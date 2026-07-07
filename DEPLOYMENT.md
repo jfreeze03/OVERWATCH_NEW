@@ -20,6 +20,7 @@ snowflake/migrations/V011__proactive_alerts.sql
 snowflake/migrations/V012__routing_anomaly_remediation.sql
 snowflake/migrations/V013__user_prefs.sql
 snowflake/migrations/V014__lifecycle_hardening.sql
+snowflake/migrations/V015__pilot_and_backups.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -121,7 +122,21 @@ object the teardown does not cover, or if a destructive drop ever goes live.
 
 Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
-## 6. Release checklist
+## 6. Disaster recovery (summary — full detail in RUNBOOK.md)
+
+- **Weekly backups:** `TASK_BACKUP_OPERATOR` (Sun 05:40) clones every
+  operator-editable table to `<NAME>_BAK_LAST` (zero-copy). Restore one table:
+  `CREATE OR REPLACE TABLE <NAME> CLONE <NAME>_BAK_LAST;`
+- **Fine-grained undo:** Time Travel — `SELECT * FROM <t> AT(OFFSET => -3600)`
+  or `UNDROP TABLE <t>` within the retention window.
+- **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
+  re-run migrations V001..V015 + roles.sql + validate.sql; facts refill from
+  the loader tasks (history limited to ACCOUNT_USAGE retention); operator
+  tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
+- **App broken after deploy:** `snow streamlit deploy --replace` with the
+  previous git tag; migrations are additive so no schema rollback is needed.
+
+## 7. Release checklist
 
 1. `ruff check .` and `pytest -q` green (CI enforces).
 2. New migration file if schema changed (never edit an applied `V00x` file).

@@ -358,3 +358,15 @@ WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1
 ORDER BY 1
 """
+
+
+def ml_forecast_daily() -> str:
+    """Reader for the opt-in SNOWFLAKE.ML.FORECAST output table (see
+    snowflake/ml_forecast_option.sql). Absent = engine falls back."""
+    return f"""
+SELECT TS::DATE AS DAY, FORECAST_CREDITS, LOWER_BOUND, UPPER_BOUND
+FROM {core_object("FORECAST_ML_DAILY")}
+WHERE TS::DATE > CURRENT_DATE()
+ORDER BY DAY
+LIMIT 60
+"""

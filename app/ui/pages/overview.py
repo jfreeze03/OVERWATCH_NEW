@@ -22,7 +22,7 @@ from app.core.state import filters
 from app.data import cost_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
-from app.logic.forecast import month_end_projection
+from app.logic.forecast import MonthEndForecast, month_end_projection
 from app.logic.formulas import exec_summary_html, format_usd, month_days, safe_float
 from app.ui import charts
 from app.ui.components import (
@@ -126,7 +126,37 @@ def render() -> None:
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
     mtd_spend, mtd_source = _mtd_spend_usd(rate)
     alerts_res, critical_alerts, high_alerts = _open_alert_counts()
-    forecast = month_end_projection(daily, date.today()) if not daily.empty else month_end_projection(pd.DataFrame(), date.today())
+    engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
+    forecast = None
+    if engine == "ml_forecast":
+        mlres = run(mart_sql.ml_forecast_daily(), page=_PAGE, key="ml_forecast",
+                    tier="recent", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
+        if mlres.usable():
+            mdf = mlres.df.copy()
+            month_end = (date.today().replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
+            mdf["DAY"] = pd.to_datetime(mdf["DAY"]).dt.date
+            mdf = mdf[(mdf["DAY"] > date.today()) & (mdf["DAY"] < month_end)]
+            if not mdf.empty:
+                mtd_now = float(pd.to_numeric(
+                    daily[pd.to_datetime(daily.iloc[:, 0]).dt.date >= date.today().replace(day=1)]
+                    .iloc[:, -1], errors="coerce").fillna(0).sum()) if not daily.empty else 0.0
+                add = float(pd.to_numeric(mdf["FORECAST_CREDITS"], errors="coerce").fillna(0).sum()) * rate
+                lo = float(pd.to_numeric(mdf["LOWER_BOUND"], errors="coerce").fillna(0).sum()) * rate
+                hi = float(pd.to_numeric(mdf["UPPER_BOUND"], errors="coerce").fillna(0).sum()) * rate
+                forecast = MonthEndForecast(
+                    ok=True, mtd_usd=round(mtd_now, 2),
+                    projected_usd=round(mtd_now + add, 2),
+                    low_usd=round(max(mtd_now, mtd_now + lo), 2),
+                    high_usd=round(mtd_now + hi, 2),
+                    daily_rate_usd=round(add / max(len(mdf), 1), 2),
+                    days_remaining=len(mdf),
+                    basis="SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY (opt-in script).",
+                )
+        if forecast is None:
+            engine = "seasonal"  # honest fallback when the ML view isn't installed
+    if forecast is None:
+        forecast = (month_end_projection(daily, date.today(), engine=engine)
+                    if not daily.empty else month_end_projection(pd.DataFrame(), date.today(), engine=engine))
 
     queries = _board_metric(board, "QUERIES")
     failed_queries = _board_metric(board, "FAILED_QUERIES")

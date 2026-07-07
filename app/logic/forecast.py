@@ -31,7 +31,7 @@ class MonthEndForecast:
     basis: str = ""
 
 
-def month_end_projection(daily: pd.DataFrame, today: date) -> MonthEndForecast:
+def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear") -> MonthEndForecast:
     """Project month-end spend from a ``DAY``/``USD`` daily frame.
 
     projected = MTD actual + recent-daily-average * remaining days.
@@ -60,6 +60,33 @@ def month_end_projection(daily: pd.DataFrame, today: date) -> MonthEndForecast:
     daily_std = float(baseline["USD"].std(ddof=0))
     _, _, remaining = month_days(today)
 
+    if engine == "seasonal" and len(baseline) >= 14:
+        # Day-of-week means over the baseline; each remaining calendar day is
+        # projected with its own weekday mean. Band = per-day residual std
+        # against the weekday means, scaled by sqrt(remaining).
+        from datetime import timedelta
+
+        frame_b = baseline.copy()
+        frame_b["DOW"] = pd.to_datetime(frame_b["DAY"]).map(lambda d: d.weekday())
+        dow_mean = frame_b.groupby("DOW")["USD"].mean()
+        resid = frame_b["USD"] - frame_b["DOW"].map(dow_mean)
+        resid_std = float(resid.std(ddof=0))
+        future = [today + timedelta(days=i) for i in range(1, remaining + 1)]
+        add = sum(float(dow_mean.get(d.weekday(), daily_rate)) for d in future)
+        projected = mtd + add
+        spread = resid_std * (remaining**0.5)
+        return MonthEndForecast(
+            ok=True,
+            mtd_usd=round(mtd, 2),
+            projected_usd=round(projected, 2),
+            low_usd=round(max(mtd, projected - spread), 2),
+            high_usd=round(projected + spread, 2),
+            daily_rate_usd=round(add / remaining, 2) if remaining else 0.0,
+            days_remaining=remaining,
+            basis=f"Seasonal engine: day-of-week means over {len(baseline)}d, "
+                  f"{remaining} remaining days projected per weekday.",
+        )
+
     projected = mtd + daily_rate * remaining
     spread = daily_std * (remaining**0.5)
     return MonthEndForecast(
@@ -70,7 +97,7 @@ def month_end_projection(daily: pd.DataFrame, today: date) -> MonthEndForecast:
         high_usd=round(projected + spread, 2),
         daily_rate_usd=round(daily_rate, 2),
         days_remaining=remaining,
-        basis=f"MTD actual + {_BASELINE_DAYS}d avg daily rate x {remaining} remaining days.",
+        basis=f"Linear engine: MTD actual + {_BASELINE_DAYS}d avg daily rate x {remaining} remaining days.",
     )
 
 
