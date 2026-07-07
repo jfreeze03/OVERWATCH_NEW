@@ -19,7 +19,14 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import mart_sql
 from app.ui import charts
-from app.ui.components import guard, kpi_row, page_header, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    lazy_sections,
+    page_header,
+    result_caption,
+    styled_table,
+)
 
 _PAGE = "Alerts"
 _SETUP_HINT = "Alert tables come from migration V004; the hourly scan task populates events."
@@ -63,11 +70,10 @@ def render() -> None:
             {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}"},
         ])
 
-    tab_open, tab_rules, tab_history, tab_native = st.tabs(
-        ["Open events", "Rules", "History", "Native delivery"]
-    )
+    section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
+                            key="alerts_section")
 
-    with tab_open:
+    if section == "Open events":
         if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
                  setup_hint=_SETUP_HINT):
             styled_table(events.df[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]])
@@ -94,7 +100,7 @@ def render() -> None:
             else:
                 st.caption("Copy and run as OVERWATCH_OPERATOR — in-app execution needs the operator role.")
 
-    with tab_rules:
+    elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")
         if guard(rules, "No alert rules found.", setup_hint=_SETUP_HINT):
@@ -119,7 +125,7 @@ def render() -> None:
                     )
                     st.caption("Rule changes are generate-only: review, then run as OVERWATCH_OPERATOR.")
 
-    with tab_history:
+    elif section == "History":
         hist = run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",
                    tier="recent", source="ALERT_EVENTS")
         if guard(hist, "No alert events in the last 30 days.", setup_hint=_SETUP_HINT):
@@ -145,7 +151,7 @@ def render() -> None:
         else:
             st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
-    with tab_native:
+    else:
         st.markdown(
             "Server-side email delivery uses Snowflake ALERT objects so notifications fire even "
             "when nobody has the app open. Templates ship in the repo and stay suspended until "

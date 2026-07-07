@@ -14,7 +14,14 @@ from app.core.state import filters
 from app.data import insights_sql, security_sql
 from app.logic.insights import dormant_severity
 from app.ui import charts
-from app.ui.components import guard, kpi_row, page_header, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    lazy_sections,
+    page_header,
+    result_caption,
+    styled_table,
+)
 
 _PAGE = "Security"
 
@@ -73,24 +80,28 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(creds)
 
     st.markdown("**Dormant users still holding access (90d+)**")
-    res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
-              tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
-    if res.ok and res.empty:
-        st.success("No enabled users dormant 90+ days in this scope.")
-    elif guard(res, ""):
-        ranked = dormant_severity(res.df)
-        high = ranked[ranked["SEVERITY"] == "High"]
-        kpi_row([
-            {"label": "Dormant users", "value": f"{len(ranked)}"},
-            {"label": "High severity", "value": f"{len(high)}",
-             "help": "180+ days dormant, or 5+ roles still granted.",
-             "delta_color": "inverse" if len(high) else "off"},
-        ])
-        styled_table(
-            ranked[["SEVERITY", "USER_NAME", "EMAIL", "DAYS_DORMANT", "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
-        )
-        st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
-        result_caption(res)
+    _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
+                         key="sec_dormant_toggle",
+                         help="The heaviest scan on this page — runs only when you ask. The export pack always includes it.")
+    if _dorm_on:
+        res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
+                  tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
+        if res.ok and res.empty:
+            st.success("No enabled users dormant 90+ days in this scope.")
+        elif guard(res, ""):
+            ranked = dormant_severity(res.df)
+            high = ranked[ranked["SEVERITY"] == "High"]
+            kpi_row([
+                {"label": "Dormant users", "value": f"{len(ranked)}"},
+                {"label": "High severity", "value": f"{len(high)}",
+                 "help": "180+ days dormant, or 5+ roles still granted.",
+                 "delta_color": "inverse" if len(high) else "off"},
+            ])
+            styled_table(
+                ranked[["SEVERITY", "USER_NAME", "EMAIL", "DAYS_DORMANT", "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
+            )
+            st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
+            result_caption(res)
 
     st.markdown("**Role grants in the window (account-wide)**")
     res = run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
@@ -168,10 +179,10 @@ def render() -> None:
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
-    tab_access, tab_changes = st.tabs(["Access", "Changes"])
-    with tab_access:
+    section = lazy_sections(["Access", "Changes"], key="sec_section")
+    if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
         _export_pack(f["company"], f["days"])
-    with tab_changes:
+    else:
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])

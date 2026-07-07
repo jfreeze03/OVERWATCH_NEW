@@ -99,3 +99,23 @@ remediation, per-company credit-rate divergence (one contract rate until
 finance says otherwise), and Dynamic Tables (ACCOUNT_USAGE is already delayed;
 scheduled MERGE tasks are cheaper and more debuggable — same rationale the old
 app documented, kept because it was correct).
+
+## Performance model (July 2026)
+
+Three rules keep the app fast without spending more on the warehouse:
+
+1. **Lazy sections.** `st.tabs` executes every tab body on every rerun; pages
+   use `components.lazy_sections` instead, so a page paint costs the active
+   section only (Cost went from ~20 queries per load to 1-3).
+2. **SQL is the cache key.** The tiered `st.cache_data` fetchers key on the
+   SQL text plus `role|salt`. Filters are baked into each builder's SQL, so
+   changing a filter refetches only the queries whose SQL actually changed.
+3. **Facts before ACCOUNT_USAGE.** Hot paths (Ops query summary, Cost spend)
+   read the hourly-loaded `FACT_*` tables and fall back to labeled live
+   queries when a fact is empty or a dimension (e.g. schema) is missing.
+   Heavy elective scans (dormant users, repeat-query fingerprints) run
+   behind toggles.
+
+Admin > Performance shows the app's own statement families on
+`WH_ALFA_OVERWATCH` (p95, GB scanned, by parameterized hash) and the
+session's approximate cache-hit rate — measure before optimizing further.

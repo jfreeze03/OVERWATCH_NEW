@@ -34,6 +34,78 @@ def source_freshness() -> str:
     return f"SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, HOURS_SINCE_LOAD FROM {mart_object('MART_SOURCE_FRESHNESS')} ORDER BY SOURCE_NAME"
 
 
+def fact_metering_by_service(days: int) -> str:
+    """Spend-tab hot path: same output shape as the live metering reader,
+    served from the hourly-loaded fact instead of ACCOUNT_USAGE."""
+    days = bounded_days(days)
+    return f"""
+SELECT DAY, SERVICE_TYPE, CREDITS_USED, CREDITS_BILLED, CREDITS_ADJUSTMENT
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+ORDER BY DAY, SERVICE_TYPE
+"""
+
+
+def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "",
+                              user_contains: str = "", database: str = "") -> str:
+    """Ops Queries-tab hot path from FACT_QUERY_HOURLY.
+
+    Counts, failures, queued time and spill are exact sums of the hourly
+    fact. P95 is the PEAK hourly-group p95 (a true p95 needs raw rows) —
+    the UI labels it as such. No schema dimension in the fact, so callers
+    fall back to live when a schema filter is active.
+    """
+    from app import companies
+    from app.core.sqlsafe import contains_filter
+
+    days = bounded_days(days)
+    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"]
+    if str(company).upper() != "ALL":
+        where.append(f"COMPANY = {sql_literal(company)}")
+    where.append(contains_filter("WAREHOUSE_NAME", warehouse_contains))
+    where.append(contains_filter("USER_NAME", user_contains))
+    where.append(companies.database_equals_clause(database, "DATABASE_NAME"))
+    return f"""
+SELECT
+    SUM(QUERY_COUNT) AS QUERY_COUNT,
+    SUM(FAILED_COUNT) AS FAILED_COUNT,
+    MAX(P95_ELAPSED_SEC) AS P95_ELAPSED_SEC,
+    SUM(QUEUED_SEC_SUM) AS QUEUED_SEC,
+    SUM(SPILL_REMOTE_GB) AS SPILL_REMOTE_GB
+FROM {mart_object("FACT_QUERY_HOURLY")}
+WHERE {and_where(*where)}
+"""
+
+
+def app_statement_stats(days: int = 7) -> str:
+    """The app's own slowest statement families on the dedicated warehouse.
+
+    Groups by QUERY_PARAMETERIZED_HASH so each app query pattern (all pages,
+    all filter values) collapses to one row — the honest way to find which
+    builder to optimize next.
+    """
+    from app.config import APP_WAREHOUSE
+
+    days = bounded_days(days, 30)
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(LEFT(QUERY_TEXT, 90)) AS SAMPLE_TEXT,
+    COUNT(*) AS RUNS,
+    COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+    ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+    ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+    ROUND(AVG(BYTES_SCANNED) / POWER(1024, 3), 3) AS AVG_GB_SCANNED
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
+  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+GROUP BY 1
+ORDER BY P95_S DESC
+LIMIT 30
+"""
+
+
 def fact_daily_spend(days: int) -> str:
     """Account billed credits per day from the daily fact (adjustment applied)."""
     days = bounded_days(days)

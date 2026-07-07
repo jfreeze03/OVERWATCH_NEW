@@ -75,11 +75,18 @@ _FETCHERS = {
 
 
 def _cache_scope(extra: str) -> str:
-    from app.core.state import filters_signature  # local import: avoid cycle
+    """Cache identity beyond the SQL text itself.
 
+    The SQL string is a cache-key argument to every tier fetcher, and every
+    filter a builder honors is baked into its SQL — so filters do NOT belong
+    here. (They used to: the full filters signature cold-started every query
+    on the page whenever ANY filter changed, even ones the query ignored.)
+    Scope is what the SQL cannot express: who is asking (role decides row
+    visibility under SiS) and the manual refresh generation.
+    """
     role = str(st.session_state.get("_ow_current_role", "") or "")
     salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
-    return f"{filters_signature()}|role={role}|salt={salt}|{extra}"
+    return f"role={role}|salt={salt}|{extra}"
 
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool) -> None:

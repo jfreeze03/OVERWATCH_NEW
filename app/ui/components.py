@@ -34,6 +34,21 @@ def _scope_chip_html() -> str:
     return "".join(chips)
 
 
+def lazy_sections(labels: list[str], key: str) -> str:
+    """Tab-style navigation that renders ONLY the selected section.
+
+    st.tabs executes every tab body on every rerun and merely hides the
+    output — an 8-tab page fires every tab's queries to paint one. This
+    pill radio keeps the navigation but lets the page dispatch a single
+    section, so first paint costs one section, not all of them.
+    """
+    choice = st.radio("Section", labels, key=key, horizontal=True,
+                      label_visibility="collapsed")
+    st.markdown("<hr style='margin: 0.2rem 0 0.9rem 0; opacity: 0.25;'>",
+                unsafe_allow_html=True)
+    return str(choice)
+
+
 def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
     st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
     st.title(title)

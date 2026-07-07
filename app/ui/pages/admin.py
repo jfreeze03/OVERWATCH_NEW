@@ -21,7 +21,14 @@ from app.core.query import bump_refresh_salt, execute_statement, query_telemetry
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.data import cost_sql, mart_sql
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
+from app.ui.components import (
+    guard,
+    kpi_row,
+    lazy_sections,
+    load_settings,
+    page_header,
+    result_caption,
+)
 
 _PAGE = "Admin"
 _EXPECTED_MIGRATIONS = {
@@ -199,6 +206,39 @@ def _org_spend_tab() -> None:
     result_caption(res)
 
 
+def _performance_tab() -> None:
+    """Prove (or disprove) that the app is fast: its own statement stats."""
+    st.caption(
+        "Every statement family the app has run on WH_ALFA_OVERWATCH, grouped by "
+        "parameterized hash — the slowest rows are the builders worth optimizing next. "
+        "Section navigation is lazy and filters no longer cold the cache, so most "
+        "interactions should be cache hits."
+    )
+    telemetry = query_telemetry()
+    if not telemetry.empty:
+        served = len(telemetry)
+        fast = int((telemetry["elapsed_ms"] < 50).sum())
+        kpi_row([
+            {"label": "Statements this session", "value": f"{served:,}"},
+            {"label": "Served in <50ms", "value": f"{fast / served * 100:.0f}%",
+             "help": "Approximates the cache-hit rate: sub-50ms answers never left Streamlit's cache."},
+            {"label": "Failed", "value": f"{int((~telemetry['ok']).sum())}",
+             "delta_color": "inverse" if (~telemetry["ok"]).any() else "off"},
+        ])
+    res = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
+              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_OVERWATCH)")
+    if guard(res, "No statements on the app warehouse in the last 7 days.",
+             setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_OVERWATCH."):
+        st.dataframe(res.df, hide_index=True, use_container_width=True,
+                     column_config={
+                         "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
+                         "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
+                         "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
+                     })
+        result_caption(res)
+        st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
+
+
 def _canary_tab() -> None:
     st.caption(
         "Runs every registered SQL builder against the live account (1-row caps) to catch "
@@ -243,18 +283,20 @@ def render() -> None:
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
-    tab_settings, tab_migrations, tab_cost, tab_org, tab_canary, tab_obs = st.tabs(
-        ["Settings", "Migrations & freshness", "App self-cost", "Org spend", "Canary", "Errors & telemetry"]
-    )
-    with tab_settings:
+    section = lazy_sections(
+        ["Settings", "Migrations & freshness", "App self-cost", "Org spend",
+         "Performance", "Canary", "Errors & telemetry"], key="adm_section")
+    if section == "Settings":
         _settings_tab(is_operator)
-    with tab_migrations:
+    elif section == "Migrations & freshness":
         _migrations_tab()
-    with tab_cost:
+    elif section == "App self-cost":
         _self_cost_tab()
-    with tab_org:
+    elif section == "Org spend":
         _org_spend_tab()
-    with tab_canary:
+    elif section == "Performance":
+        _performance_tab()
+    elif section == "Canary":
         _canary_tab()
-    with tab_obs:
+    else:
         _observability_tab()

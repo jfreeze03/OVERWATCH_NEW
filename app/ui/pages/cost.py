@@ -28,7 +28,15 @@ from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspen
 from app.logic.sizing import size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    lazy_sections,
+    load_settings,
+    page_header,
+    result_caption,
+    styled_table,
+)
 
 _PAGE = "Cost & Contract"
 
@@ -52,8 +60,13 @@ def _categorize(service: str) -> str:
 
 
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
-    res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
-              tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
+    # Hot path: the daily metering fact carries the same columns; fall back
+    # to live ACCOUNT_USAGE only when the fact has no rows yet.
+    res = run(mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
+              tier="recent", source="FACT_METERING_DAILY (mart, loaded hourly)")
+    if not res.ok or res.empty:
+        res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
+                  tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     df = res.df.copy()
@@ -292,34 +305,38 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
     st.markdown("**Repeat-query candidates (cache / materialization)**")
-    rq_res = run(insights_sql.repeat_query_fingerprints(
-        days, company,
-        database=st.session_state.get("flt_database", ""),
-        schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
-                 key=f"repeatq_{company}_{days}", tier="historical",
-                 source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH)")
-    if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
-             setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
-        candidates = flag_repeat_candidates(rq_res.df)
-        hot = candidates[candidates["CANDIDATE"]]
-        kpi_row([
-            {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
-            {"label": "Materialization candidates", "value": f"{len(hot)}",
-             "help": ">=0.5h total compute and <=25% cache hit."},
-            {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
-        ])
-        styled_table(
-            candidates[["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
-                         "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "CANDIDATE", "QUERY_PREVIEW"]],
-            column_config={
-                "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
-                "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
-                "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
-            },
-        )
-        result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
+    _rq_on = st.toggle("Run repeat-query scan (fingerprints the window's QUERY_HISTORY)",
+                       key="cost_repeatq_toggle",
+                       help="The heaviest scan on this page — runs only when you ask.")
+    if _rq_on:
+        rq_res = run(insights_sql.repeat_query_fingerprints(
+            days, company,
+            database=st.session_state.get("flt_database", ""),
+            schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
+                     key=f"repeatq_{company}_{days}", tier="historical",
+                     source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH)")
+        if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
+                 setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
+            candidates = flag_repeat_candidates(rq_res.df)
+            hot = candidates[candidates["CANDIDATE"]]
+            kpi_row([
+                {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
+                {"label": "Materialization candidates", "value": f"{len(hot)}",
+                 "help": ">=0.5h total compute and <=25% cache hit."},
+                {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
+            ])
+            styled_table(
+                candidates[["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
+                             "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "CANDIDATE", "QUERY_PREVIEW"]],
+                column_config={
+                    "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
+                    "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
+                    "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
+                },
+            )
+            result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
 
-    st.divider()
+        st.divider()
     # ---- 3. Storage growth movers ------------------------------------------------
     st.markdown("**Storage growth movers**")
     days_storage = max(days, 30)
@@ -682,22 +699,22 @@ def render() -> None:
                 scope_note=f"{f['company']} · last {f['days']} days")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    tab_spend, tab_attr, tab_contract, tab_cb, tab_ai, tab_users, tab_opt, tab_savings = st.tabs(
-        ["Spend", "Attribution", "Contract", "Chargeback", "Cortex & Storage", "AI Users", "Optimization", "Savings ledger"]
-    )
-    with tab_spend:
+    section = lazy_sections(
+        ["Spend", "Attribution", "Contract", "Chargeback", "Cortex & Storage",
+         "AI Users", "Optimization", "Savings ledger"], key="cost_section")
+    if section == "Spend":
         _spend_tab(f["company"], f["days"], rate, ai_rate)
-    with tab_attr:
+    elif section == "Attribution":
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
-    with tab_contract:
+    elif section == "Contract":
         _contract_tab(settings)
-    with tab_cb:
+    elif section == "Chargeback":
         _chargeback_tab(f["company"], f["days"], rate, is_operator)
-    with tab_ai:
+    elif section == "Cortex & Storage":
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
-    with tab_users:
+    elif section == "AI Users":
         _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
-    with tab_opt:
+    elif section == "Optimization":
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
-    with tab_savings:
+    else:
         _savings_tab()

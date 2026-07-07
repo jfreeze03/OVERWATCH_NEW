@@ -19,16 +19,36 @@ from app.logic.formulas import credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    lazy_sections,
+    load_settings,
+    page_header,
+    result_caption,
+    styled_table,
+)
 
 _PAGE = "Operations"
 
 
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  database: str = "", schema_contains: str = "") -> None:
-    summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains),
-                  page=_PAGE, key=f"q_summary_{company}_{days}", tier="recent",
-                  source="ACCOUNT_USAGE.QUERY_HISTORY")
+    # Hot path: the hourly fact answers this without scanning QUERY_HISTORY.
+    # The fact has warehouse/user/database dims but no schema — fall back to
+    # live when a schema filter is on, or the mart has no rows yet.
+    summary = None
+    used_mart = False
+    if not schema_contains:
+        m = run(mart_sql.fact_query_window_summary(days, company, wh_filter, user_filter, database),
+                page=_PAGE, key=f"q_fact_summary_{company}_{days}", tier="recent",
+                source="FACT_QUERY_HOURLY (mart, loaded hourly)")
+        if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
+            summary, used_mart = m, True
+    if summary is None:
+        summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains),
+                      page=_PAGE, key=f"q_summary_{company}_{days}", tier="recent",
+                      source="ACCOUNT_USAGE.QUERY_HISTORY")
     if summary.usable():
         row = summary.df.iloc[0]
         qcount = safe_float(row.get("QUERY_COUNT"))
@@ -37,7 +57,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}"},
             {"label": "Fail rate", "value": f"{(failed / qcount * 100) if qcount else 0:.2f}%",
              "delta": f"{failed:,.0f} failed", "delta_color": "off"},
-            {"label": "p95 runtime", "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
+            {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
+             "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s",
+             "help": "Peak hourly-cohort p95 from the fact table; open with a schema filter for the exact raw p95."
+                     if used_mart else None},
             {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.0f} min"},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
         ])
@@ -411,22 +434,21 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
     page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.",
                 scope_note=f"{f['company']} · last {f['days']} days")
-    tab_q, tab_t, tab_w, tab_c, tab_r, tab_ci, tab_s = st.tabs(
+    section = lazy_sections(
         ["Queries", "Tasks", "Warehouses", "Contention", "Release compare",
-         "Change impact", "Pipeline SLA"]
-    )
-    with tab_q:
+         "Change impact", "Pipeline SLA"], key="ops_section")
+    if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
                      f["database"], f["schema_contains"])
-    with tab_t:
+    elif section == "Tasks":
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
-    with tab_w:
+    elif section == "Warehouses":
         _warehouses_tab(f["company"], rate)
-    with tab_c:
+    elif section == "Contention":
         _contention_tab(f["company"], f["days"])
-    with tab_r:
+    elif section == "Release compare":
         _release_compare_tab(f["company"])
-    with tab_ci:
+    elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
-    with tab_s:
+    else:
         _pipeline_sla_tab(is_operator)
