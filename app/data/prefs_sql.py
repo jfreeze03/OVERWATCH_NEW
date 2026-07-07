@@ -11,7 +11,11 @@ import re
 from app.config import core_object
 from app.core.sqlsafe import sql_literal
 
-_KEY_RE = re.compile(r"^(DEFAULT_VIEW|VIEW:[A-Za-z0-9 _\-]{1,40})$")
+_KEY_RE = re.compile(r"^(DEFAULT_VIEW|DISPLAY_TZ|VIEW:[A-Za-z0-9 _\-]{1,40})$")
+
+# Offered display timezones; 'Account' means render as stored (account time).
+DISPLAY_TIMEZONES = ("Account (America/Chicago)", "America/New_York",
+                     "America/Los_Angeles", "UTC", "Europe/London")
 VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,40}$")
 
 

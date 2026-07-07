@@ -6,12 +6,14 @@ says so out loud instead of pretending otherwise (old-app review point).
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import run
 from app.core.state import filters
 from app.data import insights_sql, security_sql
+from app.logic.governance import governance_drift
 from app.logic.insights import dormant_severity
 from app.ui import charts
 from app.ui.components import (
@@ -139,6 +141,47 @@ def _trust_center_tab() -> None:
         result_caption(tcf)
 
 
+def _governance_score_panel() -> None:
+    """Governance debt as a number with named deductions (CoCo item 14a)."""
+    counts = run(security_sql.governance_counts(), page=_PAGE, key="gov_counts",
+                 tier="historical", source="USERS + CREDENTIALS + GRANTS_TO_USERS")
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    inputs: dict = {}
+    if counts.usable():
+        row = counts.df.iloc[0]
+        inputs = {
+            "mfa_gap_users": row.get("MFA_GAP_USERS"),
+            "expired_credentials": row.get("EXPIRED_CREDENTIALS"),
+            "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
+            "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
+        }
+    if whs.ok and not whs.empty:
+        wdf = whs.df.copy()
+        wdf.columns = [str(c).lower() for c in wdf.columns]
+        if "resource_monitor" in wdf.columns:
+            rm = wdf["resource_monitor"].astype(str).str.strip().str.lower()
+            inputs["warehouses_no_monitor"] = int(((rm == "null") | (rm == "") | (rm == "none")).sum())
+        if "auto_suspend" in wdf.columns:
+            asus = pd.to_numeric(wdf["auto_suspend"], errors="coerce").fillna(0)
+            inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())
+    if not inputs:
+        return
+    drift = governance_drift(inputs)
+    kpi_row([
+        {"label": "Governance drift score", "value": f"{drift.score}/100",
+         "delta": drift.state, "delta_color": "off",
+         "help": "Countable hygiene debt: MFA gaps, credential rotation, break-glass "
+                 "grants, unmonitored warehouses. Fixed weights, capped per category."},
+        {"label": "Deductions", "value": f"{len(drift.drivers)}"},
+    ])
+    if drift.drivers:
+        with st.expander(f"Governance deductions ({drift.score}/100 · {drift.state})"):
+            for d in drift.drivers:
+                st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
+    st.divider()
+
+
 def _export_pack(company: str, days: int) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     st.markdown("**Auditor export pack**")
@@ -221,12 +264,13 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
-    page_header("Security", "Access posture and change evidence.",
+    page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC (that scope is roadmap, deliberately).",
                 scope_note=f"{f['company']} · last {f['days']} days")
     st.caption(
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
+    _governance_score_panel()
     section = lazy_sections(["Access", "Changes", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])

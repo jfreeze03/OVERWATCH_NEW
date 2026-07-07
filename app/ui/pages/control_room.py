@@ -23,6 +23,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     load_settings,
+    localize_timestamps,
     page_header,
     panel_help,
     result_caption,
@@ -146,6 +147,9 @@ def render() -> None:
         st.success("Quiet week: no alerts, task failures, or DDL in the window.")
     elif guard(tl, ""):
         tdf = tl.df.copy()
+        tdf, tz_note = localize_timestamps(tdf, ["AT"])
+        if tz_note:
+            st.caption(tz_note)
         charts.event_timeline(tdf)
         sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
         if sel_tl is not None:

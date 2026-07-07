@@ -158,6 +158,18 @@ def _views_popover() -> None:
             ok, msg = execute_statement(
                 prefs_sql.upsert_pref_sql(f"VIEW:{clean}", _current_view_payload()), page="Views")
             notify(ok, msg if not ok else f"Saved '{clean}' (page, section, and filters).")
+        st.divider()
+        current_tz = st.session_state.get("_ow_display_tz") or prefs_sql.DISPLAY_TIMEZONES[0]
+        tz_idx = (prefs_sql.DISPLAY_TIMEZONES.index(current_tz)
+                  if current_tz in prefs_sql.DISPLAY_TIMEZONES else 0)
+        tz_pick = st.selectbox("Display timezone", prefs_sql.DISPLAY_TIMEZONES, index=tz_idx,
+                               key="views_tz",
+                               help="Display-only: tables and the timeline convert; SQL, alerts, "
+                                    "and exports stay in account time (America/Chicago).")
+        if st.button("Save timezone", key="views_tz_save"):
+            st.session_state["_ow_display_tz"] = tz_pick
+            ok, msg = execute_statement(prefs_sql.upsert_pref_sql("DISPLAY_TZ", tz_pick), page="Views")
+            notify(ok, msg if not ok else f"Times will display in {tz_pick}.")
         if has_default and st.button("Clear default landing", key="views_clear_default"):
             ok, msg = execute_statement(prefs_sql.delete_pref_sql("DEFAULT_VIEW"), page="Views")
             notify(ok, msg if not ok else "Default cleared — app opens on Overview again.")
@@ -181,6 +193,10 @@ def _apply_default_landing() -> None:
                 source="USER_PREFS")
     if not prefs.ok or prefs.empty:
         return
+    tz_pref = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
+                    if str(r["PREF_KEY"]) == "DISPLAY_TZ"), "")
+    if tz_pref:
+        st.session_state["_ow_display_tz"] = tz_pref
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)

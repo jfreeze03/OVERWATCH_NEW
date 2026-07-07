@@ -34,6 +34,40 @@ def _scope_chip_html() -> str:
     return "".join(chips)
 
 
+_ACCOUNT_TZ = "America/Chicago"
+
+
+def display_timezone() -> str:
+    """The user's chosen display timezone ('' = account time as stored)."""
+    return str(st.session_state.get("_ow_display_tz") or "")
+
+
+def localize_timestamps(df, columns: list[str]):
+    """Convert naive account-time timestamp columns to the display timezone.
+
+    Returns (df, note): note is '' when no conversion happened. Conversion is
+    display-only — SQL, dedupe keys, and exports stay in account time.
+    """
+    import pandas as pd
+
+    tz = display_timezone()
+    if not tz or tz.startswith("Account") or df is None or getattr(df, "empty", True):
+        return df, ""
+    out = df.copy()
+    converted = False
+    for col in columns:
+        if col not in out.columns:
+            continue
+        try:
+            series = pd.to_datetime(out[col], errors="coerce")
+            out[col] = (series.dt.tz_localize(_ACCOUNT_TZ, ambiguous="NaT", nonexistent="NaT")
+                        .dt.tz_convert(tz).dt.tz_localize(None))
+            converted = True
+        except (TypeError, ValueError):
+            continue
+    return out, (f"Times shown in {tz} (stored in account time)." if converted else "")
+
+
 def panel_help(text: str) -> None:
     """Per-panel 'what is this / when red do X' popover (help mode)."""
     with st.popover("ⓘ about this panel", use_container_width=False):

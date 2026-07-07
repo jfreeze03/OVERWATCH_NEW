@@ -28,6 +28,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    localize_timestamps,
     notify,
     page_header,
     panel_help,
@@ -85,6 +86,9 @@ def render() -> None:
         if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
                  setup_hint=_SETUP_HINT):
             edf = events.df.reset_index(drop=True)
+            edf, tz_note = localize_timestamps(edf, ["RAISED_AT", "ACK_AT"])
+            if tz_note:
+                st.caption(tz_note)
             sel = selectable_table(
                 edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
                 key="alert_events_sel")
