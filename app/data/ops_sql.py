@@ -242,3 +242,29 @@ GROUP BY 1, 2, 3
 ORDER BY FAILED_FILES DESC
 LIMIT 100
 """
+
+
+def dynamic_table_health(days: int) -> str:
+    """Refresh outcomes per dynamic table; failures mean downstream tables
+    are silently serving stale data."""
+    days = bounded_days(days, 14)
+    return f"""
+SELECT
+    DATABASE_NAME, SCHEMA_NAME, NAME,
+    COUNT(*) AS REFRESHES,
+    COUNT_IF(STATE = 'FAILED') AS FAILURES,
+    MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE,
+    MAX(REFRESH_END_TIME) AS LAST_REFRESH,
+    IFF(COUNT_IF(STATE = 'FAILED') > 0, 'FAILED', 'SUCCEEDED') AS STATUS
+FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+WHERE REFRESH_END_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3
+ORDER BY FAILURES DESC, LAST_REFRESH DESC
+LIMIT 200
+"""
+
+
+def show_streams_sql() -> str:
+    """SHOW-based (no ACCOUNT_USAGE view exists for stream staleness).
+    LIMIT keeps the runtime row-cap rewrite from touching a SHOW command."""
+    return "SHOW STREAMS IN ACCOUNT LIMIT 200"

@@ -24,6 +24,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     page_header,
+    panel_help,
     result_caption,
     styled_table,
 )
@@ -152,6 +153,25 @@ def render() -> None:
             st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
     else:
+        st.markdown("**Routing (family → channel)**")
+        panel_help(
+            "ALERT_ROUTES (V012) sends each family/severity through a named notification "
+            "integration — COST to #finops, SECURITY to #security. The seeded ALL/HIGH "
+            "route keeps the original single-webhook behavior until you add rows. One "
+            "failing integration never blocks the others."
+        )
+        routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="live",
+                     source="ALERT_ROUTES")
+        if guard(routes, "No routes — run V012 to seed the default.",
+                 setup_hint="V012 creates ALERT_ROUTES with a default OVERWATCH_WEBHOOK route."):
+            st.dataframe(routes.df, hide_index=True, use_container_width=True)
+            st.code(
+                "-- add a route (operator): send all PIPELINE alerts of MEDIUM+ to #dataeng\n"
+                "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)\n"
+                "SELECT 'PIPELINE', 'MEDIUM', 'OVERWATCH_WEBHOOK_DATAENG';\n"
+                "-- each integration is a Snowflake NOTIFICATION INTEGRATION pointing at one channel's webhook",
+                language="sql",
+            )
         st.markdown(
             "Server-side email delivery uses Snowflake ALERT objects so notifications fire even "
             "when nobody has the app open. Templates ship in the repo and stay suspended until "

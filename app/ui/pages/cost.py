@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
@@ -18,6 +19,7 @@ from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
 from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql
+from app.logic import contract_planner, remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
@@ -34,6 +36,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     page_header,
+    panel_help,
     result_caption,
     styled_table,
 )
@@ -204,6 +207,34 @@ def _contract_tab(settings: dict) -> None:
          "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal"},
     ])
     result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
+
+    st.divider()
+    st.markdown("**Renewal planner (what-if)**")
+    panel_help(
+        "Straight-line scenarios from the trailing 30-day burn — no seasonality is "
+        "invented. Recommended commit = term consumption plus your buffer. Use it to "
+        "walk into the renewal with a number instead of a feeling."
+    )
+    burn_res = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
+                   tier="recent", source="FACT_METERING_DAILY")
+    if guard(burn_res, "Need the metering fact loaded to plan (run the hourly task once)."):
+        rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+        bdf = burn_res.df.copy()
+        daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * rate_now
+        remaining_usd = max(0.0, (contract_credits - consumed) * rate_now)
+        col1, col2 = st.columns(2)
+        term_months = col1.slider("Next term (months)", 12, 36, 12, step=6, key="plan_term")
+        buffer_pct = col2.slider("Safety buffer %", 0, 40, 15, step=5, key="plan_buffer")
+        rows = contract_planner.plan_scenarios(daily_usd, term_months, buffer_pct, remaining_usd)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                     column_config={
+                         "TERM_CONSUMPTION_USD": st.column_config.NumberColumn("Term consumption", format="$%.0f"),
+                         "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
+                         "DAILY_BURN_USD": st.column_config.NumberColumn("Daily burn", format="$%.2f"),
+                     })
+        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${rate_now}/credit. "
+                   "Exhaustion applies to the current contract's remaining "
+                   f"{contract_credits - consumed:,.0f} credits.")
 
 
 def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict) -> None:
@@ -434,6 +465,85 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
                        "reduction, transient conversion, or dropping.")
             result_caption(waste)
+
+    st.divider()
+    st.markdown("**Guarded remediation (generate → review → execute)**")
+    panel_help(
+        "Turns findings into exact `ALTER` statements. Execution needs the "
+        "OVERWATCH_OPERATOR role, writes a REMEDIATION_LOG audit row, and books an "
+        "ESTIMATED savings-ledger item that the monthly verifier later proves or rejects. "
+        "Anyone can copy the SQL for review."
+    )
+    idle_res = run(insights_sql.idle_warehouse_analysis(days, company), page=_PAGE,
+                   key=f"remed_idle_{company}_{days}", tier="recent",
+                   source="WAREHOUSE_METERING_HISTORY + FACT_QUERY_HOURLY")
+    if guard(idle_res, "No warehouse activity in the window to remediate."):
+        idf = idle_res.df.copy()
+        wh_pick = st.selectbox("Warehouse", sorted(idf["WAREHOUSE_NAME"].astype(str)),
+                               key="remed_wh")
+        fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s", "Off-hours suspend/resume schedule"],
+                            horizontal=True, key="remed_kind")
+        row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
+        idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
+        est_monthly = remediation.monthly_savings_estimate(idle_credits, days, rate)
+
+        stmt = ""
+        if fix_kind.startswith("Tighten"):
+            stmt = remediation.auto_suspend_fix(wh_pick, 60)
+            st.caption(f"Idle credits in window: {idle_credits:,.1f} → estimated ${est_monthly:,.0f}/mo if suspend catches them (ESTIMATED until verified).")
+        else:
+            prof = run(insights_sql.warehouse_hourly_activity(14, company), page=_PAGE,
+                       key=f"remed_prof_{company}", tier="recent",
+                       source="hour-of-day activity profile")
+            if guard(prof, "No hourly profile available yet."):
+                mine = prof.df[prof.df["WAREHOUSE_NAME"].astype(str) == wh_pick]
+                proposal = remediation.propose_quiet_window(mine.to_dict("records"))
+                if proposal is None:
+                    st.info("No contiguous 4h+ window where this warehouse burns credits with ~no queries — "
+                            "a schedule would not pay for its risk. Auto-suspend is the better fix here.")
+                else:
+                    st.caption(
+                        f"Quiet window {proposal['start']:02d}:00–{proposal['end']:02d}:00 "
+                        f"({proposal['hours']}h, ~{proposal['avg_credits_per_day']} credits/day burned idle). "
+                        f"Weekday schedule below; review before executing — resume-on-demand still works "
+                        f"if a job fires early."
+                    )
+                    stmt = remediation.suspend_schedule(wh_pick, proposal["start"], proposal["end"])
+                    est_monthly = round(proposal["avg_credits_per_day"] * 30 * rate * 5 / 7, 2)
+
+        if stmt:
+            st.code(stmt, language="sql")
+            if is_operator:
+                confirm = st.text_input("Type the warehouse name to confirm execution", key="remed_confirm")
+                if st.button("Execute + log + book estimated savings", key="remed_exec",
+                             disabled=(confirm != wh_pick)):
+                    ok, msg = execute_statement(stmt, page=_PAGE)
+                    log_sql = (
+                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                        f"SELECT {sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, "
+                        f"{sql_literal(wh_pick)}, {sql_literal(stmt[:4000])}, {sql_number(est_monthly)}, "
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}"
+                    )
+                    execute_statement(log_sql, page=_PAGE)
+                    if ok and est_monthly > 0:
+                        ledger_sql = (
+                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                            f"SELECT {sql_literal(f'{fix_kind} on {wh_pick}')}, 'ESTIMATED', "
+                            f"{sql_number(est_monthly)}, {sql_literal(stmt[:4000])}, "
+                            f"{sql_literal('Booked by guarded remediation; verifier will test actuals.')}"
+                        )
+                        execute_statement(ledger_sql, page=_PAGE)
+                    (st.success if ok else st.error)(msg)
+            else:
+                st.caption("Copy the SQL freely; executing from the app requires OVERWATCH_OPERATOR.")
+
+    remlog = run(mart_sql.remediation_log(50), page=_PAGE, key="remed_log", tier="live",
+                 source="REMEDIATION_LOG")
+    if remlog.ok and not remlog.empty:
+        st.markdown("**Remediation history**")
+        styled_table(remlog.df, height=200)
 
 
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:

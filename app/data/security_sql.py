@@ -202,3 +202,20 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1, 2
 ORDER BY 1
 """
+
+
+def trust_center_findings() -> str:
+    """Latest Trust Center run per scanner. Needs the TRUST_CENTER_VIEWER
+    application role (the account already pays for Trust Center scans)."""
+    return """
+SELECT
+    SCANNER_NAME,
+    UPPER(SEVERITY) AS SEVERITY,
+    TOTAL_AT_RISK_COUNT,
+    CREATED_ON AS SCANNED_AT
+FROM SNOWFLAKE.TRUST_CENTER.FINDINGS
+QUALIFY ROW_NUMBER() OVER (PARTITION BY SCANNER_ID ORDER BY CREATED_ON DESC) = 1
+ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+         WHEN 'MEDIUM' THEN 2 ELSE 3 END, TOTAL_AT_RISK_COUNT DESC
+LIMIT 100
+"""

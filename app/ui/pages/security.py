@@ -19,6 +19,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     page_header,
+    panel_help,
     result_caption,
     styled_table,
 )
@@ -113,6 +114,31 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(res)
 
 
+def _trust_center_tab() -> None:
+    st.caption("Latest Trust Center scanner results — the account already pays for these scans.")
+    panel_help(
+        "Source: SNOWFLAKE.TRUST_CENTER.FINDINGS (latest run per scanner). Needs the "
+        "TRUST_CENTER_VIEWER application role. CRITICAL/HIGH rows list at-risk entities "
+        "in Snowsight's Trust Center; fix there, then re-scan."
+    )
+    tcf = run(security_sql.trust_center_findings(), page=_PAGE, key="trust_center",
+              tier="historical", source="SNOWFLAKE.TRUST_CENTER.FINDINGS")
+    if tcf.ok and tcf.empty:
+        st.success("No findings — every scanner came back clean.")
+    elif guard(tcf, "", setup_hint="Grant SNOWFLAKE.TRUST_CENTER_VIEWER to your role and enable Trust Center scanners."):
+        fdf = tcf.df.copy()
+        sev = fdf["SEVERITY"].astype(str).str.upper()
+        kpi_row([
+            {"label": "Scanners reporting", "value": f"{len(fdf)}"},
+            {"label": "Critical", "value": f"{int((sev == 'CRITICAL').sum())}",
+             "delta_color": "inverse" if (sev == "CRITICAL").any() else "off"},
+            {"label": "High", "value": f"{int((sev == 'HIGH').sum())}",
+             "delta_color": "inverse" if (sev == "HIGH").any() else "off"},
+        ])
+        styled_table(fdf, height=300)
+        result_caption(tcf)
+
+
 def _export_pack(company: str, days: int) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     st.markdown("**Auditor export pack**")
@@ -201,10 +227,12 @@ def render() -> None:
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
-    section = lazy_sections(["Access", "Changes"], key="sec_section")
+    section = lazy_sections(["Access", "Changes", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
         _export_pack(f["company"], f["days"])
-    else:
+    elif section == "Changes":
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+    else:
+        _trust_center_tab()

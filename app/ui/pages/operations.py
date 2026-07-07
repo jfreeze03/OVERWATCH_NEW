@@ -25,6 +25,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     page_header,
+    panel_help,
     result_caption,
     styled_table,
 )
@@ -299,6 +300,48 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour (V011); "
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
+
+    st.markdown("**Dynamic table refresh health (7d)**")
+    panel_help(
+        "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). A FAILED "
+        "row means every downstream consumer is reading stale data. The daily "
+        "PIPE_DT_FAILURES alert fires on 24h failures; this is the weekly picture."
+    )
+    dth = run(ops_sql.dynamic_table_health(7), page=_PAGE, key="dt_health", tier="recent",
+              source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
+    if dth.ok and dth.empty:
+        st.info("No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
+    elif guard(dth, "", setup_hint="Needs the DYNAMIC_TABLE_REFRESH_HISTORY view (standard on current accounts)."):
+        styled_table(dth.df, height=240)
+        result_caption(dth)
+
+    st.markdown("**Stream staleness**")
+    panel_help(
+        "SHOW STREAMS (live metadata — no ACCOUNT_USAGE view exists for staleness). "
+        "A STALE stream has passed its retention without being consumed: downstream "
+        "pipelines are silently missing changes. Fix = consume or recreate the stream."
+    )
+    if st.toggle("Check streams now (live SHOW command)", key="ops_streams_toggle"):
+        strm = run(ops_sql.show_streams_sql(), page=_PAGE, key="streams_show", tier="live",
+                   source="SHOW STREAMS IN ACCOUNT", max_rows=0)
+        if strm.ok and strm.empty:
+            st.success("No streams in the account.")
+        elif guard(strm, ""):
+            sdf = strm.df.copy()
+            sdf.columns = [str(c).upper() for c in sdf.columns]
+            if "STALE" in sdf.columns:
+                stale = sdf[sdf["STALE"].astype(str).str.lower() == "true"]
+                kpi_row([
+                    {"label": "Streams", "value": f"{len(sdf)}"},
+                    {"label": "Stale", "value": f"{len(stale)}",
+                     "delta_color": "inverse" if len(stale) else "off"},
+                ])
+                if not stale.empty:
+                    show_cols = [c for c in ("NAME", "DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME",
+                                             "STALE_AFTER", "MODE") if c in stale.columns]
+                    st.dataframe(stale[show_cols], hide_index=True, use_container_width=True)
+            else:
+                st.dataframe(sdf, hide_index=True, use_container_width=True)
 
 
 def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:

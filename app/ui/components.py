@@ -34,6 +34,12 @@ def _scope_chip_html() -> str:
     return "".join(chips)
 
 
+def panel_help(text: str) -> None:
+    """Per-panel 'what is this / when red do X' popover (help mode)."""
+    with st.popover("ⓘ about this panel", use_container_width=False):
+        st.markdown(text)
+
+
 def lazy_sections(labels: list[str], key: str) -> str:
     """Tab-style navigation that renders ONLY the selected section.
 

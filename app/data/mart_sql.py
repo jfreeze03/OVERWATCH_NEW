@@ -269,3 +269,22 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
 GROUP BY 1
 ORDER BY DAY
 """
+
+
+def alert_routes() -> str:
+    return f"""
+SELECT ROUTE_ID, FAMILY, MIN_SEVERITY, INTEGRATION_NAME, ENABLED, CREATED_BY, CREATED_AT
+FROM {core_object("ALERT_ROUTES")}
+ORDER BY FAMILY, MIN_SEVERITY
+"""
+
+
+def remediation_log(limit: int = 100) -> str:
+    limit = max(1, min(int(limit), 500))
+    return f"""
+SELECT FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD,
+       EXECUTED_BY, EXECUTED_AT, STATUS, RESULT_NOTE
+FROM {core_object("REMEDIATION_LOG")}
+ORDER BY EXECUTED_AT DESC
+LIMIT {limit}
+"""

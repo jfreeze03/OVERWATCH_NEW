@@ -406,3 +406,35 @@ WHERE {where}
 ORDER BY m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES DESC
 LIMIT 50
 """
+
+
+def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
+    """Hour-of-day credits vs query activity per warehouse — the input to
+    the off-hours schedule advisor (credits with no queries = waste)."""
+    days = bounded_days(days, 30)
+    where_m = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+WITH m AS (
+    SELECT WAREHOUSE_NAME, HOUR(START_TIME) AS HR,
+           SUM(CREDITS_USED) AS CR,
+           COUNT(DISTINCT DATE(START_TIME)) AS DAYS_SEEN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE {where_m}
+    GROUP BY 1, 2
+),
+q AS (
+    SELECT WAREHOUSE_NAME, HOUR(HOUR_TS) AS HR, SUM(QUERY_COUNT) AS QC
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    GROUP BY 1, 2
+)
+SELECT m.WAREHOUSE_NAME, m.HR AS HOUR_OF_DAY,
+       ROUND(m.CR / NULLIF(m.DAYS_SEEN, 0), 3) AS AVG_CREDITS,
+       ROUND(COALESCE(q.QC, 0) / NULLIF(m.DAYS_SEEN, 0), 1) AS AVG_QUERIES
+FROM m
+LEFT JOIN q ON q.WAREHOUSE_NAME = m.WAREHOUSE_NAME AND q.HR = m.HR
+ORDER BY m.WAREHOUSE_NAME, m.HR
+"""
