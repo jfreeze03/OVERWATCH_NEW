@@ -289,6 +289,17 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         elif not is_operator:
             st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
 
+    st.markdown("**File-load failures (COPY / Snowpipe, 7d)**")
+    cpf = run(ops_sql.copy_load_failures(7, "ALL"), page=_PAGE,
+              key="copy_fails", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
+    if cpf.ok and cpf.empty:
+        st.success("No failed or partial file loads in the last 7 days.")
+    elif guard(cpf, ""):
+        styled_table(cpf.df, height=240)
+        st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour (V011); "
+                   "this table is the 7-day picture with sample errors.")
+        result_caption(cpf)
+
 
 def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
@@ -340,6 +351,18 @@ def _warehouses_tab(company: str, rate: float) -> None:
             },
         )
     result_caption(res)
+
+    st.markdown("**Concurrency peaks (right-size before queuing hurts)**")
+    peaks = run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
+                key=f"conc_peaks_{company}", tier="recent",
+                source="ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY")
+    if peaks.ok and peaks.empty:
+        st.info("No warehouse load intervals recorded in the last 14 days.")
+    elif guard(peaks, ""):
+        st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
+                   "or split workloads — before users feel it.")
+        st.dataframe(peaks.df, hide_index=True, use_container_width=True)
+        result_caption(peaks)
 
 
 def _contention_tab(company: str, days: int) -> None:

@@ -374,3 +374,35 @@ WHERE {where}
 ORDER BY DAYS_DORMANT DESC, ROLE_COUNT DESC
 LIMIT 300
 """
+
+
+def storage_waste(company: str = "ALL", min_gb: float = 1.0) -> str:
+    """Tables carrying heavy Time-Travel/failsafe bytes, flagged STALE when
+    no DML touched them in 90 days — retention money for nothing."""
+    min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
+    where = and_where(
+        "m.DELETED = FALSE",
+        f"m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES >= {min_bytes}",
+        companies.database_clause(company, "m.TABLE_CATALOG"),
+    )
+    return f"""
+SELECT
+    m.TABLE_CATALOG AS DATABASE_NAME,
+    m.TABLE_SCHEMA AS SCHEMA_NAME,
+    m.TABLE_NAME,
+    ROUND(m.ACTIVE_BYTES / POWER(1024, 3), 2) AS ACTIVE_GB,
+    ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
+    ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2) AS FAILSAFE_GB,
+    d.LAST_DML,
+    IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
+LEFT JOIN (
+    SELECT TABLE_ID, MAX(END_TIME) AS LAST_DML
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY
+    WHERE START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+    GROUP BY 1
+) d ON d.TABLE_ID = m.ID
+WHERE {where}
+ORDER BY m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES DESC
+LIMIT 50
+"""

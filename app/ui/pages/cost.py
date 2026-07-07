@@ -17,7 +17,7 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
-from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql
+from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
@@ -88,6 +88,29 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
     result_caption(res)
+
+    st.markdown("**Cloud-services health by warehouse**")
+    st.caption(
+        "Cloud services above ~10% of a warehouse's credits means many tiny queries, "
+        "metadata-heavy patterns, or compile-heavy SQL. The COST_CLOUD_SVC_RATIO alert "
+        "fires at the ELEVATED threshold (editable on the Alerts page)."
+    )
+    csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
+              key=f"cs_ratio_{company}_{days}", tier="recent",
+              source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
+    if guard(csr, "No warehouse metering in this window."):
+        styled_table(csr.df, height=260)
+        result_caption(csr)
+        elevated = csr.df[csr.df["STATUS"].astype(str) == "ELEVATED"]
+        if not elevated.empty:
+            st.markdown("**Why is it elevated? Compile-heavy query families**")
+            comp = run(cost_sql.compile_heavy_families(days, company), page=_PAGE,
+                       key=f"compile_fams_{company}_{days}", tier="historical",
+                       source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME)")
+            if guard(comp, "No query family with 20+ runs averages >0.5s compile time — "
+                           "the ratio driver is likely many tiny/metadata queries instead."):
+                st.dataframe(comp.df, hide_index=True, use_container_width=True)
+                result_caption(comp)
 
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
@@ -363,6 +386,54 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             },
         )
         result_caption(sg_res, note=f"Window widened to {days_storage}d for a stable growth slope.")
+
+    st.divider()
+    st.markdown("**Query efficiency (pruning + result cache)**")
+    if st.toggle("Run query-efficiency scan", key="cost_eff_toggle",
+                 help="Scans the window's QUERY_HISTORY for full-table-scan families and the zero-scan share."):
+        prune = run(ops_sql.poor_pruning_queries(
+            days, company,
+            database=st.session_state.get("flt_database", ""),
+            schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
+                    key=f"prune_{company}_{days}", tier="historical",
+                    source="ACCOUNT_USAGE.QUERY_HISTORY (PARTITIONS_SCANNED)")
+        if prune.ok and prune.empty:
+            st.success("No query family scans >80% of a 100+-partition table in this window.")
+        elif guard(prune, ""):
+            st.caption("These families read almost every micro-partition — clustering keys or "
+                       "better predicates would cut both runtime and credits.")
+            st.dataframe(prune.df, hide_index=True, use_container_width=True)
+            result_caption(prune)
+        cache = run(ops_sql.result_cache_daily(days, company), page=_PAGE,
+                    key=f"cachehit_{company}_{days}", tier="historical",
+                    source="ACCOUNT_USAGE.QUERY_HISTORY (BYTES_SCANNED = 0)")
+        if guard(cache, "No queries in the window."):
+            charts.daily_metric_line(cache.df, "DAY", "HIT_PCT", "zero-scan answers %")
+            st.caption("Share of successful queries answered without scanning (result cache + "
+                       "metadata). A falling line means redundant recomputation.")
+
+    st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
+    if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
+                 help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
+        waste = run(insights_sql.storage_waste(company), page=_PAGE,
+                    key=f"waste_{company}", tier="historical",
+                    source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+        if waste.ok and waste.empty:
+            st.success("No table above 1 GB of combined active + retention bytes in this scope.")
+        elif guard(waste, ""):
+            stale = waste.df[waste.df["STATUS"].astype(str) == "STALE"]
+            kpi_row([
+                {"label": "Tables shown", "value": f"{len(waste.df)}"},
+                {"label": "Stale (no DML 90d)", "value": f"{len(stale)}",
+                 "delta_color": "inverse" if len(stale) else "off"},
+                {"label": "Stale retention GB",
+                 "value": f"{float(stale['TIME_TRAVEL_GB'].sum() + stale['FAILSAFE_GB'].sum()):,.0f}"
+                          if not stale.empty else "0"},
+            ])
+            styled_table(waste.df, height=300)
+            st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
+                       "reduction, transient conversion, or dropping.")
+            result_caption(waste)
 
 
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:

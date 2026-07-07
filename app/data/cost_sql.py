@@ -194,3 +194,62 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
 WHERE USAGE_DATE >= DATE '{text}'
 """
+
+
+def cloud_services_ratio_by_warehouse(days: int, company: str = "ALL") -> str:
+    """Cloud-services share of each warehouse's credits (CoCo's top finding).
+
+    >10% deserves a look, >20% (the alert threshold) usually means many tiny
+    queries, metadata-heavy patterns, or compile-heavy SQL.
+    """
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    ROUND(SUM(CREDITS_USED_COMPUTE), 2) AS COMPUTE_CREDITS,
+    ROUND(SUM(CREDITS_USED_CLOUD_SERVICES), 2) AS CLOUD_SVC_CREDITS,
+    ROUND(SUM(CREDITS_USED), 2) AS TOTAL_CREDITS,
+    ROUND(SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100, 1) AS CLOUD_SVC_PCT,
+    CASE
+        WHEN SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) > 0.20 THEN 'ELEVATED'
+        WHEN SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) > 0.10 THEN 'WATCH'
+        ELSE 'NORMAL'
+    END AS STATUS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE {where}
+GROUP BY 1
+HAVING SUM(CREDITS_USED) >= 0.5
+ORDER BY CLOUD_SVC_PCT DESC
+LIMIT 100
+"""
+
+
+def compile_heavy_families(days: int, company: str = "ALL") -> str:
+    """Query families whose compile time dominates — the usual driver of a
+    high cloud-services ratio."""
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(LEFT(QUERY_TEXT, 90)) AS SAMPLE_TEXT,
+    COUNT(*) AS RUNS,
+    ROUND(AVG(COMPILATION_TIME) / 1000, 2) AS AVG_COMPILE_S,
+    ROUND(AVG(TOTAL_ELAPSED_TIME) / 1000, 2) AS AVG_TOTAL_S,
+    ROUND(AVG(COMPILATION_TIME) / NULLIF(AVG(TOTAL_ELAPSED_TIME), 0) * 100, 1) AS COMPILE_PCT,
+    ROUND(SUM(COMPILATION_TIME) / 3600000, 2) AS TOTAL_COMPILE_HOURS
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1
+HAVING COUNT(*) >= 20 AND AVG(COMPILATION_TIME) > 500
+ORDER BY SUM(COMPILATION_TIME) DESC
+LIMIT 25
+"""

@@ -148,3 +148,97 @@ GROUP BY 1, 2
 ORDER BY TOTAL_WAIT_SEC DESC
 LIMIT 50
 """
+
+
+def poor_pruning_queries(days: int, company: str = "ALL", database: str = "",
+                         schema_contains: str = "") -> str:
+    """Query families scanning >80% of a 100+-partition table — missing
+    clustering keys or unpruned predicates."""
+    days = bounded_days(days)
+    scope = _query_scope(days, company, "", "", database, schema_contains)
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(LEFT(QUERY_TEXT, 90)) AS SAMPLE_TEXT,
+    COUNT(*) AS RUNS,
+    ROUND(AVG(PARTITIONS_SCANNED / NULLIF(PARTITIONS_TOTAL, 0)) * 100, 1) AS AVG_SCAN_PCT,
+    ROUND(AVG(PARTITIONS_TOTAL), 0) AS AVG_PARTITIONS,
+    ROUND(SUM(BYTES_SCANNED) / POWER(1024, 4), 3) AS TB_SCANNED
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {scope}
+  AND EXECUTION_STATUS = 'SUCCESS'
+  AND PARTITIONS_TOTAL >= 100
+  AND PARTITIONS_SCANNED / NULLIF(PARTITIONS_TOTAL, 0) > 0.8
+  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+GROUP BY 1
+ORDER BY SUM(BYTES_SCANNED) DESC
+LIMIT 25
+"""
+
+
+def result_cache_daily(days: int, company: str = "ALL") -> str:
+    """Share of successful queries answered without scanning (result cache /
+    metadata answers). A falling line means redundant recomputation."""
+    days = bounded_days(days)
+    scope = _query_scope(days, company, "", "", "", "")
+    return f"""
+SELECT
+    DATE_TRUNC('day', START_TIME) AS DAY,
+    COUNT(*) AS QUERIES,
+    COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND COALESCE(BYTES_SCANNED, 0) = 0) AS ZERO_SCAN,
+    ROUND(COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND COALESCE(BYTES_SCANNED, 0) = 0)
+          / NULLIF(COUNT(*), 0) * 100, 1) AS HIT_PCT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {scope}
+GROUP BY 1
+ORDER BY 1
+"""
+
+
+def warehouse_concurrency_peaks(days: int, company: str = "ALL") -> str:
+    """Peak running/queued load per warehouse — right-size multi-cluster
+    BEFORE queuing hurts, not after."""
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    ROUND(MAX(AVG_RUNNING), 1) AS PEAK_RUNNING,
+    ROUND(MAX(AVG_QUEUED_LOAD), 1) AS PEAK_QUEUED,
+    COUNT_IF(AVG_QUEUED_LOAD > 0.5) AS QUEUED_INTERVALS,
+    COUNT(*) AS INTERVALS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY
+WHERE {where}
+GROUP BY 1
+ORDER BY PEAK_QUEUED DESC, PEAK_RUNNING DESC
+LIMIT 100
+"""
+
+
+def copy_load_failures(days: int, company: str = "ALL") -> str:
+    """Failed / partial COPY and Snowpipe file loads by target table."""
+    days = bounded_days(days)
+    where = and_where(
+        f"LAST_LOAD_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "STATUS IN ('Load failed', 'Partially loaded')",
+        companies.database_clause(company, "TABLE_CATALOG_NAME"),
+    )
+    return f"""
+SELECT
+    TABLE_CATALOG_NAME AS DATABASE_NAME,
+    TABLE_SCHEMA_NAME AS SCHEMA_NAME,
+    TABLE_NAME,
+    MAX(PIPE_NAME) AS PIPE_NAME,
+    COUNT(*) AS FAILED_FILES,
+    MAX(LAST_LOAD_TIME) AS LAST_FAILURE,
+    LEFT(MAX(FIRST_ERROR_MESSAGE), 300) AS SAMPLE_ERROR,
+    'FAILED' AS STATUS
+FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+WHERE {where}
+GROUP BY 1, 2, 3
+ORDER BY FAILED_FILES DESC
+LIMIT 100
+"""

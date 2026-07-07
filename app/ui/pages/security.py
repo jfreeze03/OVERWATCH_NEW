@@ -169,6 +169,28 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         st.dataframe(res.df, hide_index=True, use_container_width=True)
         result_caption(res)
 
+    st.markdown("**Failed-login reasons (network policy vs credentials)**")
+    reasons = run(security_sql.failed_login_reasons(days, company), page=_PAGE,
+                  key=f"login_reasons_{company}_{days}", tier="recent",
+                  source="ACCOUNT_USAGE.LOGIN_HISTORY")
+    if reasons.ok and reasons.empty:
+        st.success("No failed logins in the window.")
+    elif guard(reasons, ""):
+        st.dataframe(reasons.df, hide_index=True, use_container_width=True)
+        result_caption(reasons)
+
+    st.markdown("**Break-glass role activity (should hug zero)**")
+    bga = run(security_sql.admin_role_activity(days), page=_PAGE,
+              key=f"breakglass_{days}", tier="recent",
+              source="ACCOUNT_USAGE.QUERY_HISTORY (admin roles)")
+    if bga.ok and bga.empty:
+        st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
+    elif guard(bga, ""):
+        st.dataframe(bga.df, hide_index=True, use_container_width=True)
+        st.caption("SEC_BREAK_GLASS_USE alerts when a user exceeds the daily threshold (V011). "
+                   "Routine work belongs on SNOW_SYSADMINS.")
+        result_caption(bga)
+
 
 @safe_page(_PAGE)
 def render() -> None:

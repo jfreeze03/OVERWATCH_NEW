@@ -159,3 +159,46 @@ GROUP BY 1, 2, 3, 4, 5
 ORDER BY LAST_CHANGE DESC
 LIMIT 300
 """
+
+
+def failed_login_reasons(days: int, company: str = "ALL") -> str:
+    """Failed logins grouped by reason — network-policy blocks surface
+    separately from bad credentials."""
+    days = bounded_days(days)
+    where = and_where(
+        f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "IS_SUCCESS = 'NO'",
+        companies.user_clause(company, "USER_NAME"),
+    )
+    return f"""
+SELECT
+    COALESCE(ERROR_MESSAGE, 'UNKNOWN') AS REASON,
+    IFF(COALESCE(ERROR_MESSAGE, '') ILIKE '%network%', 'NETWORK POLICY', 'CREDENTIAL / OTHER') AS CATEGORY,
+    COUNT(*) AS ATTEMPTS,
+    COUNT(DISTINCT USER_NAME) AS USERS,
+    COUNT(DISTINCT CLIENT_IP) AS SOURCE_IPS,
+    MAX(EVENT_TIMESTAMP) AS LAST_SEEN
+FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
+WHERE {where}
+GROUP BY 1, 2
+ORDER BY ATTEMPTS DESC
+LIMIT 50
+"""
+
+
+def admin_role_activity(days: int) -> str:
+    """Daily statement volume under break-glass admin roles. Routine work
+    belongs on SNOW_SYSADMINS; this line should hug zero."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    DATE_TRUNC('day', START_TIME) AS DAY,
+    ROLE_NAME,
+    COUNT(*) AS STATEMENTS,
+    COUNT(DISTINCT USER_NAME) AS USERS
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+GROUP BY 1, 2
+ORDER BY 1
+"""
