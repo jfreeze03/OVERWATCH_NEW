@@ -32,6 +32,7 @@ from app.ui.components import (
     load_settings,
     page_header,
     result_caption,
+    styled_table,
 )
 
 _PAGE = "Overview"
@@ -220,10 +221,7 @@ def render() -> None:
             if ranked.empty:
                 st.success("No OPEN actions — everything in the queue is done or dropped.")
             else:
-                st.dataframe(
-                    ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
-                    hide_index=True, use_container_width=True,
-                )
+                styled_table(ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]])
                 result_caption(actions_res)
 
     with right:

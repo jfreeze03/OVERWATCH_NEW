@@ -10,6 +10,40 @@ import streamlit as st
 
 _HEIGHT = 260
 
+_ACCENT = "#38bdf8"
+_GRID = "#1e293b"
+_LABEL = "#94a3b8"
+_TITLE = "#cbd5e1"
+
+
+def _overwatch_theme() -> dict:
+    return {
+        "config": {
+            "background": "transparent",
+            "view": {"stroke": "transparent"},
+            "axis": {
+                "gridColor": _GRID, "domainColor": _GRID, "tickColor": _GRID,
+                "labelColor": _LABEL, "titleColor": _TITLE,
+                "labelFontSize": 12, "titleFontSize": 12,
+            },
+            "legend": {"labelColor": _LABEL, "titleColor": _TITLE, "labelFontSize": 12},
+            "range": {
+                "category": [_ACCENT, "#34d399", "#c084fc", "#fbbf24", "#f87171",
+                              "#22d3ee", "#a3e635", "#fb923c"],
+            },
+            "bar": {"cornerRadiusEnd": 3, "color": _ACCENT},
+            "line": {"color": _ACCENT},
+            "point": {"color": _ACCENT, "filled": True},
+        }
+    }
+
+
+try:  # altair >=5 keeps both registries during the theme API transition
+    alt.themes.register("overwatch", _overwatch_theme)
+    alt.themes.enable("overwatch")
+except Exception:  # noqa: BLE001 - chart theming must never break a page
+    pass
+
 
 def _base(df: pd.DataFrame) -> alt.Chart:
     return alt.Chart(df).properties(height=_HEIGHT)

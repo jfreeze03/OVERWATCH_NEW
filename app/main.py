@@ -24,6 +24,16 @@ from app.core.state import init_filters, remember_page, requested_page  # noqa: 
 from app.theme import inject_theme  # noqa: E402
 from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security  # noqa: E402
 
+_PAGE_ICONS = {
+    "Overview": "📊",
+    "Control Room": "🎛️",
+    "Cost & Contract": "💰",
+    "Operations": "🔧",
+    "Alerts": "🚨",
+    "Security": "🔐",
+    "Admin": "⚙️",
+}
+
 _RENDERERS = {
     "Overview": overview.render,
     "Control Room": control_room.render,
@@ -38,7 +48,11 @@ _RENDERERS = {
 def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
     """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
-        st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ow-brand"><span class="ow-brand-dot"></span>'
+            '<span class="ow-kicker">OVERWATCH</span></div>',
+            unsafe_allow_html=True,
+        )
         st.markdown(f"**Snowflake Command Center** · v{APP_VERSION}")
         st.caption(
             (f"Connected · role {role or 'unknown'} · {profile} view")
@@ -49,7 +63,10 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         default_page = requested_page(pages) or st.session_state.get("_ow_page") or pages[0]
         if default_page not in pages:
             default_page = pages[0]
-        page = st.radio("Navigate", pages, index=pages.index(default_page), key="_ow_nav_radio")
+        st.caption("Navigate")
+        page = st.radio("Navigate", pages, index=pages.index(default_page),
+                        key="_ow_nav_radio", label_visibility="collapsed",
+                        format_func=lambda p: f"{_PAGE_ICONS.get(p, '•')} {p}")
         st.session_state["_ow_page"] = page
         remember_page(page)
 
@@ -63,7 +80,13 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
 
 def _topbar_scope() -> None:
     """Triage filter strip above every page, like the original OVERWATCH."""
-    st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+    box = st.container(border=True)
+    with box:
+        st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+        _topbar_scope_controls()
+
+
+def _topbar_scope_controls() -> None:
     c_company, c_env, c_days, c_db = st.columns([1.0, 1.0, 1.2, 1.4])
     with c_company:
         st.selectbox("Company", COMPANIES, key="flt_company")
@@ -87,7 +110,6 @@ def _topbar_scope() -> None:
     with c_schema:
         st.text_input("Schema contains", key="flt_schema_contains",
                       help="Case-insensitive match where the source has schema grain.")
-    st.divider()
 
 
 def main() -> None:

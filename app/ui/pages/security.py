@@ -14,7 +14,7 @@ from app.core.state import filters
 from app.data import insights_sql, security_sql
 from app.logic.insights import dormant_severity
 from app.ui import charts
-from app.ui.components import guard, kpi_row, page_header, result_caption
+from app.ui.components import guard, kpi_row, page_header, result_caption, styled_table
 
 _PAGE = "Security"
 
@@ -66,9 +66,8 @@ def _access_tab(company: str, days: int) -> None:
              "help": "180+ days dormant, or 5+ roles still granted.",
              "delta_color": "inverse" if len(high) else "off"},
         ])
-        st.dataframe(
+        styled_table(
             ranked[["SEVERITY", "USER_NAME", "EMAIL", "DAYS_DORMANT", "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
-            hide_index=True, use_container_width=True,
         )
         st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
         result_caption(res)
