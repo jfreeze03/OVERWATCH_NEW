@@ -1,0 +1,18 @@
+# Snowflake CLI project definition for Streamlit-in-Snowflake deploys.
+# Usage: snow streamlit deploy --replace
+definition_version: 2
+entities:
+  overwatch:
+    type: streamlit
+    identifier:
+      name: OVERWATCH_APP
+      database: OVERWATCH
+      schema: CORE
+    main_file: streamlit_app.py
+    query_warehouse: OVERWATCH_WH
+    title: "OVERWATCH — Snowflake Command Center"
+    artifacts:
+      - streamlit_app.py
+      - environment.yml
+      - app/
+      - snowflake/native_alert_templates.sql

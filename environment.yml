@@ -1,0 +1,12 @@
+# Streamlit-in-Snowflake environment (Snowflake Anaconda channel).
+# Deliberately looser than requirements.txt: the SiS conda channel lags PyPI
+# and pins there cause deploy failures. The two files have different correct
+# answers — do not "align" them.
+name: overwatch
+channels:
+  - snowflake
+dependencies:
+  - streamlit
+  - pandas
+  - altair
+  - snowflake-snowpark-python
