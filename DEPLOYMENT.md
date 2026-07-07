@@ -2,8 +2,8 @@
 
 ## 1. Snowflake objects (one-time, then per release)
 
-Run as a role that can create a database, warehouse, resource monitor, tasks,
-and grants (break-glass admin is fine for setup; daily use should not be):
+Run as **SNOW_ACCOUNTADMINS** (or **SNOW_SYSADMINS** if it can create the
+warehouse/resource monitor and grants) — these are the account's DBA roles:
 
 ```
 snowflake/migrations/V001__core.sql
@@ -45,8 +45,12 @@ Task graphs run on the dedicated **`WH_ALFA_OVERWATCH`** warehouse (XSMALL,
 - `OVERWATCH_MONITOR` — read-only telemetry (IMPORTED PRIVILEGES on SNOWFLAKE
   db + SELECT on OVERWATCH objects). Grant to viewer roles.
 - `OVERWATCH_OPERATOR` — MONITOR plus INSERT/UPDATE on settings, alert
-  lifecycle, action queue, savings ledger. Grant to the DBA(s) who ack alerts
-  and edit settings.
+  lifecycle, action queue, savings ledger. `roles.sql` grants it to
+  **SNOW_SYSADMINS** and **SNOW_ACCOUNTADMINS** (the account's DBA roles);
+  both already resolve to the DBA navigation profile in-app, so members get
+  the Admin page and gated in-app execution with no extra setup.
+- Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
+  day-to-day operation never requires the break-glass role.
 
 ## 3. Streamlit-in-Snowflake (primary target)
 

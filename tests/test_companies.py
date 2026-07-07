@@ -81,3 +81,16 @@ def test_alfa_is_the_default_company_on_open():
     """
     assert co.DEFAULT_COMPANY == "ALFA"
     assert co.COMPANIES[0] == "ALFA"
+
+
+def test_admin_roles_resolve_to_dba_profile():
+    """Owner requirement 2026-07: DBA work runs as SNOW_ACCOUNTADMINS /
+    SNOW_SYSADMINS — both must get the full DBA profile (all pages + Admin,
+    operator-gated execution)."""
+    from app.config import OPERATOR_PROFILES, PAGES_BY_PROFILE, resolve_role_profile
+
+    for role in ("SNOW_ACCOUNTADMINS", "SNOW_SYSADMINS", "snow_sysadmins"):
+        profile = resolve_role_profile(role)
+        assert profile == "DBA", (role, profile)
+        assert profile in OPERATOR_PROFILES
+        assert "Admin" in PAGES_BY_PROFILE[profile]
