@@ -12,6 +12,7 @@ from app.core.result import QueryResult
 from app.data import mart_sql
 from app.logic.formulas import format_usd, safe_float
 from app.theme import chip
+from app.ui.icons import icon
 from app.ui.status_colors import status_columns_in, status_css
 
 
@@ -117,21 +118,129 @@ def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
         st.markdown(f'<div class="ow-scope-row">{chips}</div>', unsafe_allow_html=True)
 
 
+_SEV_HEX = {"ok": "#34d399", "warn": "#fbbf24", "bad": "#fb7185",
+            "info": "#38bdf8", "": "#38bdf8"}
+
+
+def spark_svg(values, width: int = 84, height: int = 24, color: str = "#38bdf8",
+              fill: bool = True) -> str:
+    """Inline SVG sparkline (polyline + soft area). Pure — embeds anywhere.
+
+    A number without direction is half a number; this puts the direction on
+    the card. Returns '' for fewer than 2 finite points.
+    """
+    nums = []
+    for v in (values or []):
+        f = safe_float(v, None) if v is not None else None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and f == f:  # not NaN
+            nums.append(f)
+    if len(nums) < 2:
+        return ""
+    lo, hi = min(nums), max(nums)
+    rng = (hi - lo) or 1.0
+    n = len(nums)
+    pts = [(round(i / (n - 1) * (width - 2) + 1, 1),
+            round(height - 2 - (v - lo) / rng * (height - 4), 1)) for i, v in enumerate(nums)]
+    line = " ".join(f"{x},{y}" for x, y in pts)
+    uid = abs(hash(line)) % 100000
+    area = ""
+    if fill:
+        area = (f'<defs><linearGradient id="g{uid}" x1="0" y1="0" x2="0" y2="1">'
+                f'<stop offset="0" stop-color="{color}" stop-opacity="0.35"/>'
+                f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
+                f'<polygon points="1,{height-1} {line} {width-1},{height-1}" fill="url(#g{uid})"/>')
+    last = pts[-1]
+    return (f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+            f'style="display:block">{area}'
+            f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="1.6" '
+            f'stroke-linecap="round" stroke-linejoin="round"/>'
+            f'<circle cx="{last[0]}" cy="{last[1]}" r="1.9" fill="{color}"/></svg>')
+
+
+def _delta_html(delta, delta_color: str) -> str:
+    if not delta:
+        return ""
+    text = html.escape(str(delta))
+    down = str(delta).strip().startswith("-")
+    if delta_color == "off":
+        col, arrow = "#6b7a90", "flat"
+    else:
+        good = down if delta_color == "inverse" else (not down)
+        col = "#34d399" if good else "#fb7185"
+        arrow = "down" if down else "up"
+    return (f'<div style="font-size:0.78rem;font-weight:640;color:{col};'
+            f'display:flex;align-items:center;gap:4px;margin-top:3px">'
+            f'{icon(arrow, 13)}{text}</div>')
+
+
+def metric_card_html(item: dict) -> str:
+    """Rich KPI card: severity stripe, uppercase micro-label, big tabular
+    value, colored trend delta, optional inline sparkline. Full design
+    control where st.metric could not go."""
+    sev = str(item.get("severity", "") or "")
+    label = html.escape(str(item.get("label", "")))
+    value = html.escape(str(item.get("value", "—")))
+    help_t = html.escape(str(item.get("help", "") or ""))
+    cls = f"ow-card ow-card--{sev}" if sev in ("ok", "warn", "bad", "info") else "ow-card"
+    spark = ""
+    if item.get("spark"):
+        spark = ('<div class="ow-card__meta" style="margin-top:6px">'
+                 + spark_svg(item["spark"], color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
+    delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
+    title_attr = f' title="{help_t}"' if help_t else ""
+    return (f'<div class="{cls}" style="min-height:96px"{title_attr}>'
+            f'<div class="ow-card__title">{label}</div>'
+            f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
+
+
 def kpi_row(items: list[dict], columns: int | None = None) -> None:
-    """st.metric row. Item keys: label, value, delta (opt), help (opt)."""
+    """Row of rich KPI cards. Item keys: label, value, delta, delta_color,
+    help, plus optional severity ('ok'|'warn'|'bad'|'info') and spark (list
+    of numbers). One centralized upgrade lifts every KPI row in the app."""
     items = [i for i in items if i]
     if not items:
         return
     cols = st.columns(columns or len(items))
     for idx, item in enumerate(items):
         with cols[idx % len(cols)]:
-            st.metric(
-                label=str(item.get("label", "")),
-                value=str(item.get("value", "—")),
-                delta=item.get("delta"),
-                delta_color=item.get("delta_color", "normal"),
-                help=item.get("help"),
-            )
+            st.markdown(metric_card_html(item), unsafe_allow_html=True)
+
+
+def section_header(title: str, health: str = "", icon_name: str = "",
+                   badge: str = "") -> None:
+    """Section header with a left severity stripe + optional icon and status
+    badge — gives visual weight to what matters (CoCo's #2 high item)."""
+    hcls = f" ow-section--{health}" if health in ("ok", "warn", "bad", "info") else ""
+    ico = f'<span class="ow-section__icon">{icon(icon_name)}</span>' if icon_name else ""
+    bdg = f'<span class="ow-section__badge">{html.escape(badge)}</span>' if badge else ""
+    st.markdown(f'<div class="ow-section{hcls}">{ico}'
+                f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</div>',
+                unsafe_allow_html=True)
+
+
+def status_bar(stats: list[dict]) -> None:
+    """Persistent status strip: [{k, v, sev?, spark?, icon?}]. Rendered once
+    per page so the 3-4 numbers that matter follow the user everywhere."""
+    stats = [s for s in stats if s]
+    if not stats:
+        return
+    cells = []
+    for s in stats:
+        sev = str(s.get("sev", "") or "")
+        scls = f"ow-stat ow-stat--{sev}" if sev in ("ok", "warn", "bad", "info") else "ow-stat"
+        ico = f'{icon(s["icon"], 13)} ' if s.get("icon") else ""
+        spark = ""
+        if s.get("spark"):
+            spark = ('<div class="ow-stat__spark">'
+                     + spark_svg(s["spark"], width=104, height=18,
+                                 color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
+        cells.append(f'<div class="{scls}"><div class="ow-stat__k">{html.escape(str(s.get("k","")))}</div>'
+                     f'<div class="ow-stat__v">{ico}{html.escape(str(s.get("v","—")))}</div>{spark}</div>')
+    st.markdown(f'<div class="ow-statusbar">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
 def result_caption(result: QueryResult, note: str = "") -> None:
@@ -316,6 +425,25 @@ def notify(ok: bool, msg: str) -> None:
     except Exception:  # noqa: BLE001 - toast is a nicety
         pass
     (st.success if ok else st.error)(msg)
+
+
+def mark_refreshed() -> None:
+    """Stamp the session's last data-refresh time (called on load/refresh)."""
+    from datetime import datetime
+    st.session_state["_ow_refreshed_at"] = datetime.now()
+
+
+def last_refreshed_note() -> str:
+    """Human 'updated Nm ago' for the always-visible sidebar indicator."""
+    from datetime import datetime
+    ts = st.session_state.get("_ow_refreshed_at")
+    if not ts:
+        return "Live · cached per tier"
+    secs = max(0, int((datetime.now() - ts).total_seconds()))
+    if secs < 60:
+        return f"Updated {secs}s ago"
+    mins = secs // 60
+    return f"Updated {mins}m ago" if mins < 60 else f"Updated {mins // 60}h ago"
 
 
 def download_text_button(label: str, text: str, filename: str) -> None:
