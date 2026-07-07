@@ -15,15 +15,30 @@ snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
 
-Each migration records itself in `OVERWATCH.CORE.SCHEMA_VERSION`; re-running is
+Each migration records itself in `DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION`; re-running is
 safe (idempotent `CREATE OR REPLACE` / `CREATE IF NOT EXISTS` + MERGE seeds).
 The Admin page compares `SCHEMA_VERSION` against the versions bundled with the
 app and flags drift.
 
 Cost controls installed by V002:
-- `OVERWATCH_WH` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to the app + tasks.
+- `WH_ALFA_OVERWATCH` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to the app + tasks.
 - `OVERWATCH_RM` — resource monitor, default 30 credits/month, suspends the
   warehouse at 100%. Adjust the quota in V002 before running if needed.
+
+### Shared schema warning (read before migrating)
+
+All objects live in **`DBA_MAINT_DB.OVERWATCH`** — the same schema the
+previous OVERWATCH app used. Migrations are strictly `CREATE IF NOT EXISTS` +
+`MERGE`: they will never drop or overwrite an existing table. That also means
+**name collisions keep the OLD table shape** and this app's queries against
+them will fail cleanly. Known collisions with the old app: `ALERT_CONFIG`,
+`ALERT_EVENTS`, and `FACT_QUERY_HOURLY`. If those exist with the old shape,
+rename them first (e.g. `ALTER TABLE ... RENAME TO ALERT_CONFIG_V3;`), then
+run the migrations. `snowflake/validate.sql` checks the shapes and flags any
+survivor.
+
+Task graphs run on the dedicated **`WH_ALFA_OVERWATCH`** warehouse (XSMALL,
+60s auto-suspend, `OVERWATCH_RM` resource monitor).
 
 ## 2. Roles
 
@@ -41,7 +56,7 @@ snow streamlit deploy --replace
 ```
 
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
-OVERWATCH_WH`); `environment.yml` pins the Snowflake-channel packages. Each
+WH_ALFA_OVERWATCH`); `environment.yml` pins the Snowflake-channel packages. Each
 viewer runs under their own role — that is the access-control model.
 
 ## 4. Local development (dev only)
@@ -54,9 +69,9 @@ account = "<account>"
 user = "<user>"
 authenticator = "externalbrowser"   # or password
 role = "OVERWATCH_MONITOR"
-warehouse = "OVERWATCH_WH"
-database = "OVERWATCH"
-schema = "CORE"
+warehouse = "WH_ALFA_OVERWATCH"
+database = "DBA_MAINT_DB"
+schema = "OVERWATCH"
 ```
 
 ```bash

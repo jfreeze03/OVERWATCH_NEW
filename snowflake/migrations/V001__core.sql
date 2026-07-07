@@ -1,14 +1,17 @@
 -- V001__core.sql — database, schemas, settings, company scope, versioning.
 -- Idempotent. Run as a deployment role (see DEPLOYMENT.md).
 
-CREATE DATABASE IF NOT EXISTS OVERWATCH;
-CREATE SCHEMA IF NOT EXISTS OVERWATCH.CORE;
-CREATE SCHEMA IF NOT EXISTS OVERWATCH.MART;
+-- Owner decision 2026-07: objects live in the existing DBA_MAINT_DB.OVERWATCH
+-- schema, shared with the previous OVERWATCH app. Everything here is
+-- CREATE IF NOT EXISTS / MERGE — nothing existing is dropped or replaced
+-- except OVERWATCH-owned functions/procedures listed in these migrations.
+CREATE DATABASE IF NOT EXISTS DBA_MAINT_DB;
+CREATE SCHEMA IF NOT EXISTS DBA_MAINT_DB.OVERWATCH;
 
 -- ---------------------------------------------------------------------------
 -- Migration bookkeeping
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.SCHEMA_VERSION (
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (
     VERSION      NUMBER        NOT NULL,
     DESCRIPTION  VARCHAR(200)  NOT NULL,
     APPLIED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
@@ -20,14 +23,14 @@ CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.SCHEMA_VERSION (
 -- The app reads these; code constants are offline fallbacks only.
 -- Confirmed 2026-07: $3.68 compute credit, $2.20 Cortex credit.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.SETTINGS (
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SETTINGS (
     KEY        VARCHAR(80)   NOT NULL PRIMARY KEY,
     VALUE      VARCHAR(400),
     UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
     UPDATED_BY VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
 );
 
-MERGE INTO OVERWATCH.CORE.SETTINGS t
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
 USING (
     SELECT * FROM VALUES
         ('CREDIT_PRICE_USD',        '3.68'),
@@ -47,14 +50,14 @@ WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
 -- tests/test_companies.py::test_company_scope_seed_matches_code enforces it.
 -- KEBARR1 holds both companies' roles; policy: classified as ALFA.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.COMPANY_SCOPE (
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (
     COMPANY    VARCHAR(40)  NOT NULL,
     SCOPE_TYPE VARCHAR(40)  NOT NULL,   -- WAREHOUSE | DATABASE | USER_PREFIX | USER_OVERRIDE
     PATTERN    VARCHAR(200) NOT NULL,
     NOTE       VARCHAR(400)
 );
 
-MERGE INTO OVERWATCH.CORE.COMPANY_SCOPE t
+MERGE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE t
 USING (
     SELECT * FROM VALUES
         ('Trexis', 'WAREHOUSE',     'WH_TRXS_LOAD',          'Trexis load compute'),
@@ -82,29 +85,29 @@ WHEN NOT MATCHED THEN INSERT (COMPANY, SCOPE_TYPE, PATTERN, NOTE)
 -- ---------------------------------------------------------------------------
 -- Company classification helpers (single-sourced from COMPANY_SCOPE)
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION OVERWATCH.CORE.COMPANY_FOR_WAREHOUSE(WH VARCHAR)
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WH VARCHAR)
 RETURNS VARCHAR
 AS
 $$
     COALESCE(
-        (SELECT MAX(COMPANY) FROM OVERWATCH.CORE.COMPANY_SCOPE
+        (SELECT MAX(COMPANY) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
           WHERE SCOPE_TYPE = 'WAREHOUSE' AND PATTERN = UPPER(COALESCE(WH, ''))),
         'ALFA'
     )
 $$;
 
-CREATE OR REPLACE FUNCTION OVERWATCH.CORE.COMPANY_FOR_USER(U VARCHAR)
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(U VARCHAR)
 RETURNS VARCHAR
 AS
 $$
     COALESCE(
-        (SELECT MAX(COMPANY) FROM OVERWATCH.CORE.COMPANY_SCOPE
+        (SELECT MAX(COMPANY) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
           WHERE SCOPE_TYPE = 'USER_OVERRIDE' AND PATTERN = UPPER(COALESCE(U, ''))),
         IFF(UPPER(COALESCE(U, '')) LIKE 'TRXS!_%' ESCAPE '!', 'Trexis', 'ALFA')
     )
 $$;
 
-CREATE OR REPLACE FUNCTION OVERWATCH.CORE.COMPANY_FOR_DATABASE(DB VARCHAR)
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DB VARCHAR)
 RETURNS VARCHAR
 AS
 $$
@@ -114,7 +117,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- App error sink (populated best-effort by the app's error boundary)
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.APP_ERROR_LOG (
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (
     LOGGED_AT     TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
     PAGE          VARCHAR(80),
     ERROR_TYPE    VARCHAR(200),
@@ -123,7 +126,7 @@ CREATE TABLE IF NOT EXISTS OVERWATCH.CORE.APP_ERROR_LOG (
     ROLE_NAME     VARCHAR(200)
 );
 
-MERGE INTO OVERWATCH.CORE.SCHEMA_VERSION t
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 1 AS VERSION, 'core: db, schemas, settings, company scope, error log' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);

@@ -2,7 +2,7 @@
 
 Contract (ARCHITECTURE.md): nothing is swallowed invisibly. Every caught
 exception is recorded to the in-session ring buffer and best-effort written to
-CORE.APP_ERROR_LOG; the Admin page displays both. This module and the other
+APP_ERROR_LOG; the Admin page displays both. This module and the other
 core runtime modules are the only sanctioned broad-except sites (ruff BLE001
 enforces that elsewhere).
 """

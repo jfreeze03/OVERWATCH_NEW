@@ -54,7 +54,7 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
 
     events = run(mart_sql.open_alert_events(300), page=_PAGE, key="alert_events",
-                 tier="live", source="CORE.ALERT_EVENTS")
+                 tier="live", source="ALERT_EVENTS")
     if events.ok:
         sev = events.df["SEVERITY"].astype(str).str.upper() if not events.empty else None
         kpi_row([
@@ -99,11 +99,11 @@ def render() -> None:
 
     with tab_rules:
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
-                    source="CORE.ALERT_CONFIG")
+                    source="ALERT_CONFIG")
         if guard(rules, "No alert rules found.", setup_hint=_SETUP_HINT):
             st.dataframe(rules.df, hide_index=True, use_container_width=True)
             st.caption(
-                "Thresholds are data, not code: update CORE.ALERT_CONFIG and the next scan uses them. "
+                "Thresholds are data, not code: update ALERT_CONFIG and the next scan uses them. "
                 "Statistical anomaly detection runs in-app (Cost > Attribution, Operations > Warehouses) "
                 "and is deliberately separate from these deterministic rules."
             )
@@ -124,7 +124,7 @@ def render() -> None:
 
     with tab_history:
         hist = run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",
-                   tier="recent", source="CORE.ALERT_EVENTS")
+                   tier="recent", source="ALERT_EVENTS")
         if guard(hist, "No alert events in the last 30 days.", setup_hint=_SETUP_HINT):
             charts.events_by_day(hist.df)
             result_caption(hist)

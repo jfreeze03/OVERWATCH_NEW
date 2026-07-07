@@ -85,11 +85,11 @@ def _settings_frame_cached(scope: str):
     from app.core.query import run  # local import: avoid module cycle
 
     return run(mart_sql.settings(), page="Settings", key="settings", tier="recent",
-               source="CORE.SETTINGS").df
+               source="SETTINGS").df
 
 
 def load_settings(page: str) -> dict:
-    """Settings from CORE.SETTINGS with code defaults as offline fallback."""
+    """Settings from SETTINGS with code defaults as offline fallback."""
     merged = dict(DEFAULT_SETTINGS)
     try:
         df = _settings_frame_cached("global")
@@ -102,11 +102,11 @@ def load_settings(page: str) -> dict:
                         merged[key] = safe_float(raw, merged[key])
                     else:
                         merged[key] = str(raw if raw is not None else merged[key])
-            merged["_source"] = "CORE.SETTINGS"
+            merged["_source"] = "SETTINGS"
             return merged
     except Exception:  # noqa: BLE001 — settings fallback must never break a page
         pass
-    merged["_source"] = "code defaults (CORE.SETTINGS not reachable)"
+    merged["_source"] = "code defaults (SETTINGS not reachable)"
     return merged
 
 
@@ -125,7 +125,7 @@ def budget_kpi(settings: dict, spend_usd: float) -> dict:
         "value": f"{format_usd(spend_usd)} / {format_usd(budget)}",
         "delta": f"{pct:,.0f}% of budget",
         "delta_color": "inverse" if pct >= 100 else "off",
-        "help": "Budget from CORE.SETTINGS; spend from warehouse metering.",
+        "help": "Budget from SETTINGS; spend from warehouse metering.",
     }
 
 

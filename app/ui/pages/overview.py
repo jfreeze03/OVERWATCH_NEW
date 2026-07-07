@@ -86,7 +86,7 @@ def _mtd_spend_usd(rate: float) -> tuple[float, str]:
 
 def _open_alert_counts() -> tuple[QueryResult, int, int]:
     res = run(mart_sql.open_alert_events(500), page=_PAGE, key="open_alerts",
-              tier="live", source="CORE.ALERT_EVENTS")
+              tier="live", source="ALERT_EVENTS")
     if not res.ok or res.empty:
         return res, 0, 0
     sev = res.df["SEVERITY"].astype(str).str.upper()
@@ -169,7 +169,7 @@ def render() -> None:
         {
             "label": "Open critical / high alerts",
             "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Setup",
-            "help": "From CORE.ALERT_EVENTS (V004). Alerts page has the queue." if alerts_res.ok
+            "help": "From ALERT_EVENTS (V004). Alerts page has the queue." if alerts_res.ok
                     else f"Alert tables unreachable: {alerts_res.error}",
         },
         {
@@ -210,7 +210,7 @@ def render() -> None:
     with left:
         st.subheader("Top actions")
         actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
-                          tier="live", source="CORE.ACTION_QUEUE")
+                          tier="live", source="ACTION_QUEUE")
         if not actions_res.ok:
             st.info("Action queue not deployed yet (migration V005). No placeholder rows are shown.")
         elif actions_res.empty:

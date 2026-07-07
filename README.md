@@ -13,14 +13,14 @@ decision here traces to a finding in the hostile panel review of the old app
 
 | Old-app finding | What this repo does instead |
 |---|---|
-| Fabricated exec trend line, hardcoded action rows, fictional $50k budget | No synthetic data anywhere. Charts render real series or an honest empty state. Budget comes from `OVERWATCH.CORE.SETTINGS` or the KPI says "not configured". |
+| Fabricated exec trend line, hardcoded action rows, fictional $50k budget | No synthetic data anywhere. Charts render real series or an honest empty state. Budget comes from `DBA_MAINT_DB.OVERWATCH.SETTINGS` or the KPI says "not configured". |
 | Wall of zeros on first paint | Overview loads the compact exec mart automatically (one cheap cached query). Live fallback is a bounded aggregate, not a blank page. |
 | Errors cached as empty data for up to 4h | Cached query functions raise on failure; Streamlit never caches exceptions. Failures surface as labeled errors, not silent empty frames. |
 | 461 silent `except Exception` sites | Central `safe_page` boundary + error ring buffer + optional Snowflake error sink. Ruff `BLE001` enforced in CI. |
 | 4 copies of SQL-safety primitives | One module: `app/core/sqlsafe.py`. |
 | 6,134-line setup SQL, no versioning | Numbered migrations in `snowflake/migrations/` + `SCHEMA_VERSION` table + status check on the Admin page. |
 | 92k lines, two apps, 30 zombie section modules | One app, 7 pages, pure-logic layer with tests. No dead routes. |
-| Anyone could change the $/credit execs see | Rates live in `OVERWATCH.CORE.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). Sidebar override is admin-gated and watermarked. |
+| Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). Sidebar override is admin-gated and watermarked. |
 | Cloud-services adjustment hardcoded to 0 | Billed dollars come from `METERING_DAILY_HISTORY` **with** `CREDITS_ADJUSTMENT_CLOUD_SERVICES` applied. |
 | Silent LIMIT injection | Row caps fetch `n+1`, set a `truncated` flag, and the UI shows a truncation banner. |
 | No deep links | Page navigation syncs to `?page=` query params where the runtime supports it. |
@@ -28,7 +28,7 @@ decision here traces to a finding in the hostile panel review of the old app
 ## Company scoping (deliberate, documented)
 
 ALFA and Trexis share one Snowflake account, so scoping is **hardcoded on purpose**
-in exactly one module: `app/companies.py` (mirrored in the `CORE.COMPANY_SCOPE`
+in exactly one module: `app/companies.py` (mirrored in the `COMPANY_SCOPE`
 seed, with a unit test that keeps the two in sync).
 
 - Trexis: the four `WH_TRXS_*` warehouses, `TRXS_*` databases, `TRXS_*` users.
@@ -76,7 +76,7 @@ Streamlit-in-Snowflake: see `DEPLOYMENT.md` (uses `snowflake.yml`, `environment.
 
 ## Rates
 
-Defaults seeded in `CORE.SETTINGS` and mirrored in `app/config.py`:
+Defaults seeded in `SETTINGS` and mirrored in `app/config.py`:
 compute **$3.68/credit**, Cortex **$2.20/credit**, storage **$23/TB/mo**.
 Change them in the Admin page (operator role) — not in code.
 

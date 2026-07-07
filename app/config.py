@@ -1,7 +1,7 @@
 """Central constants. Pure module: no Streamlit, no Snowflake imports.
 
 Rates and thresholds here are OFFLINE FALLBACKS ONLY — the live values come
-from OVERWATCH.CORE.SETTINGS (seeded by V001) and are edited on the Admin
+from DBA_MAINT_DB.OVERWATCH.SETTINGS (seeded by V001) and are edited on the Admin
 page, not in code.
 """
 
@@ -13,10 +13,12 @@ APP_VERSION = "4.0.0"
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
 # ---------------------------------------------------------------------------
-OVERWATCH_DB = "OVERWATCH"
-CORE_SCHEMA = "CORE"
-MART_SCHEMA = "MART"
-APP_WAREHOUSE = "OVERWATCH_WH"
+# Owner decision 2026-07: all OVERWATCH objects live in the existing
+# DBA_MAINT_DB.OVERWATCH schema (shared with the previous app's objects).
+OVERWATCH_DB = "DBA_MAINT_DB"
+CORE_SCHEMA = "OVERWATCH"
+MART_SCHEMA = "OVERWATCH"
+APP_WAREHOUSE = "WH_ALFA_OVERWATCH"
 APP_QUERY_TAG_PREFIX = "OVERWATCH"
 
 
@@ -29,7 +31,7 @@ def mart_object(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Rates — fallback defaults; CORE.SETTINGS is authoritative at runtime.
+# Rates — fallback defaults; SETTINGS is authoritative at runtime.
 # Contract rates confirmed 2026-07: $3.68 compute, $2.20 Cortex.
 # ---------------------------------------------------------------------------
 DEFAULT_SETTINGS = {

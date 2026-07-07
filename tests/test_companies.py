@@ -61,7 +61,7 @@ def test_clauses_pass_injection_gate():
 
 
 def test_company_scope_seed_matches_code():
-    """V001's CORE.COMPANY_SCOPE seed must list exactly the code's rules."""
+    """V001's COMPANY_SCOPE seed must list exactly the code's rules."""
     sql = MIGRATION.read_text(encoding="utf-8")
     for wh in co.TREXIS_WAREHOUSES:
         assert re.search(rf"'Trexis'\s*,\s*'WAREHOUSE'\s*,\s*'{wh}'", sql), f"seed missing warehouse {wh}"

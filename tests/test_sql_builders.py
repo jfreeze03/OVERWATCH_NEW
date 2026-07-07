@@ -114,6 +114,6 @@ def test_free_text_filters_are_sanitized_into_builders():
 
 
 def test_mart_readers_target_overwatch_objects():
-    assert "OVERWATCH.MART.MART_EXEC_BOARD" in mart_sql.exec_board("ALFA", 7)
-    assert "OVERWATCH.CORE.SETTINGS" in mart_sql.settings()
-    assert "OVERWATCH.CORE.ALERT_EVENTS" in mart_sql.open_alert_events()
+    assert "DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD" in mart_sql.exec_board("ALFA", 7)
+    assert "DBA_MAINT_DB.OVERWATCH.SETTINGS" in mart_sql.settings()
+    assert "DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS" in mart_sql.open_alert_events()

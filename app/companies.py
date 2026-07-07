@@ -11,7 +11,7 @@ hardcoded (owner decision, 2026-07). Rules:
 
 This scoping is a shared-account convenience filter, not a security boundary;
 Snowflake RBAC under Streamlit-in-Snowflake is the boundary. The same rules
-are seeded into ``OVERWATCH.CORE.COMPANY_SCOPE`` by V001 and
+are seeded into ``DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE`` by V001 and
 ``tests/test_companies.py`` keeps code and seed in sync.
 """
 

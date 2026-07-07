@@ -8,7 +8,7 @@ panel review of the old repo.
 
 1. **Scope:** full parity — 6 sections + Admin (setup/health moved off the exec page).
 2. **Tenancy:** ALFA/Trexis hardcoded (shared account), isolated in `app/companies.py`
-   + `CORE.COMPANY_SCOPE` seed, sync-tested. `KEBARR1` → ALFA by override.
+   + `COMPANY_SCOPE` seed, sync-tested. `KEBARR1` → ALFA by override.
 3. **Deploy target:** Streamlit-in-Snowflake primary (per-user roles = real access
    control). Community Cloud / local = dev only, documented.
 4. **Data:** mart-first (tasks load compact facts hourly/daily; exec board mart for
@@ -36,7 +36,7 @@ panel review of the old repo.
       filter state + query-param navigation.
 - [x] **P4 — Snowflake migrations**: V001 core (db/schemas/settings/company
       scope/schema_version/error log), V002 facts (6 fact tables, hourly/daily
-      MERGE procs, OVERWATCH_WH XSMALL + resource monitor, chained tasks),
+      MERGE procs, WH_ALFA_OVERWATCH XSMALL + resource monitor, chained tasks),
       V003 marts (exec board + control-room snapshot + freshness view),
       V004 alerts (config/events/audit + scan proc + native templates),
       V005 actions (action queue + savings ledger). Roles + validate scripts.

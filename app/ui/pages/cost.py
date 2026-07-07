@@ -64,8 +64,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
          "help": "Billed credits x rate. Includes the cloud-services adjustment."},
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — money the old dashboard ignored."},
-        {"label": "Compute rate", "value": f"${rate:.2f}/cr", "help": "CORE.SETTINGS CREDIT_PRICE_USD."},
-        {"label": "Cortex rate", "value": f"${ai_rate:.2f}/cr", "help": "CORE.SETTINGS AI_CREDIT_PRICE_USD."},
+        {"label": "Compute rate", "value": f"${rate:.2f}/cr", "help": "SETTINGS CREDIT_PRICE_USD."},
+        {"label": "Cortex rate", "value": f"${ai_rate:.2f}/cr", "help": "SETTINGS AI_CREDIT_PRICE_USD."},
     ])
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
@@ -141,7 +141,7 @@ def _contract_tab(settings: dict) -> None:
     try:
         start, end = date.fromisoformat(start_s), date.fromisoformat(end_s)
     except ValueError:
-        st.error(f"Contract dates in CORE.SETTINGS are not YYYY-MM-DD: {start_s!r} / {end_s!r}.")
+        st.error(f"Contract dates in SETTINGS are not YYYY-MM-DD: {start_s!r} / {end_s!r}.")
         return
     res = run(cost_sql.contract_consumed_credits(start_s), page=_PAGE, key="contract_consumed",
               tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
@@ -193,7 +193,7 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             total_tb = float(latest["TB"].sum())
             kpi_row([{"label": "Current storage", "value": f"{total_tb:,.2f} TB",
                       "delta": f"~{format_usd(total_tb * rate_tb)}/mo",
-                      "help": f"${rate_tb:.2f}/TB/mo from CORE.SETTINGS. Display estimate."}])
+                      "help": f"${rate_tb:.2f}/TB/mo from SETTINGS. Display estimate."}])
             charts.bar_usd(latest.sort_values("USD_MONTH", ascending=False),
                            "DATABASE_NAME", "USD_MONTH", title="$/month (est.)")
             result_caption(res)
@@ -201,7 +201,7 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
 
 def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
-              tier="live", source="CORE.SAVINGS_LEDGER")
+              tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
         st.info("Savings ledger not deployed yet (migration V005).")
         return

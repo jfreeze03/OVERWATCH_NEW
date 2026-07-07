@@ -2,45 +2,70 @@
 
 WITH checks AS (
     SELECT 'V001..V005 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM OVERWATCH.CORE.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 5) = 5,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 5) = 5,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
-           IFF((SELECT COUNT(*) FROM OVERWATCH.CORE.SETTINGS
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.SETTINGS
                  WHERE KEY IN ('CREDIT_PRICE_USD', 'AI_CREDIT_PRICE_USD')) = 2,
-               'OK', 'FAIL: rates missing from CORE.SETTINGS')
+               'OK', 'FAIL: rates missing from SETTINGS')
     UNION ALL
     SELECT 'Credit rate is 3.68 unless deliberately changed',
-           IFF((SELECT VALUE FROM OVERWATCH.CORE.SETTINGS WHERE KEY = 'CREDIT_PRICE_USD') IS NOT NULL,
+           IFF((SELECT VALUE FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'CREDIT_PRICE_USD') IS NOT NULL,
                'OK', 'FAIL')
     UNION ALL
     SELECT 'Company scope seeded (Trexis warehouses)',
-           IFF((SELECT COUNT(*) FROM OVERWATCH.CORE.COMPANY_SCOPE
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
                  WHERE COMPANY = 'Trexis' AND SCOPE_TYPE = 'WAREHOUSE') = 4,
                'OK', 'FAIL: expected 4 Trexis warehouses')
     UNION ALL
     SELECT 'KEBARR1 override present',
-           IFF(EXISTS (SELECT 1 FROM OVERWATCH.CORE.COMPANY_SCOPE
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
                         WHERE SCOPE_TYPE = 'USER_OVERRIDE' AND PATTERN = 'KEBARR1' AND COMPANY = 'ALFA'),
                'OK', 'FAIL: KEBARR1 must classify as ALFA')
     UNION ALL
     SELECT 'KEBARR1 classifies as ALFA',
-           IFF(OVERWATCH.CORE.COMPANY_FOR_USER('KEBARR1') = 'ALFA', 'OK', 'FAIL')
+           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('KEBARR1') = 'ALFA', 'OK', 'FAIL')
     UNION ALL
     SELECT 'TRXS_ prefix classifies as Trexis',
-           IFF(OVERWATCH.CORE.COMPANY_FOR_USER('TRXS_LOADER') = 'Trexis', 'OK', 'FAIL')
+           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('TRXS_LOADER') = 'Trexis', 'OK', 'FAIL')
     UNION ALL
-    SELECT 'Resource monitor attached to OVERWATCH_WH',
+    SELECT 'Resource monitor attached to WH_ALFA_OVERWATCH',
            IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSES
-                        WHERE NAME = 'OVERWATCH_WH' AND DELETED IS NULL),
-               'OK', 'CHECK: confirm OVERWATCH_WH + OVERWATCH_RM in SHOW WAREHOUSES')
+                        WHERE NAME = 'WH_ALFA_OVERWATCH' AND DELETED IS NULL),
+               'OK', 'CHECK: confirm WH_ALFA_OVERWATCH + OVERWATCH_RM in SHOW WAREHOUSES')
     UNION ALL
     SELECT 'Alert rules seeded',
-           IFF((SELECT COUNT(*) FROM OVERWATCH.CORE.ALERT_CONFIG) >= 7, 'OK', 'FAIL')
+           IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')
+    UNION ALL
+    -- Shared-schema collision checks: if an old-app table with the same name
+    -- survived, it keeps the old shape and these columns are missing.
+    SELECT 'ALERT_EVENTS has new shape (DEDUPE_KEY)',
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'ALERT_EVENTS'
+                          AND COLUMN_NAME = 'DEDUPE_KEY'),
+               'OK', 'FAIL: old-app ALERT_EVENTS present — rename it and rerun V004')
+    UNION ALL
+    SELECT 'ALERT_CONFIG has new shape (THRESHOLD_NUM)',
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'ALERT_CONFIG'
+                          AND COLUMN_NAME = 'THRESHOLD_NUM'),
+               'OK', 'FAIL: old-app ALERT_CONFIG present — rename it and rerun V004')
+    UNION ALL
+    SELECT 'FACT_QUERY_HOURLY has new shape (COMPANY)',
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'FACT_QUERY_HOURLY'
+                          AND COLUMN_NAME = 'COMPANY'),
+               'OK', 'FAIL: old-app FACT_QUERY_HOURLY present — rename it and rerun V002')
+    UNION ALL
+    SELECT 'Task warehouse is WH_ALFA_OVERWATCH',
+           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'SCHEMA_VERSION'),
+               'OK', 'CHECK: confirm SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH shows WH_ALFA_OVERWATCH')
 )
 SELECT * FROM checks
 UNION ALL
 SELECT 'Task: ' || NAME,
        IFF(STATE = 'started', 'OK', 'CHECK: task not started (' || STATE || ')')
-FROM TABLE(INFORMATION_SCHEMA.TASK_DEPENDENTS(TASK_NAME => 'OVERWATCH.MART.TASK_LOAD_HOURLY', RECURSIVE => TRUE))
+FROM TABLE(INFORMATION_SCHEMA.TASK_DEPENDENTS(TASK_NAME => 'DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY', RECURSIVE => TRUE))
 ORDER BY 1;

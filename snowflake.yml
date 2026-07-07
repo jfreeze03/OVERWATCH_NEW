@@ -6,10 +6,10 @@ entities:
     type: streamlit
     identifier:
       name: OVERWATCH_APP
-      database: OVERWATCH
-      schema: CORE
+      database: DBA_MAINT_DB
+      schema: OVERWATCH
     main_file: streamlit_app.py
-    query_warehouse: OVERWATCH_WH
+    query_warehouse: WH_ALFA_OVERWATCH
     title: "OVERWATCH — Snowflake Command Center"
     artifacts:
       - streamlit_app.py

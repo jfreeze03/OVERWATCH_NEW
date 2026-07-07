@@ -29,9 +29,9 @@ def test_sql_number_never_interpolates_text():
 
 
 def test_safe_identifier_accepts_qualified_when_allowed():
-    assert safe_identifier("OVERWATCH.CORE.SETTINGS", allow_qualified=True) == "OVERWATCH.CORE.SETTINGS"
+    assert safe_identifier("DBA_MAINT_DB.OVERWATCH.SETTINGS", allow_qualified=True) == "DBA_MAINT_DB.OVERWATCH.SETTINGS"
     with pytest.raises(ValueError):
-        safe_identifier("OVERWATCH.CORE.SETTINGS")  # dots not allowed unqualified
+        safe_identifier("DBA_MAINT_DB.OVERWATCH.SETTINGS")  # dots not allowed unqualified
     with pytest.raises(ValueError):
         safe_identifier("bad-name")
     with pytest.raises(ValueError):

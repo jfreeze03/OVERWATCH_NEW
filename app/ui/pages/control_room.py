@@ -86,7 +86,7 @@ def render() -> None:
     # ---- Triage queue ----------------------------------------------------------
     st.subheader("Triage queue")
     alerts = run(mart_sql.open_alert_events(100), page=_PAGE, key="cr_alerts", tier="live",
-                 source="CORE.ALERT_EVENTS")
+                 source="ALERT_EVENTS")
     tasks = run(mart_sql.fact_task_daily(2, company), page=_PAGE, key=f"cr_tasks_{company}",
                 tier="recent", source="FACT_TASK_DAILY")
     if not tasks.usable():

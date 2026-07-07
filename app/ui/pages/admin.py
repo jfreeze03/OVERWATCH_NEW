@@ -51,8 +51,8 @@ def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
     st.caption(f"Values from: {settings.get('_source')}. Rates confirmed 2026-07: $3.68 compute / $2.20 Cortex.")
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
-              source="CORE.SETTINGS")
-    if guard(res, "CORE.SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
+              source="SETTINGS")
+    if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
         st.dataframe(res.df, hide_index=True, use_container_width=True)
         result_caption(res)
 
@@ -80,7 +80,7 @@ def _settings_tab(is_operator: bool) -> None:
 
 def _migrations_tab() -> None:
     res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="live",
-              source="CORE.SCHEMA_VERSION")
+              source="SCHEMA_VERSION")
     if not res.ok:
         st.error(f"Cannot read SCHEMA_VERSION: {res.error}")
         st.info("Run snowflake/migrations/V001__core.sql first.")
@@ -99,13 +99,13 @@ def _migrations_tab() -> None:
     fresh = run(mart_sql.source_freshness(), page=_PAGE, key="adm_freshness", tier="live",
                 source="MART_SOURCE_FRESHNESS")
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
-             setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN DATABASE OVERWATCH."):
+             setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
         st.dataframe(fresh.df, hide_index=True, use_container_width=True)
 
 
 def _self_cost_tab() -> None:
     st.caption(
-        "The monitoring app must never become the cost problem: OVERWATCH_WH is XSMALL with a "
+        "The monitoring app must never become the cost problem: WH_ALFA_OVERWATCH is XSMALL with a "
         "30-credit monthly resource monitor, and every app query carries an OVERWATCH query tag."
     )
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
@@ -132,7 +132,7 @@ def _observability_tab() -> None:
         st.dataframe(pd.DataFrame(buffer)[["at", "page", "type", "message"]],
                      hide_index=True, use_container_width=True)
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
-               source="CORE.APP_ERROR_LOG")
+               source="APP_ERROR_LOG")
     st.markdown("**Persisted error log (all sessions)**")
     if sink.ok and sink.empty:
         st.success("Error sink is empty.")

@@ -58,7 +58,7 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
 
 - Every page renders inside `safe_page` (app/core/errors.py): exceptions are
   recorded to an in-session ring buffer and best-effort inserted into
-  `CORE.APP_ERROR_LOG`, then a friendly error renders. Nothing is swallowed
+  `APP_ERROR_LOG`, then a friendly error renders. Nothing is swallowed
   invisibly; the Admin page lists recent errors.
 - Ruff `BLE001` bans blind `except Exception:` everywhere except the three
   sanctioned runtime modules that record what they catch.
@@ -71,7 +71,7 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
 - Warehouse spend: `WAREHOUSE_METERING_HISTORY` (exact, includes idle).
 - User/database spend: allocated from query elapsed-time share (or
   `QUERY_ATTRIBUTION_HISTORY` when present) and always labeled **allocated**.
-- Rates come from `CORE.SETTINGS` (seeded $3.68 compute / $2.20 Cortex /
+- Rates come from `SETTINGS` (seeded $3.68 compute / $2.20 Cortex /
   $23 TB-mo). The Admin page edits them with the operator role; code ships
   matching defaults only as offline fallback.
 - All conversion math lives in `app/logic/formulas.py` and is regression-tested.
@@ -82,7 +82,7 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   Each viewer's own role limits what data the app can read for them.
 - Company scoping (ALFA vs Trexis) is a shared-account *convenience filter*,
   hardcoded deliberately in `app/companies.py` and seeded to
-  `CORE.COMPANY_SCOPE` (a pytest keeps code and seed in sync). It is not an
+  `COMPANY_SCOPE` (a pytest keeps code and seed in sync). It is not an
   isolation mechanism and the docs never claim it is.
 - User classification: `TRXS_*` → Trexis; explicit override `KEBARR1` → ALFA
   (holds both companies' roles, treated as ALFA by policy).
