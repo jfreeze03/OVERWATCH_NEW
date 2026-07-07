@@ -68,6 +68,7 @@ snowflake/migrations/V002__facts.sql     -- fact tables, load procs, warehouse +
 snowflake/migrations/V003__marts.sql     -- exec board, control room snapshot, freshness view
 snowflake/migrations/V004__alerts.sql    -- alert config/events/audit + scan proc
 snowflake/migrations/V005__actions.sql   -- action queue + savings ledger
+snowflake/migrations/V006__pipeline_sla.sql -- pipeline freshness SLA config + status
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

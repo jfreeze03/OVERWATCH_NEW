@@ -11,6 +11,7 @@ snowflake/migrations/V002__facts.sql
 snowflake/migrations/V003__marts.sql
 snowflake/migrations/V004__alerts.sql
 snowflake/migrations/V005__actions.sql
+snowflake/migrations/V006__pipeline_sla.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

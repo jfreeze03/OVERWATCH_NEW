@@ -17,12 +17,13 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
-from app.data import cortex_sql, cost_sql, mart_sql
+from app.data import cortex_sql, cost_sql, insights_sql, mart_sql
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
 from app.logic.forecast import contract_pace
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
+from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
 from app.ui import charts
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
 
@@ -198,6 +199,107 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             charts.bar_usd(latest.sort_values("USD_MONTH", ascending=False),
                            "DATABASE_NAME", "USD_MONTH", title="$/month (est.)")
             result_caption(res)
+
+
+def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool) -> None:
+    """Ported optimization insights: idle warehouses, repeat queries, storage movers."""
+    # ---- 1. Idle warehouse advisor -------------------------------------------
+    st.markdown("**Idle warehouse advisor**")
+    st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
+    idle_res = run(insights_sql.idle_warehouse_analysis(days, company), page=_PAGE,
+                   key=f"idle_{company}_{days}", tier="historical",
+                   source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (hourly join)")
+    if guard(idle_res, "No warehouse metering in this window."):
+        advisor = idle_advisor(idle_res.df, rate, days)
+        flagged = advisor[advisor["FLAGGED"]]
+        total_idle = float(advisor["IDLE_USD"].sum())
+        kpi_row([
+            {"label": f"Idle spend ({days}d)", "value": format_usd(total_idle),
+             "help": "Credits billed while no query ran on the warehouse."},
+            {"label": "Projected monthly idle", "value": format_usd(float(advisor["PROJECTED_MONTHLY_IDLE_USD"].sum()))},
+            {"label": "Warehouses flagged", "value": f"{len(flagged)}",
+             "help": ">=20% idle share and >=1 idle credit."},
+        ])
+        st.dataframe(
+            advisor[["WAREHOUSE_NAME", "COMPANY", "TOTAL_CREDITS", "IDLE_CREDITS",
+                      "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD", "RECOMMENDATION"]],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
+                "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
+                "PROJECTED_MONTHLY_IDLE_USD": st.column_config.NumberColumn("Proj. monthly $", format="$%.0f"),
+            },
+        )
+        result_caption(idle_res, note="Hour-slice granularity; short auto-suspends already reduce this.")
+        if not flagged.empty:
+            with st.expander("Generated remediation + savings-ledger entries"):
+                statements = []
+                for _, r in flagged.head(10).iterrows():
+                    statements.append(idle_suspend_sql(r["WAREHOUSE_NAME"]))
+                    statements.append(
+                        f"INSERT INTO {core_object('SAVINGS_LEDGER')} (DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL)\n"
+                        f"VALUES ({sql_literal('Auto-suspend tune: ' + str(r['WAREHOUSE_NAME']))}, 'ESTIMATED', "
+                        f"{sql_number(r['PROJECTED_MONTHLY_IDLE_USD'])}, "
+                        f"{sql_literal('Re-run idle analysis for ' + str(r['WAREHOUSE_NAME']) + ' after the change; verify idle $ drop.')});"
+                    )
+                st.code("\n".join(statements), language="sql")
+                st.caption("Review and run as OVERWATCH_OPERATOR. Warehouse changes are never executed from the app.")
+
+    st.divider()
+    # ---- 2. Repeat-query candidates -------------------------------------------
+    st.markdown("**Repeat-query candidates (cache / materialization)**")
+    rq_res = run(insights_sql.repeat_query_fingerprints(days, company), page=_PAGE,
+                 key=f"repeatq_{company}_{days}", tier="historical",
+                 source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH)")
+    if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
+             setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
+        candidates = flag_repeat_candidates(rq_res.df)
+        hot = candidates[candidates["CANDIDATE"]]
+        kpi_row([
+            {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
+            {"label": "Materialization candidates", "value": f"{len(hot)}",
+             "help": ">=0.5h total compute and <=25% cache hit."},
+            {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
+        ])
+        st.dataframe(
+            candidates[["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
+                         "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "CANDIDATE", "QUERY_PREVIEW"]],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
+                "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
+                "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
+            },
+        )
+        result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
+
+    st.divider()
+    # ---- 3. Storage growth movers ------------------------------------------------
+    st.markdown("**Storage growth movers**")
+    days_storage = max(days, 30)
+    sg_res = run(insights_sql.storage_growth_by_database(days_storage, company), page=_PAGE,
+                 key=f"storgrow_{company}_{days_storage}", tier="historical",
+                 source="DATABASE_STORAGE_USAGE_HISTORY")
+    if guard(sg_res, "No storage history for this scope."):
+        movers = storage_movers(sg_res.df, safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0))
+        growing = movers[movers["GROWTH_TB"] > 0]
+        kpi_row([
+            {"label": "Current storage", "value": f"{float(movers['CURRENT_TB'].sum()):,.2f} TB"},
+            {"label": f"Growth ({days_storage}d)", "value": f"{float(movers['GROWTH_TB'].sum()):,.2f} TB"},
+            {"label": "Projected growth $/mo", "value": format_usd(float(growing['GROWTH_USD_30D'].sum())),
+             "help": "Growth rate extended 30 days x storage rate. Display estimate."},
+        ])
+        charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D", title="Projected growth $/mo")
+        st.dataframe(
+            movers[["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
+                     "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
+                "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
+            },
+        )
+        result_caption(sg_res, note=f"Window widened to {days_storage}d for a stable growth slope.")
 
 
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:
@@ -392,8 +494,8 @@ def render() -> None:
                 scope_note=f"{f['company']} · last {f['days']} days")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    tab_spend, tab_attr, tab_contract, tab_ai, tab_users, tab_savings = st.tabs(
-        ["Spend", "Attribution", "Contract", "Cortex & Storage", "AI Users", "Savings ledger"]
+    tab_spend, tab_attr, tab_contract, tab_ai, tab_users, tab_opt, tab_savings = st.tabs(
+        ["Spend", "Attribution", "Contract", "Cortex & Storage", "AI Users", "Optimization", "Savings ledger"]
     )
     with tab_spend:
         _spend_tab(f["company"], f["days"], rate, ai_rate)
@@ -405,5 +507,7 @@ def render() -> None:
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
     with tab_users:
         _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
+    with tab_opt:
+        _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
     with tab_savings:
         _savings_tab()

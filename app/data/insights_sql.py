@@ -1,0 +1,276 @@
+"""Insight builders ported from the original OVERWATCH (features 1-7).
+
+Idle warehouse analysis, repeat-query fingerprints, storage growth, release
+window compares, task failure detail, pipeline SLA readers, dormant users.
+Pure SQL strings: bounded windows, company scoping, no dollar rates.
+"""
+
+from __future__ import annotations
+
+from app import companies
+from app.config import core_object
+from app.data.common import and_where, bounded_days
+
+
+def _iso_date(value: str, name: str) -> str:
+    text = str(value or "").strip()
+    if len(text) != 10 or text[4] != "-" or text[7] != "-" or not text.replace("-", "").isdigit():
+        raise ValueError(f"{name} must be YYYY-MM-DD, got {text!r}")
+    return text
+
+
+# ---------------------------------------------------------------------------
+# 1. Idle warehouse analysis: metered warehouse-hours with zero query activity
+# ---------------------------------------------------------------------------
+
+def idle_warehouse_analysis(days: int, company: str = "ALL") -> str:
+    """Per warehouse: total vs idle credits (hour slices with no queries).
+
+    WAREHOUSE_METERING_HISTORY bills by hour slice; joining each slice to
+    query activity in the same warehouse-hour isolates credits burned while
+    nothing ran — the auto-suspend opportunity.
+    """
+    days = bounded_days(days)
+    where = and_where(
+        f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+    )
+    return f"""
+WITH query_hours AS (
+    SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+)
+SELECT
+    M.WAREHOUSE_NAME,
+    {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
+    COUNT(*) AS METERED_HOURS,
+    SUM(IFF(Q.HOUR_TS IS NULL, 1, 0)) AS IDLE_HOURS,
+    SUM(COALESCE(M.CREDITS_USED, 0)) AS TOTAL_CREDITS,
+    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+LEFT JOIN query_hours Q
+       ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+      AND Q.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
+WHERE {where}
+GROUP BY 1, 2
+HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
+ORDER BY IDLE_CREDITS DESC
+LIMIT 100
+"""
+
+
+# ---------------------------------------------------------------------------
+# 2. Repeat-query fingerprints (cache/materialization candidates)
+# ---------------------------------------------------------------------------
+
+def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 10) -> str:
+    days = bounded_days(days)
+    min_runs = max(2, min(int(min_runs), 1000))
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "EXECUTION_STATUS = 'SUCCESS'",
+        "QUERY_TYPE = 'SELECT'",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        companies.warehouse_clause(company),
+        companies.user_clause(company),
+    )
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+    COUNT(*) AS RUNS,
+    COUNT(DISTINCT USER_NAME) AS USERS,
+    COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
+    AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
+    SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
+    AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) AS AVG_CACHE_PCT,
+    ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
+    MAX(START_TIME) AS LAST_RUN
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY QUERY_PARAMETERIZED_HASH
+HAVING COUNT(*) >= {min_runs}
+ORDER BY TOTAL_ELAPSED_HOURS DESC
+LIMIT 100
+"""
+
+
+# ---------------------------------------------------------------------------
+# 3. Storage growth movers
+# ---------------------------------------------------------------------------
+
+def storage_growth_by_database(days: int, company: str = "ALL") -> str:
+    days = bounded_days(days)
+    where = and_where(
+        f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.database_clause(company),
+    )
+    return f"""
+WITH daily AS (
+    SELECT
+        DATABASE_NAME,
+        USAGE_DATE,
+        AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
+        AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+    WHERE {where}
+    GROUP BY 1, 2
+)
+SELECT
+    DATABASE_NAME,
+    {companies.company_case_sql("DATABASE_NAME")} AS COMPANY,
+    MIN(USAGE_DATE) AS FIRST_DAY,
+    MAX(USAGE_DATE) AS LAST_DAY,
+    MIN_BY(DB_BYTES, USAGE_DATE) AS FIRST_BYTES,
+    MAX_BY(DB_BYTES, USAGE_DATE) AS LAST_BYTES,
+    MAX_BY(FAILSAFE_BYTES, USAGE_DATE) AS FAILSAFE_BYTES,
+    DATEDIFF('day', MIN(USAGE_DATE), MAX(USAGE_DATE)) AS SPAN_DAYS
+FROM daily
+GROUP BY 1, 2
+HAVING MAX_BY(DB_BYTES, USAGE_DATE) > 0 OR MIN_BY(DB_BYTES, USAGE_DATE) > 0
+ORDER BY (MAX_BY(DB_BYTES, USAGE_DATE) - MIN_BY(DB_BYTES, USAGE_DATE)) DESC
+LIMIT 100
+"""
+
+
+# ---------------------------------------------------------------------------
+# 4. Release window compare (before vs after a deploy date)
+# ---------------------------------------------------------------------------
+
+def release_query_compare(release_date: str, window_days: int, company: str = "ALL") -> str:
+    """Overall query health in the N days before vs after a release date."""
+    release = _iso_date(release_date, "release_date")
+    window = max(1, min(int(window_days), 14))
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
+        f"START_TIME < DATEADD('day', {window}, DATE '{release}')",
+        companies.warehouse_clause(company),
+        companies.user_clause(company),
+    )
+    return f"""
+SELECT
+    IFF(START_TIME < DATE '{release}', 'BEFORE', 'AFTER') AS PERIOD,
+    COUNT(*) AS QUERY_COUNT,
+    SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)) AS FAILED_COUNT,
+    APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
+    SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+    SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1
+"""
+
+
+def release_task_compare(release_date: str, window_days: int, company: str = "ALL") -> str:
+    """Per-task runs/failures/runtime before vs after a release date."""
+    release = _iso_date(release_date, "release_date")
+    window = max(1, min(int(window_days), 14))
+    where = and_where(
+        f"QUERY_START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
+        f"QUERY_START_TIME < DATEADD('day', {window}, DATE '{release}')",
+        companies.database_clause(company, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    NAME AS TASK_NAME,
+    IFF(QUERY_START_TIME < DATE '{release}', 'BEFORE', 'AFTER') AS PERIOD,
+    COUNT(*) AS RUNS,
+    SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
+    AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE {where}
+GROUP BY 1, 2, 3
+ORDER BY DATABASE_NAME, TASK_NAME, PERIOD
+LIMIT 1000
+"""
+
+
+# ---------------------------------------------------------------------------
+# 5. Task failure detail (root-cause timeline)
+# ---------------------------------------------------------------------------
+
+def task_failure_details(days: int, company: str = "ALL") -> str:
+    days = bounded_days(days, maximum=14)
+    where = and_where(
+        f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "STATE = 'FAILED'",
+        companies.database_clause(company, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    NAME AS TASK_NAME,
+    ROOT_TASK_ID,
+    GRAPH_RUN_GROUP_ID,
+    QUERY_START_TIME,
+    DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC,
+    COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
+    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE {where}
+ORDER BY QUERY_START_TIME DESC
+LIMIT 500
+"""
+
+
+# ---------------------------------------------------------------------------
+# 6. Pipeline SLA (config in V006; status computed against table freshness)
+# ---------------------------------------------------------------------------
+
+def pipeline_sla_status() -> str:
+    return f"""
+SELECT DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, OWNER, MAX_AGE_HOURS,
+       LAST_ALTERED, HOURS_SINCE, SLA_MET
+FROM {core_object("PIPELINE_SLA_STATUS")}
+ORDER BY SLA_MET, HOURS_SINCE DESC
+"""
+
+
+def pipeline_sla_config() -> str:
+    return f"""
+SELECT DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER, ENABLED, UPDATED_AT
+FROM {core_object("PIPELINE_SLA_CONFIG")}
+ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
+"""
+
+
+# ---------------------------------------------------------------------------
+# 7. Dormant users & grant review
+# ---------------------------------------------------------------------------
+
+def dormant_users(dormant_days: int = 90, company: str = "ALL") -> str:
+    dormant_days = max(30, min(int(dormant_days), 365))
+    where = and_where(
+        "U.DELETED_ON IS NULL",
+        "COALESCE(U.DISABLED, FALSE) = FALSE",
+        f"(U.LAST_SUCCESS_LOGIN IS NULL OR U.LAST_SUCCESS_LOGIN < DATEADD('day', -{dormant_days}, CURRENT_TIMESTAMP()))",
+        f"U.CREATED_ON < DATEADD('day', -{dormant_days}, CURRENT_TIMESTAMP())",
+        companies.user_clause(company, "U.NAME"),
+    )
+    return f"""
+WITH role_counts AS (
+    SELECT GRANTEE_NAME, COUNT(*) AS ROLE_COUNT,
+           LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ROLES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE DELETED_ON IS NULL
+    GROUP BY GRANTEE_NAME
+)
+SELECT
+    U.NAME AS USER_NAME,
+    U.EMAIL,
+    U.CREATED_ON,
+    U.LAST_SUCCESS_LOGIN,
+    COALESCE(DATEDIFF('day', U.LAST_SUCCESS_LOGIN, CURRENT_TIMESTAMP()), 9999) AS DAYS_DORMANT,
+    COALESCE(R.ROLE_COUNT, 0) AS ROLE_COUNT,
+    LEFT(COALESCE(R.ROLES, ''), 300) AS ROLES
+FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+LEFT JOIN role_counts R ON R.GRANTEE_NAME = U.NAME
+WHERE {where}
+ORDER BY DAYS_DORMANT DESC, ROLE_COUNT DESC
+LIMIT 300
+"""

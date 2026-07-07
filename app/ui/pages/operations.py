@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import streamlit as st
 
+from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import execute_statement, run
+from app.core.session import current_role
+from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import mart_sql, ops_sql
+from app.data import insights_sql, mart_sql, ops_sql
 from app.logic.anomaly import flag_anomalies
 from app.logic.formulas import credits_to_usd, safe_float
+from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
 
@@ -59,6 +65,141 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str) -> N
         st.dataframe(fails.df, hide_index=True, use_container_width=True)
 
 
+def _failure_timeline_section(company: str) -> None:
+    """Root-cause vs cascade view of recent task failures (ported)."""
+    st.markdown("**Failure root-cause timeline (7d)**")
+    res = run(insights_sql.task_failure_details(7, company), page=_PAGE,
+              key=f"t_rca_{company}", tier="recent",
+              source="ACCOUNT_USAGE.TASK_HISTORY (failures)")
+    if not res.ok:
+        st.error(f"Failure detail unavailable: {res.error}")
+        return
+    if res.empty:
+        st.success("No task failures in the last 7 days for this scope.")
+        return
+    timeline = build_failure_timeline(res.df)
+    roots = timeline[timeline["ROLE_IN_GRAPH"] == "Root cause"]
+    kpi_row([
+        {"label": "Failures (7d)", "value": f"{len(timeline)}"},
+        {"label": "Root causes", "value": f"{len(roots)}",
+         "help": "First failure per task-graph run; fix these, the cascade follows."},
+        {"label": "Top error family",
+         "value": str(timeline["ERROR_FAMILY"].mode().iloc[0]) if not timeline.empty else "n/a"},
+    ])
+    fam = timeline.groupby("ERROR_FAMILY", as_index=False).size().rename(columns={"size": "FAILURES"})
+    charts.bar_count(fam.sort_values("FAILURES", ascending=False), "ERROR_FAMILY", "FAILURES",
+                     title="Failures by family")
+    st.dataframe(
+        timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
+                   "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
+        hide_index=True, use_container_width=True,
+    )
+    result_caption(res)
+
+
+def _release_compare_tab(company: str) -> None:
+    """Before/after a release date: query health + per-task regressions (ported)."""
+    st.caption(
+        "Pick the deploy date; each side compares the same number of days before and after. "
+        "ACCOUNT_USAGE lag means very recent releases under-count the AFTER side."
+    )
+    col_date, col_window = st.columns([1.2, 1.0])
+    with col_date:
+        release_day = st.date_input("Release date", value=date.today() - timedelta(days=1),
+                                    key="ops_release_date")
+    with col_window:
+        window = st.select_slider("Compare window (days each side)", options=[1, 2, 3, 5, 7, 14],
+                                  value=3, key="ops_release_window")
+    release_iso = release_day.isoformat()
+
+    q_res = run(insights_sql.release_query_compare(release_iso, window, company), page=_PAGE,
+                key=f"rel_q_{company}_{release_iso}_{window}", tier="historical",
+                source="ACCOUNT_USAGE.QUERY_HISTORY")
+    st.markdown("**Query health: before vs after**")
+    if guard(q_res, "No query history in the compare windows."):
+        verdicts = compare_release_periods(q_res.df)
+        if verdicts:
+            st.dataframe(verdicts, hide_index=True, use_container_width=True)
+            worse = [v["Metric"] for v in verdicts if v["Verdict"] == "Worse"]
+            if worse:
+                st.warning("Regressed after release: " + ", ".join(worse))
+            else:
+                st.success("No query-health regression beyond the 10% flat tolerance.")
+        else:
+            st.info("Need data on both sides of the release date to compare.")
+        result_caption(q_res)
+
+    st.markdown("**Task regressions**")
+    t_res = run(insights_sql.release_task_compare(release_iso, window, company), page=_PAGE,
+                key=f"rel_t_{company}_{release_iso}_{window}", tier="historical",
+                source="ACCOUNT_USAGE.TASK_HISTORY")
+    if guard(t_res, "No task runs in the compare windows."):
+        deltas = task_release_deltas(t_res.df)
+        worse = deltas[deltas["GOT_WORSE"]]
+        if worse.empty:
+            st.success("No task gained failures or slowed >25% after the release.")
+        else:
+            st.warning(f"{len(worse)} task(s) regressed after the release:")
+        st.dataframe(
+            deltas[["DATABASE_NAME", "TASK_NAME", "RUNS_BEFORE", "RUNS_AFTER",
+                     "FAILED_BEFORE", "FAILED_AFTER", "NEW_FAILURES",
+                     "AVG_SEC_BEFORE", "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]],
+            hide_index=True, use_container_width=True,
+        )
+        result_caption(t_res)
+
+
+def _pipeline_sla_tab(is_operator: bool) -> None:
+    """Metadata-driven table freshness SLAs (ported; config lives in V006)."""
+    res = run(insights_sql.pipeline_sla_status(), page=_PAGE, key="sla_status", tier="live",
+              source="PIPELINE_SLA_STATUS")
+    if not res.ok:
+        st.info("Pipeline SLA objects not deployed yet — run migration V006.")
+        return
+    if res.empty:
+        st.info("No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
+    else:
+        df = res.df.copy()
+        met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
+        total = len(df)
+        kpi_row([
+            {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
+             "delta": f"{met}/{total} tables", "delta_color": "off"},
+            {"label": "Breaching", "value": f"{total - met}",
+             "delta_color": "inverse" if total - met else "off"},
+        ])
+        breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
+        if not breaching.empty:
+            st.warning("Tables past their freshness SLA:")
+            st.dataframe(breaching, hide_index=True, use_container_width=True)
+        with st.expander("All registered tables"):
+            st.dataframe(df, hide_index=True, use_container_width=True)
+        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h).")
+
+    with st.expander("Register a table"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            db = st.text_input("Database", key="sla_db")
+        with c2:
+            schema = st.text_input("Schema", key="sla_schema")
+        with c3:
+            table = st.text_input("Table", key="sla_table")
+        max_age = st.number_input("Max age (hours)", min_value=1.0, max_value=168.0, value=24.0, key="sla_age")
+        owner = st.text_input("Owner", value="Data Engineering", key="sla_owner")
+        insert_sql = (
+            f"INSERT INTO {core_object('PIPELINE_SLA_CONFIG')} "
+            "(DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)\n"
+            f"VALUES ({sql_literal(db.upper())}, {sql_literal(schema.upper())}, "
+            f"{sql_literal(table.upper())}, {max_age}, {sql_literal(owner)});"
+        )
+        st.code(insert_sql, language="sql")
+        if is_operator and db and schema and table and st.button("Execute insert", key="sla_exec"):
+            ok, msg = execute_statement(insert_sql, page=_PAGE)
+            (st.success if ok else st.error)(msg)
+        elif not is_operator:
+            st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
+
+
 def _tasks_tab(company: str, days: int) -> None:
     res = run(mart_sql.fact_task_daily(days, company), page=_PAGE, key=f"t_fact_{company}_{days}",
               tier="recent", source="FACT_TASK_DAILY")
@@ -80,6 +221,8 @@ def _tasks_tab(company: str, days: int) -> None:
             df = df.sort_values(failed_col, ascending=False)
         st.dataframe(df, hide_index=True, use_container_width=True)
         result_caption(res)
+    st.divider()
+    _failure_timeline_section(company)
 
 
 def _warehouses_tab(company: str, rate: float) -> None:
@@ -133,9 +276,13 @@ def render() -> None:
     f = filters()
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    page_header("Operations", "Queries, tasks, warehouses, and contention.",
+    profile = resolve_role_profile(current_role())
+    is_operator = profile in OPERATOR_PROFILES
+    page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.",
                 scope_note=f"{f['company']} · last {f['days']} days")
-    tab_q, tab_t, tab_w, tab_c = st.tabs(["Queries", "Tasks", "Warehouses", "Contention"])
+    tab_q, tab_t, tab_w, tab_c, tab_r, tab_s = st.tabs(
+        ["Queries", "Tasks", "Warehouses", "Contention", "Release compare", "Pipeline SLA"]
+    )
     with tab_q:
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"])
     with tab_t:
@@ -144,3 +291,7 @@ def render() -> None:
         _warehouses_tab(f["company"], rate)
     with tab_c:
         _contention_tab(f["company"], f["days"])
+    with tab_r:
+        _release_compare_tab(f["company"])
+    with tab_s:
+        _pipeline_sla_tab(is_operator)
