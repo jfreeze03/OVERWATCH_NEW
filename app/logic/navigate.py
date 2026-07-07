@@ -51,6 +51,21 @@ FIX_TARGETS = {
 }
 
 
+# Warehouse-lever rules: the drawer generates the fix INLINE (no navigation)
+# because the target and the statement are both unambiguous.
+INLINE_FIX_RULES = ("COST_CLOUD_SVC_RATIO", "COST_WH_DAILY_CREDITS",
+                    "COST_ANOMALY_SWEEP", "PERF_QUEUED_MINUTES", "PERF_SPILL_GB")
+
+
+def inline_fix_warehouse(rule_id: str, text: str = "") -> str:
+    """The warehouse an inline fix should target, or '' when not applicable."""
+    rid = str(rule_id or "").strip().upper()
+    if rid not in INLINE_FIX_RULES:
+        return ""
+    m = _WH_RE.search(str(text or "").upper())
+    return m.group(0) if m else ""
+
+
 def fix_target(rule_id: str, text: str = "") -> dict | None:
     """Like investigation_target but lands where the FIX is generated."""
     rid = str(rule_id or "").strip().upper()

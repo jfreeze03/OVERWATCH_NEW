@@ -377,6 +377,18 @@ or after Refresh.
 
 ## 12. Alert engine reference
 
+**Delivery (V018):** `TASK_ALERT_NOTIFY` is created in-chain (AFTER the
+scan) and auto-resumes when the `OVERWATCH_WEBHOOK` integration exists; the
+Alerts page shows a live status chip (integration / task / last send). The
+one-time integration setup — the only step that can't ship in git — is
+`snowflake/webhook_delivery.sql`; to resume manually:
+`ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;`. The morning
+digest also sends through the default route (guarded; absent integration =
+in-app only). **Storm view:** Open events has a group-by-rule toggle (5
+warehouses over budget = 1 row); dedupe semantics unchanged. **Closed loop:**
+for warehouse-lever rules the drawer generates the fix inline — confirm,
+execute, REMEDIATION_LOG row, ESTIMATED ledger item.
+
 **Isolation (v7):** every rule block runs in its own INSERT with its own
 exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG
 and raises OPS_SCAN_DEGRADED while every other rule keeps firing.

@@ -7,7 +7,7 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Capability | Where |
 |---|---|
 | 26 alert rules (cost, perf, pipeline, security, platform) with editable thresholds | Alerts → Rules; catalogue in RUNBOOK §12 |
-| Webhook delivery, per-family channel routing, per-route failure isolation | `webhook_delivery.sql` + `ALERT_ROUTES` (Alerts → Native delivery) |
+| Webhook delivery **in-chain** (V018): notify task after every scan, guarded auto-resume, live status chip, per-family routing | Alerts (chip at top; routes in Native delivery) |
 | Anomaly sweep (robust-z per warehouse/service series) — **events arrive pre-explained by grounded Cortex** | daily task; hypothesis in event DETAIL |
 | Contract-breach projection (weekly, CRITICAL ≤14d) | scan rule + Brief KPI + Cost → Contract |
 | Fingerprint drift (p95/query-family, no change event needed, Mondays) | `PERF_FINGERPRINT_DRIFT` |
@@ -19,7 +19,7 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 ## Investigate
 | Capability | Where |
 |---|---|
-| Alert drawer: detail, rule config, history, playbook, on-demand AI explain, Investigate→ deep link | Alerts → Open events (click a row) |
+| Alert drawer: detail, rule, history, playbook, AI explain, Investigate→, **inline closed-loop fix** (warehouse rules), storm rollup toggle | Alerts → Open events |
 | Incident correlation timeline (alerts + task failures + DDL, ±30 min drill) | Control Room |
 | Query drill-through, heaviest queries (row-click), pruning/compile/cache diagnostics | Operations → Queries; Cost → Optimization |
 | Task-graph DAG with failure overlay; pipeline SLAs; stream staleness | Operations → Tasks / Pipeline SLA |

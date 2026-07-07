@@ -19,8 +19,9 @@ from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql
+from app.logic import remediation
 from app.logic.ai_prompts import anomaly_explain_prompt
-from app.logic.navigate import fix_target, investigation_target
+from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.components import (
@@ -62,12 +63,67 @@ def _lifecycle_sql(event_id: str, action: str, note: str) -> str:
     return update + "\n" + audit
 
 
+def _delivery_status() -> None:
+    """Answers 'who gets paged at 2am?' in green or red, right on the page."""
+    integ = run("SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH_WEBHOOK'", page=_PAGE,
+                key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
+    task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
+               page=_PAGE, key="delivery_task", tier="metadata", source="SHOW TASKS", max_rows=0)
+    last = run(f"SELECT MAX(NOTIFIED_AT) AS LAST_SEND FROM {core_object('ALERT_EVENTS')}",
+               page=_PAGE, key="delivery_last", tier="live", source="ALERT_EVENTS")
+    has_integ = integ.ok and not integ.empty
+    task_state = ""
+    if task.ok and not task.empty:
+        tdf = task.df.copy()
+        tdf.columns = [str(c).lower() for c in tdf.columns]
+        if "state" in tdf.columns:
+            task_state = str(tdf["state"].iloc[0]).lower()
+    last_send = ""
+    if last.usable():
+        val = last.df.iloc[0].get("LAST_SEND")
+        last_send = str(val)[:16] if val is not None and str(val) != "NaT" else ""
+    if has_integ and task_state == "started":
+        st.success("Delivery LIVE — webhook integration up, notify task chained after the scan"
+                   + (f" · last send {last_send}" if last_send else " · no sends yet"))
+    elif has_integ:
+        st.warning("Integration exists but the notify task is suspended — an admin can "
+                   "resume TASK_ALERT_NOTIFY (one statement, see the runbook's delivery "
+                   "section). Until then, 2am alerts wait for someone to look.")
+    else:
+        st.error("No webhook integration — alerts stay in-app only. One-time setup: "
+                 "snowflake/webhook_delivery.sql (ACCOUNTADMIN pastes the channel URL).")
+
+
 @st.fragment
 def _open_events_section(events, is_operator: bool) -> None:
     """Fragment: drawer/bulk interactions rerun this section only, not the page."""
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT):
         edf = events.df.reset_index(drop=True)
+        if st.toggle("Group by rule (storm view)", key="alert_rollup",
+                     help="5 warehouses over budget = 1 row here. Toggle off for drawers."):
+            sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+            g = edf.copy()
+            g["_R"] = g["SEVERITY"].astype(str).map(sev_rank).fillna(0)
+            rolled = (g.groupby("RULE_ID")
+                       .agg(EVENTS=("EVENT_ID", "count"),
+                            WORST=("_R", "max"),
+                            NEWEST=("RAISED_AT", "max"),
+                            SAMPLE=("TITLE", "first"))
+                       .reset_index().sort_values(["WORST", "EVENTS"], ascending=False))
+            rev = {v: k for k, v in sev_rank.items()}
+            rolled["SEVERITY"] = rolled["WORST"].map(rev).fillna("LOW")
+            sel_g = selectable_table(
+                rolled[["SEVERITY", "RULE_ID", "EVENTS", "NEWEST", "SAMPLE"]],
+                key="alert_rollup_sel", height=280)
+            if sel_g is not None:
+                rid_pick = str(rolled.iloc[int(sel_g)]["RULE_ID"])
+                st.markdown(f"**Events for `{rid_pick}`**")
+                styled_table(edf[edf["RULE_ID"].astype(str) == rid_pick]
+                             [["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS"]], height=240)
+            st.caption("Dedupe semantics are untouched — this is a display rollup. "
+                       "Toggle off to open a drawer, bulk-ack, or investigate.")
+            return
         edf, tz_note = localize_timestamps(edf, ["RAISED_AT", "ACK_AT"])
         if tz_note:
             st.caption(tz_note)
@@ -108,6 +164,47 @@ def _open_events_section(events, is_operator: bool) -> None:
             target = investigation_target(str(row["RULE_ID"]),
                                           f"{row['TITLE']} {detail_text}")
             fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+            wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+            if wh_inline:
+                with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
+                    st.caption("Playbook above says what; this generates the how. Execute is "
+                               "operator-gated, audited to REMEDIATION_LOG, and books an "
+                               "ESTIMATED ledger item the monthly verifier proves or rejects.")
+                    fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
+                                                "Statement timeout 1h",
+                                                "Cap clusters at 1"],
+                                        horizontal=True, key=f"clf_kind_{event_id[:8]}")
+                    if fix_kind.startswith("Tighten"):
+                        stmt_cl = remediation.auto_suspend_fix(wh_inline, 60)
+                    elif fix_kind.startswith("Statement"):
+                        stmt_cl = remediation.statement_timeout_fix(wh_inline, 3600)
+                    else:
+                        stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
+                    st.code(stmt_cl, language="sql")
+                    if is_operator:
+                        conf_cl = st.text_input("Type the warehouse name to confirm",
+                                                key=f"clf_confirm_{event_id[:8]}")
+                        if st.button("Execute + audit + book estimate", key=f"clf_exec_{event_id[:8]}",
+                                     disabled=(conf_cl != wh_inline)):
+                            ok, msg = execute_statement(stmt_cl, page=_PAGE)
+                            execute_statement(
+                                f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                                "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                                f"SELECT 'ALERT_CLOSED_LOOP', {sql_literal(wh_inline)}, "
+                                f"{sql_literal(stmt_cl)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, "
+                                f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}",
+                                page=_PAGE)
+                            if ok:
+                                execute_statement(
+                                    f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                                    "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                                    f"SELECT {sql_literal(fix_kind + ' on ' + wh_inline + ' (alert closed loop)')}, "
+                                    f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
+                                    f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}",
+                                    page=_PAGE)
+                            notify(ok, msg)
+                    else:
+                        st.caption("Copy the SQL; executing needs OVERWATCH_OPERATOR.")
             rid_u = str(row["RULE_ID"]).upper()
             if rid_u.startswith(("COST_", "PERF_")):
                 with st.expander("Explain with AI (grounded in the day's evidence)"):
@@ -228,6 +325,7 @@ def render() -> None:
             {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}"},
         ])
 
+    _delivery_status()
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
                             key="alerts_section")
 

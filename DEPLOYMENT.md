@@ -23,6 +23,7 @@ snowflake/migrations/V014__lifecycle_hardening.sql
 snowflake/migrations/V015__pilot_and_backups.sql
 snowflake/migrations/V016__closing_loops.sql
 snowflake/migrations/V017__hardening_v7.sql
+snowflake/migrations/V018__delivery_first_class.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
