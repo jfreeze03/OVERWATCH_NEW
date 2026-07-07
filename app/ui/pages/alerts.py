@@ -62,6 +62,149 @@ def _lifecycle_sql(event_id: str, action: str, note: str) -> str:
     return update + "\n" + audit
 
 
+@st.fragment
+def _open_events_section(events, is_operator: bool) -> None:
+    """Fragment: drawer/bulk interactions rerun this section only, not the page."""
+    if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
+             setup_hint=_SETUP_HINT):
+        edf = events.df.reset_index(drop=True)
+        edf, tz_note = localize_timestamps(edf, ["RAISED_AT", "ACK_AT"])
+        if tz_note:
+            st.caption(tz_note)
+        sel = selectable_table(
+            edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
+            key="alert_events_sel")
+        result_caption(events)
+        if sel is None:
+            st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
+                       "one-click investigate, ack/resolve.")
+        else:
+            row = edf.iloc[sel]
+            event_id = str(row["EVENT_ID"])
+            st.divider()
+            st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
+            st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
+                       f"event {event_id[:8]} · status {row['STATUS']}")
+            detail_text = str(row.get("DETAIL") or "").strip()
+            if detail_text:
+                st.markdown(detail_text)
+            rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
+                            tier="recent", source="ALERT_CONFIG")
+            if rules_res.usable():
+                rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                if not rmatch.empty:
+                    rrow = rmatch.iloc[0]
+                    st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
+                               f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
+            with st.expander("Playbook — what to do first", expanded=True):
+                st.markdown(playbook_for(str(row["RULE_ID"])))
+            hist = run(mart_sql.alert_event_history(90), page=_PAGE, key="hist_for_drawer",
+                       tier="recent", source="ALERT_EVENTS (90d)")
+            if hist.usable():
+                same = hist.df[hist.df["RULE_ID"].astype(str) == str(row["RULE_ID"])].head(10)
+                if len(same) > 1:
+                    with st.expander(f"This rule recently ({len(same)} events)"):
+                        styled_table(same, height=220)
+            target = investigation_target(str(row["RULE_ID"]),
+                                          f"{row['TITLE']} {detail_text}")
+            rid_u = str(row["RULE_ID"]).upper()
+            if rid_u.startswith(("COST_", "PERF_")):
+                with st.expander("Explain with AI (grounded in the day's evidence)"):
+                    import re as _re
+
+                    m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
+                    event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
+                    st.caption(f"Evidence window: {event_day} vs its prior 7 days"
+                               + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
+                                  if target["filters"].get("warehouse_contains") else ""))
+                    if st.button("Assemble evidence + explain", key=f"ai_expl_go_{event_id[:8]}"):
+                        ev = run(insights_sql.anomaly_evidence(
+                                     event_day, target["filters"].get("warehouse_contains", "")),
+                                 page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
+                                 source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
+                        if not ev.ok or ev.empty:
+                            st.info("No query-family evidence found for that day/scope — "
+                                    "the driver may be serverless or storage rather than queries.")
+                        else:
+                            settings = load_settings(_PAGE)
+                            prompt = anomaly_explain_prompt(
+                                str(row["TITLE"]), detail_text, ev.df, None,
+                                f"{event_day} vs prior 7d")
+                            ok_ai, answer = cortex_complete(
+                                prompt, str(settings.get("CORTEX_MODEL") or "llama3.1-8b"),
+                                page=_PAGE)
+                            if ok_ai:
+                                st.session_state[f"_ai_expl_{event_id}"] = answer
+                            else:
+                                st.error(answer)
+                    hypothesis = st.session_state.get(f"_ai_expl_{event_id}", "")
+                    if hypothesis:
+                        st.markdown(hypothesis)
+                        st.caption("Grounded on the evidence rows above only; verify before acting.")
+                        if is_operator and st.button("Append hypothesis to the event",
+                                                     key=f"ai_expl_save_{event_id[:8]}"):
+                            appended = (
+                                f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
+                                f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
+                                f"{sql_literal(hypothesis[:800])}, 2000) "
+                                f"WHERE EVENT_ID = {sql_literal(event_id)};"
+                            )
+                            ok_u, msg_u = execute_statement(appended, page=_PAGE)
+                            notify(ok_u, msg_u if not ok_u else "Hypothesis stored on the event.")
+            c_inv, c_act, c_note = st.columns([1.2, 1.0, 2.0])
+            with c_inv:
+                if st.button("Investigate →", key="alert_investigate", use_container_width=True,
+                             help=f"Jump to {target['page']} · {target['section'] or 'top'} "
+                                  "with filters applied from this event"):
+                    request_navigation(target["page"], target["section"], target["filters"])
+            with c_act:
+                action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
+            with c_note:
+                note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
+            sql_script = _lifecycle_sql(event_id, action, note)
+            with st.expander("SQL that will run"):
+                st.code(sql_script, language="sql")
+            if is_operator:
+                confirm = st.text_input(f"Type {action} to confirm execution", key="alert_confirm")
+                if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
+                    ok_all, messages = True, []
+                    for stmt in [s for s in sql_script.split(";") if s.strip()]:
+                        ok, msg = execute_statement(stmt + ";", page=_PAGE)
+                        ok_all = ok_all and ok
+                        messages.append(msg)
+                    notify(ok_all, " / ".join(messages))
+            else:
+                st.caption("Executing requires the OVERWATCH_OPERATOR role; the SQL is copyable for review.")
+
+        if is_operator and len(edf):
+            st.divider()
+            st.markdown("**Bulk acknowledge / resolve**")
+            options = {
+                f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
+                for _, r in edf.iterrows()
+            }
+            chosen = st.multiselect("Events", list(options), key="alert_bulk_pick")
+            b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
+                                key="alert_bulk_action")
+            b_note = st.text_input("Bulk note (applies to every selected event)",
+                                   key="alert_bulk_note", max_chars=500)
+            confirm_b = st.text_input(
+                f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
+                key="alert_bulk_confirm")
+            if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec",
+                         disabled=(not chosen or confirm_b != f"BULK {b_action}")):
+                done = 0
+                for label in chosen:
+                    script = _lifecycle_sql(options[label], b_action, b_note)
+                    ok_one = True
+                    for stmt in [s for s in script.split(";") if s.strip()]:
+                        ok, _msg = execute_statement(stmt + ";", page=_PAGE)
+                        ok_one = ok_one and ok
+                    done += int(ok_one)
+                notify(done == len(chosen),
+                       f"{b_action} applied to {done}/{len(chosen)} event(s); audit rows written.")
+
+
 @safe_page(_PAGE)
 def render() -> None:
     filters()  # keep global scope initialized/consistent
@@ -83,145 +226,7 @@ def render() -> None:
                             key="alerts_section")
 
     if section == "Open events":
-        if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
-                 setup_hint=_SETUP_HINT):
-            edf = events.df.reset_index(drop=True)
-            edf, tz_note = localize_timestamps(edf, ["RAISED_AT", "ACK_AT"])
-            if tz_note:
-                st.caption(tz_note)
-            sel = selectable_table(
-                edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
-                key="alert_events_sel")
-            result_caption(events)
-            if sel is None:
-                st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
-                           "one-click investigate, ack/resolve.")
-            else:
-                row = edf.iloc[sel]
-                event_id = str(row["EVENT_ID"])
-                st.divider()
-                st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
-                st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
-                           f"event {event_id[:8]} · status {row['STATUS']}")
-                detail_text = str(row.get("DETAIL") or "").strip()
-                if detail_text:
-                    st.markdown(detail_text)
-                rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
-                                tier="recent", source="ALERT_CONFIG")
-                if rules_res.usable():
-                    rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
-                    if not rmatch.empty:
-                        rrow = rmatch.iloc[0]
-                        st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
-                                   f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
-                with st.expander("Playbook — what to do first", expanded=True):
-                    st.markdown(playbook_for(str(row["RULE_ID"])))
-                hist = run(mart_sql.alert_event_history(90), page=_PAGE, key="hist_for_drawer",
-                           tier="recent", source="ALERT_EVENTS (90d)")
-                if hist.usable():
-                    same = hist.df[hist.df["RULE_ID"].astype(str) == str(row["RULE_ID"])].head(10)
-                    if len(same) > 1:
-                        with st.expander(f"This rule recently ({len(same)} events)"):
-                            styled_table(same, height=220)
-                target = investigation_target(str(row["RULE_ID"]),
-                                              f"{row['TITLE']} {detail_text}")
-                rid_u = str(row["RULE_ID"]).upper()
-                if rid_u.startswith(("COST_", "PERF_")):
-                    with st.expander("Explain with AI (grounded in the day's evidence)"):
-                        import re as _re
-
-                        m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
-                        event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
-                        st.caption(f"Evidence window: {event_day} vs its prior 7 days"
-                                   + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
-                                      if target["filters"].get("warehouse_contains") else ""))
-                        if st.button("Assemble evidence + explain", key=f"ai_expl_go_{event_id[:8]}"):
-                            ev = run(insights_sql.anomaly_evidence(
-                                         event_day, target["filters"].get("warehouse_contains", "")),
-                                     page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
-                                     source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
-                            if not ev.ok or ev.empty:
-                                st.info("No query-family evidence found for that day/scope — "
-                                        "the driver may be serverless or storage rather than queries.")
-                            else:
-                                settings = load_settings(_PAGE)
-                                prompt = anomaly_explain_prompt(
-                                    str(row["TITLE"]), detail_text, ev.df, None,
-                                    f"{event_day} vs prior 7d")
-                                ok_ai, answer = cortex_complete(
-                                    prompt, str(settings.get("CORTEX_MODEL") or "llama3.1-8b"),
-                                    page=_PAGE)
-                                if ok_ai:
-                                    st.session_state[f"_ai_expl_{event_id}"] = answer
-                                else:
-                                    st.error(answer)
-                        hypothesis = st.session_state.get(f"_ai_expl_{event_id}", "")
-                        if hypothesis:
-                            st.markdown(hypothesis)
-                            st.caption("Grounded on the evidence rows above only; verify before acting.")
-                            if is_operator and st.button("Append hypothesis to the event",
-                                                         key=f"ai_expl_save_{event_id[:8]}"):
-                                appended = (
-                                    f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
-                                    f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
-                                    f"{sql_literal(hypothesis[:800])}, 2000) "
-                                    f"WHERE EVENT_ID = {sql_literal(event_id)};"
-                                )
-                                ok_u, msg_u = execute_statement(appended, page=_PAGE)
-                                notify(ok_u, msg_u if not ok_u else "Hypothesis stored on the event.")
-                c_inv, c_act, c_note = st.columns([1.2, 1.0, 2.0])
-                with c_inv:
-                    if st.button("Investigate →", key="alert_investigate", use_container_width=True,
-                                 help=f"Jump to {target['page']} · {target['section'] or 'top'} "
-                                      "with filters applied from this event"):
-                        request_navigation(target["page"], target["section"], target["filters"])
-                with c_act:
-                    action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
-                with c_note:
-                    note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
-                sql_script = _lifecycle_sql(event_id, action, note)
-                with st.expander("SQL that will run"):
-                    st.code(sql_script, language="sql")
-                if is_operator:
-                    confirm = st.text_input(f"Type {action} to confirm execution", key="alert_confirm")
-                    if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
-                        ok_all, messages = True, []
-                        for stmt in [s for s in sql_script.split(";") if s.strip()]:
-                            ok, msg = execute_statement(stmt + ";", page=_PAGE)
-                            ok_all = ok_all and ok
-                            messages.append(msg)
-                        notify(ok_all, " / ".join(messages))
-                else:
-                    st.caption("Executing requires the OVERWATCH_OPERATOR role; the SQL is copyable for review.")
-
-            if is_operator and len(edf):
-                st.divider()
-                st.markdown("**Bulk acknowledge / resolve**")
-                options = {
-                    f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
-                    for _, r in edf.iterrows()
-                }
-                chosen = st.multiselect("Events", list(options), key="alert_bulk_pick")
-                b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
-                                    key="alert_bulk_action")
-                b_note = st.text_input("Bulk note (applies to every selected event)",
-                                       key="alert_bulk_note", max_chars=500)
-                confirm_b = st.text_input(
-                    f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
-                    key="alert_bulk_confirm")
-                if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec",
-                             disabled=(not chosen or confirm_b != f"BULK {b_action}")):
-                    done = 0
-                    for label in chosen:
-                        script = _lifecycle_sql(options[label], b_action, b_note)
-                        ok_one = True
-                        for stmt in [s for s in script.split(";") if s.strip()]:
-                            ok, _msg = execute_statement(stmt + ";", page=_PAGE)
-                            ok_one = ok_one and ok
-                        done += int(ok_one)
-                    notify(done == len(chosen),
-                           f"{b_action} applied to {done}/{len(chosen)} event(s); audit rows written.")
-
+        _open_events_section(events, is_operator)
     elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")

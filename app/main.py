@@ -20,6 +20,7 @@ from app.config import (  # noqa: E402
 )
 from app.core.query import bump_refresh_salt, execute_statement, run  # noqa: E402
 from app.core.session import connection_available, current_role  # noqa: E402
+from app.core.sqlsafe import sql_literal  # noqa: E402
 from app.core.state import (  # noqa: E402
     consume_pending_navigation,
     init_filters,
@@ -27,12 +28,22 @@ from app.core.state import (  # noqa: E402
     request_navigation,
     requested_page,
 )
-from app.data import mart_sql  # noqa: E402
+from app.data import mart_sql, security_sql  # noqa: E402
 from app.theme import inject_theme  # noqa: E402
 from app.ui.components import notify  # noqa: E402
-from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security  # noqa: E402
+from app.ui.pages import (  # noqa: E402
+    admin,
+    alerts,
+    brief,
+    control_room,
+    cost,
+    operations,
+    overview,
+    security,
+)
 
 _PAGE_ICONS = {
+    "Brief": "☀️",
     "Overview": "📊",
     "Control Room": "🎛️",
     "Cost & Contract": "💰",
@@ -50,6 +61,7 @@ _RENDERERS = {
     "Alerts": alerts.render,
     "Security": security.render,
     "Admin": admin.render,
+    "Brief": brief.render,
 }
 
 
@@ -77,8 +89,10 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
                         format_func=lambda p: f"{_PAGE_ICONS.get(p, '•')} {p}")
         st.session_state["_ow_page"] = page
         remember_page(page)
+        _log_usage(page)
 
         st.divider()
+        _global_jump(pages)
         _health_strip()
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
@@ -209,6 +223,53 @@ def _apply_default_landing() -> None:
         consume_pending_navigation()  # pre-widget: applies immediately, no rerun
 
 
+def _log_usage(page: str) -> None:
+    """Usage analytics (APP_USAGE): one row per page change per session.
+    Best-effort — first failure disables logging for the session."""
+    if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_last_logged") == page:
+        return
+    st.session_state["_ow_last_logged"] = page
+    ok, _msg = execute_statement(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE) "
+        f"SELECT {sql_literal(str(page)[:80])}", page="Sidebar")
+    if not ok:
+        st.session_state["_ow_usage_off"] = True
+
+
+def _global_jump(pages: tuple) -> None:
+    """Jump-to: pages, databases, warehouses, alert rules — one box."""
+    from app.companies import ALFA_DATABASES, TREXIS_DATABASES, TREXIS_WAREHOUSES
+
+    options = [f"Page · {p}" for p in pages]
+    options += [f"DB · {d}" for d in sorted(set(ALFA_DATABASES) | set(TREXIS_DATABASES))]
+    wh_names = list(TREXIS_WAREHOUSES)
+    whs = run(security_sql.show_warehouses_sql(), page="Sidebar", key="jump_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    if whs.ok and not whs.empty:
+        wdf = whs.df.copy()
+        wdf.columns = [str(c).lower() for c in wdf.columns]
+        if "name" in wdf.columns:
+            wh_names = sorted(set(wdf["name"].astype(str)))
+    options += [f"WH · {w}" for w in wh_names]
+    rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
+                source="ALERT_CONFIG")
+    if rules.usable() and "RULE_ID" in rules.df.columns:
+        options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
+    pick = st.selectbox("Jump to", options, index=None, placeholder="Jump to…",
+                        key="_ow_jump", label_visibility="collapsed")
+    if not pick:
+        return
+    kind, _, name = pick.partition(" · ")
+    if kind == "Page":
+        request_navigation(name)
+    elif kind == "DB":
+        request_navigation("Operations", "Queries", {"database": name})
+    elif kind == "WH":
+        request_navigation("Operations", "Warehouses", {"warehouse_contains": name})
+    elif kind == "Rule":
+        request_navigation("Alerts", "Rules")
+
+
 _STRIP_COLORS = {"OK": "#22c55e", "WARN": "#f59e0b", "BAD": "#ef4444",
                  "INFO": "#38bdf8", "MUTED": "#94a3b8"}
 
@@ -251,9 +312,17 @@ def _topbar_scope() -> None:
     """Triage filter strip above every page, like the original OVERWATCH."""
     box = st.container(border=True)
     with box:
-        head_l, head_r = st.columns([5, 1])
+        head_l, head_m, head_r = st.columns([3.6, 1.4, 1])
         with head_l:
             st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+        with head_m:
+            strip_res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip",
+                            tier="live", source="freshness")
+            if strip_res.ok and not strip_res.empty:
+                vals = {str(r["METRIC"]): str(r["VALUE"]) for _, r in strip_res.df.iterrows()}
+                stale_h = vals.get("STALEST_SOURCE_H", "-1")
+                if stale_h not in ("-1", ""):
+                    st.caption(f"Telemetry ≤ {stale_h}h old")
         with head_r:
             _views_popover()
         _topbar_scope_controls()

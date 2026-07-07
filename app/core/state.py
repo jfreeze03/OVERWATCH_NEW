@@ -95,6 +95,7 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
 
 def consume_pending_navigation() -> None:
     """Call first thing in main(): applies a queued jump pre-instantiation."""
+    st.session_state["_ow_jump"] = None  # clear the jump box pre-instantiation
     pending = st.session_state.pop("_ow_nav_pending", None)
     if not pending:
         return

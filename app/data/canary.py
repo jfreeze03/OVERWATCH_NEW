@@ -60,6 +60,12 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("prefs.user_prefs", lambda: prefs_sql.user_prefs()),
     ("mart.incident_timeline", lambda: mart_sql.incident_timeline(1, "ALFA")),
     ("mart.fact_daily_activity", lambda: mart_sql.fact_daily_activity(1)),
+    ("ops.task_graph_nodes", lambda: ops_sql.task_graph_nodes()),
+    ("ops.volume_deltas", lambda: ops_sql.volume_deltas()),
+    ("mart.dept_budgets", lambda: mart_sql.dept_budgets()),
+    ("mart.app_usage_summary", lambda: mart_sql.app_usage_summary(1)),
+    ("security.unused_roles", lambda: security_sql.unused_roles(1)),
+    ("security.role_privilege_matrix", lambda: security_sql.role_privilege_matrix()),
     ("insights.anomaly_evidence", lambda: insights_sql.anomaly_evidence(
         __import__("datetime").date.today().isoformat())),
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),

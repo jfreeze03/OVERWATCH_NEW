@@ -311,6 +311,20 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
 
+    st.markdown("**Volume drops (yesterday vs prior-7d average)**")
+    panel_help(
+        "Rows added per table yesterday vs its prior-7-day average (tables moving "
+        "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past 50%; this table also "
+        "shows the 30-50% WATCH band so you see decay before it alerts."
+    )
+    vd = run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
+             source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
+    if vd.ok and vd.empty:
+        st.success("Every moving table is within its normal daily volume.")
+    elif guard(vd, "", setup_hint="Needs TABLE_DML_HISTORY (standard on current accounts)."):
+        styled_table(vd.df, height=240)
+        result_caption(vd)
+
     st.markdown("**Dynamic table refresh health (7d)**")
     panel_help(
         "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). A FAILED "
@@ -377,6 +391,39 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
         result_caption(res)
     st.divider()
     _failure_timeline_section(company, database, schema_contains)
+
+    st.markdown("**Task graph (DAG)**")
+    if st.toggle("Render account task topology", key="ops_dag_toggle",
+                 help="Latest task versions + predecessors; red = failed in 24h, gray = suspended."):
+        gres = run(ops_sql.task_graph_nodes(), page=_PAGE, key="task_dag", tier="recent",
+                   source="TASK_VERSIONS + TASK_HISTORY")
+        if guard(gres, "No tasks recorded in TASK_VERSIONS."):
+            import json as _json
+
+            lines = ["digraph tasks {", 'rankdir=LR; node [shape=box, style="rounded,filled", fontsize=10];']
+            for _, r in gres.df.iterrows():
+                fqn = str(r["TASK_FQN"])
+                short = fqn.split(".")[-1]
+                fails = int(r.get("FAILURES_24H") or 0)
+                state = str(r.get("STATE") or "").lower()
+                color = "#fecaca" if fails else ("#e2e8f0" if "suspend" in state else "#bbf7d0")
+                lines.append(f'"{fqn}" [label="{short}", fillcolor="{color}"];')
+                preds_raw = r.get("PREDECESSORS")
+                preds = []
+                try:
+                    parsed = _json.loads(preds_raw) if isinstance(preds_raw, str) else preds_raw
+                    if isinstance(parsed, list):
+                        preds = [str(p) for p in parsed]
+                except (TypeError, ValueError):
+                    if preds_raw:
+                        preds = [p.strip().strip('"') for p in str(preds_raw).strip("[]").split(",") if p.strip()]
+                for p in preds:
+                    lines.append(f'"{p.upper()}" -> "{fqn}";')
+            lines.append("}")
+            st.graphviz_chart("\n".join(lines))
+            st.caption("Green = healthy, red = failed in the last 24h, gray = suspended. "
+                       "Edges point downstream.")
+            result_caption(gres)
 
 
 def _warehouses_tab(company: str, rate: float) -> None:

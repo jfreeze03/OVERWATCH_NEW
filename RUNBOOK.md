@@ -18,7 +18,7 @@ labels and generates (never silently executes) the SQL to fix what it finds.
 
 ## 1. Ten-minute orientation
 
-- Open the app → **Overview** loads the executive board (one cached mart
+- **Brief** is the one-scroll morning page (numbers, fires, asks); **Overview** loads the executive board (one cached mart
   query): spend vs budget, month-end forecast, alerts, platform score, top
   actions.
 - **Control Room** is the DBA morning page: triage queue, freshness,
@@ -104,7 +104,8 @@ Then `roles.sql` (idempotent; re-run after every upgrade) and
 **Opt-in scripts** (run deliberately, not part of the chain):
 `webhook_delivery.sql` (notification integration + sender task),
 `native_alert_templates.sql` (CREATE ALERT equivalents if you prefer
-native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine).
+native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfill_365.sql`
+(one-time year of daily facts — run before ACCOUNT_USAGE history ages out).
 `teardown.sql` is the surgical uninstall (never drops the schema).
 
 ## 4. Scheduled automation (all times America/Chicago)
@@ -122,6 +123,7 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine).
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
 | TASK_BACKUP_OPERATOR | 05:40 Sundays | SP_BACKUP_OPERATOR_TABLES | `*_BAK_LAST` clones |
+| TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
 | MART_SPEND_ROLLUP_DT | TARGET_LAG 6h (Dynamic Table) | — | monthly spend rollup (pilot) |
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
@@ -297,7 +299,10 @@ required "inconclusive" escape, word limits.
   Cortex is unavailable the digest row says so instead of failing.
 - **Evaluation panels** — button-gated "AI evaluation" on release compare,
   task failures, etc.; never auto-run.
-- **Anomaly explanation** — alert drawer, COST_/PERF_ events: assembles
+- **Pre-explained anomalies** — sweep v3 appends a grounded hypothesis to
+  fresh COST_ANOMALY_SWEEP events server-side (capped 5/run) so webhook
+  messages arrive explained.
+- **Anomaly explanation (on-demand)** — alert drawer, COST_/PERF_ events: assembles
   the event day's evidence (top query families by elapsed-hours vs their
   prior-7-day average, warehouse-scoped) and asks for the 1-2 most likely
   drivers with numbers, or "inconclusive". Operators may append the
@@ -384,6 +389,10 @@ blocks others).
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days (CRITICAL if expired) | weekly until rotated |
 | SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day under admin roles | daily per user |
+| COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
+| COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
+| PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
+| OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 

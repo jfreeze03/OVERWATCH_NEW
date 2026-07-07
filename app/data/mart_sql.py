@@ -378,3 +378,16 @@ SELECT DEPARTMENT, MONTHLY_BUDGET_USD, UPDATED_AT, UPDATED_BY
 FROM {core_object("DEPT_BUDGETS")}
 ORDER BY DEPARTMENT
 """
+
+
+def app_usage_summary(days: int = 30) -> str:
+    """Which pages actually get opened — adoption data for curation calls."""
+    days = bounded_days(days)
+    return f"""
+SELECT PAGE, COUNT(*) AS VISITS, COUNT(DISTINCT USER_NAME) AS USERS,
+       MAX(AT) AS LAST_VISIT
+FROM {core_object("APP_USAGE")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY PAGE
+ORDER BY VISITS DESC
+"""

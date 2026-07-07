@@ -104,10 +104,10 @@ ROLE_PROFILE_OVERRIDES = {
 }
 
 PAGES_BY_PROFILE = {
-    "EXECUTIVE": ("Overview", "Cost & Contract", "Alerts"),
-    "ANALYST": ("Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
-    "MANAGER": ("Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
-    "DBA": ("Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security", "Admin"),
+    "EXECUTIVE": ("Brief", "Overview", "Cost & Contract", "Alerts"),
+    "ANALYST": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
+    "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
+    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security", "Admin"),
 }
 DEFAULT_PROFILE = "ANALYST"
 

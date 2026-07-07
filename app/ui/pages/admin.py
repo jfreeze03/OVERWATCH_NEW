@@ -444,6 +444,13 @@ def _emergency_extras(is_operator: bool) -> None:
                    "warehouse map. Suggestions appear once all three exist.")
 
 
+@st.fragment
+def _emergency_fragment(is_operator: bool) -> None:
+    """Fragment: lever interactions rerun this section only."""
+    _emergency_tab(is_operator)
+    _emergency_extras(is_operator)
+
+
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
@@ -475,6 +482,15 @@ def _performance_tab() -> None:
                      })
         result_caption(res)
         st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
+
+    st.markdown("**Page adoption (30d)**")
+    usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",
+                source="APP_USAGE")
+    if usage.ok and usage.empty:
+        st.info("No visits logged yet (logging starts after V016 + a roles.sql re-run).")
+    elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
+        st.dataframe(usage.df, hide_index=True, use_container_width=True)
+        st.caption("Curation calls (merge/kill sections) should follow this table, not opinions.")
 
 
 def _canary_tab() -> None:
@@ -527,8 +543,7 @@ def render() -> None:
     if section == "Settings":
         _settings_tab(is_operator)
     elif section == "Emergency":
-        _emergency_tab(is_operator)
-        _emergency_extras(is_operator)
+        _emergency_fragment(is_operator)
     elif section == "Migrations & freshness":
         _migrations_tab()
     elif section == "App self-cost":

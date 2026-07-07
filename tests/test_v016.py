@@ -67,3 +67,30 @@ def test_round3_builders():
     assert "LISTAGG(ROLE" in _s.direct_role_grants()
     gc = _s.grant_changes(90)
     assert "'REVOKED'" in gc and "'GRANTED'" in gc
+
+
+def test_round3_ux_builders_and_wiring():
+    from pathlib import Path
+
+    from app.data import mart_sql as _m
+    from app.data import ops_sql as _o
+
+    dag = _o.task_graph_nodes()
+    assert "TASK_VERSIONS" in dag and "PREDECESSORS" in dag and "FAILURES_24H" in dag
+    vd = _o.volume_deltas()
+    assert "TABLE_DML_HISTORY" in vd and "'WATCH'" in vd and "AVG_ROWS >= 1000" in vd
+    assert "APP_USAGE" in _m.app_usage_summary(30)
+
+    root = Path(__file__).resolve().parents[1]
+    main_src = (root / "app" / "main.py").read_text(encoding="utf-8")
+    assert "_global_jump" in main_src and "_log_usage" in main_src
+    assert '"Brief": brief.render,' in main_src
+    alerts_src = (root / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
+    assert "@st.fragment" in alerts_src and "_open_events_section(events, is_operator)" in alerts_src
+    admin_src = (root / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
+    assert "@st.fragment" in admin_src
+
+    rb = (root / "RUNBOOK.md").read_text(encoding="utf-8")
+    for marker in ("COST_DEPT_BUDGET_PACE", "TASK_CANARY_SENTINEL", "backfill_365",
+                   "Pre-explained anomalies", "Brief"):
+        assert marker in rb, marker
