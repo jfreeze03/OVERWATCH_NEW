@@ -12,6 +12,26 @@ from app.core.result import QueryResult
 from app.data import mart_sql
 from app.logic.formulas import format_usd, safe_float
 from app.theme import chip
+from app.ui.status_colors import status_columns_in, status_css
+
+
+def _scope_chip_html() -> str:
+    """Active scope as chips so context survives scrolling past the top bar."""
+    try:
+        from app.core.state import filters  # local import: avoid module cycle
+
+        f = filters()
+    except Exception:  # noqa: BLE001 - header chrome must never break a page
+        return ""
+    chips = [chip(html.escape(f["company"]), "ok"), chip(f"{f['days']}d")]
+    if f["environment"] != "ALL":
+        chips.append(chip(html.escape(f["environment"])))
+    for key, label in (("database", ""), ("schema_contains", "schema~"),
+                        ("warehouse_contains", "wh~"), ("user_contains", "user~")):
+        value = str(f.get(key) or "").strip()
+        if value:
+            chips.append(chip(html.escape(f"{label}{value}")))
+    return "".join(chips)
 
 
 def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
@@ -19,6 +39,9 @@ def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
     st.title(title)
     caption = subtitle if not scope_note else f"{subtitle} · {scope_note}"
     st.caption(caption)
+    chips = _scope_chip_html()
+    if chips:
+        st.markdown(f'<div class="ow-scope-row">{chips}</div>', unsafe_allow_html=True)
 
 
 def kpi_row(items: list[dict], columns: int | None = None) -> None:
@@ -127,6 +150,31 @@ def budget_kpi(settings: dict, spend_usd: float) -> dict:
         "delta_color": "inverse" if pct >= 100 else "off",
         "help": "Budget from SETTINGS; spend from warehouse metering.",
     }
+
+
+def styled_table(df, *, height: int | None = None, column_config: dict | None = None) -> None:
+    """st.dataframe with the app's semantic status colors and a height cap.
+
+    Status-bearing columns (SEVERITY, STATUS, STATE, SLA_MET, ...) get
+    background tints via pandas Styler; long tables cap at 380px so pages
+    keep their reading rhythm.
+    """
+    if df is None or getattr(df, "empty", True):
+        st.dataframe(df, hide_index=True, use_container_width=True)
+        return
+    status_cols = status_columns_in(list(df.columns))
+    data = df
+    if status_cols:
+        try:
+            data = df.style
+            for col in status_cols:
+                data = data.map(lambda v, _c=col: status_css(_c, v), subset=[col])
+        except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
+            data = df
+    if height is None and len(df) > 10:
+        height = 380
+    st.dataframe(data, hide_index=True, use_container_width=True,
+                 height=height, column_config=column_config)
 
 
 def download_text_button(label: str, text: str, filename: str) -> None:

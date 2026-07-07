@@ -27,7 +27,7 @@ from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
+from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
 
 _PAGE = "Cost & Contract"
 
@@ -222,10 +222,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             {"label": "Warehouses flagged", "value": f"{len(flagged)}",
              "help": ">=20% idle share and >=1 idle credit."},
         ])
-        st.dataframe(
+        styled_table(
             advisor[["WAREHOUSE_NAME", "COMPANY", "TOTAL_CREDITS", "IDLE_CREDITS",
-                      "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD", "RECOMMENDATION"]],
-            hide_index=True, use_container_width=True,
+                      "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD", "FLAGGED", "RECOMMENDATION"]],
             column_config={
                 "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
                 "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
@@ -273,10 +272,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
              "help": ">=0.5h total compute and <=25% cache hit."},
             {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
         ])
-        st.dataframe(
+        styled_table(
             candidates[["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
                          "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "CANDIDATE", "QUERY_PREVIEW"]],
-            hide_index=True, use_container_width=True,
             column_config={
                 "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
                 "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
@@ -384,10 +382,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         else:
             st.info("No cost-per-request spikes. Configure AI_MONTHLY_BUDGET_USD to also flag budget pressure.")
     else:
-        st.dataframe(
+        styled_table(
             exceptions[["SEVERITY", "SIGNAL", "USER_NAME", "SOURCE", "TOTAL_REQUESTS",
                          "CREDITS_PER_REQUEST", "PROJECTED_30D_USD"]],
-            hide_index=True, use_container_width=True,
         )
         with st.expander("Queue top exceptions to the Action Queue"):
             statements = []
@@ -445,10 +442,7 @@ def _savings_tab() -> None:
     if res.empty:
         st.info("Ledger is empty. Add an item below when an optimization ships.")
     else:
-        st.dataframe(
-            res.df[["CREATED_AT", "DESCRIPTION", "STATE", "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY"]],
-            hide_index=True, use_container_width=True,
-        )
+        styled_table(res.df[["CREATED_AT", "DESCRIPTION", "STATE", "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY"]])
 
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES

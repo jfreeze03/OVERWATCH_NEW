@@ -19,7 +19,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import mart_sql
 from app.ui import charts
-from app.ui.components import guard, kpi_row, page_header, result_caption
+from app.ui.components import guard, kpi_row, page_header, result_caption, styled_table
 
 _PAGE = "Alerts"
 _SETUP_HINT = "Alert tables come from migration V004; the hourly scan task populates events."
@@ -70,10 +70,7 @@ def render() -> None:
     with tab_open:
         if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
                  setup_hint=_SETUP_HINT):
-            st.dataframe(
-                events.df[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
-                hide_index=True, use_container_width=True,
-            )
+            styled_table(events.df[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]])
             result_caption(events)
             st.markdown("**Acknowledge / resolve**")
             options = {
@@ -101,7 +98,7 @@ def render() -> None:
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")
         if guard(rules, "No alert rules found.", setup_hint=_SETUP_HINT):
-            st.dataframe(rules.df, hide_index=True, use_container_width=True)
+            styled_table(rules.df)
             st.caption(
                 "Thresholds are data, not code: update ALERT_CONFIG and the next scan uses them. "
                 "Statistical anomaly detection runs in-app (Cost > Attribution, Operations > Warehouses) "

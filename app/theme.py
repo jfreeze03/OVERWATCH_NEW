@@ -28,6 +28,13 @@ _CSS = """
       font-size: 0.72rem; letter-spacing: 0.14em; font-weight: 700;
       color: #64748b; text-transform: uppercase; margin-bottom: 0.1rem;
   }
+  .ow-brand { display: flex; align-items: center; gap: 8px; }
+  .ow-brand-dot {
+      width: 10px; height: 10px; border-radius: 999px; background: #38bdf8;
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+  }
+  .ow-scope-row { margin: 2px 0 6px 0; }
+  button[data-baseweb="tab"] { font-weight: 600; }
 </style>
 """
 

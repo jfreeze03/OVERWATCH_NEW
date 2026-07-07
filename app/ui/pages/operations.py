@@ -19,7 +19,7 @@ from app.logic.formulas import credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
+from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
 
 _PAGE = "Operations"
 
@@ -48,10 +48,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
               page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
-        st.dataframe(
+        styled_table(
             top.df[["USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
                      "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]],
-            hide_index=True, use_container_width=True,
             column_config={
                 "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed s", format="%.1f"),
                 "QUEUED_SEC": st.column_config.NumberColumn("Queued s", format="%.1f"),
@@ -65,7 +64,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 key=f"q_fails_{company}_{days}", tier="recent",
                 source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
-        st.dataframe(fails.df, hide_index=True, use_container_width=True)
+        styled_table(fails.df)
 
 
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "") -> None:
@@ -92,10 +91,9 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     fam = timeline.groupby("ERROR_FAMILY", as_index=False).size().rename(columns={"size": "FAILURES"})
     charts.bar_count(fam.sort_values("FAILURES", ascending=False), "ERROR_FAMILY", "FAILURES",
                      title="Failures by family")
-    st.dataframe(
+    styled_table(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
                    "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
-        hide_index=True, use_container_width=True,
     )
     result_caption(res)
     ai_evaluation_panel(
@@ -130,7 +128,9 @@ def _release_compare_tab(company: str) -> None:
     if guard(q_res, "No query history in the compare windows."):
         verdicts = compare_release_periods(q_res.df)
         if verdicts:
-            st.dataframe(verdicts, hide_index=True, use_container_width=True)
+            import pandas as _pd
+
+            styled_table(_pd.DataFrame(verdicts))
             worse = [v["Metric"] for v in verdicts if v["Verdict"] == "Worse"]
             if worse:
                 st.warning("Regressed after release: " + ", ".join(worse))
@@ -151,11 +151,10 @@ def _release_compare_tab(company: str) -> None:
             st.success("No task gained failures or slowed >25% after the release.")
         else:
             st.warning(f"{len(worse)} task(s) regressed after the release:")
-        st.dataframe(
+        styled_table(
             deltas[["DATABASE_NAME", "TASK_NAME", "RUNS_BEFORE", "RUNS_AFTER",
                      "FAILED_BEFORE", "FAILED_AFTER", "NEW_FAILURES",
                      "AVG_SEC_BEFORE", "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]],
-            hide_index=True, use_container_width=True,
         )
         result_caption(t_res)
         ai_evaluation_panel(
@@ -189,9 +188,9 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
         if not breaching.empty:
             st.warning("Tables past their freshness SLA:")
-            st.dataframe(breaching, hide_index=True, use_container_width=True)
+            styled_table(breaching)
         with st.expander("All registered tables"):
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            styled_table(df)
         result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h).")
 
     with st.expander("Register a table"):
@@ -237,7 +236,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
                  "delta_color": "inverse" if total_failed else "off"},
             ])
             df = df.sort_values(failed_col, ascending=False)
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        styled_table(df)
         result_caption(res)
     st.divider()
     _failure_timeline_section(company, database, schema_contains)

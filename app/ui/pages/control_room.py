@@ -17,7 +17,7 @@ from app.data import cost_sql, mart_sql, ops_sql
 from app.logic.actions import triage_queue
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
+from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
 
 _PAGE = "Control Room"
 
@@ -45,9 +45,8 @@ def _freshness_board() -> None:
     stale_count = int(df["STALE"].sum())
     if stale_count:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
-    st.dataframe(
+    styled_table(
         df[["SOURCE_NAME", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD", "STALE"]],
-        hide_index=True, use_container_width=True,
         column_config={"HOURS_SINCE_LOAD": st.column_config.NumberColumn("Hours since load", format="%.1f")},
     )
 
@@ -119,7 +118,7 @@ def render() -> None:
                     + ("alert tables missing (V004); " if not alerts.ok else "")
                     + ("task facts missing (V002)." if not tasks.ok else ""))
     else:
-        st.dataframe(queue, hide_index=True, use_container_width=True)
+        styled_table(queue)
         st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies.")
 
     # ---- Spend movers ----------------------------------------------------------
