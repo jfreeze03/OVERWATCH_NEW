@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.data import cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql, security_sql
+from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql, security_sql
 
 CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.metering_daily_by_service", lambda: cost_sql.metering_daily_by_service(2)),
@@ -60,4 +60,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.latest_digest", mart_sql.latest_digest),
     ("mart.savings_verification_runs", mart_sql.savings_verification_runs),
     ("mart.alert_mttr.canary", lambda: mart_sql.alert_mttr(2)),
+    ("chargeback.department_window", lambda: chargeback_sql.department_window_credits(1, "ALFA")),
+    ("chargeback.role_share", lambda: chargeback_sql.role_share_within_warehouse(1, "ALFA")),
+    ("chargeback.department_map", chargeback_sql.department_map),
+    ("chargeback.role_department", lambda: chargeback_sql.role_department_map_join(1, "ALFA")),
 )

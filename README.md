@@ -70,6 +70,7 @@ snowflake/migrations/V004__alerts.sql    -- alert config/events/audit + scan pro
 snowflake/migrations/V005__actions.sql   -- action queue + savings ledger
 snowflake/migrations/V006__pipeline_sla.sql -- pipeline freshness SLA config + status
 snowflake/migrations/V007__automation.sql -- budget alerts, AI digest, savings verification
+snowflake/migrations/V008__chargeback.sql -- department chargeback map (warehouse + role)
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

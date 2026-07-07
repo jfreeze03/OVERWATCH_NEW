@@ -17,7 +17,7 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
-from app.data import cortex_sql, cost_sql, insights_sql, mart_sql
+from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
@@ -460,6 +460,137 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             st.caption(f"View not available in this account/role: {fn_res.error}")
 
 
+def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> None:
+    """Department chargeback: warehouse = billing truth, role = usage lens."""
+    dept_res = run(chargeback_sql.department_window_credits(days, company), page=_PAGE,
+                   key=f"cb_dept_{company}_{days}", tier="historical",
+                   source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
+    if not guard(dept_res, "No warehouse credits in this window.",
+                 setup_hint="Department mapping comes from migration V008 (DEPARTMENT_MAP)."):
+        return
+    df = dept_res.df.copy()
+    df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
+    dept = df.groupby("DEPARTMENT", as_index=False)["USD"].sum().sort_values("USD", ascending=False)
+    unmapped_usd = float(dept[dept["DEPARTMENT"] == "Unmapped"]["USD"].sum())
+    total_usd = float(dept["USD"].sum())
+
+    kpi_row([
+        {"label": f"Chargeback total ({days}d)", "value": format_usd(total_usd),
+         "help": "Exact warehouse metering x rate. Reconciles to the scoped spend by construction."},
+        {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},
+        {"label": "Unmapped", "value": format_usd(unmapped_usd),
+         "delta": "map warehouses below" if unmapped_usd > 0 else "fully mapped",
+         "delta_color": "inverse" if unmapped_usd > 0 else "normal",
+         "help": "Credits from warehouses with no DEPARTMENT_MAP row. Should be $0."},
+    ])
+    charts.bar_usd(dept, "DEPARTMENT", "USD", title="Spend (USD, exact)")
+    styled_table(
+        df[["DEPARTMENT", "WAREHOUSE_NAME", "COMPANY", "CREDITS_TOTAL", "USD"]],
+        column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")},
+    )
+    result_caption(dept_res, note="Idle credits stay with the owning department - that is the point of chargeback.")
+
+    st.markdown("**Role usage within warehouses (allocated)**")
+    st.caption(
+        "Elapsed-time share per role inside each warehouse x that warehouse's exact spend. "
+        "Usage lens for conversations, not the billing number."
+    )
+    share_res = run(chargeback_sql.role_share_within_warehouse(days, company), page=_PAGE,
+                    key=f"cb_share_{company}_{days}", tier="historical",
+                    source="QUERY_HISTORY (elapsed share per warehouse)")
+    if share_res.usable():
+        wh_usd = df.set_index("WAREHOUSE_NAME")["USD"].to_dict()
+        share = share_res.df.copy()
+        share["ALLOCATED_USD"] = share.apply(
+            lambda r: round(safe_float(r["ELAPSED_SHARE"]) * wh_usd.get(str(r["WAREHOUSE_NAME"]), 0.0), 2),
+            axis=1,
+        )
+        by_role = (share.groupby("ROLE_NAME", as_index=False)["ALLOCATED_USD"].sum()
+                   .sort_values("ALLOCATED_USD", ascending=False))
+        charts.bar_usd(by_role, "ROLE_NAME", "ALLOCATED_USD", title="Allocated $ by role", top_n=12)
+        with st.expander("Role detail per warehouse"):
+            styled_table(
+                share[["WAREHOUSE_NAME", "ROLE_NAME", "QUERY_COUNT", "ELAPSED_SHARE", "ALLOCATED_USD"]],
+                column_config={
+                    "ELAPSED_SHARE": st.column_config.NumberColumn("Share", format="%.3f"),
+                    "ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.0f"),
+                },
+            )
+
+    st.markdown("**Monthly statement export**")
+    from datetime import date as _date
+
+    this_month = _date.today().strftime("%Y-%m")
+    prev = (_date.today().replace(day=1) - __import__("datetime").timedelta(days=1)).strftime("%Y-%m")
+    month = st.selectbox("Statement month", [prev, this_month], key="cb_month",
+                         help="Prior month is the finance-ready one; current month is partial.")
+    if st.button("Build department statements", key="cb_build"):
+        import io
+        import zipfile
+
+        month_res = run(chargeback_sql.department_month_credits(month, company), page=_PAGE,
+                        key=f"cb_month_{company}_{month}", tier="historical",
+                        source="WAREHOUSE_METERING_HISTORY (calendar month)")
+        if not month_res.usable():
+            st.error(month_res.error or "No credits recorded for that month/scope.")
+        else:
+            frame = month_res.df.copy()
+            frame["USD"] = frame["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+                summary = frame.groupby(["DEPARTMENT", "DEPT_OWNER"], as_index=False)["USD"].sum()
+                bundle.writestr("00_summary.csv", summary.to_csv(index=False))
+                for dept_name, block in frame.groupby("DEPARTMENT"):
+                    safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(dept_name))[:60]
+                    bundle.writestr(f"{safe_name}.csv", block.to_csv(index=False))
+                bundle.writestr(
+                    "MANIFEST.txt",
+                    f"OVERWATCH chargeback statements - {company} - {month}\n"
+                    f"Rate: ${rate:.2f}/credit (CORE settings). Warehouse metering is exact; "
+                    f"idle time bills to the owning department.\n"
+                    f"Total: ${float(frame['USD'].sum()):,.2f} across "
+                    f"{frame['DEPARTMENT'].nunique()} departments.",
+                )
+            st.download_button(
+                "Download statements (.zip)", data=buffer.getvalue(),
+                file_name=f"overwatch_chargeback_{company}_{month}.zip",
+                mime="application/zip", key="cb_dl",
+            )
+            st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
+
+    with st.expander("Manage mapping"):
+        map_res = run(chargeback_sql.department_map(), page=_PAGE, key="cb_map", tier="recent",
+                      source="DEPARTMENT_MAP")
+        if map_res.usable():
+            styled_table(map_res.df, height=280)
+        unmapped_whs = sorted(df[df["DEPARTMENT"] == "Unmapped"]["WAREHOUSE_NAME"].unique())
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            map_type = st.selectbox("Type", ["WAREHOUSE", "ROLE"], key="cb_map_type")
+        with c2:
+            default_name = unmapped_whs[0] if unmapped_whs and map_type == "WAREHOUSE" else ""
+            name = st.text_input("Name", value=default_name, key="cb_map_name")
+        with c3:
+            department = st.text_input("Department", key="cb_map_dept")
+        owner = st.text_input("Owner", value="DBA", key="cb_map_owner")
+        merge_sql = (
+            f"MERGE INTO {core_object('DEPARTMENT_MAP')} t\n"
+            f"USING (SELECT {sql_literal(map_type)} AS MAP_TYPE, {sql_literal(name.upper())} AS NAME, "
+            f"{sql_literal(department)} AS DEPARTMENT, {sql_literal(owner)} AS OWNER) s\n"
+            "ON t.MAP_TYPE = s.MAP_TYPE AND t.NAME = s.NAME\n"
+            "WHEN MATCHED THEN UPDATE SET DEPARTMENT = s.DEPARTMENT, OWNER = s.OWNER, "
+            "UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER()\n"
+            "WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER) "
+            "VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER);"
+        )
+        st.code(merge_sql, language="sql")
+        if is_operator and name and department and st.button("Execute mapping", key="cb_map_exec"):
+            ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
+            (st.success if ok else st.error)(msg)
+        elif not is_operator:
+            st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
+
+
 def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
@@ -551,8 +682,8 @@ def render() -> None:
                 scope_note=f"{f['company']} · last {f['days']} days")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    tab_spend, tab_attr, tab_contract, tab_ai, tab_users, tab_opt, tab_savings = st.tabs(
-        ["Spend", "Attribution", "Contract", "Cortex & Storage", "AI Users", "Optimization", "Savings ledger"]
+    tab_spend, tab_attr, tab_contract, tab_cb, tab_ai, tab_users, tab_opt, tab_savings = st.tabs(
+        ["Spend", "Attribution", "Contract", "Chargeback", "Cortex & Storage", "AI Users", "Optimization", "Savings ledger"]
     )
     with tab_spend:
         _spend_tab(f["company"], f["days"], rate, ai_rate)
@@ -560,6 +691,8 @@ def render() -> None:
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
     with tab_contract:
         _contract_tab(settings)
+    with tab_cb:
+        _chargeback_tab(f["company"], f["days"], rate, is_operator)
     with tab_ai:
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
     with tab_users:

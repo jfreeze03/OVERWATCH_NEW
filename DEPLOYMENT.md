@@ -13,6 +13,7 @@ snowflake/migrations/V004__alerts.sql
 snowflake/migrations/V005__actions.sql
 snowflake/migrations/V006__pipeline_sla.sql
 snowflake/migrations/V007__automation.sql
+snowflake/migrations/V008__chargeback.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
