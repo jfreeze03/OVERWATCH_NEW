@@ -16,6 +16,8 @@ from app.config import APP_QUERY_TAG_PREFIX
 
 _TAG_ATTR = "_ow_query_tag"
 _TIMEOUT_ATTR = "_ow_stmt_timeout"
+_ALTER_SUPPORT_ATTR = "_ow_alter_session_supported"  # None unknown / True / False
+_SIS_ATTR = "_ow_is_sis"
 _TAG_MAX = 200
 
 
@@ -39,7 +41,13 @@ def _connect():
     try:
         from snowflake.snowpark.context import get_active_session
 
-        return get_active_session()  # Streamlit-in-Snowflake
+        session = get_active_session()  # Streamlit-in-Snowflake
+        # SiS executes inside an owner's-rights procedure where ALTER SESSION
+        # raises "Unsupported statement type 'ALTER_SESSION'". Mark it up
+        # front so we never spray failed statements into QUERY_HISTORY.
+        setattr(session, _SIS_ATTR, True)
+        setattr(session, _ALTER_SUPPORT_ATTR, False)
+        return session
     except Exception:
         pass
     conn = st.connection("snowflake")  # local dev secrets; raises if absent
@@ -70,40 +78,59 @@ def connection_available() -> bool:
         return False
 
 
+def alter_session_supported(session) -> bool:
+    """Whether this runtime accepts ALTER SESSION (SiS does not)."""
+    return getattr(session, _ALTER_SUPPORT_ATTR, None) is not False
+
+
+def _try_alter_session(session, statement: str) -> bool:
+    """Run one ALTER SESSION, learning the runtime's capability exactly once.
+
+    On the first failure the session object is marked unsupported and no
+    ALTER SESSION is ever attempted again — one failed probe maximum, not a
+    failed statement per query (the SiS screenshots that motivated this fix).
+    """
+    if not alter_session_supported(session):
+        return False
+    try:
+        session.sql(statement).collect()
+        setattr(session, _ALTER_SUPPORT_ATTR, True)
+        return True
+    except Exception:
+        setattr(session, _ALTER_SUPPORT_ATTR, False)
+        return False
+
+
 def _apply_base_parameters(session) -> None:
     if getattr(session, _TAG_ATTR, None) is None:
-        try:
-            session.sql(
-                f"ALTER SESSION SET QUERY_TAG = '{APP_QUERY_TAG_PREFIX}', TIMEZONE = 'UTC'"
-            ).collect()
-            setattr(session, _TAG_ATTR, APP_QUERY_TAG_PREFIX)
-        except Exception:
-            setattr(session, _TAG_ATTR, "")  # tag is attribution, not correctness
+        applied = _try_alter_session(
+            session,
+            f"ALTER SESSION SET QUERY_TAG = '{APP_QUERY_TAG_PREFIX}', TIMEZONE = 'UTC'",
+        )
+        setattr(session, _TAG_ATTR, APP_QUERY_TAG_PREFIX if applied else "")
 
 
 def apply_query_tag(session, tag: str) -> None:
-    """Set QUERY_TAG only when it changes; tracked on the session object."""
+    """Set QUERY_TAG only when it changes; no-op where ALTER SESSION is unsupported."""
+    if not alter_session_supported(session):
+        return
     tag = (tag or APP_QUERY_TAG_PREFIX)[:_TAG_MAX]
     if getattr(session, _TAG_ATTR, None) == tag:
         return
-    try:
-        safe = tag.replace("'", "''")
-        session.sql(f"ALTER SESSION SET QUERY_TAG = '{safe}'").collect()
+    safe = tag.replace("'", "''")
+    if _try_alter_session(session, f"ALTER SESSION SET QUERY_TAG = '{safe}'"):
         setattr(session, _TAG_ATTR, tag)
-    except Exception:
-        pass  # attribution only; the query itself still runs
 
 
 def apply_statement_timeout(session, seconds: int) -> None:
-    """Set a bounded statement timeout; tracked on the session object."""
+    """Session statement timeout; no-op in SiS (warehouse timeout is the backstop)."""
+    if not alter_session_supported(session):
+        return
     seconds = max(10, min(int(seconds), 900))
     if getattr(session, _TIMEOUT_ATTR, None) == seconds:
         return
-    try:
-        session.sql(f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds}").collect()
+    if _try_alter_session(session, f"ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds}"):
         setattr(session, _TIMEOUT_ATTR, seconds)
-    except Exception:
-        pass  # warehouse-level timeout still applies as the backstop
 
 
 def current_role() -> str:

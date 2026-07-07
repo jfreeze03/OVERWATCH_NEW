@@ -125,6 +125,11 @@ def triage_queue(
     if not rows:
         return pd.DataFrame()
     queue = pd.DataFrame(rows)
+    # Sources mix timestamps, dates, and None here; Arrow serialization in
+    # st.dataframe requires one type, so render RAISED_AT as text.
+    queue["RAISED_AT"] = queue["RAISED_AT"].map(
+        lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+    )
     queue["_SEV"] = queue["SEVERITY"].map(SEVERITY_RANK).fillna(9)
     queue = queue.sort_values(["_SEV", "KIND"]).drop(columns=["_SEV"]).reset_index(drop=True)
     return queue

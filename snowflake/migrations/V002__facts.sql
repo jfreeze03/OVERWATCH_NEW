@@ -11,7 +11,13 @@ CREATE WAREHOUSE IF NOT EXISTS WH_ALFA_OVERWATCH
     AUTO_SUSPEND = 60
     AUTO_RESUME = TRUE
     INITIALLY_SUSPENDED = TRUE
+    STATEMENT_TIMEOUT_IN_SECONDS = 300
     COMMENT = 'OVERWATCH app + telemetry tasks. Keep XSMALL.';
+
+-- Warehouse-level timeout is the runaway backstop: Streamlit-in-Snowflake
+-- runs in an owner's-rights procedure where ALTER SESSION (and therefore
+-- session-level timeouts/query tags) is unsupported.
+ALTER WAREHOUSE WH_ALFA_OVERWATCH SET STATEMENT_TIMEOUT_IN_SECONDS = 300;
 
 CREATE RESOURCE MONITOR IF NOT EXISTS OVERWATCH_RM
     WITH CREDIT_QUOTA = 30

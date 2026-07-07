@@ -36,6 +36,7 @@ _RENDERERS = {
 
 
 def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
+    """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
         st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
         st.markdown(f"**Snowflake Command Center** · v{APP_VERSION}")
@@ -53,24 +54,40 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         remember_page(page)
 
         st.divider()
-        st.markdown("**Scope**")
-        st.selectbox("Company", COMPANIES, key="flt_company")
-        st.selectbox("Environment", ENVIRONMENTS, key="flt_environment",
-                     help="PROD = *_PRD and ALFA_EDW_PROD/MGM databases.")
-        st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
-        st.text_input("Warehouse contains", key="flt_warehouse_contains")
-        st.text_input("User contains", key="flt_user_contains")
-        db_options = ["", *database_options(st.session_state.get("flt_company", COMPANIES[0]))]
-        st.selectbox("Database", db_options, key="flt_database",
-                     format_func=lambda v: v or "All databases",
-                     help="Applies to query, task, DDL, attribution, and storage panels.")
-        st.text_input("Schema contains", key="flt_schema_contains",
-                      help="Case-insensitive match on schema name where the source has schema grain.")
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
             st.rerun()
         st.caption("Account telemetry lags up to ~45 min; metering-daily up to 24h. Labels on every panel.")
     return page
+
+
+def _topbar_scope() -> None:
+    """Triage filter strip above every page, like the original OVERWATCH."""
+    st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+    c_company, c_env, c_days, c_db = st.columns([1.0, 1.0, 1.2, 1.4])
+    with c_company:
+        st.selectbox("Company", COMPANIES, key="flt_company")
+    with c_env:
+        st.selectbox("Environment", ENVIRONMENTS, key="flt_environment",
+                     help="PROD = *_PRD and ALFA_EDW_PROD/MGM databases.")
+    with c_days:
+        st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
+    with c_db:
+        db_options = ["", *database_options(st.session_state.get("flt_company", COMPANIES[0]))]
+        if st.session_state.get("flt_database") not in db_options:
+            st.session_state["flt_database"] = ""
+        st.selectbox("Database", db_options, key="flt_database",
+                     format_func=lambda v: v or "All databases",
+                     help="Applies to query, task, DDL, attribution, and storage panels.")
+    c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
+    with c_wh:
+        st.text_input("Warehouse contains", key="flt_warehouse_contains")
+    with c_user:
+        st.text_input("User contains", key="flt_user_contains")
+    with c_schema:
+        st.text_input("Schema contains", key="flt_schema_contains",
+                      help="Case-insensitive match where the source has schema grain.")
+    st.divider()
 
 
 def main() -> None:
@@ -83,6 +100,8 @@ def main() -> None:
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 
     page = _sidebar(pages, role, profile, connected)
+    if connected:
+        _topbar_scope()
 
     if not connected:
         st.title("OVERWATCH")
