@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.1.0"
+APP_VERSION = "4.2.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -143,7 +143,7 @@ def resolve_role_profile(role: str) -> str:
 def clamp_days(days: object, maximum: int = MAX_LIVE_WINDOW_DAYS) -> int:
     """Clamp a day window to a safe integer range for live scans."""
     try:
-        value = int(days)  # type: ignore[arg-type]
+        value = int(days)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         value = DEFAULT_DAY_WINDOW
     return max(1, min(value, maximum))

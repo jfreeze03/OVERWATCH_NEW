@@ -96,3 +96,97 @@ def sizing_summary(out: pd.DataFrame) -> dict:
 
 def _unused_guard() -> float:  # pragma: no cover - keeps safe_div imported for future ratios
     return safe_div(1, 1)
+
+
+# ---------------------------------------------------------------------------
+# Interactive what-if simulator (pure; the UI supplies observed inputs)
+# ---------------------------------------------------------------------------
+
+SIZE_ORDER = ("XSMALL", "SMALL", "MEDIUM", "LARGE", "XLARGE",
+              "2XLARGE", "3XLARGE", "4XLARGE")
+_SIZE_ALIASES = {"X-SMALL": "XSMALL", "XS": "XSMALL", "S": "SMALL", "M": "MEDIUM",
+                 "L": "LARGE", "X-LARGE": "XLARGE", "XL": "XLARGE",
+                 "2X-LARGE": "2XLARGE", "3X-LARGE": "3XLARGE", "4X-LARGE": "4XLARGE"}
+
+
+def normalize_size(size: object) -> str:
+    text = str(size or "").strip().upper().replace("_", "-")
+    text = _SIZE_ALIASES.get(text, text.replace("-", ""))
+    return text if text in SIZE_ORDER else ""
+
+
+def shifted_size(size: str, delta: int) -> str:
+    """Size N steps up/down the ladder, clamped at the ends ('' if unknown)."""
+    current = normalize_size(size)
+    if not current:
+        return ""
+    idx = max(0, min(SIZE_ORDER.index(current) + int(delta), len(SIZE_ORDER) - 1))
+    return SIZE_ORDER[idx]
+
+
+def simulate_scenario(
+    *,
+    size: str,
+    credits_window: float,
+    idle_credits_window: float,
+    window_days: int,
+    rate_usd: float,
+    size_delta: int = 0,
+    autosuspend_now_s: int = 600,
+    autosuspend_new_s: int = 60,
+) -> dict:
+    """What-if for one warehouse: size step and/or auto-suspend change.
+
+    Transparent replay of the observed window, not a promise:
+    - Busy credits scale between two stated bounds. Sizing up (rate x2 per
+      step): worst case queries run the SAME wall time (cost x2), best case
+      they halve (cost-neutral). Sizing down mirrors that.
+    - Idle credits scale with the new rate AND shrink/grow with the
+      auto-suspend ratio (capped at 2x — longer suspends can't burn more
+      than always-on).
+    Returns monthly dollars: {ok, size_now, size_new, monthly_now_usd,
+    monthly_low_usd, monthly_high_usd, assumptions: [...]}
+    """
+    from .formulas import safe_float as _sf
+
+    size_now = normalize_size(size)
+    size_new = shifted_size(size_now, size_delta)
+    if not size_now:
+        return {"ok": False, "reason": f"Unknown warehouse size {size!r}."}
+    days = max(int(window_days or 1), 1)
+    rate = _sf(rate_usd, 3.68)
+    total = max(0.0, _sf(credits_window))
+    idle = min(max(0.0, _sf(idle_credits_window)), total)
+    busy = total - idle
+    # Effective applied delta after clamping at the ladder ends.
+    applied_delta = SIZE_ORDER.index(size_new) - SIZE_ORDER.index(size_now)
+    factor = 2.0 ** applied_delta
+    busy_bounds = sorted((busy * factor, busy * 1.0))
+    suspend_ratio = min(max(_sf(autosuspend_new_s, 60), 0.0)
+                        / max(_sf(autosuspend_now_s, 600), 1.0), 2.0)
+    idle_new = idle * factor * suspend_ratio
+    to_month = 30.0 / days
+
+    def _usd(credits: float) -> float:
+        return round(credits * to_month * rate, 0)
+
+    low = _usd(busy_bounds[0] + idle_new)
+    high = _usd(busy_bounds[1] + idle_new)
+    assumptions = [
+        f"Observed window: {days}d, {total:,.1f} credits ({idle:,.1f} idle).",
+        (f"Size {size_now} -> {size_new}: busy credits bounded between rate-scaled "
+         f"(x{factor:g}) and cost-neutral (perfect runtime scaling)."
+         if applied_delta else "Size unchanged: busy credits unchanged."),
+        (f"Auto-suspend {int(autosuspend_now_s)}s -> {int(autosuspend_new_s)}s: idle credits "
+         f"scaled x{suspend_ratio:.2f} (linear with suspend window, capped at 2x)."),
+        "Idle burns at the NEW size's rate. Concurrency, caching, and queueing shifts are not modeled.",
+    ]
+    return {
+        "ok": True,
+        "size_now": size_now,
+        "size_new": size_new,
+        "monthly_now_usd": _usd(total),
+        "monthly_low_usd": min(low, high),
+        "monthly_high_usd": max(low, high),
+        "assumptions": assumptions,
+    }

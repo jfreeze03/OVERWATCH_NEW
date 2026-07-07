@@ -50,7 +50,7 @@ def can_verify(row: dict) -> tuple[bool, str]:
     if not proof:
         return False, "A proof query is required before verification."
     try:
-        verified = float(row.get("VERIFIED_USD"))
+        verified = float(str(row.get("VERIFIED_USD")))
     except (TypeError, ValueError):
         return False, "A numeric verified USD amount is required."
     if verified < 0:

@@ -42,23 +42,37 @@ _PAGE = "Alerts"
 _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin → Migrations & freshness."
 
 
-def _lifecycle_sql(event_id: str, action: str, note: str) -> str:
-    """ACK/RESOLVE update + audit insert, executed as one script."""
+RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
+
+
+def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
+    """ACK/RESOLVE update + audit insert, executed as one script.
+
+    ``kind`` (RESOLVE only, V021): ACTIONED = a real fix followed; NOISE =
+    threshold cried wolf; EXPECTED = known/maintenance. Powers the per-rule
+    precision score on the Rules section. Pre-V021 deployments: the caller
+    retries without the column when Snowflake rejects it.
+    """
     action = "RESOLVE" if action == "RESOLVE" else "ACK"
+    kind = str(kind or "").upper()
+    kind = kind if kind in RESOLUTION_KINDS else ""
     if action == "ACK":
         update = (
             f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), "
             f"ACK_AT = CURRENT_TIMESTAMP() WHERE EVENT_ID = {sql_literal(event_id)} AND STATUS = 'OPEN';"
         )
     else:
+        set_kind = f", RESOLUTION_KIND = {sql_literal(kind)}" if kind else ""
         update = (
             f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'RESOLVED', "
-            f"RESOLVED_AT = CURRENT_TIMESTAMP() WHERE EVENT_ID = {sql_literal(event_id)} "
+            f"RESOLVED_AT = CURRENT_TIMESTAMP(){set_kind} "
+            f"WHERE EVENT_ID = {sql_literal(event_id)} "
             "AND STATUS IN ('OPEN', 'ACK');"
         )
+    audit_note = f"[{kind}] {note}" if kind else note
     audit = (
         f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE) "
-        f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)});"
+        f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)});"
     )
     return update + "\n" + audit
 
@@ -290,7 +304,14 @@ def _open_events_section(events, is_operator: bool) -> None:
                 action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
             with c_note:
                 note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
-            sql_script = _lifecycle_sql(event_id, action, note)
+            kind = ""
+            if action == "RESOLVE":
+                kind = st.radio(
+                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key="alert_kind",
+                    help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
+                         "EXPECTED = known/maintenance. Feeds the per-rule precision score "
+                         "on the Rules section (V021).")
+            sql_script = _lifecycle_sql(event_id, action, note, kind)
             with st.expander("SQL that will run"):
                 st.code(sql_script, language="sql")
             if is_operator:
@@ -299,6 +320,12 @@ def _open_events_section(events, is_operator: bool) -> None:
                     ok_all, messages = True, []
                     for stmt in [s for s in sql_script.split(";") if s.strip()]:
                         ok, msg = execute_statement(stmt + ";", page=_PAGE)
+                        if not ok and "RESOLUTION_KIND" in msg:
+                            # Pre-V021 deployment: retry the legacy statement.
+                            legacy = _lifecycle_sql(event_id, action, note)
+                            ok, msg = execute_statement(
+                                legacy.split(";")[0] + ";", page=_PAGE)
+                            msg += (" (resolution kind not stored — an admin can apply the pending schema update on Admin → Migrations & freshness)")
                         ok_all = ok_all and ok
                         messages.append(msg)
                     notify(ok_all, " / ".join(messages))
@@ -367,6 +394,24 @@ def render() -> None:
                 "Statistical anomaly detection runs in-app (Cost > Attribution, Operations > Warehouses) "
                 "and is deliberately separate from these deterministic rules."
             )
+            st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
+            prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",
+                       tier="recent", source="ALERT_EVENTS.RESOLUTION_KIND")
+            if not prec.ok:
+                st.info("Precision is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+            elif prec.empty:
+                st.info("No resolved events in 90d — precision appears once alerts get closed "
+                        "with a resolution kind.")
+            else:
+                pdf_ = prec.df.copy()
+                styled_table(pdf_, column_config={
+                    "PRECISION_PCT": st.column_config.NumberColumn("Precision %", format="%.1f%%"),
+                })
+                st.caption(
+                    "Precision = ACTIONED / (ACTIONED + NOISE); EXPECTED is excluded. High NOISE "
+                    "with low precision = raise the threshold; high UNTAGGED = the score isn't "
+                    "trustworthy yet — close events with a kind. Tune via the generator below."
+                )
             with st.expander("Generate a threshold change"):
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()

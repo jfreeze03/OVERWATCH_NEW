@@ -106,4 +106,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("chargeback.role_share", lambda: chargeback_sql.role_share_within_warehouse(1, "ALFA")),
     ("chargeback.department_map", chargeback_sql.department_map),
     ("chargeback.role_department", lambda: chargeback_sql.role_department_map_join(1, "ALFA")),
+    ("insights.expensive_queries_usd", lambda: insights_sql.expensive_queries_usd(1, "ALFA", 5)),
+    ("mart.rule_precision", lambda: mart_sql.rule_precision(7)),
+    ("mart.mart_vs_live_recon", mart_sql.mart_vs_live_recon),
+    ("mart.fleet_query_stats", lambda: mart_sql.fleet_query_stats(2)),
 )

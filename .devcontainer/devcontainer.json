@@ -1,0 +1,16 @@
+{
+  "name": "OVERWATCH dev",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r requirements.txt -r requirements-dev.txt",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "charliermarsh.ruff"],
+      "settings": {
+        "python.testing.pytestEnabled": true,
+        "editor.rulers": [110]
+      }
+    }
+  },
+  "forwardPorts": [8501],
+  "portsAttributes": { "8501": { "label": "Streamlit" } }
+}

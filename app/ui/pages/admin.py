@@ -33,6 +33,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     selectable_table,
+    styled_table,
 )
 
 _PAGE = "Admin"
@@ -218,6 +219,49 @@ def _org_spend_tab() -> None:
                  column_config={"USAGE_IN_CURRENCY": st.column_config.NumberColumn(
                      f"Spend ({currency})", format="%.2f")})
     result_caption(res)
+
+    st.divider()
+    st.markdown("**Billing truth vs app model (this account)**")
+    st.caption(
+        "Org rate-card dollars for THIS account vs the app's credits x configured rate. "
+        "The compute bucket should track closely; the residual is rate-card reality "
+        "(storage, transfer, serverless, discounts), not a bug in either number."
+    )
+    org_m = run(cost_sql.org_account_month_usd(2), page=_PAGE, key="org_month_this",
+                tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account)")
+    model_m = run(mart_sql.fact_daily_spend(70), page=_PAGE, key="fact_daily_45",
+                  tier="recent", source="FACT_METERING_DAILY")
+    if not org_m.usable():
+        st.info("Needs ORGANIZATION_USAGE visibility (see the note above).")
+    elif not model_m.usable():
+        st.info("Needs the daily metering facts (V002) for the model side.")
+    else:
+        rate_now = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+        mdf = model_m.df.copy()
+        mdf["MONTH"] = pd.to_datetime(mdf["DAY"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+        model_by_month = mdf.groupby("MONTH")["CREDITS_BILLED"].sum() * rate_now
+        odf = org_m.df.copy()
+        odf["MONTH"] = pd.to_datetime(odf["MONTH"], errors="coerce")
+        rows_rc = []
+        for _, orow in odf.iterrows():
+            month = orow["MONTH"]
+            model_usd = float(model_by_month.get(month, 0.0))
+            org_usd = safe_float(orow.get("COMPUTE_USD"))
+            drift = (100.0 * (model_usd - org_usd) / org_usd) if org_usd else None
+            rows_rc.append({
+                "MONTH": month.strftime("%Y-%m") if pd.notna(month) else "?",
+                "ORG_COMPUTE_USD": round(org_usd, 2),
+                "APP_MODEL_USD": round(model_usd, 2),
+                "DELTA_PCT": round(drift, 2) if drift is not None else None,
+                "ORG_TOTAL_USD": round(safe_float(orow.get("TOTAL_USD")), 2),
+            })
+        styled_table(pd.DataFrame(rows_rc), column_config={
+            "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%")})
+        st.caption(
+            f"Model = FACT_METERING_DAILY billed credits x ${rate_now:.2f} (SETTINGS). The current "
+            "month is partial on both sides; judge the prior month. A steady gap means the "
+            "contract rate in SETTINGS no longer matches the rate card — fix it on Settings."
+        )
 
 
 _EMERGENCY_CATALOG = """
@@ -500,6 +544,22 @@ def _performance_tab() -> None:
         st.dataframe(usage.df, hide_index=True, use_container_width=True)
         st.caption("Curation calls (merge/kill sections) should follow this table, not opinions.")
 
+    st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")
+    fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
+             source="APP_QUERY_TELEMETRY (V021)")
+    if not fq.ok:
+        st.info("Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant).")
+    elif fq.empty:
+        st.success("No slow (≥2s) or failed fetches persisted in 7 days — every viewer is "
+                   "riding the cache.")
+    else:
+        styled_table(fq.df, height=280)
+        st.caption(
+            "Only fetches ≥2s or failed are persisted (sampled, fire-and-forget, 60/session cap) "
+            "— this is the regression surface across every user, not a complete census. "
+            "The session table above shows only YOUR session."
+        )
+
 
 def _canary_tab() -> None:
     st.caption(
@@ -537,6 +597,31 @@ def _canary_tab() -> None:
         view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED"})
         view = view.rename(columns={"STATUS": "EXECUTION_STATUS"})
         _styled(view, height=420)
+
+    st.divider()
+    st.markdown("**Mart reconciliation — do the numbers MATCH the source?**")
+    st.caption(
+        "Freshness proves the loaders ran; this compares mart totals against live "
+        "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
+        "beyond ±5%, re-run the backfill for that window (snowflake/backfill_365.sql, scoped)."
+    )
+    recon = run(mart_sql.mart_vs_live_recon(), page=_PAGE, key="mart_recon", tier="historical",
+                source="FACT_* vs METERING_DAILY_HISTORY / QUERY_HISTORY")
+    if guard(recon, "Reconciliation needs the facts (V002) installed.",
+             setup_hint="Runs the mart and the live aggregate side by side; deploy marts first."):
+        rdf = recon.df.copy()
+        rdf["STATE"] = rdf["DRIFT_PCT"].map(
+            lambda d: "OK" if abs(safe_float(d)) <= 2 else ("WARN" if abs(safe_float(d)) <= 5 else "BAD"))
+        styled_table(rdf, column_config={
+            "DRIFT_PCT": st.column_config.NumberColumn("Drift %", format="%.2f%%")})
+        worst = rdf["DRIFT_PCT"].map(lambda d: abs(safe_float(d))).max()
+        if worst > 5:
+            st.error("Mart drift beyond ±5%: chargeback and exec numbers are off until the "
+                     "backfill re-runs. This is exactly what this panel exists to catch.")
+        elif worst > 2:
+            st.warning("Mart drift in the 2-5% band — usually late-arriving metering rows; "
+                       "re-check tomorrow before re-running backfills.")
+        result_caption(recon)
 
 
 @safe_page(_PAGE)

@@ -253,3 +253,27 @@ HAVING COUNT(*) >= 20 AND AVG(COMPILATION_TIME) > 500
 ORDER BY SUM(COMPILATION_TIME) DESC
 LIMIT 25
 """
+
+def org_account_month_usd(months: int = 2) -> str:
+    """This account's org-billed dollars by month and bucket, for the
+    reconciliation panel: COMPUTE_USD (compute + cloud services + their
+    adjustments — the bucket the app's credits x rate models) vs TOTAL_USD
+    (everything: storage, transfer, serverless, priority support).
+
+    Uses the org rate card, so this is billing truth; differences from the
+    app's model are rate-card reality, not a bug in either number.
+    """
+    months = max(1, min(int(months or 2), 12))
+    return f"""
+SELECT
+    DATE_TRUNC('month', USAGE_DATE)::DATE AS MONTH,
+    SUM(IFF(LOWER(USAGE_TYPE) LIKE '%compute%' OR LOWER(USAGE_TYPE) LIKE '%cloud service%',
+            USAGE_IN_CURRENCY, 0))        AS COMPUTE_USD,
+    SUM(USAGE_IN_CURRENCY)                AS TOTAL_USD,
+    MAX(CURRENCY)                         AS CURRENCY
+FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
+  AND USAGE_DATE >= DATE_TRUNC('month', DATEADD('month', -{months - 1}, CURRENT_DATE()))
+GROUP BY 1
+ORDER BY 1 DESC
+"""

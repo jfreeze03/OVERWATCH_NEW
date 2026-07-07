@@ -14,6 +14,8 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Change-impact regression tracker (frozen 14d baselines, measured credits/call) | Operations → Change impact |
 | Dept budget pace, org account creep, volume drops, COPY/DT failures, credential expiry, break-glass use | scan + sweep rules |
 | Self-monitoring: weekly source sentinel (24 probes) + render-time SLA | `OPS_CANARY_FAIL` / `OPS_SLOW_RENDER`; Admin → Canary |
+| Mart reconciliation — totals MATCH the source, not just fresh (±2%/±5% bands) | Admin → Canary |
+| Fleet slow/failed fetch telemetry across all viewers (V021) | Admin → Performance |
 | Morning AI digest (grounded, Cortex) | Overview expander; daily task |
 
 ## Investigate
@@ -22,6 +24,8 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Alert drawer: detail, rule, history, playbook, AI explain, Investigate→, **inline closed-loop fix** (warehouse rules), storm rollup toggle | Alerts → Open events |
 | Incident correlation timeline (alerts + task failures + DDL, ±30 min drill) | Control Room |
 | Query drill-through, heaviest queries (row-click), pruning/compile/cache diagnostics | Operations → Queries; Cost → Optimization |
+| Most expensive queries in **allocated $** (hour-share model, labeled) | Cost → Optimization |
+| Per-rule alert precision from resolution kinds (ACTIONED/NOISE/EXPECTED) | Alerts → Rules |
 | Task-graph DAG with failure overlay; pipeline SLAs; stream staleness | Operations → Tasks / Pipeline SLA |
 | Attribution (exact per warehouse; labeled-allocated per user/db/role) + waterfall | Cost → Attribution / Chargeback |
 | Global jump box (pages, DBs, warehouses, rules) | sidebar |
@@ -30,6 +34,8 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Capability | Where |
 |---|---|
 | One-click remediation: auto-suspend, off-hours schedules, resize, retention — audit row + ESTIMATED savings | Cost → Optimization |
+| Interactive right-size what-if (size step + auto-suspend, bounded $ range) | Cost → Optimization |
+| Storage reclaim shortlist: stale AND never-read 90d (ACCESS_HISTORY) | Cost → Optimization |
 | Savings verifier flips ESTIMATED → VERIFIED/REJECTED from actuals monthly | Cost → Savings ledger |
 | Emergency levers: suspend WH, timeouts, cluster caps, monitor quotas, pipe/task pause, disable user, Cortex allowlist | Admin → Emergency |
 | Live query kill-switch (`SYSTEM$CANCEL_QUERY`, audited) | Admin → Emergency |
@@ -42,6 +48,7 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Month-end forecast: linear / seasonal / opt-in `ML.FORECAST` | Overview; `ml_forecast_option.sql` |
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
 | Department budgets + monthly statement exports | Cost → Chargeback |
+| Billing truth vs app model (org rate card vs credits x rate, monthly) | Admin → Org spend |
 | Styled HTML executive summary; per-table CSV everywhere | Overview; all tables |
 | Quarterly access-review export pack (grants matrix, unused roles, 90d diff) | Security → Access |
 | Governance-drift + platform scores, both settings-tunable with named deductions | Security / Overview |

@@ -473,3 +473,102 @@ WHERE RULE_ID = {sql_literal(rid)}
 ORDER BY RAISED_AT DESC
 LIMIT 20
 """
+
+def rule_precision(days: int = 90) -> str:
+    """Per-rule alert precision from resolution kinds (V021).
+
+    precision = ACTIONED / (ACTIONED + NOISE); EXPECTED (maintenance/known)
+    is excluded from the denominator. UNTAGGED counts resolved events from
+    before V021 or closed without a kind — high untagged means the score
+    is not yet trustworthy for that rule.
+    """
+    days = max(7, min(int(days or 90), 365))
+    return f"""
+SELECT
+    RULE_ID,
+    COUNT(*)                                          AS RESOLVED_EVENTS,
+    COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
+    COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
+    COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,
+    COUNT_IF(RESOLUTION_KIND IS NULL)                 AS UNTAGGED,
+    ROUND(100 * ACTIONED / NULLIF(ACTIONED + NOISE, 0), 1) AS PRECISION_PCT
+FROM {core_object("ALERT_EVENTS")}
+WHERE STATUS = 'RESOLVED'
+  AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY RULE_ID
+ORDER BY RESOLVED_EVENTS DESC
+LIMIT 100
+"""
+
+
+def mart_vs_live_recon() -> str:
+    """Mart totals vs live ACCOUNT_USAGE over the same complete window —
+    freshness says the loaders RAN; this says the numbers MATCH.
+
+    Metering compares 28 complete days ending 3 days ago (metering-daily can
+    lag 24-72h); query counts compare 7 days ending 2 days ago. DRIFT_PCT
+    within ±2% is normal (late-arriving rows); beyond ±5% means a loader gap
+    — re-run the backfill for that window.
+    """
+    return f"""
+WITH f_met AS (
+    SELECT SUM(CREDITS_BILLED) AS V
+    FROM {core_object("FACT_METERING_DAILY")}
+    WHERE DAY >= DATEADD('day', -31, CURRENT_DATE())
+      AND DAY <  DATEADD('day', -3,  CURRENT_DATE())
+),
+l_met AS (
+    SELECT SUM(CREDITS_BILLED) AS V
+    FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+    WHERE USAGE_DATE >= DATEADD('day', -31, CURRENT_DATE())
+      AND USAGE_DATE <  DATEADD('day', -3,  CURRENT_DATE())
+),
+f_q AS (
+    SELECT SUM(QUERY_COUNT) AS V
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE HOUR_TS >= DATEADD('day', -9, CURRENT_DATE())
+      AND HOUR_TS <  DATEADD('day', -2, CURRENT_DATE())
+),
+l_q AS (
+    SELECT COUNT(*) AS V
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -9, CURRENT_DATE())
+      AND START_TIME <  DATEADD('day', -2, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+)
+SELECT 'Billed credits (28d, mart vs metering-daily)' AS CHECK_NAME,
+       ROUND(f_met.V, 2) AS FACT_VALUE, ROUND(l_met.V, 2) AS LIVE_VALUE,
+       ROUND(100 * (f_met.V - l_met.V) / NULLIF(l_met.V, 0), 2) AS DRIFT_PCT
+FROM f_met, l_met
+UNION ALL
+SELECT 'Query count (7d, mart vs query-history)',
+       f_q.V, l_q.V,
+       ROUND(100 * (f_q.V - l_q.V) / NULLIF(l_q.V, 0), 2)
+FROM f_q, l_q
+"""
+
+
+def fleet_query_stats(days: int = 7) -> str:
+    """Slow/failed fetches across ALL viewers (APP_QUERY_TELEMETRY, V021).
+
+    Only rows the app chose to persist land here (>=2s or failed), so this is
+    the regression surface, not a complete census — the note on the panel
+    says so.
+    """
+    days = max(1, min(int(days or 7), 90))
+    return f"""
+SELECT
+    PAGE,
+    QUERY_KEY,
+    COUNT(*)                                   AS SLOW_OR_FAILED,
+    COUNT_IF(NOT OK)                           AS FAILURES,
+    ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.5))  AS P50_MS,
+    ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95)) AS P95_MS,
+    COUNT(DISTINCT ROLE_NAME)                  AS ROLES_AFFECTED,
+    MAX(AT)                                    AS NEWEST
+FROM {core_object("APP_QUERY_TELEMETRY")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY PAGE, QUERY_KEY
+ORDER BY P95_MS DESC NULLS LAST
+LIMIT 40
+"""

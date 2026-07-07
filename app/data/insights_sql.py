@@ -470,3 +470,119 @@ HAVING ELAPSED_H_DAY > 0
 ORDER BY ELAPSED_H_DAY - ELAPSED_H_PRIOR_AVG DESC
 LIMIT 15
 """
+
+
+def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
+                          database: str = "") -> str:
+    """Top queries by ALLOCATED credits — warehouse-hour credits split across
+    that hour's queries by execution-time share.
+
+    Labeled *allocated*, not billed: Snowflake bills the warehouse, not the
+    query. Bucketing is by the query's start hour (a long query's later hours
+    are attributed to its first — documented approximation). Idle credits in
+    an hour with queries are carried pro-rata; fully idle hours are excluded
+    (the idle advisor owns those).
+    """
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 50), 200))
+    where_q = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "WAREHOUSE_NAME IS NOT NULL",
+        "COALESCE(EXECUTION_TIME, 0) > 0",
+        companies.warehouse_clause(company),
+        companies.database_equals_clause(database),
+    )
+    where_m = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+WITH q AS (
+    SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, QUERY_TYPE, EXECUTION_STATUS,
+           START_TIME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+           COALESCE(EXECUTION_TIME, 0) AS EXEC_MS,
+           COALESCE(TOTAL_ELAPSED_TIME, 0) / 1000.0 AS ELAPSED_SEC,
+           LEFT(QUERY_TEXT, 140) AS QUERY_SNIPPET
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where_q}
+),
+m AS (
+    SELECT WAREHOUSE_NAME, START_TIME AS HOUR_TS, SUM(CREDITS_USED) AS HOUR_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE {where_m}
+    GROUP BY 1, 2
+),
+t AS (
+    SELECT WAREHOUSE_NAME, HOUR_TS, SUM(EXEC_MS) AS TOTAL_EXEC_MS
+    FROM q GROUP BY 1, 2
+)
+SELECT
+    q.QUERY_ID,
+    MAX(q.USER_NAME)        AS USER_NAME,
+    MAX(q.WAREHOUSE_NAME)   AS WAREHOUSE_NAME,
+    MAX(q.QUERY_TYPE)       AS QUERY_TYPE,
+    MAX(q.EXECUTION_STATUS) AS EXECUTION_STATUS,
+    MIN(q.START_TIME)       AS START_TIME,
+    MAX(q.ELAPSED_SEC)      AS ELAPSED_SEC,
+    SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) AS ALLOCATED_CREDITS,
+    MAX(q.QUERY_SNIPPET)    AS QUERY_SNIPPET
+FROM q
+JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS
+JOIN m ON m.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND m.HOUR_TS = q.HOUR_TS
+GROUP BY q.QUERY_ID
+HAVING ALLOCATED_CREDITS > 0
+ORDER BY ALLOCATED_CREDITS DESC
+LIMIT {limit}
+"""
+
+
+def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 90) -> str:
+    """storage_waste + read evidence: LAST_READ from ACCESS_HISTORY so a table
+    can be STALE (no DML) *and* NEVER_READ — the safe-to-archive shortlist.
+
+    ACCESS_HISTORY needs Enterprise edition; the page degrades to
+    storage_waste() when this errors. Deliberately NOT in the canary registry:
+    on Standard edition it would be a permanently red row (alert noise), and
+    the panel already labels the degraded state.
+    """
+    read_days = bounded_days(read_days, 90)
+    min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
+    where = and_where(
+        "m.DELETED = FALSE",
+        f"m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES >= {min_bytes}",
+        companies.database_clause(company, "m.TABLE_CATALOG"),
+    )
+    return f"""
+WITH reads AS (
+    SELECT f.value:"objectName"::STRING AS FQN, MAX(a.QUERY_START_TIME) AS LAST_READ
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{read_days}, CURRENT_TIMESTAMP())
+      AND f.value:"objectDomain"::STRING = 'Table'
+    GROUP BY 1
+)
+SELECT
+    m.TABLE_CATALOG AS DATABASE_NAME,
+    m.TABLE_SCHEMA  AS SCHEMA_NAME,
+    m.TABLE_NAME,
+    ROUND(m.ACTIVE_BYTES / POWER(1024, 3), 2)      AS ACTIVE_GB,
+    ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
+    ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2)    AS FAILSAFE_GB,
+    ROUND(m.RETAINED_FOR_CLONE_BYTES / POWER(1024, 3), 2) AS CLONE_RETAINED_GB,
+    d.LAST_DML,
+    r.LAST_READ,
+    IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS DML_STATUS,
+    IFF(r.LAST_READ IS NULL, TRUE, FALSE)      AS NEVER_READ
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
+LEFT JOIN (
+    SELECT TABLE_ID, MAX(END_TIME) AS LAST_DML
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY
+    WHERE START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+    GROUP BY 1
+) d ON d.TABLE_ID = m.ID
+LEFT JOIN reads r
+       ON r.FQN = m.TABLE_CATALOG || '.' || m.TABLE_SCHEMA || '.' || m.TABLE_NAME
+WHERE {where}
+ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + m.RETAINED_FOR_CLONE_BYTES) DESC
+LIMIT 50
+"""

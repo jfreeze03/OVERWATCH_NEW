@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.2.0 — cost intelligence + trust batch (2026-07-07)
+
+Migration V021 (RESOLUTION_KIND on ALERT_EVENTS, APP_QUERY_TELEMETRY + purge
+task) — re-run snowflake/roles.sql after applying.
+
+- Most expensive queries in allocated dollars (warehouse-hour credits split
+  by execution-second share) — Cost → Optimization, canary-registered.
+- Interactive right-size what-if: size step + auto-suspend together, shown as
+  a bounded monthly range with stated assumptions — extends the sizing panel.
+- Storage reclaim: ACCESS_HISTORY read-evidence joins the waste scan; "stale
+  AND never read (90d)" shortlist; degrades honestly on Standard edition.
+- Alert precision per rule (ACTIONED / NOISE / EXPECTED resolution kinds,
+  new picker on resolve) — Alerts → Rules; pre-V021 deployments retry legacy.
+- Mart reconciliation: fact totals vs live ACCOUNT_USAGE with drift bands
+  (±2% noise / ±5% act) — Admin → Canary.
+- Billing truth vs app model: org rate-card dollars for this account vs
+  credits x configured rate, by month — Admin → Org spend.
+- Fleet query telemetry: slow (≥2s) and failed fetches persisted from every
+  viewer session (sampled, capped, fire-and-forget) — Admin → Performance.
+- CI: mypy gate on the pure layers (zero findings) + floor-compat job pinned
+  to the requirements minimums; devcontainer, Makefile, secrets.toml.example.
+- New test files: test_v22_features (25 locks) + test_operator_gating
+  (profile navigation via AppTest + lifecycle SQL state gates).
+
 ## 4.1.0 — feature waves V012–V020 + hardening pass (2026-07-07)
 
 Everything shipped after the 4.0.0 rebuild, plus a 20-item review pass.

@@ -18,7 +18,7 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
-from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql
+from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql, security_sql
 from app.logic import contract_planner, remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
@@ -27,7 +27,7 @@ from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_sum
 from app.logic.forecast import contract_pace
 from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
-from app.logic.sizing import size_recommendations, sizing_summary
+from app.logic.sizing import simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
@@ -401,7 +401,88 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
                         "'Booked from sizing simulator; verifier tests actuals.'", page=_PAGE)
                 notify(ok, msg)
+        with st.expander("Interactive what-if: size step + auto-suspend together"):
+            st.caption(
+                "Replays this window's observed credits under a size step and a new "
+                "auto-suspend, as a bounded range — not a promise. Busy credits land "
+                "between rate-scaled (queries keep their wall time) and cost-neutral "
+                "(perfect runtime scaling); idle scales with the suspend window."
+            )
+            wi_names = sized["WAREHOUSE_NAME"].astype(str).tolist()
+            wi_pick = st.selectbox("Warehouse", wi_names, key="whatif_wh")
+            wrow_wi = sized[sized["WAREHOUSE_NAME"].astype(str) == wi_pick].iloc[0]
+            live_size, live_suspend = "", 600
+            whs_wi = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+                         tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+            if whs_wi.ok and not whs_wi.empty:
+                wdf_wi = whs_wi.df.copy()
+                wdf_wi.columns = [str(c).lower() for c in wdf_wi.columns]
+                match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
+                if not match.empty:
+                    live_size = str(match.iloc[0].get("size", "") or "")
+                    live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600) or 600)
+            c_sz, c_sus = st.columns(2)
+            with c_sz:
+                delta_wi = st.select_slider("Size step", options=[-2, -1, 0, 1, 2], value=0,
+                                            key="whatif_delta")
+            with c_sus:
+                sus_wi = st.select_slider("New auto-suspend (s)",
+                                          options=[30, 60, 120, 300, 600, 900],
+                                          value=60, key="whatif_suspend")
+            idle_wi = safe_float(wrow_wi.get("CREDITS_TOTAL")) * safe_float(wrow_wi.get("IDLE_PCT")) / 100.0
+            sim = simulate_scenario(
+                size=live_size or "MEDIUM",
+                credits_window=safe_float(wrow_wi.get("CREDITS_TOTAL")),
+                idle_credits_window=idle_wi,
+                window_days=days, rate_usd=rate, size_delta=int(delta_wi),
+                autosuspend_now_s=live_suspend, autosuspend_new_s=int(sus_wi),
+            )
+            if not sim.get("ok"):
+                st.info(str(sim.get("reason", "Cannot simulate this warehouse."))
+                        + (" (SHOW WAREHOUSES did not return its size.)" if not live_size else ""))
+            else:
+                kpi_row([
+                    {"label": f"Now ({sim['size_now']}, {live_suspend}s suspend)",
+                     "value": format_usd(sim["monthly_now_usd"]),
+                     "help": "Observed window scaled to 30 days at the configured rate."},
+                    {"label": f"Scenario ({sim['size_new']}, {int(sus_wi)}s)",
+                     "value": f"{format_usd(sim['monthly_low_usd'])} – {format_usd(sim['monthly_high_usd'])}",
+                     "severity": ("ok" if sim["monthly_high_usd"] <= sim["monthly_now_usd"] else
+                                  "warn" if sim["monthly_low_usd"] <= sim["monthly_now_usd"] else "bad"),
+                     "help": "Bounded range — both ends of the stated assumptions."},
+                ])
+                for a_line in sim["assumptions"]:
+                    st.caption(f"· {a_line}")
         result_caption(prof_res)
+
+    st.divider()
+    # ---- Most expensive queries (allocated $) --------------------------------
+    st.markdown("**Most expensive queries (allocated $)**")
+    if st.toggle("Run expensive-query scan", key="cost_expq_toggle",
+                 help="Splits each warehouse-hour's credits across that hour's queries "
+                      "by execution-time share. The heaviest scan after repeat-queries."):
+        expq = run(insights_sql.expensive_queries_usd(days, company, 50), page=_PAGE,
+                   key=f"expq_{company}_{days}", tier="historical",
+                   source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share allocation)")
+        if guard(expq, "No warehouse queries in this window."):
+            edf_q = expq.df.copy()
+            edf_q["ALLOCATED_USD"] = edf_q["ALLOCATED_CREDITS"].map(
+                lambda c: round(safe_float(c) * rate, 2))
+            top_total = float(edf_q["ALLOCATED_USD"].sum())
+            kpi_row([
+                {"label": "Top-50 allocated spend", "value": format_usd(top_total),
+                 "help": "Allocated, not billed: Snowflake bills the warehouse, not the query. "
+                         "Hour-of-start bucketing; idle-only hours excluded (idle advisor owns those)."},
+                {"label": "Costliest single query",
+                 "value": format_usd(float(edf_q["ALLOCATED_USD"].max())) if len(edf_q) else "$0"},
+            ])
+            styled_table(
+                edf_q[["ALLOCATED_USD", "USER_NAME", "WAREHOUSE_NAME", "QUERY_TYPE",
+                       "EXECUTION_STATUS", "ELAPSED_SEC", "START_TIME", "QUERY_SNIPPET", "QUERY_ID"]],
+                column_config={"ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.2f")},
+            )
+            result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
+            st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
@@ -493,27 +574,48 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
     if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                  help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
-        waste = run(insights_sql.storage_waste(company), page=_PAGE,
-                    key=f"waste_{company}", tier="historical",
-                    source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+        waste = run(insights_sql.storage_reclaim(company), page=_PAGE,
+                    key=f"reclaim_{company}", tier="historical",
+                    source="TABLE_STORAGE_METRICS + DML + ACCESS_HISTORY (reads, 90d)")
+        reads_available = waste.ok
+        if not waste.ok:
+            # ACCESS_HISTORY needs Enterprise edition — degrade to the DML-only view.
+            waste = run(insights_sql.storage_waste(company), page=_PAGE,
+                        key=f"waste_{company}", tier="historical",
+                        source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
         if waste.ok and waste.empty:
             st.success("No table above 1 GB of combined active + retention bytes in this scope.")
         elif guard(waste, ""):
-            stale = waste.df[waste.df["STATUS"].astype(str) == "STALE"]
-            kpi_row([
-                {"label": "Tables shown", "value": f"{len(waste.df)}"},
+            sdf = waste.df.copy()
+            if "DML_STATUS" in sdf.columns:
+                sdf = sdf.rename(columns={"DML_STATUS": "STATUS"})
+            stale = sdf[sdf["STATUS"].astype(str) == "STALE"]
+            kpis_w = [
+                {"label": "Tables shown", "value": f"{len(sdf)}"},
                 {"label": "Stale (no DML 90d)", "value": f"{len(stale)}",
                  "delta_color": "inverse" if len(stale) else "off"},
                 {"label": "Stale retention GB",
                  "value": f"{float(stale['TIME_TRAVEL_GB'].sum() + stale['FAILSAFE_GB'].sum()):,.0f}"
                           if not stale.empty else "0"},
-            ])
-            sel_w = selectable_table(waste.df, key="waste_sel", height=300)
+            ]
+            if reads_available and "NEVER_READ" in sdf.columns:
+                never = sdf[sdf["NEVER_READ"].astype(bool) & (sdf["STATUS"].astype(str) == "STALE")]
+                kpis_w.append({
+                    "label": "Stale AND never read (90d)", "value": f"{len(never)}",
+                    "severity": "warn" if len(never) else "ok",
+                    "help": "No DML and no reads in ACCESS_HISTORY for 90 days — the "
+                            "safe-to-archive shortlist. Verify with owners before dropping.",
+                })
+            kpi_row(kpis_w)
+            sel_w = selectable_table(sdf, key="waste_sel", height=300)
             st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
-                       "reduction, transient conversion, or dropping.")
+                       "reduction, transient conversion, or dropping."
+                       + ("" if reads_available else
+                          " Read evidence unavailable (ACCESS_HISTORY needs Enterprise edition) — "
+                          "showing DML-only staleness."))
             result_caption(waste)
             if sel_w is not None and is_operator:
-                wrow = waste.df.iloc[int(sel_w)]
+                wrow = sdf.iloc[int(sel_w)]
                 keep_days = st.number_input("Set retention days", 0, 90, 1, key="waste_days")
                 stmt_w = remediation.retention_fix(str(wrow["DATABASE_NAME"]),
                                                    str(wrow["SCHEMA_NAME"]),

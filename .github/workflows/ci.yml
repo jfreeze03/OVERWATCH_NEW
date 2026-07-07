@@ -25,5 +25,25 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Ruff (style + blind-except ban)
         run: ruff check .
+      - name: Mypy (pure layers: logic + data + config)
+        run: mypy
       - name: Pytest (logic + data layers + page smokes)
+        run: pytest -q
+
+  # Floor compatibility: the exact minimums the requirements promise. Catches
+  # accidental reliance on newer Streamlit/altair/pandas APIs before a deploy
+  # to an environment (like the SiS conda channel) that lags PyPI.
+  floor-compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install FLOOR-pinned runtime + test deps
+        run: |
+          pip install "streamlit==1.45.0" "pandas==2.2.0" "altair==5.4.0" \
+                      "jinja2==3.1.2" "pytest~=8.3"
+      - name: Page smokes + logic tests on the floor pins
         run: pytest -q

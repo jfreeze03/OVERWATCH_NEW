@@ -18,10 +18,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from app.config import DEFAULT_MAX_ROWS
+from app.config import DEFAULT_MAX_ROWS, core_object
 from app.core.errors import format_snowflake_error, record_error
 from app.core.result import QueryResult
 from app.core.session import apply_query_tag, apply_statement_timeout, build_query_tag, get_session
+from app.core.sqlsafe import sql_literal
 
 CACHE_TTLS = {"live": 30, "recent": 300, "historical": 3600, "metadata": 14400}
 STATEMENT_TIMEOUTS = {"live": 30, "recent": 120, "historical": 180, "metadata": 30}
@@ -33,6 +34,47 @@ _TELEMETRY_MAX = 200
 # somewhere in a column name (RATE_LIMIT) or comment — those used to disable
 # the cap silently, leaving the query unbounded.
 _LIMIT_RE = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
+
+# Fleet telemetry (V021): persist only what matters for regressions — slow or
+# failed fetches — so viewers' sessions feed Admin > Performance without an
+# INSERT per query. Fire-and-forget; first failure disables for the session.
+TELEMETRY_PERSIST_MS = 2000.0
+_TELEMETRY_PERSIST_CAP = 60  # rows per session: a broken page can't spam
+
+
+def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
+                             threshold_ms: float = TELEMETRY_PERSIST_MS,
+                             cap: int = _TELEMETRY_PERSIST_CAP) -> bool:
+    """Pure gate: failed always qualifies, slow qualifies, capped per session."""
+    if persisted >= cap:
+        return False
+    return (not ok) or float(elapsed_ms) >= float(threshold_ms)
+
+
+def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
+                       rows: int, ok: bool) -> None:
+    try:
+        if st.session_state.get("_ow_qtel_off"):
+            return
+        done = int(st.session_state.get("_ow_qtel_n", 0))
+        if not should_persist_telemetry(elapsed_ms, ok, done):
+            return
+        st.session_state["_ow_qtel_n"] = done + 1
+        session = get_session()
+        statement = session.sql(
+            f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+            "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) VALUES ("
+            f"{sql_literal(str(page)[:80])}, {sql_literal(str(tier)[:20])}, "
+            f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
+            f"{int(rows)}, {'TRUE' if ok else 'FALSE'})"
+        )
+        try:
+            statement.collect_nowait()
+        except AttributeError:
+            statement.collect()
+    except Exception:
+        # Table missing (pre-V021) or no INSERT grant: stop trying this session.
+        st.session_state["_ow_qtel_off"] = True
 
 
 def _with_row_cap(sql: str, cap: int) -> str:
@@ -121,6 +163,7 @@ def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok:
         del entries[:-_TELEMETRY_MAX]
     except Exception:
         pass
+    _persist_telemetry(page, tier, key, elapsed_ms, rows, ok)
 
 
 def query_telemetry() -> pd.DataFrame:
