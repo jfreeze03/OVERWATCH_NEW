@@ -82,6 +82,47 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(res)
 
 
+def _export_pack(company: str, days: int) -> None:
+    """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
+    st.markdown("**Auditor export pack**")
+    st.caption("Dormant users, MFA gaps, break-glass holders, and window grants as a timestamped zip of CSVs.")
+    if not st.button("Build access-review pack", key="sec_pack_build"):
+        return
+    import io
+    import zipfile
+    from datetime import datetime
+
+    sheets = {
+        "dormant_users": insights_sql.dormant_users(90, company),
+        "mfa_gaps_password_login": security_sql.users_without_mfa(company),
+        "break_glass_holders": security_sql.admin_role_holders(),
+        "role_grants_window": security_sql.recent_role_grants(days),
+        "failed_logins_window": security_sql.failed_logins(days, company),
+    }
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    buffer = io.BytesIO()
+    rows_written = {}
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for name, sql in sheets.items():
+            res = run(sql, page=_PAGE, key=f"pack_{name}", tier="recent",
+                      source=name, max_rows=10_000)
+            frame = res.df if res.ok else __import__("pandas").DataFrame({"ERROR": [res.error]})
+            bundle.writestr(f"{name}.csv", frame.to_csv(index=False))
+            rows_written[name] = len(frame) if res.ok else 0
+        manifest = "\n".join(
+            [f"OVERWATCH access review pack — {company} — generated {stamp}",
+             f"Window: last {days} days (dormant users fixed at 90d)",
+             *(f"{k}.csv: {v} rows" for k, v in rows_written.items())]
+        )
+        bundle.writestr("MANIFEST.txt", manifest)
+    st.download_button(
+        "Download access-review pack (.zip)", data=buffer.getvalue(),
+        file_name=f"overwatch_access_review_{company}_{stamp}.zip", mime="application/zip",
+        key="sec_pack_dl",
+    )
+    st.caption(f"{sum(rows_written.values()):,} rows across {len(sheets)} files.")
+
+
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     st.markdown("**Who changed what (DDL/DCL)**")
     res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
@@ -109,5 +150,7 @@ def render() -> None:
     tab_access, tab_changes = st.tabs(["Access", "Changes"])
     with tab_access:
         _access_tab(f["company"], f["days"])
+        st.divider()
+        _export_pack(f["company"], f["days"])
     with tab_changes:
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])

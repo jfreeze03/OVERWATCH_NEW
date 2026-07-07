@@ -125,6 +125,25 @@ def render() -> None:
         if guard(hist, "No alert events in the last 30 days.", setup_hint=_SETUP_HINT):
             charts.events_by_day(hist.df)
             result_caption(hist)
+        st.markdown("**Response performance (MTTA / MTTR)**")
+        mttr = run(mart_sql.alert_mttr(90), page=_PAGE, key="alert_mttr",
+                   tier="recent", source="ALERT_EVENTS lifecycle timestamps")
+        if mttr.usable():
+            df = mttr.df.copy()
+            latest = df.dropna(subset=["MTTA_MIN"]).tail(4)
+            kpi_row([
+                {"label": "MTTA (4-week avg)",
+                 "value": f"{latest['MTTA_MIN'].mean():,.0f} min" if not latest.empty else "No acks yet",
+                 "help": "Raised -> acknowledged. Improve by working the queue, not the inbox."},
+                {"label": "MTTR (4-week avg)",
+                 "value": (f"{df.dropna(subset=['MTTR_MIN']).tail(4)['MTTR_MIN'].mean():,.0f} min"
+                           if df["MTTR_MIN"].notna().any() else "No resolves yet"),
+                 "help": "Raised -> resolved, including remediation time."},
+                {"label": "Events (90d)", "value": f"{int(df['EVENTS'].sum()):,}"},
+            ])
+            styled_table(df, height=240)
+        else:
+            st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
     with tab_native:
         st.markdown(

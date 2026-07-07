@@ -96,6 +96,24 @@ ORDER BY DAY
 """
 
 
+def alert_mttr(days: int = 90) -> str:
+    """Weekly MTTA/MTTR from alert lifecycle timestamps."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
+    COUNT(*) AS EVENTS,
+    SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
+    SUM(IFF(RESOLVED_AT IS NOT NULL, 1, 0)) AS RESOLVED,
+    ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,
+    ROUND(AVG(DATEDIFF('minute', RAISED_AT, RESOLVED_AT)), 1) AS MTTR_MIN
+FROM {core_object("ALERT_EVENTS")}
+WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 1
+ORDER BY WEEK
+"""
+
+
 def alert_rules() -> str:
     return f"""
 SELECT RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS, OWNER, CHANNEL, UPDATED_AT

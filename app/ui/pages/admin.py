@@ -152,14 +152,52 @@ def _observability_tab() -> None:
         st.rerun()
 
 
+def _canary_tab() -> None:
+    st.caption(
+        "Runs every registered SQL builder against the live account (1-row caps) to catch "
+        "ACCOUNT_USAGE column drift or missing OVERWATCH objects before a user does. "
+        "Failures are logged to APP_ERROR_LOG."
+    )
+    from app.data.canary import CANARIES
+
+    st.markdown(f"**{len(CANARIES)} registered statements**")
+    if st.button("Run canary now", key="adm_canary_run"):
+        results = []
+        progress = st.progress(0.0, text="Running canary...")
+        for idx, (name, builder) in enumerate(CANARIES):
+            res = run(builder(), page=_PAGE, key=f"canary_{name}", tier="live",
+                      source=name, max_rows=1)
+            results.append({"CHECK": name, "STATUS": "PASS" if res.ok else "FAIL",
+                            "ROWS": len(res.df), "ERROR": res.error[:160]})
+            progress.progress((idx + 1) / len(CANARIES), text=f"{name}")
+        progress.empty()
+        import pandas as _pd
+
+        frame = _pd.DataFrame(results)
+        failed = frame[frame["STATUS"] == "FAIL"]
+        if failed.empty:
+            st.success(f"All {len(frame)} canary statements passed.")
+        else:
+            st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
+        st.session_state["_adm_canary_results"] = frame
+    stored = st.session_state.get("_adm_canary_results")
+    if stored is not None:
+        from app.ui.components import styled_table as _styled
+
+        view = stored.copy()
+        view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED"})
+        view = view.rename(columns={"STATUS": "EXECUTION_STATUS"})
+        _styled(view, height=420)
+
+
 @safe_page(_PAGE)
 def render() -> None:
-    page_header("Admin", "Settings, migrations, self-cost, and app observability.")
+    page_header("Admin", "Settings, migrations, self-cost, canary, and app observability.")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
-    tab_settings, tab_migrations, tab_cost, tab_obs = st.tabs(
-        ["Settings", "Migrations & freshness", "App self-cost", "Errors & telemetry"]
+    tab_settings, tab_migrations, tab_cost, tab_canary, tab_obs = st.tabs(
+        ["Settings", "Migrations & freshness", "App self-cost", "Canary", "Errors & telemetry"]
     )
     with tab_settings:
         _settings_tab(is_operator)
@@ -167,5 +205,7 @@ def render() -> None:
         _migrations_tab()
     with tab_cost:
         _self_cost_tab()
+    with tab_canary:
+        _canary_tab()
     with tab_obs:
         _observability_tab()
