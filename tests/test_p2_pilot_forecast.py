@@ -92,3 +92,18 @@ def test_emergency_builders_validated():
         r.cortex_allowlist("bad'; DROP--")
     with _pt.raises(ValueError):
         r.suspend_warehouse("WH; DROP")
+
+
+def test_runbook_complete_and_selfcontained():
+    from pathlib import Path
+
+    rb = (Path(__file__).resolve().parents[1] / "RUNBOOK.md").read_text(encoding="utf-8")
+    for section in ("Ten-minute orientation", "Scheduled automation", "Calculated scores",
+                    "Forecast engines", "AI engines", "Emergency levers", "Alert engine reference",
+                    "Fallback matrix", "Troubleshooting", "Disaster recovery", "Glossary",
+                    "Settings reference", "Object inventory"):
+        assert section in rb, section
+    for rule in ("COST_CONTRACT_BREACH", "PERF_FINGERPRINT_DRIFT", "SEC_CRED_EXPIRY",
+                 "CORTEX_MODELS_ALLOWLIST", "TASK_BACKUP_OPERATOR"):
+        assert rule in rb, rule
+    assert "old app" not in rb.lower()
