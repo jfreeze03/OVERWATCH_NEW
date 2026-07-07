@@ -16,6 +16,7 @@ from app.data import (
     insights_sql,
     mart_sql,
     ops_sql,
+    prefs_sql,
     security_sql,
 )
 
@@ -56,6 +57,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.dynamic_table_health", lambda: ops_sql.dynamic_table_health(1)),
     ("mart.alert_routes", lambda: mart_sql.alert_routes()),
     ("mart.remediation_log", lambda: mart_sql.remediation_log(1)),
+    ("prefs.user_prefs", lambda: prefs_sql.user_prefs()),
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),
     ("insights.repeat_query_fingerprints", lambda: insights_sql.repeat_query_fingerprints(1, "ALFA", 2)),
     ("insights.storage_growth_by_database", lambda: insights_sql.storage_growth_by_database(2, "ALFA")),

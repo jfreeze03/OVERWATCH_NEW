@@ -18,7 +18,7 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     resolve_role_profile,
 )
-from app.core.query import bump_refresh_salt  # noqa: E402
+from app.core.query import bump_refresh_salt, execute_statement, run  # noqa: E402
 from app.core.session import connection_available, current_role  # noqa: E402
 from app.core.state import (  # noqa: E402
     consume_pending_navigation,
@@ -27,6 +27,7 @@ from app.core.state import (  # noqa: E402
     requested_page,
 )
 from app.theme import inject_theme  # noqa: E402
+from app.ui.components import notify  # noqa: E402
 from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security  # noqa: E402
 
 _PAGE_ICONS = {
@@ -83,11 +84,121 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
     return page
 
 
+def _current_view_payload() -> str:
+    import json
+
+    from app.core.state import filters
+    from app.logic.navigate import PAGE_SECTION_KEYS
+
+    page = str(st.session_state.get("_ow_page") or "")
+    section_key = PAGE_SECTION_KEYS.get(page, "")
+    return json.dumps({
+        "page": page,
+        "section": str(st.session_state.get(section_key) or "") if section_key else "",
+        "filters": filters(),
+    })
+
+
+def _parse_view(raw: str) -> dict | None:
+    import json
+
+    try:
+        data = json.loads(raw or "")
+        return data if isinstance(data, dict) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _views_popover() -> None:
+    """Saved filter views + default landing (USER_PREFS, V013)."""
+    from app.core.state import request_navigation
+    from app.data import prefs_sql
+
+    with st.popover("💾 Views"):
+        prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
+                    source="USER_PREFS")
+        views: dict[str, str] = {}
+        has_default = False
+        if prefs.ok and not prefs.empty:
+            for _, row in prefs.df.iterrows():
+                key = str(row["PREF_KEY"])
+                if key.startswith("VIEW:"):
+                    views[key[5:]] = str(row["PREF_VALUE"] or "")
+                elif key == "DEFAULT_VIEW":
+                    has_default = True
+        elif not prefs.ok:
+            st.caption("Saved views need migration V013 (and a roles.sql re-run).")
+
+        if views:
+            pick = st.selectbox("Saved views", sorted(views), key="views_pick")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("Apply", key="views_apply", use_container_width=True):
+                data = _parse_view(views.get(pick, ""))
+                if data:
+                    request_navigation(str(data.get("page") or st.session_state.get("_ow_page") or ""),
+                                       str(data.get("section") or ""),
+                                       dict(data.get("filters") or {}))
+            if c2.button("Set default", key="views_default", use_container_width=True,
+                         help="This view loads automatically when you open the app."):
+                ok, msg = execute_statement(
+                    prefs_sql.upsert_pref_sql("DEFAULT_VIEW", views.get(pick, "")), page="Views")
+                notify(ok, msg if not ok else f"'{pick}' is now your landing view.")
+            if c3.button("Delete", key="views_delete", use_container_width=True):
+                ok, msg = execute_statement(prefs_sql.delete_pref_sql(f"VIEW:{pick}"), page="Views")
+                notify(ok, msg if not ok else f"Deleted '{pick}'.")
+
+        name = st.text_input("Save current filters as", key="views_name", max_chars=40,
+                             placeholder="e.g. Trexis prod 7d")
+        clean = name.strip()
+        if st.button("Save view", key="views_save",
+                     disabled=not (clean and prefs_sql.VIEW_NAME_RE.match(clean))):
+            ok, msg = execute_statement(
+                prefs_sql.upsert_pref_sql(f"VIEW:{clean}", _current_view_payload()), page="Views")
+            notify(ok, msg if not ok else f"Saved '{clean}' (page, section, and filters).")
+        if has_default and st.button("Clear default landing", key="views_clear_default"):
+            ok, msg = execute_statement(prefs_sql.delete_pref_sql("DEFAULT_VIEW"), page="Views")
+            notify(ok, msg if not ok else "Default cleared — app opens on Overview again.")
+
+
+def _apply_default_landing() -> None:
+    """Once per session: land on the user's saved default view. An explicit
+    ?page= deep link always wins over the default."""
+    if st.session_state.get("_ow_default_applied"):
+        return
+    st.session_state["_ow_default_applied"] = True
+    try:
+        if st.query_params.get("page"):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    from app.core.state import consume_pending_navigation
+    from app.data import prefs_sql
+
+    prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
+                source="USER_PREFS")
+    if not prefs.ok or prefs.empty:
+        return
+    raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
+                if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
+    data = _parse_view(raw)
+    if data:
+        st.session_state["_ow_nav_pending"] = {
+            "page": str(data.get("page") or ""),
+            "section": str(data.get("section") or ""),
+            "filters": dict(data.get("filters") or {}),
+        }
+        consume_pending_navigation()  # pre-widget: applies immediately, no rerun
+
+
 def _topbar_scope() -> None:
     """Triage filter strip above every page, like the original OVERWATCH."""
     box = st.container(border=True)
     with box:
-        st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+        head_l, head_r = st.columns([5, 1])
+        with head_l:
+            st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
+        with head_r:
+            _views_popover()
         _topbar_scope_controls()
 
 
@@ -119,6 +230,7 @@ def _topbar_scope_controls() -> None:
 
 def main() -> None:
     consume_pending_navigation()
+    _apply_default_landing()
     inject_theme()
     init_filters()
 

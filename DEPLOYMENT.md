@@ -18,6 +18,7 @@ snowflake/migrations/V009__credentials.sql
 snowflake/migrations/V010__change_impact.sql
 snowflake/migrations/V011__proactive_alerts.sql
 snowflake/migrations/V012__routing_anomaly_remediation.sql
+snowflake/migrations/V013__user_prefs.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
