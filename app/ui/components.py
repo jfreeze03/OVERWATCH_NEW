@@ -329,7 +329,8 @@ def budget_kpi(settings: dict, spend_usd: float) -> dict:
         return {
             "label": "Monthly budget",
             "value": "Not configured",
-            "help": "Set MONTHLY_BUDGET_USD on the Admin page. No default is assumed.",
+            "help": "Set MONTHLY_BUDGET_USD on the Admin page. No default is assumed. "
+                    "MTD spend here is account-wide (metering-daily has no company split).",
         }
     pct = spend_usd / budget * 100 if budget else 0.0
     return {
@@ -337,7 +338,7 @@ def budget_kpi(settings: dict, spend_usd: float) -> dict:
         "value": f"{format_usd(spend_usd)} / {format_usd(budget)}",
         "delta": f"{pct:,.0f}% of budget",
         "delta_color": "inverse" if pct >= 100 else "off",
-        "help": "Budget from SETTINGS; spend from warehouse metering.",
+        "help": "Budget from SETTINGS; spend is account-wide billed credits (metering-daily has no company split).",
     }
 
 

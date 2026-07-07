@@ -33,8 +33,9 @@ def render() -> None:
             if strip.ok and not strip.empty else {})
     mtd_credits = safe_float(vals.get("MTD_CREDITS"))
     kpis = [
-        {"label": "MTD spend", "value": format_usd(mtd_credits * rate),
-         "delta": f"{mtd_credits:,.0f} credits", "delta_color": "off"},
+        {"label": "MTD spend (account)", "value": format_usd(mtd_credits * rate),
+         "delta": f"{mtd_credits:,.0f} credits", "delta_color": "off",
+         "help": "Account-wide billed credits this month. Metering-daily has no company dimension; the company filter scopes warehouse, attribution, and user views."},
         {"label": "Open criticals", "value": vals.get("OPEN_CRITICAL", "0"),
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
         {"label": "Stalest telemetry", "value": f"{vals.get('STALEST_SOURCE_H', '?')}h"},
