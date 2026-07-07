@@ -30,10 +30,14 @@ WITH checks AS (
     SELECT 'TRXS_ prefix classifies as Trexis',
            IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('TRXS_LOADER') = 'Trexis', 'OK', 'FAIL')
     UNION ALL
-    SELECT 'Resource monitor attached to WH_ALFA_OVERWATCH',
-           IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSES
-                        WHERE NAME = 'WH_ALFA_OVERWATCH' AND DELETED IS NULL),
-               'OK', 'CHECK: confirm WH_ALFA_OVERWATCH + OVERWATCH_RM in SHOW WAREHOUSES')
+    -- This account does not expose ACCOUNT_USAGE.WAREHOUSES; use
+    -- WAREHOUSE_EVENTS_HISTORY (any lifecycle event proves the warehouse
+    -- exists). Events can lag ~1-3h after CREATE WAREHOUSE, hence CHECK not
+    -- FAIL — confirm with SHOW WAREHOUSES on a fresh install.
+    SELECT 'WH_ALFA_OVERWATCH exists (event evidence)',
+           IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
+                        WHERE WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'),
+               'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_OVERWATCH + OVERWATCH_RM via SHOW WAREHOUSES')
     UNION ALL
     SELECT 'Alert rules seeded',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')
