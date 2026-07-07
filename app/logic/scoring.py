@@ -120,7 +120,7 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
         )
 
     total_penalty = sum(d.penalty for d in drivers)
-    score = int(round(max(0.0, 100.0 - total_penalty)))
+    score = round(max(0.0, 100.0 - total_penalty))
     state = "Healthy" if score >= 85 else "Watch" if score >= 70 else "Degraded" if score >= 50 else "At risk"
     ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
     return PlatformScore(score=score, state=state, drivers=ranked)

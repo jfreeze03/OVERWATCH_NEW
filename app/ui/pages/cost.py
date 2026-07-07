@@ -25,7 +25,7 @@ from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
 from app.logic.forecast import contract_pace
-from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
+from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
 from app.logic.sizing import size_recommendations, sizing_summary
 from app.ui import charts
@@ -201,7 +201,7 @@ def _contract_tab(settings: dict) -> None:
     if not guard(res, "No metering rows since the contract start."):
         return
     consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))
-    pace = contract_pace(consumed, contract_credits, start, end, date.today())
+    pace = contract_pace(consumed, contract_credits, start, end, account_today())
     if not pace.get("ok"):
         st.info(str(pace.get("reason")))
         return
@@ -833,10 +833,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
 
     st.markdown("**Monthly statement export**")
-    from datetime import date as _date
+    from datetime import timedelta
 
-    this_month = _date.today().strftime("%Y-%m")
-    prev = (_date.today().replace(day=1) - __import__("datetime").timedelta(days=1)).strftime("%Y-%m")
+    today = account_today()
+    this_month = today.strftime("%Y-%m")
+    prev = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     month = st.selectbox("Statement month", [prev, this_month], key="cb_month",
                          help="Prior month is the finance-ready one; current month is partial.")
     if st.button("Build department statements", key="cb_build"):

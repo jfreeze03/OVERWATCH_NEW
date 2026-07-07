@@ -22,3 +22,7 @@ Thumbs.db
 # Local scratch
 *.local.*
 scratch/
+
+# Git-recovery scratch (corrupt/pre-merge/stage backups of .git). A nested
+# git dir must never reach the remote — GitHub rejects/bloats on them.
+.git_*/

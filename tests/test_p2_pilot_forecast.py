@@ -84,7 +84,7 @@ def test_emergency_builders_validated():
         r.scaling_policy_fix("WH_A", "TURBO")
     assert "CREDIT_QUOTA = 30" in r.resource_monitor_quota("OVERWATCH_RM", 30)
     assert "PIPE_EXECUTION_PAUSED = TRUE" in r.pause_pipe("DB1", "RAW", "MY_PIPE")
-    assert "ALTER TASK DB1.RAW.T1 SUSPEND;" == r.suspend_task_fqn("db1", "raw", "t1")
+    assert r.suspend_task_fqn("db1", "raw", "t1") == "ALTER TASK DB1.RAW.T1 SUSPEND;"
     assert "SET DISABLED = TRUE" in r.disable_user("BADUSER")
     assert r.cortex_allowlist("None") == "ALTER ACCOUNT SET CORTEX_MODELS_ALLOWLIST = 'None';"
     assert "llama3.1-8b,mistral-7b" in r.cortex_allowlist("llama3.1-8b,mistral-7b")

@@ -7,7 +7,7 @@ from app.logic import navigate, playbooks
 def test_every_deep_link_rule_has_a_specific_playbook():
     for rule in navigate._RULE_TARGETS:
         text = playbooks.playbook_for(rule)
-        assert "1." in text and rule not in text.upper() or "**Means:**" in text
+        assert ("1." in text and rule not in text.upper()) or "**Means:**" in text
         assert text != playbooks.playbook_for("TOTALLY_UNKNOWN_RULE")
 
 

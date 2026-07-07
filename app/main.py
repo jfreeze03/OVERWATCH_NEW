@@ -20,7 +20,12 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     resolve_role_profile,
 )
-from app.core.query import bump_refresh_salt, execute_statement, run  # noqa: E402
+from app.core.query import (  # noqa: E402
+    bump_refresh_salt,
+    execute_statement,
+    execute_statement_async,
+    run,
+)
 from app.core.session import connection_available, current_role  # noqa: E402
 from app.core.sqlsafe import sql_literal  # noqa: E402
 from app.core.state import (  # noqa: E402
@@ -95,6 +100,9 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         _health_strip()
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
+            # Re-resolve the role too: a grant/role change mid-session should
+            # be picked up here, not only on a full browser reload.
+            st.session_state.pop("_ow_current_role", None)
             mark_refreshed()
             st.rerun()
         st.caption("Account telemetry lags up to ~45 min; metering-daily up to 24h. Labels on every panel.")
@@ -231,7 +239,7 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
         return
     st.session_state["_ow_last_logged"] = page
     ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
-    ok, _msg = execute_statement(
+    ok = execute_statement_async(
         "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
         f"SELECT {sql_literal(str(page)[:80])}, {ms}", page="Sidebar")
     if not ok:
@@ -277,24 +285,35 @@ _STRIP_COLORS = {"OK": "#22c55e", "WARN": "#f59e0b", "BAD": "#ef4444",
 
 
 def _strip_line(state: str, text: str) -> None:
+    import html as _html
+
     color = _STRIP_COLORS.get(state, _STRIP_COLORS["MUTED"])
     st.markdown(
         f'<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">'
         f'<span style="width:9px;height:9px;border-radius:50%;background:{color};'
-        f'display:inline-block;flex:none;" role="img" aria-label="{state}"></span>'
-        f'<span style="font-size:0.8rem;opacity:0.85;">{text}</span></div>',
+        f'display:inline-block;flex:none;" role="img" aria-label="{_html.escape(state)}"></span>'
+        f'<span style="font-size:0.8rem;opacity:0.85;">{_html.escape(text)}</span></div>',
         unsafe_allow_html=True,
     )
+
+
+def _health_values() -> dict[str, tuple[str, str]]:
+    """One fetch+parse of the health-strip mart, shared by the sidebar strip,
+    the persistent status bar, and the top bar (they used to parse it thrice
+    with three different source labels)."""
+    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
+              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+    if not res.ok or res.empty:
+        return {}
+    return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
 
 
 def _health_strip() -> None:
     """Always-visible pulse: criticals, telemetry freshness, MTD credits.
     You should not have to visit Overview to know something is red."""
-    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
-              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
-    if not res.ok or res.empty:
+    vals = _health_values()
+    if not vals:
         return
-    vals = {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
     crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
     if crit_state == "BAD":
         if st.button(f"{crit} open critical(s) →", key="strip_crit", use_container_width=True,
@@ -313,12 +332,10 @@ def _health_strip() -> None:
 def _persistent_status_bar() -> None:
     """The 3-4 numbers that matter, on every page (CoCo high item)."""
     from app.ui.components import status_bar
-    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
-              source="freshness")
-    if not res.ok or res.empty:
+    vals = _health_values()
+    if not vals:
         return
-    vals = {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
-    crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
+    crit, _ = vals.get("OPEN_CRITICAL", ("0", "OK"))
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
@@ -344,13 +361,10 @@ def _topbar_scope() -> None:
         with head_l:
             st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
         with head_m:
-            strip_res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip",
-                            tier="live", source="freshness")
-            if strip_res.ok and not strip_res.empty:
-                vals = {str(r["METRIC"]): str(r["VALUE"]) for _, r in strip_res.df.iterrows()}
-                stale_h = vals.get("STALEST_SOURCE_H", "-1")
-                if stale_h not in ("-1", ""):
-                    st.caption(f"Telemetry ≤ {stale_h}h old")
+            vals = _health_values()
+            stale_h = vals.get("STALEST_SOURCE_H", ("-1", ""))[0] if vals else "-1"
+            if stale_h not in ("-1", ""):
+                st.caption(f"Telemetry ≤ {stale_h}h old")
         with head_r:
             _views_popover()
         _topbar_scope_controls()
@@ -408,6 +422,11 @@ def main() -> None:
             "- **Local dev:** add `[connections.snowflake]` to `.streamlit/secrets.toml` "
             "(see DEPLOYMENT.md).\n"
         )
+        from app.core.session import connection_error
+        reason = connection_error()
+        if reason:
+            with st.expander("Connection error detail"):
+                st.code(reason)
         if st.button("Retry connection"):
             st.cache_resource.clear()
             st.session_state.pop("_ow_current_role", None)

@@ -10,7 +10,7 @@ Contract (the old app broke all four of these):
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -23,7 +23,7 @@ from app.data import cost_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, month_end_projection
-from app.logic.formulas import exec_summary_html, format_usd, month_days, safe_float
+from app.logic.formulas import account_today, exec_summary_html, format_usd, month_days, safe_float
 from app.ui import charts
 from app.ui.components import (
     budget_kpi,
@@ -80,7 +80,7 @@ def _mtd_spend_usd(rate: float) -> tuple[float, str]:
         return 0.0, ""
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
-    month_start = date.today().replace(day=1)
+    month_start = account_today().replace(day=1)
     mtd_credits = frame[frame["DAY"] >= month_start]["CREDITS_BILLED"].map(safe_float).sum()
     return mtd_credits * rate, res.source
 
@@ -134,12 +134,13 @@ def render() -> None:
                     tier="recent", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
         if mlres.usable():
             mdf = mlres.df.copy()
-            month_end = (date.today().replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
+            today = account_today()
+            month_end = (today.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
             mdf["DAY"] = pd.to_datetime(mdf["DAY"]).dt.date
-            mdf = mdf[(mdf["DAY"] > date.today()) & (mdf["DAY"] < month_end)]
+            mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
             if not mdf.empty:
                 mtd_now = float(pd.to_numeric(
-                    daily[pd.to_datetime(daily.iloc[:, 0]).dt.date >= date.today().replace(day=1)]
+                    daily[pd.to_datetime(daily.iloc[:, 0]).dt.date >= today.replace(day=1)]
                     .iloc[:, -1], errors="coerce").fillna(0).sum()) if not daily.empty else 0.0
                 add = float(pd.to_numeric(mdf["FORECAST_CREDITS"], errors="coerce").fillna(0).sum()) * rate
                 lo = float(pd.to_numeric(mdf["LOWER_BOUND"], errors="coerce").fillna(0).sum()) * rate
@@ -156,8 +157,8 @@ def render() -> None:
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
-        forecast = (month_end_projection(daily, date.today(), engine=engine)
-                    if not daily.empty else month_end_projection(pd.DataFrame(), date.today(), engine=engine))
+        forecast = (month_end_projection(daily, account_today(), engine=engine)
+                    if not daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
 
     queries = _board_metric(board, "QUERIES")
     failed_queries = _board_metric(board, "FAILED_QUERIES")
@@ -231,8 +232,7 @@ def render() -> None:
                 "task fills this in; the chart stays empty rather than showing invented numbers."
             )
     else:
-        _, _, _ = month_days(date.today())
-        daily_budget = (budget / month_days(date.today())[0]) if budget > 0 else 0.0
+        daily_budget = (budget / month_days(account_today())[0]) if budget > 0 else 0.0
         band = (forecast.low_usd, forecast.high_usd) if forecast.ok and budget > 0 else None
         charts.spend_trend(daily, daily_budget_usd=daily_budget, band=None if band is None else band)
         activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="spark_activity",

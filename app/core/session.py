@@ -70,6 +70,20 @@ def get_cached_session():
         return None
 
 
+def connection_error() -> str:
+    """Why the connection attempt failed ('' when connected).
+
+    Surfaced on the not-connected screen so local-dev setup problems are
+    diagnosable without digging into logs (wrong account, bad key, no
+    secrets.toml section, network) — the message is shown in an expander.
+    """
+    try:
+        get_session()
+        return ""
+    except Exception as exc:
+        return str(exc)[:500]
+
+
 def connection_available() -> bool:
     try:
         get_session()
@@ -138,11 +152,13 @@ def current_role() -> str:
     cached = st.session_state.get("_ow_current_role")
     if cached is not None:
         return str(cached)
-    role = ""
     try:
         rows = get_session().sql("SELECT CURRENT_ROLE() AS R").collect()
         role = str(rows[0]["R"] or "").upper() if rows else ""
     except Exception:
-        role = ""
+        # Transient failure: return unknown WITHOUT pinning it. Caching ""
+        # here locked the whole session into the ANALYST fallback profile
+        # (and dropped role from the cache scope) after one bad probe.
+        return ""
     st.session_state["_ow_current_role"] = role
     return role

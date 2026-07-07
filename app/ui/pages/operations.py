@@ -418,8 +418,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
                 except (TypeError, ValueError):
                     if preds_raw:
                         preds = [p.strip().strip('"') for p in str(preds_raw).strip("[]").split(",") if p.strip()]
-                for p in preds:
-                    lines.append(f'"{p.upper()}" -> "{fqn}";')
+                lines.extend(f'"{p.upper()}" -> "{fqn}";' for p in preds)
             lines.append("}")
             st.graphviz_chart("\n".join(lines))
             st.caption("Green = healthy, red = failed in the last 24h, gray = suspended. "

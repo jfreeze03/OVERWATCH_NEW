@@ -53,11 +53,16 @@ def _overwatch_theme() -> dict:
     }
 
 
-try:  # altair >=5 keeps both registries during the theme API transition
-    alt.themes.register("overwatch", _overwatch_theme)
-    alt.themes.enable("overwatch")
+try:  # altair >= 5.5: alt.theme is the surviving registry (alt.themes is
+    # deprecated and removed in altair 6) — try it first so runs stop
+    # emitting the AltairDeprecationWarning on every session.
+    alt.theme.register("overwatch", enable=True)(_overwatch_theme)
 except Exception:  # noqa: BLE001 - chart theming must never break a page
-    pass
+    try:  # altair 5.0–5.4: legacy registry
+        alt.themes.register("overwatch", _overwatch_theme)
+        alt.themes.enable("overwatch")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _base(df: pd.DataFrame, height: int | None = None) -> alt.Chart:
@@ -265,8 +270,8 @@ def event_timeline(df: pd.DataFrame) -> None:
     rng = [SEV_COLORS[s] for s in dom]
     color = alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng),
                       legend=alt.Legend(orient="top", title=None))
-    common = dict(x=alt.X("AT:T", title=None), y=alt.Y("EVENT_TYPE:N", title=None),
-                  tooltip=["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"])
+    common = {"x": alt.X("AT:T", title=None), "y": alt.Y("EVENT_TYPE:N", title=None),
+              "tooltip": ["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"]}
     glow = _base(data, height=186).mark_circle(size=240, opacity=0.16).encode(color=color, **common)
     dots = _base(data, height=186).mark_circle(size=90, opacity=0.95,
                 stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, **common)

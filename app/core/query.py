@@ -11,6 +11,7 @@ Design contracts (each closes an old-app finding):
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 
@@ -27,6 +28,22 @@ STATEMENT_TIMEOUTS = {"live": 30, "recent": 120, "historical": 180, "metadata": 
 
 _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
+
+# A real row cap already present in the statement, not just the word "limit"
+# somewhere in a column name (RATE_LIMIT) or comment — those used to disable
+# the cap silently, leaving the query unbounded.
+_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
+
+
+def _with_row_cap(sql: str, cap: int) -> str:
+    """Append ``LIMIT cap+1`` unless the SQL already carries a LIMIT clause.
+
+    Fetching cap+1 lets the caller detect truncation honestly (n+1 rows back
+    means the cap was hit) — see run()/run_batch().
+    """
+    if cap <= 0 or _LIMIT_RE.search(sql):
+        return sql
+    return f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
@@ -122,9 +139,7 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
-    jobs = []
-    for sql in sqls:
-        jobs.append(session.sql(sql).to_pandas(block=False))  # AsyncJob
+    jobs = [session.sql(sql).to_pandas(block=False) for sql in sqls]  # AsyncJobs
     return tuple(_normalize(job.result()) for job in jobs)
 
 
@@ -155,14 +170,12 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     for spec in specs:
         sql = str(spec["sql"])
         cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
-        if cap > 0 and "LIMIT" not in sql.upper():
-            sql = f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
-        capped.append(sql)
+        capped.append(_with_row_cap(sql, cap))
         caps.append(cap)
     try:
         scope = _cache_scope("batch:" + "|".join(str(s["key"]) for s in specs))
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
-    except Exception as exc:  # noqa: BLE001 - by contract: any failure -> serial fallback
+    except Exception as exc:
         _telemetry(page, tier, "batch_fallback", (time.perf_counter() - started) * 1000, 0, ok=False)
         record_error(page, exc, context=f"run_batch fallback ({len(specs)} queries)")
         return None
@@ -197,11 +210,8 @@ def run(
     tier = tier if tier in _FETCHERS else "recent"
     started = time.perf_counter()
     try:
-        capped_sql = sql
         cap = int(max_rows) if max_rows else 0
-        if cap > 0 and "LIMIT" not in sql.upper():
-            capped_sql = f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
-        df = _FETCHERS[tier](capped_sql, _cache_scope(key), page)
+        df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(key), page)
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
@@ -219,6 +229,28 @@ def run(
             df=pd.DataFrame(), ok=False, error=format_snowflake_error(exc),
             source=source, tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
         )
+
+
+def execute_statement_async(sql: str, *, page: str) -> bool:
+    """Fire-and-forget write for telemetry rows (usage analytics).
+
+    Submits server-side async so the render path never waits on an INSERT
+    round trip; falls back to a blocking collect where async is unavailable.
+    Post-submission failures are not observed — acceptable for telemetry
+    only. Operator actions must keep using execute_statement().
+    """
+    try:
+        session = get_session()
+        apply_query_tag(session, build_query_tag(page=page, tier="write"))
+        statement = session.sql(sql)
+        try:
+            statement.collect_nowait()
+        except AttributeError:  # older Snowpark: no async API
+            statement.collect()
+        return True
+    except Exception as exc:
+        record_error(page, exc, context=f"execute_statement_async: {sql[:200]}")
+        return False
 
 
 def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:

@@ -71,8 +71,8 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     return {
         "estimated_usd": round(float(est_usd), 2),
         "verified_usd": round(float(ver_usd), 2),
-        "estimated_count": int(len(est)),
-        "verified_count": int(len(ver)),
+        "estimated_count": len(est),
+        "verified_count": len(ver),
     }
 
 
@@ -112,16 +112,15 @@ def triage_queue(
                 "SOURCE": "FACT_TASK_DAILY",
                 "RAISED_AT": r.get("DAY"),
             })
-    for a in anomalies or []:
-        rows.append({
-            "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",
-            "KIND": "Spend anomaly",
-            "DATABASE": "",
-            "TITLE": f"{a.get('label', 'warehouse')} daily spend z={a.get('z', 0):+.1f}",
-            "DETAIL": f"Daily spend ${a.get('value', 0):,.0f} vs robust baseline.",
-            "SOURCE": "FACT_WAREHOUSE_DAILY",
-            "RAISED_AT": None,
-        })
+    rows.extend({
+        "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",
+        "KIND": "Spend anomaly",
+        "DATABASE": "",
+        "TITLE": f"{a.get('label', 'warehouse')} daily spend z={a.get('z', 0):+.1f}",
+        "DETAIL": f"Daily spend ${a.get('value', 0):,.0f} vs robust baseline.",
+        "SOURCE": "FACT_WAREHOUSE_DAILY",
+        "RAISED_AT": None,
+    } for a in anomalies or [])
     if not rows:
         return pd.DataFrame()
     queue = pd.DataFrame(rows)

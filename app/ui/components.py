@@ -10,7 +10,7 @@ import streamlit as st
 from app.config import ACCOUNT_USAGE_LAG_NOTE, DEFAULT_SETTINGS
 from app.core.result import QueryResult
 from app.data import mart_sql
-from app.logic.formulas import format_usd, safe_float
+from app.logic.formulas import ACCOUNT_TIMEZONE, format_usd, safe_float
 from app.theme import chip
 from app.ui.icons import icon
 from app.ui.status_colors import status_columns_in, status_css
@@ -35,7 +35,8 @@ def _scope_chip_html() -> str:
     return "".join(chips)
 
 
-_ACCOUNT_TZ = "America/Chicago"
+# One spelling of account time across the app (formulas.account_today uses it too).
+_ACCOUNT_TZ = ACCOUNT_TIMEZONE
 
 
 def display_timezone() -> str:
@@ -357,13 +358,11 @@ def _auto_formats(df, skip: set) -> dict:
         if col in skip or not ptypes.is_numeric_dtype(df[col]):
             continue
         c = str(col).upper()
-        if c.endswith("_USD") or c == "USD" or c.endswith("_PRICE"):
+        if c.endswith(("_USD", "_PRICE")) or c == "USD":
             fmts[col] = "${:,.2f}"
         elif "CREDITS" in c:
             fmts[col] = "{:,.2f}"
-        elif c.endswith("_PCT") or c.endswith("_SHARE") or c == "HIT_PCT":
-            fmts[col] = "{:,.1f}"
-        elif c.endswith(("_GB", "_TB", "_MB", "_HOURS", "_S", "_SEC", "_MS")):
+        elif c.endswith(("_PCT", "_SHARE", "_GB", "_TB", "_MB", "_HOURS", "_S", "_SEC", "_MS")) or c == "HIT_PCT":
             fmts[col] = "{:,.1f}"
         elif c.endswith(_COUNT_SUFFIXES):
             fmts[col] = "{:,.0f}"
@@ -388,7 +387,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         data = df
     if height is None and len(df) > 10:
         height = 380
-    kwargs = dict(hide_index=True, use_container_width=True, column_config=column_config)
+    kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height
     selected: int | None = None

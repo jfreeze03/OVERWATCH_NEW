@@ -90,6 +90,6 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
             "No auto-suspend", _cap(no_suspend * w["GOV_PTS_NO_AUTOSUSPEND"], 12),
             f"{no_suspend:.0f} warehouses without auto-suspend."))
 
-    score = int(round(max(0.0, 100.0 - sum(d.penalty for d in drivers))))
+    score = round(max(0.0, 100.0 - sum(d.penalty for d in drivers)))
     state = "Healthy" if score >= 90 else ("Watch" if score >= 75 else "Act")
     return GovernanceDrift(score=score, state=state, drivers=tuple(drivers))

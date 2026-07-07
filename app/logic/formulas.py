@@ -6,13 +6,35 @@ formula, rounding, and edge-case behavior live in exactly one tested place.
 
 from __future__ import annotations
 
+import html as _html
 import math
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 DEFAULT_CREDIT_PRICE_USD = 3.68
 DEFAULT_AI_CREDIT_PRICE_USD = 2.20
 DEFAULT_STORAGE_USD_PER_TB_MONTH = 23.00
+
+# The Snowflake account runs in Central time; SETTINGS and the marts store
+# account time. components.py imports this so the app has ONE spelling of it.
+ACCOUNT_TIMEZONE = "America/Chicago"
+
+
+def account_today() -> date:
+    """Today in the ACCOUNT's timezone, not the server's.
+
+    Under SiS/containers the process clock is UTC while account time is
+    America/Chicago: from 18:00 to midnight Chicago the two disagree about
+    what 'today' is, which shifted MTD boundaries and month-end forecasts
+    for a quarter of every day. Falls back to the local date only where
+    tzdata is unavailable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(tz=ZoneInfo(ACCOUNT_TIMEZONE)).date()
+    except (ImportError, KeyError):  # ZoneInfoNotFoundError is a KeyError
+        return date.today()
 
 
 def safe_float(value: object, default: float = 0.0) -> float:
@@ -113,13 +135,23 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
     """Styled, self-contained HTML executive summary (the .txt looked amateur).
 
     Pure string builder — inputs arrive pre-formatted so this stays testable
-    and the page keeps owning data honesty.
+    and the page keeps owning data honesty. Every interpolated field is
+    HTML-escaped HERE, in the one tested place, so an object name carrying
+    '<', '&', or a stray tag can never break (or script) the exported file.
     """
+    esc = _html.escape
+    company = esc(str(company))
+    generated = esc(str(generated))
+    window_spend = esc(str(window_spend))
+    mtd_line = esc(str(mtd_line))
+    forecast_line = esc(str(forecast_line))
+    alerts_line = esc(str(alerts_line))
+    score_line = esc(str(score_line))
     driver_rows = "".join(
-        f"<tr><td>{d}</td><td style='text-align:right'>-{p}</td><td>{e}</td></tr>"
+        f"<tr><td>{esc(str(d))}</td><td style='text-align:right'>-{esc(str(p))}</td><td>{esc(str(e))}</td></tr>"
         for d, p, e in drivers
     ) or "<tr><td colspan='3'>No deductions — clean window.</td></tr>"
-    action_items = "".join(f"<li>{a}</li>" for a in actions) or "<li>No open actions.</li>"
+    action_items = "".join(f"<li>{esc(str(a))}</li>" for a in actions) or "<li>No open actions.</li>"
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>OVERWATCH executive summary</title>
 <style>

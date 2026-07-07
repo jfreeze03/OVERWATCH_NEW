@@ -12,12 +12,20 @@ from __future__ import annotations
 import re
 
 from app.core.errors import format_snowflake_error, record_error
-from app.core.session import apply_query_tag, build_query_tag, get_session
+from app.core.session import (
+    apply_query_tag,
+    apply_statement_timeout,
+    build_query_tag,
+    get_session,
+)
 from app.core.sqlsafe import sql_literal
 
 _MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,60}$")
 _DEFAULT_MODEL = "llama3.1-8b"
 MAX_PROMPT_CHARS = 6000
+# Cortex COMPLETE runs from an explicit button press with a spinner on screen;
+# if the model hangs, cut it off rather than freezing the page indefinitely.
+CORTEX_TIMEOUT_SECONDS = 90
 
 
 def normalize_model(model: object) -> str:
@@ -37,6 +45,7 @@ def cortex_complete(prompt: str, model: object = _DEFAULT_MODEL, *, page: str = 
     try:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="cortex"))
+        apply_statement_timeout(session, CORTEX_TIMEOUT_SECONDS)
         rows = session.sql(sql).collect()
         answer = str(rows[0]["ANSWER"]) if rows else ""
         return (True, answer) if answer.strip() else (False, "Cortex returned an empty answer.")

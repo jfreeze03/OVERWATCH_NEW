@@ -117,7 +117,7 @@ def warehouse_clause(company: str, column: str = "WAREHOUSE_NAME") -> str:
 def database_clause(company: str, column: str = "DATABASE_NAME") -> str:
     company = str(company or DEFAULT_COMPANY)
     if company == "Trexis":
-        clause = like_any(column, TREXIS_DATABASES + ("TRXS_%",))
+        clause = like_any(column, (*TREXIS_DATABASES, "TRXS_%"))
     elif company == "ALFA":
         include = like_any(column, ALFA_DATABASE_PATTERNS)
         exclude = not_in_list(column, TREXIS_DATABASES)

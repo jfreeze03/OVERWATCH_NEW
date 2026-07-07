@@ -4,9 +4,16 @@ target-version = "py311"
 [lint]
 # BLE001 (blind except) is the enforcement of panel-review finding H2:
 # the old app accumulated 461 silent `except Exception` sites.
-select = ["E", "F", "W", "I", "B", "BLE", "UP"]
+# C4/SIM/PIE/PERF/RUF added 2026-07: comprehension, simplification, and
+# perf-antipattern rules; the codebase was brought to zero findings first.
+select = ["E", "F", "W", "I", "B", "BLE", "UP", "C4", "SIM", "PIE", "PERF", "RUF"]
 ignore = [
-  "E501", # long lines allowed in SQL builder strings; line-length still guides
+  "E501",   # long lines allowed in SQL builder strings; line-length still guides
+  "RUF001", # typographic unicode (em dashes etc.) in strings is house style
+  "RUF002", # same, in docstrings
+  "RUF003", # same, in comments
+  "SIM105", # explicit try/except-pass reads clearer than contextlib.suppress here
+  "SIM108", # ternaries are not always clearer than if/else blocks
 ]
 
 [lint.per-file-ignores]

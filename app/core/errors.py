@@ -36,6 +36,8 @@ def format_snowflake_error(error: object, max_len: int = 300) -> str:
         return f"This Snowflake edition/account does not expose {ident} here."
     if "timeout" in lower:
         return "The query hit its statement timeout. Narrow the window or filters and retry."
+    if "session no longer exists" in lower or ("token" in lower and "expired" in lower):
+        return "The Snowflake session expired. Press 'Refresh data' in the sidebar (or reload the app) to reconnect."
     text = re.sub(r"^\(\d+\):?\s*[0-9a-f-]*:?\s*", "", text)
     text = re.sub(r"\s+", " ", text)
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
@@ -64,13 +66,19 @@ def record_error(page: str, error: BaseException, context: str = "") -> None:
 
         session = get_cached_session()
         if session is not None:
-            session.sql(
+            statement = session.sql(
                 f"INSERT INTO {core_object('APP_ERROR_LOG')} "
                 "(PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME) VALUES ("
                 f"{sql_literal(entry['page'])}, {sql_literal(entry['type'])}, "
                 f"{sql_literal(entry['message'])}, {sql_literal(entry['context'])}, "
                 "CURRENT_ROLE())"
-            ).collect()
+            )
+            try:
+                # Async: an error path should not pay a SECOND blocking round
+                # trip just to log the first failure.
+                statement.collect_nowait()
+            except AttributeError:  # older Snowpark: no async API
+                statement.collect()
     except Exception:
         pass  # the ring buffer above still has it; Admin page shows it
 
@@ -97,7 +105,13 @@ def safe_page(page_name: str):
             except Exception as exc:
                 record_error(page_name, exc, context="page render")
                 st.error(f"{page_name} could not finish rendering.")
-                st.caption(format_snowflake_error(exc))
+                friendly = format_snowflake_error(exc)
+                if isinstance(exc, (KeyError, ValueError, TypeError, AttributeError, IndexError)):
+                    # Python-side bug, not a Snowflake failure: say so, with the
+                    # type, so triage starts in the right place (e.g. the
+                    # KeyError('RULE_ID') class of crash).
+                    friendly = f"{type(exc).__name__}: {friendly} — app bug, not a Snowflake failure."
+                st.caption(friendly)
                 st.info(
                     "The failure was logged (Admin > Error log). Other pages are unaffected; "
                     "refresh after fixing the cause."
