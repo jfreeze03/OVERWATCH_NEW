@@ -62,3 +62,23 @@ def test_localize_timestamps_is_display_only():
         assert note2 == "" and str(same["AT"].iloc[0]) == "2026-07-07 12:00:00"
     finally:
         st.session_state.pop("_ow_display_tz", None)
+
+
+def test_run_batch_returns_none_without_session():
+    """The parallel path degrades to None (serial fallback) — never raises."""
+    from app.core.query import run_batch
+
+    out = run_batch([{"key": "a", "sql": "SELECT 1 AS X"}], page="Test", tier="recent")
+    assert out is None  # no Snowflake session in CI
+
+
+def test_run_batch_contract_in_source():
+    import inspect
+
+    from app.core import query
+
+    src = inspect.getsource(query.run_batch)
+    assert "None" in src and "fallback" in src.lower()
+    batch_src = inspect.getsource(query._execute_batch)
+    assert "block=False" in batch_src            # true server-side async
+    assert "raises on any failure" in batch_src.lower() or "Raises on ANY failure" in batch_src

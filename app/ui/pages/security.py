@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.state import filters
 from app.data import insights_sql, security_sql
 from app.logic.governance import governance_drift
@@ -30,7 +30,23 @@ _PAGE = "Security"
 
 
 def _access_tab(company: str, days: int) -> None:
-    mfa = run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
+    # Parallel path: the tab's five independent queries submit server-side
+    # async in one shot (~1 round trip instead of five serial). Any failure
+    # falls back to the serial per-query calls below, unchanged.
+    batch = run_batch([
+        {"key": "mfa", "sql": security_sql.users_without_mfa(company),
+         "source": "ACCOUNT_USAGE.USERS + LOGIN_HISTORY"},
+        {"key": "creds", "sql": security_sql.expiring_credentials(30, company),
+         "source": "ACCOUNT_USAGE.CREDENTIALS"},
+        {"key": "logins", "sql": security_sql.failed_logins(days, company),
+         "source": "ACCOUNT_USAGE.LOGIN_HISTORY"},
+        {"key": "admins", "sql": security_sql.admin_role_holders(),
+         "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
+        {"key": "grants", "sql": security_sql.recent_role_grants(days),
+         "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
+    ], page=_PAGE, tier="historical") or {}
+
+    mfa = batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
               tier="historical", source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY")
     st.markdown("**MFA gaps with password-login evidence (30d)**")
     if mfa.ok and mfa.empty:
@@ -47,7 +63,7 @@ def _access_tab(company: str, days: int) -> None:
     left, right = st.columns(2)
     with left:
         st.markdown("**Failed logins**")
-        res = run(security_sql.failed_logins(days, company), page=_PAGE,
+        res = batch.get("logins") or run(security_sql.failed_logins(days, company), page=_PAGE,
                   key=f"faillog_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
         if res.ok and res.empty:
@@ -56,14 +72,14 @@ def _access_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
     with right:
         st.markdown("**Break-glass role holders**")
-        res = run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
+        res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No ACCOUNTADMIN/SECURITYADMIN/ORGADMIN grants visible to this role."):
             st.dataframe(res.df, hide_index=True, use_container_width=True)
             st.caption("This list should be short and every name should be expected.")
 
     st.markdown("**Expiring credentials (30-day horizon)**")
-    creds = run(security_sql.expiring_credentials(30, company), page=_PAGE,
+    creds = batch.get("creds") or run(security_sql.expiring_credentials(30, company), page=_PAGE,
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
     if creds.ok and creds.empty:
@@ -107,7 +123,7 @@ def _access_tab(company: str, days: int) -> None:
             result_caption(res)
 
     st.markdown("**Role grants in the window (account-wide)**")
-    res = run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
+    res = batch.get("grants") or run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
               tier="recent", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
     if res.ok and res.empty:
         st.success("No new role grants in this window.")

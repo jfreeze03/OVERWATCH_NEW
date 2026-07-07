@@ -115,6 +115,71 @@ def bump_refresh_salt() -> None:
     st.session_state["_ow_refresh_salt"] = datetime.now().isoformat()
 
 
+def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
+    """Submit every statement server-side async (collect on one connection is
+    serialized; async jobs are not), then gather. Raises on ANY failure so a
+    failed batch is never cached — callers fall back to serial run()."""
+    session = get_session()
+    apply_query_tag(session, build_query_tag(page=page, tier=tier))
+    apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
+    jobs = []
+    for sql in sqls:
+        jobs.append(session.sql(sql).to_pandas(block=False))  # AsyncJob
+    return tuple(_normalize(job.result()) for job in jobs)
+
+
+@st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
+def _fetch_recent_batch(sqls: tuple, scope: str, page: str = "") -> tuple:
+    return _execute_batch(sqls, "recent", page)
+
+
+@st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False)
+def _fetch_historical_batch(sqls: tuple, scope: str, page: str = "") -> tuple:
+    return _execute_batch(sqls, "historical", page)
+
+
+_BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch}
+
+
+def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
+    """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
+
+    Returns {key: QueryResult} on success or None when the parallel path is
+    unavailable or ANY query fails — callers then use serial run() per query,
+    which restores per-query caching, error isolation, and original tiers.
+    The batch caches as one unit (same-section queries share filter inputs).
+    """
+    tier = tier if tier in _BATCH_FETCHERS else "recent"
+    started = time.perf_counter()
+    capped, caps = [], []
+    for spec in specs:
+        sql = str(spec["sql"])
+        cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
+        if cap > 0 and "LIMIT" not in sql.upper():
+            sql = f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
+        capped.append(sql)
+        caps.append(cap)
+    try:
+        scope = _cache_scope("batch:" + "|".join(str(s["key"]) for s in specs))
+        frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
+    except Exception as exc:  # noqa: BLE001 - by contract: any failure -> serial fallback
+        _telemetry(page, tier, "batch_fallback", (time.perf_counter() - started) * 1000, 0, ok=False)
+        record_error(page, exc, context=f"run_batch fallback ({len(specs)} queries)")
+        return None
+    elapsed = (time.perf_counter() - started) * 1000
+    out: dict = {}
+    for spec, df, cap in zip(specs, frames, caps, strict=True):
+        truncated = bool(cap) and len(df) > cap
+        if truncated:
+            df = df.head(cap)
+        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1), len(df), ok=True)
+        out[str(spec["key"])] = QueryResult(
+            df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
+            tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
+        )
+    return out
+
+
 def run(
     sql: str,
     *,
