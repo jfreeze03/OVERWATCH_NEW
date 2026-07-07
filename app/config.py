@@ -56,6 +56,7 @@ DEFAULT_SETTINGS = {
     "FACT_RETENTION_DAYS_HOURLY": "400",
     "FACT_RETENTION_DAYS_DAILY": "800",
     "ERROR_LOG_RETENTION_DAYS": "180",
+    "APP_USAGE_RETENTION_DAYS": "365",
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",

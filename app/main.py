@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import streamlit as st
 
 st.set_page_config(
@@ -89,7 +91,6 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
                         format_func=lambda p: f"{_PAGE_ICONS.get(p, '•')} {p}")
         st.session_state["_ow_page"] = page
         remember_page(page)
-        _log_usage(page)
 
         st.divider()
         _global_jump(pages)
@@ -223,15 +224,17 @@ def _apply_default_landing() -> None:
         consume_pending_navigation()  # pre-widget: applies immediately, no rerun
 
 
-def _log_usage(page: str) -> None:
-    """Usage analytics (APP_USAGE): one row per page change per session.
-    Best-effort — first failure disables logging for the session."""
+def _log_usage(page: str, render_ms: int | None = None) -> None:
+    """Usage analytics (APP_USAGE): one row per page change per session,
+    carrying the FIRST paint's render time — the p95 the OPS_SLOW_RENDER
+    sentinel checks. Best-effort; first failure disables for the session."""
     if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_last_logged") == page:
         return
     st.session_state["_ow_last_logged"] = page
+    ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
     ok, _msg = execute_statement(
-        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE) "
-        f"SELECT {sql_literal(str(page)[:80])}", page="Sidebar")
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
+        f"SELECT {sql_literal(str(page)[:80])}, {ms}", page="Sidebar")
     if not ok:
         st.session_state["_ow_usage_off"] = True
 
@@ -384,7 +387,9 @@ def main() -> None:
             st.rerun()
         return
 
+    _render_started = time.perf_counter()
     _RENDERERS[page]()
+    _log_usage(page, int((time.perf_counter() - _render_started) * 1000))
 
 
 if __name__ == "__main__":

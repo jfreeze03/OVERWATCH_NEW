@@ -97,6 +97,11 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | V014 lifecycle | `COST_CONTRACT_BREACH` (scan v5), `PERF_FINGERPRINT_DRIFT` (sweep v2, Mondays), `SP_PURGE_FACTS` + monthly task |
 | V015 pilot+backups | `MART_SPEND_ROLLUP_DT` (Dynamic Table pilot), `SP_BACKUP_OPERATOR_TABLES` + Sunday task |
 
+App files deploy to the dedicated stage
+**`DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE`** (V017; `snowflake.yml` pins it —
+see DEPLOYMENT.md for the manual PUT path). V017 also inaugurates the
+version guard: each migration refuses to run if its predecessor is missing.
+
 Then `roles.sql` (idempotent; re-run after every upgrade) and
 `validate.sql` (every row should read OK). Deploy the app with
 `snow streamlit deploy --replace`.
@@ -360,6 +365,10 @@ or after Refresh.
 
 ## 12. Alert engine reference
 
+**Isolation (v7):** every rule block runs in its own INSERT with its own
+exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG
+and raises OPS_SCAN_DEGRADED while every other rule keeps firing.
+
 **Lifecycle:** rule (ALERT_CONFIG row) → scan inserts an event with a
 DEDUPE_KEY (no duplicate while the key exists) → OPEN → ACK → RESOLVED,
 each transition writing ALERT_AUDIT. Severity escalations are computed at
@@ -393,6 +402,8 @@ blocks others).
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
 | PIPE_VOLUME_DROP | PIPELINE | table rows-added down threshold % vs prior-7d avg (≥1k rows/day) | daily per table |
 | OPS_CANARY_FAIL | PLATFORM | weekly source sentinel found failing dependency views | daily key |
+| OPS_SCAN_DEGRADED | PLATFORM | one or more rule blocks failed in the last scan (v7 isolation) | daily key |
+| OPS_SLOW_RENDER | PLATFORM | page p95 first paint > threshold s (7d, from APP_USAGE.RENDER_MS) | weekly per page |
 
 Playbooks for each rule render in the alert drawer (`logic/playbooks.py`).
 

@@ -79,6 +79,7 @@ snowflake/migrations/V013__user_prefs.sql -- saved views + default landing per u
 snowflake/migrations/V014__lifecycle_hardening.sql -- contract-breach projection, fingerprint drift, fact retention
 snowflake/migrations/V015__pilot_and_backups.sql -- Dynamic Table pilot + weekly operator-table backups
 snowflake/migrations/V016__closing_loops.sql -- pre-explained anomalies, dept budgets, org creep, volume drop, canary sentinel
+snowflake/migrations/V017__hardening_v7.sql -- scan v7 per-rule isolation, deploy stage, render SLA, version guard
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

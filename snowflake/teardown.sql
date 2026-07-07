@@ -11,7 +11,8 @@
 --     action queue, savings ledger, audit/error logs. Only uncomment for a
 --     true factory reset, and take the clone backups first.
 --   * Section C (commented out): shared infrastructure — warehouse, resource
---     monitor, Streamlit app object, roles.
+--     monitor, Streamlit app object, OVERWATCH_STAGE (app files live on
+--     it — dropping it breaks the deployed app), roles.
 --
 -- RESTORE
 --   1. Re-run snowflake/migrations/V001..V005 in order, then roles.sql.
@@ -124,6 +125,7 @@ DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.APP_USAGE;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS;
+-- DROP STAGE IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE;  -- app files live here
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE;

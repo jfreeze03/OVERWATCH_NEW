@@ -39,6 +39,28 @@ _FAMILY_DEFAULTS = (
     ("SEC", ("Security", "Access")),
 )
 
+# Rules with a mechanical fix: the drawer offers "Generate fix ->" landing on
+# the remediation/optimization surface with the event's filters applied.
+FIX_TARGETS = {
+    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Optimization"),
+    "COST_WH_DAILY_CREDITS": ("Cost & Contract", "Optimization"),
+    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Optimization"),
+    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization"),
+    "PERF_QUEUED_MINUTES": ("Cost & Contract", "Optimization"),
+    "PERF_SPILL_GB": ("Cost & Contract", "Optimization"),
+}
+
+
+def fix_target(rule_id: str, text: str = "") -> dict | None:
+    """Like investigation_target but lands where the FIX is generated."""
+    rid = str(rule_id or "").strip().upper()
+    if rid not in FIX_TARGETS:
+        return None
+    page, section = FIX_TARGETS[rid]
+    return {"page": page, "section": section,
+            "filters": investigation_target(rid, text)["filters"]}
+
+
 _WH_RE = re.compile(r"\bWH_[A-Z0-9_]+\b")
 _DB_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})\.([A-Z][A-Z0-9_]{2,})\.")
 

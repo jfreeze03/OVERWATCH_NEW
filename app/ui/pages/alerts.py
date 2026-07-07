@@ -20,7 +20,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql
 from app.logic.ai_prompts import anomaly_explain_prompt
-from app.logic.navigate import investigation_target
+from app.logic.navigate import fix_target, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.components import (
@@ -107,6 +107,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                         styled_table(same, height=220)
             target = investigation_target(str(row["RULE_ID"]),
                                           f"{row['TITLE']} {detail_text}")
+            fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
             rid_u = str(row["RULE_ID"]).upper()
             if rid_u.startswith(("COST_", "PERF_")):
                 with st.expander("Explain with AI (grounded in the day's evidence)"):
@@ -151,7 +152,12 @@ def _open_events_section(events, is_operator: bool) -> None:
                             )
                             ok_u, msg_u = execute_statement(appended, page=_PAGE)
                             notify(ok_u, msg_u if not ok_u else "Hypothesis stored on the event.")
-            c_inv, c_act, c_note = st.columns([1.2, 1.0, 2.0])
+            c_inv, c_fix, c_act, c_note = st.columns([1.1, 1.1, 0.9, 1.9])
+            with c_fix:
+                if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
+                                     help="Lands on the remediation surface with this event's "
+                                          "scope applied — generate, confirm, execute, audited."):
+                    request_navigation(fix["page"], fix["section"], fix["filters"])
             with c_inv:
                 if st.button("Investigate →", key="alert_investigate", use_container_width=True,
                              help=f"Jump to {target['page']} · {target['section'] or 'top'} "

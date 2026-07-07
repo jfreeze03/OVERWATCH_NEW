@@ -22,6 +22,7 @@ snowflake/migrations/V013__user_prefs.sql
 snowflake/migrations/V014__lifecycle_hardening.sql
 snowflake/migrations/V015__pilot_and_backups.sql
 snowflake/migrations/V016__closing_loops.sql
+snowflake/migrations/V017__hardening_v7.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -69,10 +70,33 @@ Task graphs run on the dedicated **`WH_ALFA_OVERWATCH`** warehouse (XSMALL,
 
 ## 3. Streamlit-in-Snowflake (primary target)
 
+App files live on the dedicated stage
+**`DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE`** (created by V017, directory
+table enabled). `snowflake.yml` pins the deploy there.
+
 ```bash
-# Snowflake CLI
+# Snowflake CLI (uploads artifacts to OVERWATCH_STAGE, creates/updates the app)
 snow streamlit deploy --replace
 ```
+
+Manual path (no CLI — SnowSQL or any PUT-capable client):
+
+```sql
+PUT file://streamlit_app.py @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+PUT file://environment.yml  @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+PUT file://app/*            @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/ OVERWRITE=TRUE AUTO_COMPRESS=FALSE;
+-- (repeat per subfolder: app/core, app/data, app/logic, app/ui, app/ui/pages)
+
+CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
+    ROOT_LOCATION = '@DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app'
+    MAIN_FILE = 'streamlit_app.py'
+    QUERY_WAREHOUSE = WH_ALFA_OVERWATCH
+    TITLE = 'OVERWATCH — Snowflake Command Center';
+```
+
+`LIST @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE` (or the directory table)
+shows what is deployed; re-running PUT with OVERWRITE replaces files and the
+app picks them up on next open.
 
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
 WH_ALFA_OVERWATCH`); `environment.yml` pins the Snowflake-channel packages. Each
