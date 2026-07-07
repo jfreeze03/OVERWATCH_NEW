@@ -39,6 +39,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    selectable_table,
     styled_table,
 )
 
@@ -350,10 +351,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             {"label": "Potential saving (down)", "value": format_usd(summary["potential_saving_usd"]),
              "help": "Half-rate scenario on down candidates only. Model, not a promise."},
         ])
-        styled_table(
+        sel_sz = selectable_table(
             sized[["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                     "MONTHLY_USD_NOW", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
                     "QUEUED_MIN_PER_DAY", "SPILL_REMOTE_GB", "P95_ELAPSED_SEC", "IDLE_PCT"]],
+            key="sizing_sel",
             column_config={
                 "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
                 "SCENARIO_DOWN_USD": st.column_config.NumberColumn("x0.5 $/mo", format="$%.0f"),
@@ -361,6 +363,35 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
             },
         )
+        if sel_sz is not None and is_operator:
+            srow = sized.iloc[int(sel_sz)]
+            target_size = st.selectbox("Resize to", ["XSMALL", "SMALL", "MEDIUM", "LARGE"],
+                                       key="sizing_to")
+            stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
+            st.code(stmt_sz, language="sql")
+            est_sz = 0.0
+            if str(srow.get("RECOMMENDATION", "")).upper().startswith("DOWN"):
+                est_sz = round(max(0.0, safe_float(srow.get("MONTHLY_USD_NOW"))
+                                    - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
+                st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until the verifier proves it).")
+            confirm_sz = st.text_input("Type the warehouse name to confirm resize", key="sizing_confirm")
+            if st.button("Execute resize + log", key="sizing_exec",
+                         disabled=(confirm_sz != str(srow["WAREHOUSE_NAME"]))):
+                ok, msg = execute_statement(stmt_sz, page=_PAGE)
+                execute_statement(
+                    f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                    f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
+                    f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
+                    page=_PAGE)
+                if ok and est_sz > 0:
+                    execute_statement(
+                        f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                        "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                        f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
+                        f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
+                        "'Booked from sizing simulator; verifier tests actuals.'", page=_PAGE)
+                notify(ok, msg)
         result_caption(prof_res)
 
     st.divider()
@@ -468,10 +499,39 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "value": f"{float(stale['TIME_TRAVEL_GB'].sum() + stale['FAILSAFE_GB'].sum()):,.0f}"
                           if not stale.empty else "0"},
             ])
-            styled_table(waste.df, height=300)
+            sel_w = selectable_table(waste.df, key="waste_sel", height=300)
             st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
                        "reduction, transient conversion, or dropping.")
             result_caption(waste)
+            if sel_w is not None and is_operator:
+                wrow = waste.df.iloc[int(sel_w)]
+                keep_days = st.number_input("Set retention days", 0, 90, 1, key="waste_days")
+                stmt_w = remediation.retention_fix(str(wrow["DATABASE_NAME"]),
+                                                   str(wrow["SCHEMA_NAME"]),
+                                                   str(wrow["TABLE_NAME"]), int(keep_days))
+                st.code(stmt_w, language="sql")
+                est_w = round((safe_float(wrow.get("TIME_TRAVEL_GB")) + safe_float(wrow.get("FAILSAFE_GB")))
+                              / 1024 * safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0), 2)
+                st.caption(f"Frees ~{safe_float(wrow.get('TIME_TRAVEL_GB')) + safe_float(wrow.get('FAILSAFE_GB')):,.0f} GB "
+                           f"of retention (~${est_w:,.2f}/mo, ESTIMATED). Failsafe drains over 7 days.")
+                confirm_w = st.text_input("Type the table name to confirm", key="waste_confirm")
+                if st.button("Execute retention change + log", key="waste_exec",
+                             disabled=(confirm_w != str(wrow["TABLE_NAME"]))):
+                    ok, msg = execute_statement(stmt_w, page=_PAGE)
+                    execute_statement(
+                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                        f"SELECT 'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}, "
+                        f"{sql_literal(stmt_w)}, {sql_number(est_w)}, "
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}", page=_PAGE)
+                    if ok and est_w > 0:
+                        execute_statement(
+                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                            f"SELECT {sql_literal('Retention ' + str(wrow['TABLE_NAME']) + ' -> ' + str(int(keep_days)) + 'd')}, "
+                            f"'ESTIMATED', {sql_number(est_w)}, {sql_literal(stmt_w)}, "
+                            "'Booked from storage-waste scan.'", page=_PAGE)
+                    notify(ok, msg)
 
     st.divider()
     st.markdown("**Guarded remediation (generate → review → execute)**")
@@ -724,6 +784,43 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                     "ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.0f"),
                 },
             )
+
+    st.markdown("**Department budgets & pace**")
+    panel_help(
+        "Budgets live in DEPT_BUDGETS; the hourly scan raises COST_DEPT_BUDGET_PACE when a "
+        "department runs ahead of pace (threshold on the Alerts page). Spend is the "
+        "department's warehouses — exact billing, same as the table above."
+    )
+    bud = run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
+              source="DEPT_BUDGETS")
+    if bud.ok and not bud.empty:
+        st.dataframe(bud.df, hide_index=True, use_container_width=True)
+    elif bud.ok:
+        st.info("No department budgets set yet — add one below and the pace alert goes live.")
+    if is_operator:
+        dmap = run(chargeback_sql.department_map(), page=_PAGE, key="cb_dmap_bud", tier="recent",
+                   source="DEPARTMENT_MAP")
+        dept_opts = (sorted(dmap.df["DEPARTMENT"].astype(str).unique())
+                     if dmap.usable() and "DEPARTMENT" in dmap.df.columns else [])
+        c_d, c_b = st.columns(2)
+        pick_dept = c_d.selectbox("Department", dept_opts, key="bud_dept") if dept_opts else             c_d.text_input("Department", key="bud_dept_txt")
+        bud_usd = c_b.number_input("Monthly budget USD (0 removes)", 0, 10_000_000, 0,
+                                   step=500, key="bud_usd")
+        if st.button("Save budget", key="bud_save", disabled=not pick_dept):
+            if bud_usd > 0:
+                stmt_b = (
+                    f"MERGE INTO {core_object('DEPT_BUDGETS')} t "
+                    f"USING (SELECT {sql_literal(str(pick_dept))} AS D) s ON t.DEPARTMENT = s.D "
+                    f"WHEN MATCHED THEN UPDATE SET MONTHLY_BUDGET_USD = {sql_number(float(bud_usd))}, "
+                    "UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER() "
+                    f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD) "
+                    f"VALUES (s.D, {sql_number(float(bud_usd))});"
+                )
+            else:
+                stmt_b = (f"DELETE FROM {core_object('DEPT_BUDGETS')} "
+                          f"WHERE DEPARTMENT = {sql_literal(str(pick_dept))};")
+            ok, msg = execute_statement(stmt_b, page=_PAGE)
+            notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
 
     st.markdown("**Monthly statement export**")
     from datetime import date as _date

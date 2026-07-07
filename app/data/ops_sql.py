@@ -268,3 +268,17 @@ def show_streams_sql() -> str:
     """SHOW-based (no ACCOUNT_USAGE view exists for stream staleness).
     LIMIT keeps the runtime row-cap rewrite from touching a SHOW command."""
     return "SHOW STREAMS IN ACCOUNT LIMIT 200"
+
+
+def running_queries() -> str:
+    """Live in-flight statements (INFORMATION_SCHEMA function — real time,
+    unlike the lagged ACCOUNT_USAGE view). Feeds the kill-switch panel."""
+    return """
+SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, EXECUTION_STATUS,
+       START_TIME, ROUND(TOTAL_ELAPSED_TIME / 1000, 1) AS ELAPSED_S,
+       LEFT(QUERY_TEXT, 90) AS QUERY_PREVIEW
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(RESULT_LIMIT => 1000))
+WHERE EXECUTION_STATUS IN ('RUNNING', 'QUEUED', 'RESUMING_WAREHOUSE', 'BLOCKED')
+ORDER BY START_TIME
+LIMIT 100
+"""

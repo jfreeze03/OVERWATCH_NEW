@@ -20,8 +20,9 @@ from app.core.errors import error_buffer, safe_page
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import cost_sql, mart_sql, security_sql
+from app.data import chargeback_sql, cost_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation
+from app.logic.formulas import safe_float
 from app.ui.components import (
     guard,
     kpi_row,
@@ -31,6 +32,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    selectable_table,
 )
 
 _PAGE = "Admin"
@@ -352,6 +354,96 @@ def _emergency_tab(is_operator: bool) -> None:
             st.caption("Copy the SQL; executing from the app requires OVERWATCH_OPERATOR.")
 
 
+def _emergency_extras(is_operator: bool) -> None:
+    st.divider()
+    st.markdown("**Running queries (kill-switch)**")
+    panel_help(
+        "Live in-flight statements via INFORMATION_SCHEMA (real time). Cancel needs "
+        "ownership of the query or OPERATE on its warehouse; the attempt is audited "
+        "either way. Suspending a warehouse does NOT kill these — this does."
+    )
+    if st.toggle("Show running queries now", key="emg_rq_toggle"):
+        rq = run(ops_sql.running_queries(), page=_PAGE, key="emg_running", tier="live",
+                 source="INFORMATION_SCHEMA.QUERY_HISTORY (live)", max_rows=0)
+        if rq.ok and rq.empty:
+            st.success("Nothing running or queued right now.")
+        elif guard(rq, ""):
+            sel_rq = selectable_table(rq.df, key="emg_rq_sel", height=240)
+            if sel_rq is not None and is_operator:
+                qrow = rq.df.iloc[int(sel_rq)]
+                qid = str(qrow["QUERY_ID"])
+                st.code(f"SELECT SYSTEM$CANCEL_QUERY('{qid}');", language="sql")
+                confirm_q = st.text_input("Type CANCEL to confirm", key="emg_rq_confirm")
+                if st.button("Cancel query + audit", key="emg_rq_exec",
+                             disabled=(confirm_q != "CANCEL")):
+                    ok, msg = execute_statement(
+                        f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})", page=_PAGE)
+                    execute_statement(
+                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                        f"SELECT 'CANCEL_QUERY', {sql_literal(qid)}, "
+                        f"{sql_literal('SYSTEM$CANCEL_QUERY ' + qid)}, "
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
+                        page=_PAGE)
+                    notify(ok, msg)
+
+    st.divider()
+    st.markdown("**Budget ↔ resource-monitor sync**")
+    panel_help(
+        "Budgets are intent (SETTINGS / DEPT_BUDGETS); resource monitors are enforcement. "
+        "This suggests a quota per monitor from the budgets of the departments whose "
+        "warehouses it guards (quota = budget ÷ credit rate), and applies it in one click."
+    )
+    mons = run("SHOW RESOURCE MONITORS LIMIT 100", page=_PAGE, key="emg_show_rm",
+               tier="metadata", source="SHOW RESOURCE MONITORS", max_rows=0)
+    whs2 = run(security_sql.show_warehouses_sql(), page=_PAGE, key="emg_show_wh2",
+               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    bud2 = run(mart_sql.dept_budgets(), page=_PAGE, key="emg_budgets", tier="live",
+               source="DEPT_BUDGETS")
+    dmap2 = run(chargeback_sql.department_map(), page=_PAGE, key="emg_dmap", tier="recent",
+                source="DEPARTMENT_MAP")
+    settings2 = load_settings(_PAGE)
+    rate2 = safe_float(settings2.get("CREDIT_PRICE_USD"), 3.68)
+    if mons.ok and not mons.empty and whs2.ok and not whs2.empty and bud2.ok and not bud2.empty             and dmap2.usable():
+        wdf2 = whs2.df.copy()
+        wdf2.columns = [str(c).lower() for c in wdf2.columns]
+        mdf2 = dmap2.df.copy()
+        j = wdf2.merge(mdf2[mdf2["MAP_TYPE"].astype(str) == "WAREHOUSE"],
+                       left_on=wdf2["name"].astype(str).str.upper(),
+                       right_on=mdf2["NAME"].astype(str).str.upper(), how="inner")
+        j = j.merge(bud2.df, on="DEPARTMENT", how="inner")
+        if not j.empty and "resource_monitor" in j.columns:
+            j = j[~j["resource_monitor"].astype(str).str.lower().isin(("null", "", "none"))]
+            sug = (j.groupby("resource_monitor")["MONTHLY_BUDGET_USD"].sum()
+                    .reset_index())
+            sug["SUGGESTED_QUOTA_CREDITS"] = (sug["MONTHLY_BUDGET_USD"] / rate2).round(0)
+            st.dataframe(sug.rename(columns={"resource_monitor": "MONITOR"}),
+                         hide_index=True, use_container_width=True)
+            if is_operator and not sug.empty:
+                pick_m = st.selectbox("Monitor", sorted(sug["resource_monitor"].astype(str)),
+                                      key="emg_sync_mon")
+                row_m = sug[sug["resource_monitor"].astype(str) == pick_m].iloc[0]
+                quota = int(row_m["SUGGESTED_QUOTA_CREDITS"])
+                stmt_m = remediation.resource_monitor_quota(pick_m, quota)
+                st.code(stmt_m, language="sql")
+                confirm_m = st.text_input("Type SYNC to confirm", key="emg_sync_confirm")
+                if st.button("Apply quota + audit", key="emg_sync_exec",
+                             disabled=(confirm_m != "SYNC")):
+                    ok, msg = execute_statement(stmt_m, page=_PAGE)
+                    execute_statement(
+                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                        f"SELECT 'MONITOR_SYNC', {sql_literal(pick_m)}, {sql_literal(stmt_m)}, "
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
+                        page=_PAGE)
+                    notify(ok, msg)
+        else:
+            st.info("No monitored warehouses map to budgeted departments yet.")
+    else:
+        st.caption("Needs: resource monitors, department budgets (Cost > Chargeback), and the "
+                   "warehouse map. Suggestions appear once all three exist.")
+
+
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
@@ -436,6 +528,7 @@ def render() -> None:
         _settings_tab(is_operator)
     elif section == "Emergency":
         _emergency_tab(is_operator)
+        _emergency_extras(is_operator)
     elif section == "Migrations & freshness":
         _migrations_tab()
     elif section == "App self-cost":

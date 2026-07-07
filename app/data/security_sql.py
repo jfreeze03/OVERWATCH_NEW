@@ -246,3 +246,64 @@ def show_warehouses_sql() -> str:
     """SHOW-based (WAREHOUSES view absent on this account); LIMIT keeps the
     row-cap rewrite away. resource_monitor/auto_suspend parsed client-side."""
     return "SHOW WAREHOUSES LIMIT 500"
+
+
+def role_privilege_matrix() -> str:
+    """Auditor sheet: privileges per role aggregated by object type."""
+    return """
+SELECT GRANTEE_NAME AS ROLE_NAME, GRANTED_ON AS OBJECT_TYPE, PRIVILEGE,
+       COUNT(*) AS GRANT_COUNT
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+WHERE DELETED_ON IS NULL
+GROUP BY 1, 2, 3
+ORDER BY ROLE_NAME, GRANT_COUNT DESC
+LIMIT 5000
+"""
+
+
+def unused_roles(days: int = 90) -> str:
+    """Roles never assumed in the window but still granted — revoke fodder."""
+    days = bounded_days(days)
+    return f"""
+SELECT r.NAME AS ROLE_NAME, r.CREATED_ON,
+       (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
+         WHERE g.ROLE = r.NAME AND g.DELETED_ON IS NULL) AS GRANTED_TO_USERS
+FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+LEFT JOIN (
+    SELECT DISTINCT ROLE_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+) q ON q.ROLE_NAME = r.NAME
+WHERE r.DELETED_ON IS NULL AND q.ROLE_NAME IS NULL
+  AND r.NAME NOT IN ('PUBLIC')
+ORDER BY GRANTED_TO_USERS DESC, r.CREATED_ON
+LIMIT 500
+"""
+
+
+def direct_role_grants() -> str:
+    """Current role->user grants (auditors reconcile this against HR)."""
+    return """
+SELECT GRANTEE_NAME AS USER_NAME, COUNT(*) AS ROLE_COUNT,
+       LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ROLES
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+WHERE DELETED_ON IS NULL
+GROUP BY 1
+ORDER BY ROLE_COUNT DESC
+LIMIT 1000
+"""
+
+
+def grant_changes(days: int = 90) -> str:
+    """Grants added or revoked in the window — the quarterly diff sheet."""
+    days = bounded_days(days, 180)
+    return f"""
+SELECT ROLE, GRANTEE_NAME AS USER_NAME,
+       IFF(DELETED_ON IS NOT NULL, 'REVOKED', 'GRANTED') AS CHANGE,
+       COALESCE(DELETED_ON, CREATED_ON) AS CHANGED_AT, GRANTED_BY
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+WHERE CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+   OR DELETED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+ORDER BY CHANGED_AT DESC
+LIMIT 2000
+"""

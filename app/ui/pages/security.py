@@ -215,6 +215,10 @@ def _export_pack(company: str, days: int) -> None:
         "role_grants_window": security_sql.recent_role_grants(days),
         "failed_logins_window": security_sql.failed_logins(days, company),
         "expiring_credentials_30d": security_sql.expiring_credentials(30, company),
+        "role_privilege_matrix": security_sql.role_privilege_matrix(),
+        "unused_roles_90d": security_sql.unused_roles(90),
+        "direct_role_grants": security_sql.direct_role_grants(),
+        "grant_changes_90d": security_sql.grant_changes(90),
     }
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     buffer = io.BytesIO()
@@ -263,6 +267,16 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     elif guard(reasons, ""):
         st.dataframe(reasons.df, hide_index=True, use_container_width=True)
         result_caption(reasons)
+
+    st.markdown("**Unused roles (90d) — revoke fodder**")
+    ur = run(security_sql.unused_roles(90), page=_PAGE, key="unused_roles", tier="historical",
+             source="ROLES x QUERY_HISTORY (90d)")
+    if ur.ok and ur.empty:
+        st.success("Every active role was assumed in the last 90 days.")
+    elif guard(ur, ""):
+        st.dataframe(ur.df, hide_index=True, use_container_width=True)
+        st.caption("Also in the quarterly export pack with the full grant matrix and 90d diff.")
+        result_caption(ur)
 
     st.markdown("**Break-glass role activity (should hug zero)**")
     bga = run(security_sql.admin_role_activity(days), page=_PAGE,

@@ -51,3 +51,19 @@ def test_grants_for_new_tables():
     roles = (_ROOT / "snowflake" / "roles.sql").read_text(encoding="utf-8")
     assert "APP_USAGE TO ROLE OVERWATCH_MONITOR" in roles
     assert "DEPT_BUDGETS TO ROLE OVERWATCH_OPERATOR" in roles
+
+
+def test_round3_builders():
+    from app.data import mart_sql as _m
+    from app.data import ops_sql as _o
+    from app.data import security_sql as _s
+
+    rq = _o.running_queries()
+    assert "INFORMATION_SCHEMA.QUERY_HISTORY" in rq and "'RUNNING'" in rq and "LIMIT" in rq
+    assert "DEPT_BUDGETS" in _m.dept_budgets()
+    assert "GRANTS_TO_ROLES" in _s.role_privilege_matrix()
+    ur = _s.unused_roles(9999)
+    assert "DATEADD('day', -90" in ur and "q.ROLE_NAME IS NULL" in ur
+    assert "LISTAGG(ROLE" in _s.direct_role_grants()
+    gc = _s.grant_changes(90)
+    assert "'REVOKED'" in gc and "'GRANTED'" in gc
