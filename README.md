@@ -73,6 +73,7 @@ snowflake/migrations/V007__automation.sql -- budget alerts, AI digest, savings v
 snowflake/migrations/V008__chargeback.sql -- department chargeback map (warehouse + role)
 snowflake/migrations/V009__credentials.sql -- 30-day credential expiry alerting
 snowflake/migrations/V010__change_impact.sql -- object-change regression tracking + alerts
+snowflake/migrations/V011__proactive_alerts.sql -- preventive rules: cloud-svc ratio, storage surge, serverless creep, copy failures, break-glass
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```
