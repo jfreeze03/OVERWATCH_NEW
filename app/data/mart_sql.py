@@ -391,3 +391,24 @@ WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY PAGE
 ORDER BY VISITS DESC
 """
+
+
+def contract_exhaustion() -> str:
+    """The CIO number: projected contract exhaustion at trailing 30d burn.
+    Same math as the COST_CONTRACT_BREACH scan block; n/a until configured."""
+    return f"""
+SELECT TOTAL, CONSUMED, DAILY_BURN,
+       CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+       DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+               CURRENT_DATE()) AS EXHAUST_DATE
+FROM (
+    SELECT
+        (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+         FROM {core_object("SETTINGS")}) AS TOTAL,
+        (SELECT COALESCE(SUM(CREDITS_BILLED), 0) FROM {mart_object("FACT_METERING_DAILY")}
+         WHERE DAY >= COALESCE((SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                                FROM {core_object("SETTINGS")}), CURRENT_DATE())) AS CONSUMED,
+        (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30 FROM {mart_object("FACT_METERING_DAILY")}
+         WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+)
+"""

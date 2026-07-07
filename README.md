@@ -104,6 +104,8 @@ Streamlit-free by design and fully unit-testable.
 
 ## Docs
 
+- `FEATURES.md` — one-line map of every capability and where it lives (start here).
+
 - `REBUILD_PLAN.md` — the plan this rebuild follows, with status.
 - `ARCHITECTURE.md` — layers, data flow, caching, mart-first boundaries, security model.
 - `DEPLOYMENT.md` — SiS deploy, migrations, roles, validation.

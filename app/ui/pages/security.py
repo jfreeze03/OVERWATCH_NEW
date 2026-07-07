@@ -13,13 +13,14 @@ from app.core.errors import safe_page
 from app.core.query import run, run_batch
 from app.core.state import filters
 from app.data import insights_sql, security_sql
-from app.logic.governance import governance_drift
+from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
+    load_settings,
     page_header,
     panel_help,
     result_caption,
@@ -183,7 +184,8 @@ def _governance_score_panel() -> None:
             inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())
     if not inputs:
         return
-    drift = governance_drift(inputs)
+    settings = load_settings(_PAGE)
+    drift = governance_drift(inputs, weights=resolve_gov_weights(settings))
     kpi_row([
         {"label": "Governance drift score", "value": f"{drift.score}/100",
          "delta": drift.state, "delta_color": "off",

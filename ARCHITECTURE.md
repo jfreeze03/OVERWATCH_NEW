@@ -119,3 +119,38 @@ Three rules keep the app fast without spending more on the warehouse:
 Admin > Performance shows the app's own statement families on
 `WH_ALFA_OVERWATCH` (p95, GB scanned, by parameterized hash) and the
 session's approximate cache-hit rate — measure before optimizing further.
+
+## Deliberate choices reviewers will ask about
+
+**Custom alert scan instead of native `CREATE ALERT`.** One task + one proc
+evaluates ~26 rules with shared dedupe keys, severity escalation, channel
+routing, and rules-as-rows editable in-app. Native ALERTs would mean ~26
+separately billed serverless schedules with no shared dedupe or routing and
+config drift outside the app. `native_alert_templates.sql` ships for teams
+that prefer them. This is a costed choice, not unfamiliarity.
+
+**Scheduled MERGE facts instead of Dynamic Tables everywhere.** Loaders run
+on the dedicated XSMALL under a resource monitor — predictable cost, explicit
+procs covered by teardown/canary/tests. DTs bill serverless refresh outside
+that budget and cannot source SNOWFLAKE share views (no change tracking), so
+they cannot replace the ACCOUNT_USAGE loaders anyway. `MART_SPEND_ROLLUP_DT`
+(V015) is the measured pilot; more marts migrate if its cost proves out.
+
+**String-built SQL with a safety layer instead of Snowpark binds.** Builders
+are pure functions emitting complete statements the app also SHOWS to users
+(review-before-execute is a feature). Every user input passes
+`clean_filter_text` (whitelist), `contains_filter` (LIKE-metachar escaping,
+`ESCAPE '~'`), `sql_literal`/`safe_identifier`, with injection tests in CI.
+Snowpark binds would not remove the display/require-review path.
+
+**Hardcoded company scope instead of row access policies.** Two companies,
+one account, scope is convenience not a security boundary (roles are). RAPs
+cannot bind SNOWFLAKE.ACCOUNT_USAGE itself, and policy sprawl across derived
+objects buys admin burden without closing the actual exposure. Revisit on a
+compliance driver.
+
+**Webhook delivery IS wired.** `TASK_ALERT_NOTIFY` chains AFTER the scan and
+sends via `SYSTEM$SEND_SNOWFLAKE_NOTIFICATION` through per-family
+`ALERT_ROUTES`. The one manual step Snowflake requires — an ACCOUNTADMIN
+creating the NOTIFICATION INTEGRATION holding the webhook secret — is
+documented in `webhook_delivery.sql` and the RUNBOOK.

@@ -59,6 +59,13 @@ DEFAULT_SETTINGS = {
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",
+    # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
+    "GOV_PTS_MFA_GAP": "5",
+    "GOV_PTS_EXPIRED_CRED": "8",
+    "GOV_PTS_EXPIRING_CRED": "2",
+    "GOV_PTS_BREAKGLASS_GRANT": "6",
+    "GOV_PTS_NO_MONITOR": "4",
+    "GOV_PTS_NO_AUTOSUSPEND": "3",
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",
     "CONTRACT_END_DATE": "",

@@ -32,13 +32,29 @@ def render() -> None:
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}
             if strip.ok and not strip.empty else {})
     mtd_credits = safe_float(vals.get("MTD_CREDITS"))
-    kpi_row([
+    kpis = [
         {"label": "MTD spend", "value": format_usd(mtd_credits * rate),
          "delta": f"{mtd_credits:,.0f} credits", "delta_color": "off"},
         {"label": "Open criticals", "value": vals.get("OPEN_CRITICAL", "0"),
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
         {"label": "Stalest telemetry", "value": f"{vals.get('STALEST_SOURCE_H', '?')}h"},
-    ])
+    ]
+    exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
+              tier="recent", source="SETTINGS + FACT_METERING_DAILY")
+    if exh.usable():
+        erow = exh.df.iloc[0]
+        total = safe_float(erow.get("TOTAL"))
+        days_left = safe_float(erow.get("DAYS_LEFT"), -1.0)
+        if total > 0 and days_left >= 0:
+            kpis.append({
+                "label": "Contract exhausts",
+                "value": str(erow.get("EXHAUST_DATE")),
+                "delta": f"{days_left:,.0f} days at current burn",
+                "delta_color": "inverse" if days_left <= 90 else "off",
+                "help": "Straight-line on trailing 30d billed credits vs contracted credits. "
+                        "Scenarios: Cost > Contract > Renewal planner.",
+            })
+    kpi_row(kpis)
 
     spend = run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
                 source="FACT_METERING_DAILY")

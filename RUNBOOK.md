@@ -414,6 +414,12 @@ SP_BACKUP_OPERATOR_TABLES (+ opt-in SP_REFRESH_ML_FORECAST).
 **Functions:** COMPANY_FOR_USER. **Tasks:** §4. **Misc:** SCHEMA_VERSION,
 APP_ERROR_LOG, FORECAST_ML_DAILY (opt-in).
 
+**Usage analytics disclosure:** `APP_USAGE` records user name, page, first
+render time (ms), and timestamp — one row per page change per session, used
+only for the Admin adoption/performance panels. Retention is
+`APP_USAGE_RETENTION_DAYS` (default 365, floor 90) via the monthly purge.
+Tell your users it exists; auditors will ask.
+
 **Canary** (Admin → Canary): runs every registered SQL builder with 1-row
 caps against the live account and reports PASS/FAIL — the drift detector
 for ACCOUNT_USAGE column changes or missing objects. Run it after every

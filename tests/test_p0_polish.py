@@ -57,3 +57,31 @@ def test_exec_summary_html_self_contained():
     assert html.startswith("<!DOCTYPE html>")
     assert "ALFA" in html and "88/100" in html and "Critical alerts" in html
     assert "<script" not in html.lower()  # static document, nothing executable
+
+
+def test_gov_weights_configurable():
+    from app.logic.governance import governance_drift, resolve_gov_weights
+
+    base = governance_drift({"mfa_gap_users": 2})
+    heavier = governance_drift({"mfa_gap_users": 2}, weights={"GOV_PTS_MFA_GAP": 10})
+    assert heavier.score < base.score
+    w = resolve_gov_weights({"GOV_PTS_MFA_GAP": "bad"})
+    assert w["GOV_PTS_MFA_GAP"] == 5.0
+    assert resolve_gov_weights({"GOV_PTS_EXPIRED_CRED": "4"})["GOV_PTS_EXPIRED_CRED"] == 4.0
+
+
+def test_contract_exhaustion_reader_and_features_index():
+    from pathlib import Path
+
+    from app.data import mart_sql
+
+    sql = mart_sql.contract_exhaustion()
+    assert "CONTRACT_CREDITS" in sql and "DAYS_LEFT" in sql and "EXHAUST_DATE" in sql
+    root = Path(__file__).resolve().parents[1]
+    feats = (root / "FEATURES.md").read_text(encoding="utf-8")
+    for marker in ("pre-explained", "Incident correlation timeline", "kill-switch",
+                   "Renewal planner", "ML.FORECAST"):
+        assert marker in feats, marker
+    arch = (root / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "Deliberate choices reviewers will ask about" in arch
+    assert "Webhook delivery IS wired" in arch
