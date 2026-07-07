@@ -101,3 +101,26 @@ def release_compare_prompt(verdicts: list[dict], task_deltas: pd.DataFrame,
         "Judge whether the release degraded the platform, name the specific tasks/metrics driving "
         "that judgment, and recommend what to roll back, re-test, or monitor next.",
     )
+
+
+def anomaly_explain_prompt(title: str, detail: str, evidence: pd.DataFrame,
+                           ddl_count: int, window_label: str) -> str:
+    """Grounded 'why did this spike?' prompt: evidence rows only, no
+    invitation to speculate beyond them."""
+    rows = _serialize_rows(
+        evidence,
+        ["SAMPLE_TEXT", "WAREHOUSE_NAME", "RUNS_DAY", "ELAPSED_H_DAY", "ELAPSED_H_PRIOR_AVG"],
+        max_rows=15,
+    )
+    return (
+        "You are a Snowflake cost analyst. An automated sweep raised this anomaly:\n"
+        f"ALERT: {str(title)[:300]}\n"
+        f"DETAIL: {str(detail)[:500]}\n\n"
+        f"Query families by elapsed hours on the anomalous day vs their prior-7-day average ({window_label}):\n"
+        f"{rows}\n\n"
+        f"DDL statements in the same window: {int(ddl_count) if ddl_count is not None and int(ddl_count) >= 0 else 'not counted'}\n\n"
+        "Using ONLY the evidence above: (1) name the 1-2 most likely drivers with the "
+        "numbers that support them, (2) state what to check next, (3) say 'evidence is "
+        "inconclusive' if the rows do not explain the spike. Max 150 words. Never invent "
+        "queries, warehouses, or numbers not shown."
+    )

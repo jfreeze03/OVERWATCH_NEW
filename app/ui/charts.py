@@ -135,6 +135,98 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     st.altair_chart(chart, use_container_width=True)
 
 
+def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
+    """Row of tiny trend lines: [(label, df, day_col, value_col), ...].
+    A KPI without direction is half a number — these add the direction."""
+    cols = st.columns(len(items))
+    for slot, (label, df, day_col, value_col) in zip(cols, items, strict=True):
+        with slot:
+            st.caption(label)
+            if df is None or getattr(df, "empty", True):
+                st.caption("–")
+                continue
+            data = df[[day_col, value_col]].copy()
+            data.columns = ["Day", "Value"]
+            chart = (
+                _base(data)
+                .mark_area(line={"size": 2}, opacity=0.25)
+                .encode(
+                    x=alt.X("Day:T", axis=None),
+                    y=alt.Y("Value:Q", axis=None),
+                    tooltip=["Day:T", "Value:Q"],
+                )
+                .properties(height=56)
+            )
+            st.altair_chart(chart, use_container_width=True)
+
+
+def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
+                 title: str = "") -> None:
+    """Hour-of-day x entity heatmap (e.g. credits burned by warehouse-hour)."""
+    data = df[[row_col, hour_col, value_col]].copy()
+    data.columns = ["Row", "Hour", "Value"]
+    chart = (
+        _base(data)
+        .mark_rect()
+        .encode(
+            x=alt.X("Hour:O", title="hour of day"),
+            y=alt.Y("Row:N", title=None),
+            color=alt.Color("Value:Q", title=title or value_col,
+                            scale=alt.Scale(scheme="orangered")),
+            tooltip=["Row:N", "Hour:O", "Value:Q"],
+        )
+        .properties(height=max(120, 24 * data["Row"].nunique()))
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10) -> None:
+    """Attribution waterfall: top-N contributors + Other, cumulative build-up."""
+    data = df[[label_col, usd_col]].copy()
+    data.columns = ["Label", "USD"]
+    data = data.groupby("Label", as_index=False)["USD"].sum().sort_values("USD", ascending=False)
+    top = data.head(top_n)
+    rest = float(data["USD"][top_n:].sum())
+    if rest > 0:
+        top = pd.concat([top, pd.DataFrame([{"Label": "Other", "USD": rest}])], ignore_index=True)
+    top["End"] = top["USD"].cumsum()
+    top["Start"] = top["End"] - top["USD"]
+    top["Order"] = range(len(top))
+    chart = (
+        _base(top)
+        .mark_bar()
+        .encode(
+            x=alt.X("Label:N", sort=alt.SortField("Order"), title=None),
+            y=alt.Y("Start:Q", title="Cumulative spend (USD)", axis=alt.Axis(format="$,.0f")),
+            y2="End:Q",
+            tooltip=["Label:N", alt.Tooltip("USD:Q", format="$,.0f"),
+                     alt.Tooltip("End:Q", format="$,.0f", title="Cumulative")],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def event_timeline(df: pd.DataFrame) -> None:
+    """Incident correlation strip: every event type on one time axis."""
+    data = df.copy()
+    color_domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    color_range = ["#ef4444", "#f97316", "#f59e0b", "#94a3b8", "#38bdf8"]
+    chart = (
+        _base(data)
+        .mark_circle(size=70, opacity=0.85)
+        .encode(
+            x=alt.X("AT:T", title=None),
+            y=alt.Y("EVENT_TYPE:N", title=None),
+            color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=color_domain, range=color_range),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"],
+        )
+        .properties(height=170)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
                       title: str = "", rule_date: object = None) -> None:
     """Single daily metric as a line; optional vertical rule (e.g. change date)."""

@@ -12,12 +12,14 @@ from pathlib import Path
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
+from app.core.ai import cortex_complete
 from app.core.errors import safe_page
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
-from app.data import mart_sql
+from app.data import insights_sql, mart_sql
+from app.logic.ai_prompts import anomaly_explain_prompt
 from app.logic.navigate import investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
@@ -25,6 +27,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
+    load_settings,
     notify,
     page_header,
     panel_help,
@@ -118,6 +121,50 @@ def render() -> None:
                             styled_table(same, height=220)
                 target = investigation_target(str(row["RULE_ID"]),
                                               f"{row['TITLE']} {detail_text}")
+                rid_u = str(row["RULE_ID"]).upper()
+                if rid_u.startswith(("COST_", "PERF_")):
+                    with st.expander("Explain with AI (grounded in the day's evidence)"):
+                        import re as _re
+
+                        m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
+                        event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
+                        st.caption(f"Evidence window: {event_day} vs its prior 7 days"
+                                   + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
+                                      if target["filters"].get("warehouse_contains") else ""))
+                        if st.button("Assemble evidence + explain", key=f"ai_expl_go_{event_id[:8]}"):
+                            ev = run(insights_sql.anomaly_evidence(
+                                         event_day, target["filters"].get("warehouse_contains", "")),
+                                     page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
+                                     source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
+                            if not ev.ok or ev.empty:
+                                st.info("No query-family evidence found for that day/scope — "
+                                        "the driver may be serverless or storage rather than queries.")
+                            else:
+                                settings = load_settings(_PAGE)
+                                prompt = anomaly_explain_prompt(
+                                    str(row["TITLE"]), detail_text, ev.df, None,
+                                    f"{event_day} vs prior 7d")
+                                ok_ai, answer = cortex_complete(
+                                    prompt, str(settings.get("CORTEX_MODEL") or "llama3.1-8b"),
+                                    page=_PAGE)
+                                if ok_ai:
+                                    st.session_state[f"_ai_expl_{event_id}"] = answer
+                                else:
+                                    st.error(answer)
+                        hypothesis = st.session_state.get(f"_ai_expl_{event_id}", "")
+                        if hypothesis:
+                            st.markdown(hypothesis)
+                            st.caption("Grounded on the evidence rows above only; verify before acting.")
+                            if is_operator and st.button("Append hypothesis to the event",
+                                                         key=f"ai_expl_save_{event_id[:8]}"):
+                                appended = (
+                                    f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
+                                    f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
+                                    f"{sql_literal(hypothesis[:800])}, 2000) "
+                                    f"WHERE EVENT_ID = {sql_literal(event_id)};"
+                                )
+                                ok_u, msg_u = execute_statement(appended, page=_PAGE)
+                                notify(ok_u, msg_u if not ok_u else "Hypothesis stored on the event.")
                 c_inv, c_act, c_note = st.columns([1.2, 1.0, 2.0])
                 with c_inv:
                     if st.button("Investigate →", key="alert_investigate", use_container_width=True,

@@ -310,3 +310,51 @@ SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'I
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
 """
+
+
+def incident_timeline(days: int, company: str = "ALL") -> str:
+    """One time axis for everything that happened: alerts, task failures,
+    DDL. The 'what else happened around then?' view Datadog does well."""
+    days = bounded_days(days, 14)
+    comp = str(company or "ALL")
+    alert_filter = "" if comp.upper() == "ALL" else \
+        f"AND COMPANY IN ({sql_literal(comp)}, 'ALL')"
+    entity_filter = "" if comp.upper() == "ALL" else (
+        "AND IFF(DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA') = " + sql_literal(comp))
+    return f"""
+SELECT 'ALERT' AS EVENT_TYPE, RAISED_AT::TIMESTAMP_NTZ AS AT, SEVERITY,
+       LEFT(TITLE, 120) AS LABEL
+FROM {core_object("ALERT_EVENTS")}
+WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()) {alert_filter}
+UNION ALL
+SELECT 'TASK FAILURE', COMPLETED_TIME::TIMESTAMP_NTZ, 'HIGH',
+       LEFT(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME || ': ' ||
+            COALESCE(ERROR_MESSAGE, 'failed'), 120)
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE COMPLETED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND STATE = 'FAILED' {entity_filter}
+UNION ALL
+SELECT 'DDL CHANGE', START_TIME::TIMESTAMP_NTZ, 'INFO',
+       LEFT(USER_NAME || ': ' || QUERY_TEXT, 120)
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND EXECUTION_STATUS = 'SUCCESS'
+  AND (QUERY_TYPE ILIKE 'CREATE%' OR QUERY_TYPE ILIKE 'ALTER%' OR QUERY_TYPE ILIKE 'DROP%')
+  {entity_filter}
+ORDER BY AT DESC
+LIMIT 400
+"""
+
+
+def fact_daily_activity(days: int) -> str:
+    """Daily query volume + failures from the hourly fact (sparkline feed)."""
+    days = bounded_days(days, 30)
+    return f"""
+SELECT DATE_TRUNC('day', HOUR_TS)::DATE AS DAY,
+       SUM(QUERY_COUNT) AS QUERIES,
+       SUM(FAILED_COUNT) AS FAILS
+FROM {mart_object("FACT_QUERY_HOURLY")}
+WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1
+ORDER BY 1
+"""

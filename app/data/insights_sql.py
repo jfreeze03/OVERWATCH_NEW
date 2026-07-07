@@ -438,3 +438,35 @@ FROM m
 LEFT JOIN q ON q.WAREHOUSE_NAME = m.WAREHOUSE_NAME AND q.HR = m.HR
 ORDER BY m.WAREHOUSE_NAME, m.HR
 """
+
+
+def anomaly_evidence(event_date: str, warehouse_contains: str = "") -> str:
+    """Evidence pack for one anomalous day: which query families' elapsed
+    hours moved vs their prior-7-day average. Feeds the grounded AI
+    explanation — never shown as fact, always as ranked evidence."""
+    import datetime as _dt
+
+    from app.core.sqlsafe import contains_filter
+
+    day = _dt.date.fromisoformat(str(event_date).strip()).isoformat()  # validates
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -7, DATE '{day}')",
+        f"START_TIME < DATEADD('day', 1, DATE '{day}')",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        contains_filter("WAREHOUSE_NAME", warehouse_contains),
+    )
+    return f"""
+SELECT
+    QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(LEFT(QUERY_TEXT, 80)) AS SAMPLE_TEXT,
+    ANY_VALUE(WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+    COUNT_IF(DATE(START_TIME) = DATE '{day}') AS RUNS_DAY,
+    ROUND(SUM(IFF(DATE(START_TIME) = DATE '{day}', TOTAL_ELAPSED_TIME, 0)) / 3600000, 2) AS ELAPSED_H_DAY,
+    ROUND(SUM(IFF(DATE(START_TIME) < DATE '{day}', TOTAL_ELAPSED_TIME, 0)) / 7 / 3600000, 2) AS ELAPSED_H_PRIOR_AVG
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1
+HAVING ELAPSED_H_DAY > 0
+ORDER BY ELAPSED_H_DAY - ELAPSED_H_PRIOR_AVG DESC
+LIMIT 15
+"""

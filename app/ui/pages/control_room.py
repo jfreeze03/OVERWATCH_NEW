@@ -7,6 +7,7 @@ on entry.
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from app.config import THRESHOLDS
@@ -17,7 +18,17 @@ from app.data import cost_sql, mart_sql, ops_sql
 from app.logic.actions import triage_queue
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
-from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
+from app.ui import charts
+from app.ui.components import (
+    guard,
+    kpi_row,
+    load_settings,
+    page_header,
+    panel_help,
+    result_caption,
+    selectable_table,
+    styled_table,
+)
 
 _PAGE = "Control Room"
 
@@ -122,6 +133,33 @@ def render() -> None:
         st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies.")
 
     # ---- Spend movers ----------------------------------------------------------
+    st.subheader("Incident correlation timeline")
+    panel_help(
+        "Alerts, task failures, and DDL changes on one time axis (7 days). Click a row "
+        "below the chart to see everything else that happened within ±30 minutes — the "
+        "'what changed right before this broke?' view."
+    )
+    tl = run(mart_sql.incident_timeline(7, f["company"] if isinstance(f, dict) and "company" in f else "ALL"),
+             page=_PAGE, key="incident_timeline", tier="recent",
+             source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL)")
+    if tl.ok and tl.empty:
+        st.success("Quiet week: no alerts, task failures, or DDL in the window.")
+    elif guard(tl, ""):
+        tdf = tl.df.copy()
+        charts.event_timeline(tdf)
+        sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
+        if sel_tl is not None:
+            anchor = tdf.iloc[sel_tl]
+            try:
+                at = pd.to_datetime(anchor["AT"])
+                lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
+                nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
+                st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
+                st.dataframe(nearby, hide_index=True, use_container_width=True)
+            except (KeyError, ValueError, TypeError):
+                st.caption("Could not compute the ±30 minute window for this row.")
+        result_caption(tl)
+
     st.subheader("Spend movers (window vs prior)")
     movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"cr_movers_{company}_{days}", tier="historical",

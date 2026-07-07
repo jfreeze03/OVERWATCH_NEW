@@ -151,6 +151,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                           key=f"alloc_{dim}_{company}_{days}", tier="historical",
                           source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
                 if guard(res, f"No query history to allocate by {label}."):
+                    vdf = res.df.copy()
+                    usd_col = next((c for c in vdf.columns if str(c).upper().endswith('_USD') or str(c).upper() == 'ALLOCATED_USD'), None)
+                    label_col = vdf.columns[0]
+                    if usd_col is not None and len(vdf) > 1:
+                        charts.waterfall_usd(vdf, label_col, usd_col)
+                        st.caption('Waterfall: how the window total builds up, largest contributors first (allocated).')
                     alloc = res.df.copy()
                     alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
                     charts.bar_usd(alloc, "DIMENSION", "ALLOCATED_USD", title=f"Allocated $ by {label}")
@@ -497,6 +503,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        key=f"remed_prof_{company}", tier="recent",
                        source="hour-of-day activity profile")
             if guard(prof, "No hourly profile available yet."):
+                charts.hour_heatmap(prof.df, "WAREHOUSE_NAME", "HOUR_OF_DAY", "AVG_CREDITS",
+                                    title="avg credits/hour")
+                st.caption("Dark cells with no matching query activity are the schedule opportunity.")
                 mine = prof.df[prof.df["WAREHOUSE_NAME"].astype(str) == wh_pick]
                 proposal = remediation.propose_quiet_window(mine.to_dict("records"))
                 if proposal is None:

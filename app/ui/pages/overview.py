@@ -198,6 +198,18 @@ def render() -> None:
         daily_budget = (budget / month_days(date.today())[0]) if budget > 0 else 0.0
         band = (forecast.low_usd, forecast.high_usd) if forecast.ok and budget > 0 else None
         charts.spend_trend(daily, daily_budget_usd=daily_budget, band=None if band is None else band)
+        activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="spark_activity",
+                       tier="recent", source="FACT_QUERY_HOURLY (daily)")
+        adf = activity.df if activity.ok and not activity.empty else None
+        spend14 = daily.tail(14) if len(daily) else None
+        day_col = daily.columns[0] if len(daily.columns) else "DAY"
+        usd_col = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
+                       daily.columns[-1] if len(daily.columns) else "USD")
+        charts.sparkline_row([
+            ("Spend, 14d", spend14, day_col, usd_col),
+            ("Queries, 14d", adf, "DAY", "QUERIES"),
+            ("Failures, 14d", adf, "DAY", "FAILS"),
+        ])
         result_caption(trend_source, note="mart-first" if using_mart else "live fallback — deploy marts for cheaper loads")
 
     if score.drivers:
