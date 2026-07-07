@@ -68,3 +68,27 @@ def test_ml_option_script_is_self_contained():
     assert "FORECAST_ML_DAILY" in script
     assert "TASK_REFRESH_ML_FORECAST" in script
     assert "-- ALTER TASK" in script                   # created suspended, opt-in resume
+
+
+def test_emergency_builders_validated():
+    import pytest as _pt
+
+    from app.logic import remediation as r
+
+    assert r.suspend_warehouse("wh_trxs_transform") == "ALTER WAREHOUSE WH_TRXS_TRANSFORM SUSPEND;"
+    assert "RESUME IF SUSPENDED" in r.resume_warehouse("WH_A")
+    assert "STATEMENT_TIMEOUT_IN_SECONDS = 3600" in r.statement_timeout_fix("WH_A", 3600)
+    assert "MIN_CLUSTER_COUNT = 1 MAX_CLUSTER_COUNT = 3" in r.cluster_range_fix("WH_A", 1, 3)
+    assert r.cluster_range_fix("WH_A", 5, 2).count("5") >= 2  # hi floored to lo
+    with _pt.raises(ValueError):
+        r.scaling_policy_fix("WH_A", "TURBO")
+    assert "CREDIT_QUOTA = 30" in r.resource_monitor_quota("OVERWATCH_RM", 30)
+    assert "PIPE_EXECUTION_PAUSED = TRUE" in r.pause_pipe("DB1", "RAW", "MY_PIPE")
+    assert "ALTER TASK DB1.RAW.T1 SUSPEND;" == r.suspend_task_fqn("db1", "raw", "t1")
+    assert "SET DISABLED = TRUE" in r.disable_user("BADUSER")
+    assert r.cortex_allowlist("None") == "ALTER ACCOUNT SET CORTEX_MODELS_ALLOWLIST = 'None';"
+    assert "llama3.1-8b,mistral-7b" in r.cortex_allowlist("llama3.1-8b,mistral-7b")
+    with _pt.raises(ValueError):
+        r.cortex_allowlist("bad'; DROP--")
+    with _pt.raises(ValueError):
+        r.suspend_warehouse("WH; DROP")

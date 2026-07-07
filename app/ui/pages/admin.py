@@ -20,7 +20,8 @@ from app.core.errors import error_buffer, safe_page
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import cost_sql, mart_sql
+from app.data import cost_sql, mart_sql, security_sql
+from app.logic import remediation
 from app.ui.components import (
     guard,
     kpi_row,
@@ -28,6 +29,7 @@ from app.ui.components import (
     load_settings,
     notify,
     page_header,
+    panel_help,
     result_caption,
 )
 
@@ -209,6 +211,147 @@ def _org_spend_tab() -> None:
     result_caption(res)
 
 
+_EMERGENCY_CATALOG = """
+| Lever | Statement | When |
+|---|---|---|
+| Suspend warehouse | `ALTER WAREHOUSE <wh> SUSPEND` | Runaway spend — the kill-switch. Billing stops when running queries end. |
+| Resume warehouse | `ALTER WAREHOUSE <wh> RESUME` | After the fix. |
+| Statement timeout (WH) | `SET STATEMENT_TIMEOUT_IN_SECONDS = n` | Queries running for hours; caps every new statement on that warehouse. |
+| Cluster range | `SET MIN/MAX_CLUSTER_COUNT` | Multi-cluster fan-out burning credits, or raise it during a queue emergency. |
+| Scaling policy | `SET SCALING_POLICY = ECONOMY` | Slows cluster spawn during bursty-but-tolerant loads. |
+| Resource monitor quota | `ALTER RESOURCE MONITOR ... SET CREDIT_QUOTA = n` | The hard monthly brake; SUSPEND_IMMEDIATE trigger kills at the cap. |
+| Attach monitor | `SET RESOURCE_MONITOR = <rm>` | Unmonitored warehouse found during an incident. |
+| Warehouse size | `SET WAREHOUSE_SIZE = <size>` | Down = cost triage; up = performance firefight (use the remediation panel's resize). |
+| Auto-suspend | `SET AUTO_SUSPEND = 60` | Idle-burn discovered mid-incident (remediation panel). |
+| Pause pipe | `ALTER PIPE ... SET PIPE_EXECUTION_PAUSED = TRUE` | Ingestion flood / bad file loop. |
+| Suspend task | `ALTER TASK <root> SUSPEND` | Runaway or failing task graph (suspend the ROOT). |
+| Disable user | `ALTER USER <u> SET DISABLED = TRUE` | Compromised credentials — kills new sessions immediately. |
+| Cortex model allowlist | `ALTER ACCOUNT SET CORTEX_MODELS_ALLOWLIST = 'None'` | AI spend kill-switch (Cortex Code / LLM functions). **Account-level: run as SNOW_ACCOUNTADMINS.** |
+| Account stmt timeout | `ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = n` | Global default cap. **Account-level.** |
+| Network policy | `ALTER ACCOUNT SET NETWORK_POLICY = <p>` | Access lockdown. **Account-level; not generated here — coordinate before locking yourself out.** |
+"""
+
+
+def _emergency_tab(is_operator: bool) -> None:
+    """On-the-fly incident levers: generate exact SQL, confirm, execute, audit."""
+    st.caption(
+        "Every execution writes a REMEDIATION_LOG audit row (append-only). Warehouse/"
+        "pipe/task/user levers run under your role; ACCOUNT-level levers (Cortex "
+        "allowlist, account timeout) need SNOW_ACCOUNTADMINS — the SQL is still "
+        "generated here for copy-paste."
+    )
+    panel_help(
+        "The catalogue below is the education; the generator builds exact statements "
+        "with validated identifiers. Suspending a warehouse does not kill in-flight "
+        "queries — pair with a statement timeout when something is stuck. Resource "
+        "monitor quota changes take effect immediately; Cortex allowlist changes "
+        "apply account-wide within minutes."
+    )
+    with st.expander("Known emergency levers (reference)", expanded=False):
+        st.markdown(_EMERGENCY_CATALOG)
+
+    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="emg_show_wh",
+              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    wh_names = []
+    if whs.ok and not whs.empty:
+        wdf = whs.df.copy()
+        wdf.columns = [str(c).lower() for c in wdf.columns]
+        if "name" in wdf.columns:
+            wh_names = sorted(wdf["name"].astype(str))
+
+    action = st.selectbox("Lever", [
+        "Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
+        "Cluster range", "Scaling policy", "Resource monitor quota",
+        "Attach resource monitor", "Pause pipe", "Resume pipe", "Suspend task",
+        "Resume task", "Disable user", "Re-enable user",
+        "Cortex allowlist (ACCOUNT)", "Account statement timeout (ACCOUNT)",
+    ], key="emg_action")
+
+    stmt = ""
+    try:
+        if action in ("Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
+                      "Cluster range", "Scaling policy", "Attach resource monitor"):
+            wh = (st.selectbox("Warehouse", wh_names, key="emg_wh") if wh_names
+                  else st.text_input("Warehouse", key="emg_wh_txt"))
+            if action == "Suspend warehouse" and wh:
+                stmt = remediation.suspend_warehouse(wh)
+            elif action == "Resume warehouse" and wh:
+                stmt = remediation.resume_warehouse(wh)
+            elif action == "Warehouse statement timeout" and wh:
+                secs = st.number_input("Timeout seconds (0 = no cap)", 0, 604800, 3600,
+                                       step=300, key="emg_secs")
+                stmt = remediation.statement_timeout_fix(wh, int(secs))
+            elif action == "Cluster range" and wh:
+                c1, c2 = st.columns(2)
+                lo = c1.number_input("Min clusters", 1, 10, 1, key="emg_min")
+                hi = c2.number_input("Max clusters", 1, 10, 1, key="emg_max")
+                stmt = remediation.cluster_range_fix(wh, int(lo), int(hi))
+            elif action == "Scaling policy" and wh:
+                pol = st.radio("Policy", ["ECONOMY", "STANDARD"], horizontal=True, key="emg_pol")
+                stmt = remediation.scaling_policy_fix(wh, pol)
+            elif action == "Attach resource monitor" and wh:
+                mon = st.text_input("Resource monitor name", "OVERWATCH_RM", key="emg_mon")
+                if mon:
+                    stmt = remediation.attach_resource_monitor(wh, mon)
+        elif action == "Resource monitor quota":
+            mon = st.text_input("Resource monitor name", "OVERWATCH_RM", key="emg_mon2")
+            quota = st.number_input("Credit quota / month", 1, 100000, 30, key="emg_quota")
+            if mon:
+                stmt = remediation.resource_monitor_quota(mon, int(quota))
+        elif action in ("Pause pipe", "Resume pipe"):
+            fqn = st.text_input("Pipe (DB.SCHEMA.PIPE)", key="emg_pipe")
+            parts = [p for p in fqn.split(".") if p.strip()]
+            if len(parts) == 3:
+                stmt = remediation.pause_pipe(*parts, paused=(action == "Pause pipe"))
+        elif action in ("Suspend task", "Resume task"):
+            fqn = st.text_input("Task (DB.SCHEMA.TASK — suspend the ROOT of a graph)",
+                                key="emg_task")
+            parts = [p for p in fqn.split(".") if p.strip()]
+            if len(parts) == 3:
+                stmt = remediation.suspend_task_fqn(*parts, resume=(action == "Resume task"))
+        elif action in ("Disable user", "Re-enable user"):
+            usr = st.text_input("User name", key="emg_user")
+            if usr:
+                stmt = remediation.disable_user(usr, disabled=(action == "Disable user"))
+        elif action == "Cortex allowlist (ACCOUNT)":
+            choice = st.radio("Allowlist", ["None (block all AI)", "All (restore)",
+                                            "Pinned models"], key="emg_cx")
+            if choice.startswith("None"):
+                stmt = remediation.cortex_allowlist("None")
+            elif choice.startswith("All"):
+                stmt = remediation.cortex_allowlist("All")
+            else:
+                models = st.text_input("Model list (comma-separated)", "llama3.1-8b",
+                                       key="emg_cx_models")
+                if models:
+                    stmt = remediation.cortex_allowlist(models)
+        elif action == "Account statement timeout (ACCOUNT)":
+            secs = st.number_input("Timeout seconds", 0, 604800, 7200, step=600, key="emg_asecs")
+            stmt = remediation.account_statement_timeout(int(secs))
+    except ValueError as exc:
+        st.error(str(exc))
+
+    if stmt:
+        st.code(stmt, language="sql")
+        if "ALTER ACCOUNT" in stmt:
+            st.warning("ACCOUNT-level: execute as SNOW_ACCOUNTADMINS. Copy the SQL if this "
+                       "session's role lacks the privilege.")
+        if is_operator:
+            confirm = st.text_input("Type EMERGENCY to confirm execution", key="emg_confirm")
+            if st.button("Execute + audit", key="emg_exec", disabled=(confirm != "EMERGENCY")):
+                ok, msg = execute_statement(stmt, page=_PAGE)
+                log_sql = (
+                    f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                    f"SELECT 'EMERGENCY', {sql_literal(action)}, {sql_literal(stmt[:4000])}, "
+                    f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}"
+                )
+                execute_statement(log_sql, page=_PAGE)
+                notify(ok, msg)
+        else:
+            st.caption("Copy the SQL; executing from the app requires OVERWATCH_OPERATOR.")
+
+
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
@@ -287,10 +430,12 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
     section = lazy_sections(
-        ["Settings", "Migrations & freshness", "App self-cost", "Org spend",
+        ["Settings", "Emergency", "Migrations & freshness", "App self-cost", "Org spend",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     if section == "Settings":
         _settings_tab(is_operator)
+    elif section == "Emergency":
+        _emergency_tab(is_operator)
     elif section == "Migrations & freshness":
         _migrations_tab()
     elif section == "App self-cost":

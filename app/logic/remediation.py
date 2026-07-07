@@ -106,3 +106,88 @@ def propose_quiet_window(hours: list[dict], min_len: int = 4,
     credits = sum(float(by_hour[h].get("AVG_CREDITS") or 0) for h in window)
     return {"start": best_start, "end": (best_start + best_len) % 24,
             "hours": best_len, "avg_credits_per_day": round(credits, 2)}
+
+
+# ---------------------------------------------------------------------------
+# Emergency controls: the on-the-fly levers for incidents. Same contract as
+# the fixes above — pure statement builders, identifier-gated; the page owns
+# confirmation, execution, and the REMEDIATION_LOG audit row.
+# ---------------------------------------------------------------------------
+
+def suspend_warehouse(warehouse: str) -> str:
+    """The spend kill-switch: running queries finish/abort, billing stops."""
+    return f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} SUSPEND;"
+
+
+def resume_warehouse(warehouse: str) -> str:
+    return f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} RESUME IF SUSPENDED;"
+
+
+def statement_timeout_fix(warehouse: str, seconds: int) -> str:
+    """Cap runaway queries on one warehouse (0 disables the cap)."""
+    seconds = max(0, min(int(seconds), 604800))
+    return (f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} "
+            f"SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds};")
+
+
+def cluster_range_fix(warehouse: str, min_clusters: int, max_clusters: int) -> str:
+    """Cap (or open) multi-cluster scale-out during queue or spend incidents."""
+    lo = max(1, min(int(min_clusters), 10))
+    hi = max(lo, min(int(max_clusters), 10))
+    return (f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} "
+            f"SET MIN_CLUSTER_COUNT = {lo} MAX_CLUSTER_COUNT = {hi};")
+
+
+def scaling_policy_fix(warehouse: str, policy: str) -> str:
+    p = str(policy or "").strip().upper()
+    if p not in ("STANDARD", "ECONOMY"):
+        raise ValueError(f"Scaling policy must be STANDARD or ECONOMY, got {policy!r}")
+    return f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} SET SCALING_POLICY = '{p}';"
+
+
+def resource_monitor_quota(monitor: str, credits: int) -> str:
+    """Tighten (or raise) the hard brake. SUSPEND_IMMEDIATE triggers kill
+    running queries when the quota hits."""
+    credits = max(1, min(int(credits), 100000))
+    return (f"ALTER RESOURCE MONITOR {_ident(monitor, 'resource monitor')} "
+            f"SET CREDIT_QUOTA = {credits};")
+
+
+def attach_resource_monitor(warehouse: str, monitor: str) -> str:
+    return (f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} "
+            f"SET RESOURCE_MONITOR = {_ident(monitor, 'resource monitor')};")
+
+
+def pause_pipe(database: str, schema: str, pipe: str, paused: bool = True) -> str:
+    """Stop an ingestion flood (or resume it)."""
+    fqn = ".".join(_ident(p, "name part") for p in (database, schema, pipe))
+    return f"ALTER PIPE {fqn} SET PIPE_EXECUTION_PAUSED = {'TRUE' if paused else 'FALSE'};"
+
+
+def suspend_task_fqn(database: str, schema: str, task: str, resume: bool = False) -> str:
+    """Stop a runaway task graph (suspend the ROOT task to stop the graph)."""
+    fqn = ".".join(_ident(p, "name part") for p in (database, schema, task))
+    return f"ALTER TASK {fqn} {'RESUME' if resume else 'SUSPEND'};"
+
+
+def disable_user(user: str, disabled: bool = True) -> str:
+    """Compromised-credential lever. Disabling kills new sessions immediately."""
+    return f"ALTER USER {_ident(user, 'user')} SET DISABLED = {'TRUE' if disabled else 'FALSE'};"
+
+
+def cortex_allowlist(value: str) -> str:
+    """The AI-spend kill-switch (ACCOUNT-level — needs the break-glass role).
+
+    'None' blocks all Cortex LLM functions account-wide, 'All' restores, or a
+    comma list pins cheap models only (e.g. 'llama3.1-8b,mistral-7b').
+    """
+    v = str(value or "").strip()
+    if v not in ("None", "All") and not re.match(r"^[A-Za-z0-9.\-]+(,[A-Za-z0-9.\-]+)*$", v):
+        raise ValueError(f"Allowlist must be 'None', 'All', or a model list, got {value!r}")
+    return f"ALTER ACCOUNT SET CORTEX_MODELS_ALLOWLIST = '{v}';"
+
+
+def account_statement_timeout(seconds: int) -> str:
+    """ACCOUNT-level default statement timeout (needs the break-glass role)."""
+    seconds = max(0, min(int(seconds), 604800))
+    return f"ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds};"
