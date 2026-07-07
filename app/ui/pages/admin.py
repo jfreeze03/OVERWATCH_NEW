@@ -119,11 +119,16 @@ def _migrations_tab() -> None:
         st.dataframe(fresh.df, hide_index=True, use_container_width=True)
 
 
+_SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
+              "cache); results cache for an hour, so repeat views are instant.")
+
+
 def _self_cost_tab() -> None:
     st.caption(
         "The monitoring app must never become the cost problem: WH_ALFA_OVERWATCH is XSMALL with a "
         "30-credit monthly resource monitor, and every app query carries an OVERWATCH query tag."
     )
+    st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
               source="ACCOUNT_USAGE.QUERY_HISTORY (QUERY_TAG LIKE 'OVERWATCH%')")
     if guard(res, "No tagged OVERWATCH queries in the last 14 days (fresh install, or tags disabled)."):
@@ -174,6 +179,7 @@ def _org_spend_tab() -> None:
         "Org-level billed spend in currency per account and usage type — the same source "
         "as Snowsight's Accounts Spend Summary (USAGE_IN_CURRENCY_DAILY, lags up to 24-72h)."
     )
+    st.caption(_SCAN_NOTE)
     res = run(cost_sql.org_usage_in_currency(30), page=_PAGE, key="org_spend",
               tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY")
     if not res.ok:
@@ -471,6 +477,7 @@ def _performance_tab() -> None:
             {"label": "Failed", "value": f"{int((~telemetry['ok']).sum())}",
              "delta_color": "inverse" if (~telemetry["ok"]).any() else "off"},
         ])
+    st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
               tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_OVERWATCH)")
     if guard(res, "No statements on the app warehouse in the last 7 days.",

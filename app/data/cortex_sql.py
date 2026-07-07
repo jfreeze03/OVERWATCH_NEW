@@ -35,7 +35,9 @@ def cortex_code_user_rollup(days: int, company: str = "ALL") -> str:
     classification happen in app/logic/cortex.py, not in SQL.
     """
     days = bounded_days(days)
-    where = and_where("1 = 1", companies.user_clause(company, "U.NAME"))
+    # Company scope is applied ONCE per grouped user in the outer WHERE (a
+    # ~50-row set), not per raw usage row — COMPANY_FOR_USER stays cheap.
+    outer_scope = companies.user_clause(company, "USER_NAME")
     return f"""
 WITH combined AS ({_COMBINED_CODE_USAGE.format(days=days)}),
 user_daily AS (
@@ -51,9 +53,9 @@ user_daily AS (
         MAX(C.USAGE_TIME) AS LAST_TS
     FROM combined C
     LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
-    WHERE {where}
     GROUP BY 1, 2, 3, 4
-)
+),
+by_user AS (
 SELECT
     USER_NAME,
     EMAIL,
@@ -68,6 +70,9 @@ SELECT
     SUM(CREDITS) / NULLIF(COUNT(DISTINCT USAGE_DATE), 0) AS AVG_DAILY_CREDITS
 FROM user_daily
 GROUP BY USER_NAME, EMAIL, SOURCE
+)
+SELECT * FROM by_user
+WHERE {outer_scope if outer_scope else '1 = 1'}
 ORDER BY TOTAL_CREDITS DESC
 LIMIT 500
 """
