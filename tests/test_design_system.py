@@ -81,3 +81,21 @@ def test_pages_carry_svg_icons():
                     ("brief", "brief"), ("admin", "admin")]:
         src = (pdir / f"{pg}.py").read_text(encoding="utf-8")
         assert f'icon_name="{ico}"' in src, pg
+
+
+def test_daily_count_bars_uses_time_axis():
+    """The DDL-changes chart must plot Day as time, not epoch-millis labels."""
+    import inspect
+
+    from app.ui import charts
+    src = inspect.getsource(charts.daily_count_bars)
+    assert '"Day:T"' in src and "pd.to_datetime" in src
+
+
+def test_role_based_user_scope_everywhere():
+    """No user-grained builder should still scope by TRXS_ name prefix."""
+    from app.data import cortex_sql, insights_sql, security_sql
+    for sql in (cortex_sql.cortex_code_user_rollup(30, "ALFA"),
+                security_sql.failed_login_reasons(7, "Trexis"),
+                insights_sql.dormant_users(90, "ALFA")):
+        assert "COMPANY_FOR_USER" in sql

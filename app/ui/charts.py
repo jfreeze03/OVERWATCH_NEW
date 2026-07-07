@@ -128,6 +128,29 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     st.altair_chart(bars + labels, use_container_width=True)
 
 
+def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str = "") -> None:
+    """Per-day count as vertical gradient bars over a TIME axis. Use this for
+    'events/day' series — bar_count would render the date column as epoch
+    millis on a nominal axis (the DDL-changes bug)."""
+    data = df[[day_col, value_col]].copy()
+    data.columns = ["Day", "Value"]
+    data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+    grad = alt.Gradient(gradient="linear", x1=0, x2=0, y1=1, y2=0,
+                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
+                               alt.GradientStop(color=_ACCENT, offset=1.0)])
+    chart = (
+        _base(data)
+        .mark_bar(color=grad, cornerRadiusEnd=3, size=18)
+        .encode(
+            x=alt.X("Day:T", title=None),
+            y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
+            tooltip=[alt.Tooltip("Day:T", title="Day"),
+                     alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10) -> None:
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]

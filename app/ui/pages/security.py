@@ -256,7 +256,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         return
     if guard(res, ""):
         daily = res.df.groupby("DAY", as_index=False)["STATEMENTS"].sum()
-        charts.bar_count(daily.sort_values("DAY"), "DAY", "STATEMENTS", title="Change statements/day")
+        charts.daily_count_bars(daily.sort_values("DAY"), "DAY", "STATEMENTS", title="Change statements/day")
         st.dataframe(res.df, hide_index=True, use_container_width=True)
         result_caption(res)
 
