@@ -47,7 +47,7 @@ def test_failed_login_reasons_builder():
     sql = security_sql.failed_login_reasons(30, "ALFA")
     assert "LOGIN_HISTORY" in sql and "IS_SUCCESS = 'NO'" in sql
     assert "'NETWORK POLICY'" in sql
-    assert "KEBARR1" in sql                     # company override carried
+    assert "COMPANY_FOR_USER(USER_NAME) = 'ALFA'" in sql  # role-based user scope
 
 
 def test_admin_role_activity_builder():

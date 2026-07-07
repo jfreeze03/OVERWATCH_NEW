@@ -30,7 +30,8 @@ def test_rollup_covers_both_code_sources_and_users_join():
 def test_rollup_company_scope_carries_kebarr1():
     alfa = cortex_sql.cortex_code_user_rollup(7, "ALFA")
     trexis = cortex_sql.cortex_code_user_rollup(7, "Trexis")
-    assert "KEBARR1" in alfa and "KEBARR1" in trexis
+    assert "COMPANY_FOR_USER(U.NAME) = 'ALFA'" in alfa
+    assert "COMPANY_FOR_USER(U.NAME) = 'Trexis'" in trexis
 
 
 def test_no_dollar_rates_baked_into_sql():

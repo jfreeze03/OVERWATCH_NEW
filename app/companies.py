@@ -27,6 +27,7 @@ TREXIS_WAREHOUSES = (
     "WH_TRXS_QUERY",
     "WH_TRXS_TRANSFORM",
     "WH_TRXS_UNLOAD",
+    "WH_TRXS_LINEAGE",
 )
 
 TREXIS_DATABASES = (
@@ -50,7 +51,7 @@ USER_COMPANY_OVERRIDES = {
 }
 
 ALFA_DATABASES = (
-    "ALFA_EDW_PROD",
+    "ALFA_EDW_PRD",
     "ALFA_EDW_MGM",
     "ALFA_EDW_DEV",
     "ALFA_EDW_SAN",
@@ -63,7 +64,7 @@ ALFA_DATABASE_PATTERNS = ("ALFA%", "ADMIN")
 
 ENVIRONMENTS = ("ALL", "PROD", "NONPROD")
 DEFAULT_ENVIRONMENT = "ALL"
-_PROD_DB_EXACT = ("ALFA_EDW_PROD", "ALFA_EDW_MGM")
+_PROD_DB_EXACT = ("ALFA_EDW_PRD", "ALFA_EDW_MGM")
 _PROD_DB_SUFFIX = ("_PRD",)
 
 
@@ -82,6 +83,9 @@ def classify_database(name: object) -> str:
 
 
 def classify_user(name: object) -> str:
+    # Offline heuristic (name prefix + override). Live scoping is role-based
+    # via COMPANY_FOR_USER — see user_clause. Kept for the seed-sync test and
+    # any Python-side labeling where role data isn't queryable.
     user = str(name or "").strip().upper()
     if user in USER_COMPANY_OVERRIDES:
         return USER_COMPANY_OVERRIDES[user]
@@ -123,20 +127,20 @@ def database_clause(company: str, column: str = "DATABASE_NAME") -> str:
     return assert_no_control_tokens(clause)
 
 
+# The account's Trexis users have ordinary names (e.g. SSLONSKY) and
+# @trexis.com emails — they are NOT prefixed TRXS_. They are identified by
+# holding a role that carries _TRXS_ (e.g. SNOW_PRI_GFR_PRD_TRXS_DATA_TEAM).
+# COMPANY_FOR_USER (V019) resolves that by role membership with the KEBARR1
+# ALFA override baked in, so every user-grained scope routes through it —
+# one source of truth, and it passes the injection gate (no subquery text).
+COMPANY_FOR_USER_FN = "DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER"
+
+
 def user_clause(company: str, column: str = "USER_NAME") -> str:
-    """Company scope for user-grained sources, honoring explicit overrides."""
+    """Company scope for user-grained sources, by role membership."""
     company = str(company or DEFAULT_COMPANY)
-    alfa_overrides = [u for u, c in USER_COMPANY_OVERRIDES.items() if c == "ALFA"]
-    if company == "Trexis":
-        clause = f"UPPER({column}) LIKE {sql_literal(TREXIS_USER_PREFIX + '%')}"
-        if alfa_overrides:
-            clause += f" AND {not_in_list(column, alfa_overrides, allow_null=False)}"
-    elif company == "ALFA":
-        not_trexis = f"UPPER({column}) NOT LIKE {sql_literal(TREXIS_USER_PREFIX + '%')}"
-        if alfa_overrides:
-            clause = f"({not_trexis} OR {in_list(column, alfa_overrides)})"
-        else:
-            clause = not_trexis
+    if company in ("Trexis", "ALFA"):
+        clause = f"{COMPANY_FOR_USER_FN}({column}) = {sql_literal(company)}"
     else:
         clause = ""
     return assert_no_control_tokens(clause)

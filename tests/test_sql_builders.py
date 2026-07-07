@@ -58,7 +58,7 @@ def test_company_scope_present_when_requested():
 
 def test_user_scope_carries_kebarr1_override():
     sql = cost_sql.allocated_attribution(7, "USER_NAME", "ALFA")
-    assert "KEBARR1" in sql
+    assert "COMPANY_FOR_USER(USER_NAME) = 'ALFA'" in sql  # role-based user scope
 
 
 def test_detail_queries_have_limits():
@@ -158,11 +158,11 @@ def test_empty_database_filter_adds_no_clause():
 def test_database_options_scoped_per_company():
     from app.companies import database_options
 
-    assert "ALFA_EDW_PROD" in database_options("ALFA")
+    assert "ALFA_EDW_PRD" in database_options("ALFA")
     assert "TRXS_EDW_PRD" not in database_options("ALFA")
     assert database_options("Trexis") == tuple(sorted(database_options("Trexis"))) or True  # membership below
     assert "TRXS_EDW_PRD" in database_options("Trexis")
-    assert "ALFA_EDW_PROD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
+    assert "ALFA_EDW_PRD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
 
 
 def test_expiring_credentials_builder():
@@ -174,7 +174,7 @@ def test_expiring_credentials_builder():
     assert "DATEADD('day', 30, CURRENT_TIMESTAMP())" in sql
     assert "DELETED_ON IS NULL" in sql and "EXPIRES_AT IS NOT NULL" in sql
     assert "'EXPIRED'" in sql and "'EXPIRING'" in sql
-    assert "KEBARR1" in sql  # company scope carries the override
+    assert "COMPANY_FOR_USER(USER_NAME)" in sql  # role-based user scope
     # horizon clamped
     assert "DATEADD('day', 365," in _sec.expiring_credentials(9999)
 

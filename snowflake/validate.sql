@@ -1,8 +1,8 @@
 -- validate.sql — post-install checks. Every row should read OK.
 
 WITH checks AS (
-    SELECT 'V001..V018 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 18) = 18,
+    SELECT 'V001..V019 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 19) = 19,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -16,8 +16,8 @@ WITH checks AS (
     UNION ALL
     SELECT 'Company scope seeded (Trexis warehouses)',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
-                 WHERE COMPANY = 'Trexis' AND SCOPE_TYPE = 'WAREHOUSE') = 4,
-               'OK', 'FAIL: expected 4 Trexis warehouses')
+                 WHERE COMPANY = 'Trexis' AND SCOPE_TYPE = 'WAREHOUSE') = 5,
+               'OK', 'FAIL: expected 5 Trexis warehouses')
     UNION ALL
     SELECT 'KEBARR1 override present',
            IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE

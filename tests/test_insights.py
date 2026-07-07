@@ -52,7 +52,7 @@ def test_release_windows_clamped_to_14_days():
 def test_dormant_users_bounds_and_grants_join():
     sql = insights_sql.dormant_users(90, "ALFA")
     assert "GRANTS_TO_USERS" in sql and "LAST_SUCCESS_LOGIN" in sql
-    assert "KEBARR1" in sql  # company override respected
+    assert "COMPANY_FOR_USER(U.NAME) = 'ALFA'" in sql  # role-based user scope
     sql = insights_sql.dormant_users(5, "ALL")
     assert "-30," in sql.replace(" ", "")  # floor clamp
 
