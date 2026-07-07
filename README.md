@@ -82,6 +82,7 @@ snowflake/migrations/V016__closing_loops.sql -- pre-explained anomalies, dept bu
 snowflake/migrations/V017__hardening_v7.sql -- scan v7 per-rule isolation, deploy stage, render SLA, version guard
 snowflake/migrations/V018__delivery_first_class.sql -- notify task in-chain, guarded auto-resume, digest delivery
 snowflake/migrations/V019__scoping_fixes.sql -- role-based Trexis user scoping, WH_TRXS_LINEAGE
+snowflake/migrations/V020__credentials_column.sql -- CREDENTIALS.EXPIRATION_DATE, re-enable expiry rule
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

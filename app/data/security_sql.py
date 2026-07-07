@@ -68,9 +68,8 @@ LIMIT 100
 
 
 def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
-    """ACCOUNT_USAGE.CREDENTIALS expiry watch. Some editions/accounts do not
-    expose EXPIRES_AT — the caller guards and shows a setup hint; the alert
-    rule SEC_CRED_EXPIRY is auto-disabled by V019 on those accounts."""
+    """ACCOUNT_USAGE.CREDENTIALS expiry watch (EXPIRATION_DATE, TIMESTAMP_LTZ).
+    The caller still guards in case an edition lacks the column."""
     """Credentials expiring within the horizon (or already expired).
 
     Source: ACCOUNT_USAGE.CREDENTIALS (passwords, RSA keys, programmatic
@@ -79,8 +78,8 @@ def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
     days_ahead = max(1, min(int(days_ahead), 365))
     where = and_where(
         "DELETED_ON IS NULL",
-        "EXPIRES_AT IS NOT NULL",
-        f"EXPIRES_AT <= DATEADD('day', {days_ahead}, CURRENT_TIMESTAMP())",
+        "EXPIRATION_DATE IS NOT NULL",
+        f"EXPIRATION_DATE <= DATEADD('day', {days_ahead}, CURRENT_TIMESTAMP())",
         companies.user_clause(company, "USER_NAME"),
     )
     return f"""
@@ -89,12 +88,12 @@ SELECT
     NAME AS CREDENTIAL_NAME,
     TYPE AS CREDENTIAL_TYPE,
     CREATED_ON,
-    EXPIRES_AT,
-    DATEDIFF('day', CURRENT_TIMESTAMP(), EXPIRES_AT) AS DAYS_TO_EXPIRY,
-    IFF(EXPIRES_AT < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING') AS STATUS
+    EXPIRATION_DATE AS EXPIRES_AT,
+    DATEDIFF('day', CURRENT_TIMESTAMP(), EXPIRATION_DATE) AS DAYS_TO_EXPIRY,
+    IFF(EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING') AS STATUS
 FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
 WHERE {where}
-ORDER BY EXPIRES_AT
+ORDER BY EXPIRATION_DATE
 LIMIT 300
 """
 
@@ -234,10 +233,10 @@ SELECT
         AND HAS_PASSWORD = TRUE AND COALESCE(HAS_MFA, FALSE) = FALSE
         AND CREATED_ON < DATEADD('day', -7, CURRENT_TIMESTAMP())) AS MFA_GAP_USERS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
-      WHERE DELETED_ON IS NULL AND EXPIRES_AT < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
+      WHERE DELETED_ON IS NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
       WHERE DELETED_ON IS NULL
-        AND EXPIRES_AT BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
+        AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
       WHERE DELETED_ON IS NULL
         AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')

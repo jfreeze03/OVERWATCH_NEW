@@ -172,7 +172,7 @@ def test_expiring_credentials_builder():
     sql = _sec.expiring_credentials(30, "ALFA")
     assert "ACCOUNT_USAGE.CREDENTIALS" in sql
     assert "DATEADD('day', 30, CURRENT_TIMESTAMP())" in sql
-    assert "DELETED_ON IS NULL" in sql and "EXPIRES_AT IS NOT NULL" in sql
+    assert "DELETED_ON IS NULL" in sql and "EXPIRATION_DATE IS NOT NULL" in sql
     assert "'EXPIRED'" in sql and "'EXPIRING'" in sql
     assert "COMPANY_FOR_USER(USER_NAME)" in sql  # role-based user scope
     # horizon clamped
@@ -197,3 +197,14 @@ def test_v009_seeds_credential_rule():
     assert "ACCOUNT_USAGE.CREDENTIALS" in sql
     assert "DATE_TRUNC('week'" in sql  # weekly re-alert until rotated
     assert "IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL'" in sql
+
+
+def test_v020_credentials_column_and_reenable():
+    from pathlib import Path
+    sql = (Path(__file__).resolve().parents[1] / "snowflake" / "migrations"
+           / "V020__credentials_column.sql").read_text(encoding="utf-8")
+    assert "cr.EXPIRATION_DATE" in sql and "cr.EXPIRES_AT" not in sql
+    assert "SET ENABLED = TRUE\n WHERE RULE_ID = 'SEC_CRED_EXPIRY'" in sql
+    assert "alert scan v8 complete" in sql
+    assert "SEC_BREAK_GLASS_USE" in sql and "COST_CONTRACT_BREACH" in sql  # full carryover
+    assert "SELECT 20 AS VERSION" in sql
