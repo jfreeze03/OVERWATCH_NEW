@@ -8,12 +8,18 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-_HEIGHT = 260
+_HEIGHT = 264
 
 _ACCENT = "#38bdf8"
-_GRID = "#1e293b"
-_LABEL = "#94a3b8"
-_TITLE = "#cbd5e1"
+_ACCENT2 = "#22d3ee"
+_GRID = "rgba(148,163,184,0.14)"
+_LABEL = "#8b98ad"
+_TITLE = "#c3cddb"
+_FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, "
+         "'Segoe UI', Roboto, sans-serif")
+# severity palette shared with status_colors, so a "bad" series looks bad
+SEV_COLORS = {"CRITICAL": "#fb7185", "HIGH": "#fb923c", "MEDIUM": "#fbbf24",
+              "LOW": "#8b98ad", "INFO": "#38bdf8", "OK": "#34d399"}
 
 
 def _overwatch_theme() -> dict:
@@ -21,19 +27,28 @@ def _overwatch_theme() -> dict:
         "config": {
             "background": "transparent",
             "view": {"stroke": "transparent"},
+            "font": _FONT,
             "axis": {
-                "gridColor": _GRID, "domainColor": _GRID, "tickColor": _GRID,
+                "gridColor": _GRID, "gridDash": [3, 4], "domainColor": _GRID,
+                "tickColor": _GRID, "tickSize": 4,
                 "labelColor": _LABEL, "titleColor": _TITLE,
-                "labelFontSize": 12, "titleFontSize": 12,
+                "labelFontSize": 11, "titleFontSize": 11, "titleFontWeight": 600,
+                "labelFont": _FONT, "titleFont": _FONT, "titlePadding": 8,
             },
-            "legend": {"labelColor": _LABEL, "titleColor": _TITLE, "labelFontSize": 12},
+            "axisX": {"grid": False, "labelAngle": 0},
+            "legend": {"labelColor": _LABEL, "titleColor": _TITLE, "labelFontSize": 11,
+                       "labelFont": _FONT, "titleFont": _FONT, "symbolType": "circle",
+                       "symbolSize": 90, "orient": "top", "titlePadding": 6},
             "range": {
-                "category": [_ACCENT, "#34d399", "#c084fc", "#fbbf24", "#f87171",
+                "category": [_ACCENT, "#34d399", "#c084fc", "#fbbf24", "#fb7185",
                               "#22d3ee", "#a3e635", "#fb923c"],
+                "heatmap": ["#0f1729", "#164e63", "#0891b2", "#22d3ee", "#a5f3fc"],
             },
-            "bar": {"cornerRadiusEnd": 3, "color": _ACCENT},
-            "line": {"color": _ACCENT},
-            "point": {"color": _ACCENT, "filled": True},
+            "bar": {"cornerRadiusEnd": 4, "color": _ACCENT},
+            "line": {"color": _ACCENT, "strokeWidth": 2.4},
+            "point": {"color": _ACCENT, "filled": True, "size": 42},
+            "rule": {"color": _LABEL},
+            "area": {"line": True, "opacity": 0.22},
         }
     }
 
@@ -45,8 +60,17 @@ except Exception:  # noqa: BLE001 - chart theming must never break a page
     pass
 
 
-def _base(df: pd.DataFrame) -> alt.Chart:
-    return alt.Chart(df).properties(height=_HEIGHT)
+def _base(df: pd.DataFrame, height: int | None = None) -> alt.Chart:
+    return alt.Chart(df).properties(height=height or _HEIGHT)
+
+
+def _grad(color: str = _ACCENT):
+    """Vertical fade for area fills — the polish that reads as 'product'."""
+    return alt.Gradient(
+        gradient="linear", x1=1, x2=1, y1=1, y2=0,
+        stops=[alt.GradientStop(color=color, offset=0.0),
+               alt.GradientStop(color=color, offset=1.0)],
+    )
 
 
 def spend_trend(
@@ -60,16 +84,19 @@ def spend_trend(
     """Daily spend line with optional daily-budget rule and forecast band."""
     data = df[[day_col, usd_col]].copy()
     data.columns = ["Day", "USD"]
-    line = (
-        _base(data)
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("Day:T", title=None),
-            y=alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
-            tooltip=[alt.Tooltip("Day:T"), alt.Tooltip("USD:Q", format="$,.2f", title="Spend")],
-        )
-    )
-    layers = [line]
+    enc_x = alt.X("Day:T", title=None)
+    enc_y = alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f"))
+    tip = [alt.Tooltip("Day:T"), alt.Tooltip("USD:Q", format="$,.2f", title="Spend")]
+    area = (_base(data).mark_area(
+                line={"color": _ACCENT, "strokeWidth": 2.4},
+                color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
+                    stops=[alt.GradientStop(color=_ACCENT, offset=0.0),
+                           alt.GradientStop(color=_ACCENT, offset=0.0)]),
+                opacity=0.16)
+            .encode(x=enc_x, y=enc_y, tooltip=tip))
+    line = (_base(data).mark_line(point={"filled": True, "size": 34}, strokeWidth=2.4)
+            .encode(x=enc_x, y=enc_y, tooltip=tip))
+    layers = [area, line]
     if daily_budget_usd and daily_budget_usd > 0:
         rule_df = pd.DataFrame({"y": [daily_budget_usd]})
         layers.append(
@@ -88,16 +115,17 @@ def spend_trend(
 def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10) -> None:
     data = df[[label_col, usd_col]].head(top_n).copy()
     data.columns = ["Label", "USD"]
-    chart = (
-        _base(data)
-        .mark_bar()
-        .encode(
-            y=alt.Y("Label:N", sort="-x", title=None),
-            x=alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f")),
-            tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")],
-        )
-    )
-    st.altair_chart(chart, use_container_width=True)
+    grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
+                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
+                               alt.GradientStop(color=_ACCENT, offset=1.0)])
+    enc_y = alt.Y("Label:N", sort="-x", title=None)
+    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"))
+    tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
+    base = _base(data, height=max(_HEIGHT, 30 * len(data)))
+    bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
+    labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
+        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
+    st.altair_chart(bars + labels, use_container_width=True)
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10) -> None:
@@ -210,21 +238,16 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
 def event_timeline(df: pd.DataFrame) -> None:
     """Incident correlation strip: every event type on one time axis."""
     data = df.copy()
-    color_domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    color_range = ["#ef4444", "#f97316", "#f59e0b", "#94a3b8", "#38bdf8"]
-    chart = (
-        _base(data)
-        .mark_circle(size=70, opacity=0.85)
-        .encode(
-            x=alt.X("AT:T", title=None),
-            y=alt.Y("EVENT_TYPE:N", title=None),
-            color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=color_domain, range=color_range),
-                            legend=alt.Legend(orient="top", title=None)),
-            tooltip=["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"],
-        )
-        .properties(height=170)
-    )
-    st.altair_chart(chart, use_container_width=True)
+    dom = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    rng = [SEV_COLORS[s] for s in dom]
+    color = alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng),
+                      legend=alt.Legend(orient="top", title=None))
+    common = dict(x=alt.X("AT:T", title=None), y=alt.Y("EVENT_TYPE:N", title=None),
+                  tooltip=["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"])
+    glow = _base(data, height=186).mark_circle(size=240, opacity=0.16).encode(color=color, **common)
+    dots = _base(data, height=186).mark_circle(size=90, opacity=0.95,
+                stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, **common)
+    st.altair_chart(glow + dots, use_container_width=True)
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
