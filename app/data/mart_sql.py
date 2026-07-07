@@ -412,3 +412,46 @@ FROM (
          WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
 )
 """
+
+
+def savings_summary_quarter() -> str:
+    """The ROI numerator: VERIFIED savings this quarter (never mixed with
+    estimates) plus the open estimated pipeline, labeled separately."""
+    return f"""
+SELECT
+    ROUND(SUM(IFF(STATE = 'VERIFIED'
+                  AND VERIFIED_AT >= DATE_TRUNC('quarter', CURRENT_DATE()),
+                  COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
+    COUNT_IF(STATE = 'VERIFIED'
+             AND VERIFIED_AT >= DATE_TRUNC('quarter', CURRENT_DATE())) AS VERIFIED_ITEMS,
+    ROUND(SUM(IFF(STATE = 'ESTIMATED', COALESCE(ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD
+FROM {core_object("SAVINGS_LEDGER")}
+"""
+
+
+def app_cost_quarter() -> str:
+    """The ROI denominator: everything the app + its tasks burned this
+    quarter on the dedicated warehouse."""
+    return """
+SELECT ROUND(COALESCE(SUM(CREDITS_USED), 0), 2) AS APP_CREDITS_QTD
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'
+  AND START_TIME >= DATE_TRUNC('quarter', CURRENT_DATE())
+"""
+
+
+def ledger_for_event(event_id_prefix: str) -> str:
+    """Closed-loop verification chip: ledger items booked from one alert
+    event (the drawer writes 'event <id8>' into NOTES)."""
+    import re as _re
+
+    prefix = str(event_id_prefix or "").strip().lower()
+    if not _re.match(r"^[0-9a-f\-]{8}$", prefix):
+        raise ValueError(f"Invalid event id prefix: {event_id_prefix!r}")
+    return f"""
+SELECT DESCRIPTION, STATE, ESTIMATED_USD, VERIFIED_USD, CREATED_AT
+FROM {core_object("SAVINGS_LEDGER")}
+WHERE NOTES LIKE {sql_literal('%event ' + prefix + '%')}
+ORDER BY CREATED_AT DESC
+LIMIT 5
+"""

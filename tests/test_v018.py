@@ -50,3 +50,32 @@ def test_alerts_page_wiring():
     assert "Group by rule (storm view)" in src
     assert "ALERT_CLOSED_LOOP" in src                  # audited inline execution
     assert "Respond — closed loop" in src
+
+
+def test_roi_readers_never_mix_estimates_with_verified():
+    import pytest as _pt
+
+    from app.data import mart_sql as _m
+
+    s = _m.savings_summary_quarter()
+    assert "VERIFIED_QTD_USD" in s and "ESTIMATED_OPEN_USD" in s
+    assert "STATE = 'VERIFIED'" in s and "STATE = 'ESTIMATED'" in s
+    assert "DATE_TRUNC('quarter'" in s
+    c = _m.app_cost_quarter()
+    assert "WH_ALFA_OVERWATCH" in c and "DATE_TRUNC('quarter'" in c
+    led = _m.ledger_for_event("ab12cd34")
+    assert "'%event ab12cd34%'" in led and "LIMIT 5" in led
+    with _pt.raises(ValueError):
+        _m.ledger_for_event("not-valid-id!")
+    with _pt.raises(ValueError):
+        _m.ledger_for_event("ab12cd34ef")   # too long
+
+
+def test_routing_recipes_documented():
+    from pathlib import Path
+
+    wd = (Path(__file__).resolve().parents[1] / "snowflake" / "webhook_delivery.sql").read_text(encoding="utf-8")
+    assert "OVERWATCH_WEBHOOK_PAGERDUTY" in wd
+    assert "events.pagerduty.com" in wd
+    assert "'ALL', 'CRITICAL', 'OVERWATCH_WEBHOOK_PAGERDUTY'" in wd
+    assert "OVERWATCH_WEBHOOK_FINOPS" in wd

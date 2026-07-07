@@ -65,6 +65,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.dept_budgets", lambda: mart_sql.dept_budgets()),
     ("mart.app_usage_summary", lambda: mart_sql.app_usage_summary(1)),
     ("mart.contract_exhaustion", lambda: mart_sql.contract_exhaustion()),
+    ("mart.savings_summary_quarter", lambda: mart_sql.savings_summary_quarter()),
+    ("mart.app_cost_quarter", lambda: mart_sql.app_cost_quarter()),
     ("security.unused_roles", lambda: security_sql.unused_roles(1)),
     ("security.role_privilege_matrix", lambda: security_sql.role_privilege_matrix()),
     ("insights.anomaly_evidence", lambda: insights_sql.anomaly_evidence(

@@ -38,7 +38,7 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 ## Plan & report
 | Capability | Where |
 |---|---|
-| Brief (phone-first: numbers, fires, asks, exhaustion date) | Brief |
+| Brief (phone-first: numbers, fires, asks, exhaustion date, **ROI: verified savings vs app cost**) | Brief |
 | Month-end forecast: linear / seasonal / opt-in `ML.FORECAST` | Overview; `ml_forecast_option.sql` |
 | Renewal planner (growth scenarios, recommended commit) | Cost → Contract |
 | Department budgets + monthly statement exports | Cost → Chargeback |

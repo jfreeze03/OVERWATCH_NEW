@@ -54,6 +54,33 @@ def render() -> None:
                 "help": "Straight-line on trailing 30d billed credits vs contracted credits. "
                         "Scenarios: Cost > Contract > Renewal planner.",
             })
+    roi = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
+              tier="recent", source="SAVINGS_LEDGER")
+    cost_q = run(mart_sql.app_cost_quarter(), page=_PAGE, key="brief_app_cost",
+                 tier="recent", source="WAREHOUSE_METERING_HISTORY (WH_ALFA_OVERWATCH)")
+    if roi.usable():
+        rrow = roi.df.iloc[0]
+        verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
+        pipeline = safe_float(rrow.get("ESTIMATED_OPEN_USD"))
+        app_usd = (safe_float(cost_q.df.iloc[0].get("APP_CREDITS_QTD")) * rate
+                   if cost_q.usable() else 0.0)
+        kpis.append({
+            "label": "Verified savings (QTD)",
+            "value": format_usd(verified),
+            "delta": f"vs {format_usd(app_usd)} app run cost",
+            "delta_color": "normal" if verified >= app_usd else "inverse",
+            "help": "VERIFIED ledger items only — proven by before/after actuals, never "
+                    "mixed with estimates. App cost = the dedicated warehouse's quarter "
+                    "spend. Green means OVERWATCH pays for itself.",
+        })
+        if pipeline > 0:
+            kpis.append({
+                "label": "Estimated pipeline",
+                "value": format_usd(pipeline),
+                "delta_color": "off",
+                "help": "Open ESTIMATED items awaiting the monthly verifier. "
+                        "Deliberately shown apart from verified.",
+            })
     kpi_row(kpis)
 
     spend = run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",

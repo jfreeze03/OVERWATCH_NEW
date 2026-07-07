@@ -389,6 +389,16 @@ warehouses over budget = 1 row); dedupe semantics unchanged. **Closed loop:**
 for warehouse-lever rules the drawer generates the fix inline — confirm,
 execute, REMEDIATION_LOG row, ESTIMATED ledger item.
 
+**Severity routing recipes:** CRITICAL→PagerDuty + HIGH→Slack are two
+integrations and two `ALERT_ROUTES` rows — copy-paste blocks live in
+`snowflake/webhook_delivery.sql`. Each route sends through its own named
+integration with per-route failure isolation; MIN_SEVERITY is a rank filter
+(CRITICAL ⊂ HIGH ⊂ MEDIUM ⊂ LOW).
+
+**ROI (Brief):** "Verified savings (QTD)" = VERIFIED ledger items only,
+shown against the app's own quarterly warehouse cost (green = pays for
+itself); the open ESTIMATED pipeline is a separate figure by design.
+
 **Isolation (v7):** every rule block runs in its own INSERT with its own
 exception handler — a broken rule logs `rule_block_failed` to APP_ERROR_LOG
 and raises OPS_SCAN_DEGRADED while every other rule keeps firing.
