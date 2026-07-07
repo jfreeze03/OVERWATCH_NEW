@@ -68,6 +68,9 @@ LIMIT 100
 
 
 def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
+    """ACCOUNT_USAGE.CREDENTIALS expiry watch. Some editions/accounts do not
+    expose EXPIRES_AT — the caller guards and shows a setup hint; the alert
+    rule SEC_CRED_EXPIRY is auto-disabled by V019 on those accounts."""
     """Credentials expiring within the horizon (or already expired).
 
     Source: ACCOUNT_USAGE.CREDENTIALS (passwords, RSA keys, programmatic

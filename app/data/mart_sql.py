@@ -455,3 +455,21 @@ WHERE NOTES LIKE {sql_literal('%event ' + prefix + '%')}
 ORDER BY CREATED_AT DESC
 LIMIT 5
 """
+
+
+def events_for_rule(rule_id: str, days: int = 90) -> str:
+    """Recent events for ONE rule (drawer history). Rule id validated."""
+    import re as _re
+
+    rid = str(rule_id or "").strip().upper()
+    if not _re.match(r"^[A-Z0-9_]{1,60}$", rid):
+        raise ValueError(f"Invalid rule id: {rule_id!r}")
+    days = bounded_days(days, 180)
+    return f"""
+SELECT RAISED_AT, SEVERITY, COMPANY, TITLE, STATUS
+FROM {core_object("ALERT_EVENTS")}
+WHERE RULE_ID = {sql_literal(rid)}
+  AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+ORDER BY RAISED_AT DESC
+LIMIT 20
+"""

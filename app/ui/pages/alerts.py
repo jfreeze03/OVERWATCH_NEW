@@ -154,13 +154,12 @@ def _open_events_section(events, is_operator: bool) -> None:
                                f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
             with st.expander("Playbook — what to do first", expanded=True):
                 st.markdown(playbook_for(str(row["RULE_ID"])))
-            hist = run(mart_sql.alert_event_history(90), page=_PAGE, key="hist_for_drawer",
-                       tier="recent", source="ALERT_EVENTS (90d)")
-            if hist.usable():
-                same = hist.df[hist.df["RULE_ID"].astype(str) == str(row["RULE_ID"])].head(10)
-                if len(same) > 1:
-                    with st.expander(f"This rule recently ({len(same)} events)"):
-                        styled_table(same, height=220)
+            hist = run(mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
+                       key=f"hist_rule_{event_id[:8]}", tier="recent",
+                       source="ALERT_EVENTS (90d, this rule)")
+            if hist.usable() and len(hist.df) > 1:
+                with st.expander(f"This rule recently ({len(hist.df)} events)"):
+                    styled_table(hist.df, height=220)
             target = investigation_target(str(row["RULE_ID"]),
                                           f"{row['TITLE']} {detail_text}")
             fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")

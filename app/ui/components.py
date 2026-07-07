@@ -387,8 +387,9 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         data = df
     if height is None and len(df) > 10:
         height = 380
-    kwargs = dict(hide_index=True, use_container_width=True, height=height,
-                  column_config=column_config)
+    kwargs = dict(hide_index=True, use_container_width=True, column_config=column_config)
+    if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
+        kwargs["height"] = height
     selected: int | None = None
     if selectable and key:
         try:

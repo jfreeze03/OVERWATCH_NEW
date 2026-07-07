@@ -676,8 +676,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 
     st.markdown("**User attribution detail**")
     st.dataframe(
-        enriched[["USER_NAME", "EMAIL", "SOURCE", "ACTIVE_DAYS", "TOTAL_REQUESTS",
-                   "TOTAL_CREDITS", "CREDITS_PER_REQUEST", "SPEND_USD", "PROJECTED_30D_USD"]],
+        enriched[[c for c in ["USER_NAME", "EMAIL", "SOURCE", "ACTIVE_DAYS", "TOTAL_REQUESTS",
+                   "TOTAL_CREDITS", "TOTAL_TOKENS", "CREDITS_PER_REQUEST", "SPEND_USD",
+                   "PROJECTED_30D_USD", "FIRST_USAGE", "LAST_USAGE"] if c in enriched.columns]],
         hide_index=True, use_container_width=True,
         column_config={
             "SPEND_USD": st.column_config.NumberColumn("Spend $", format="$%.2f"),
