@@ -135,6 +135,30 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     st.altair_chart(chart, use_container_width=True)
 
 
+def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
+                      title: str = "", rule_date: object = None) -> None:
+    """Single daily metric as a line; optional vertical rule (e.g. change date)."""
+    data = df[[day_col, value_col]].copy()
+    data.columns = ["Day", "Value"]
+    chart = (
+        _base(data)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("Day:T", title=None),
+            y=alt.Y("Value:Q", title=title or value_col),
+            tooltip=["Day:T", "Value:Q"],
+        )
+    )
+    if rule_date is not None:
+        rule = (
+            alt.Chart(pd.DataFrame({"Day": [pd.Timestamp(rule_date)]}))
+            .mark_rule(strokeDash=[6, 3])
+            .encode(x="Day:T")
+        )
+        chart = chart + rule
+    st.altair_chart(chart.properties(height=220), use_container_width=True)
+
+
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY", count_col: str = "EVENTS") -> None:
     data = df[[day_col, severity_col, count_col]].copy()
     data.columns = ["Day", "Severity", "Events"]

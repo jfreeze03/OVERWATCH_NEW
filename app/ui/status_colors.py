@@ -42,7 +42,12 @@ STATUS_COLUMNS = (
     "STALE", "IS_ANOMALY", "SLA_MET", "ENABLED", "VERDICT",
 )
 _TRUE_IS_GOOD = {"SLA_MET", "ENABLED"}
-_VERDICTS = {"BETTER": _OK, "WORSE": _BAD, "FLAT": _MUTED, "N/A": _MUTED}
+_VERDICTS = {
+    "BETTER": _OK, "WORSE": _BAD, "FLAT": _MUTED, "N/A": _MUTED,
+    # change-impact registry (V010)
+    "REGRESSED": _BAD, "IMPROVED": _OK, "NEUTRAL": _MUTED, "PENDING": _INFO,
+    "NO_BASELINE": _MUTED, "INSUFFICIENT_AFTER": _MUTED,
+}
 
 
 def status_css(column: str, value: object) -> str:

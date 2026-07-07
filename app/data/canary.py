@@ -8,7 +8,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql, security_sql
+from app.data import (
+    change_impact_sql,
+    chargeback_sql,
+    cortex_sql,
+    cost_sql,
+    insights_sql,
+    mart_sql,
+    ops_sql,
+    security_sql,
+)
 
 CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.metering_daily_by_service", lambda: cost_sql.metering_daily_by_service(2)),
@@ -30,6 +39,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.admin_role_holders", security_sql.admin_role_holders),
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),
     ("security.expiring_credentials", lambda: security_sql.expiring_credentials(30, "ALFA")),
+    ("change_impact.change_registry", lambda: change_impact_sql.change_registry(30, "ALFA")),
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),
     ("insights.repeat_query_fingerprints", lambda: insights_sql.repeat_query_fingerprints(1, "ALFA", 2)),
     ("insights.storage_growth_by_database", lambda: insights_sql.storage_growth_by_database(2, "ALFA")),

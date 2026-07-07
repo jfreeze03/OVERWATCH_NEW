@@ -12,7 +12,7 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import insights_sql, mart_sql, ops_sql
+from app.data import change_impact_sql, insights_sql, mart_sql, ops_sql
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
 from app.logic.formulas import credits_to_usd, safe_float
@@ -338,6 +338,70 @@ def _contention_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
 
 
+def _change_impact_tab(company: str, database: str, schema_contains: str,
+                       is_operator: bool) -> None:
+    st.caption(
+        "When a stored procedure or task changes, the daily scan freezes a 14-day "
+        "pre-change baseline and compares the 14 days after: runs, p95 runtime, failure "
+        "rate, and measured credits/call (QUERY_ATTRIBUTION_HISTORY roll-up to the CALL). "
+        "REGRESSED rows raise PERF_CHANGE_REGRESSION alerts automatically."
+    )
+    res = run(change_impact_sql.change_registry(90, company, database, schema_contains),
+              page=_PAGE, key=f"chg_reg_{company}_{database}_{schema_contains}",
+              tier="recent", source="OBJECT_CHANGE_REGISTRY")
+    if res.ok and res.empty:
+        st.info(
+            "No procedure/task changes registered for this scope yet. The daily scan "
+            "(TASK_CHANGE_IMPACT_SCAN) registers changes within a day of the ALTER / "
+            "CREATE OR REPLACE, then tracks each one for 14 days."
+        )
+    elif guard(res, "", setup_hint="Run migration V010, then let the daily scan populate the registry."):
+        df = res.df.copy()
+        verdicts = df["VERDICT"].astype(str).str.upper()
+        kpi_row([
+            {"label": "Changes tracked (90d)", "value": f"{len(df)}"},
+            {"label": "Regressed", "value": f"{int((verdicts == 'REGRESSED').sum())}",
+             "delta_color": "inverse" if (verdicts == "REGRESSED").any() else "off",
+             "help": "Worse credits/call, p95, or failure rate vs the frozen pre-change baseline."},
+            {"label": "Improved", "value": f"{int((verdicts == 'IMPROVED').sum())}"},
+            {"label": "Still accumulating", "value": f"{int((verdicts == 'PENDING').sum())}",
+             "help": "Fewer than 5 post-change runs so far — no verdict yet."},
+        ])
+        show_cols = ["VERDICT", "OBJECT_TYPE", "DATABASE_NAME", "SCHEMA_NAME", "OBJECT_NAME",
+                     "CHANGE_SEEN_AT", "CHANGED_BY", "BASELINE_CALLS", "AFTER_CALLS",
+                     "BASELINE_P95_S", "AFTER_P95_S",
+                     "BASELINE_CREDITS_PER_CALL", "AFTER_CREDITS_PER_CALL", "VERDICT_DETAIL"]
+        styled_table(df[[c for c in show_cols if c in df.columns]], height=320)
+        result_caption(res)
+
+        st.markdown("**Run history around one change**")
+        picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)})
+        pick = st.selectbox("Object", picks, key="chg_pick")
+        if pick:
+            otype, _, name = pick.partition(" ")
+            hist = run(change_impact_sql.object_run_history(otype, name, 28),
+                       page=_PAGE, key=f"chg_hist_{pick}", tier="recent",
+                       source="ACCOUNT_USAGE.QUERY_HISTORY" if otype == "PROCEDURE"
+                              else "ACCOUNT_USAGE.TASK_HISTORY")
+            if guard(hist, "No runs recorded for this object in the last 28 days."):
+                rule_at = None
+                match = df[(df["OBJECT_TYPE"] == otype) & (df["OBJECT_NAME"] == name)]
+                if not match.empty:
+                    rule_at = match["CHANGE_SEEN_AT"].max()
+                charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime (s)", rule_date=rule_at)
+                st.caption("Dashed line marks the registered change.")
+                st.dataframe(hist.df, hide_index=True, use_container_width=True)
+                result_caption(hist)
+
+    if is_operator:
+        if st.button("Run change-impact scan now", key="chg_scan_now",
+                     help="Registers fresh changes and re-evaluates verdicts without waiting for the daily task."):
+            ok, msg = execute_statement(change_impact_sql.run_scan_call(), page=_PAGE)
+            (st.success if ok else st.error)(msg)
+    else:
+        st.caption("The scan runs daily at 06:50; OVERWATCH_OPERATOR can also trigger it on demand.")
+
+
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
@@ -347,8 +411,9 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
     page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.",
                 scope_note=f"{f['company']} · last {f['days']} days")
-    tab_q, tab_t, tab_w, tab_c, tab_r, tab_s = st.tabs(
-        ["Queries", "Tasks", "Warehouses", "Contention", "Release compare", "Pipeline SLA"]
+    tab_q, tab_t, tab_w, tab_c, tab_r, tab_ci, tab_s = st.tabs(
+        ["Queries", "Tasks", "Warehouses", "Contention", "Release compare",
+         "Change impact", "Pipeline SLA"]
     )
     with tab_q:
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
@@ -361,5 +426,7 @@ def render() -> None:
         _contention_tab(f["company"], f["days"])
     with tab_r:
         _release_compare_tab(f["company"])
+    with tab_ci:
+        _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     with tab_s:
         _pipeline_sla_tab(is_operator)

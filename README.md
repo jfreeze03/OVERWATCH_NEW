@@ -47,7 +47,7 @@ security boundary is Snowflake roles under Streamlit-in-Snowflake.
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers. |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
 | Cost & Contract | Service/warehouse/user attribution, contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
-| Operations | Queries, tasks, warehouses, contention — p95, failures, queue, spill, anomalies. |
+| Operations | Queries, tasks, warehouses, contention, change impact — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |
 | Admin | Settings, migration status, source freshness, app self-cost, error log, telemetry. |
 
@@ -72,6 +72,7 @@ snowflake/migrations/V006__pipeline_sla.sql -- pipeline freshness SLA config + s
 snowflake/migrations/V007__automation.sql -- budget alerts, AI digest, savings verification
 snowflake/migrations/V008__chargeback.sql -- department chargeback map (warehouse + role)
 snowflake/migrations/V009__credentials.sql -- 30-day credential expiry alerting
+snowflake/migrations/V010__change_impact.sql -- object-change regression tracking + alerts
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```
