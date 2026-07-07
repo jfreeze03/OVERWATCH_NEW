@@ -99,3 +99,8 @@ def test_role_based_user_scope_everywhere():
                 security_sql.failed_login_reasons(7, "Trexis"),
                 insights_sql.dormant_users(90, "ALFA")):
         assert "COMPANY_FOR_USER" in sql
+
+
+def test_stale_elements_hidden_for_crisp_section_switch():
+    from app import theme
+    assert '[data-stale="true"]' in theme._CSS   # no bleed between lazy sections

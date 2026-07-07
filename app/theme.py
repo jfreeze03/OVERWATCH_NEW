@@ -141,6 +141,13 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
   [data-testid="stMetricValue"] { font-size:1.32rem; }
   .ow-stat { flex-basis:46%; }
 }
+/* Crisp section switches: when the lazy-section radio changes, Streamlit marks
+   the outgoing section's elements stale while the new ones render. Hide stale
+   elements (opacity, so layout height doesn't thrash) so the previous section
+   can't visually bleed/linger under the new one. */
+[data-stale="true"], .element-container[data-stale="true"], .stStale {
+  opacity: 0 !important; transition: opacity 40ms linear !important; pointer-events: none !important;
+}
 @media (prefers-reduced-motion:reduce) { *,*::before { transition:none !important; animation:none !important; } }
 </style>
 """
