@@ -28,6 +28,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    section_header,
     selectable_table,
     styled_table,
 )
@@ -560,11 +561,13 @@ def render() -> None:
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.",
+    page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.", icon_name="operations",
                 scope_note=f"{f['company']} · last {f['days']} days")
+    # Contention folded under Warehouses (CoCo): warehouse health and the
+    # contention it causes read together. Seven pills -> six.
     section = lazy_sections(
-        ["Queries", "Tasks", "Warehouses", "Contention", "Release compare",
-         "Change impact", "Pipeline SLA"], key="ops_section")
+        ["Queries", "Tasks", "Warehouses", "Change impact", "Pipeline SLA",
+         "Release compare"], key="ops_section")
     if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
                      f["database"], f["schema_contains"])
@@ -572,11 +575,12 @@ def render() -> None:
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Warehouses":
         _warehouses_tab(f["company"], rate)
-    elif section == "Contention":
+        st.divider()
+        section_header("Contention (lock waits)", "info", "warehouse")
         _contention_tab(f["company"], f["days"])
-    elif section == "Release compare":
-        _release_compare_tab(f["company"])
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
-    else:
+    elif section == "Pipeline SLA":
         _pipeline_sla_tab(is_operator)
+    else:
+        _release_compare_tab(f["company"])

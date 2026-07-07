@@ -338,7 +338,7 @@ def _open_events_section(events, is_operator: bool) -> None:
 @safe_page(_PAGE)
 def render() -> None:
     filters()  # keep global scope initialized/consistent
-    page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.")
+    page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.", icon_name="alerts")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
 

@@ -23,7 +23,7 @@ _PAGE = "Brief"
 
 @safe_page(_PAGE)
 def render() -> None:
-    page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.")
+    page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
 

@@ -32,7 +32,8 @@ from app.core.state import (  # noqa: E402
 )
 from app.data import mart_sql, security_sql  # noqa: E402
 from app.theme import inject_theme  # noqa: E402
-from app.ui.components import notify  # noqa: E402
+from app.ui.components import mark_refreshed, notify  # noqa: E402
+from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
     admin,
     alerts,
@@ -44,16 +45,9 @@ from app.ui.pages import (  # noqa: E402
     security,
 )
 
-_PAGE_ICONS = {
-    "Brief": "☀️",
-    "Overview": "📊",
-    "Control Room": "🎛️",
-    "Cost & Contract": "💰",
-    "Operations": "🔧",
-    "Alerts": "🚨",
-    "Security": "🔐",
-    "Admin": "⚙️",
-}
+# Nav labels are plain text (st.radio can't render markup); the sidebar CSS
+# active-rail shows position, and each page's header carries its SVG icon.
+# This removes the inconsistent emoji CoCo flagged, cleanly.
 
 _RENDERERS = {
     "Overview": overview.render,
@@ -80,6 +74,11 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             (f"Connected · role {role or 'unknown'} · {profile} view")
             if connected else "Not connected to Snowflake"
         )
+        if connected:
+            from app.ui.components import last_refreshed_note
+            st.markdown(
+                f'<div style="font-size:0.72rem;color:var(--ow-ink-mute);margin-top:2px">'
+                f'{icon("refresh", 11)} {last_refreshed_note()}</div>', unsafe_allow_html=True)
         st.divider()
 
         default_page = requested_page(pages) or st.session_state.get("_ow_page") or pages[0]
@@ -87,8 +86,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             default_page = pages[0]
         st.caption("Navigate")
         page = st.radio("Navigate", pages, index=pages.index(default_page),
-                        key="_ow_nav_radio", label_visibility="collapsed",
-                        format_func=lambda p: f"{_PAGE_ICONS.get(p, '•')} {p}")
+                        key="_ow_nav_radio", label_visibility="collapsed")
         st.session_state["_ow_page"] = page
         remember_page(page)
 
@@ -97,6 +95,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         _health_strip()
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
+            mark_refreshed()
             st.rerun()
         st.caption("Account telemetry lags up to ~45 min; metering-daily up to 24h. Labels on every panel.")
     return page
@@ -311,6 +310,32 @@ def _health_strip() -> None:
         _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
 
 
+def _persistent_status_bar() -> None:
+    """The 3-4 numbers that matter, on every page (CoCo high item)."""
+    from app.ui.components import status_bar
+    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
+              source="freshness")
+    if not res.ok or res.empty:
+        return
+    vals = {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
+    crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
+    stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
+    mtd, _ = vals.get("MTD_CREDITS", ("", ""))
+    _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
+    stats = [
+        {"k": "Open criticals", "v": crit, "icon": "alerts",
+         "sev": "bad" if crit not in ("0", "") else "ok"},
+        {"k": "Telemetry age", "v": (f"{stale}h" if stale != "-1" else "n/a"),
+         "icon": "clock", "sev": _sev.get(stale_state, "")},
+    ]
+    if mtd:
+        try:
+            stats.append({"k": "MTD credits", "v": f"{float(mtd):,.0f}", "icon": "cost", "sev": "info"})
+        except (TypeError, ValueError):
+            pass
+    status_bar(stats)
+
+
 def _topbar_scope() -> None:
     """Triage filter strip above every page, like the original OVERWATCH."""
     box = st.container(border=True)
@@ -361,6 +386,8 @@ def main() -> None:
     consume_pending_navigation()
     _apply_default_landing()
     inject_theme()
+    if "_ow_refreshed_at" not in st.session_state:
+        mark_refreshed()
     init_filters()
 
     connected = connection_available()
@@ -387,6 +414,8 @@ def main() -> None:
             st.rerun()
         return
 
+    if page != "Brief":  # Brief is already the compact status view
+        _persistent_status_bar()
     _render_started = time.perf_counter()
     _RENDERERS[page]()
     _log_usage(page, int((time.perf_counter() - _render_started) * 1000))

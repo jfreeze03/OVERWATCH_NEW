@@ -69,22 +69,28 @@ def render() -> None:
     company, days = f["company"], f["days"]
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.",
+    page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.", icon_name="control",
                 scope_note=f"{company} · last {days} days")
 
     # ---- 24h pulse -----------------------------------------------------------
     pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
                 page=_PAGE, key=f"pulse_{company}",
                 tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
+    act = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="cr_activity",
+              tier="recent", source="FACT_QUERY_HOURLY (daily)")
+    q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
+    f_spark = act.df["FAILS"].tolist() if act.ok and not act.empty else None
     if pulse.usable():
         row = pulse.df.iloc[0]
         qcount = safe_float(row.get("QUERY_COUNT"))
         failed = safe_float(row.get("FAILED_COUNT"))
+        _fail_bad = bool(qcount and failed / qcount > 0.02)
         kpi_row([
-            {"label": "Queries (24h)", "value": f"{qcount:,.0f}"},
+            {"label": "Queries (24h)", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Failed", "value": f"{failed:,.0f}",
              "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
-             "delta_color": "inverse" if qcount and failed / qcount > 0.02 else "off"},
+             "delta_color": "inverse" if _fail_bad else "off",
+             "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
             {"label": "p95 runtime", "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
             {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.1f} min"},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},

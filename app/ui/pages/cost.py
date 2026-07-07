@@ -39,6 +39,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    section_header,
     selectable_table,
     styled_table,
 )
@@ -992,25 +993,35 @@ def render() -> None:
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     page_header("Cost & Contract",
                 "Where the money goes, whether the contract holds, and what savings are proven.",
-                scope_note=f"{f['company']} · last {f['days']} days")
+                scope_note=f"{f['company']} · last {f['days']} days", icon_name="cost")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
+    # Four grouped sections instead of eight pills (CoCo density fix): each
+    # group renders its related sub-panels under labeled section headers.
     section = lazy_sections(
-        ["Spend", "Attribution", "Contract", "Chargeback", "Cortex & Storage",
-         "AI Users", "Optimization", "Savings ledger"], key="cost_section")
-    if section == "Spend":
+        ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
+         "Optimization & Savings"], key="cost_section")
+    if section == "Spend & Attribution":
+        section_header("Spend", "info", "spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate)
-    elif section == "Attribution":
+        st.divider()
+        section_header("Attribution", "info", "chargeback")
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
-    elif section == "Contract":
+    elif section == "Contract & Forecast":
+        section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)
-    elif section == "Chargeback":
+    elif section == "Chargeback & AI":
+        section_header("Department chargeback", "info", "chargeback")
         _chargeback_tab(f["company"], f["days"], rate, is_operator)
-    elif section == "Cortex & Storage":
+        st.divider()
+        section_header("Cortex & storage", "info", "cost")
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
-    elif section == "AI Users":
+        st.divider()
+        section_header("AI users", "info", "operations")
         _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
-    elif section == "Optimization":
-        _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
     else:
+        section_header("Optimization", "info", "optimize")
+        _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
+        st.divider()
+        section_header("Savings ledger", "ok", "cost")
         _savings_tab()

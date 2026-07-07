@@ -296,7 +296,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
-    page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC (that scope is roadmap, deliberately).",
+    page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC (that scope is roadmap, deliberately).", icon_name="security",
                 scope_note=f"{f['company']} · last {f['days']} days")
     st.caption(
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "

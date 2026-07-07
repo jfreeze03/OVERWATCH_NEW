@@ -60,3 +60,4 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Usage analytics (page adoption + render ms) | Admin → Performance |
 | Dynamic Table pilot with measured cost | `MART_SPEND_ROLLUP_DT` |
 | Parallel batch fetch, lazy sections, SQL-keyed cache, fragments | core runtime |
+| **Design system**: token layer, card variants, severity stripes, SVG icons, sparklines, persistent status bar, refined charts, responsive | app/theme.py, app/ui/icons.py, app/ui/components.py |

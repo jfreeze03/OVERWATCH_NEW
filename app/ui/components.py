@@ -107,10 +107,17 @@ def _section_slug(label: str) -> str:
     return str(label).lower().replace("&", "and").replace(" ", "-")
 
 
-def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
+def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str = "") -> None:
     st.session_state["_ow_dl_seq"] = 0
     st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
-    st.title(title)
+    if icon_name:
+        st.markdown(
+            f'<div style="display:flex;align-items:center;gap:11px;margin:-2px 0 2px 0">'
+            f'<span style="color:var(--ow-accent);display:inline-flex">{icon(icon_name, 26)}</span>'
+            f'<span style="font-size:1.72rem;font-weight:750;letter-spacing:-0.015em;'
+            f'color:var(--ow-ink)">{title}</span></div>', unsafe_allow_html=True)
+    else:
+        st.title(title)
     caption = subtitle if not scope_note else f"{subtitle} · {scope_note}"
     st.caption(caption)
     chips = _scope_chip_html()

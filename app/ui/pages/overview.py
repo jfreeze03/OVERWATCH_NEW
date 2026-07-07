@@ -105,6 +105,7 @@ def render() -> None:
         "Overview",
         "Spend, risk, and the work that needs an owner.",
         scope_note=f"{company} · last {days} days",
+        icon_name="overview",
     )
 
     # ---- data loads (mart-first, labeled live fallback) --------------------
@@ -179,10 +180,13 @@ def render() -> None:
     }, weights=scoring.resolve_weights(settings))
 
     # ---- KPI row -----------------------------------------------------------
+    _spend_spark = (daily["USD"].tail(14).tolist() if not daily.empty else None)
+    _score_sev = ("ok" if score.score >= 85 else "warn" if score.score >= 70 else "bad")
     kpis = [
         {
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
+            "spark": _spend_spark,
             "help": "Warehouse metering credits x configured rate "
                     f"(${rate:.2f}/credit from {settings.get('_source')}).",
         },
@@ -200,6 +204,8 @@ def render() -> None:
         {
             "label": "Open critical / high alerts",
             "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Setup",
+            "severity": ("bad" if (alerts_res.ok and critical_alerts) else
+                         "warn" if (alerts_res.ok and high_alerts) else "ok"),
             "help": "The Alerts page has the full queue." if alerts_res.ok
                     else f"Alert tables unreachable: {alerts_res.error}",
         },
@@ -208,6 +214,7 @@ def render() -> None:
             "value": f"{score.score}/100",
             "delta": score.state,
             "delta_color": "off",
+            "severity": _score_sev,
             "help": "Evidence-based; every deduction is listed below the trend.",
         },
     ]

@@ -534,7 +534,7 @@ def _canary_tab() -> None:
 
 @safe_page(_PAGE)
 def render() -> None:
-    page_header("Admin", "Settings, migrations, self-cost, canary, and app observability.")
+    page_header("Admin", "Settings, migrations, self-cost, canary, and app observability.", icon_name="admin")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
     _context_section()

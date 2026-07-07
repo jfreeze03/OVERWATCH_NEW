@@ -52,3 +52,32 @@ def test_metric_card_escapes_and_severity_and_trend():
     # inverse + negative delta = good = green
     assert "#34d399" in card
     assert 'title=' in card                         # help became a tooltip
+
+
+def test_no_emoji_page_icons_remain():
+    """CoCo high item: emoji page icons replaced by SVG."""
+    from pathlib import Path
+    main = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    for emoji in ("☀️", "📊", "🎛️", "💰", "🔧", "🚨", "🔐", "⚙️"):
+        assert emoji not in main, f"emoji {emoji} still in nav"
+    assert "_persistent_status_bar" in main       # status bar on every page
+    assert "last_refreshed_note" in main           # global freshness indicator
+
+
+def test_cost_consolidated_to_four_sections():
+    from pathlib import Path
+    cost = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
+    assert '"Spend & Attribution", "Contract & Forecast", "Chargeback & AI"' in cost
+    # all eight original sub-tabs still called (nothing lost in the merge)
+    for fn in ("_spend_tab", "_attribution_tab", "_contract_tab", "_chargeback_tab",
+               "_cortex_storage_tab", "_ai_users_tab", "_optimization_tab", "_savings_tab"):
+        assert fn + "(" in cost, fn
+
+
+def test_pages_carry_svg_icons():
+    from pathlib import Path
+    pdir = Path(__file__).resolve().parents[1] / "app" / "ui" / "pages"
+    for pg, ico in [("overview", "overview"), ("cost", "cost"), ("alerts", "alerts"),
+                    ("brief", "brief"), ("admin", "admin")]:
+        src = (pdir / f"{pg}.py").read_text(encoding="utf-8")
+        assert f'icon_name="{ico}"' in src, pg
