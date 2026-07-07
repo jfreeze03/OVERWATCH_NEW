@@ -37,6 +37,7 @@ USING (
         ('AI_CREDIT_PRICE_USD',     '2.20'),
         ('STORAGE_USD_PER_TB_MONTH','23.00'),
         ('MONTHLY_BUDGET_USD',      '0'),      -- 0 = not configured; set in Admin
+        ('AI_MONTHLY_BUDGET_USD',   '0'),      -- 0 = not configured; Cortex user severities
         ('CONTRACT_CREDITS',        '0'),      -- 0 = not configured
         ('CONTRACT_START_DATE',     ''),
         ('CONTRACT_END_DATE',       '')

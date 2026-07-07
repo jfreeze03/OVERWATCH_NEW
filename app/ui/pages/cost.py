@@ -17,9 +17,10 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
-from app.data import cost_sql, mart_sql
+from app.data import cortex_sql, cost_sql, mart_sql
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.anomaly import anomaly_summary, flag_anomalies
+from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
 from app.logic.forecast import contract_pace
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.ui import charts
@@ -199,6 +200,119 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
 
 
+def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:
+    """Cortex Code user attribution — ported from the original AI & Cortex
+    Monitor. Token credits are exact per user; projections and severities are
+    computed in tested logic, and budget severities only exist when an AI
+    budget is actually configured."""
+    ai_budget = safe_float(settings.get("AI_MONTHLY_BUDGET_USD"))
+    rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
+                     key=f"cortex_users_{company}_{days}", tier="historical",
+                     source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY")
+    if not guard(rollup_res,
+                 "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
+                 setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
+        return
+
+    enriched = enrich_user_rollup(rollup_res.df, ai_rate)
+    summary = rollup_summary(enriched, days)
+    budget_kpi_item = (
+        {"label": "AI monthly budget", "value": format_usd(ai_budget),
+         "help": "AI_MONTHLY_BUDGET_USD from SETTINGS; drives the severity flags below."}
+        if ai_budget > 0 else
+        {"label": "AI monthly budget", "value": "Not configured",
+         "help": "Set AI_MONTHLY_BUDGET_USD in Admin to enable budget-breach severities. Nothing is assumed."}
+    )
+    kpi_row([
+        {"label": f"Active AI users ({days}d)", "value": f"{summary['active_users']:,}"},
+        {"label": "Requests", "value": f"{summary['total_requests']:,}"},
+        {"label": "Cortex Code spend", "value": format_usd(summary["spend_usd"]),
+         "help": f"Exact token credits x ${ai_rate:.2f}/credit."},
+        {"label": "Projected 30d", "value": format_usd(summary["projected_30d_usd"]),
+         "help": "Window run-rate extended to 30 days."},
+        budget_kpi_item,
+    ])
+
+    left, right = st.columns([1.1, 1.0])
+    with left:
+        st.markdown("**Cost by user (exact token credits)**")
+        by_user = (enriched.groupby("USER_NAME", as_index=False)["SPEND_USD"].sum()
+                   .sort_values("SPEND_USD", ascending=False))
+        charts.bar_usd(by_user, "USER_NAME", "SPEND_USD", title="Spend (USD)", top_n=12)
+    with right:
+        st.markdown("**Daily usage by source**")
+        daily_res = run(cortex_sql.cortex_code_daily(days, company), page=_PAGE,
+                        key=f"cortex_daily_{company}_{days}", tier="historical",
+                        source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY")
+        if guard(daily_res, "No daily Cortex Code usage rows."):
+            daily = daily_res.df.copy()
+            daily["USD"] = daily["TOTAL_CREDITS"].map(safe_float) * ai_rate
+            charts.daily_stacked_usd(daily, "DAY", "SOURCE", "USD")
+
+    st.markdown("**User attribution detail**")
+    st.dataframe(
+        enriched[["USER_NAME", "EMAIL", "SOURCE", "ACTIVE_DAYS", "TOTAL_REQUESTS",
+                   "TOTAL_CREDITS", "CREDITS_PER_REQUEST", "SPEND_USD", "PROJECTED_30D_USD"]],
+        hide_index=True, use_container_width=True,
+        column_config={
+            "SPEND_USD": st.column_config.NumberColumn("Spend $", format="$%.2f"),
+            "PROJECTED_30D_USD": st.column_config.NumberColumn("Proj. 30d $", format="$%.2f"),
+            "CREDITS_PER_REQUEST": st.column_config.NumberColumn("Cr/request", format="%.4f"),
+        },
+    )
+    result_caption(rollup_res, note="Cortex Code token metering is exact per user; no allocation involved.")
+
+    exceptions = classify_exceptions(enriched, ai_budget, ai_rate)
+    st.markdown("**Exceptions**")
+    if exceptions.empty:
+        if ai_budget > 0:
+            st.success("No users over 25% of the AI budget and no cost-per-request spikes.")
+        else:
+            st.info("No cost-per-request spikes. Configure AI_MONTHLY_BUDGET_USD to also flag budget pressure.")
+    else:
+        st.dataframe(
+            exceptions[["SEVERITY", "SIGNAL", "USER_NAME", "SOURCE", "TOTAL_REQUESTS",
+                         "CREDITS_PER_REQUEST", "PROJECTED_30D_USD"]],
+            hide_index=True, use_container_width=True,
+        )
+        with st.expander("Queue top exceptions to the Action Queue"):
+            statements = []
+            for _, r in exceptions.head(10).iterrows():
+                title = f"Cortex {r['SIGNAL']}: {r['USER_NAME']} ({r['SOURCE']})"
+                detail = (f"{int(r['TOTAL_REQUESTS'])} requests, projected 30d "
+                          f"{format_usd(r['PROJECTED_30D_USD'])}, cr/request {r['CREDITS_PER_REQUEST']:.4f}.")
+                statements.append(
+                    f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD)\n"
+                    f"VALUES ({sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
+                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > AI Users', "
+                    f"{sql_number(r['PROJECTED_30D_USD'])});"
+                )
+            script = "\n".join(statements)
+            st.code(script, language="sql")
+            if is_operator and st.button("Execute inserts", key="cortex_queue_exec"):
+                ok_all, count = True, 0
+                for stmt in statements:
+                    ok, _msg = execute_statement(stmt.replace("\n", " "), page=_PAGE)
+                    ok_all, count = ok_all and ok, count + int(ok)
+                (st.success if ok_all else st.error)(f"{count}/{len(statements)} action(s) queued.")
+            elif not is_operator:
+                st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
+
+    with st.expander("AI Functions usage (optional view)"):
+        fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
+                     key=f"cortex_fn_{days}", tier="historical",
+                     source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
+        if fn_res.ok and not fn_res.empty:
+            fn = fn_res.df.copy()
+            fn["USD"] = fn["TOTAL_CREDITS"].map(safe_float) * ai_rate
+            charts.daily_stacked_usd(fn, "DAY", "SOURCE", "USD")
+            result_caption(fn_res)
+        elif fn_res.ok:
+            st.caption("No AI Functions usage in this window.")
+        else:
+            st.caption(f"View not available in this account/role: {fn_res.error}")
+
+
 def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
@@ -276,8 +390,10 @@ def render() -> None:
     page_header("Cost & Contract",
                 "Where the money goes, whether the contract holds, and what savings are proven.",
                 scope_note=f"{f['company']} · last {f['days']} days")
-    tab_spend, tab_attr, tab_contract, tab_ai, tab_savings = st.tabs(
-        ["Spend", "Attribution", "Contract", "Cortex & Storage", "Savings ledger"]
+    profile = resolve_role_profile(current_role())
+    is_operator = profile in OPERATOR_PROFILES
+    tab_spend, tab_attr, tab_contract, tab_ai, tab_users, tab_savings = st.tabs(
+        ["Spend", "Attribution", "Contract", "Cortex & Storage", "AI Users", "Savings ledger"]
     )
     with tab_spend:
         _spend_tab(f["company"], f["days"], rate, ai_rate)
@@ -287,5 +403,7 @@ def render() -> None:
         _contract_tab(settings)
     with tab_ai:
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
+    with tab_users:
+        _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
     with tab_savings:
         _savings_tab()
