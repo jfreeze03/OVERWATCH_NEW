@@ -156,6 +156,27 @@ ORDER BY DAY
 """
 
 
+def org_usage_in_currency(days: int) -> str:
+    """Org-wide daily spend in currency per account (Accounts Spend Summary).
+
+    Requires ORGANIZATION_USAGE access on this account; the page shows a
+    friendly setup note when the role cannot see the view.
+    """
+    days = bounded_days(days)
+    return f"""
+SELECT
+    USAGE_DATE AS DAY,
+    ACCOUNT_NAME,
+    UPPER(COALESCE(USAGE_TYPE, 'UNKNOWN')) AS USAGE_TYPE,
+    MAX(CURRENCY) AS CURRENCY,
+    SUM(COALESCE(USAGE_IN_CURRENCY, 0)) AS USAGE_IN_CURRENCY
+FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 1, 2, 3
+ORDER BY DAY, ACCOUNT_NAME
+"""
+
+
 def contract_consumed_credits(contract_start_date: str) -> str:
     """Total billed credits since the contract start (account-wide).
 

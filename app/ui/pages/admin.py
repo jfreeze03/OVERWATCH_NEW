@@ -20,13 +20,13 @@ from app.core.errors import error_buffer, safe_page
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import mart_sql
+from app.data import cost_sql, mart_sql
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
 
 _PAGE = "Admin"
 _EXPECTED_MIGRATIONS = {
     1: "core", 2: "facts", 3: "marts", 4: "alerts", 5: "actions", 6: "pipeline sla",
-    7: "automation", 8: "chargeback",
+    7: "automation", 8: "chargeback", 9: "credentials",
 }
 
 
@@ -153,6 +153,52 @@ def _observability_tab() -> None:
         st.rerun()
 
 
+def _org_spend_tab() -> None:
+    """Accounts Spend Summary from ORGANIZATION_USAGE (currency, per account)."""
+    st.caption(
+        "Org-level billed spend in currency per account and usage type — the same source "
+        "as Snowsight's Accounts Spend Summary (USAGE_IN_CURRENCY_DAILY, lags up to 24-72h)."
+    )
+    res = run(cost_sql.org_usage_in_currency(30), page=_PAGE, key="org_spend",
+              tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY")
+    if not res.ok:
+        st.info(
+            "ORGANIZATION_USAGE is not visible to this role/account. Grant the "
+            "ORGANIZATION_USAGE_VIEWER application role (or enable org views on this account) "
+            f"to light this up. Detail: {res.error}"
+        )
+        return
+    if res.empty:
+        st.info("No org usage rows in the last 30 days.")
+        return
+    df = res.df.copy()
+    df["USAGE_IN_CURRENCY"] = pd.to_numeric(df["USAGE_IN_CURRENCY"], errors="coerce").fillna(0)
+    currency = str(df["CURRENCY"].dropna().iloc[0]) if df["CURRENCY"].notna().any() else "USD"
+    total = float(df["USAGE_IN_CURRENCY"].sum())
+    by_account = (df.groupby("ACCOUNT_NAME", as_index=False)["USAGE_IN_CURRENCY"].sum()
+                  .sort_values("USAGE_IN_CURRENCY", ascending=False))
+    kpi_row([
+        {"label": f"Org spend (30d, {currency})", "value": f"{total:,.0f}",
+         "help": "Billed currency across every account in the organization."},
+        {"label": "Accounts", "value": f"{by_account['ACCOUNT_NAME'].nunique()}"},
+        {"label": "Largest account",
+         "value": str(by_account.iloc[0]["ACCOUNT_NAME"]) if not by_account.empty else "n/a",
+         "delta": f"{float(by_account.iloc[0]['USAGE_IN_CURRENCY']):,.0f} {currency}" if not by_account.empty else None,
+         "delta_color": "off"},
+    ])
+    from app.ui import charts as _charts
+
+    _charts.daily_stacked_usd(
+        df.rename(columns={"USAGE_IN_CURRENCY": "USD"}), "DAY", "ACCOUNT_NAME", "USD")
+    st.caption(f"Amounts are {currency} from the org rate card, not credits x app rate.")
+    pivot = (df.groupby(["ACCOUNT_NAME", "USAGE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
+             .sort_values(["ACCOUNT_NAME", "USAGE_IN_CURRENCY"], ascending=[True, False]))
+    st.dataframe(pivot, hide_index=True, use_container_width=True,
+                 column_config={"USAGE_IN_CURRENCY": st.column_config.NumberColumn(
+                     f"Spend ({currency})", format="%.2f")})
+    result_caption(res)
+
+
 def _canary_tab() -> None:
     st.caption(
         "Runs every registered SQL builder against the live account (1-row caps) to catch "
@@ -197,8 +243,8 @@ def render() -> None:
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
-    tab_settings, tab_migrations, tab_cost, tab_canary, tab_obs = st.tabs(
-        ["Settings", "Migrations & freshness", "App self-cost", "Canary", "Errors & telemetry"]
+    tab_settings, tab_migrations, tab_cost, tab_org, tab_canary, tab_obs = st.tabs(
+        ["Settings", "Migrations & freshness", "App self-cost", "Org spend", "Canary", "Errors & telemetry"]
     )
     with tab_settings:
         _settings_tab(is_operator)
@@ -206,6 +252,8 @@ def render() -> None:
         _migrations_tab()
     with tab_cost:
         _self_cost_tab()
+    with tab_org:
+        _org_spend_tab()
     with tab_canary:
         _canary_tab()
     with tab_obs:

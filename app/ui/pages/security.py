@@ -52,6 +52,26 @@ def _access_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
             st.caption("This list should be short and every name should be expected.")
 
+    st.markdown("**Expiring credentials (30-day horizon)**")
+    creds = run(security_sql.expiring_credentials(30, company), page=_PAGE,
+                key=f"creds_{company}", tier="recent",
+                source="ACCOUNT_USAGE.CREDENTIALS")
+    if creds.ok and creds.empty:
+        st.success("No credentials expiring within 30 days for this scope.")
+    elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
+        cdf = creds.df.copy()
+        expired = int((cdf["STATUS"].astype(str).str.upper() == "EXPIRED").sum())
+        kpi_row([
+            {"label": "Expiring ≤30d", "value": f"{len(cdf) - expired}",
+             "delta_color": "inverse" if len(cdf) - expired else "off"},
+            {"label": "Already expired", "value": f"{expired}",
+             "delta_color": "inverse" if expired else "off",
+             "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
+        ])
+        styled_table(cdf, height=280)
+        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated (V009).")
+        result_caption(creds)
+
     st.markdown("**Dormant users still holding access (90d+)**")
     res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
               tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
@@ -98,6 +118,7 @@ def _export_pack(company: str, days: int) -> None:
         "break_glass_holders": security_sql.admin_role_holders(),
         "role_grants_window": security_sql.recent_role_grants(days),
         "failed_logins_window": security_sql.failed_logins(days, company),
+        "expiring_credentials_30d": security_sql.expiring_credentials(30, company),
     }
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     buffer = io.BytesIO()

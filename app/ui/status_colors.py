@@ -31,6 +31,8 @@ STATUS_COLOR_MAP = {
     "TRUE": _WARN, "FALSE": _MUTED,
     # triage kinds
     "ALERT": _BAD, "TASK FAILURE": _WARN, "SPEND ANOMALY": _INFO,
+    # credential expiry
+    "EXPIRED": _BAD, "EXPIRING": _WARN,
 }
 
 # Columns that carry status semantics; True-is-good ones invert boolean colors.

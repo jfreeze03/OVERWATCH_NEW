@@ -29,6 +29,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.recent_role_grants", lambda: security_sql.recent_role_grants(1)),
     ("security.admin_role_holders", security_sql.admin_role_holders),
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),
+    ("security.expiring_credentials", lambda: security_sql.expiring_credentials(30, "ALFA")),
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),
     ("insights.repeat_query_fingerprints", lambda: insights_sql.repeat_query_fingerprints(1, "ALFA", 2)),
     ("insights.storage_growth_by_database", lambda: insights_sql.storage_growth_by_database(2, "ALFA")),

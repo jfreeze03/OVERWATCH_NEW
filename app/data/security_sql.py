@@ -67,6 +67,35 @@ LIMIT 100
 """
 
 
+def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
+    """Credentials expiring within the horizon (or already expired).
+
+    Source: ACCOUNT_USAGE.CREDENTIALS (passwords, RSA keys, programmatic
+    access tokens). Rows without an expiry never appear here by design.
+    """
+    days_ahead = max(1, min(int(days_ahead), 365))
+    where = and_where(
+        "DELETED_ON IS NULL",
+        "EXPIRES_AT IS NOT NULL",
+        f"EXPIRES_AT <= DATEADD('day', {days_ahead}, CURRENT_TIMESTAMP())",
+        companies.user_clause(company, "USER_NAME"),
+    )
+    return f"""
+SELECT
+    USER_NAME,
+    NAME AS CREDENTIAL_NAME,
+    TYPE AS CREDENTIAL_TYPE,
+    CREATED_ON,
+    EXPIRES_AT,
+    DATEDIFF('day', CURRENT_TIMESTAMP(), EXPIRES_AT) AS DAYS_TO_EXPIRY,
+    IFF(EXPIRES_AT < CURRENT_TIMESTAMP(), 'EXPIRED', 'EXPIRING') AS STATUS
+FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+WHERE {where}
+ORDER BY EXPIRES_AT
+LIMIT 300
+"""
+
+
 def recent_role_grants(days: int) -> str:
     """Recently granted roles to users (account-wide governance view)."""
     days = bounded_days(days, maximum=90)

@@ -163,3 +163,37 @@ def test_database_options_scoped_per_company():
     assert database_options("Trexis") == tuple(sorted(database_options("Trexis"))) or True  # membership below
     assert "TRXS_EDW_PRD" in database_options("Trexis")
     assert "ALFA_EDW_PROD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
+
+
+def test_expiring_credentials_builder():
+    """Owner requirement: alert on credentials expiring within 30 days."""
+    from app.data import security_sql as _sec
+
+    sql = _sec.expiring_credentials(30, "ALFA")
+    assert "ACCOUNT_USAGE.CREDENTIALS" in sql
+    assert "DATEADD('day', 30, CURRENT_TIMESTAMP())" in sql
+    assert "DELETED_ON IS NULL" in sql and "EXPIRES_AT IS NOT NULL" in sql
+    assert "'EXPIRED'" in sql and "'EXPIRING'" in sql
+    assert "KEBARR1" in sql  # company scope carries the override
+    # horizon clamped
+    assert "DATEADD('day', 365," in _sec.expiring_credentials(9999)
+
+
+def test_org_usage_builder():
+    from app.data import cost_sql as _cost
+
+    sql = _cost.org_usage_in_currency(30)
+    assert "ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY" in sql
+    assert "USAGE_IN_CURRENCY" in sql and "ACCOUNT_NAME" in sql
+    assert "DATEADD('day', -30" in sql
+
+
+def test_v009_seeds_credential_rule():
+    from pathlib import Path
+
+    sql = (Path(__file__).resolve().parents[1] / "snowflake" / "migrations"
+           / "V009__credentials.sql").read_text(encoding="utf-8")
+    assert "'SEC_CRED_EXPIRY'" in sql and "30" in sql
+    assert "ACCOUNT_USAGE.CREDENTIALS" in sql
+    assert "DATE_TRUNC('week'" in sql  # weekly re-alert until rotated
+    assert "IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL'" in sql
