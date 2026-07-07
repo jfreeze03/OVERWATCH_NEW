@@ -108,4 +108,5 @@ Streamlit-free by design and fully unit-testable.
 - `ARCHITECTURE.md` — layers, data flow, caching, mart-first boundaries, security model.
 - `DEPLOYMENT.md` — SiS deploy, migrations, roles, validation.
 - `RUNBOOK.md` — the full operator manual: every metric, score, alert rule, AI engine, fallback, emergency lever, troubleshooting, DR.
+- `docs/reviews/` — external review rounds and the point-by-point responses (decision trail).
 - `CHANGELOG.md` — release history.
