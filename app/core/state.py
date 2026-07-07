@@ -15,6 +15,8 @@ FILTER_DEFAULTS = {
     "flt_days": DEFAULT_DAY_WINDOW,
     "flt_warehouse_contains": "",
     "flt_user_contains": "",
+    "flt_database": "",
+    "flt_schema_contains": "",
 }
 
 
@@ -27,6 +29,11 @@ def init_filters() -> None:
         st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
     if st.session_state["flt_days"] not in DAY_WINDOW_OPTIONS:
         st.session_state["flt_days"] = DEFAULT_DAY_WINDOW
+    # A database selection from another company scope resets to All.
+    from app.companies import database_options  # local import: tiny, avoids cycles
+    valid_dbs = database_options(st.session_state["flt_company"])
+    if st.session_state["flt_database"] and st.session_state["flt_database"] not in valid_dbs:
+        st.session_state["flt_database"] = ""
 
 
 def filters() -> dict:
@@ -37,6 +44,8 @@ def filters() -> dict:
         "days": int(st.session_state["flt_days"]),
         "warehouse_contains": str(st.session_state["flt_warehouse_contains"]),
         "user_contains": str(st.session_state["flt_user_contains"]),
+        "database": str(st.session_state["flt_database"]),
+        "schema_contains": str(st.session_state["flt_schema_contains"]),
     }
 
 
@@ -45,6 +54,7 @@ def filters_signature() -> str:
     return (
         f"co={f['company']}|env={f['environment']}|d={f['days']}"
         f"|wh={f['warehouse_contains']}|u={f['user_contains']}"
+        f"|db={f['database']}|sc={f['schema_contains']}"
     )
 
 

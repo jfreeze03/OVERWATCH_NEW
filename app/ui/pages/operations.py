@@ -22,8 +22,9 @@ from app.ui.components import guard, kpi_row, load_settings, page_header, result
 _PAGE = "Operations"
 
 
-def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str) -> None:
-    summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter),
+def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
+                 database: str = "", schema_contains: str = "") -> None:
+    summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains),
                   page=_PAGE, key=f"q_summary_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.QUERY_HISTORY")
     if summary.usable():
@@ -41,7 +42,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str) -> N
         result_caption(summary)
 
     st.markdown("**Heaviest queries**")
-    top = run(ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter),
+    top = run(ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter, database, schema_contains),
               page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
@@ -58,17 +59,17 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str) -> N
         st.caption("Elapsed-time ranking. Per-query dollars are estimates; exact billing is per warehouse.")
 
     st.markdown("**Failures by error**")
-    fails = run(ops_sql.failures_by_error(days, company), page=_PAGE,
+    fails = run(ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
                 key=f"q_fails_{company}_{days}", tier="recent",
                 source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
         st.dataframe(fails.df, hide_index=True, use_container_width=True)
 
 
-def _failure_timeline_section(company: str) -> None:
+def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "") -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
     st.markdown("**Failure root-cause timeline (7d)**")
-    res = run(insights_sql.task_failure_details(7, company), page=_PAGE,
+    res = run(insights_sql.task_failure_details(7, company, database, schema_contains), page=_PAGE,
               key=f"t_rca_{company}", tier="recent",
               source="ACCOUNT_USAGE.TASK_HISTORY (failures)")
     if not res.ok:
@@ -200,11 +201,11 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
             st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
 
 
-def _tasks_tab(company: str, days: int) -> None:
-    res = run(mart_sql.fact_task_daily(days, company), page=_PAGE, key=f"t_fact_{company}_{days}",
+def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+    res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
               tier="recent", source="FACT_TASK_DAILY")
     if not res.usable():
-        res = run(ops_sql.task_runs(days, company), page=_PAGE, key=f"t_live_{company}_{days}",
+        res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
     if guard(res, "No task runs recorded for this scope/window."):
         df = res.df.copy()
@@ -222,7 +223,7 @@ def _tasks_tab(company: str, days: int) -> None:
         st.dataframe(df, hide_index=True, use_container_width=True)
         result_caption(res)
     st.divider()
-    _failure_timeline_section(company)
+    _failure_timeline_section(company, database, schema_contains)
 
 
 def _warehouses_tab(company: str, rate: float) -> None:
@@ -284,9 +285,10 @@ def render() -> None:
         ["Queries", "Tasks", "Warehouses", "Contention", "Release compare", "Pipeline SLA"]
     )
     with tab_q:
-        _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"])
+        _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
+                     f["database"], f["schema_contains"])
     with tab_t:
-        _tasks_tab(f["company"], f["days"])
+        _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     with tab_w:
         _warehouses_tab(f["company"], rate)
     with tab_c:

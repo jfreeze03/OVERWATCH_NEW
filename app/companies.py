@@ -49,6 +49,16 @@ USER_COMPANY_OVERRIDES = {
     "KEBARR1": "ALFA",
 }
 
+ALFA_DATABASES = (
+    "ALFA_EDW_PROD",
+    "ALFA_EDW_MGM",
+    "ALFA_EDW_DEV",
+    "ALFA_EDW_SAN",
+    "ALFA_EDW_PHX",
+    "ALFA_EDW_SEA",
+    "ALFA_EDW_SIT",
+    "ADMIN",
+)
 ALFA_DATABASE_PATTERNS = ("ALFA%", "ADMIN")
 
 ENVIRONMENTS = ("ALL", "PROD", "NONPROD")
@@ -145,6 +155,24 @@ def environment_clause(environment: str, column: str = "DATABASE_NAME") -> str:
     else:
         clause = ""
     return assert_no_control_tokens(clause)
+
+
+def database_options(company: str) -> tuple[str, ...]:
+    """Known databases for the sidebar picker, scoped to the company."""
+    company = str(company or DEFAULT_COMPANY)
+    if company == "Trexis":
+        return TREXIS_DATABASES
+    if company == "ALFA":
+        return ALFA_DATABASES
+    return tuple(dict.fromkeys((*ALFA_DATABASES, *TREXIS_DATABASES)))
+
+
+def database_equals_clause(database: str, column: str = "DATABASE_NAME") -> str:
+    """Exact-match clause for the selected database ('' = no filter)."""
+    db = str(database or "").strip()
+    if not db:
+        return ""
+    return assert_no_control_tokens(in_list(column, [db]))
 
 
 def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:

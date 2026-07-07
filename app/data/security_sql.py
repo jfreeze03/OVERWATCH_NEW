@@ -99,10 +99,14 @@ ORDER BY ROLE, USER_NAME
 """
 
 
-def recent_ddl_changes(days: int, company: str = "ALL") -> str:
+def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     """Who changed what: DDL/DCL statements grouped by user and object type."""
     days = bounded_days(days, maximum=30)
+    from app.core.sqlsafe import contains_filter
+
     where = and_where(
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "EXECUTION_STATUS = 'SUCCESS'",
         ("QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_VIEW', 'ALTER', 'ALTER_TABLE_MODIFY_COLUMN', "

@@ -65,7 +65,10 @@ LIMIT 100
 # 2. Repeat-query fingerprints (cache/materialization candidates)
 # ---------------------------------------------------------------------------
 
-def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 10) -> str:
+def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
+                              database: str = "", schema_contains: str = "") -> str:
+    from app.core.sqlsafe import contains_filter
+
     days = bounded_days(days)
     min_runs = max(2, min(int(min_runs), 1000))
     where = and_where(
@@ -76,6 +79,8 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
         companies.warehouse_clause(company),
         companies.user_clause(company),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT
@@ -193,12 +198,16 @@ LIMIT 1000
 # 5. Task failure detail (root-cause timeline)
 # ---------------------------------------------------------------------------
 
-def task_failure_details(days: int, company: str = "ALL") -> str:
+def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
+    from app.core.sqlsafe import contains_filter
+
     days = bounded_days(days, maximum=14)
     where = and_where(
         f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "STATE = 'FAILED'",
         companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT

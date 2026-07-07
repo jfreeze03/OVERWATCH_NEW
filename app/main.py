@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from app.companies import COMPANIES, ENVIRONMENTS  # noqa: E402
+from app.companies import COMPANIES, ENVIRONMENTS, database_options  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
@@ -60,6 +60,12 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
         st.text_input("Warehouse contains", key="flt_warehouse_contains")
         st.text_input("User contains", key="flt_user_contains")
+        db_options = ["", *database_options(st.session_state.get("flt_company", COMPANIES[0]))]
+        st.selectbox("Database", db_options, key="flt_database",
+                     format_func=lambda v: v or "All databases",
+                     help="Applies to query, task, DDL, attribution, and storage panels.")
+        st.text_input("Schema contains", key="flt_schema_contains",
+                      help="Case-insensitive match on schema name where the source has schema grain.")
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
             st.rerun()

@@ -7,17 +7,21 @@ from app.core.sqlsafe import contains_filter
 from app.data.common import and_where, bounded_days
 
 
-def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "") -> str:
+def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
+                 database: str = "", schema_contains: str = "") -> str:
     return and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.warehouse_clause(company),
         companies.user_clause(company),
+        companies.database_equals_clause(database),
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
         contains_filter("USER_NAME", user_contains),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
 
 
-def query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "", user_contains: str = "") -> str:
+def query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "", user_contains: str = "",
+                         database: str = "", schema_contains: str = "") -> str:
     """One-row query health summary for the window."""
     days = bounded_days(days)
     return f"""
@@ -28,12 +32,13 @@ SELECT
     SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {_query_scope(days, company, warehouse_contains, user_contains)}
+WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains)}
 """
 
 
 def top_queries_by_elapsed(days: int, company: str = "ALL", limit: int = 50,
-                           warehouse_contains: str = "", user_contains: str = "") -> str:
+                           warehouse_contains: str = "", user_contains: str = "",
+                           database: str = "", schema_contains: str = "") -> str:
     """Heaviest queries in the window (elapsed basis; cost labeled estimate)."""
     days = bounded_days(days)
     limit = max(1, min(int(limit), 500))
@@ -51,17 +56,17 @@ SELECT
     COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) / POWER(1024, 3) AS SPILL_REMOTE_GB,
     LEFT(QUERY_TEXT, 180) AS QUERY_PREVIEW
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {_query_scope(days, company, warehouse_contains, user_contains)}
+WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains)}
 ORDER BY TOTAL_ELAPSED_TIME DESC
 LIMIT {limit}
 """
 
 
-def failures_by_error(days: int, company: str = "ALL") -> str:
+def failures_by_error(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     """Failed queries grouped by error code/message family."""
     days = bounded_days(days)
     where = and_where(
-        _query_scope(days, company),
+        _query_scope(days, company, database=database, schema_contains=schema_contains),
         "EXECUTION_STATUS = 'FAIL'",
     )
     return f"""
@@ -79,12 +84,14 @@ LIMIT 50
 """
 
 
-def task_runs(days: int, company: str = "ALL") -> str:
+def task_runs(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     """Task run outcomes grouped by task, newest failures surfaced."""
     days = bounded_days(days)
     where = and_where(
         f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT

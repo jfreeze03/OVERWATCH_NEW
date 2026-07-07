@@ -84,7 +84,8 @@ ORDER BY CREDITS_CURRENT DESC
 """
 
 
-def allocated_attribution(days: int, dimension: str, company: str = "ALL") -> str:
+def allocated_attribution(days: int, dimension: str, company: str = "ALL",
+                          database: str = "", schema_contains: str = "") -> str:
     """Elapsed-time-share attribution by USER_NAME or DATABASE_NAME.
 
     Produces shares, not dollars: the caller multiplies by scoped warehouse
@@ -93,11 +94,15 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL") -> st
     days = bounded_days(days)
     dim = "USER_NAME" if str(dimension).upper() == "USER_NAME" else "DATABASE_NAME"
     scope = companies.user_clause(company) if dim == "USER_NAME" else companies.database_clause(company)
+    from app.core.sqlsafe import contains_filter
+
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "EXECUTION_STATUS = 'SUCCESS'",
         "WAREHOUSE_NAME IS NOT NULL",
         companies.warehouse_clause(company),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
         scope,
     )
     return f"""
@@ -130,12 +135,13 @@ ORDER BY DAY
 """
 
 
-def storage_by_database(days: int, company: str = "ALL") -> str:
+def storage_by_database(days: int, company: str = "ALL", database: str = "") -> str:
     """Average database storage per day (bytes), company-scoped."""
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.database_clause(company),
+        companies.database_equals_clause(database),
     )
     return f"""
 SELECT

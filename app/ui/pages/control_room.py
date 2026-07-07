@@ -62,7 +62,8 @@ def render() -> None:
                 scope_note=f"{company} · last {days} days")
 
     # ---- 24h pulse -----------------------------------------------------------
-    pulse = run(ops_sql.query_window_summary(1, company), page=_PAGE, key=f"pulse_{company}",
+    pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
+                page=_PAGE, key=f"pulse_{company}",
                 tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
     if pulse.usable():
         row = pulse.df.iloc[0]
@@ -87,10 +88,11 @@ def render() -> None:
     st.subheader("Triage queue")
     alerts = run(mart_sql.open_alert_events(100), page=_PAGE, key="cr_alerts", tier="live",
                  source="ALERT_EVENTS")
-    tasks = run(mart_sql.fact_task_daily(2, company), page=_PAGE, key=f"cr_tasks_{company}",
+    tasks = run(mart_sql.fact_task_daily(2, company, f["database"]), page=_PAGE, key=f"cr_tasks_{company}",
                 tier="recent", source="FACT_TASK_DAILY")
     if not tasks.usable():
-        tasks = run(ops_sql.task_runs(2, company), page=_PAGE, key=f"cr_tasks_live_{company}",
+        tasks = run(ops_sql.task_runs(2, company, f["database"], f["schema_contains"]),
+                    page=_PAGE, key=f"cr_tasks_live_{company}",
                     tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
 
     wh_daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,

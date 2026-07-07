@@ -74,7 +74,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
     result_caption(res)
 
 
-def _attribution_tab(company: str, days: int, rate: float) -> None:
+def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
     wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
              key=f"wh_vs_prior_{company}_{days}", tier="historical",
              source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
@@ -104,7 +104,7 @@ def _attribution_tab(company: str, days: int, rate: float) -> None:
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
             with col:
-                res = run(cost_sql.allocated_attribution(days, dim, company), page=_PAGE,
+                res = run(cost_sql.allocated_attribution(days, dim, company, database, schema_contains), page=_PAGE,
                           key=f"alloc_{dim}_{company}_{days}", tier="historical",
                           source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
                 if guard(res, f"No query history to allocate by {label}."):
@@ -182,7 +182,7 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
     with right:
         st.markdown("**Storage by database**")
-        res = run(cost_sql.storage_by_database(days, company), page=_PAGE,
+        res = run(cost_sql.storage_by_database(days, company, st.session_state.get("flt_database", "")), page=_PAGE,
                   key=f"storage_{company}_{days}", tier="historical",
                   source="ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY")
         if guard(res, "No storage rows for this scope."):
@@ -248,7 +248,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
     st.markdown("**Repeat-query candidates (cache / materialization)**")
-    rq_res = run(insights_sql.repeat_query_fingerprints(days, company), page=_PAGE,
+    rq_res = run(insights_sql.repeat_query_fingerprints(
+        days, company,
+        database=st.session_state.get("flt_database", ""),
+        schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
                  key=f"repeatq_{company}_{days}", tier="historical",
                  source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH)")
     if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
@@ -500,7 +503,7 @@ def render() -> None:
     with tab_spend:
         _spend_tab(f["company"], f["days"], rate, ai_rate)
     with tab_attr:
-        _attribution_tab(f["company"], f["days"], rate)
+        _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
     with tab_contract:
         _contract_tab(settings)
     with tab_ai:

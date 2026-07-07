@@ -83,9 +83,9 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(res)
 
 
-def _changes_tab(company: str, days: int) -> None:
+def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     st.markdown("**Who changed what (DDL/DCL)**")
-    res = run(security_sql.recent_ddl_changes(days, company), page=_PAGE,
+    res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
               key=f"ddl_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (DDL/DCL types)")
     if res.ok and res.empty:
@@ -111,4 +111,4 @@ def render() -> None:
     with tab_access:
         _access_tab(f["company"], f["days"])
     with tab_changes:
-        _changes_tab(f["company"], f["days"])
+        _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])

@@ -59,11 +59,13 @@ ORDER BY DAY
 """
 
 
-def fact_task_daily(days: int, company: str = "ALL") -> str:
+def fact_task_daily(days: int, company: str = "ALL", database: str = "") -> str:
     days = bounded_days(days)
     where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
+    if str(database or "").strip():
+        where.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
     return f"""
 SELECT DAY, DATABASE_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
 FROM {mart_object("FACT_TASK_DAILY")}

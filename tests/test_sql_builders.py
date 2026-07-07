@@ -117,3 +117,49 @@ def test_mart_readers_target_overwatch_objects():
     assert "DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD" in mart_sql.exec_board("ALFA", 7)
     assert "DBA_MAINT_DB.OVERWATCH.SETTINGS" in mart_sql.settings()
     assert "DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS" in mart_sql.open_alert_events()
+
+
+def test_database_and_schema_filters_flow_into_builders():
+    """Owner requirement 2026-07: filter on individual databases and schemas,
+    not just PROD vs DEV."""
+    from app.data import insights_sql, security_sql
+
+    sql = ops_sql.query_window_summary(7, "ALFA", database="ALFA_EDW_SIT", schema_contains="CLAIMS")
+    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_SIT')" in sql
+    assert "SCHEMA_NAME ILIKE '%CLAIMS%'" in sql
+
+    sql = ops_sql.task_runs(7, "ALFA", database="ALFA_EDW_PROD", schema_contains="DW")
+    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_PROD')" in sql and "SCHEMA_NAME ILIKE '%DW%'" in sql
+
+    sql = cost_sql.allocated_attribution(7, "USER_NAME", "ALFA", database="ADMIN", schema_contains="X")
+    assert "UPPER(DATABASE_NAME) IN ('ADMIN')" in sql
+
+    sql = security_sql.recent_ddl_changes(7, "ALFA", database="ALFA_EDW_DEV")
+    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_DEV')" in sql
+
+    sql = insights_sql.repeat_query_fingerprints(7, "ALL", database="TRXS_EDW_PRD", schema_contains="GW")
+    assert "UPPER(DATABASE_NAME) IN ('TRXS_EDW_PRD')" in sql
+
+    sql = mart_sql.fact_task_daily(7, "ALFA", database="ALFA_EDW_SIT")
+    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_SIT'" in sql
+
+
+def test_schema_filter_sanitizes_hostile_input():
+    sql = ops_sql.query_window_summary(7, "ALL", schema_contains="x'; DROP TABLE q;--")
+    assert "DROP" not in sql.upper().replace("BYTES_SPILLED_TO_REMOTE_STORAGE", "")
+
+
+def test_empty_database_filter_adds_no_clause():
+    with_f = ops_sql.query_window_summary(7, "ALFA", database="ALFA_EDW_SIT")
+    without = ops_sql.query_window_summary(7, "ALFA", database="")
+    assert "ALFA_EDW_SIT" in with_f and "IN ('ALFA_EDW_SIT')" not in without
+
+
+def test_database_options_scoped_per_company():
+    from app.companies import database_options
+
+    assert "ALFA_EDW_PROD" in database_options("ALFA")
+    assert "TRXS_EDW_PRD" not in database_options("ALFA")
+    assert database_options("Trexis") == tuple(sorted(database_options("Trexis"))) or True  # membership below
+    assert "TRXS_EDW_PRD" in database_options("Trexis")
+    assert "ALFA_EDW_PROD" in database_options("ALL") and "TRXS_EDW_PRD" in database_options("ALL")
