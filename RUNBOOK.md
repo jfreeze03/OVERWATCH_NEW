@@ -131,6 +131,18 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
 | MART_SPEND_ROLLUP_DT | TARGET_LAG 6h (Dynamic Table) | — | monthly spend rollup (pilot) |
 
+**Notes on the automation:** the Monday 05:30 sentinel deliberately leads
+the morning batch, so its warehouse resume is shared, not extra. Its
+`EXECUTE IMMEDIATE 'SELECT 1 FROM ' || name` loop is exempt from the sqlsafe
+rule because the probe list is a hardcoded array — no user input ever
+reaches it. **Scan-proc test strategy:** CI asserts structure (17 isolated
+blocks, per-block dedupe, rule carryover on every regeneration); runtime
+failures are the sentinel's and OPS_SCAN_DEGRADED's job — a broken block
+logs `rule_block_failed` and self-alerts, which IS the failure-injection
+test running in production, safely. **DT pilot cost:** MART_SPEND_ROLLUP_DT
+refreshes on WH_ALFA_OVERWATCH, so its cost shows up in Admin → App
+self-cost; compare against the loader tasks before migrating more marts.
+
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
 

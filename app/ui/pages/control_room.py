@@ -140,8 +140,13 @@ def render() -> None:
         "below the chart to see everything else that happened within ±30 minutes — the "
         "'what changed right before this broke?' view."
     )
-    tl = run(mart_sql.incident_timeline(7, f["company"] if isinstance(f, dict) and "company" in f else "ALL"),
-             page=_PAGE, key="incident_timeline", tier="recent",
+    tl_win = st.radio("Window", ["48h (fresh)", "7d (cached hourly)"], horizontal=True,
+                      key="cr_tl_win", label_visibility="collapsed",
+                      help="Mid-incident you want fresh; the 7-day retrospective is the "
+                           "heavy three-source join, so it caches for an hour.")
+    tl_days, tl_tier = (2, "recent") if tl_win.startswith("48h") else (7, "historical")
+    tl = run(mart_sql.incident_timeline(tl_days, f["company"] if isinstance(f, dict) and "company" in f else "ALL"),
+             page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
              source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL)")
     if tl.ok and tl.empty:
         st.success("Quiet week: no alerts, task failures, or DDL in the window.")
@@ -160,8 +165,9 @@ def render() -> None:
                 nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
                 st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
                 st.dataframe(nearby, hide_index=True, use_container_width=True)
-            except (KeyError, ValueError, TypeError):
-                st.caption("Could not compute the ±30 minute window for this row.")
+            except (KeyError, ValueError, TypeError) as exc:
+                st.caption(f"±30 min window unavailable for this row — {type(exc).__name__}: "
+                           f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")
         result_caption(tl)
 
     st.subheader("Spend movers (window vs prior)")

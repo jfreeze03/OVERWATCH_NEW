@@ -230,17 +230,25 @@ def _contract_tab(settings: dict) -> None:
         bdf = burn_res.df.copy()
         daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * rate_now
         remaining_usd = max(0.0, (contract_credits - consumed) * rate_now)
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         term_months = col1.slider("Next term (months)", 12, 36, 12, step=6, key="plan_term")
         buffer_pct = col2.slider("Safety buffer %", 0, 40, 15, step=5, key="plan_buffer")
-        rows = contract_planner.plan_scenarios(daily_usd, term_months, buffer_pct, remaining_usd)
+        extra_credits = col3.number_input("What-if: add load (credits/day)", 0, 10000, 0,
+                                          step=10, key="plan_extra",
+                                          help="Hypothetical new workload (e.g. a planned XL "
+                                               "warehouse). Reprojects every scenario and the "
+                                               "exhaustion date.")
+        daily_usd_adj = daily_usd + float(extra_credits) * rate_now
+        rows = contract_planner.plan_scenarios(daily_usd_adj, term_months, buffer_pct, remaining_usd)
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
                      column_config={
                          "TERM_CONSUMPTION_USD": st.column_config.NumberColumn("Term consumption", format="$%.0f"),
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
                          "DAILY_BURN_USD": st.column_config.NumberColumn("Daily burn", format="$%.2f"),
                      })
-        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${rate_now}/credit. "
+        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${rate_now}/credit"
+                   + (f" + ${float(extra_credits) * rate_now:,.0f}/day hypothetical load"
+                      if extra_credits else "") + ". "
                    "Exhaustion applies to the current contract's remaining "
                    f"{contract_credits - consumed:,.0f} credits.")
 

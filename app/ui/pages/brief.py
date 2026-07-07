@@ -61,6 +61,13 @@ def render() -> None:
     if spend.ok and not spend.empty:
         charts.sparkline_row([("Spend, 14 days", spend.df, "DAY", "CREDITS_BILLED")])
 
+    digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
+                 source="DAILY_DIGEST (Cortex, grounded)")
+    if digest.usable():
+        drow = digest.df.iloc[0]
+        with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=True):
+            st.markdown(str(drow.get("BODY") or ""))
+
     st.markdown("**Fires**")
     events = run(mart_sql.open_alert_events(50), page=_PAGE, key="brief_events", tier="live",
                  source="ALERT_EVENTS")
