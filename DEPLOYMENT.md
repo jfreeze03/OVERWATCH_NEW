@@ -83,7 +83,28 @@ A local run uses one shared connection/role for every browser tab. Do not
 expose a local/Community-Cloud deployment to mixed audiences — that model has
 no per-user access control. This is a dev path only.
 
-## 5. Release checklist
+## 5. Teardown / drop-and-restore
+
+`snowflake/teardown.sql` drops OVERWATCH's objects for a clean rebuild. It is
+surgical by design — the schema is shared with the old app, so it never drops
+`DBA_MAINT_DB.OVERWATCH` itself, only named objects:
+
+- **Section A (live):** tasks, alerts, procs, functions, views, transient
+  facts/marts. Safe anytime — re-run V001..V005 and the loaders repopulate.
+- **Section B (commented):** operator data — settings, company scope, alert
+  config/events/audit, action queue, savings ledger, error log,
+  schema_version. Uncomment only for a factory reset, and run the provided
+  `CLONE` backups first. `UNDROP TABLE ...` also works within Time Travel.
+- **Section C (commented):** warehouse, resource monitor, Streamlit app
+  object, roles — shared infrastructure, dropped only deliberately.
+
+The verify query at the bottom lists any surviving OVERWATCH objects. A unit
+test (`tests/test_teardown_coverage.py`) fails CI if a migration creates an
+object the teardown does not cover, or if a destructive drop ever goes live.
+
+Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
+
+## 6. Release checklist
 
 1. `ruff check .` and `pytest -q` green (CI enforces).
 2. New migration file if schema changed (never edit an applied `V00x` file).

@@ -70,3 +70,14 @@ def test_company_scope_seed_matches_code():
     assert re.search(r"'Trexis'\s*,\s*'USER_PREFIX'\s*,\s*'TRXS_'", sql), "seed missing user prefix rule"
     for user, company in co.USER_COMPANY_OVERRIDES.items():
         assert re.search(rf"'{company}'\s*,\s*'USER_OVERRIDE'\s*,\s*'{user}'", sql), f"seed missing override {user}"
+
+
+def test_alfa_is_the_default_company_on_open():
+    """Owner requirement 2026-07: the app must open scoped to ALFA.
+
+    app/core/state.py seeds flt_company from DEFAULT_COMPANY and resets any
+    invalid persisted value back to it, and the sidebar selectbox is bound to
+    that state key — so this constant IS the open-the-app default.
+    """
+    assert co.DEFAULT_COMPANY == "ALFA"
+    assert co.COMPANIES[0] == "ALFA"
