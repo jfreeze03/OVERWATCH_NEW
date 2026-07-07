@@ -56,4 +56,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.schema_version", mart_sql.schema_version),
     ("mart.app_error_log", lambda: mart_sql.app_error_log(1)),
     ("mart.app_self_cost", lambda: mart_sql.app_self_cost(1)),
+    ("mart.latest_digest", mart_sql.latest_digest),
+    ("mart.savings_verification_runs", mart_sql.savings_verification_runs),
+    ("mart.alert_mttr.canary", lambda: mart_sql.alert_mttr(2)),
 )

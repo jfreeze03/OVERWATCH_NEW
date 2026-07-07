@@ -26,6 +26,7 @@ from app.ui.components import guard, kpi_row, load_settings, page_header, result
 _PAGE = "Admin"
 _EXPECTED_MIGRATIONS = {
     1: "core", 2: "facts", 3: "marts", 4: "alerts", 5: "actions", 6: "pipeline sla",
+    7: "automation",
 }
 
 

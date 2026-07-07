@@ -26,6 +26,7 @@ def _created_objects() -> set[str]:
     created: set[str] = set()
     sources = sorted((SNOWFLAKE_DIR / "migrations").glob("V0*.sql"))
     sources.append(SNOWFLAKE_DIR / "native_alert_templates.sql")
+    sources.append(SNOWFLAKE_DIR / "webhook_delivery.sql")
     for path in sources:
         text = path.read_text(encoding="utf-8")
         # strip comment lines so commented examples don't count as created

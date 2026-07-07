@@ -151,8 +151,13 @@ def render() -> None:
             "when nobody has the app open. Templates ship in the repo and stay suspended until "
             "the notification integration and recipients are approved."
         )
-        template_path = Path(__file__).resolve().parents[3] / "snowflake" / "native_alert_templates.sql"
-        try:
-            st.code(template_path.read_text(encoding="utf-8"), language="sql")
-        except OSError:
-            st.info("Template file not found in this deployment; see snowflake/native_alert_templates.sql in the repo.")
+        for filename, blurb in (
+            ("native_alert_templates.sql", "Email via Snowflake ALERT objects"),
+            ("webhook_delivery.sql", "Slack / Teams webhook via SYSTEM$SEND_SNOWFLAKE_NOTIFICATION"),
+        ):
+            st.markdown(f"**{blurb}**")
+            template_path = Path(__file__).resolve().parents[3] / "snowflake" / filename
+            try:
+                st.code(template_path.read_text(encoding="utf-8"), language="sql")
+            except OSError:
+                st.info(f"File not found in this deployment; see snowflake/{filename} in the repo.")

@@ -236,6 +236,16 @@ def render() -> None:
         else:
             st.info("No cost-driver rows for this scope/window.")
 
+    # ---- Daily AI digest ------------------------------------------------------
+    digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
+                 source="DAILY_DIGEST (Cortex, grounded in the exec board)")
+    if digest.usable():
+        row = digest.df.iloc[0]
+        with st.expander(f"Morning AI digest — {row.get('DIGEST_DATE')} ({row.get('MODEL')})",
+                         expanded=False):
+            st.markdown(str(row.get("BODY") or ""))
+            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only.")
+
     # ---- Executive summary download -----------------------------------------
     summary = (
         f"OVERWATCH executive summary — {company}, last {days} days — "

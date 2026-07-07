@@ -447,6 +447,21 @@ def _savings_tab() -> None:
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
 
+    runs = run(mart_sql.savings_verification_runs(), page=_PAGE, key="savings_runs",
+               tier="recent", source="SAVINGS_VERIFICATION_RUNS")
+    if runs.usable():
+        st.markdown("**Auto-verification (monthly re-measurement)**")
+        st.caption(
+            "TASK_VERIFY_SAVINGS re-measures each ESTIMATED auto-suspend item's idle spend and "
+            "proposes a verified amount. Apply it below with the standard proof-gated verify flow."
+        )
+        styled_table(runs.df, height=260,
+                     column_config={
+                         "BASELINE_EST_USD": st.column_config.NumberColumn("Baseline est. $", format="$%.0f"),
+                         "MEASURED_IDLE_USD_30D": st.column_config.NumberColumn("Idle now (30d) $", format="$%.0f"),
+                         "PROPOSED_VERIFIED_USD": st.column_config.NumberColumn("Proposed verified $", format="$%.0f"),
+                     })
+
     with st.expander("Add estimated savings item"):
         desc = st.text_input("Description", key="ledger_desc", max_chars=400)
         est = st.number_input("Estimated USD", min_value=0.0, step=50.0, key="ledger_est")
