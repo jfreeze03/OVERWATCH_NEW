@@ -30,60 +30,93 @@ def _cap(value: float, cap: float) -> float:
     return min(max(value, 0.0), cap)
 
 
-def platform_score(signals: dict) -> PlatformScore:
+# Per-unit penalty weights. UNCALIBRATED STARTING POINTS — tune them against
+# your incident history via SETTINGS (SCORE_PTS_*); caps stay fixed so no
+# single driver can dominate the score.
+DEFAULT_WEIGHTS = {
+    "SCORE_PTS_BUDGET_PER_PCT": 0.5,
+    "SCORE_PTS_PER_CRITICAL": 6.0,
+    "SCORE_PTS_PER_HIGH": 2.0,
+    "SCORE_PTS_QUERY_FAIL_PER_PCT": 1.5,
+    "SCORE_PTS_TASK_FAIL_PER_PCT": 2.0,
+    "SCORE_PTS_QUEUE_PER_MIN": 0.3,
+    "SCORE_PTS_SPILL_PER_GB": 0.5,
+    "SCORE_PTS_PER_STALE_SOURCE": 4.0,
+    "SCORE_PTS_PER_OPEN_ACTION": 1.5,
+}
+
+
+def resolve_weights(settings: dict | None) -> dict:
+    """Merge SETTINGS overrides onto the defaults (bad values fall back)."""
+    weights = dict(DEFAULT_WEIGHTS)
+    for key, default in DEFAULT_WEIGHTS.items():
+        raw = (settings or {}).get(key)
+        value = safe_float(raw, -1.0)
+        if value >= 0:
+            weights[key] = value
+        else:
+            weights[key] = default
+    return weights
+
+
+def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
     """Score 0-100 from a signals dict. Missing signals simply add no penalty.
 
     Expected keys (all optional):
       budget_pct, critical_alerts, high_alerts, query_fail_pct, task_fail_pct,
       queue_minutes, spill_gb, stale_sources, open_high_actions
+    Weights come from resolve_weights(settings) so executives can ask "why is
+    a critical worth N points?" and get "because we set it" — not magic.
     """
+    w = dict(DEFAULT_WEIGHTS)
+    w.update(weights or {})
     drivers: list[ScoreDriver] = []
 
     budget_pct = safe_float(signals.get("budget_pct"))
     if budget_pct > 100:
-        penalty = _cap((budget_pct - 100) * 0.5, 20)
+        penalty = _cap((budget_pct - 100) * w["SCORE_PTS_BUDGET_PER_PCT"], 20)
         drivers.append(ScoreDriver("Over budget", penalty, f"Spend at {budget_pct:.0f}% of monthly budget."))
 
     critical = safe_float(signals.get("critical_alerts"))
     if critical > 0:
-        drivers.append(ScoreDriver("Critical alerts", _cap(critical * 6, 24), f"{critical:.0f} open critical alerts."))
+        drivers.append(ScoreDriver("Critical alerts", _cap(critical * w["SCORE_PTS_PER_CRITICAL"], 24), f"{critical:.0f} open critical alerts."))
 
     high = safe_float(signals.get("high_alerts"))
     if high > 0:
-        drivers.append(ScoreDriver("High alerts", _cap(high * 2, 10), f"{high:.0f} open high alerts."))
+        drivers.append(ScoreDriver("High alerts", _cap(high * w["SCORE_PTS_PER_HIGH"], 10), f"{high:.0f} open high alerts."))
 
     query_fail = safe_float(signals.get("query_fail_pct"))
     if query_fail > 2:
         drivers.append(
-            ScoreDriver("Query failures", _cap((query_fail - 2) * 1.5, 12), f"{query_fail:.1f}% of queries failed.")
+            ScoreDriver("Query failures", _cap((query_fail - 2) * w["SCORE_PTS_QUERY_FAIL_PER_PCT"], 12), f"{query_fail:.1f}% of queries failed.")
         )
 
     task_fail = safe_float(signals.get("task_fail_pct"))
     if task_fail > 1:
         drivers.append(
-            ScoreDriver("Task failures", _cap((task_fail - 1) * 2, 14), f"{task_fail:.1f}% of task runs failed.")
+            ScoreDriver("Task failures", _cap((task_fail - 1) * w["SCORE_PTS_TASK_FAIL_PER_PCT"], 14), f"{task_fail:.1f}% of task runs failed.")
         )
 
     queue_minutes = safe_float(signals.get("queue_minutes"))
     if queue_minutes > 10:
         drivers.append(
-            ScoreDriver("Queueing", _cap((queue_minutes - 10) * 0.3, 10), f"{queue_minutes:.0f} queued minutes in window.")
+            ScoreDriver("Queueing", _cap((queue_minutes - 10) * w["SCORE_PTS_QUEUE_PER_MIN"], 10), f"{queue_minutes:.0f} queued minutes in window.")
         )
 
     spill_gb = safe_float(signals.get("spill_gb"))
     if spill_gb > 5:
         drivers.append(
-            ScoreDriver("Remote spill", _cap((spill_gb - 5) * 0.5, 8), f"{spill_gb:.1f} GB spilled to remote storage.")
+            ScoreDriver("Remote spill", _cap((spill_gb - 5) * w["SCORE_PTS_SPILL_PER_GB"], 8), f"{spill_gb:.1f} GB spilled to remote storage.")
         )
 
     stale = safe_float(signals.get("stale_sources"))
     if stale > 0:
-        drivers.append(ScoreDriver("Stale telemetry", _cap(stale * 4, 12), f"{stale:.0f} fact sources stale."))
+        drivers.append(ScoreDriver("Stale telemetry", _cap(stale * w["SCORE_PTS_PER_STALE_SOURCE"], 12), f"{stale:.0f} fact sources stale."))
 
     open_high_actions = safe_float(signals.get("open_high_actions"))
     if open_high_actions > 0:
         drivers.append(
-            ScoreDriver("Owner queue", _cap(open_high_actions * 1.5, 9), f"{open_high_actions:.0f} open high-severity actions.")
+            ScoreDriver("Owner queue", _cap(open_high_actions * w["SCORE_PTS_PER_OPEN_ACTION"], 9), f"{open_high_actions:.0f} open high-severity actions.")
         )
 
     total_penalty = sum(d.penalty for d in drivers)

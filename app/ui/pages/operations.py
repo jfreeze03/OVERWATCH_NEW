@@ -251,11 +251,11 @@ def _release_compare_tab(company: str) -> None:
 
 
 def _pipeline_sla_tab(is_operator: bool) -> None:
-    """Metadata-driven table freshness SLAs (ported; config lives in V006)."""
+    """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG)."""
     res = run(insights_sql.pipeline_sla_status(), page=_PAGE, key="sla_status", tier="live",
               source="PIPELINE_SLA_STATUS")
     if not res.ok:
-        st.info("Pipeline SLA objects not deployed yet — run migration V006.")
+        st.info("Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
         return
     if res.empty:
         st.info("No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
@@ -307,7 +307,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         st.success("No failed or partial file loads in the last 7 days.")
     elif guard(cpf, ""):
         styled_table(cpf.df, height=240)
-        st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour (V011); "
+        st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour; "
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
 
@@ -382,7 +382,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 def _warehouses_tab(company: str, rate: float) -> None:
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="recent", source="FACT_WAREHOUSE_DAILY")
-    if not guard(res, "No warehouse dailies yet — V002 facts load them hourly.",
+    if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
                  setup_hint="Live equivalent lives on Cost & Contract > Attribution."):
         return
     df = res.df.copy()
@@ -454,7 +454,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             "(TASK_CHANGE_IMPACT_SCAN) registers changes within a day of the ALTER / "
             "CREATE OR REPLACE, then tracks each one for 14 days."
         )
-    elif guard(res, "", setup_hint="Run migration V010, then let the daily scan populate the registry."):
+    elif guard(res, "", setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. The daily scan then populates this within a day."):
         df = res.df.copy()
         verdicts = df["VERDICT"].astype(str).str.upper()
         kpi_row([

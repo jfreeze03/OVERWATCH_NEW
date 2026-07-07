@@ -110,9 +110,15 @@ def like_any(column: str, patterns: list[str] | tuple[str, ...]) -> str:
 
 
 def contains_filter(column: str, raw_value: object) -> str:
-    """Case-insensitive contains clause from sanitized UI text; '' when off."""
+    """Case-insensitive contains clause from sanitized UI text; '' when off.
+
+    LIKE metacharacters in the user's text are escaped so 'WH_' matches the
+    literal underscore rather than any character ('~' escape avoids
+    backslash-in-string-literal semantics entirely).
+    """
     text = clean_filter_text(raw_value)
     if not text:
         return ""
     column = safe_identifier(column, allow_qualified=True)
-    return f"{column} ILIKE {sql_literal('%' + text + '%', 300)}"
+    escaped = text.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+    return f"{column} ILIKE {sql_literal('%' + escaped + '%', 300)} ESCAPE '~'"

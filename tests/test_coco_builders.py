@@ -22,7 +22,7 @@ def test_poor_pruning_builder_scoped():
     assert "PARTITIONS_TOTAL >= 100" in sql
     assert "> 0.8" in sql
     assert "UPPER(DATABASE_NAME) IN ('ALFA_DW')" in sql
-    assert "SCHEMA_NAME ILIKE '%CLAIMS%'" in sql
+    assert "SCHEMA_NAME ILIKE '%CLAIMS%' ESCAPE '~'" in sql
 
 
 def test_result_cache_builder():

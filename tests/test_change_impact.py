@@ -15,7 +15,7 @@ def test_registry_reader_bounded_and_scoped():
     assert "DATEADD('day', -120" in sql          # clamped
     assert "COMPANY = 'Trexis'" in sql
     assert "UPPER(DATABASE_NAME) IN ('TRXS_DW')" in sql  # exact database filter
-    assert "SCHEMA_NAME ILIKE '%STAGING%'" in sql
+    assert "SCHEMA_NAME ILIKE '%STAGING%' ESCAPE '~'" in sql
     assert "OBJECT_CHANGE_REGISTRY" in sql and "LIMIT 200" in sql
 
 

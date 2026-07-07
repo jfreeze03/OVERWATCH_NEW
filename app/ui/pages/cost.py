@@ -170,7 +170,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         else:
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:
-        st.caption("Anomaly check needs FACT_WAREHOUSE_DAILY (V002) — 30 days of per-warehouse dailies.")
+        st.caption("Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
 
 
 def _contract_tab(settings: dict) -> None:
@@ -665,7 +665,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                    key=f"cb_dept_{company}_{days}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
     if not guard(dept_res, "No warehouse credits in this window.",
-                 setup_hint="Department mapping comes from migration V008 (DEPARTMENT_MAP)."):
+                 setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. Seed department names in DEPARTMENT_MAP."):
         return
     df = dept_res.df.copy()
     df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
@@ -794,7 +794,7 @@ def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
-        st.info("Savings ledger not deployed yet (migration V005).")
+        st.info("Savings ledger is not installed yet — an admin can verify on Admin → Migrations & freshness.")
         return
     totals = ledger_totals(res.df)
     kpi_row([

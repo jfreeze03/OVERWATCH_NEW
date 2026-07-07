@@ -193,7 +193,19 @@ def _apply_default_landing() -> None:
         consume_pending_navigation()  # pre-widget: applies immediately, no rerun
 
 
-_STRIP_DOTS = {"OK": "🟢", "WARN": "🟡", "BAD": "🔴", "INFO": "🔵", "MUTED": "⚪"}
+_STRIP_COLORS = {"OK": "#22c55e", "WARN": "#f59e0b", "BAD": "#ef4444",
+                 "INFO": "#38bdf8", "MUTED": "#94a3b8"}
+
+
+def _strip_line(state: str, text: str) -> None:
+    color = _STRIP_COLORS.get(state, _STRIP_COLORS["MUTED"])
+    st.markdown(
+        f'<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">'
+        f'<span style="width:9px;height:9px;border-radius:50%;background:{color};'
+        f'display:inline-block;flex:none;" role="img" aria-label="{state}"></span>'
+        f'<span style="font-size:0.8rem;opacity:0.85;">{text}</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _health_strip() -> None:
@@ -206,16 +218,17 @@ def _health_strip() -> None:
     vals = {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
     crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
     if crit_state == "BAD":
-        if st.button(f"🔴 {crit} open critical(s) →", key="strip_crit", use_container_width=True):
+        if st.button(f"{crit} open critical(s) →", key="strip_crit", use_container_width=True,
+                     type="primary"):
             request_navigation("Alerts", "Open events")
     else:
-        st.caption("🟢 No open criticals")
+        _strip_line("OK", "No open criticals")
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     if stale != "-1":
-        st.caption(f"{_STRIP_DOTS.get(stale_state, '⚪')} Stalest telemetry: {stale}h")
+        _strip_line(stale_state, f"Stalest telemetry: {stale}h")
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     if mtd:
-        st.caption(f"🔵 MTD: {float(mtd):,.0f} credits")
+        _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
 
 
 def _topbar_scope() -> None:

@@ -77,7 +77,7 @@ def _access_tab(company: str, days: int) -> None:
              "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
         ])
         styled_table(cdf, height=280)
-        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated (V009).")
+        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated.")
         result_caption(creds)
 
     st.markdown("**Dormant users still holding access (90d+)**")
@@ -213,7 +213,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
         st.dataframe(bga.df, hide_index=True, use_container_width=True)
-        st.caption("SEC_BREAK_GLASS_USE alerts when a user exceeds the daily threshold (V011). "
+        st.caption("SEC_BREAK_GLASS_USE alerts when a user exceeds the daily threshold. "
                    "Routine work belongs on SNOW_SYSADMINS.")
         result_caption(bga)
 

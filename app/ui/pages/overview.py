@@ -23,7 +23,7 @@ from app.data import cost_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import month_end_projection
-from app.logic.formulas import format_usd, month_days, safe_float
+from app.logic.formulas import exec_summary_html, format_usd, month_days, safe_float
 from app.ui import charts
 from app.ui.components import (
     budget_kpi,
@@ -138,7 +138,7 @@ def render() -> None:
     task_fail_pct = (task_failures / task_runs * 100) if task_runs else 0.0
 
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
-    score = scoring.platform_score({
+    score = scoring.platform_score(signals={
         "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts,
@@ -146,7 +146,7 @@ def render() -> None:
         "task_fail_pct": task_fail_pct,
         "queue_minutes": queued_minutes,
         "spill_gb": spill_gb,
-    })
+    }, weights=scoring.resolve_weights(settings))
 
     # ---- KPI row -----------------------------------------------------------
     kpis = [
@@ -159,7 +159,7 @@ def render() -> None:
         budget_kpi(settings, mtd_spend) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
-            "help": "Run migration V002 so FACT_METERING_DAILY exists (billed credits incl. cloud-services adjustment).",
+            "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",
         },
         {
             "label": "Projected month-end",
@@ -170,7 +170,7 @@ def render() -> None:
         {
             "label": "Open critical / high alerts",
             "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Setup",
-            "help": "From ALERT_EVENTS (V004). Alerts page has the queue." if alerts_res.ok
+            "help": "The Alerts page has the full queue." if alerts_res.ok
                     else f"Alert tables unreachable: {alerts_res.error}",
         },
         {
@@ -190,7 +190,7 @@ def render() -> None:
             st.error(f"Spend history unavailable: {trend_source.error}")
         else:
             st.info(
-                "No spend history loaded yet for this scope. After V002/V003 run, the hourly "
+                "No spend history loaded yet for this scope. Once installed, the hourly "
                 "task fills this in; the chart stays empty rather than showing invented numbers."
             )
     else:
@@ -206,6 +206,7 @@ def render() -> None:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
 
     # ---- Two-column: actions + cost drivers ---------------------------------
+    action_lines: list[str] = []
     left, right = st.columns([1.15, 1.0])
 
     with left:
@@ -213,7 +214,7 @@ def render() -> None:
         actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
                           tier="live", source="ACTION_QUEUE")
         if not actions_res.ok:
-            st.info("Action queue not deployed yet (migration V005). No placeholder rows are shown.")
+            st.info("Action queue is not installed yet. No placeholder rows are shown.")
         elif actions_res.empty:
             st.success("Action queue is empty — nothing is waiting on an owner.")
         else:
@@ -223,6 +224,10 @@ def render() -> None:
             else:
                 styled_table(ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]])
                 result_caption(actions_res)
+                action_lines = [
+                    f"[{a['SEVERITY']}] {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"
+                    for _, a in ranked.iterrows()
+                ]
 
     with right:
         st.subheader("Top cost drivers")
@@ -232,7 +237,7 @@ def render() -> None:
                     .sort_values("VALUE_USD", ascending=False))
             charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
         elif not using_mart and not daily.empty:
-            st.caption("Driver ranking needs the exec board mart (V003).")
+            st.caption("Driver ranking appears once the exec board mart is installed.")
         else:
             st.info("No cost-driver rows for this scope/window.")
 
@@ -259,4 +264,23 @@ def render() -> None:
         f"Platform score: {score.score}/100 ({score.state})"
         + ("".join(f"\n  - {d.driver}: -{d.penalty:.1f} pts ({d.evidence})" for d in score.drivers) if score.drivers else "")
     )
-    download_text_button("Download executive summary (.txt)", summary, "overwatch_executive_summary.txt")
+    html = exec_summary_html(
+        company=company, days=days, generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        window_spend=format_usd(window_spend),
+        mtd_line=(format_usd(mtd_spend) if mtd_source else "n/a")
+                 + (f" vs {format_usd(budget)} budget" if budget > 0 else ""),
+        forecast_line=(format_usd(forecast.projected_usd)
+                       + f" ({format_usd(forecast.low_usd)}–{format_usd(forecast.high_usd)})")
+                      if forecast.ok else "insufficient history",
+        alerts_line=f"{critical_alerts} critical · {high_alerts} high",
+        score_line=f"{score.score}/100 ({score.state})",
+        drivers=[(d.driver, f"{d.penalty:.1f}", d.evidence) for d in score.drivers],
+        actions=action_lines,
+    )
+    c_html, c_txt = st.columns(2)
+    with c_html:
+        st.download_button("Download executive summary (HTML)", html,
+                           file_name="overwatch_executive_summary.html", mime="text/html",
+                           use_container_width=True)
+    with c_txt:
+        download_text_button("Plain-text version (.txt)", summary, "overwatch_executive_summary.txt")

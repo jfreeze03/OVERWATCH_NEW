@@ -110,7 +110,7 @@ def test_free_text_filters_are_sanitized_into_builders():
     hostile = ops_sql.top_queries_by_elapsed(7, "ALL", warehouse_contains="x'; DROP TABLE q;--")
     assert "DROP" not in hostile.upper().replace("BYTES_SPILLED_TO_REMOTE_STORAGE", "")
     clean = ops_sql.top_queries_by_elapsed(7, "ALL", warehouse_contains="TRXS")
-    assert "ILIKE '%TRXS%'" in clean
+    assert "ILIKE '%TRXS%' ESCAPE '~'" in clean
 
 
 def test_mart_readers_target_overwatch_objects():
@@ -126,10 +126,10 @@ def test_database_and_schema_filters_flow_into_builders():
 
     sql = ops_sql.query_window_summary(7, "ALFA", database="ALFA_EDW_SIT", schema_contains="CLAIMS")
     assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_SIT')" in sql
-    assert "SCHEMA_NAME ILIKE '%CLAIMS%'" in sql
+    assert "SCHEMA_NAME ILIKE '%CLAIMS%' ESCAPE '~'" in sql
 
     sql = ops_sql.task_runs(7, "ALFA", database="ALFA_EDW_PROD", schema_contains="DW")
-    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_PROD')" in sql and "SCHEMA_NAME ILIKE '%DW%'" in sql
+    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_PROD')" in sql and "SCHEMA_NAME ILIKE '%DW%' ESCAPE '~'" in sql
 
     sql = cost_sql.allocated_attribution(7, "USER_NAME", "ALFA", database="ADMIN", schema_contains="X")
     assert "UPPER(DATABASE_NAME) IN ('ADMIN')" in sql

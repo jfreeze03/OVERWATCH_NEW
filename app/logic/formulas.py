@@ -104,3 +104,53 @@ def format_credits(credits: float) -> str:
     if abs(value) >= 1:
         return f"{value:,.2f}"
     return f"{value:,.4f}"
+
+
+def exec_summary_html(*, company: str, days: int, generated: str, window_spend: str,
+                      mtd_line: str, forecast_line: str, alerts_line: str,
+                      score_line: str, drivers: list[tuple[str, str, str]],
+                      actions: list[str]) -> str:
+    """Styled, self-contained HTML executive summary (the .txt looked amateur).
+
+    Pure string builder — inputs arrive pre-formatted so this stays testable
+    and the page keeps owning data honesty.
+    """
+    driver_rows = "".join(
+        f"<tr><td>{d}</td><td style='text-align:right'>-{p}</td><td>{e}</td></tr>"
+        for d, p, e in drivers
+    ) or "<tr><td colspan='3'>No deductions — clean window.</td></tr>"
+    action_items = "".join(f"<li>{a}</li>" for a in actions) or "<li>No open actions.</li>"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>OVERWATCH executive summary</title>
+<style>
+ body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #0f172a; margin: 32px; }}
+ .kicker {{ letter-spacing: .18em; font-size: 11px; color: #64748b; text-transform: uppercase; }}
+ h1 {{ margin: 4px 0 2px 0; font-size: 22px; }}
+ .meta {{ color: #64748b; font-size: 12px; margin-bottom: 18px; }}
+ .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }}
+ .card {{ border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 16px; min-width: 170px; }}
+ .card .label {{ font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }}
+ .card .value {{ font-size: 17px; font-weight: 600; margin-top: 3px; }}
+ table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
+ th, td {{ border-bottom: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }}
+ th {{ color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }}
+ h2 {{ font-size: 14px; margin: 22px 0 8px 0; }}
+ .foot {{ margin-top: 26px; color: #94a3b8; font-size: 11px; }}
+</style></head><body>
+<div class="kicker">OVERWATCH</div>
+<h1>Executive summary — {company}</h1>
+<div class="meta">Last {days} days · generated {generated}</div>
+<div class="cards">
+ <div class="card"><div class="label">Window spend</div><div class="value">{window_spend}</div></div>
+ <div class="card"><div class="label">Month to date</div><div class="value">{mtd_line}</div></div>
+ <div class="card"><div class="label">Projected month-end</div><div class="value">{forecast_line}</div></div>
+ <div class="card"><div class="label">Open alerts</div><div class="value">{alerts_line}</div></div>
+ <div class="card"><div class="label">Platform score</div><div class="value">{score_line}</div></div>
+</div>
+<h2>Score deductions</h2>
+<table><tr><th>Driver</th><th>Points</th><th>Evidence</th></tr>{driver_rows}</table>
+<h2>Top actions</h2>
+<ul>{action_items}</ul>
+<div class="foot">Numbers come from ACCOUNT_USAGE-derived facts with the cloud-services
+adjustment applied; telemetry lags up to ~45 min (metering daily up to 24h).</div>
+</body></html>"""

@@ -27,7 +27,7 @@ def _freshness_board() -> None:
               source="MART_SOURCE_FRESHNESS")
     st.subheader("Telemetry freshness")
     if not res.ok:
-        st.info("Freshness view not deployed (V003). Live fallbacks below still work.")
+        st.info("Freshness board is not installed yet; the live fallbacks below still work.")
         return
     if res.empty:
         st.info("Freshness view exists but has no rows — have the loader tasks run yet?")
@@ -115,8 +115,8 @@ def render() -> None:
             st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
         else:
             st.info("Triage inputs incomplete: "
-                    + ("alert tables missing (V004); " if not alerts.ok else "")
-                    + ("task facts missing (V002)." if not tasks.ok else ""))
+                    + ("alert tables not installed; " if not alerts.ok else "")
+                    + ("task facts not installed." if not tasks.ok else ""))
     else:
         styled_table(queue)
         st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies.")

@@ -34,7 +34,7 @@ from app.ui.components import (
 )
 
 _PAGE = "Alerts"
-_SETUP_HINT = "Alert tables come from migration V004; the hourly scan task populates events."
+_SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin → Migrations & freshness."
 
 
 def _lifecycle_sql(event_id: str, action: str, note: str) -> str:
@@ -225,15 +225,15 @@ def render() -> None:
     else:
         st.markdown("**Routing (family → channel)**")
         panel_help(
-            "ALERT_ROUTES (V012) sends each family/severity through a named notification "
+            "Routing sends each family/severity through a named notification "
             "integration — COST to #finops, SECURITY to #security. The seeded ALL/HIGH "
             "route keeps the original single-webhook behavior until you add rows. One "
             "failing integration never blocks the others."
         )
         routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="live",
                      source="ALERT_ROUTES")
-        if guard(routes, "No routes — run V012 to seed the default.",
-                 setup_hint="V012 creates ALERT_ROUTES with a default OVERWATCH_WEBHOOK route."):
+        if guard(routes, "No routes configured yet.",
+                 setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness."):
             st.dataframe(routes.df, hide_index=True, use_container_width=True)
             st.code(
                 "-- add a route (operator): send all PIPELINE alerts of MEDIUM+ to #dataeng\n"

@@ -41,6 +41,17 @@ DEFAULT_SETTINGS = {
     "MONTHLY_BUDGET_USD": 0.0,       # 0 = not configured; UI must not invent one
     "AI_MONTHLY_BUDGET_USD": 0.0,    # 0 = not configured; gates Cortex user severities
     "CORTEX_MODEL": "llama3.1-8b",   # model for in-app AI evaluations (Admin-editable)
+    # Platform-score weights (per-unit penalties; caps fixed in scoring.py).
+    # Uncalibrated starting points - tune against incident history.
+    "SCORE_PTS_BUDGET_PER_PCT": "0.5",
+    "SCORE_PTS_PER_CRITICAL": "6",
+    "SCORE_PTS_PER_HIGH": "2",
+    "SCORE_PTS_QUERY_FAIL_PER_PCT": "1.5",
+    "SCORE_PTS_TASK_FAIL_PER_PCT": "2",
+    "SCORE_PTS_QUEUE_PER_MIN": "0.3",
+    "SCORE_PTS_SPILL_PER_GB": "0.5",
+    "SCORE_PTS_PER_STALE_SOURCE": "4",
+    "SCORE_PTS_PER_OPEN_ACTION": "1.5",
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",
     "CONTRACT_END_DATE": "",

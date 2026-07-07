@@ -37,8 +37,8 @@ def test_fact_query_summary_matches_live_aliases():
         assert alias in fact and alias in live, alias
     assert "FACT_QUERY_HOURLY" in fact
     assert "COMPANY = 'ALFA'" in fact
-    assert "WAREHOUSE_NAME ILIKE '%WH_%'" in fact
-    assert "USER_NAME ILIKE '%KEB%'" in fact
+    assert "WAREHOUSE_NAME ILIKE '%WH~_%' ESCAPE '~'" in fact   # _ matched literally
+    assert "USER_NAME ILIKE '%KEB%' ESCAPE '~'" in fact
     assert "UPPER(DATABASE_NAME) IN ('ALFA_DW')" in fact
     assert "DATEADD('day', -30" in fact
 

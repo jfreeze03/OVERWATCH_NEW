@@ -49,7 +49,7 @@ def test_clean_filter_text_degrades_to_off():
 
 def test_contains_filter_wraps_wildcards():
     clause = contains_filter("USER_NAME", "kebarr")
-    assert clause == "USER_NAME ILIKE '%kebarr%'"
+    assert clause == "USER_NAME ILIKE '%kebarr%' ESCAPE '~'"
     assert contains_filter("USER_NAME", "x; DROP") == ""
 
 
