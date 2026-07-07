@@ -25,6 +25,7 @@ from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_sum
 from app.logic.forecast import contract_pace
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
+from app.logic.sizing import size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption, styled_table
@@ -252,6 +253,41 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             page=_PAGE,
             subject="evaluate idle warehouse spend",
         )
+
+    st.divider()
+    # ---- Right-sizing simulator ------------------------------------------------
+    st.markdown("**Warehouse right-sizing simulator**")
+    st.caption(
+        "Mechanical scenario model: one Snowflake size step halves or doubles the credit rate. "
+        "Runtime effects depend on the workload - the rationale says why; you decide."
+    )
+    prof_res = run(insights_sql.warehouse_sizing_profile(days, company), page=_PAGE,
+                   key=f"sizing_{company}_{days}", tier="historical",
+                   source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (profile)")
+    if guard(prof_res, "No warehouse activity to profile in this window."):
+        sized = size_recommendations(prof_res.df, rate, days)
+        summary = sizing_summary(sized)
+        kpi_row([
+            {"label": "Size up / add cluster", "value": f"{summary['up']}",
+             "delta_color": "inverse" if summary["up"] else "off",
+             "help": "Sustained queueing or remote spill in the window."},
+            {"label": "Size-down candidates", "value": f"{summary['down']}"},
+            {"label": "Tune auto-suspend first", "value": f"{summary['suspend']}"},
+            {"label": "Potential saving (down)", "value": format_usd(summary["potential_saving_usd"]),
+             "help": "Half-rate scenario on down candidates only. Model, not a promise."},
+        ])
+        styled_table(
+            sized[["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
+                    "MONTHLY_USD_NOW", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
+                    "QUEUED_MIN_PER_DAY", "SPILL_REMOTE_GB", "P95_ELAPSED_SEC", "IDLE_PCT"]],
+            column_config={
+                "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
+                "SCENARIO_DOWN_USD": st.column_config.NumberColumn("x0.5 $/mo", format="$%.0f"),
+                "SCENARIO_UP_USD": st.column_config.NumberColumn("x2 $/mo", format="$%.0f"),
+                "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+            },
+        )
+        result_caption(prof_res)
 
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------

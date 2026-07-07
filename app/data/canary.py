@@ -36,6 +36,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("insights.release_task_compare", lambda: insights_sql.release_task_compare("2026-01-01", 1)),
     ("insights.task_failure_details", lambda: insights_sql.task_failure_details(1, "ALFA")),
     ("insights.dormant_users", lambda: insights_sql.dormant_users(30, "ALFA")),
+    ("insights.warehouse_sizing_profile", lambda: insights_sql.warehouse_sizing_profile(1, "ALFA")),
     ("insights.pipeline_sla_status", insights_sql.pipeline_sla_status),
     ("insights.pipeline_sla_config", insights_sql.pipeline_sla_config),
     ("cortex.code_user_rollup", lambda: cortex_sql.cortex_code_user_rollup(1, "ALFA")),

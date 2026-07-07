@@ -228,6 +228,97 @@ LIMIT 500
 
 
 # ---------------------------------------------------------------------------
+# Warehouse sizing profile (credits + load stats + idle share per warehouse)
+# ---------------------------------------------------------------------------
+
+def warehouse_sizing_profile(days: int, company: str = "ALL") -> str:
+    days = bounded_days(days)
+    where_m = and_where(
+        f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+    )
+    return f"""
+WITH query_stats AS (
+    SELECT
+        WAREHOUSE_NAME,
+        COUNT(*) AS QUERY_COUNT,
+        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+        SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+    GROUP BY WAREHOUSE_NAME
+),
+query_hours AS (
+    SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+)
+SELECT
+    M.WAREHOUSE_NAME,
+    {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
+    SUM(COALESCE(M.CREDITS_USED, 0)) AS CREDITS_TOTAL,
+    ROUND(SUM(IFF(H.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0))
+          / NULLIF(SUM(COALESCE(M.CREDITS_USED, 0)), 0) * 100, 1) AS IDLE_PCT,
+    COALESCE(MAX(Q.QUERY_COUNT), 0) AS QUERY_COUNT,
+    COALESCE(MAX(Q.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
+    COALESCE(MAX(Q.QUEUED_SEC), 0) AS QUEUED_SEC,
+    COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+LEFT JOIN query_hours H
+       ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+      AND H.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
+LEFT JOIN query_stats Q ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+WHERE {where_m}
+GROUP BY 1, 2
+HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
+ORDER BY CREDITS_TOTAL DESC
+LIMIT 100
+"""
+
+
+# ---------------------------------------------------------------------------
+# Query drill-through
+# ---------------------------------------------------------------------------
+
+_QUERY_ID_RE_HINT = "Snowflake query IDs are UUID-like hex strings"
+
+
+def query_detail(query_id: str) -> str:
+    """Full detail for one query; the ID is validated before embedding."""
+    import re as _re
+
+    qid = str(query_id or "").strip()
+    if not _re.match(r"^[0-9a-fA-F-]{16,64}$", qid):
+        raise ValueError(f"Invalid query id ({_QUERY_ID_RE_HINT}): {qid!r}")
+    from app.core.sqlsafe import sql_literal as _lit
+
+    return f"""
+SELECT
+    QUERY_ID, USER_NAME, ROLE_NAME, WAREHOUSE_NAME, WAREHOUSE_SIZE,
+    DATABASE_NAME, SCHEMA_NAME, QUERY_TYPE, EXECUTION_STATUS,
+    ERROR_CODE, ERROR_MESSAGE,
+    START_TIME, END_TIME,
+    TOTAL_ELAPSED_TIME / 1000.0 AS ELAPSED_SEC,
+    COMPILATION_TIME / 1000.0 AS COMPILE_SEC,
+    EXECUTION_TIME / 1000.0 AS EXECUTION_SEC,
+    (COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+    BYTES_SCANNED / POWER(1024, 3) AS GB_SCANNED,
+    PERCENTAGE_SCANNED_FROM_CACHE AS CACHE_PCT,
+    COALESCE(BYTES_SPILLED_TO_LOCAL_STORAGE, 0) / POWER(1024, 3) AS LOCAL_SPILL_GB,
+    COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) / POWER(1024, 3) AS REMOTE_SPILL_GB,
+    ROWS_PRODUCED,
+    PARTITIONS_SCANNED, PARTITIONS_TOTAL,
+    QUERY_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE QUERY_ID = {_lit(qid)}
+LIMIT 1
+"""
+
+
+# ---------------------------------------------------------------------------
 # 6. Pipeline SLA (config in V006; status computed against table freshness)
 # ---------------------------------------------------------------------------
 

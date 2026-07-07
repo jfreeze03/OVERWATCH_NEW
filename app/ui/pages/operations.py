@@ -59,6 +59,56 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         )
         st.caption("Elapsed-time ranking. Per-query dollars are estimates; exact billing is per warehouse.")
 
+    st.markdown("**Query drill-through**")
+    candidate_ids: list[str] = []
+    if top.usable():
+        candidate_ids = [str(q) for q in top.df["QUERY_ID"].dropna().head(50)]
+    if candidate_ids:
+        picked = st.selectbox("Query ID (from the table above, heaviest first)",
+                              candidate_ids, key="ops_drill_pick")
+        manual = st.text_input("...or paste any query ID", key="ops_drill_manual")
+        target = (manual or picked or "").strip()
+        if target and st.button("Load query detail", key="ops_drill_go"):
+            st.session_state["_ops_drill_target"] = target
+        target_id = st.session_state.get("_ops_drill_target", "")
+        if target_id:
+            try:
+                detail_sql = insights_sql.query_detail(target_id)
+            except ValueError as exc:
+                st.error(str(exc))
+                detail_sql = ""
+            if detail_sql:
+                detail = run(detail_sql, page=_PAGE, key=f"drill_{target_id[:16]}",
+                             tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (single query)")
+                if guard(detail, "Query not found (IDs age out of QUERY_HISTORY after 365 days)."):
+                    row = detail.df.iloc[0]
+                    kpi_row([
+                        {"label": "Elapsed", "value": f"{safe_float(row.get('ELAPSED_SEC')):,.1f}s",
+                         "delta": f"queued {safe_float(row.get('QUEUED_SEC')):,.1f}s", "delta_color": "off"},
+                        {"label": "Scanned", "value": f"{safe_float(row.get('GB_SCANNED')):,.2f} GB",
+                         "delta": f"{safe_float(row.get('CACHE_PCT')):,.0f}% cache", "delta_color": "off"},
+                        {"label": "Partitions", "value": (f"{int(safe_float(row.get('PARTITIONS_SCANNED'))):,}"
+                                                          f"/{int(safe_float(row.get('PARTITIONS_TOTAL'))):,}"),
+                         "help": "Scanned vs total - high ratios suggest missing pruning."},
+                        {"label": "Spill", "value": f"{safe_float(row.get('REMOTE_SPILL_GB')):,.2f} GB remote"},
+                        {"label": "Status", "value": str(row.get("EXECUTION_STATUS", "?"))},
+                    ])
+                    st.code(str(row.get("QUERY_TEXT") or ""), language="sql")
+                    ctx = run(
+                        "SELECT CURRENT_ORGANIZATION_NAME() AS ORG, CURRENT_ACCOUNT_NAME() AS ACCT",
+                        page=_PAGE, key="drill_ctx", tier="metadata", source="session context")
+                    if ctx.usable():
+                        org = str(ctx.df.iloc[0].get("ORG", "") or "")
+                        acct = str(ctx.df.iloc[0].get("ACCT", "") or "")
+                        if org and acct:
+                            st.markdown(
+                                f"[Open the query profile in Snowsight]"
+                                f"(https://app.snowflake.com/{org.lower()}/{acct.lower()}"
+                                f"/#/compute/history/queries/{target_id}/profile)")
+                    if str(row.get("ERROR_MESSAGE") or "").strip():
+                        st.error(f"{row.get('ERROR_CODE')}: {row.get('ERROR_MESSAGE')}")
+                    result_caption(detail)
+
     st.markdown("**Failures by error**")
     fails = run(ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
                 key=f"q_fails_{company}_{days}", tier="recent",

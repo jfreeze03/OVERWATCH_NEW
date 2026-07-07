@@ -3,3 +3,7 @@
 pandas~=2.2
 pytest~=8.3
 ruff~=0.9
+# AppTest page-smoke suite (tests/test_pages_apptest.py)
+streamlit~=1.45
+altair~=5.4
+jinja2>=3.1.2
