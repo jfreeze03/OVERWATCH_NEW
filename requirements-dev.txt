@@ -1,0 +1,5 @@
+# CI / local development toolchain.
+# app/logic and app/data are Streamlit-free by design, so tests only need these.
+pandas~=2.2
+pytest~=8.3
+ruff~=0.9

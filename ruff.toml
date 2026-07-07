@@ -1,0 +1,18 @@
+line-length = 110
+target-version = "py311"
+
+[lint]
+# BLE001 (blind except) is the enforcement of panel-review finding H2:
+# the old app accumulated 461 silent `except Exception` sites.
+select = ["E", "F", "W", "I", "B", "BLE", "UP"]
+ignore = [
+  "E501", # long lines allowed in SQL builder strings; line-length still guides
+]
+
+[lint.per-file-ignores]
+# The error boundary and session bootstrap are the two sanctioned places that
+# may catch broad exceptions (they record them; they do not swallow them).
+"app/core/errors.py" = ["BLE001"]
+"app/core/session.py" = ["BLE001"]
+"app/core/query.py" = ["BLE001"]
+"app/core/state.py" = ["BLE001"]
