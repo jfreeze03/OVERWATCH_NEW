@@ -24,6 +24,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    notify,
     page_header,
     panel_help,
     result_caption,
@@ -286,7 +287,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         st.code(insert_sql, language="sql")
         if is_operator and db and schema and table and st.button("Execute insert", key="sla_exec"):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
-            (st.success if ok else st.error)(msg)
+            notify(ok, msg)
         elif not is_operator:
             st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
 
@@ -486,7 +487,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
         if st.button("Run change-impact scan now", key="chg_scan_now",
                      help="Registers fresh changes and re-evaluates verdicts without waiting for the daily task."):
             ok, msg = execute_statement(change_impact_sql.run_scan_call(), page=_PAGE)
-            (st.success if ok else st.error)(msg)
+            notify(ok, msg)
     else:
         st.caption("The scan runs daily at 06:50; OVERWATCH_OPERATOR can also trigger it on demand.")
 

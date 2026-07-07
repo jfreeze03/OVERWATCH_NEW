@@ -48,14 +48,32 @@ def lazy_sections(labels: list[str], key: str) -> str:
     pill radio keeps the navigation but lets the page dispatch a single
     section, so first paint costs one section, not all of them.
     """
+    if key not in st.session_state:
+        try:  # deep link: ?section=<slug> selects the section on first render
+            want = str(st.query_params.get("section") or "")
+            for label in labels:
+                if _section_slug(label) == want:
+                    st.session_state[key] = label
+                    break
+        except Exception:  # noqa: BLE001 - deep links are progressive enhancement
+            pass
     choice = st.radio("Section", labels, key=key, horizontal=True,
                       label_visibility="collapsed")
+    try:
+        st.query_params["section"] = _section_slug(choice)
+    except Exception:  # noqa: BLE001
+        pass
     st.markdown("<hr style='margin: 0.2rem 0 0.9rem 0; opacity: 0.25;'>",
                 unsafe_allow_html=True)
     return str(choice)
 
 
+def _section_slug(label: str) -> str:
+    return str(label).lower().replace("&", "and").replace(" ", "-")
+
+
 def page_header(title: str, subtitle: str, scope_note: str = "") -> None:
+    st.session_state["_ow_dl_seq"] = 0
     st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
     st.title(title)
     caption = subtitle if not scope_note else f"{subtitle} · {scope_note}"
@@ -173,29 +191,97 @@ def budget_kpi(settings: dict, spend_usd: float) -> dict:
     }
 
 
-def styled_table(df, *, height: int | None = None, column_config: dict | None = None) -> None:
-    """st.dataframe with the app's semantic status colors and a height cap.
+_COUNT_SUFFIXES = ("_COUNT", "RUNS", "CALLS", "FAILS", "FAILED", "QUERIES", "EVENTS",
+                   "ATTEMPTS", "FILES", "USERS", "STMTS", "INTERVALS", "REFRESHES",
+                   "FAILURES", "STATEMENTS", "ROWS")
 
-    Status-bearing columns (SEVERITY, STATUS, STATE, SLA_MET, ...) get
-    background tints via pandas Styler; long tables cap at 380px so pages
-    keep their reading rhythm.
-    """
+
+def _auto_formats(df, skip: set) -> dict:
+    """Consistent number display by column-name convention (item: every table
+    shows $ and thousands separators without per-site column_config)."""
+    from pandas.api import types as ptypes
+
+    fmts: dict = {}
+    for col in df.columns:
+        if col in skip or not ptypes.is_numeric_dtype(df[col]):
+            continue
+        c = str(col).upper()
+        if c.endswith("_USD") or c == "USD" or c.endswith("_PRICE"):
+            fmts[col] = "${:,.2f}"
+        elif "CREDITS" in c:
+            fmts[col] = "{:,.2f}"
+        elif c.endswith("_PCT") or c.endswith("_SHARE") or c == "HIT_PCT":
+            fmts[col] = "{:,.1f}"
+        elif c.endswith(("_GB", "_TB", "_MB", "_HOURS", "_S", "_SEC", "_MS")):
+            fmts[col] = "{:,.1f}"
+        elif c.endswith(_COUNT_SUFFIXES):
+            fmts[col] = "{:,.0f}"
+    return fmts
+
+
+def _render_table(df, *, height: int | None, column_config: dict | None,
+                  key: str | None = None, selectable: bool = False) -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
-        return
-    status_cols = status_columns_in(list(df.columns))
+        return None
     data = df
-    if status_cols:
-        try:
-            data = df.style
-            for col in status_cols:
-                data = data.map(lambda v, _c=col: status_css(_c, v), subset=[col])
-        except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
-            data = df
+    try:
+        styler = df.style
+        for col in status_columns_in(list(df.columns)):
+            styler = styler.map(lambda v, _c=col: status_css(_c, v), subset=[col])
+        fmts = _auto_formats(df, set(column_config or {}))
+        if fmts:
+            styler = styler.format(fmts, na_rep="–")
+        data = styler
+    except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
+        data = df
     if height is None and len(df) > 10:
         height = 380
-    st.dataframe(data, hide_index=True, use_container_width=True,
-                 height=height, column_config=column_config)
+    kwargs = dict(hide_index=True, use_container_width=True, height=height,
+                  column_config=column_config)
+    selected: int | None = None
+    if selectable and key:
+        try:
+            event = st.dataframe(data, key=key, on_select="rerun",
+                                 selection_mode="single-row", **kwargs)
+            rows = list(getattr(getattr(event, "selection", None), "rows", None) or [])
+            selected = int(rows[0]) if rows else None
+        except TypeError:  # runtime without selection support: render, no selection
+            st.dataframe(data, **kwargs)
+    else:
+        st.dataframe(data, **kwargs)
+    try:  # every table is exportable; auditors and managers ask constantly
+        seq = int(st.session_state.get("_ow_dl_seq", 0))
+        st.session_state["_ow_dl_seq"] = seq + 1
+        st.download_button("⬇ CSV", df.to_csv(index=False).encode("utf-8"),
+                           file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                           key=f"ow_dl_{key or ''}_{seq}", type="tertiary")
+    except Exception:  # noqa: BLE001 - export is a convenience, never break the table
+        pass
+    return selected
+
+
+def styled_table(df, *, height: int | None = None, column_config: dict | None = None) -> None:
+    """st.dataframe with semantic status colors, convention-based number
+    formats, a height cap, and a CSV download."""
+    _render_table(df, height=height, column_config=column_config)
+
+
+def selectable_table(df, key: str, *, height: int | None = None,
+                     column_config: dict | None = None) -> int | None:
+    """styled_table + single-row click selection; returns the positional row
+    index or None. Degrades to a plain table on runtimes without selections."""
+    return _render_table(df, height=height, column_config=column_config,
+                         key=key, selectable=True)
+
+
+def notify(ok: bool, msg: str) -> None:
+    """Operator-action feedback: toast (survives layout shifts) + inline state."""
+    try:
+        st.toast(msg[:120], icon="✅" if ok else "⚠️")
+    except Exception:  # noqa: BLE001 - toast is a nicety
+        pass
+    (st.success if ok else st.error)(msg)
 
 
 def download_text_button(label: str, text: str, filename: str) -> None:

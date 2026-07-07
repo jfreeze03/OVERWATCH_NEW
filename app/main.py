@@ -20,7 +20,12 @@ from app.config import (  # noqa: E402
 )
 from app.core.query import bump_refresh_salt  # noqa: E402
 from app.core.session import connection_available, current_role  # noqa: E402
-from app.core.state import init_filters, remember_page, requested_page  # noqa: E402
+from app.core.state import (  # noqa: E402
+    consume_pending_navigation,
+    init_filters,
+    remember_page,
+    requested_page,
+)
 from app.theme import inject_theme  # noqa: E402
 from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security  # noqa: E402
 
@@ -113,6 +118,7 @@ def _topbar_scope_controls() -> None:
 
 
 def main() -> None:
+    consume_pending_navigation()
     inject_theme()
     init_filters()
 

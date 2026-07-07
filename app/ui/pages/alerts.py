@@ -23,6 +23,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
+    notify,
     page_header,
     panel_help,
     result_caption,
@@ -97,7 +98,7 @@ def render() -> None:
                         ok, msg = execute_statement(stmt + ";", page=_PAGE)
                         ok_all = ok_all and ok
                         messages.append(msg)
-                    (st.success if ok_all else st.error)(" / ".join(messages))
+                    notify(ok_all, " / ".join(messages))
             else:
                 st.caption("Copy and run as OVERWATCH_OPERATOR — in-app execution needs the operator role.")
 

@@ -35,6 +35,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    notify,
     page_header,
     panel_help,
     result_caption,
@@ -535,7 +536,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             f"{sql_literal('Booked by guarded remediation; verifier will test actuals.')}"
                         )
                         execute_statement(ledger_sql, page=_PAGE)
-                    (st.success if ok else st.error)(msg)
+                    notify(ok, msg)
             else:
                 st.caption("Copy the SQL freely; executing from the app requires OVERWATCH_OPERATOR.")
 
@@ -784,7 +785,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         st.code(merge_sql, language="sql")
         if is_operator and name and department and st.button("Execute mapping", key="cb_map_exec"):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
-            (st.success if ok else st.error)(msg)
+            notify(ok, msg)
         elif not is_operator:
             st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
 
@@ -838,7 +839,7 @@ def _savings_tab() -> None:
         st.code(insert_sql, language="sql")
         if is_operator and desc and st.button("Execute insert", key="ledger_add_exec"):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
-            (st.success if ok else st.error)(msg)
+            notify(ok, msg)
         elif not is_operator:
             st.caption("Copy and run as OVERWATCH_OPERATOR — in-app execution needs the operator role.")
 
@@ -866,7 +867,7 @@ def _savings_tab() -> None:
                     st.warning(why)
                 elif is_operator and st.button("Execute verification", key="ledger_verify_exec"):
                     ok, msg = execute_statement(update_sql, page=_PAGE)
-                    (st.success if ok else st.error)(msg)
+                    notify(ok, msg)
 
 
 @safe_page(_PAGE)

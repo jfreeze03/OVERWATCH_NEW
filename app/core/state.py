@@ -58,6 +58,59 @@ def filters_signature() -> str:
     )
 
 
+def apply_filters(**kwargs) -> None:
+    """Set top-bar filters programmatically (deep links, saved views).
+
+    Values are validated the same way the widgets validate them; days snaps
+    to the nearest allowed window so select_slider never sees a bad value.
+    """
+    from app.config import DAY_WINDOW_OPTIONS
+
+    mapping = {
+        "company": "flt_company", "environment": "flt_environment", "days": "flt_days",
+        "warehouse_contains": "flt_warehouse_contains", "user_contains": "flt_user_contains",
+        "database": "flt_database", "schema_contains": "flt_schema_contains",
+    }
+    for name, value in kwargs.items():
+        key = mapping.get(name)
+        if key is None or value is None:
+            continue
+        if name == "days":
+            options = list(DAY_WINDOW_OPTIONS)
+            try:
+                value = min(options, key=lambda o: abs(int(o) - int(value)))
+            except (TypeError, ValueError):
+                continue
+        st.session_state[key] = value
+
+
+def request_navigation(page: str, section: str = "", filters: dict | None = None) -> None:
+    """Queue a cross-page jump; consumed at the top of the NEXT run, before
+    any widget instantiates (Streamlit forbids touching a live widget's key)."""
+    st.session_state["_ow_nav_pending"] = {
+        "page": page, "section": section, "filters": dict(filters or {}),
+    }
+    st.rerun()
+
+
+def consume_pending_navigation() -> None:
+    """Call first thing in main(): applies a queued jump pre-instantiation."""
+    pending = st.session_state.pop("_ow_nav_pending", None)
+    if not pending:
+        return
+    from app.logic.navigate import PAGE_SECTION_KEYS
+
+    page = str(pending.get("page") or "")
+    if page:
+        st.session_state["_ow_nav_radio"] = page
+        st.session_state["_ow_page"] = page
+    section = str(pending.get("section") or "")
+    section_key = PAGE_SECTION_KEYS.get(page)
+    if section and section_key:
+        st.session_state[section_key] = section
+    apply_filters(**pending.get("filters", {}))
+
+
 def requested_page(valid_pages: tuple[str, ...]) -> str | None:
     """Page requested via ?page= deep link, when the runtime supports it."""
     try:

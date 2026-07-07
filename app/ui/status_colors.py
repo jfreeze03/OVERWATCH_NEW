@@ -14,6 +14,29 @@ _OK = ("#14532d", "#bbf7d0")      # green
 _INFO = ("#0c4a6e", "#bae6fd")    # sky
 _MUTED = ("#1e293b", "#94a3b8")   # slate
 
+# The pairs above are dark-theme tuned (deep bg, light text). Light theme
+# gets pastel backgrounds with dark text; detection falls back to the dark
+# pairs so a failed lookup never changes today's look.
+_LIGHT_EQUIV = {
+    ("#7f1d1d", "#fecaca"): ("#fee2e2", "#991b1b"),
+    ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
+    ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
+    ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
+    ("#1e293b", "#94a3b8"): ("#f1f5f9", "#475569"),
+}
+
+
+def _theme_is_light() -> bool:
+    try:
+        import streamlit as _st
+
+        ctx_theme = getattr(getattr(_st, "context", None), "theme", None)
+        if ctx_theme is not None and getattr(ctx_theme, "type", None):
+            return str(ctx_theme.type).lower() == "light"
+        return str(_st.get_option("theme.base") or "").lower() == "light"
+    except Exception:  # noqa: BLE001 - theming is cosmetic; default to dark pairs
+        return False
+
 STATUS_COLOR_MAP = {
     # severities
     "CRITICAL": _BAD, "HIGH": _BAD, "MEDIUM": _WARN, "LOW": _MUTED, "INFO": _MUTED,
@@ -65,6 +88,8 @@ def status_css(column: str, value: object) -> str:
         pair = STATUS_COLOR_MAP.get(text)
     if not pair:
         return ""
+    if _theme_is_light():
+        pair = _LIGHT_EQUIV.get(pair, pair)
     bg, fg = pair
     return f"background-color: {bg}; color: {fg}; font-weight: 600;"
 

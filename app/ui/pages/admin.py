@@ -26,6 +26,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    notify,
     page_header,
     result_caption,
 )
@@ -80,7 +81,7 @@ def _settings_tab(is_operator: bool) -> None:
         confirm = st.text_input("Type the setting key to confirm", key="adm_setting_confirm")
         if st.button("Execute update", key="adm_setting_exec", disabled=(confirm != key)):
             ok, msg = execute_statement(update_sql, page=_PAGE)
-            (st.success if ok else st.error)(msg)
+            notify(ok, msg)
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
