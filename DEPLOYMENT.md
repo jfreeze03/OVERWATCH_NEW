@@ -21,6 +21,7 @@ snowflake/migrations/V012__routing_anomaly_remediation.sql
 snowflake/migrations/V013__user_prefs.sql
 snowflake/migrations/V014__lifecycle_hardening.sql
 snowflake/migrations/V015__pilot_and_backups.sql
+snowflake/migrations/V016__closing_loops.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

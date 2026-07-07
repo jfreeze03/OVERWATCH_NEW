@@ -38,7 +38,7 @@ _EXPECTED_MIGRATIONS = {
     1: "core", 2: "facts", 3: "marts", 4: "alerts", 5: "actions", 6: "pipeline sla",
     7: "automation", 8: "chargeback", 9: "credentials", 10: "change impact",
     11: "proactive alerts", 12: "routing + anomaly sweep", 13: "user prefs",
-    14: "lifecycle hardening", 15: "DT pilot + backups",
+    14: "lifecycle hardening", 15: "DT pilot + backups", 16: "closing loops",
 }
 
 
