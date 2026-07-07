@@ -19,6 +19,7 @@ snowflake/migrations/V010__change_impact.sql
 snowflake/migrations/V011__proactive_alerts.sql
 snowflake/migrations/V012__routing_anomaly_remediation.sql
 snowflake/migrations/V013__user_prefs.sql
+snowflake/migrations/V014__lifecycle_hardening.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -59,6 +60,10 @@ Task graphs run on the dedicated **`WH_ALFA_OVERWATCH`** warehouse (XSMALL,
   the Admin page and gated in-app execution with no extra setup.
 - Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
   day-to-day operation never requires the break-glass role.
+- `ALERT_AUDIT` and `REMEDIATION_LOG` are append-only for operators
+  (INSERT granted, UPDATE/DELETE explicitly revoked). Members of the owning
+  role can still modify them — if an auditor requires stronger guarantees,
+  export the tables on a schedule or replicate them to a locked schema.
 
 ## 3. Streamlit-in-Snowflake (primary target)
 

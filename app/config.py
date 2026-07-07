@@ -52,6 +52,10 @@ DEFAULT_SETTINGS = {
     "SCORE_PTS_SPILL_PER_GB": "0.5",
     "SCORE_PTS_PER_STALE_SOURCE": "4",
     "SCORE_PTS_PER_OPEN_ACTION": "1.5",
+    # Fact retention (SP_PURGE_FACTS, monthly). Floors in the proc: 90/180/30.
+    "FACT_RETENTION_DAYS_HOURLY": "400",
+    "FACT_RETENTION_DAYS_DAILY": "800",
+    "ERROR_LOG_RETENTION_DAYS": "180",
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",
     "CONTRACT_END_DATE": "",

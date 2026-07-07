@@ -76,6 +76,7 @@ snowflake/migrations/V010__change_impact.sql -- object-change regression trackin
 snowflake/migrations/V011__proactive_alerts.sql -- preventive rules: cloud-svc ratio, storage surge, serverless creep, copy failures, break-glass
 snowflake/migrations/V012__routing_anomaly_remediation.sql -- alert routing, daily anomaly sweep, remediation log, DT failure alerts
 snowflake/migrations/V013__user_prefs.sql -- saved views + default landing per user
+snowflake/migrations/V014__lifecycle_hardening.sql -- contract-breach projection, fingerprint drift, fact retention
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```
