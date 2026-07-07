@@ -46,6 +46,11 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Quarterly access-review export pack (grants matrix, unused roles, 90d diff) | Security → Access |
 | Governance-drift + platform scores, both settings-tunable with named deductions | Security / Overview |
 
+## Assurance
+| Capability | Where |
+|---|---|
+| Injection fuzz suite: adversarial corpus through every filter-accepting builder (strip-literals invariant) + refusal checks | `tests/test_injection_fuzz.py` — the pen-test hand-off artifact |
+
 ## Platform
 | Capability | Where |
 |---|---|

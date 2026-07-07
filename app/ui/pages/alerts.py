@@ -170,6 +170,24 @@ def _open_events_section(events, is_operator: bool) -> None:
                     st.caption("Playbook above says what; this generates the how. Execute is "
                                "operator-gated, audited to REMEDIATION_LOG, and books an "
                                "ESTIMATED ledger item the monthly verifier proves or rejects.")
+                    try:
+                        prior = run(mart_sql.ledger_for_event(event_id[:8].lower()), page=_PAGE,
+                                    key=f"clf_led_{event_id[:8]}", tier="live",
+                                    source="SAVINGS_LEDGER")
+                        if prior.ok and not prior.empty:
+                            st.markdown("**Loop status — fixes already booked from this event:**")
+                            for _, li in prior.df.iterrows():
+                                state = str(li.get("STATE") or "")
+                                usd = li.get("VERIFIED_USD") if state == "VERIFIED" else li.get("ESTIMATED_USD")
+                                try:
+                                    usd_s = f"${float(usd):,.0f}"
+                                except (TypeError, ValueError):
+                                    usd_s = "n/a"
+                                st.markdown(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})")
+                            st.caption("VERIFIED/REJECTED comes from the monthly verifier's "
+                                       "before/after actuals — the loop, closed end to end.")
+                    except ValueError:
+                        pass  # non-uuid event id shapes: chip simply doesn't render
                     fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
                                                 "Statement timeout 1h",
                                                 "Cap clusters at 1"],
@@ -205,6 +223,15 @@ def _open_events_section(events, is_operator: bool) -> None:
                             notify(ok, msg)
                     else:
                         st.caption("Copy the SQL; executing needs OVERWATCH_OPERATOR.")
+                    booked = run(mart_sql.ledger_for_event(event_id[:8]), page=_PAGE,
+                                 key=f"clf_led_{event_id[:8]}", tier="live",
+                                 source="SAVINGS_LEDGER")
+                    if booked.usable():
+                        st.markdown("**Savings booked from this alert**")
+                        styled_table(booked.df[["DESCRIPTION", "STATE", "ESTIMATED_USD",
+                                                "VERIFIED_USD", "CREATED_AT"]], height=140)
+                        st.caption("ESTIMATED flips to VERIFIED (or REJECTED) when the monthly "
+                                   "verifier compares actual before/after spend — the loop closes here.")
             rid_u = str(row["RULE_ID"]).upper()
             if rid_u.startswith(("COST_", "PERF_")):
                 with st.expander("Explain with AI (grounded in the day's evidence)"):

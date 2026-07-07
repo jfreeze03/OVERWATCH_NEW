@@ -79,3 +79,13 @@ def test_routing_recipes_documented():
     assert "events.pagerduty.com" in wd
     assert "'ALL', 'CRITICAL', 'OVERWATCH_WEBHOOK_PAGERDUTY'" in wd
     assert "OVERWATCH_WEBHOOK_FINOPS" in wd
+
+
+def test_drawer_shows_verification_chip():
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
+    assert "ledger_for_event(event_id[:8])" in src
+    assert "Savings booked from this alert" in src
+    # the chip lives inside the closed-loop Respond expander (after execution)
+    assert src.index("ALERT_CLOSED_LOOP") < src.index("Savings booked from this alert")

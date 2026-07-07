@@ -387,7 +387,9 @@ digest also sends through the default route (guarded; absent integration =
 in-app only). **Storm view:** Open events has a group-by-rule toggle (5
 warehouses over budget = 1 row); dedupe semantics unchanged. **Closed loop:**
 for warehouse-lever rules the drawer generates the fix inline — confirm,
-execute, REMEDIATION_LOG row, ESTIMATED ledger item.
+execute, REMEDIATION_LOG row, ESTIMATED ledger item — and the expander
+shows the ledger state of fixes already booked from that event
+(ESTIMATED → VERIFIED/REJECTED), so the loop is visible end to end.
 
 **Severity routing recipes:** CRITICAL→PagerDuty + HIGH→Slack are two
 integrations and two `ALERT_ROUTES` rows — copy-paste blocks live in
