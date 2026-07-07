@@ -13,10 +13,12 @@ from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import insights_sql, mart_sql, ops_sql
+from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
 from app.logic.formulas import credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
+from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
 
 _PAGE = "Operations"
@@ -92,10 +94,17 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
                      title="Failures by family")
     st.dataframe(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
-                   "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
+                   "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
         hide_index=True, use_container_width=True,
     )
     result_caption(res)
+    ai_evaluation_panel(
+        key=f"task_failures_{company}",
+        prompt=task_failure_prompt(timeline, company),
+        settings=load_settings(_PAGE),
+        page=_PAGE,
+        subject="diagnose these task failures",
+    )
 
 
 def _release_compare_tab(company: str) -> None:
@@ -117,6 +126,7 @@ def _release_compare_tab(company: str) -> None:
                 key=f"rel_q_{company}_{release_iso}_{window}", tier="historical",
                 source="ACCOUNT_USAGE.QUERY_HISTORY")
     st.markdown("**Query health: before vs after**")
+    verdicts: list[dict] = []
     if guard(q_res, "No query history in the compare windows."):
         verdicts = compare_release_periods(q_res.df)
         if verdicts:
@@ -148,6 +158,13 @@ def _release_compare_tab(company: str) -> None:
             hide_index=True, use_container_width=True,
         )
         result_caption(t_res)
+        ai_evaluation_panel(
+            key=f"release_{company}_{release_iso}_{window}",
+            prompt=release_compare_prompt(verdicts, deltas, release_iso, window),
+            settings=load_settings(_PAGE),
+            page=_PAGE,
+            subject="judge this release",
+        )
 
 
 def _pipeline_sla_tab(is_operator: bool) -> None:

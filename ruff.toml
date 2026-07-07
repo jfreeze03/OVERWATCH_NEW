@@ -16,3 +16,4 @@ ignore = [
 "app/core/session.py" = ["BLE001"]
 "app/core/query.py" = ["BLE001"]
 "app/core/state.py" = ["BLE001"]
+"app/core/ai.py" = ["BLE001"]

@@ -57,8 +57,10 @@ def test_ledger_totals_never_mix_states():
 def test_triage_queue_merges_and_ranks():
     alerts = pd.DataFrame([{"SEVERITY": "CRITICAL", "TITLE": "spend spike", "DETAIL": "x", "RAISED_AT": "2026-07-07"}])
     tasks = pd.DataFrame([
-        {"TASK_NAME": "LOAD_A", "FAILED": 4, "LAST_ERROR": "boom", "DAY": "2026-07-06"},
-        {"TASK_NAME": "LOAD_B", "FAILED": 0, "LAST_ERROR": "", "DAY": "2026-07-06"},
+        {"TASK_NAME": "LOAD_A", "DATABASE_NAME": "ALFA_EDW_PROD", "SCHEMA_NAME": "DW",
+         "FAILED": 4, "LAST_ERROR": "boom", "DAY": "2026-07-06"},
+        {"TASK_NAME": "LOAD_B", "DATABASE_NAME": "ALFA_EDW_DEV", "SCHEMA_NAME": "DW",
+         "FAILED": 0, "LAST_ERROR": "", "DAY": "2026-07-06"},
     ])
     anomalies = [{"label": "WH_X", "value": 900.0, "z": 6.2}]
     queue = triage_queue(alerts, tasks, anomalies)
@@ -66,6 +68,11 @@ def test_triage_queue_merges_and_ranks():
     kinds = set(queue["KIND"])
     assert kinds == {"Alert", "Task failure", "Spend anomaly"}
     assert len(queue) == 3  # zero-failure task excluded
+    # Owner requirement: failed tasks must show their database.
+    task_row = queue[queue["KIND"] == "Task failure"].iloc[0]
+    assert task_row["DATABASE"] == "ALFA_EDW_PROD"
+    assert task_row["TITLE"].startswith("ALFA_EDW_PROD.DW.LOAD_A")
+    assert "DATABASE" in queue.columns
 
 
 def test_triage_queue_empty_inputs():

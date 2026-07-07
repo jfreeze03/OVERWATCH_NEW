@@ -19,12 +19,14 @@ from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
 from app.data import cortex_sql, cost_sql, insights_sql, mart_sql
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
+from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
 from app.logic.forecast import contract_pace
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
 from app.ui import charts
+from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import guard, kpi_row, load_settings, page_header, result_caption
 
 _PAGE = "Cost & Contract"
@@ -244,6 +246,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     )
                 st.code("\n".join(statements), language="sql")
                 st.caption("Review and run as OVERWATCH_OPERATOR. Warehouse changes are never executed from the app.")
+        ai_evaluation_panel(
+            key=f"idle_{company}_{days}",
+            prompt=idle_warehouse_prompt(advisor, company, days),
+            settings=settings,
+            page=_PAGE,
+            subject="evaluate idle warehouse spend",
+        )
 
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------

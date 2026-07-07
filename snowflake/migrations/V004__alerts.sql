@@ -159,10 +159,12 @@ BEGIN
         UNION ALL
         -- PIPE_TASK_FAILURES per task
         SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
-               tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
-               LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 500),
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
                tk.FAILED,
-               c.RULE_ID || '|' || tk.TASK_NAME || '|' || tk.DAY
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
         FROM cfg c
         JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
           ON c.RULE_ID = 'PIPE_TASK_FAILURES'

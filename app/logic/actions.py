@@ -89,6 +89,7 @@ def triage_queue(
             rows.append({
                 "SEVERITY": str(r.get("SEVERITY", "MEDIUM")).upper(),
                 "KIND": "Alert",
+                "DATABASE": "",
                 "TITLE": str(r.get("TITLE", "Alert event")),
                 "DETAIL": str(r.get("DETAIL", ""))[:220],
                 "SOURCE": "ALERT_EVENTS",
@@ -99,10 +100,14 @@ def triage_queue(
             failed = int(float(r.get("FAILED", 0) or 0))
             if failed <= 0:
                 continue
+            database = str(r.get("DATABASE_NAME", "") or "")
+            schema = str(r.get("SCHEMA_NAME", "") or "")
+            qualified = ".".join(p for p in (database, schema) if p)
             rows.append({
                 "SEVERITY": "HIGH" if failed >= 3 else "MEDIUM",
                 "KIND": "Task failure",
-                "TITLE": f"{r.get('TASK_NAME', 'task')} failed {failed}x",
+                "DATABASE": database,
+                "TITLE": f"{qualified + '.' if qualified else ''}{r.get('TASK_NAME', 'task')} failed {failed}x",
                 "DETAIL": str(r.get("LAST_ERROR", "") or "")[:220],
                 "SOURCE": "FACT_TASK_DAILY",
                 "RAISED_AT": r.get("DAY"),
@@ -111,6 +116,7 @@ def triage_queue(
         rows.append({
             "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",
             "KIND": "Spend anomaly",
+            "DATABASE": "",
             "TITLE": f"{a.get('label', 'warehouse')} daily spend z={a.get('z', 0):+.1f}",
             "DETAIL": f"Daily spend ${a.get('value', 0):,.0f} vs robust baseline.",
             "SOURCE": "FACT_WAREHOUSE_DAILY",
