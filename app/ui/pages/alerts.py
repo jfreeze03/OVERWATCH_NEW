@@ -16,8 +16,10 @@ from app.core.errors import safe_page
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.core.state import filters
+from app.core.state import filters, request_navigation
 from app.data import mart_sql
+from app.logic.navigate import investigation_target
+from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -27,6 +29,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    selectable_table,
     styled_table,
 )
 
@@ -78,29 +81,95 @@ def render() -> None:
     if section == "Open events":
         if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
                  setup_hint=_SETUP_HINT):
-            styled_table(events.df[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]])
+            edf = events.df.reset_index(drop=True)
+            sel = selectable_table(
+                edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
+                key="alert_events_sel")
             result_caption(events)
-            st.markdown("**Acknowledge / resolve**")
-            options = {
-                f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
-                for _, r in events.df.iterrows()
-            }
-            chosen = st.selectbox("Event", list(options), key="alert_pick")
-            action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
-            note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
-            sql_script = _lifecycle_sql(options[chosen], action, note)
-            st.code(sql_script, language="sql")
-            if is_operator:
-                confirm = st.text_input(f"Type {action} to confirm execution", key="alert_confirm")
-                if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
-                    ok_all, messages = True, []
-                    for stmt in [s for s in sql_script.split(";") if s.strip()]:
-                        ok, msg = execute_statement(stmt + ";", page=_PAGE)
-                        ok_all = ok_all and ok
-                        messages.append(msg)
-                    notify(ok_all, " / ".join(messages))
+            if sel is None:
+                st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
+                           "one-click investigate, ack/resolve.")
             else:
-                st.caption("Copy and run as OVERWATCH_OPERATOR — in-app execution needs the operator role.")
+                row = edf.iloc[sel]
+                event_id = str(row["EVENT_ID"])
+                st.divider()
+                st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
+                st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
+                           f"event {event_id[:8]} · status {row['STATUS']}")
+                detail_text = str(row.get("DETAIL") or "").strip()
+                if detail_text:
+                    st.markdown(detail_text)
+                rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
+                                tier="recent", source="ALERT_CONFIG")
+                if rules_res.usable():
+                    rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                    if not rmatch.empty:
+                        rrow = rmatch.iloc[0]
+                        st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
+                                   f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
+                with st.expander("Playbook — what to do first", expanded=True):
+                    st.markdown(playbook_for(str(row["RULE_ID"])))
+                hist = run(mart_sql.alert_event_history(90), page=_PAGE, key="hist_for_drawer",
+                           tier="recent", source="ALERT_EVENTS (90d)")
+                if hist.usable():
+                    same = hist.df[hist.df["RULE_ID"].astype(str) == str(row["RULE_ID"])].head(10)
+                    if len(same) > 1:
+                        with st.expander(f"This rule recently ({len(same)} events)"):
+                            styled_table(same, height=220)
+                target = investigation_target(str(row["RULE_ID"]),
+                                              f"{row['TITLE']} {detail_text}")
+                c_inv, c_act, c_note = st.columns([1.2, 1.0, 2.0])
+                with c_inv:
+                    if st.button("Investigate →", key="alert_investigate", use_container_width=True,
+                                 help=f"Jump to {target['page']} · {target['section'] or 'top'} "
+                                      "with filters applied from this event"):
+                        request_navigation(target["page"], target["section"], target["filters"])
+                with c_act:
+                    action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
+                with c_note:
+                    note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
+                sql_script = _lifecycle_sql(event_id, action, note)
+                with st.expander("SQL that will run"):
+                    st.code(sql_script, language="sql")
+                if is_operator:
+                    confirm = st.text_input(f"Type {action} to confirm execution", key="alert_confirm")
+                    if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
+                        ok_all, messages = True, []
+                        for stmt in [s for s in sql_script.split(";") if s.strip()]:
+                            ok, msg = execute_statement(stmt + ";", page=_PAGE)
+                            ok_all = ok_all and ok
+                            messages.append(msg)
+                        notify(ok_all, " / ".join(messages))
+                else:
+                    st.caption("Executing requires the OVERWATCH_OPERATOR role; the SQL is copyable for review.")
+
+            if is_operator and len(edf):
+                st.divider()
+                st.markdown("**Bulk acknowledge / resolve**")
+                options = {
+                    f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
+                    for _, r in edf.iterrows()
+                }
+                chosen = st.multiselect("Events", list(options), key="alert_bulk_pick")
+                b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
+                                    key="alert_bulk_action")
+                b_note = st.text_input("Bulk note (applies to every selected event)",
+                                       key="alert_bulk_note", max_chars=500)
+                confirm_b = st.text_input(
+                    f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
+                    key="alert_bulk_confirm")
+                if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec",
+                             disabled=(not chosen or confirm_b != f"BULK {b_action}")):
+                    done = 0
+                    for label in chosen:
+                        script = _lifecycle_sql(options[label], b_action, b_note)
+                        ok_one = True
+                        for stmt in [s for s in script.split(";") if s.strip()]:
+                            ok, _msg = execute_statement(stmt + ";", page=_PAGE)
+                            ok_one = ok_one and ok
+                        done += int(ok_one)
+                    notify(done == len(chosen),
+                           f"{b_action} applied to {done}/{len(chosen)} event(s); audit rows written.")
 
     elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",

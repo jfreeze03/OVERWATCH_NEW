@@ -24,8 +24,10 @@ from app.core.state import (  # noqa: E402
     consume_pending_navigation,
     init_filters,
     remember_page,
+    request_navigation,
     requested_page,
 )
+from app.data import mart_sql  # noqa: E402
 from app.theme import inject_theme  # noqa: E402
 from app.ui.components import notify  # noqa: E402
 from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security  # noqa: E402
@@ -77,6 +79,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
         remember_page(page)
 
         st.divider()
+        _health_strip()
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
             st.rerun()
@@ -188,6 +191,31 @@ def _apply_default_landing() -> None:
             "filters": dict(data.get("filters") or {}),
         }
         consume_pending_navigation()  # pre-widget: applies immediately, no rerun
+
+
+_STRIP_DOTS = {"OK": "🟢", "WARN": "🟡", "BAD": "🔴", "INFO": "🔵", "MUTED": "⚪"}
+
+
+def _health_strip() -> None:
+    """Always-visible pulse: criticals, telemetry freshness, MTD credits.
+    You should not have to visit Overview to know something is red."""
+    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
+              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+    if not res.ok or res.empty:
+        return
+    vals = {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
+    crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
+    if crit_state == "BAD":
+        if st.button(f"🔴 {crit} open critical(s) →", key="strip_crit", use_container_width=True):
+            request_navigation("Alerts", "Open events")
+    else:
+        st.caption("🟢 No open criticals")
+    stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
+    if stale != "-1":
+        st.caption(f"{_STRIP_DOTS.get(stale_state, '⚪')} Stalest telemetry: {stale}h")
+    mtd, _ = vals.get("MTD_CREDITS", ("", ""))
+    if mtd:
+        st.caption(f"🔵 MTD: {float(mtd):,.0f} credits")
 
 
 def _topbar_scope() -> None:

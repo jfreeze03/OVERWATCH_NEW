@@ -28,6 +28,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    selectable_table,
     styled_table,
 )
 
@@ -73,9 +74,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
               page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
-        styled_table(
+        sel_q = selectable_table(
             top.df[["USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
                      "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]],
+            key="ops_top_sel",
             column_config={
                 "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed s", format="%.1f"),
                 "QUEUED_SEC": st.column_config.NumberColumn("Queued s", format="%.1f"),
@@ -88,11 +90,18 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     candidate_ids: list[str] = []
     if top.usable():
         candidate_ids = [str(q) for q in top.df["QUERY_ID"].dropna().head(50)]
+    clicked_qid = ""
+    try:
+        if top.usable() and sel_q is not None:
+            clicked_qid = str(top.df.iloc[int(sel_q)]["QUERY_ID"])
+            st.session_state["_ops_drill_target"] = clicked_qid
+    except (KeyError, IndexError, ValueError, TypeError):
+        clicked_qid = ""
     if candidate_ids:
-        picked = st.selectbox("Query ID (from the table above, heaviest first)",
+        picked = st.selectbox("Query ID (from the table above, heaviest first — or click a row)",
                               candidate_ids, key="ops_drill_pick")
         manual = st.text_input("...or paste any query ID", key="ops_drill_manual")
-        target = (manual or picked or "").strip()
+        target = (clicked_qid or manual or picked or "").strip()
         if target and st.button("Load query detail", key="ops_drill_go"):
             st.session_state["_ops_drill_target"] = target
         target_id = st.session_state.get("_ops_drill_target", "")
@@ -461,12 +470,17 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                      "CHANGE_SEEN_AT", "CHANGED_BY", "BASELINE_CALLS", "AFTER_CALLS",
                      "BASELINE_P95_S", "AFTER_P95_S",
                      "BASELINE_CREDITS_PER_CALL", "AFTER_CREDITS_PER_CALL", "VERDICT_DETAIL"]
-        styled_table(df[[c for c in show_cols if c in df.columns]], height=320)
+        sel_ci = selectable_table(df[[c for c in show_cols if c in df.columns]],
+                                  key="chg_sel", height=320)
         result_caption(res)
 
         st.markdown("**Run history around one change**")
         picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)})
-        pick = st.selectbox("Object", picks, key="chg_pick")
+        clicked_obj = None
+        if sel_ci is not None:
+            crow = df.iloc[int(sel_ci)]
+            clicked_obj = f"{crow['OBJECT_TYPE']} {crow['OBJECT_NAME']}"
+        pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         if pick:
             otype, _, name = pick.partition(" ")
             hist = run(change_impact_sql.object_run_history(otype, name, 28),

@@ -288,3 +288,25 @@ FROM {core_object("REMEDIATION_LOG")}
 ORDER BY EXECUTED_AT DESC
 LIMIT {limit}
 """
+
+
+def health_strip() -> str:
+    """Three always-on sidebar badges in one cached statement: open
+    criticals, stalest telemetry source, month-to-date billed credits."""
+    return f"""
+SELECT 'OPEN_CRITICAL' AS METRIC, TO_VARCHAR(COUNT(*)) AS VALUE,
+       IFF(COUNT(*) > 0, 'BAD', 'OK') AS STATE
+FROM {core_object("ALERT_EVENTS")}
+WHERE STATUS = 'OPEN' AND SEVERITY = 'CRITICAL'
+UNION ALL
+SELECT 'STALEST_SOURCE_H', TO_VARCHAR(COALESCE(ROUND(MAX(HOURS_SINCE_LOAD), 1), -1)),
+       CASE WHEN MAX(HOURS_SINCE_LOAD) IS NULL THEN 'MUTED'
+            WHEN MAX(HOURS_SINCE_LOAD) > 26 THEN 'BAD'
+            WHEN MAX(HOURS_SINCE_LOAD) > 3 THEN 'WARN'
+            ELSE 'OK' END
+FROM {mart_object("MART_SOURCE_FRESHNESS")}
+UNION ALL
+SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+"""
