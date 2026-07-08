@@ -250,10 +250,12 @@ BEGIN
                 FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY d
                 WHERE d.START_TIME >= DATEADD('day', -8, CURRENT_DATE())
                   AND d.START_TIME < CURRENT_DATE()
-                  -- PROD only (owner decision 2026-07-08 after the DEV/SIT
-                  -- storm: 700+ HIGHs from scratch/backup tables): volume
-                  -- drops in non-prod are business as usual, not incidents.
-                  -- Same semantics as app environment_clause('PROD').
+                  -- PROD only, BOTH companies (owner decision 2026-07-08
+                  -- after the DEV/SIT storm): ALFA_EDW_PRD + ALFA_EDW_MGM by
+                  -- name, and every *_PRD database by suffix — which is what
+                  -- covers Trexis PROD (TRXS_EDW_PRD, TRXS_GW_DATA_PRD,
+                  -- TRXS_ABC_METADATA_PRD). DEV/SIT/SAN stay silent. Same
+                  -- semantics as app environment_clause('PROD').
                   AND (UPPER(d.DATABASE_NAME) IN ('ALFA_EDW_PRD', 'ALFA_EDW_MGM')
                        OR UPPER(d.DATABASE_NAME) LIKE '%!_PRD' ESCAPE '!')
                 GROUP BY 1, 2, 3

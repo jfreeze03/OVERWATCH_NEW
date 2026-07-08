@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.6.2 — Trexis-PROD lock + teardown integration audit (2026-07-08)
+
+- V023's PROD volume scope verified and LOCKED for both companies:
+  tests/test_migration_v023.py scrapes the migration's predicate and proves
+  TRXS_EDW_PRD / TRXS_GW_DATA_PRD / TRXS_ABC_METADATA_PRD keep alerting
+  while every DEV/SIT/SAN database goes quiet — and that the SQL agrees
+  with the app's classify_environment, so PROD has one definition.
+- Teardown audit (user catch: "do we drop email integrations?"): NO — the
+  webhook integration, its URL secret, the email/recipe integrations, and
+  the ML forecast model all survived teardown. Now dropped (integrations
+  under an ACCOUNTADMIN-labeled block). The teardown-coverage test now
+  parses SECRET / NOTIFICATION INTEGRATION / SNOWFLAKE.ML.FORECAST kinds
+  across ALL opt-in scripts, so this class can't slip through again.
+
 ## 4.6.1 — first live-fire morning: three fixes from real telemetry (2026-07-08)
 
 Migration V023 (apply in order after V022): sweep v4 + scan v9.

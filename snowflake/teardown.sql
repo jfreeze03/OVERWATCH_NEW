@@ -143,6 +143,19 @@ DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS;
 DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY;  -- V021 telemetry (rebuildable)
 DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES;  -- V022 delivery ledger
 
+-- Opt-in script artifacts (2026-07-08 audit: these previously survived a
+-- full teardown — the user's "do we drop email integrations?" catch).
+DROP SNOWFLAKE.ML.FORECAST IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_SPEND_FORECAST;  -- ml_forecast_option.sql
+DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL;                    -- webhook_delivery.sql
+
+-- ACCOUNT-LEVEL: notification integrations are not schema objects — run
+-- these as ACCOUNTADMIN. IF EXISTS keeps them safe when a recipe was never
+-- applied (PagerDuty/finops/email are copy-paste recipes).
+DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK;            -- webhook_delivery.sql
+DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_EMAIL;              -- native_alert_templates.sql recipe
+DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_PAGERDUTY;  -- recipe
+DROP NOTIFICATION INTEGRATION IF EXISTS OVERWATCH_WEBHOOK_FINOPS;     -- recipe
+
 -- To restore operator data after re-running migrations, INSERT ... SELECT from
 -- the *_BAK_* clones (column lists match), then drop the clones.
 

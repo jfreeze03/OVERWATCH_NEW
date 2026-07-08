@@ -13,7 +13,8 @@ SNOWFLAKE_DIR = Path(__file__).resolve().parents[1] / "snowflake"
 
 _CREATE_RE = re.compile(
     r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TRANSIENT\s+)?"
-    r"(TABLE|VIEW|TASK|PROCEDURE|FUNCTION|WAREHOUSE|RESOURCE\s+MONITOR|ALERT)"
+    r"(TABLE|VIEW|TASK|PROCEDURE|FUNCTION|WAREHOUSE|RESOURCE\s+MONITOR|ALERT"
+    r"|SECRET|NOTIFICATION\s+INTEGRATION|SNOWFLAKE\.ML\.FORECAST)"
     r"\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Z0-9_.]+)",
     re.IGNORECASE,
 )
@@ -27,6 +28,8 @@ def _created_objects() -> set[str]:
     sources = sorted((SNOWFLAKE_DIR / "migrations").glob("V0*.sql"))
     sources.append(SNOWFLAKE_DIR / "native_alert_templates.sql")
     sources.append(SNOWFLAKE_DIR / "webhook_delivery.sql")
+    sources.append(SNOWFLAKE_DIR / "ml_forecast_option.sql")
+    sources.append(SNOWFLAKE_DIR / "alert_drill.sql")
     for path in sources:
         text = path.read_text(encoding="utf-8")
         # strip comment lines so commented examples don't count as created
