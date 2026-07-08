@@ -29,6 +29,7 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Task-graph DAG with failure overlay; pipeline SLAs; stream staleness | Operations → Tasks / Pipeline SLA |
 | Attribution (exact per warehouse; labeled-allocated per user/db/role) + waterfall | Cost → Attribution / Chargeback |
 | Global jump box (pages, DBs, warehouses, rules) | sidebar |
+| Navigation-consistency suite: every routed page/section proven against page source | `tests/test_navigation_consistency.py` |
 
 ## Fix (guarded, audited, verified)
 | Capability | Where |

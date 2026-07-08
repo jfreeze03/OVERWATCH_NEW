@@ -134,6 +134,7 @@ def _parse_view(raw: str) -> dict | None:
         return None
 
 
+@st.fragment
 def _views_popover() -> None:
     """Saved filter views + default landing (USER_PREFS, V013)."""
     from app.core.state import request_navigation

@@ -29,12 +29,12 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
-    localize_timestamps,
     notify,
     page_header,
     panel_help,
     result_caption,
     selectable_table,
+    severity_sort,
     styled_table,
 )
 
@@ -113,7 +113,7 @@ def _open_events_section(events, is_operator: bool) -> None:
     """Fragment: drawer/bulk interactions rerun this section only, not the page."""
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT):
-        edf = events.df.reset_index(drop=True)
+        edf = severity_sort(events.df)  # worst first, newest within — triage order
         if st.toggle("Group by rule (storm view)", key="alert_rollup",
                      help="5 warehouses over budget = 1 row here. Toggle off for drawers."):
             sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -138,9 +138,6 @@ def _open_events_section(events, is_operator: bool) -> None:
             st.caption("Dedupe semantics are untouched — this is a display rollup. "
                        "Toggle off to open a drawer, bulk-ack, or investigate.")
             return
-        edf, tz_note = localize_timestamps(edf, ["RAISED_AT", "ACK_AT"])
-        if tz_note:
-            st.caption(tz_note)
         sel = selectable_table(
             edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
             key="alert_events_sel")

@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.3.0 — UI performance + display pass, router fixes (2026-07-07)
+
+Interaction latency:
+- Fragments: Views popover, right-size what-if, statement export (alert
+  drawer and Admin emergency already were) — widget moves rerun panels,
+  not pages.
+- pandas Styler capped at 1,500 rows; larger tables fall back to
+  Arrow-native printf formats (commas traded for paint time, deliberately).
+- run_batch adopted on Operations Queries + Contention (one async round
+  trip on cold cache); spinners on the heavy scans (repeat-query, storage,
+  expensive queries).
+- spend_trend and the incident timeline embed their dataset ONCE per chart
+  (was once per layer); hour heatmap capped at top-20 rows.
+
+Display:
+- Wide tables auto-pin the first column (8+ cols, runtime-guarded).
+- Alert tables triage-sort: worst severity first, newest within.
+- Display-timezone conversion is now CENTRAL in the table pipeline (naming
+  convention on timestamp columns; explicit conversions kept for charts;
+  double-conversion guarded by a frame marker). CSVs stay account time.
+- Fresh-deploy setup gaps render as one calm info line, not red errors;
+  CSV buttons drop to icon-only and skip tiny frames; ops KPIs get sparks.
+
+Router/classifier audit (user-requested):
+- FIXED: alert deep-links routed to the Cost page's PRE-consolidation
+  section names (Spend/Optimization/Contract) — every COST_* Investigate→
+  and fix jump crashed the section radio since design-system D. Renamed to
+  the live labels; COST_DEPT_BUDGET_PACE now lands on Chargeback & AI.
+- lazy_sections self-heals: a stale saved-view/deep-link section falls back
+  to the first label instead of crashing the page.
+- New test suite scrapes lazy_sections labels/keys from page source and
+  asserts every navigate.py target, jump-box target, and all 26 seeded rule
+  ids resolve — section consolidations can never strand deep links again.
+
 ## 4.2.0 — cost intelligence + trust batch (2026-07-07)
 
 Migration V021 (RESOLUTION_KIND on ALERT_EVENTS, APP_QUERY_TELEMETRY + purge

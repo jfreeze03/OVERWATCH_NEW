@@ -8,7 +8,7 @@ import streamlit as st
 
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.errors import safe_page
-from app.core.query import execute_statement, run
+from app.core.query import execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -57,10 +57,17 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         row = summary.df.iloc[0]
         qcount = safe_float(row.get("QUERY_COUNT"))
         failed = safe_float(row.get("FAILED_COUNT"))
+        activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="ops_spark_activity",
+                       tier="recent", source="FACT_QUERY_HOURLY (daily)")
+        q_spark = (activity.df["QUERIES"].tolist()
+                   if activity.usable() and "QUERIES" in activity.df.columns else None)
+        f_spark = (activity.df["FAILS"].tolist()
+                   if activity.usable() and "FAILS" in activity.df.columns else None)
         kpi_row([
-            {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}"},
+            {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Fail rate", "value": f"{(failed / qcount * 100) if qcount else 0:.2f}%",
-             "delta": f"{failed:,.0f} failed", "delta_color": "off"},
+             "delta": f"{failed:,.0f} failed", "delta_color": "off", "spark": f_spark,
+             "severity": "warn" if failed else ""},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
              "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s",
              "help": "Peak hourly-cohort p95 from the fact table; open with a schema filter for the exact raw p95."
@@ -70,10 +77,21 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         ])
         result_caption(summary)
 
+    # Parallel path (same contract as Security): both queries submit async in
+    # one shot; any failure falls back to the serial per-query calls.
+    _qb = run_batch([
+        {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
+                                                             user_filter, database, schema_contains),
+         "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
+        {"key": "fails", "sql": ops_sql.failures_by_error(days, company, database, schema_contains),
+         "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
+    ], page=_PAGE, tier="recent") or {}
+
     st.markdown("**Heaviest queries**")
-    top = run(ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter, database, schema_contains),
-              page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
-              source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
+    top = _qb.get("top") or run(
+        ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter, database, schema_contains),
+        page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
+        source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
         sel_q = selectable_table(
             top.df[["USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
@@ -145,9 +163,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     result_caption(detail)
 
     st.markdown("**Failures by error**")
-    fails = run(ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
-                key=f"q_fails_{company}_{days}", tier="recent",
-                source="ACCOUNT_USAGE.QUERY_HISTORY")
+    fails = _qb.get("fails") or run(
+        ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
+        key=f"q_fails_{company}_{days}", tier="recent",
+        source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
         styled_table(fails.df)
 
@@ -466,10 +485,16 @@ def _warehouses_tab(company: str, rate: float) -> None:
 
 
 def _contention_tab(company: str, days: int) -> None:
+    _cb = run_batch([
+        {"key": "pressure", "sql": ops_sql.warehouse_pressure(days, company),
+         "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
+        {"key": "locks", "sql": ops_sql.lock_contention(min(days, 14)),
+         "source": "ACCOUNT_USAGE.LOCK_WAIT_HISTORY"},
+    ], page=_PAGE, tier="recent") or {}
     left, right = st.columns(2)
     with left:
         st.markdown("**Warehouse queue & spill pressure**")
-        res = run(ops_sql.warehouse_pressure(days, company), page=_PAGE,
+        res = _cb.get("pressure") or run(ops_sql.warehouse_pressure(days, company), page=_PAGE,
                   key=f"c_pressure_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.QUERY_HISTORY")
         if guard(res, "No queueing or spill pressure in this window."):
@@ -478,7 +503,8 @@ def _contention_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
     with right:
         st.markdown("**Lock waits (account-wide)**")
-        res = run(ops_sql.lock_contention(min(days, 14)), page=_PAGE, key=f"c_locks_{days}",
+        res = _cb.get("locks") or run(ops_sql.lock_contention(min(days, 14)), page=_PAGE,
+                  key=f"c_locks_{days}",
                   tier="recent", source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY")
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
             st.dataframe(res.df, hide_index=True, use_container_width=True)

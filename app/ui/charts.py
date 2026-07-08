@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 _HEIGHT = 264
+HEATMAP_MAX_ROWS = 20  # 24px/row; beyond this the heatmap became a scroll trap
 
 _ACCENT = "#38bdf8"
 _ACCENT2 = "#22d3ee"
@@ -92,16 +93,18 @@ def spend_trend(
     enc_x = alt.X("Day:T", title=None)
     enc_y = alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f"))
     tip = [alt.Tooltip("Day:T"), alt.Tooltip("USD:Q", format="$,.2f", title="Spend")]
-    area = (_base(data).mark_area(
+    # Data-less child specs + data on the layer: the frame ships in the page
+    # payload ONCE instead of once per mark (this is the most-viewed chart).
+    area = (alt.Chart().mark_area(
                 line={"color": _ACCENT, "strokeWidth": 2.4},
                 color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
                     stops=[alt.GradientStop(color=_ACCENT, offset=0.0),
                            alt.GradientStop(color=_ACCENT, offset=0.0)]),
                 opacity=0.16)
             .encode(x=enc_x, y=enc_y, tooltip=tip))
-    line = (_base(data).mark_line(point={"filled": True, "size": 34}, strokeWidth=2.4)
+    line = (alt.Chart().mark_line(point={"filled": True, "size": 34}, strokeWidth=2.4)
             .encode(x=enc_x, y=enc_y, tooltip=tip))
-    layers = [area, line]
+    layers = [alt.layer(area, line, data=data).properties(height=_HEIGHT)]
     if daily_budget_usd and daily_budget_usd > 0:
         rule_df = pd.DataFrame({"y": [daily_budget_usd]})
         layers.append(
@@ -221,6 +224,13 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
     """Hour-of-day x entity heatmap (e.g. credits burned by warehouse-hour)."""
     data = df[[row_col, hour_col, value_col]].copy()
     data.columns = ["Row", "Hour", "Value"]
+    capped_note = ""
+    n_rows = data["Row"].nunique()
+    if n_rows > HEATMAP_MAX_ROWS:
+        keep = (data.groupby("Row")["Value"].sum()
+                .sort_values(ascending=False).head(HEATMAP_MAX_ROWS).index)
+        data = data[data["Row"].isin(keep)]
+        capped_note = f"Top {HEATMAP_MAX_ROWS} of {n_rows} by total — narrow the scope for the rest."
     chart = (
         _base(data)
         .mark_rect()
@@ -234,6 +244,8 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
         .properties(height=max(120, 24 * data["Row"].nunique()))
     )
     st.altair_chart(chart, use_container_width=True)
+    if capped_note:
+        st.caption(capped_note)
 
 
 def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10) -> None:
@@ -272,10 +284,11 @@ def event_timeline(df: pd.DataFrame) -> None:
                       legend=alt.Legend(orient="top", title=None))
     common = {"x": alt.X("AT:T", title=None), "y": alt.Y("EVENT_TYPE:N", title=None),
               "tooltip": ["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"]}
-    glow = _base(data, height=186).mark_circle(size=240, opacity=0.16).encode(color=color, **common)
-    dots = _base(data, height=186).mark_circle(size=90, opacity=0.95,
+    glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(color=color, **common)
+    dots = alt.Chart().mark_circle(size=90, opacity=0.95,
                 stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, **common)
-    st.altair_chart(glow + dots, use_container_width=True)
+    st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
+                    use_container_width=True)
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,

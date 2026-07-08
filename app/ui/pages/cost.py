@@ -288,6 +288,63 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
 
 
+@st.fragment
+def _whatif_panel(sized, days: int, rate: float) -> None:
+    """Fragment: slider moves rerun this panel only, not the whole page."""
+    with st.expander("Interactive what-if: size step + auto-suspend together"):
+        st.caption(
+            "Replays this window's observed credits under a size step and a new "
+            "auto-suspend, as a bounded range — not a promise. Busy credits land "
+            "between rate-scaled (queries keep their wall time) and cost-neutral "
+            "(perfect runtime scaling); idle scales with the suspend window."
+        )
+        wi_names = sized["WAREHOUSE_NAME"].astype(str).tolist()
+        wi_pick = st.selectbox("Warehouse", wi_names, key="whatif_wh")
+        wrow_wi = sized[sized["WAREHOUSE_NAME"].astype(str) == wi_pick].iloc[0]
+        live_size, live_suspend = "", 600
+        whs_wi = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+                     tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        if whs_wi.ok and not whs_wi.empty:
+            wdf_wi = whs_wi.df.copy()
+            wdf_wi.columns = [str(c).lower() for c in wdf_wi.columns]
+            match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
+            if not match.empty:
+                live_size = str(match.iloc[0].get("size", "") or "")
+                live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600) or 600)
+        c_sz, c_sus = st.columns(2)
+        with c_sz:
+            delta_wi = st.select_slider("Size step", options=[-2, -1, 0, 1, 2], value=0,
+                                        key="whatif_delta")
+        with c_sus:
+            sus_wi = st.select_slider("New auto-suspend (s)",
+                                      options=[30, 60, 120, 300, 600, 900],
+                                      value=60, key="whatif_suspend")
+        idle_wi = safe_float(wrow_wi.get("CREDITS_TOTAL")) * safe_float(wrow_wi.get("IDLE_PCT")) / 100.0
+        sim = simulate_scenario(
+            size=live_size or "MEDIUM",
+            credits_window=safe_float(wrow_wi.get("CREDITS_TOTAL")),
+            idle_credits_window=idle_wi,
+            window_days=days, rate_usd=rate, size_delta=int(delta_wi),
+            autosuspend_now_s=live_suspend, autosuspend_new_s=int(sus_wi),
+        )
+        if not sim.get("ok"):
+            st.info(str(sim.get("reason", "Cannot simulate this warehouse."))
+                    + (" (SHOW WAREHOUSES did not return its size.)" if not live_size else ""))
+        else:
+            kpi_row([
+                {"label": f"Now ({sim['size_now']}, {live_suspend}s suspend)",
+                 "value": format_usd(sim["monthly_now_usd"]),
+                 "help": "Observed window scaled to 30 days at the configured rate."},
+                {"label": f"Scenario ({sim['size_new']}, {int(sus_wi)}s)",
+                 "value": f"{format_usd(sim['monthly_low_usd'])} – {format_usd(sim['monthly_high_usd'])}",
+                 "severity": ("ok" if sim["monthly_high_usd"] <= sim["monthly_now_usd"] else
+                              "warn" if sim["monthly_low_usd"] <= sim["monthly_now_usd"] else "bad"),
+                 "help": "Bounded range — both ends of the stated assumptions."},
+            ])
+            for a_line in sim["assumptions"]:
+                st.caption(f"· {a_line}")
+
+
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool) -> None:
     """Ported optimization insights: idle warehouses, repeat queries, storage movers."""
     # ---- 1. Idle warehouse advisor -------------------------------------------
@@ -401,58 +458,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
                         "'Booked from sizing simulator; verifier tests actuals.'", page=_PAGE)
                 notify(ok, msg)
-        with st.expander("Interactive what-if: size step + auto-suspend together"):
-            st.caption(
-                "Replays this window's observed credits under a size step and a new "
-                "auto-suspend, as a bounded range — not a promise. Busy credits land "
-                "between rate-scaled (queries keep their wall time) and cost-neutral "
-                "(perfect runtime scaling); idle scales with the suspend window."
-            )
-            wi_names = sized["WAREHOUSE_NAME"].astype(str).tolist()
-            wi_pick = st.selectbox("Warehouse", wi_names, key="whatif_wh")
-            wrow_wi = sized[sized["WAREHOUSE_NAME"].astype(str) == wi_pick].iloc[0]
-            live_size, live_suspend = "", 600
-            whs_wi = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
-                         tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-            if whs_wi.ok and not whs_wi.empty:
-                wdf_wi = whs_wi.df.copy()
-                wdf_wi.columns = [str(c).lower() for c in wdf_wi.columns]
-                match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
-                if not match.empty:
-                    live_size = str(match.iloc[0].get("size", "") or "")
-                    live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600) or 600)
-            c_sz, c_sus = st.columns(2)
-            with c_sz:
-                delta_wi = st.select_slider("Size step", options=[-2, -1, 0, 1, 2], value=0,
-                                            key="whatif_delta")
-            with c_sus:
-                sus_wi = st.select_slider("New auto-suspend (s)",
-                                          options=[30, 60, 120, 300, 600, 900],
-                                          value=60, key="whatif_suspend")
-            idle_wi = safe_float(wrow_wi.get("CREDITS_TOTAL")) * safe_float(wrow_wi.get("IDLE_PCT")) / 100.0
-            sim = simulate_scenario(
-                size=live_size or "MEDIUM",
-                credits_window=safe_float(wrow_wi.get("CREDITS_TOTAL")),
-                idle_credits_window=idle_wi,
-                window_days=days, rate_usd=rate, size_delta=int(delta_wi),
-                autosuspend_now_s=live_suspend, autosuspend_new_s=int(sus_wi),
-            )
-            if not sim.get("ok"):
-                st.info(str(sim.get("reason", "Cannot simulate this warehouse."))
-                        + (" (SHOW WAREHOUSES did not return its size.)" if not live_size else ""))
-            else:
-                kpi_row([
-                    {"label": f"Now ({sim['size_now']}, {live_suspend}s suspend)",
-                     "value": format_usd(sim["monthly_now_usd"]),
-                     "help": "Observed window scaled to 30 days at the configured rate."},
-                    {"label": f"Scenario ({sim['size_new']}, {int(sus_wi)}s)",
-                     "value": f"{format_usd(sim['monthly_low_usd'])} – {format_usd(sim['monthly_high_usd'])}",
-                     "severity": ("ok" if sim["monthly_high_usd"] <= sim["monthly_now_usd"] else
-                                  "warn" if sim["monthly_low_usd"] <= sim["monthly_now_usd"] else "bad"),
-                     "help": "Bounded range — both ends of the stated assumptions."},
-                ])
-                for a_line in sim["assumptions"]:
-                    st.caption(f"· {a_line}")
+        _whatif_panel(sized, days, rate)
         result_caption(prof_res)
 
     st.divider()
@@ -461,9 +467,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     if st.toggle("Run expensive-query scan", key="cost_expq_toggle",
                  help="Splits each warehouse-hour's credits across that hour's queries "
                       "by execution-time share. The heaviest scan after repeat-queries."):
-        expq = run(insights_sql.expensive_queries_usd(days, company, 50), page=_PAGE,
-                   key=f"expq_{company}_{days}", tier="historical",
-                   source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share allocation)")
+        with st.spinner("Allocating warehouse-hour credits across queries…"):
+            expq = run(insights_sql.expensive_queries_usd(days, company, 50), page=_PAGE,
+                       key=f"expq_{company}_{days}", tier="historical",
+                       source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share allocation)")
         if guard(expq, "No warehouse queries in this window."):
             edf_q = expq.df.copy()
             edf_q["ALLOCATED_USD"] = edf_q["ALLOCATED_CREDITS"].map(
@@ -491,7 +498,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        key="cost_repeatq_toggle",
                        help="The heaviest scan on this page — runs only when you ask.")
     if _rq_on:
-        rq_res = run(insights_sql.repeat_query_fingerprints(
+        with st.spinner("Fingerprinting the window's QUERY_HISTORY…"):
+            rq_res = run(insights_sql.repeat_query_fingerprints(
             days, company,
             database=st.session_state.get("flt_database", ""),
             schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
@@ -574,15 +582,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
     if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                  help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
-        waste = run(insights_sql.storage_reclaim(company), page=_PAGE,
-                    key=f"reclaim_{company}", tier="historical",
-                    source="TABLE_STORAGE_METRICS + DML + ACCESS_HISTORY (reads, 90d)")
-        reads_available = waste.ok
-        if not waste.ok:
-            # ACCESS_HISTORY needs Enterprise edition — degrade to the DML-only view.
-            waste = run(insights_sql.storage_waste(company), page=_PAGE,
-                        key=f"waste_{company}", tier="historical",
-                        source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+        with st.spinner("Scanning table storage + 90 days of read/DML history…"):
+            waste = run(insights_sql.storage_reclaim(company), page=_PAGE,
+                        key=f"reclaim_{company}", tier="historical",
+                        source="TABLE_STORAGE_METRICS + DML + ACCESS_HISTORY (reads, 90d)")
+            reads_available = waste.ok
+            if not waste.ok:
+                # ACCESS_HISTORY needs Enterprise edition — degrade to the DML-only view.
+                waste = run(insights_sql.storage_waste(company), page=_PAGE,
+                            key=f"waste_{company}", tier="historical",
+                            source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
         if waste.ok and waste.empty:
             st.success("No table above 1 GB of combined active + retention bytes in this scope.")
         elif guard(waste, ""):
@@ -840,6 +849,52 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             st.caption(f"View not available in this account/role: {fn_res.error}")
 
 
+@st.fragment
+def _statement_export(company: str, rate: float) -> None:
+    """Fragment: month picks and the zip build rerun this block only."""
+    st.markdown("**Monthly statement export**")
+    from datetime import timedelta
+
+    today = account_today()
+    this_month = today.strftime("%Y-%m")
+    prev = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    month = st.selectbox("Statement month", [prev, this_month], key="cb_month",
+                         help="Prior month is the finance-ready one; current month is partial.")
+    if st.button("Build department statements", key="cb_build"):
+        import io
+        import zipfile
+
+        month_res = run(chargeback_sql.department_month_credits(month, company), page=_PAGE,
+                        key=f"cb_month_{company}_{month}", tier="historical",
+                        source="WAREHOUSE_METERING_HISTORY (calendar month)")
+        if not month_res.usable():
+            st.error(month_res.error or "No credits recorded for that month/scope.")
+        else:
+            frame = month_res.df.copy()
+            frame["USD"] = frame["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+                summary = frame.groupby(["DEPARTMENT", "DEPT_OWNER"], as_index=False)["USD"].sum()
+                bundle.writestr("00_summary.csv", summary.to_csv(index=False))
+                for dept_name, block in frame.groupby("DEPARTMENT"):
+                    safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(dept_name))[:60]
+                    bundle.writestr(f"{safe_name}.csv", block.to_csv(index=False))
+                bundle.writestr(
+                    "MANIFEST.txt",
+                    f"OVERWATCH chargeback statements - {company} - {month}\n"
+                    f"Rate: ${rate:.2f}/credit (CORE settings). Warehouse metering is exact; "
+                    f"idle time bills to the owning department.\n"
+                    f"Total: ${float(frame['USD'].sum()):,.2f} across "
+                    f"{frame['DEPARTMENT'].nunique()} departments.",
+                )
+            st.download_button(
+                "Download statements (.zip)", data=buffer.getvalue(),
+                file_name=f"overwatch_chargeback_{company}_{month}.zip",
+                mime="application/zip", key="cb_dl",
+            )
+            st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
+
+
 def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> None:
     """Department chargeback: warehouse = billing truth, role = usage lens."""
     dept_res = run(chargeback_sql.department_window_credits(days, company), page=_PAGE,
@@ -934,47 +989,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             ok, msg = execute_statement(stmt_b, page=_PAGE)
             notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
 
-    st.markdown("**Monthly statement export**")
-    from datetime import timedelta
-
-    today = account_today()
-    this_month = today.strftime("%Y-%m")
-    prev = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
-    month = st.selectbox("Statement month", [prev, this_month], key="cb_month",
-                         help="Prior month is the finance-ready one; current month is partial.")
-    if st.button("Build department statements", key="cb_build"):
-        import io
-        import zipfile
-
-        month_res = run(chargeback_sql.department_month_credits(month, company), page=_PAGE,
-                        key=f"cb_month_{company}_{month}", tier="historical",
-                        source="WAREHOUSE_METERING_HISTORY (calendar month)")
-        if not month_res.usable():
-            st.error(month_res.error or "No credits recorded for that month/scope.")
-        else:
-            frame = month_res.df.copy()
-            frame["USD"] = frame["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
-                summary = frame.groupby(["DEPARTMENT", "DEPT_OWNER"], as_index=False)["USD"].sum()
-                bundle.writestr("00_summary.csv", summary.to_csv(index=False))
-                for dept_name, block in frame.groupby("DEPARTMENT"):
-                    safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(dept_name))[:60]
-                    bundle.writestr(f"{safe_name}.csv", block.to_csv(index=False))
-                bundle.writestr(
-                    "MANIFEST.txt",
-                    f"OVERWATCH chargeback statements - {company} - {month}\n"
-                    f"Rate: ${rate:.2f}/credit (CORE settings). Warehouse metering is exact; "
-                    f"idle time bills to the owning department.\n"
-                    f"Total: ${float(frame['USD'].sum()):,.2f} across "
-                    f"{frame['DEPARTMENT'].nunique()} departments.",
-                )
-            st.download_button(
-                "Download statements (.zip)", data=buffer.getvalue(),
-                file_name=f"overwatch_chargeback_{company}_{month}.zip",
-                mime="application/zip", key="cb_dl",
-            )
-            st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
+    _statement_export(company, rate)
 
     with st.expander("Manage mapping"):
         map_res = run(chargeback_sql.department_map(), page=_PAGE, key="cb_map", tier="recent",

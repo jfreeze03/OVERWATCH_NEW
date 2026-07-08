@@ -20,10 +20,11 @@ PAGE_SECTION_KEYS = {
 
 _RULE_TARGETS = {
     "PERF_CHANGE_REGRESSION": ("Operations", "Change impact"),
-    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Spend"),
-    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization"),
-    "COST_SERVERLESS_CREEP": ("Cost & Contract", "Spend"),
-    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Spend"),
+    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Spend & Attribution"),
+    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization & Savings"),
+    "COST_SERVERLESS_CREEP": ("Cost & Contract", "Spend & Attribution"),
+    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Spend & Attribution"),
+    "COST_DEPT_BUDGET_PACE": ("Cost & Contract", "Chargeback & AI"),
     "PIPE_COPY_FAILURES": ("Operations", "Pipeline SLA"),
     "PIPE_DT_FAILURES": ("Operations", "Pipeline SLA"),
     "SEC_CRED_EXPIRY": ("Security", "Access"),
@@ -31,8 +32,8 @@ _RULE_TARGETS = {
 }
 
 _FAMILY_DEFAULTS = (
-    ("BUDGET", ("Cost & Contract", "Contract")),
-    ("COST", ("Cost & Contract", "Spend")),
+    ("BUDGET", ("Cost & Contract", "Contract & Forecast")),
+    ("COST", ("Cost & Contract", "Spend & Attribution")),
     ("PERF", ("Operations", "Queries")),
     ("PIPE", ("Operations", "Pipeline SLA")),
     ("TASK", ("Operations", "Tasks")),
@@ -42,12 +43,12 @@ _FAMILY_DEFAULTS = (
 # Rules with a mechanical fix: the drawer offers "Generate fix ->" landing on
 # the remediation/optimization surface with the event's filters applied.
 FIX_TARGETS = {
-    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Optimization"),
-    "COST_WH_DAILY_CREDITS": ("Cost & Contract", "Optimization"),
-    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Optimization"),
-    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization"),
-    "PERF_QUEUED_MINUTES": ("Cost & Contract", "Optimization"),
-    "PERF_SPILL_GB": ("Cost & Contract", "Optimization"),
+    "COST_CLOUD_SVC_RATIO": ("Cost & Contract", "Optimization & Savings"),
+    "COST_WH_DAILY_CREDITS": ("Cost & Contract", "Optimization & Savings"),
+    "COST_ANOMALY_SWEEP": ("Cost & Contract", "Optimization & Savings"),
+    "COST_STORAGE_SURGE": ("Cost & Contract", "Optimization & Savings"),
+    "PERF_QUEUED_MINUTES": ("Cost & Contract", "Optimization & Savings"),
+    "PERF_SPILL_GB": ("Cost & Contract", "Optimization & Savings"),
 }
 
 
@@ -90,6 +91,8 @@ def investigation_target(rule_id: str, text: str = "") -> dict:
                 page, section = target
                 break
         else:
+            # OPS_* (canary/render/scan) deliberately lands on Overview: their
+            # home is Admin, which non-DBA profiles cannot navigate to.
             page, section = "Overview", ""
     filters: dict = {}
     upper = str(text or "").upper()

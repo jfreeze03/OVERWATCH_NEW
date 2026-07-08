@@ -56,7 +56,7 @@ def test_fix_targets_and_render_capture():
     from app.logic.navigate import fix_target
 
     t = fix_target("COST_CLOUD_SVC_RATIO", "WH_TRXS_TRANSFORM ratio 31%")
-    assert t == {"page": "Cost & Contract", "section": "Optimization",
+    assert t == {"page": "Cost & Contract", "section": "Optimization & Savings",
                  "filters": {"warehouse_contains": "WH_TRXS_TRANSFORM"}}
     assert fix_target("SEC_CRED_EXPIRY") is None        # no mechanical fix
 

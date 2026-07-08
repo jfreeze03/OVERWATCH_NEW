@@ -67,6 +67,11 @@ def localize_timestamps(df, columns: list[str]):
             converted = True
         except (TypeError, ValueError):
             continue
+    if converted:
+        try:
+            out.attrs["_ow_tz_converted"] = True  # central pass must not convert again
+        except Exception:  # noqa: BLE001 - attrs are best-effort metadata
+            pass
     return out, (f"Times shown in {tz} (stored in account time)." if converted else "")
 
 
@@ -93,6 +98,12 @@ def lazy_sections(labels: list[str], key: str) -> str:
                     break
         except Exception:  # noqa: BLE001 - deep links are progressive enhancement
             pass
+    elif st.session_state.get(key) not in labels:
+        # A router/saved-view pointed at a section that no longer exists
+        # (labels get consolidated); land on the first section instead of
+        # crashing the radio. The navigation-consistency test keeps the
+        # router honest; this keeps stale SAVED links harmless forever.
+        st.session_state[key] = labels[0]
     choice = st.radio("Section", labels, key=key, horizontal=True,
                       label_visibility="collapsed")
     try:
@@ -270,7 +281,13 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
     Returns True when the caller should render the data.
     """
     if not result.ok:
-        st.error(f"Query failed: {result.error}")
+        # Absence-of-setup is a state, not a failure: fresh deployments show
+        # one calm line instead of a wall of red while marts install.
+        if "run the migrations and roles.sql" in str(result.error):
+            st.info("This panel needs OVERWATCH's objects installed — an admin can see "
+                    "what's pending on Admin → Migrations & freshness.")
+        else:
+            st.error(f"Query failed: {result.error}")
         if setup_hint:
             st.caption(setup_hint)
         return False
@@ -285,6 +302,27 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
             "Narrow the window or filters to see everything."
         )
     return True
+
+
+SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+
+
+def severity_sort(df, sev_col: str = "SEVERITY", time_col: str = "RAISED_AT"):
+    """Triage order: worst severity first, newest within a severity.
+
+    Default table order was pure recency, which let an hour-old CRITICAL sink
+    below a minute-old INFO. Returns a re-indexed copy; no-op when the
+    severity column is absent.
+    """
+    if df is None or getattr(df, "empty", True) or sev_col not in df.columns:
+        return df
+    out = df.copy()
+    out["_SEV_RANK"] = out[sev_col].astype(str).str.upper().map(SEVERITY_RANK).fillna(-1)
+    by, ascending = ["_SEV_RANK"], [False]
+    if time_col in out.columns:
+        by.append(time_col)
+        ascending.append(False)
+    return out.sort_values(by, ascending=ascending).drop(columns=["_SEV_RANK"]).reset_index(drop=True)
 
 
 def status_chips(pairs: list[tuple[str, str]]) -> None:
@@ -369,22 +407,86 @@ def _auto_formats(df, skip: set) -> dict:
     return fmts
 
 
+# Above this row count, pandas Styler (per-cell styles for the WHOLE frame)
+# dominates paint time — fall back to Arrow-native printf formats instead.
+STYLER_MAX_ROWS = 1500
+
+# Styler format -> printf equivalent for the large-frame path. Commas are
+# lost above the cap (printf has no grouping); that trade is deliberate.
+_PRINTF_EQUIV = {"${:,.2f}": "$%.2f", "{:,.2f}": "%.2f", "{:,.1f}": "%.1f", "{:,.0f}": "%.0f"}
+
+# Columns that hold account-time timestamps, by naming convention — the
+# display-timezone conversion (Views popover) applies to every table via
+# _render_table, not just the pages that remembered to call it.
+_TS_SUFFIXES = ("_AT", "_TIME", "_TS", "_DML", "_READ", "_SEND")
+_TS_EXACT = ("AT", "TIMESTAMP", "NEWEST", "OLDEST", "LAST_DML", "LAST_READ", "LAST_SEND")
+
+
+def timestampish_columns(columns) -> list[str]:
+    """Column names that look like account-time timestamps (convention)."""
+    out = []
+    for col in columns:
+        c = str(col).upper()
+        if c.endswith(_TS_SUFFIXES) or c in _TS_EXACT:
+            out.append(col)
+    return out
+
+
+def _auto_pin(df, column_config: dict | None) -> dict | None:
+    """Pin the first column on wide tables so horizontal scroll keeps the
+    row's identity. No-op when the caller configured that column, when the
+    table is narrow, or on runtimes without pinning support."""
+    if len(df.columns) < 8:
+        return column_config
+    first = df.columns[0]
+    cfg = dict(column_config or {})
+    if first in cfg:
+        return column_config
+    try:
+        cfg[first] = st.column_config.Column(pinned=True)
+    except TypeError:  # runtime predates pinned=
+        return column_config
+    return cfg
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False) -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
         return None
-    data = df
-    try:
-        styler = df.style
-        for col in status_columns_in(list(df.columns)):
-            styler = styler.map(lambda v, _c=col: status_css(_c, v), subset=[col])
-        fmts = _auto_formats(df, set(column_config or {}))
-        if fmts:
-            styler = styler.format(fmts, na_rep="–")
-        data = styler
-    except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
-        data = df
+    display_df = df
+    try:  # display-timezone conversion is display-only; the CSV keeps account time
+        ts_cols = [] if getattr(df, "attrs", {}).get("_ow_tz_converted") else timestampish_columns(df.columns)
+        if ts_cols:
+            display_df, tz_note = localize_timestamps(df, ts_cols)
+            if tz_note:
+                st.caption(tz_note)
+    except Exception:  # noqa: BLE001 - conversion is cosmetic
+        display_df = df
+    data = display_df
+    fmts = _auto_formats(df, set(column_config or {}))
+    if len(df) <= STYLER_MAX_ROWS:
+        try:
+            styler = display_df.style
+            for col in status_columns_in(list(df.columns)):
+                styler = styler.map(lambda v, _c=col: status_css(_c, v), subset=[col])
+            if fmts:
+                styler = styler.format(fmts, na_rep="–")
+            data = styler
+        except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
+            data = display_df
+    else:
+        # Large frame: skip Styler entirely; carry the number formats through
+        # column_config so display stays consistent (minus thousands commas).
+        cfg = dict(column_config or {})
+        for col, fmt in fmts.items():
+            if col not in cfg and fmt in _PRINTF_EQUIV:
+                try:
+                    cfg[col] = st.column_config.NumberColumn(format=_PRINTF_EQUIV[fmt])
+                except Exception:  # noqa: BLE001
+                    break
+        column_config = cfg
+    column_config = _auto_pin(df, column_config)
     if height is None and len(df) > 10:
         height = 380
     kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
@@ -401,12 +503,14 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             st.dataframe(data, **kwargs)
     else:
         st.dataframe(data, **kwargs)
-    try:  # every table is exportable; auditors and managers ask constantly
-        seq = int(st.session_state.get("_ow_dl_seq", 0))
-        st.session_state["_ow_dl_seq"] = seq + 1
-        st.download_button("⬇ CSV", df.to_csv(index=False).encode("utf-8"),
-                           file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
-                           key=f"ow_dl_{key or ''}_{seq}", type="tertiary")
+    try:  # every real table is exportable; tiny KPI-ish frames skip the button
+        if len(df) >= 4:
+            seq = int(st.session_state.get("_ow_dl_seq", 0))
+            st.session_state["_ow_dl_seq"] = seq + 1
+            st.download_button("⬇", df.to_csv(index=False).encode("utf-8"),
+                               file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                               key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
+                               help="Download this table as CSV (account time).")
     except Exception:  # noqa: BLE001 - export is a convenience, never break the table
         pass
     return selected

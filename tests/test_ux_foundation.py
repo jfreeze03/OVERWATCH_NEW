@@ -7,7 +7,7 @@ from app.ui import status_colors
 def test_investigation_targets_known_rules():
     t = navigate.investigation_target(
         "COST_CLOUD_SVC_RATIO", "WH_TRXS_TRANSFORM cloud-services ratio 31.2% (24h)")
-    assert t["page"] == "Cost & Contract" and t["section"] == "Spend"
+    assert t["page"] == "Cost & Contract" and t["section"] == "Spend & Attribution"
     assert t["filters"]["warehouse_contains"] == "WH_TRXS_TRANSFORM"
 
     t = navigate.investigation_target(
