@@ -19,7 +19,7 @@ from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import filters
 from app.data import chargeback_sql, cortex_sql, cost_sql, insights_sql, mart_sql, ops_sql, security_sql
-from app.logic import contract_planner, remediation
+from app.logic import contract_planner, remediation, steering
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.anomaly import anomaly_summary, flag_anomalies
@@ -27,10 +27,11 @@ from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_sum
 from app.logic.forecast import contract_pace
 from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
-from app.logic.sizing import simulate_scenario, size_recommendations, sizing_summary
+from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    blast_radius,
     guard,
     kpi_row,
     lazy_sections,
@@ -216,6 +217,42 @@ def _contract_tab(settings: dict) -> None:
          "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal"},
     ])
     result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
+
+    st.markdown("**Steering to commit — the levers, in dollars per day**")
+    idle_lv = run(insights_sql.idle_warehouse_analysis(30, "ALL"), page=_PAGE,
+                  key="steer_idle", tier="historical",
+                  source="idle advisor (30d, account-wide)")
+    pats_lv = run(insights_sql.expensive_patterns_usd(30, "ALL", 10), page=_PAGE,
+                  key="steer_pats", tier="historical",
+                  source="recurring patterns (30d, account-wide)")
+    rate_st = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    levers: dict = {}
+    if idle_lv.usable():
+        adv_st = idle_advisor(idle_lv.df, rate_st, 30)
+        levers["Auto-suspend tuning (idle burn)"] = float(
+            adv_st["PROJECTED_MONTHLY_IDLE_USD"].sum())
+    if pats_lv.usable():
+        top5 = pats_lv.df.head(5)
+        levers["Top-5 recurring patterns (cache/materialize)"] = float(
+            (pd.to_numeric(top5["CREDITS_PER_DAY"], errors="coerce").fillna(0) * rate_st).sum() * 30)
+    plan = steering.steering_plan(
+        projected_term_credits=pace["projected_term_credits"],
+        contract_credits=contract_credits,
+        days_remaining=pace["days_remaining"],
+        rate_usd=rate_st, levers_monthly_usd=levers,
+    )
+    if not plan.get("ok"):
+        st.info(str(plan.get("verdict")))
+    else:
+        (st.success if plan["gap_usd"] <= 0 or plan["coverage_pct"] >= 100 else st.warning)(
+            plan["verdict"])
+        if plan["rows"]:
+            styled_table(pd.DataFrame(plan["rows"]), height=140)
+        st.caption(
+            "Lever estimates come straight from the idle advisor and recurring-pattern "
+            "panels (execute them on Optimization & Savings). Estimates, not promises — "
+            "the savings verifier proves them after the fact."
+        )
 
     st.divider()
     st.markdown("**Renewal planner (what-if)**")
@@ -440,6 +477,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 est_sz = round(max(0.0, safe_float(srow.get("MONTHLY_USD_NOW"))
                                     - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
                 st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until the verifier proves it).")
+            blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
             confirm_sz = st.text_input("Type the warehouse name to confirm resize", key="sizing_confirm")
             if st.button("Execute resize + log", key="sizing_exec",
                          disabled=(confirm_sz != str(srow["WAREHOUSE_NAME"]))):
@@ -510,6 +548,24 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 },
             )
             result_caption(pats, note="candidates for result-cache reuse, materialization, or a schedule")
+            st.markdown("**Price a pattern (estimate before prod)**")
+            pat_opts = pdf_c["PATTERN_HASH"].astype(str).tolist()
+            pat_pick = st.selectbox("Pattern", pat_opts, key="price_pat",
+                                    format_func=lambda h: h[:16] + "…")
+            prow = pdf_c[pdf_c["PATTERN_HASH"].astype(str) == pat_pick].iloc[0]
+            delta_pr = st.select_slider("At size step", options=[-2, -1, 0, 1, 2], value=0,
+                                        key="price_delta")
+            bounds = price_per_run_bounds(safe_float(prow["ALLOCATED_CREDITS"]),
+                                          int(prow["RUNS"]), rate, int(delta_pr))
+            kpi_row([
+                {"label": "Observed $/run", "value": f"${bounds['per_run_now_usd']:.4f}",
+                 "help": f"{int(prow['RUNS'])} runs in {days}d, hour-share allocated."},
+                {"label": f"At {'+' if delta_pr > 0 else ''}{delta_pr} size step",
+                 "value": f"${bounds['per_run_low_usd']:.4f} – ${bounds['per_run_high_usd']:.4f}",
+                 "help": "Bounds: rate-scaled (same wall time) vs cost-neutral "
+                         "(perfect runtime scaling) — same assumptions as the what-if."},
+            ])
+            st.caption(f"Sample: {str(prow['QUERY_SNIPPET'])[:120]}")
 
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
@@ -643,6 +699,45 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                           " Read evidence unavailable (ACCESS_HISTORY needs Enterprise edition) — "
                           "showing DML-only staleness."))
             result_caption(waste)
+            if sel_w is not None:
+                _trow = sdf.iloc[int(sel_w)]
+                st.markdown(f"**Object TCO — `{_trow['DATABASE_NAME']}.{_trow['SCHEMA_NAME']}.{_trow['TABLE_NAME']}`**")
+                _st_gb = (safe_float(_trow.get("ACTIVE_GB")) + safe_float(_trow.get("TIME_TRAVEL_GB"))
+                          + safe_float(_trow.get("FAILSAFE_GB")) + safe_float(_trow.get("CLONE_RETAINED_GB")))
+                _st_usd = round(_st_gb / 1024 * safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0), 2)
+                try:
+                    tco = run(insights_sql.table_tco(str(_trow["DATABASE_NAME"]), str(_trow["SCHEMA_NAME"]),
+                                                     str(_trow["TABLE_NAME"]), 30),
+                              page=_PAGE, key=f"tco_{sel_w}", tier="historical",
+                              source="ACCESS_HISTORY (reads + writes, 30d)")
+                except ValueError:
+                    tco = None  # exotic identifier: storage economics still shown
+                _reads = _writes = 0
+                _last_read = None
+                if tco is not None and tco.usable():
+                    for _, krow in tco.df.iterrows():
+                        if str(krow["KIND"]) == "READ":
+                            _reads = int(safe_float(krow["TOUCHES"]))
+                            _last_read = krow.get("LAST_TOUCH")
+                        else:
+                            _writes = int(safe_float(krow["TOUCHES"]))
+                kpi_row([
+                    {"label": "Storage $/mo", "value": f"${_st_usd:,.2f}",
+                     "help": f"{_st_gb:,.1f} GB total incl. retention + clone-retained."},
+                    {"label": "Reads (30d)", "value": f"{_reads:,}",
+                     "severity": "warn" if _reads == 0 else "ok"},
+                    {"label": "Writes (30d)", "value": f"{_writes:,}",
+                     "help": "Writes with zero reads = paying to refresh an unread table."},
+                ])
+                if tco is not None and not tco.ok:
+                    st.caption("Read/write evidence needs ACCESS_HISTORY (Enterprise) — "
+                               "storage economics shown from TABLE_STORAGE_METRICS alone.")
+                elif _writes > 0 and _reads == 0:
+                    st.warning("Being refreshed but never read in 30d — retire-candidate: "
+                               "pause the writer AND reduce retention below.")
+                elif _reads == 0:
+                    st.info("No reads in 30d" + (" (last read unknown)" if _last_read is None else "")
+                            + " — confirm with the owner, then reclaim below.")
             if sel_w is not None and is_operator:
                 wrow = sdf.iloc[int(sel_w)]
                 keep_days = st.number_input("Set retention days", 0, 90, 1, key="waste_days")
@@ -1146,6 +1241,30 @@ def render() -> None:
         st.divider()
         section_header("Attribution", "info", "chargeback")
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
+        st.divider()
+        section_header("Query-tag governance", "info", "chargeback")
+        st.caption("Chargeback precision is capped by tag coverage — untagged execution "
+                   "time can only be allocated, never attributed.")
+        tags_res = run(cost_sql.tag_coverage(f["days"], f["company"]), page=_PAGE,
+                       key=f"tagcov_{f['company']}_{f['days']}", tier="historical",
+                       source="QUERY_HISTORY (exec-time-weighted tag coverage)")
+        if guard(tags_res, "No workloads above the 60s floor in this window."):
+            tdf_g = tags_res.df.copy()
+            total_exec = float(tdf_g["EXEC_SEC"].sum())
+            untagged = float(tdf_g["UNTAGGED_EXEC_SEC"].sum())
+            kpi_row([
+                {"label": "Tagged share (exec-time)",
+                 "value": f"{(1 - untagged / total_exec) * 100 if total_exec else 100:,.1f}%",
+                 "severity": "ok" if total_exec and untagged / total_exec < 0.3 else "warn"},
+                {"label": "Top untagged user",
+                 "value": str(tdf_g.iloc[0]["USER_NAME"]) if len(tdf_g) else "n/a",
+                 "delta": f"{float(tdf_g.iloc[0]['UNTAGGED_EXEC_SEC']) / 3600:,.1f}h untagged" if len(tdf_g) else None,
+                 "delta_color": "off"},
+            ])
+            styled_table(tdf_g, height=260, column_config={
+                "TAGGED_PCT": st.column_config.NumberColumn("Tagged %", format="%.1f%%")})
+            st.caption("Fix at the source: set QUERY_TAG in the tool/session that runs the "
+                       "workload; the scoreboard moves within a day.")
     elif section == "Contract & Forecast":
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)

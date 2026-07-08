@@ -242,6 +242,8 @@ def _open_events_section(events, is_operator: bool) -> None:
                         stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
                     st.code(stmt_cl, language="sql")
                     if is_operator:
+                        from app.ui.components import blast_radius
+                        blast_radius(wh_inline, _PAGE)
                         conf_cl = st.text_input("Type the warehouse name to confirm",
                                                 key=f"clf_confirm_{event_id[:8]}")
                         if st.button("Execute + audit + book estimate", key=f"clf_exec_{event_id[:8]}",

@@ -643,3 +643,36 @@ HAVING RUNS >= 5 AND ALLOCATED_CREDITS > 0
 ORDER BY ALLOCATED_CREDITS DESC
 LIMIT {limit}
 """
+
+def table_tco(database: str, schema: str, table: str, days: int = 30) -> str:
+    """Object-level cost evidence: reads, writers, last touch from
+    ACCESS_HISTORY for ONE table (Enterprise edition; the page degrades).
+    Storage dollars come from the reclaim row the caller already has."""
+    from app.core.sqlsafe import safe_identifier
+
+    fqn = ".".join(safe_identifier(part) for part in (database, schema, table)).upper()
+    days = bounded_days(days, 90)
+    return f"""
+WITH touches AS (
+    SELECT a.QUERY_START_TIME, a.USER_NAME,
+           f.value:"objectName"::STRING AS FQN, 'READ' AS KIND
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND f.value:"objectName"::STRING = '{fqn}'
+    UNION ALL
+    SELECT a.QUERY_START_TIME, a.USER_NAME,
+           f.value:"objectName"::STRING, 'WRITE'
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.OBJECTS_MODIFIED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND f.value:"objectName"::STRING = '{fqn}'
+)
+SELECT KIND,
+       COUNT(*)                  AS TOUCHES,
+       COUNT(DISTINCT USER_NAME) AS DISTINCT_USERS,
+       MAX(QUERY_START_TIME)     AS LAST_TOUCH,
+       ANY_VALUE(USER_NAME)      AS SAMPLE_USER
+FROM touches
+GROUP BY KIND
+"""

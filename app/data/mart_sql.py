@@ -640,3 +640,112 @@ LEFT JOIN t ON t.DAY = spend.DAY
 LEFT JOIN a ON a.DAY = spend.DAY
 ORDER BY spend.DAY
 """
+
+def day_spend_movers(day: object) -> str:
+    """Replay: each warehouse's credits on DAY vs its trailing-14d baseline."""
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+WITH base AS (
+    SELECT WAREHOUSE_NAME, AVG(CREDITS_TOTAL) AS BASELINE_CREDITS
+    FROM {core_object("FACT_WAREHOUSE_DAILY")}
+    WHERE DAY BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit})
+    GROUP BY WAREHOUSE_NAME
+),
+day_of AS (
+    SELECT WAREHOUSE_NAME, COMPANY, SUM(CREDITS_TOTAL) AS CREDITS_TOTAL
+    FROM {core_object("FACT_WAREHOUSE_DAILY")}
+    WHERE DAY = {lit}
+    GROUP BY WAREHOUSE_NAME, COMPANY
+)
+SELECT d.WAREHOUSE_NAME, d.COMPANY, d.CREDITS_TOTAL,
+       COALESCE(b.BASELINE_CREDITS, 0)                     AS BASELINE_CREDITS,
+       d.CREDITS_TOTAL - COALESCE(b.BASELINE_CREDITS, 0)   AS DELTA_CREDITS
+FROM day_of d
+LEFT JOIN base b ON b.WAREHOUSE_NAME = d.WAREHOUSE_NAME
+ORDER BY ABS(DELTA_CREDITS) DESC
+LIMIT 40
+"""
+
+
+def day_activity(day: object) -> str:
+    """Replay: the day's query totals next to the trailing-14d daily baseline."""
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+WITH day_of AS (
+    SELECT SUM(QUERY_COUNT) AS QUERY_COUNT, SUM(FAILED_COUNT) AS FAILED_COUNT,
+           SUM(QUEUED_SEC_SUM) AS QUEUED_SEC, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE DATE(HOUR_TS) = {lit}
+),
+base AS (
+    SELECT SUM(QUERY_COUNT) / 14 AS BASELINE_QUERIES,
+           SUM(FAILED_COUNT) / 14 AS BASELINE_FAILED
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE DATE(HOUR_TS) BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit})
+)
+SELECT day_of.*, base.BASELINE_QUERIES, base.BASELINE_FAILED FROM day_of, base
+"""
+
+
+def day_task_failures(day: object) -> str:
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, LAST_ERROR
+FROM {core_object("FACT_TASK_DAILY")}
+WHERE DAY = {lit} AND FAILED > 0
+ORDER BY FAILED DESC
+LIMIT 50
+"""
+
+
+def day_alerts(day: object) -> str:
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+SELECT RAISED_AT, SEVERITY, RULE_ID, COMPANY, TITLE, STATUS
+FROM {core_object("ALERT_EVENTS")}
+WHERE DATE(RAISED_AT) = {lit}
+ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END, RAISED_AT
+LIMIT 200
+"""
+
+
+def drill_history(months: int = 14) -> str:
+    """Fire-drill events (opt-in snowflake/alert_drill.sql), newest first."""
+    months = max(3, min(int(months or 14), 36))
+    return f"""
+SELECT RAISED_AT, NOTIFIED_AT, ACK_AT, STATUS, TITLE
+FROM {core_object("ALERT_EVENTS")}
+WHERE RULE_ID = 'OPS_ALERT_DRILL'
+  AND RAISED_AT >= DATEADD('month', -{months}, CURRENT_TIMESTAMP())
+ORDER BY RAISED_AT DESC
+LIMIT 40
+"""
+
+
+def metering_restatements(days: int = 60) -> str:
+    """Days whose metering row changed >=48h after the day closed — the
+    'why did the number we reported move?' detector (LOAD_TS updates on the
+    loader MERGE). v1 of the reported-numbers audit: flags restated days;
+    first-reported snapshots would need a fact-snapshot migration.
+    """
+    days = max(14, min(int(days or 60), 180))
+    return f"""
+SELECT DAY,
+       SUM(CREDITS_BILLED) AS CREDITS_BILLED,
+       MAX(LOAD_TS)        AS LAST_LOADED_AT,
+       DATEDIFF('hour', DATEADD('day', 1, DAY)::TIMESTAMP_NTZ, MAX(LOAD_TS)) AS RESTATED_HOURS_AFTER_CLOSE
+FROM {core_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY DAY
+HAVING RESTATED_HOURS_AFTER_CLOSE >= 48
+ORDER BY DAY DESC
+LIMIT 60
+"""

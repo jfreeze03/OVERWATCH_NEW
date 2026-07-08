@@ -623,6 +623,51 @@ def _canary_tab() -> None:
                        "re-check tomorrow before re-running backfills.")
         result_caption(recon)
 
+    st.divider()
+    st.markdown("**Fire-drill scoreboard — does the page reach a human?**")
+    from app.logic.drill import drill_report
+    drills = run(mart_sql.drill_history(14), page=_PAGE, key="drill_hist", tier="recent",
+                 source="ALERT_EVENTS (OPS_ALERT_DRILL)")
+    if not drills.ok:
+        st.info("Drill history unavailable: " + drills.error)
+    else:
+        report = drill_report(drills.df if not drills.empty else None)
+        if not report["ran"]:
+            st.info("No drills yet — enable the monthly fire drill with the opt-in "
+                    "snowflake/alert_drill.sql (one synthetic CRITICAL on the 1st; "
+                    "the notify chain must deliver it and on-call must ACK it).")
+        else:
+            last = report["last"]
+            kpi_row([
+                {"label": "Drill streak", "value": f"{report['streak_months']} month(s)",
+                 "severity": "ok" if report["streak_months"] >= 1 else "bad",
+                 "help": "Consecutive months where the drill was DELIVERED and ACKED."},
+                {"label": "Last drill delivered",
+                 "value": "yes" if last["delivered"] else "NO",
+                 "severity": "ok" if last["delivered"] else "bad"},
+                {"label": "Time to ack",
+                 "value": f"{last['mtta_min']:.0f} min" if last["mtta_min"] is not None else "not acked",
+                 "severity": "ok" if last["acked"] else "warn"},
+            ])
+            styled_table(drills.df, height=200)
+            st.caption("Resolve drills as EXPECTED — they're excluded from rule precision.")
+
+    st.divider()
+    st.markdown("**Restated days — did a reported number move after close?**")
+    rest = run(mart_sql.metering_restatements(60), page=_PAGE, key="restatements",
+               tier="recent", source="FACT_METERING_DAILY LOAD_TS lag")
+    if rest.ok and rest.empty:
+        st.success("No metering day was restated ≥48h after close in the last 60 days — "
+                   "numbers reported from this app have stayed put.")
+    elif guard(rest, ""):
+        styled_table(rest.df, height=220)
+        st.caption(
+            "These days' metering changed ≥48h after the day ended (late-arriving rows or "
+            "re-runs). If finance got a figure before the restatement, this is the receipt "
+            "explaining the move. v1 flags restated days; first-reported snapshots would "
+            "need a snapshot fact."
+        )
+
 
 @safe_page(_PAGE)
 def render() -> None:

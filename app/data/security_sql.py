@@ -309,3 +309,36 @@ WHERE CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY CHANGED_AT DESC
 LIMIT 2000
 """
+
+def day_ddl(day: object) -> str:
+    """Replay: DDL that landed on one day (drop/alter/create, account-wide)."""
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+SELECT START_TIME, USER_NAME, ROLE_NAME, QUERY_TYPE, DATABASE_NAME, SCHEMA_NAME,
+       LEFT(QUERY_TEXT, 140) AS DDL_PREVIEW
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE DATE(START_TIME) = {lit}
+  AND EXECUTION_STATUS = 'SUCCESS'
+  AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                     'ALTER_TABLE_MODIFY_COLUMN', 'DROP', 'RENAME', 'ALTER_SESSION',
+                     'CREATE_VIEW', 'ALTER_WAREHOUSE_SUSPEND', 'ALTER_WAREHOUSE_RESUME',
+                     'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+ORDER BY START_TIME
+LIMIT 300
+"""
+
+
+def day_grants(day: object) -> str:
+    """Replay: role grants created or revoked on one day."""
+    from app.data.common import day_literal
+
+    lit = day_literal(day)
+    return f"""
+SELECT CREATED_ON AS GRANTED_AT, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+WHERE DATE(CREATED_ON) = {lit} OR DATE(DELETED_ON) = {lit}
+ORDER BY GRANTED_AT
+LIMIT 200
+"""

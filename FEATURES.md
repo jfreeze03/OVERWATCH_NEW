@@ -23,6 +23,14 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 |---|---|
 | Alert drawer: detail, rule, history, playbook, AI explain, Investigate→, **inline closed-loop fix** (warehouse rules), storm rollup toggle | Alerts → Open events |
 | Incident correlation timeline (alerts + task failures + DDL, ±30 min drill) | Control Room |
+| Day replay: cross-domain "what changed?" for any date, worst-first headlines | Control Room |
+| Blast radius on every warehouse suspend/resize confirm (7d users/roles/tags) | Cost → Optimization; Alerts drawer |
+| Object TCO: storage $ + reads/writes/last-touch for any reclaim candidate | Cost → Optimization |
+| Contract steering: gap-to-commit $/day vs named levers | Cost → Contract |
+| Price-a-pattern: $/run now and at ±size steps | Cost → Optimization |
+| Monthly alert fire drill with streak scoring (opt-in alert_drill.sql) | Admin → Canary |
+| Query-tag governance scoreboard (exec-time-weighted) | Cost → Attribution |
+| Restated-days detector (numbers that moved after close) | Admin → Canary |
 | Query drill-through, heaviest queries (row-click), pruning/compile/cache diagnostics | Operations → Queries; Cost → Optimization |
 | Most expensive queries in **allocated $** (hour-share model, labeled) | Cost → Optimization |
 | Per-rule alert precision from resolution kinds (ACTIONED/NOISE/EXPECTED) | Alerts → Rules |

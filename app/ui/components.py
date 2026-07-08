@@ -530,6 +530,39 @@ def selectable_table(df, key: str, *, height: int | None = None,
                          key=key, selectable=True)
 
 
+def blast_radius(warehouse: str, page: str) -> None:
+    """Who this operator action would hit: last-7d users/roles/tags on the
+    warehouse. Rendered above every suspend/resize confirmation so the
+    action is informed, not brave. Degrades silently if the scan fails."""
+    from app.core.query import run  # local import: avoid module cycle
+    from app.data import ops_sql
+
+    wh = str(warehouse or "").strip()
+    if not wh:
+        return
+    try:
+        res = run(ops_sql.warehouse_blast_radius(wh, 7), page=page,
+                  key=f"blast_{wh}", tier="recent",
+                  source="QUERY_HISTORY (7d, this warehouse)")
+    except ValueError:
+        return  # unusable identifier: no preview, the confirm gate still holds
+    if not res.ok:
+        st.caption(f"Blast radius unavailable: {res.error}")
+        return
+    if res.empty:
+        st.caption("Blast radius (7d): no queries on this warehouse — low-risk change.")
+        return
+    df = res.df
+    tags = df["SAMPLE_TAG"].dropna().astype(str)
+    tagged = tags[tags.str.len() > 0]
+    st.warning(
+        f"Blast radius (7d): {len(df)} user(s) ran {int(df['QUERIES'].sum()):,} queries here"
+        + (f"; scheduled/tooling tags present ({tagged.iloc[0][:40]}…)" if len(tagged) else "")
+        + ". Review before executing."
+    )
+    styled_table(df, height=200)
+
+
 def notify(ok: bool, msg: str) -> None:
     """Operator-action feedback: toast (survives layout shifts) + inline state."""
     try:

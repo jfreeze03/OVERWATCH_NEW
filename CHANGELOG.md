@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.5.0 — differentiators: what Snowsight structurally can't do (2026-07-07)
+
+No migration; one OPT-IN script (snowflake/alert_drill.sql).
+
+- Day replay (Control Room): pick a date → spend movers vs each warehouse's
+  own 14d baseline, query activity vs baseline, DDL landed, grant changes,
+  task failures, alerts — one cross-domain story with worst-first headlines.
+- Contract steering (Cost → Contract): the gap to commit in $/day and how
+  far the named levers reach (idle tuning + top recurring patterns), with
+  an honest coverage verdict. Estimates route through the verifier.
+- Blast radius: every warehouse suspend/resize confirmation (sizing panel,
+  alert closed-loop) now shows who ran what there in the last 7 days —
+  users, roles, tooling tags — before the typed confirm.
+- Object TCO: selecting a storage-reclaim row prices the table end to end —
+  storage $/mo + reads/writes/last-touch from ACCESS_HISTORY — and calls
+  out "refreshed but never read." Degrades honestly on Standard edition.
+- Price-a-pattern: pick any recurring fingerprint → observed $/run and a
+  bounded estimate at ±size steps (same assumption pair as the what-if).
+- Monthly fire drill (opt-in): synthetic CRITICAL on the 1st must be
+  delivered AND acked; Admin → Canary scores the streak and time-to-ack.
+- Query-tag governance (Cost → Attribution): exec-time-weighted tag
+  coverage with the top untagged workloads named.
+- Restated-days detector (Admin → Canary): metering days whose rows changed
+  ≥48h after close — the receipt when a reported number moves (v1;
+  first-reported snapshots would need a snapshot fact).
+- New pure modules: replay, steering, drill; day_literal date gate;
+  16 unit locks; 10 canary registrations; teardown covers the drill task.
+
 ## 4.4.0 — feature-depth batch: the features earn their claims (2026-07-07)
 
 No migration needed (builds on V021's resolution kinds).

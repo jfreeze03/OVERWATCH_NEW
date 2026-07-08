@@ -336,3 +336,27 @@ FROM (
 ORDER BY DROP_PCT DESC
 LIMIT 50
 """
+
+def warehouse_blast_radius(warehouse: str, days: int = 7) -> str:
+    """Who an operator action on this warehouse would affect: per-user share
+    of the last N days' work, with role and query-tag evidence (tags reveal
+    scheduled tools/tasks the user grain hides)."""
+    from app.core.sqlsafe import safe_identifier, sql_literal
+
+    wh = safe_identifier(str(warehouse or "").strip())
+    days = bounded_days(days, 30)
+    return f"""
+SELECT
+    USER_NAME,
+    ANY_VALUE(ROLE_NAME)                            AS ROLE_NAME,
+    COUNT(*)                                        AS QUERIES,
+    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0   AS ELAPSED_SEC,
+    MAX(START_TIME)                                 AS LAST_SEEN,
+    ANY_VALUE(NULLIF(QUERY_TAG, ''))                AS SAMPLE_TAG
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND UPPER(WAREHOUSE_NAME) = {sql_literal(wh.upper())}
+GROUP BY USER_NAME
+ORDER BY ELAPSED_SEC DESC
+LIMIT 25
+"""

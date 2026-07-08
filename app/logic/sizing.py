@@ -190,3 +190,24 @@ def simulate_scenario(
         "monthly_high_usd": max(low, high),
         "assumptions": assumptions,
     }
+
+
+def price_per_run_bounds(allocated_credits: float, runs: int, rate_usd: float,
+                         size_delta: int = 0) -> dict:
+    """$/run for a query pattern, now and at a size step, as honest bounds.
+
+    Same assumption pair as simulate_scenario: a size step multiplies the
+    rate by 2^delta; runtime lands between unchanged (rate-scaled cost) and
+    perfectly scaled (cost-neutral).
+    """
+    from .formulas import safe_float as _sf
+
+    runs_n = max(int(runs or 0), 1)
+    per_run_now = _sf(allocated_credits) / runs_n * _sf(rate_usd, 3.68)
+    factor = 2.0 ** int(size_delta)
+    bounds = sorted((per_run_now * factor, per_run_now))
+    return {
+        "per_run_now_usd": round(per_run_now, 4),
+        "per_run_low_usd": round(bounds[0], 4),
+        "per_run_high_usd": round(bounds[1], 4),
+    }

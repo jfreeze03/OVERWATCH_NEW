@@ -277,3 +277,28 @@ WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
 GROUP BY 1
 ORDER BY 1 DESC
 """
+
+def tag_coverage(days: int, company: str = "ALL") -> str:
+    """Query-tag governance: execution-time-weighted coverage + the top
+    untagged workloads by user. Chargeback precision is capped by this."""
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "WAREHOUSE_NAME IS NOT NULL",
+        "COALESCE(EXECUTION_TIME, 0) > 0",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+SELECT
+    USER_NAME,
+    SUM(EXECUTION_TIME) / 1000.0 AS EXEC_SEC,
+    SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL, EXECUTION_TIME, 0)) / 1000.0 AS UNTAGGED_EXEC_SEC,
+    ROUND(100 * (1 - UNTAGGED_EXEC_SEC / NULLIF(EXEC_SEC, 0)), 1) AS TAGGED_PCT,
+    COUNT(*) AS QUERIES
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY USER_NAME
+HAVING EXEC_SEC > 60
+ORDER BY UNTAGGED_EXEC_SEC DESC
+LIMIT 30
+"""

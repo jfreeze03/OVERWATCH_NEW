@@ -14,7 +14,7 @@ from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run
 from app.core.state import filters
-from app.data import cost_sql, mart_sql, ops_sql
+from app.data import cost_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import triage_queue
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
@@ -32,6 +32,80 @@ from app.ui.components import (
 )
 
 _PAGE = "Control Room"
+
+
+def _day_replay() -> None:
+    """One day, every domain, one story — the flight recorder Snowsight
+    can't assemble from its silos."""
+    from datetime import timedelta
+
+    from app.logic.formulas import account_today
+    from app.logic.replay import replay_headlines
+
+    st.subheader("Day replay — what changed?")
+    pick = st.date_input("Day", value=account_today() - timedelta(days=1),
+                         min_value=account_today() - timedelta(days=120),
+                         max_value=account_today(), key="cr_replay_day")
+    day_iso = pick.isoformat()
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    movers = run(mart_sql.day_spend_movers(day_iso), page=_PAGE, key=f"rp_mv_{day_iso}",
+                 tier="recent", source="FACT_WAREHOUSE_DAILY vs 14d baseline")
+    activity = run(mart_sql.day_activity(day_iso), page=_PAGE, key=f"rp_act_{day_iso}",
+                   tier="recent", source="FACT_QUERY_HOURLY (day vs baseline)")
+    ddl = run(security_sql.day_ddl(day_iso), page=_PAGE, key=f"rp_ddl_{day_iso}",
+              tier="historical", source="QUERY_HISTORY (DDL that day)")
+    grants = run(security_sql.day_grants(day_iso), page=_PAGE, key=f"rp_gr_{day_iso}",
+                 tier="historical", source="GRANTS_TO_USERS (that day)")
+    tasks = run(mart_sql.day_task_failures(day_iso), page=_PAGE, key=f"rp_tf_{day_iso}",
+                tier="recent", source="FACT_TASK_DAILY (failures that day)")
+    alerts_d = run(mart_sql.day_alerts(day_iso), page=_PAGE, key=f"rp_al_{day_iso}",
+                   tier="recent", source="ALERT_EVENTS (that day)")
+    crit_n = int((alerts_d.df["SEVERITY"].astype(str).str.upper() == "CRITICAL").sum()) \
+        if alerts_d.usable() else 0
+    heads = replay_headlines(
+        movers.df if movers.usable() else None,
+        activity.df if activity.usable() else None,
+        len(ddl.df) if ddl.usable() else 0,
+        len(grants.df) if grants.usable() else 0,
+        int(tasks.df["FAILED"].sum()) if tasks.usable() else 0,
+        crit_n, rate,
+    )
+    if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
+        st.info(f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
+        return
+    if heads:
+        for h in heads:
+            (st.error if h["severity"] == "bad" else
+             st.warning if h["severity"] == "warn" else st.info)(h["text"])
+    else:
+        st.success(f"{day_iso}: a quiet day — no notable movement in any domain.")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Spend movers vs 14d baseline**")
+        if guard(movers, "No warehouse spend recorded that day."):
+            styled_table(movers.df, height=240)
+        st.markdown("**Task failures**")
+        if tasks.ok and tasks.empty:
+            st.success("No task failures that day.")
+        elif guard(tasks, ""):
+            styled_table(tasks.df, height=200)
+    with c2:
+        st.markdown("**DDL that landed**")
+        if ddl.ok and ddl.empty:
+            st.success("No DDL that day.")
+        elif guard(ddl, ""):
+            styled_table(ddl.df, height=240)
+        st.markdown("**Grant changes**")
+        if grants.ok and grants.empty:
+            st.success("No grant changes that day.")
+        elif guard(grants, ""):
+            styled_table(grants.df, height=200)
+    st.markdown("**Alerts raised that day**")
+    if alerts_d.ok and alerts_d.empty:
+        st.success("No alerts raised that day.")
+    elif guard(alerts_d, ""):
+        styled_table(alerts_d.df, height=200)
+    st.caption("Baselines are each entity's own trailing 14 days; account time throughout.")
 
 
 def _freshness_board() -> None:
@@ -202,3 +276,5 @@ def render() -> None:
         result_caption(movers)
 
     _freshness_board()
+    st.divider()
+    _day_replay()
