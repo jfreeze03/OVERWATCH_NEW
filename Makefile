@@ -23,3 +23,6 @@ check: lint type test  # everything CI runs
 
 run:  # local app (needs .streamlit/secrets.toml — see secrets.toml.example)
 	streamlit run streamlit_app.py
+
+stress:  # render/logic stress harness (sandbox-relative timings)
+	OW_STRESS=1 pytest tests/test_stress.py -q -s
