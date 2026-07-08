@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.6.1 — first live-fire morning: three fixes from real telemetry (2026-07-08)
+
+Migration V023 (apply in order after V022): sweep v4 + scan v9.
+
+- PIPE_VOLUME_DROP scoped to PROD databases (ALFA_EDW_PRD/MGM, *_PRD). The
+  first production sweep raised 700+ HIGHs from DEV/SIT scratch and dated
+  backup tables — volume collapse only matters where consumers are.
+  Cleanup: bulk-resolve the open storm as NOISE (it seeds the
+  threshold-suggestion evidence).
+- Scan v9: SEC_CRED_EXPIRY no longer filters CREDENTIALS.DELETED_ON — the
+  column doesn't exist on this account (sibling of the V020 EXPIRES_AT
+  discovery). Without this, applying V020's v8 would swap the hourly
+  EXPIRES_AT failure for an hourly DELETED_ON failure.
+- App side: expiring_credentials + governance_counts stripped of the same
+  phantom column (live Security-page error 2026-07-08 08:06).
+
+Validated by the instrumentation shipped yesterday: the change-impact
+tracker flagged SP_ALERT_SCAN as REGRESSED, and the persisted error log
+carried the exact failing identifier per hour.
+
 ## 4.6.0 — review-debt closure, delivery v3, structure (2026-07-07)
 
 Migration V022 (ALERT_DELIVERIES per-route ledger + SP_NOTIFY_WEBHOOK v3) —

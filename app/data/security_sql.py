@@ -114,8 +114,10 @@ def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
     access tokens). Rows without an expiry never appear here by design.
     """
     days_ahead = max(1, min(int(days_ahead), 365))
+    # NOTE: no DELETED_ON predicate — this account's CREDENTIALS view does
+    # not expose the column (sibling of the V020 EXPIRES_AT->EXPIRATION_DATE
+    # discovery; live error 2026-07-08 "invalid identifier 'DELETED_ON'").
     where = and_where(
-        "DELETED_ON IS NULL",
         "EXPIRATION_DATE IS NOT NULL",
         f"EXPIRATION_DATE <= DATEADD('day', {days_ahead}, CURRENT_TIMESTAMP())",
         companies.user_clause(company, "USER_NAME"),
@@ -276,11 +278,11 @@ SELECT
                     WHERE L.USER_NAME = U.NAME
                       AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
                       AND L.PASSWORD_LOGINS > 0)) AS MFA_GAP_USERS,
+    -- CREDENTIALS on this account exposes no DELETED_ON (live 2026-07-08).
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
-      WHERE DELETED_ON IS NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
+      WHERE EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
-      WHERE DELETED_ON IS NULL
-        AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
+      WHERE EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
       WHERE DELETED_ON IS NULL
         AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')

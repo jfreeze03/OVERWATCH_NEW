@@ -179,7 +179,10 @@ def test_expiring_credentials_builder():
     sql = _sec.expiring_credentials(30, "ALFA")
     assert "ACCOUNT_USAGE.CREDENTIALS" in sql
     assert "DATEADD('day', 30, CURRENT_TIMESTAMP())" in sql
-    assert "DELETED_ON IS NULL" in sql and "EXPIRATION_DATE IS NOT NULL" in sql
+    # This account's CREDENTIALS view has no DELETED_ON (live 2026-07-08
+    # "invalid identifier"); the builder must NOT reference it.
+    assert "DELETED_ON" not in sql
+    assert "EXPIRATION_DATE IS NOT NULL" in sql
     assert "'EXPIRED'" in sql and "'EXPIRING'" in sql
     assert "COMPANY_FOR_USER(USER_NAME)" in sql  # role-based user scope
     # horizon clamped
