@@ -173,3 +173,15 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 5. Open Admin → Migration status (no drift), Source freshness (all fresh),
    Self-cost (task + app spend sane).
 6. Tag the release; update `CHANGELOG.md`.
+
+
+## Mid-migration expectations (append-only history)
+
+Old migrations deliberately keep their era's `SP_ALERT_SCAN` text — including
+columns later discovered not to exist on this account (`EXPIRES_AT`,
+`CREDENTIALS.DELETED_ON`). Those bodies never execute once the sequence
+completes: V019 disables SEC_CRED_EXPIRY, V020 re-points it (scan v8), V023
+is terminal (scan v9). If the hourly scan fires while you are mid-sequence,
+expect isolated `rule_block_failed` rows in the error log — they stop at the
+next run after the sequence finishes. Do not rewrite historical migrations;
+fix forward with a new scan version.
