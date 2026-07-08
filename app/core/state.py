@@ -49,15 +49,6 @@ def filters() -> dict:
     }
 
 
-def filters_signature() -> str:
-    f = filters()
-    return (
-        f"co={f['company']}|env={f['environment']}|d={f['days']}"
-        f"|wh={f['warehouse_contains']}|u={f['user_contains']}"
-        f"|db={f['database']}|sc={f['schema_contains']}"
-    )
-
-
 def apply_filters(**kwargs) -> None:
     """Set top-bar filters programmatically (deep links, saved views).
 

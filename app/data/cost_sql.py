@@ -136,7 +136,29 @@ ORDER BY DAY
 
 
 def storage_by_database(days: int, company: str = "ALL", database: str = "") -> str:
-    """Average database storage per day (bytes), company-scoped."""
+    """Database storage per day from FACT_STORAGE_DAILY (loaded daily) —
+    the live DATABASE_STORAGE_USAGE_HISTORY scan now runs once in the
+    loader, not per page view. Page falls back to the _live variant while
+    the fact is empty."""
+    days = bounded_days(days)
+    where = and_where(
+        f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.database_clause(company),
+        companies.database_equals_clause(database),
+    )
+    return f"""
+SELECT DAY, DATABASE_NAME,
+       SUM(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
+       SUM(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+WHERE {where}
+GROUP BY 1, 2
+ORDER BY DAY
+"""
+
+
+def storage_by_database_live(days: int, company: str = "ALL", database: str = "") -> str:
+    """Live fallback for storage_by_database (fact empty / not deployed)."""
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",

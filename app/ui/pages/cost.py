@@ -309,6 +309,11 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
         res = run(cost_sql.storage_by_database(days, company, st.session_state.get("flt_database", "")), page=_PAGE,
                   key=f"storage_{company}_{days}", tier="historical",
                   source="ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY")
+        if not res.ok or res.empty:
+            res = run(cost_sql.storage_by_database_live(days, company,
+                                                        st.session_state.get("flt_database", "")),
+                      page=_PAGE, key=f"storage_live_{company}_{days}", tier="historical",
+                      source="DATABASE_STORAGE_USAGE_HISTORY (live fallback)")
         if guard(res, "No storage rows for this scope."):
             df = res.df.copy()
             latest_day = df["DAY"].max()

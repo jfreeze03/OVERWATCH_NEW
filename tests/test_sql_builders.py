@@ -95,9 +95,16 @@ def test_contract_start_date_validated():
 
 
 def test_mfa_gap_requires_login_evidence():
+    # Mart-first: evidence comes from FACT_LOGIN_DAILY (loader scans
+    # LOGIN_HISTORY once an hour instead of every page view)...
     sql = security_sql.users_without_mfa("ALFA")
-    assert "LOGIN_HISTORY" in sql and "PASSWORD" in sql
+    assert "FACT_LOGIN_DAILY" in sql and "PASSWORD_LOGINS" in sql
     assert "JOIN" in sql  # evidence join, not a bare USERS scan
+    assert "HAVING PASSWORD_LOGINS_30D > 0" in sql
+    # ...and the live fallback (used while the fact is empty) still carries
+    # the original evidence semantics.
+    live = security_sql.users_without_mfa_live("ALFA")
+    assert "LOGIN_HISTORY" in live and "PASSWORD" in live and "JOIN" in live
 
 
 def test_attribution_is_share_based_not_dollars():

@@ -48,7 +48,15 @@ def _access_tab(company: str, days: int) -> None:
     ], page=_PAGE, tier="historical") or {}
 
     mfa = batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
-              tier="historical", source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY")
+              tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")
+    if not mfa.ok or mfa.empty:
+        # Fact empty/undeployed: an empty evidence set must never read as
+        # "all clear" — prove it against live LOGIN_HISTORY before celebrating.
+        live_mfa = run(security_sql.users_without_mfa_live(company), page=_PAGE,
+                       key=f"mfa_live_{company}", tier="historical",
+                       source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
+        if live_mfa.ok:
+            mfa = live_mfa
     st.markdown("**MFA gaps with password-login evidence (30d)**")
     if mfa.ok and mfa.empty:
         st.success("No active users are password-logging-in without MFA. SSO/key-pair users are excluded by design.")

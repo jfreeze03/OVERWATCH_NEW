@@ -7,6 +7,44 @@ from app.data.common import and_where, bounded_days
 
 
 def users_without_mfa(company: str = "ALL") -> str:
+    """Users lacking MFA who actually password-login — evidence from
+    FACT_LOGIN_DAILY (loaded hourly), so the 30-day LOGIN_HISTORY scan runs
+    once in the loader instead of on every page view. The page falls back to
+    users_without_mfa_live() while the fact is empty/undeployed, because an
+    empty evidence set must never read as "all clear"."""
+    where = and_where(
+        "U.DELETED_ON IS NULL",
+        "COALESCE(U.DISABLED, FALSE) = FALSE",
+        "COALESCE(U.HAS_PASSWORD, FALSE) = TRUE",
+        "COALESCE(U.EXT_AUTHN_DUO, FALSE) = FALSE",
+        companies.user_clause(company, "U.NAME"),
+    )
+    return f"""
+WITH password_logins AS (
+    SELECT
+        USER_NAME,
+        SUM(PASSWORD_LOGINS)              AS PASSWORD_LOGINS_30D,
+        MAX(IFF(PASSWORD_LOGINS > 0, DAY, NULL)) AS LAST_PASSWORD_LOGIN
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+    WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())
+    GROUP BY USER_NAME
+    HAVING PASSWORD_LOGINS_30D > 0
+)
+SELECT
+    U.NAME AS USER_NAME,
+    U.LOGIN_NAME,
+    U.LAST_SUCCESS_LOGIN,
+    PL.PASSWORD_LOGINS_30D,
+    PL.LAST_PASSWORD_LOGIN
+FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+JOIN password_logins PL ON PL.USER_NAME = U.NAME
+WHERE {where}
+ORDER BY PL.PASSWORD_LOGINS_30D DESC
+LIMIT 200
+"""
+
+
+def users_without_mfa_live(company: str = "ALL") -> str:
     """Users lacking MFA who actually password-login (login-evidence based).
 
     Cross-checks LOGIN_HISTORY so SSO/key-pair-only users are not false

@@ -70,15 +70,6 @@ def _base(df: pd.DataFrame, height: int | None = None) -> alt.Chart:
     return alt.Chart(df).properties(height=height or _HEIGHT)
 
 
-def _grad(color: str = _ACCENT):
-    """Vertical fade for area fills — the polish that reads as 'product'."""
-    return alt.Gradient(
-        gradient="linear", x1=1, x2=1, y1=1, y2=0,
-        stops=[alt.GradientStop(color=color, offset=0.0),
-               alt.GradientStop(color=color, offset=1.0)],
-    )
-
-
 def spend_trend(
     df: pd.DataFrame,
     *,

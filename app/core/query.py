@@ -106,23 +106,23 @@ def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
 # ``scope`` is part of the key on purpose — see module docstring.
 
 @st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False)
-def _fetch_live(sql: str, scope: str, page: str = "") -> pd.DataFrame:
-    return _execute(sql, "live", page)
+def _fetch_live(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
+    return _execute(sql, "live", _page)
 
 
 @st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
-def _fetch_recent(sql: str, scope: str, page: str = "") -> pd.DataFrame:
-    return _execute(sql, "recent", page)
+def _fetch_recent(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
+    return _execute(sql, "recent", _page)
 
 
 @st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False)
-def _fetch_historical(sql: str, scope: str, page: str = "") -> pd.DataFrame:
-    return _execute(sql, "historical", page)
+def _fetch_historical(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
+    return _execute(sql, "historical", _page)
 
 
 @st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False)
-def _fetch_metadata(sql: str, scope: str, page: str = "") -> pd.DataFrame:
-    return _execute(sql, "metadata", page)
+def _fetch_metadata(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
+    return _execute(sql, "metadata", _page)
 
 
 _FETCHERS = {
@@ -133,7 +133,7 @@ _FETCHERS = {
 }
 
 
-def _cache_scope(extra: str) -> str:
+def _cache_scope() -> str:
     """Cache identity beyond the SQL text itself.
 
     The SQL string is a cache-key argument to every tier fetcher, and every
@@ -141,12 +141,16 @@ def _cache_scope(extra: str) -> str:
     here. (They used to: the full filters signature cold-started every query
     on the page whenever ANY filter changed, even ones the query ignored.)
     Scope is what the SQL cannot express: who is asking (role decides row
-    visibility under SiS) and the manual refresh generation.
+    visibility under SiS; user isolates per-user reads) and the manual
+    refresh generation. The caller's KEY is deliberately NOT here anymore:
+    it made identical SQL fetched from different panels (alert rules from
+    the sidebar jump box, the Rules section, and the drawer) cache-miss
+    three times per TTL. Telemetry still records the key per call site.
     """
     role = str(st.session_state.get("_ow_current_role", "") or "")
     user = str(st.session_state.get("_ow_current_user", "") or "")
     salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
-    return f"role={role}|user={user}|salt={salt}|{extra}"
+    return f"role={role}|user={user}|salt={salt}"
 
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool) -> None:
@@ -188,13 +192,13 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
 
 
 @st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
-def _fetch_recent_batch(sqls: tuple, scope: str, page: str = "") -> tuple:
-    return _execute_batch(sqls, "recent", page)
+def _fetch_recent_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
+    return _execute_batch(sqls, "recent", _page)
 
 
 @st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False)
-def _fetch_historical_batch(sqls: tuple, scope: str, page: str = "") -> tuple:
-    return _execute_batch(sqls, "historical", page)
+def _fetch_historical_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
+    return _execute_batch(sqls, "historical", _page)
 
 
 _BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch}
@@ -217,7 +221,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         capped.append(_with_row_cap(sql, cap))
         caps.append(cap)
     try:
-        scope = _cache_scope("batch:" + "|".join(str(s["key"]) for s in specs))
+        scope = _cache_scope()
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except Exception as exc:
         _telemetry(page, tier, "batch_fallback", (time.perf_counter() - started) * 1000, 0, ok=False)
@@ -255,7 +259,7 @@ def run(
     started = time.perf_counter()
     try:
         cap = int(max_rows) if max_rows else 0
-        df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(key), page)
+        df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(), page)
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
