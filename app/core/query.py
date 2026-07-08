@@ -144,8 +144,9 @@ def _cache_scope(extra: str) -> str:
     visibility under SiS) and the manual refresh generation.
     """
     role = str(st.session_state.get("_ow_current_role", "") or "")
+    user = str(st.session_state.get("_ow_current_user", "") or "")
     salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
-    return f"role={role}|salt={salt}|{extra}"
+    return f"role={role}|user={user}|salt={salt}|{extra}"
 
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool) -> None:

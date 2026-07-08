@@ -148,17 +148,24 @@ def apply_statement_timeout(session, seconds: int) -> None:
 
 
 def current_role() -> str:
-    """CURRENT_ROLE for navigation profiles; cached per Streamlit session."""
+    """CURRENT_ROLE for navigation profiles; cached per Streamlit session.
+
+    The same probe captures CURRENT_USER for the query-cache scope: caching
+    by role alone let two users who share a role serve each other's
+    user-scoped frames (USER_PREFS saved views) for a TTL window.
+    """
     cached = st.session_state.get("_ow_current_role")
     if cached is not None:
         return str(cached)
     try:
-        rows = get_session().sql("SELECT CURRENT_ROLE() AS R").collect()
+        rows = get_session().sql("SELECT CURRENT_ROLE() AS R, CURRENT_USER() AS U").collect()
         role = str(rows[0]["R"] or "").upper() if rows else ""
+        user = str(rows[0]["U"] or "").upper() if rows else ""
     except Exception:
         # Transient failure: return unknown WITHOUT pinning it. Caching ""
         # here locked the whole session into the ANALYST fallback profile
         # (and dropped role from the cache scope) after one bad probe.
         return ""
     st.session_state["_ow_current_role"] = role
+    st.session_state["_ow_current_user"] = user
     return role

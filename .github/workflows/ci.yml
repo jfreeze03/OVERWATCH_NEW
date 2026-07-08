@@ -25,7 +25,7 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Ruff (style + blind-except ban)
         run: ruff check .
-      - name: Mypy (pure layers: logic + data + config)
+      - name: "Mypy (pure layers: logic + data + config)"
         run: mypy
       - name: Pytest (logic + data layers + page smokes)
         run: pytest -q

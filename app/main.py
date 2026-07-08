@@ -103,6 +103,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             # Re-resolve the role too: a grant/role change mid-session should
             # be picked up here, not only on a full browser reload.
             st.session_state.pop("_ow_current_role", None)
+            st.session_state.pop("_ow_current_user", None)
             mark_refreshed()
             st.rerun()
         st.caption("Account telemetry lags up to ~45 min; metering-daily up to 24h. Labels on every panel.")

@@ -5,6 +5,20 @@
 USE DATABASE DBA_MAINT_DB;
 USE SCHEMA OVERWATCH;
 
+-- Ordering guard + version row (same contract as every prior migration).
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20021, 'BLOCKED: SCHEMA_VERSION < 20 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 20) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
 -- 1) Resolution kind: how a resolved alert was closed. Powers per-rule
 --    precision (ACTIONED vs NOISE) on Alerts -> Rules for threshold tuning.
 --    Values: ACTIONED | NOISE | EXPECTED (maintenance/known); NULL = untagged.
@@ -36,3 +50,8 @@ AS
     WHERE AT < DATEADD('day', -90, CURRENT_TIMESTAMP());
 
 ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_PURGE_QUERY_TELEMETRY RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 21 AS VERSION, 'precision kinds + fleet telemetry' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);

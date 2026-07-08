@@ -155,7 +155,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                        f"event {event_id[:8]} · status {row['STATUS']}")
             detail_text = str(row.get("DETAIL") or "").strip()
             if detail_text:
-                st.markdown(detail_text)
+                # Plain text on purpose: DETAIL originates in Snowflake data;
+                # rendering it as markdown let object names inject formatting.
+                st.text(detail_text)
             rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
                             tier="recent", source="ALERT_CONFIG")
             if rules_res.usable():
@@ -328,13 +330,13 @@ def _open_events_section(events, is_operator: bool) -> None:
                                   "with filters applied from this event"):
                     request_navigation(target["page"], target["section"], target["filters"])
             with c_act:
-                action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key="alert_action")
+                action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key=f"alert_action_{event_id[:8]}")
             with c_note:
-                note = st.text_input("Note (what was done / why)", key="alert_note", max_chars=500)
+                note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}", max_chars=500)
             kind = ""
             if action == "RESOLVE":
                 kind = st.radio(
-                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key="alert_kind",
+                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}",
                     help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
                          "on the Rules section (V021).")
@@ -342,7 +344,7 @@ def _open_events_section(events, is_operator: bool) -> None:
             with st.expander("SQL that will run"):
                 st.code(sql_script, language="sql")
             if is_operator:
-                confirm = st.text_input(f"Type {action} to confirm execution", key="alert_confirm")
+                confirm = st.text_input(f"Type {action} to confirm execution", key=f"alert_confirm_{event_id[:8]}")
                 if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
                     ok_all, messages = True, []
                     for stmt in [s for s in sql_script.split(";") if s.strip()]:
