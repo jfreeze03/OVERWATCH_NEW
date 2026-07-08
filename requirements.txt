@@ -6,5 +6,5 @@ pandas~=2.2
 altair~=5.4
 snowflake-snowpark-python~=1.30
 snowflake-connector-python~=3.13
-pyarrow>=16.0,<19.0
+pyarrow>=24.0.0,<25.0
 jinja2>=3.1,<4.0     # pandas Styler for status-tinted tables
