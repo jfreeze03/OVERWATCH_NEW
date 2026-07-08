@@ -586,3 +586,60 @@ WHERE {where}
 ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + m.RETAINED_FOR_CLONE_BYTES) DESC
 LIMIT 50
 """
+
+def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> str:
+    """Recurring cost patterns: the SAME hour-share allocation as
+    expensive_queries_usd, grouped by QUERY_PARAMETERIZED_HASH.
+
+    One $9 query run 400x/day outranks a single $300 one — this is where
+    caching/materialization actually pays. USD_PER_DAY = allocated / window.
+    """
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 30), 100))
+    where_q = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "WAREHOUSE_NAME IS NOT NULL",
+        "COALESCE(EXECUTION_TIME, 0) > 0",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+        companies.warehouse_clause(company),
+    )
+    where_m = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+WITH q AS (
+    SELECT QUERY_PARAMETERIZED_HASH AS PATTERN_HASH,
+           QUERY_ID, USER_NAME, WAREHOUSE_NAME,
+           DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+           COALESCE(EXECUTION_TIME, 0) AS EXEC_MS,
+           LEFT(QUERY_TEXT, 140) AS QUERY_SNIPPET
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where_q}
+),
+m AS (
+    SELECT WAREHOUSE_NAME, START_TIME AS HOUR_TS, SUM(CREDITS_USED) AS HOUR_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE {where_m}
+    GROUP BY 1, 2
+),
+t AS (
+    SELECT WAREHOUSE_NAME, HOUR_TS, SUM(EXEC_MS) AS TOTAL_EXEC_MS
+    FROM q GROUP BY 1, 2
+)
+SELECT
+    q.PATTERN_HASH,
+    COUNT(DISTINCT q.QUERY_ID)  AS RUNS,
+    COUNT(DISTINCT q.USER_NAME) AS USERS,
+    COUNT(DISTINCT q.WAREHOUSE_NAME) AS WAREHOUSES,
+    SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) AS ALLOCATED_CREDITS,
+    SUM(m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0)) / {days} AS CREDITS_PER_DAY,
+    ANY_VALUE(q.QUERY_SNIPPET)  AS QUERY_SNIPPET
+FROM q
+JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS
+JOIN m ON m.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND m.HOUR_TS = q.HOUR_TS
+GROUP BY q.PATTERN_HASH
+HAVING RUNS >= 5 AND ALLOCATED_CREDITS > 0
+ORDER BY ALLOCATED_CREDITS DESC
+LIMIT {limit}
+"""

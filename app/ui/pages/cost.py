@@ -491,6 +491,26 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
             st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
+        st.markdown("**Recurring cost patterns (same query, run all day)**")
+        st.caption("Grouped by parameterized fingerprint: a $9 query run 400x outranks one $300 "
+                   "outlier — this is where caching/materialization actually pays.")
+        pats = run(insights_sql.expensive_patterns_usd(days, company, 30), page=_PAGE,
+                   key=f"exppat_{company}_{days}", tier="historical",
+                   source="QUERY_HISTORY x METERING (hour-share, by QUERY_PARAMETERIZED_HASH)")
+        if guard(pats, "No fingerprint with 5+ runs carrying allocated credits in this window."):
+            pdf_c = pats.df.copy()
+            pdf_c["USD_TOTAL"] = pdf_c["ALLOCATED_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
+            pdf_c["USD_PER_DAY"] = pdf_c["CREDITS_PER_DAY"].map(lambda c: round(safe_float(c) * rate, 2))
+            styled_table(
+                pdf_c[["USD_PER_DAY", "USD_TOTAL", "RUNS", "USERS", "WAREHOUSES",
+                       "QUERY_SNIPPET", "PATTERN_HASH"]],
+                column_config={
+                    "USD_PER_DAY": st.column_config.NumberColumn("$/day", format="$%.2f"),
+                    "USD_TOTAL": st.column_config.NumberColumn(f"$ ({days}d)", format="$%.2f"),
+                },
+            )
+            result_caption(pats, note="candidates for result-cache reuse, materialization, or a schedule")
+
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
     st.markdown("**Repeat-query candidates (cache / materialization)**")

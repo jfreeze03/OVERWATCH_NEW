@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.4.0 — feature-depth batch: the features earn their claims (2026-07-07)
+
+No migration needed (builds on V021's resolution kinds).
+
+- Threshold suggestions from YOUR resolutions: Rules now computes, per rule,
+  the threshold that keeps ≥90% of ACTIONED alerts while cutting NOISE —
+  with the statistical basis stated. Advice through the same generate-only
+  flow; overlapping distributions honestly say "redesign, don't tune."
+- Live re-check in the alert drawer: one button re-runs the rule's condition
+  against TODAY's data for the event's target and says "condition clear —
+  resolve with this as evidence" or "still over." Covers the warehouse-lever
+  rules + cloud-services ratio + fail rate.
+- Forecast backtest on Overview: retro-runs both engines at day 7/14/21 of
+  the last 3 months vs actuals, shows per-engine mean absolute error, and
+  names the engine that's been more reliable vs the one configured.
+- Platform score history: 30-day retro score from facts + alert history
+  (same weights), as a sparkline on the score card and a trend expander —
+  the prerequisite for calibrating the admittedly-uncalibrated weights.
+- Recurring cost patterns: the expensive-queries view now also groups the
+  hour-share allocation by QUERY_PARAMETERIZED_HASH — $/day per pattern,
+  where caching/materialization actually pays.
+- New pure modules: logic/tuning.py, data/recheck_sql.py; 17 new unit locks;
+  4 new canary registrations.
+
 ## 4.3.0 — UI performance + display pass, router fixes (2026-07-07)
 
 Interaction latency:

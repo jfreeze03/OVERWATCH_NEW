@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 from .formulas import safe_float
 
 
@@ -124,3 +126,42 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
     state = "Healthy" if score >= 85 else "Watch" if score >= 70 else "Degraded" if score >= 50 else "At risk"
     ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
     return PlatformScore(score=score, state=state, drivers=ranked)
+
+
+def score_history(inputs: pd.DataFrame, weights: dict | None = None,
+                  monthly_budget_usd: float = 0.0, rate_usd: float = 3.68) -> pd.DataFrame:
+    """Retro platform score per day from fact-derived signals.
+
+    ``inputs`` (one row per DAY): CREDITS_BILLED, CRIT_RAISED, HIGH_RAISED,
+    QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB, TASK_RUNS, TASK_FAILED.
+    Budget pct uses the month-to-date cumulative spend against the monthly
+    budget, like the live score. Labeled RETRO: the live score also counts
+    stale sources and open actions, which facts don't carry per-day — the
+    trend is comparable, the absolute value can differ by a few points.
+    """
+    if inputs is None or inputs.empty or "DAY" not in inputs.columns:
+        return pd.DataFrame()
+    frame = inputs.copy()
+    frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce")
+    frame = frame.dropna(subset=["DAY"]).sort_values("DAY")
+    for col in ("CREDITS_BILLED", "CRIT_RAISED", "HIGH_RAISED", "QUERY_COUNT",
+                "FAILED_COUNT", "QUEUED_SEC", "SPILL_GB", "TASK_RUNS", "TASK_FAILED"):
+        frame[col] = frame.get(col, 0).map(safe_float) if col in frame.columns else 0.0
+    frame["_MONTH"] = frame["DAY"].dt.to_period("M")
+    frame["_MTD_USD"] = frame.groupby("_MONTH")["CREDITS_BILLED"].cumsum() * safe_float(rate_usd, 3.68)
+    budget = safe_float(monthly_budget_usd)
+    rows = []
+    for _, r in frame.iterrows():
+        queries = r["QUERY_COUNT"]
+        tasks = r["TASK_RUNS"]
+        result = platform_score(signals={
+            "budget_pct": (r["_MTD_USD"] / budget * 100) if budget > 0 else 0,
+            "critical_alerts": r["CRIT_RAISED"],
+            "high_alerts": r["HIGH_RAISED"],
+            "query_fail_pct": (r["FAILED_COUNT"] / queries * 100) if queries else 0,
+            "task_fail_pct": (r["TASK_FAILED"] / tasks * 100) if tasks else 0,
+            "queue_minutes": r["QUEUED_SEC"] / 60.0,
+            "spill_gb": r["SPILL_GB"],
+        }, weights=weights)
+        rows.append({"DAY": r["DAY"].date(), "SCORE": result.score, "STATE": result.state})
+    return pd.DataFrame(rows)

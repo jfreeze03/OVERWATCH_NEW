@@ -18,9 +18,10 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
-from app.data import insights_sql, mart_sql
-from app.logic import remediation
+from app.data import insights_sql, mart_sql, recheck_sql
+from app.logic import remediation, tuning
 from app.logic.ai_prompts import anomaly_explain_prompt
+from app.logic.formulas import safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
@@ -165,6 +166,35 @@ def _open_events_section(events, is_operator: bool) -> None:
                                f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
             with st.expander("Playbook — what to do first", expanded=True):
                 st.markdown(playbook_for(str(row["RULE_ID"])))
+            _rid = str(row["RULE_ID"]).upper()
+            _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
+            _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess)
+            if _rc_sql and st.button(
+                    "Re-check condition now", key=f"recheck_{event_id[:8]}",
+                    help="Runs this rule's condition against TODAY's data for "
+                         f"{_wh_guess or 'the account'} — is this still true?"):
+                rc = run(_rc_sql, page=_PAGE, key=f"recheck_{event_id[:8]}", tier="live",
+                         source="live re-check (today)")
+                if rc.usable():
+                    current_v = safe_float(rc.df.iloc[0].get("CURRENT_VALUE"))
+                    thr = None
+                    if rules_res.usable():
+                        _rm = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                        if not _rm.empty:
+                            thr = safe_float(_rm.iloc[0].get("THRESHOLD_NUM"))
+                    label = recheck_sql.recheck_label(_rid)
+                    if thr is not None and thr > 0:
+                        if current_v < thr:
+                            st.success(f"Condition clear: {label} = {current_v:,.2f} vs "
+                                       f"threshold {thr:,.2f} — resolve as ACTIONED below "
+                                       "with this as evidence.")
+                        else:
+                            st.warning(f"Still over: {label} = {current_v:,.2f} vs "
+                                       f"threshold {thr:,.2f}.")
+                    else:
+                        st.info(f"{label}: {current_v:,.2f} (rule threshold unavailable).")
+                else:
+                    st.info("Re-check unavailable right now: " + (rc.error or "no data today."))
             hist = run(mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
                        key=f"hist_rule_{event_id[:8]}", tier="recent",
                        source="ALERT_EVENTS (90d, this rule)")
@@ -409,6 +439,25 @@ def render() -> None:
                     "with low precision = raise the threshold; high UNTAGGED = the score isn't "
                     "trustworthy yet — close events with a kind. Tune via the generator below."
                 )
+                st.markdown("**Suggested thresholds (from your resolutions)**")
+                mk = run(mart_sql.rule_metric_kinds(90), page=_PAGE, key="rule_metric_kinds",
+                         tier="recent", source="ALERT_EVENTS metric values by resolution kind")
+                if mk.usable():
+                    thresholds = {str(r["RULE_ID"]): safe_float(r.get("THRESHOLD_NUM"))
+                                  for _, r in rules.df.iterrows()} if not rules.empty else {}
+                    sug = tuning.suggestions_by_rule(mk.df, thresholds)
+                    if sug.empty:
+                        st.caption("No rules have enough tagged resolutions yet.")
+                    else:
+                        styled_table(sug, height=240)
+                        st.caption(
+                            "Advice, not automation: suggestions keep ≥90% of ACTIONED alerts "
+                            "while cutting NOISE, with the basis stated per rule. Apply through "
+                            "the generator below — same review-then-run flow as always."
+                        )
+                else:
+                    st.caption("Suggestions appear once resolved events carry metric values "
+                               "and resolution kinds.")
             with st.expander("Generate a threshold change"):
                 if not rules.empty:
                     rule_ids = rules.df["RULE_ID"].astype(str).tolist()

@@ -572,3 +572,71 @@ GROUP BY PAGE, QUERY_KEY
 ORDER BY P95_MS DESC NULLS LAST
 LIMIT 40
 """
+
+def rule_metric_kinds(days: int = 90) -> str:
+    """Raw material for threshold suggestions: each resolved event's metric
+    value and its resolution kind (V021). The tuning logic aggregates."""
+    days = max(7, min(int(days or 90), 365))
+    return f"""
+SELECT RULE_ID, METRIC_VALUE, RESOLUTION_KIND
+FROM {core_object("ALERT_EVENTS")}
+WHERE STATUS = 'RESOLVED'
+  AND RESOLUTION_KIND IN ('ACTIONED', 'NOISE')
+  AND METRIC_VALUE IS NOT NULL
+  AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+LIMIT 5000
+"""
+
+
+def score_inputs_daily(days: int = 30) -> str:
+    """Per-day signals for the RETRO platform-score trend, from facts +
+    alert history. The live score adds stale-source/open-action penalties
+    that facts don't carry per day — panel labels the difference."""
+    days = max(7, min(int(days or 30), 120))
+    return f"""
+WITH spend AS (
+    SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+    FROM {core_object("FACT_METERING_DAILY")}
+    WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY DAY
+),
+q AS (
+    SELECT DATE(HOUR_TS) AS DAY,
+           SUM(QUERY_COUNT) AS QUERY_COUNT,
+           SUM(FAILED_COUNT) AS FAILED_COUNT,
+           SUM(QUEUED_SEC_SUM) AS QUEUED_SEC,
+           SUM(SPILL_REMOTE_GB) AS SPILL_GB
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY 1
+),
+t AS (
+    SELECT DAY, SUM(RUNS) AS TASK_RUNS, SUM(FAILED) AS TASK_FAILED
+    FROM {core_object("FACT_TASK_DAILY")}
+    WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY DAY
+),
+a AS (
+    SELECT DATE(RAISED_AT) AS DAY,
+           COUNT_IF(UPPER(SEVERITY) = 'CRITICAL') AS CRIT_RAISED,
+           COUNT_IF(UPPER(SEVERITY) = 'HIGH') AS HIGH_RAISED
+    FROM {core_object("ALERT_EVENTS")}
+    WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
+    GROUP BY 1
+)
+SELECT spend.DAY,
+       spend.CREDITS_BILLED,
+       COALESCE(q.QUERY_COUNT, 0)  AS QUERY_COUNT,
+       COALESCE(q.FAILED_COUNT, 0) AS FAILED_COUNT,
+       COALESCE(q.QUEUED_SEC, 0)   AS QUEUED_SEC,
+       COALESCE(q.SPILL_GB, 0)     AS SPILL_GB,
+       COALESCE(t.TASK_RUNS, 0)    AS TASK_RUNS,
+       COALESCE(t.TASK_FAILED, 0)  AS TASK_FAILED,
+       COALESCE(a.CRIT_RAISED, 0)  AS CRIT_RAISED,
+       COALESCE(a.HIGH_RAISED, 0)  AS HIGH_RAISED
+FROM spend
+LEFT JOIN q ON q.DAY = spend.DAY
+LEFT JOIN t ON t.DAY = spend.DAY
+LEFT JOIN a ON a.DAY = spend.DAY
+ORDER BY spend.DAY
+"""

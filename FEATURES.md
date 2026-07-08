@@ -26,6 +26,11 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Query drill-through, heaviest queries (row-click), pruning/compile/cache diagnostics | Operations → Queries; Cost → Optimization |
 | Most expensive queries in **allocated $** (hour-share model, labeled) | Cost → Optimization |
 | Per-rule alert precision from resolution kinds (ACTIONED/NOISE/EXPECTED) | Alerts → Rules |
+| Threshold suggestions computed from resolution evidence (keeps ≥90% actioned) | Alerts → Rules |
+| Live re-check: is this alert's condition still true right now? | Alerts → drawer |
+| Forecast backtest: engine error vs actuals, last 3 months | Overview → forecast expander |
+| Retro platform-score trend (30d) from facts | Overview → score card + expander |
+| Recurring cost patterns by fingerprint ($/day) | Cost → Optimization |
 | Task-graph DAG with failure overlay; pipeline SLAs; stream staleness | Operations → Tasks / Pipeline SLA |
 | Attribution (exact per warehouse; labeled-allocated per user/db/role) + waterfall | Cost → Attribution / Chargeback |
 | Global jump box (pages, DBs, warehouses, rules) | sidebar |

@@ -17,6 +17,7 @@ from app.data import (
     mart_sql,
     ops_sql,
     prefs_sql,
+    recheck_sql,
     security_sql,
 )
 
@@ -110,4 +111,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.rule_precision", lambda: mart_sql.rule_precision(7)),
     ("mart.mart_vs_live_recon", mart_sql.mart_vs_live_recon),
     ("mart.fleet_query_stats", lambda: mart_sql.fleet_query_stats(2)),
+    ("mart.rule_metric_kinds", lambda: mart_sql.rule_metric_kinds(7)),
+    ("mart.score_inputs_daily", lambda: mart_sql.score_inputs_daily(7)),
+    ("insights.expensive_patterns_usd", lambda: insights_sql.expensive_patterns_usd(1, "ALFA", 5)),
+    ("recheck.wh_daily_credits", lambda: recheck_sql.recheck_sql("COST_WH_DAILY_CREDITS", "WH_ALFA_OVERWATCH") or ""),
 )

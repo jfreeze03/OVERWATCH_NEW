@@ -22,7 +22,7 @@ from app.core.state import filters
 from app.data import cost_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
-from app.logic.forecast import MonthEndForecast, month_end_projection
+from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import account_today, exec_summary_html, format_usd, month_days, safe_float
 from app.ui import charts
 from app.ui.components import (
@@ -170,6 +170,11 @@ def render() -> None:
     task_fail_pct = (task_failures / task_runs * 100) if task_runs else 0.0
 
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
+    score_inputs = run(mart_sql.score_inputs_daily(30), page=_PAGE, key="score_inputs",
+                       tier="recent", source="facts + ALERT_EVENTS (retro score inputs)")
+    score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
+                                          budget, rate)
+                    if score_inputs.usable() else pd.DataFrame())
     score = scoring.platform_score(signals={
         "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
         "critical_alerts": critical_alerts,
@@ -216,7 +221,10 @@ def render() -> None:
             "delta": score.state,
             "delta_color": "off",
             "severity": _score_sev,
-            "help": "Evidence-based; every deduction is listed below the trend.",
+            "spark": (score_series["SCORE"].tail(14).tolist()
+                      if not score_series.empty else None),
+            "help": "Evidence-based; every deduction is listed below the trend. "
+                    "Sparkline = 14d retro score from facts.",
         },
     ]
     kpi_row(kpis)
@@ -248,11 +256,45 @@ def render() -> None:
             ("Failures, 14d", adf, "DAY", "FAILS"),
         ])
         result_caption(trend_source, note="mart-first" if using_mart else "live fallback — deploy marts for cheaper loads")
+        with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
+            hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
+                       tier="recent", source="FACT_METERING_DAILY (150d)")
+            if not hist.usable() or len(hist.df) < 50:
+                st.info("Needs ~2 months of daily facts before a backtest says anything.")
+            else:
+                bt_daily = hist.df.copy()
+                bt_daily["USD"] = bt_daily["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+                bt = backtest_forecasts(bt_daily.rename(columns={"DAY": "DAY"})[["DAY", "USD"]])
+                if bt.empty:
+                    st.info("No complete months in the window yet.")
+                else:
+                    styled_table(bt, height=240, column_config={
+                        "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
+                    })
+                    mae = bt.groupby("ENGINE")["ERROR_PCT"].apply(lambda x: x.abs().mean())
+                    best = mae.idxmin()
+                    st.caption(
+                        "Mean absolute error — "
+                        + " · ".join(f"{eng}: {err:.1f}%" for eng, err in mae.items())
+                        + f". '{best}' has been the more reliable engine; the current engine "
+                          f"is '{engine}' (FORECAST_ENGINE on Admin → Settings)."
+                    )
 
     if score.drivers:
         with st.expander(f"Platform score deductions ({score.score}/100 · {score.state})"):
             for d in score.drivers:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
+
+    if not score_series.empty:
+        with st.expander("Score trend — 30 days, retro-computed from facts"):
+            charts.daily_metric_line(score_series, "DAY", "SCORE", title="Platform score (retro)")
+            st.caption(
+                "Same weights as the live score, replayed against each day's facts and "
+                "alert history. RETRO: stale-source and open-action penalties aren't in "
+                "the facts, so absolute values can sit a few points above the live score — "
+                "judge the TREND. This history is also the raw material for calibrating "
+                "the score weights on Admin → Settings."
+            )
 
     # ---- Two-column: actions + cost drivers ---------------------------------
     action_lines: list[str] = []

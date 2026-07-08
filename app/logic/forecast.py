@@ -9,7 +9,7 @@ declines to guess (``ok=False``) instead of inventing a line.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -131,3 +131,51 @@ def contract_pace(
         "projected_overage_credits": round(max(0.0, projected_total - total), 1),
         "days_remaining": term_days - elapsed_days,
     }
+
+
+def backtest_forecasts(daily: pd.DataFrame, months: int = 3,
+                       checkpoints: tuple[int, ...] = (7, 14, 21)) -> pd.DataFrame:
+    """How accurate would the projection have been? Retro-runs the engines.
+
+    For each of the last ``months`` COMPLETE months and each checkpoint day,
+    projects month-end using only the history available on that day, then
+    compares with the month's actual total. Pure — the page supplies the
+    daily USD frame. Columns: MONTH, CHECKPOINT_DAY, ENGINE, PROJECTED_USD,
+    ACTUAL_USD, ERROR_PCT.
+    """
+    if daily is None or daily.empty or not {"DAY", "USD"}.issubset(daily.columns):
+        return pd.DataFrame()
+    frame = daily.copy()
+    frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
+    frame = frame.dropna(subset=["DAY"]).sort_values("DAY")
+    if frame.empty:
+        return pd.DataFrame()
+    last_day = frame["DAY"].max()
+    first_of_current = last_day.replace(day=1)
+    rows: list[dict] = []
+    month_end = first_of_current
+    for _ in range(max(1, int(months))):
+        month_start = (date(month_end.year - 1, 12, 1) if month_end.month == 1
+                       else date(month_end.year, month_end.month - 1, 1))
+        month_block = frame[(frame["DAY"] >= month_start) & (frame["DAY"] < month_end)]
+        if len(month_block) < 20:  # partial history: stop walking back
+            break
+        actual = float(month_block["USD"].sum())
+        for checkpoint in checkpoints:
+            as_of = month_start + timedelta(days=checkpoint - 1)
+            history = frame[frame["DAY"] <= as_of]
+            for engine in ("linear", "seasonal"):
+                cast = month_end_projection(history, as_of, engine=engine)
+                if not cast.ok:
+                    continue
+                err = (cast.projected_usd - actual) / actual * 100 if actual else 0.0
+                rows.append({
+                    "MONTH": month_start.strftime("%Y-%m"),
+                    "CHECKPOINT_DAY": checkpoint,
+                    "ENGINE": engine,
+                    "PROJECTED_USD": round(cast.projected_usd, 0),
+                    "ACTUAL_USD": round(actual, 0),
+                    "ERROR_PCT": round(err, 1),
+                })
+        month_end = month_start
+    return pd.DataFrame(rows)
