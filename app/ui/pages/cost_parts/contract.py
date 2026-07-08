@@ -16,8 +16,9 @@ from app.core.query import run
 from app.data import cost_sql, insights_sql, mart_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
-from app.logic.formulas import account_today, safe_float
+from app.logic.formulas import account_today, format_usd, safe_float
 from app.logic.insights import idle_advisor
+from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
@@ -44,16 +45,85 @@ _SERVICE_CATEGORY = {
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
 # cost.py; ruff --fix prunes what this section does not use.
 
+def _org_truth_panel() -> bool:
+    """Contract balance straight from Snowflake billing metadata.
+
+    ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY is the balance that burns
+    down each day (the number Snowsight shows under Admin → Cost
+    Management); CONTRACT_ITEMS carries the committed amount and term
+    dates. Zero configuration — when the role can see the views this panel
+    is the truth, and the SETTINGS-based credits pacing below becomes the
+    steering layer. Returns True when it rendered."""
+    bal = run(cost_sql.org_remaining_balance(120), page=_PAGE, key="org_balance",
+              tier="historical", source="ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY")
+    if not bal.usable():
+        st.caption(
+            "Snowflake's own contract balance (SNOWFLAKE.ORGANIZATION_USAGE."
+            "REMAINING_BALANCE_DAILY) is not visible to this role/account, so pacing "
+            "relies on SETTINGS below. Org visibility would unlock automatic balance, "
+            "burn, and runway with no configuration."
+        )
+        return False
+    summary = contract_planner.remaining_balance_summary(bal.df)
+    if not summary.get("ok"):
+        st.caption(f"Org balance view returned no usable rows — {summary.get('reason')}")
+        return False
+    items = run(cost_sql.org_contract_items(), page=_PAGE, key="org_items",
+                tier="metadata", source="ORGANIZATION_USAGE.CONTRACT_ITEMS")
+    end_note = None
+    if items.usable() and "END_DATE" in items.df.columns:
+        ends = pd.to_datetime(items.df["END_DATE"], errors="coerce").dropna()
+        if len(ends):
+            end_note = str(ends.max().date())
+    st.markdown("**Contract balance — billing truth (Snowflake org rate card, $)**")
+    burn = safe_float(summary.get("burn_per_day_usd"))
+    runway = summary.get("runway_days")
+    kpis = [
+        {"label": "Remaining balance", "value": format_usd(summary["remaining_usd"]),
+         "delta": f"as of {summary['as_of']}", "delta_color": "off"},
+        {"label": "Burn / day", "value": format_usd(burn) if burn > 0 else "n/a",
+         "delta": f"avg of {summary['burn_days_observed']} burn day(s)" if burn > 0 else "no burn days observed",
+         "delta_color": "off"},
+        {"label": "Runway at this burn",
+         "value": f"{runway:,.0f} days" if runway is not None else "n/a",
+         "delta": f"contract ends {end_note}" if end_note else None,
+         "delta_color": "off"},
+    ]
+    on_demand = safe_float(summary.get("on_demand_usd"))
+    if on_demand < 0:
+        kpis.append({"label": "On-demand overrun", "value": format_usd(-on_demand),
+                     "severity": "warn",
+                     "help": "Usage past the capacity commitment, billed on demand."})
+    kpi_row(kpis)
+    daily = bal.df.groupby("DAY", as_index=False)["TOTAL_REMAINING"].sum()
+    charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING", title="Remaining balance ($)")
+    if items.usable():
+        styled_table(items.df, height=160)
+    result_caption(bal, note="Dollars at your contract rates, straight from Snowflake "
+                             "billing (refreshed daily; can lag up to a day). Burn/day "
+                             "averages only down-days, so renewal top-ups don't distort it.")
+    return True
+
+
 def _contract_tab(settings: dict) -> None:
+    org_shown = _org_truth_panel()
     contract_credits = safe_float(settings.get("CONTRACT_CREDITS"))
     start_s = str(settings.get("CONTRACT_START_DATE") or "").strip()
     end_s = str(settings.get("CONTRACT_END_DATE") or "").strip()
     if contract_credits <= 0 or not start_s or not end_s:
-        st.info(
-            "Contract pacing is not configured. Set CONTRACT_CREDITS, CONTRACT_START_DATE and "
-            "CONTRACT_END_DATE on the Admin page. Nothing is assumed."
-        )
+        if org_shown:
+            st.caption(
+                "For credits-grain pacing and the steering levers below the balance, set "
+                "CONTRACT_CREDITS, CONTRACT_START_DATE and CONTRACT_END_DATE on the Admin page."
+            )
+        else:
+            st.info(
+                "Contract pacing is not configured. Set CONTRACT_CREDITS, CONTRACT_START_DATE and "
+                "CONTRACT_END_DATE on the Admin page. Nothing is assumed."
+            )
         return
+    if org_shown:
+        st.divider()
     try:
         start, end = date.fromisoformat(start_s), date.fromisoformat(end_s)
     except ValueError:

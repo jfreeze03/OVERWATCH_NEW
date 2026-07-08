@@ -85,9 +85,11 @@ def _mtd_spend_usd(rate: float) -> tuple[float, str]:
     return mtd_credits * rate, res.source
 
 
-def _open_alert_counts() -> tuple[QueryResult, int, int]:
-    res = run(mart_sql.open_alert_events(500), page=_PAGE, key="open_alerts",
-              tier="live", source="ALERT_EVENTS")
+def _open_alert_counts(company: str = "ALL") -> tuple[QueryResult, int, int]:
+    res = run(mart_sql.open_alert_events(500, company), page=_PAGE,
+              key=f"open_alerts_{company}", tier="live",
+              source="ALERT_EVENTS" if company == "ALL"
+              else f"ALERT_EVENTS ({company} + account-level)")
     if not res.ok or res.empty:
         return res, 0, 0
     sev = res.df["SEVERITY"].astype(str).str.upper()
@@ -126,7 +128,7 @@ def render() -> None:
 
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
     mtd_spend, mtd_source = _mtd_spend_usd(rate)
-    alerts_res, critical_alerts, high_alerts = _open_alert_counts()
+    alerts_res, critical_alerts, high_alerts = _open_alert_counts(company)
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
     if engine == "ml_forecast":

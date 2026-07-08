@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.6.4 — live round 2: filters that actually filter + contract truth (2026-07-08)
+
+- FIXED: alert feeds (Brief fires, Alerts queue, Control Room triage,
+  Overview counts) now honor the Company filter — Trexis warehouse fires
+  no longer surface under an ALFA scope. Account-level events
+  (COMPANY='ALL') always show for everyone, deliberately.
+- FIXED: the Database picker honors the Environment filter — ALFA + PROD
+  offers exactly ALFA_EDW_PRD/ALFA_EDW_MGM, and a lingering DEV pin resets
+  when the environment changes. companies.databases_for() shares
+  classify_environment with the SQL clause so list and filter cannot drift.
+- NEW: Contract & Forecast shows Snowflake's own contract balance when the
+  role can see SNOWFLAKE.ORGANIZATION_USAGE — REMAINING_BALANCE_DAILY
+  (the balance that burns down daily) + CONTRACT_ITEMS (commit, term
+  dates): remaining $, burn/day (down-days only, so renewal top-ups don't
+  poison it), runway, on-demand overrun, burn-down chart. Zero config;
+  degrades honestly to the SETTINGS flow when org views aren't visible.
+- Locks in tests/test_company_env_scope.py (21 tests).
+
 ## 4.6.3 — V022 apply failure: comma-eating comment + a parse gate (2026-07-08)
 
 - FIXED: V022's ALERT_DELIVERIES CREATE TABLE was unparseable — the inline

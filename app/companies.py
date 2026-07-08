@@ -171,6 +171,21 @@ def database_options(company: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((*ALFA_DATABASES, *TREXIS_DATABASES)))
 
 
+def databases_for(company: str, environment: str = "ALL") -> tuple[str, ...]:
+    """Database picker options scoped to company AND environment.
+
+    The picker offering DEV/SAN databases while the Environment filter said
+    PROD was a live finding (2026-07-08): ALFA + PROD must be exactly
+    (ALFA_EDW_PRD, ALFA_EDW_MGM). Uses the same classify_environment rules
+    as the SQL environment_clause so the list and the filter cannot drift.
+    """
+    env = str(environment or DEFAULT_ENVIRONMENT).upper()
+    dbs = database_options(company)
+    if env not in ("PROD", "NONPROD"):
+        return dbs
+    return tuple(db for db in dbs if classify_environment(db) == env)
+
+
 def database_equals_clause(database: str, column: str = "DATABASE_NAME") -> str:
     """Exact-match clause for the selected database ('' = no filter)."""
     db = str(database or "").strip()

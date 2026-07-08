@@ -146,12 +146,23 @@ ORDER BY FAILED DESC, DAY DESC
 """
 
 
-def open_alert_events(limit: int = 200) -> str:
+def open_alert_events(limit: int = 200, company: str = "ALL") -> str:
+    """Open/ack events, most severe first, honoring the company filter.
+
+    ``company`` keeps that company's rows PLUS account-level rows
+    (COMPANY = 'ALL'): an account-wide fire (daily credit cap, telemetry
+    stall) belongs on everyone's triage view, but Trexis warehouse noise
+    must not surface under an ALFA scope (live finding, 2026-07-08).
+    """
     limit = max(1, min(int(limit), 1000))
+    where = ["STATUS IN ('OPEN', 'ACK')"]
+    comp = str(company or "ALL").strip()
+    if comp.upper() != "ALL":
+        where.append(f"(COMPANY = {sql_literal(comp)} OR UPPER(COMPANY) = 'ALL')")
     return f"""
 SELECT EVENT_ID, RULE_ID, RAISED_AT, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, STATUS, ACK_BY, ACK_AT
 FROM {core_object("ALERT_EVENTS")}
-WHERE STATUS IN ('OPEN', 'ACK')
+WHERE {and_where(*where)}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MEDIUM' THEN 2 ELSE 3 END, RAISED_AT DESC
 LIMIT {limit}
 """

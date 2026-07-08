@@ -29,9 +29,11 @@ def init_filters() -> None:
         st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
     if st.session_state["flt_days"] not in DAY_WINDOW_OPTIONS:
         st.session_state["flt_days"] = DEFAULT_DAY_WINDOW
-    # A database selection from another company scope resets to All.
-    from app.companies import database_options  # local import: tiny, avoids cycles
-    valid_dbs = database_options(st.session_state["flt_company"])
+    # A database selection from another company OR environment scope resets
+    # to All (a PROD scope must not keep a lingering DEV database pin).
+    from app.companies import databases_for  # local import: tiny, avoids cycles
+    valid_dbs = databases_for(st.session_state["flt_company"],
+                              st.session_state["flt_environment"])
     if st.session_state["flt_database"] and st.session_state["flt_database"] not in valid_dbs:
         st.session_state["flt_database"] = ""
 

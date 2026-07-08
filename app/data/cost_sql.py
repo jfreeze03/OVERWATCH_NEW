@@ -199,6 +199,49 @@ ORDER BY DAY, ACCOUNT_NAME
 """
 
 
+def org_contract_items() -> str:
+    """Contract line items from the org rate card (amounts in currency).
+
+    ORGANIZATION_USAGE.CONTRACT_ITEMS is the billing truth behind Snowsight
+    Admin → Cost Management: committed amount and term dates per contract.
+    Needs org visibility on this account; callers degrade honestly when the
+    role cannot see the view.
+    """
+    return """
+SELECT CONTRACT_NUMBER, CONTRACT_ITEM, AMOUNT, CURRENCY,
+       START_DATE, END_DATE, ORGANIZATION_NAME
+FROM SNOWFLAKE.ORGANIZATION_USAGE.CONTRACT_ITEMS
+ORDER BY START_DATE DESC, CONTRACT_NUMBER DESC
+"""
+
+
+def org_remaining_balance(days: int = 120) -> str:
+    """Daily remaining contract balance — the number that burns each day.
+
+    REMAINING_BALANCE_DAILY per Snowflake billing: FREE_USAGE_BALANCE +
+    CAPACITY_BALANCE + ROLLOVER_BALANCE is what's left on the contract in
+    currency; ON_DEMAND_CONSUMPTION_BALANCE goes negative once usage runs
+    past the commitment (billed on demand). Refreshed daily by Snowflake.
+    """
+    days = bounded_days(days, maximum=400)
+    return f"""
+SELECT
+    DATE AS DAY,
+    CONTRACT_NUMBER,
+    MAX(CURRENCY) AS CURRENCY,
+    SUM(COALESCE(FREE_USAGE_BALANCE, 0)) AS FREE_USAGE_BALANCE,
+    SUM(COALESCE(CAPACITY_BALANCE, 0)) AS CAPACITY_BALANCE,
+    SUM(COALESCE(ROLLOVER_BALANCE, 0)) AS ROLLOVER_BALANCE,
+    SUM(COALESCE(ON_DEMAND_CONSUMPTION_BALANCE, 0)) AS ON_DEMAND_CONSUMPTION_BALANCE,
+    SUM(COALESCE(FREE_USAGE_BALANCE, 0) + COALESCE(CAPACITY_BALANCE, 0)
+        + COALESCE(ROLLOVER_BALANCE, 0)) AS TOTAL_REMAINING
+FROM SNOWFLAKE.ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY
+WHERE DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 1, 2
+ORDER BY DAY, CONTRACT_NUMBER
+"""
+
+
 def contract_consumed_credits(contract_start_date: str) -> str:
     """Total billed credits since the contract start (account-wide).
 

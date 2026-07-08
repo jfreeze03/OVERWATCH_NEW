@@ -394,13 +394,16 @@ def _open_events_section(events, is_operator: bool) -> None:
 
 @safe_page(_PAGE)
 def render() -> None:
-    filters()  # keep global scope initialized/consistent
+    f = filters()
     page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.", icon_name="alerts")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
 
-    events = run(mart_sql.open_alert_events(300), page=_PAGE, key="alert_events",
-                 tier="live", source="ALERT_EVENTS")
+    company = f["company"]
+    events = run(mart_sql.open_alert_events(300, company), page=_PAGE,
+                 key=f"alert_events_{company}", tier="live",
+                 source="ALERT_EVENTS" if company == "ALL"
+                 else f"ALERT_EVENTS ({company} + account-level)")
     if events.ok:
         sev = events.df["SEVERITY"].astype(str).str.upper() if not events.empty else None
         kpi_row([

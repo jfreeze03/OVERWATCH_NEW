@@ -11,7 +11,7 @@ import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import run
-from app.core.state import request_navigation
+from app.core.state import filters, request_navigation
 from app.data import mart_sql
 from app.logic.actions import rank_actions
 from app.logic.formulas import format_usd, safe_float
@@ -113,14 +113,19 @@ def render() -> None:
             st.markdown(str(drow.get("BODY") or ""))
 
     st.markdown("**Fires**")
-    events = run(mart_sql.open_alert_events(50), page=_PAGE, key="brief_events", tier="live",
-                 source="ALERT_EVENTS")
+    # Honor the company filter (live finding 2026-07-08: Trexis warehouse
+    # fires showed under an ALFA scope). Account-level events always show.
+    company = filters()["company"]
+    events = run(mart_sql.open_alert_events(50, company), page=_PAGE,
+                 key=f"brief_events_{company}", tier="live", source="ALERT_EVENTS")
     if events.ok and not events.empty:
         crit = events.df[events.df["SEVERITY"].astype(str).isin(["CRITICAL", "HIGH"])]
         if crit.empty:
             st.success("No open critical or high alerts.")
         else:
             styled_table(crit[["RAISED_AT", "SEVERITY", "TITLE"]].head(5), height=220)
+            if company != "ALL":
+                st.caption(f"Scoped to {company} plus account-level events.")
             if st.button("Open the alert queue →", key="brief_alerts", use_container_width=True):
                 request_navigation("Alerts", "Open events")
     else:

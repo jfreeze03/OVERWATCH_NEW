@@ -9,6 +9,46 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pandas as pd
+
+
+def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> dict:
+    """Summarize ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY rows.
+
+    Expects DAY + TOTAL_REMAINING (multiple contracts per day are summed).
+    Burn/day averages only the day-over-day DROPS in the trailing window —
+    a renewal top-up is a rise, and treating it as negative burn would poison
+    the runway. Returns ok=False (with a reason) whenever the frame cannot
+    support the math; the UI degrades instead of inventing a number.
+    """
+    if df is None or len(df) == 0 or "TOTAL_REMAINING" not in getattr(df, "columns", ()):
+        return {"ok": False, "reason": "No balance rows visible."}
+    daily = (df.assign(_v=pd.to_numeric(df["TOTAL_REMAINING"], errors="coerce"))
+               .groupby("DAY")["_v"].sum().dropna().sort_index())
+    if len(daily) == 0:
+        return {"ok": False, "reason": "No balance rows visible."}
+    remaining = float(daily.iloc[-1])
+    as_of = str(pd.Timestamp(daily.index[-1]).date()) if daily.index[-1] is not None else "n/a"
+    on_demand = 0.0
+    if "ON_DEMAND_CONSUMPTION_BALANCE" in df.columns:
+        last_day = daily.index[-1]
+        od = pd.to_numeric(df.loc[df["DAY"] == last_day, "ON_DEMAND_CONSUMPTION_BALANCE"],
+                           errors="coerce").fillna(0)
+        on_demand = float(od.sum())
+    deltas = daily.diff().dropna().tail(max(1, int(burn_window_days)))
+    drops = -deltas[deltas < 0]
+    burn = float(drops.mean()) if len(drops) else 0.0
+    runway = (remaining / burn) if burn > 0 and remaining > 0 else None
+    return {
+        "ok": True,
+        "as_of": as_of,
+        "remaining_usd": remaining,
+        "on_demand_usd": on_demand,
+        "burn_per_day_usd": burn,
+        "runway_days": round(runway, 0) if runway is not None else None,
+        "burn_days_observed": len(drops),
+    }
+
 
 def plan_scenarios(daily_burn_usd: float, term_months: int, buffer_pct: float,
                    remaining_usd: float, growth_pcts: tuple = (-10, 0, 10, 25)) -> list[dict]:

@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from app.companies import COMPANIES, ENVIRONMENTS, database_options  # noqa: E402
+from app.companies import COMPANIES, ENVIRONMENTS, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
@@ -382,12 +382,17 @@ def _topbar_scope_controls() -> None:
     with c_days:
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
     with c_db:
-        db_options = ["", *database_options(st.session_state.get("flt_company", COMPANIES[0]))]
+        # Options honor BOTH scopes: ALFA + PROD offers exactly the two PROD
+        # databases, not the whole family (live finding, 2026-07-08).
+        db_options = ["", *databases_for(
+            st.session_state.get("flt_company", COMPANIES[0]),
+            st.session_state.get("flt_environment", ENVIRONMENTS[0]))]
         if st.session_state.get("flt_database") not in db_options:
             st.session_state["flt_database"] = ""
         st.selectbox("Database", db_options, key="flt_database",
                      format_func=lambda v: v or "All databases",
-                     help="Applies to query, task, DDL, attribution, and storage panels.")
+                     help="Applies to query, task, DDL, attribution, and storage panels. "
+                          "Options track the Company and Environment filters.")
     c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
     with c_wh:
         st.text_input("Warehouse contains", key="flt_warehouse_contains")
