@@ -93,3 +93,70 @@ ORDER BY 1
 def run_scan_call() -> str:
     """Operator statement: run the change-impact scan on demand."""
     return f"CALL {core_object('SP_CHANGE_IMPACT_SCAN')}()"
+
+
+_WH_NAME_RE = re.compile(r"^[A-Za-z0-9_$]{1,200}$")
+
+
+def warehouse_change_registry(days: int, company: str = "ALL",
+                              warehouse_contains: str = "") -> str:
+    """Detected warehouse setting changes: frozen baseline vs after + verdict."""
+    days = bounded_days(days, 180)
+    where = and_where(
+        f"CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "" if company == "ALL" else f"COMPANY = {sql_literal(company)}",
+        contains_filter("WAREHOUSE_NAME", warehouse_contains),
+    )
+    return f"""
+SELECT
+    WAREHOUSE_NAME, COMPANY, SETTING, OLD_VALUE, NEW_VALUE, CHANGE_SEEN_AT,
+    VERDICT, VERDICT_DETAIL,
+    BASELINE_QUERIES, AFTER_QUERIES, AFTER_DAYS,
+    BASELINE_CREDITS_PER_DAY, AFTER_CREDITS_PER_DAY,
+    BASELINE_P95_S, AFTER_P95_S,
+    BASELINE_QUEUED_MIN_PER_DAY, AFTER_QUEUED_MIN_PER_DAY,
+    BASELINE_SPILL_GB_PER_DAY, AFTER_SPILL_GB_PER_DAY,
+    BASELINE_FAIL_PCT, AFTER_FAIL_PCT,
+    TRACKING_UNTIL, ALERTED
+FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")}
+WHERE {where}
+ORDER BY CHANGE_SEEN_AT DESC
+LIMIT 200
+"""
+
+
+def warehouse_daily_series(warehouse: str, days: int = 28) -> str:
+    """Daily credits + p95/fails for ONE warehouse (the change-rule chart)."""
+    days = bounded_days(days, 60)
+    wh = str(warehouse or "").strip().upper()
+    if not _WH_NAME_RE.match(wh):
+        raise ValueError(f"Invalid warehouse name: {warehouse!r}")
+    return f"""
+SELECT
+    m.DAY, m.CREDITS, q.P95_S, q.QUERIES, q.FAILS
+FROM (
+    SELECT DATE_TRUNC('day', START_TIME)::DATE AS DAY,
+           ROUND(SUM(CREDITS_USED), 4) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND WAREHOUSE_NAME = {sql_literal(wh)}
+    GROUP BY 1
+) m
+LEFT JOIN (
+    SELECT DATE_TRUNC('day', START_TIME)::DATE AS DAY,
+           ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S,
+           COUNT(*) AS QUERIES,
+           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND WAREHOUSE_NAME = {sql_literal(wh)}
+    GROUP BY 1
+) q ON q.DAY = m.DAY
+ORDER BY m.DAY
+"""
+
+
+def run_wh_scan_call() -> str:
+    """Operator statement: run the warehouse change scan on demand."""
+    return f"CALL {core_object('SP_WAREHOUSE_CHANGE_SCAN')}()"
+

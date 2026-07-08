@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.7.0 — task-graph cost trends + warehouse change scorecard (2026-07-08)
+
+- NEW (Operations → Task graphs ($)): pipeline cost over time — one row per
+  graph run via GRAPH_RUN_GROUP_ID, MEASURED warehouse credits per run
+  (QUERY_ATTRIBUTION_HISTORY roll-up, ~6h lag), $/run (allocated), success
+  %, p95 wall time, and a CHEAPER/PRICIER/FLAT trend per pipeline. Honors
+  the Company, Database, and Schema filters. Serverless task credits are
+  listed separately at task-day grain — never smeared across graphs.
+- NEW (Operations → Change impact): warehouse setting changes tracked like
+  object changes. V024 snapshots SHOW WAREHOUSES daily (this account has no
+  ACCOUNT_USAGE.WAREHOUSES), diffs snapshots into WAREHOUSE_CHANGE_REGISTRY,
+  freezes a 14-day pre-change baseline ($/day, p95, queue min/day, spill,
+  fail %), refreshes the after-window daily until day 14, and raises
+  WH_CHANGE_REGRESSION alerts (CRITICAL at 2x $/day). Verdicts live in the
+  proc — the page and the alert can never disagree; the UI adds per-metric
+  deltas and the credits/day line with the change marked.
+- validate.sql expects V001..V024; teardown drops the new task/proc and
+  preserves the registry + snapshot tables (frozen baselines are not
+  rebuildable). Locks in tests/test_graph_wh_scorecard.py.
+
 ## 4.6.4 — live round 2: filters that actually filter + contract truth (2026-07-08)
 
 - FIXED: alert feeds (Brief fires, Alerts queue, Control Room triage,

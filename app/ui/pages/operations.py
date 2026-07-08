@@ -12,10 +12,11 @@ from app.core.query import execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import change_impact_sql, insights_sql, mart_sql, ops_sql
+from app.data import change_impact_sql, graph_sql, insights_sql, mart_sql, ops_sql
+from app.logic import graphs, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
-from app.logic.formulas import credits_to_usd, safe_float
+from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -510,6 +511,133 @@ def _contention_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
 
 
+
+def _graphs_tab(company: str, days: int, rate: float, database: str = "",
+                schema_contains: str = "") -> None:
+    st.caption(
+        "Cost per pipeline = measured warehouse credits for every task run in the "
+        "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~6h lag) at the configured rate. "
+        "$/run is a day's cost over that day's runs — allocated, not per-run metered. "
+        "Serverless tasks bill separately and are listed below at task-day grain."
+    )
+    res = run(graph_sql.graph_daily_costs(days, company, database, schema_contains),
+              page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
+              tier="historical", source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY")
+    if not guard(res, "No task-graph runs in this scope/window."):
+        return
+    daily = graphs.enrich_graph_daily(res.df, rate)
+    summary = graphs.pipeline_summary(daily)
+    top = summary.iloc[0] if not summary.empty else None
+    worst = summary.sort_values("SUCCESS_PCT").iloc[0] if not summary.empty else None
+    kpi_row([
+        {"label": "Pipeline spend (window)",
+         "value": format_usd(float(summary["USD"].sum()) if not summary.empty else 0.0),
+         "delta": f"{len(summary)} pipeline(s)", "delta_color": "off"},
+        {"label": "Most expensive",
+         "value": str(top["PIPELINE"]) if top is not None else "n/a",
+         "delta": format_usd(float(top["USD"])) if top is not None else None,
+         "delta_color": "off"},
+        {"label": "Worst success",
+         "value": f"{float(worst['SUCCESS_PCT']):.1f}%" if worst is not None else "n/a",
+         "delta": str(worst["PIPELINE"]) if worst is not None else None,
+         "delta_color": "inverse" if worst is not None and float(worst["SUCCESS_PCT"]) < 100 else "off"},
+    ])
+    top5 = summary.head(5)["PIPELINE"].tolist() if not summary.empty else []
+    chart_df = daily[daily["PIPELINE"].isin(top5)][["DAY", "PIPELINE", "USD"]]
+    if not chart_df.empty:
+        charts.daily_stacked_usd(chart_df, "DAY", "PIPELINE", "USD")
+    styled_table(summary, height=300, column_config={
+        "USD": st.column_config.NumberColumn("$ (window)", format="$%.2f"),
+        "USD_PER_RUN": st.column_config.NumberColumn("$/run (alloc)", format="$%.4f"),
+        "SUCCESS_PCT": st.column_config.NumberColumn("Success %", format="%.1f%%"),
+    })
+    with st.expander("Daily detail (per pipeline per day)"):
+        styled_table(daily.sort_values(["DAY", "USD"], ascending=[False, False]), height=280)
+    result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
+                             "Pipeline label = the graph's root task.")
+
+    sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
+              page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
+              tier="historical", source="SERVERLESS_TASK_HISTORY")
+    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
+    if not sls.ok:
+        st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
+    elif sls.empty:
+        st.caption("No serverless task credits in this scope/window.")
+    else:
+        sdf = sls.df.copy()
+        sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
+        styled_table(sdf, height=220, column_config={
+            "USD": st.column_config.NumberColumn("$", format="$%.2f")})
+
+
+def _wh_change_block(company: str, is_operator: bool) -> None:
+    st.divider()
+    section_header("Warehouse setting changes", "info", "warehouse")
+    st.caption(
+        "Detection is snapshot-diff (daily SHOW WAREHOUSES — this account has no "
+        "ACCOUNT_USAGE.WAREHOUSES view), so a change is seen within a day. Each change "
+        "freezes a 14-day baseline and tracks 14 days after: $/day, p95, queueing, "
+        "spill, failures. Confirmed regressions raise WH_CHANGE_REGRESSION alerts."
+    )
+    wh_contains = str(st.session_state.get("flt_warehouse_contains", "") or "")
+    res = run(change_impact_sql.warehouse_change_registry(90, company, wh_contains),
+              page=_PAGE, key=f"whchg_{company}_{wh_contains}", tier="recent",
+              source="WAREHOUSE_CHANGE_REGISTRY")
+    if res.ok and res.empty:
+        st.info(
+            "No warehouse setting changes detected yet. The daily scan "
+            "(TASK_WAREHOUSE_CHANGE_SCAN) seeds its first snapshot on the first run "
+            "and detects changes from the second snapshot onward."
+        )
+    elif guard(res, "", setup_hint="Not installed yet — apply V024, then the daily scan populates this."):
+        df = res.df.copy()
+        k = wh_change.registry_kpis(df)
+        kpi_row([
+            {"label": "Changes tracked (90d)", "value": f"{k['changes']}"},
+            {"label": "Regressed", "value": f"{k['regressed']}",
+             "delta_color": "inverse" if k["regressed"] else "off",
+             "help": "Worse $/day, p95, queueing, or failure rate vs the frozen pre-change baseline."},
+            {"label": "Improved", "value": f"{k['improved']}"},
+            {"label": "Still accumulating", "value": f"{k['pending']}",
+             "help": "Fewer than 3 after-days or 20 after-queries so far — no verdict yet."},
+        ])
+        sel = selectable_table(df[[c for c in (
+            "VERDICT", "WAREHOUSE_NAME", "SETTING", "OLD_VALUE", "NEW_VALUE",
+            "CHANGE_SEEN_AT", "BASELINE_CREDITS_PER_DAY", "AFTER_CREDITS_PER_DAY",
+            "BASELINE_P95_S", "AFTER_P95_S", "VERDICT_DETAIL") if c in df.columns]],
+            key="whchg_sel", height=260)
+        result_caption(res)
+        row = df.iloc[int(sel)] if sel is not None else df.iloc[0]
+        deltas = wh_change.change_deltas(row.to_dict())
+        st.markdown(f"**{row['WAREHOUSE_NAME']}** — {row['SETTING']} "
+                    f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
+        if deltas:
+            kpi_row([{
+                "label": d["metric"],
+                "value": f"{d['base']:g} → {d['after']:g}",
+                "delta": (f"{d['delta_pct']:+.1f}%" if d["delta_pct"] is not None else "new load"),
+                "delta_color": ("inverse" if d["direction"] == "worse"
+                                else "normal" if d["direction"] == "better" else "off"),
+            } for d in deltas[:5]])
+        else:
+            st.caption("Before/after stats still accumulating for this change.")
+        hist = run(change_impact_sql.warehouse_daily_series(str(row["WAREHOUSE_NAME"]), 28),
+                   page=_PAGE, key=f"whchg_hist_{row['WAREHOUSE_NAME']}", tier="recent",
+                   source="WAREHOUSE_METERING_HISTORY + QUERY_HISTORY")
+        if guard(hist, "No activity recorded for this warehouse in the last 28 days."):
+            charts.daily_metric_line(hist.df, "DAY", "CREDITS", title="credits/day",
+                                     rule_date=row.get("CHANGE_SEEN_AT"))
+            st.caption("Dashed line marks the detected change (seen within a day of the ALTER).")
+    if is_operator:
+        if st.button("Run warehouse scan now", key="whchg_scan_now",
+                     help="Snapshots settings, registers diffs, and re-evaluates verdicts immediately."):
+            ok, msg = execute_statement(change_impact_sql.run_wh_scan_call(), page=_PAGE)
+            notify(ok, msg)
+    else:
+        st.caption("The warehouse scan runs daily at 06:40; OVERWATCH_OPERATOR can trigger it on demand.")
+
+
 def _change_impact_tab(company: str, database: str, schema_contains: str,
                        is_operator: bool) -> None:
     st.caption(
@@ -578,6 +706,8 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
     else:
         st.caption("The scan runs daily at 06:50; OVERWATCH_OPERATOR can also trigger it on demand.")
 
+    _wh_change_block(company, is_operator)
+
 
 @safe_page(_PAGE)
 def render() -> None:
@@ -591,13 +721,15 @@ def render() -> None:
     # Contention folded under Warehouses (CoCo): warehouse health and the
     # contention it causes read together. Seven pills -> six.
     section = lazy_sections(
-        ["Queries", "Tasks", "Warehouses", "Change impact", "Pipeline SLA",
-         "Release compare"], key="ops_section")
+        ["Queries", "Tasks", "Task graphs ($)", "Warehouses", "Change impact",
+         "Pipeline SLA", "Release compare"], key="ops_section")
     if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
                      f["database"], f["schema_contains"])
     elif section == "Tasks":
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+    elif section == "Task graphs ($)":
+        _graphs_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
     elif section == "Warehouses":
         _warehouses_tab(f["company"], rate)
         st.divider()
