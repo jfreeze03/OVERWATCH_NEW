@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _V016 = (_ROOT / "snowflake" / "migrations" / "V016__closing_loops.sql").read_text(encoding="utf-8")
 
 
@@ -81,7 +81,7 @@ def test_round3_ux_builders_and_wiring():
     assert "TABLE_DML_HISTORY" in vd and "'WATCH'" in vd and "AVG_ROWS >= 1000" in vd
     assert "APP_USAGE" in _m.app_usage_summary(30)
 
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     main_src = (root / "app" / "main.py").read_text(encoding="utf-8")
     assert "_global_jump" in main_src and "_log_usage" in main_src
     assert '"Brief": brief.render,' in main_src

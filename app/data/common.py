@@ -25,6 +25,17 @@ def lag_offset_start(days: int, lag_hours: int = 24) -> str:
     return f"DATEADD('day', -{int(days)}, DATEADD('hour', -{int(lag_hours)}, CURRENT_TIMESTAMP()))"
 
 
+# ---------------------------------------------------------------------------
+# Window-anchoring convention (review #9: "N days" must mean one thing):
+# - Rolling live scans over event streams anchor CURRENT_TIMESTAMP() when
+#   hours matter (queued minutes, spill, logins): exactly N*24h.
+# - Day-grain sources (facts keyed by DAY, USAGE_DATE dailies) anchor
+#   CURRENT_DATE(): "N days" = N complete days plus today-so-far.
+# Every panel keeps ONE anchor family across the queries it displays
+# together; new builders follow this table rather than personal taste.
+# ---------------------------------------------------------------------------
+
+
 def day_literal(day: object) -> str:
     """Validated DATE literal for day-scoped builders (deep-linked replay).
 

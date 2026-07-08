@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-_V012 = (Path(__file__).resolve().parents[1] / "snowflake" / "migrations"
+_V012 = (Path(__file__).resolve().parents[2] / "snowflake" / "migrations"
          / "V012__routing_anomaly_remediation.sql").read_text(encoding="utf-8")
 
 

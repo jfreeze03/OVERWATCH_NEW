@@ -179,6 +179,16 @@ def database_equals_clause(database: str, column: str = "DATABASE_NAME") -> str:
     return assert_no_control_tokens(in_list(column, [db]))
 
 
+def database_case_sql(database_col: str = "DATABASE_NAME") -> str:
+    """CASE labeling rows by company at DATABASE grain. company_case_sql
+    tests membership in the WAREHOUSE list — applied to a database column it
+    labeled every row ALFA (the storage-movers bug, review #7)."""
+    literals = ", ".join(sql_literal(d) for d in TREXIS_DATABASES)
+    return (f"CASE WHEN UPPER({database_col}) IN ({literals}) "
+            f"OR UPPER({database_col}) LIKE 'TRXS!_%' ESCAPE '!' "
+            "THEN 'Trexis' ELSE 'ALFA' END")
+
+
 def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:
     """CASE expression labeling rows by company for the ALL view."""
     literals = ", ".join(sql_literal(w) for w in TREXIS_WAREHOUSES)

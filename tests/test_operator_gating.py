@@ -34,12 +34,14 @@ def _stub(monkeypatch):
     from app.config import DEFAULT_SETTINGS
     from app.ui import components
     from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security
+    from app.ui.pages.cost_parts import ai_chargeback, contract, optimize, spend
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     settings = dict(DEFAULT_SETTINGS)
     settings["_source"] = "stub"
     monkeypatch.setattr(components, "load_settings", lambda _page: dict(settings))
-    for module in (overview, control_room, cost, operations, alerts, security, admin):
+    for module in (overview, control_room, cost, operations, alerts, security, admin,
+                   spend, contract, ai_chargeback, optimize):
         if hasattr(module, "run"):
             monkeypatch.setattr(module, "run", _fake_run)
         if hasattr(module, "load_settings"):

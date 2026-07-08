@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _V017 = (_ROOT / "snowflake" / "migrations" / "V017__hardening_v7.sql").read_text(encoding="utf-8")
 
 _ALL_RULES = (

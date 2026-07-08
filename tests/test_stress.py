@@ -131,6 +131,7 @@ def _stub_runtime(monkeypatch):
     from app.config import DEFAULT_SETTINGS
     from app.ui import ai_panel, components
     from app.ui.pages import admin, alerts, control_room, cost, operations, overview, security
+    from app.ui.pages.cost_parts import ai_chargeback, contract, optimize, spend
 
     monkeypatch.setattr(main_mod, "connection_available", lambda: True)
     monkeypatch.setattr(main_mod, "current_role", lambda: "SNOW_SYSADMINS")
@@ -141,7 +142,8 @@ def _stub_runtime(monkeypatch):
     settings["_source"] = "stress-stub"
     settings["MONTHLY_BUDGET_USD"] = 100_000.0
     monkeypatch.setattr(components, "load_settings", lambda _page: dict(settings))
-    for module in (overview, control_room, cost, operations, alerts, security, admin):
+    for module in (overview, control_room, cost, operations, alerts, security, admin,
+                   spend, contract, ai_chargeback, optimize):
         if hasattr(module, "run"):
             monkeypatch.setattr(module, "run", _keyed_run)
         if hasattr(module, "run_batch"):

@@ -266,10 +266,16 @@ def governance_counts() -> str:
     from SHOW WAREHOUSES client-side — this account lacks the WAREHOUSES view)."""
     return """
 SELECT
-    (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.USERS
-      WHERE DELETED_ON IS NULL AND DISABLED = FALSE
-        AND HAS_PASSWORD = TRUE AND COALESCE(HAS_MFA, FALSE) = FALSE
-        AND CREATED_ON < DATEADD('day', -7, CURRENT_TIMESTAMP())) AS MFA_GAP_USERS,
+    (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+      WHERE U.DELETED_ON IS NULL AND U.DISABLED = FALSE
+        AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+        -- ONE definition of "MFA gap" app-wide (review #10): the same
+        -- password-login evidence the Access panel lists, not the old
+        -- created-7-days-ago proxy that disagreed with it on one page.
+        AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                    WHERE L.USER_NAME = U.NAME
+                      AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                      AND L.PASSWORD_LOGINS > 0)) AS MFA_GAP_USERS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
       WHERE DELETED_ON IS NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS

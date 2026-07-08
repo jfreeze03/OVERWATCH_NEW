@@ -565,3 +565,47 @@ OVERWATCH_OPERATOR role member; may execute generated statements behind
 typed confirms. **Quiet window** — contiguous hours where a warehouse
 burns credits with ~no queries. **Verified saving** — ledger item proven
 by actual before/after spend, not projection.
+
+---
+
+## §18 — 4.1 → 4.6 additions (2026-07-07 passes)
+
+**New Snowflake objects.** V021: `ALERT_EVENTS.RESOLUTION_KIND`,
+`APP_QUERY_TELEMETRY` (+ `TASK_PURGE_QUERY_TELEMETRY`, 90d sliding). V022:
+`ALERT_DELIVERIES` per-route ledger + `SP_NOTIFY_WEBHOOK` v3 — fan-out is
+per (event, route); a Slack success no longer suppresses PagerDuty; failed
+routes retry every chain run inside the 24h window; events aging out
+undelivered write a loud `undelivered_expired` error-log row. **V022 has
+not run against the live account yet** — apply, re-run roles.sql, then
+prove it with the fire drill. Opt-in scripts: `alert_drill.sql` (monthly
+synthetic CRITICAL; resolve as EXPECTED; Admin → Canary scores the streak).
+
+**Rule catalogue additions (§12).** `OPS_ALERT_DRILL` (PLATFORM, CRITICAL,
+ENABLED=FALSE — the drill task inserts events directly; the scan never
+fires it). `WINDOW_HOURS` on every rule is informational: scan windows are
+fixed per family in `SP_ALERT_SCAN`; edit thresholds, not windows.
+
+**Alert lifecycle.** Resolutions carry a kind — ACTIONED / NOISE /
+EXPECTED. Kinds feed the per-rule precision score and the threshold
+suggestions on Alerts → Rules (keep ≥90% of ACTIONED, cut NOISE, basis
+stated). Drills and maintenance closures are EXPECTED so they never skew
+precision. The drawer's "Re-check condition now" replays supported rules
+against today's data before you resolve.
+
+**Trust surfaces (Admin → Canary).** Mart reconciliation (fact totals vs
+live ACCOUNT_USAGE; ±2% is late-arrival noise, past ±5% re-run the scoped
+backfill), restated-days detector (metering rows changed ≥48h after close),
+fire-drill scoreboard, and fleet slow/failed fetch telemetry (Admin →
+Performance; ≥2s or failed only, 60/session cap).
+
+**Ops notes.** Query-cache identity is role+user+refresh-salt only — the
+same SQL fetched anywhere shares one entry per TTL; "Refresh data"
+invalidates and re-resolves role/user. MFA gap has ONE definition
+everywhere: password-login evidence within 30d (FACT_LOGIN_DAILY-backed,
+live LOGIN_HISTORY fallback). Storage panels read FACT_STORAGE_DAILY
+first. Window anchoring convention lives in `app/data/common.py`.
+
+**Code layout.** Cost & Contract sections live in
+`app/ui/pages/cost_parts/{spend,contract,ai_chargeback,optimize}.py`;
+`cost.py` is dispatch only. Wave-era test locks live under
+`tests/history_locks/` (see `tests/README.md`).

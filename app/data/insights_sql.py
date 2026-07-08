@@ -126,7 +126,7 @@ WITH daily AS (
 )
 SELECT
     DATABASE_NAME,
-    {companies.company_case_sql("DATABASE_NAME")} AS COMPANY,
+    {companies.database_case_sql("DATABASE_NAME")} AS COMPANY,
     MIN(USAGE_DATE) AS FIRST_DAY,
     MAX(USAGE_DATE) AS LAST_DAY,
     MIN_BY(DB_BYTES, USAGE_DATE) AS FIRST_BYTES,

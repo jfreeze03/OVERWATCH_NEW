@@ -476,6 +476,9 @@ def render() -> None:
                         language="sql",
                     )
                     st.caption("Rule changes are generate-only: review, then run as OVERWATCH_OPERATOR.")
+                    st.caption("WINDOW_HOURS is informational: each rule family's scan "
+                               "window is fixed in SP_ALERT_SCAN (see the runbook's rule "
+                               "catalogue) — editing the column does not change the scan.")
 
     elif section == "History":
         hist = run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",

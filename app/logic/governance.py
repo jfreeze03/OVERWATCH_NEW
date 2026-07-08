@@ -58,7 +58,7 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
     if mfa > 0:
         drivers.append(ScoreDriver(
             "MFA gaps", _cap(mfa * w["GOV_PTS_MFA_GAP"], 25),
-            f"{mfa:.0f} enabled password-login users without MFA 7+ days after creation."))
+            f"{mfa:.0f} users without MFA who password-logged-in within 30d (same definition as Security > Access)."))
 
     expired = safe_float(inputs.get("expired_credentials"))
     if expired > 0:

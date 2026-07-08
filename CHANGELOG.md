@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.6.0 — review-debt closure, delivery v3, structure (2026-07-07)
+
+Migration V022 (ALERT_DELIVERIES per-route ledger + SP_NOTIFY_WEBHOOK v3) —
+UNTESTED ON LIVE until applied; prove with the fire drill. Re-run roles.sql.
+
+Review debt closed (consolidated 2026-07-08 review):
+- Delivery: per-route fan-out (a Slack success no longer starves PagerDuty),
+  failed routes retry inside the window, aging-out events flagged loudly.
+- Brief refuses to invent numbers: unreachable telemetry renders n/a + a
+  warning, ROI shows "app cost unavailable" instead of $0.00.
+- Lock waits: never-acquired locks (the worst cases) are counted and ranked
+  first instead of being zeroed by COALESCE.
+- Storage movers company label: database-grain CASE (was the warehouse CASE
+  applied to a database column — everything read ALFA).
+- ONE MFA-gap definition app-wide: password-login evidence (30d), governance
+  score included; evidence wording updated.
+- THRESHOLDS trimmed to the two knobs code reads; WINDOW_HOURS labeled
+  informational in the Rules generator; window-anchoring convention
+  documented in data/common.py. Contract-dates guard verified already sound.
+
+Structure:
+- cost.py (1,290 lines) split: dispatch-only cost.py + cost_parts/{spend,
+  contract,ai_chargeback,optimize}; fixtures stub the parts.
+- 13 wave-era lock files moved to tests/history_locks/ + tests/README.md map.
+- RUNBOOK §18 syncs 4.1→4.6 (objects, drill, precision workflow, trust
+  surfaces, cache identity, layout).
+
 ## 4.5.1 — formula fact-check: three corrections (2026-07-07)
 
 Every number-producing function hand-verified (tests/test_formula_audit.py

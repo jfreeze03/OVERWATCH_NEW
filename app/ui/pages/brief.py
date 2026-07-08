@@ -29,17 +29,31 @@ def render() -> None:
 
     strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
                 source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+    strip_up = strip.ok and not strip.empty
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}
-            if strip.ok and not strip.empty else {})
+            if strip_up else {})
     mtd_credits = safe_float(vals.get("MTD_CREDITS"))
+    # Honesty contract: when telemetry is unreachable the Brief says SO —
+    # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
-        {"label": "MTD spend (account)", "value": format_usd(mtd_credits * rate),
-         "delta": f"{mtd_credits:,.0f} credits", "delta_color": "off",
-         "help": "Account-wide billed credits this month. Metering-daily has no company dimension; the company filter scopes warehouse, attribution, and user views."},
-        {"label": "Open criticals", "value": vals.get("OPEN_CRITICAL", "0"),
+        {"label": "MTD spend (account)",
+         "value": format_usd(mtd_credits * rate) if strip_up else "n/a",
+         "delta": (f"{mtd_credits:,.0f} credits" if strip_up else "telemetry unreachable"),
+         "delta_color": "off",
+         "severity": "" if strip_up else "warn",
+         "help": "Account-wide billed credits this month. Metering-daily has no company "
+                 "dimension; the company filter scopes warehouse, attribution, and user views."},
+        {"label": "Open criticals",
+         "value": vals.get("OPEN_CRITICAL", "0") if strip_up else "?",
+         "severity": "" if strip_up else "warn",
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
-        {"label": "Stalest telemetry", "value": f"{vals.get('STALEST_SOURCE_H', '?')}h"},
+        {"label": "Stalest telemetry",
+         "value": f"{vals.get('STALEST_SOURCE_H', '?')}h" if strip_up else "unknown",
+         "severity": "" if strip_up else "warn"},
     ]
+    if not strip_up:
+        st.warning("Telemetry marts unreachable — the Brief refuses to invent numbers. "
+                   + (strip.error or ""))
     exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
     if exh.usable():
@@ -64,12 +78,14 @@ def render() -> None:
         verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
         pipeline = safe_float(rrow.get("ESTIMATED_OPEN_USD"))
         app_usd = (safe_float(cost_q.df.iloc[0].get("APP_CREDITS_QTD")) * rate
-                   if cost_q.usable() else 0.0)
+                   if cost_q.usable() else None)
         kpis.append({
             "label": "Verified savings (QTD)",
             "value": format_usd(verified),
-            "delta": f"vs {format_usd(app_usd)} app run cost",
-            "delta_color": "normal" if verified >= app_usd else "inverse",
+            "delta": (f"vs {format_usd(app_usd)} app run cost" if app_usd is not None
+                      else "app cost unavailable"),
+            "delta_color": ("normal" if verified >= app_usd else "inverse")
+                           if app_usd is not None else "off",
             "help": "VERIFIED ledger items only — proven by before/after actuals, never "
                     "mixed with estimates. App cost = the dedicated warehouse's quarter "
                     "spend. Green means OVERWATCH pays for itself.",

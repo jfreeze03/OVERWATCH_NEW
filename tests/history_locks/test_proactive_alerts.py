@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-_V011 = (Path(__file__).resolve().parents[1] / "snowflake" / "migrations"
+_V011 = (Path(__file__).resolve().parents[2] / "snowflake" / "migrations"
          / "V011__proactive_alerts.sql").read_text(encoding="utf-8")
 
 _NEW_RULES = ("COST_CLOUD_SVC_RATIO", "COST_STORAGE_SURGE", "COST_SERVERLESS_CREEP",

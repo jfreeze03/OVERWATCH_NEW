@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.5.1"
+APP_VERSION = "4.6.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -80,12 +80,10 @@ DEFAULT_DAY_WINDOW = 7
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
 DEFAULT_MAX_ROWS = 5_000           # visible-truncation cap for detail tables
 
+# Only knobs that CODE actually reads live here (review #8: five decorative
+# entries removed — alert thresholds are data in ALERT_CONFIG, score weights
+# live in SETTINGS, the anomaly z default lives in logic/anomaly.py).
 THRESHOLDS = {
-    "query_fail_pct_warn": 2.0,
-    "task_fail_pct_warn": 1.0,
-    "queue_minutes_warn": 10.0,
-    "spill_gb_warn": 5.0,
-    "anomaly_z": 3.5,
     "stale_fact_hours": 3.0,        # hourly facts older than this are stale
     "stale_daily_fact_hours": 30.0, # daily facts older than this are stale
 }

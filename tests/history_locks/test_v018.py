@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _V018 = (_ROOT / "snowflake" / "migrations" / "V018__delivery_first_class.sql").read_text(encoding="utf-8")
 
 
@@ -74,7 +74,7 @@ def test_roi_readers_never_mix_estimates_with_verified():
 def test_routing_recipes_documented():
     from pathlib import Path
 
-    wd = (Path(__file__).resolve().parents[1] / "snowflake" / "webhook_delivery.sql").read_text(encoding="utf-8")
+    wd = (Path(__file__).resolve().parents[2] / "snowflake" / "webhook_delivery.sql").read_text(encoding="utf-8")
     assert "OVERWATCH_WEBHOOK_PAGERDUTY" in wd
     assert "events.pagerduty.com" in wd
     assert "'ALL', 'CRITICAL', 'OVERWATCH_WEBHOOK_PAGERDUTY'" in wd
@@ -84,7 +84,7 @@ def test_routing_recipes_documented():
 def test_drawer_shows_verification_chip():
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
+    src = (Path(__file__).resolve().parents[2] / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert "ledger_for_event(event_id[:8])" in src
     assert "Savings booked from this alert" in src
     # the chip lives inside the closed-loop Respond expander (after execution)

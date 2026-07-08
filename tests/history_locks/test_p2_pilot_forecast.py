@@ -8,7 +8,7 @@ import pandas as pd
 from app.data import mart_sql
 from app.logic.forecast import month_end_projection
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 _V015 = (_ROOT / "snowflake" / "migrations" / "V015__pilot_and_backups.sql").read_text(encoding="utf-8")
 
 
@@ -97,7 +97,7 @@ def test_emergency_builders_validated():
 def test_runbook_complete_and_selfcontained():
     from pathlib import Path
 
-    rb = (Path(__file__).resolve().parents[1] / "RUNBOOK.md").read_text(encoding="utf-8")
+    rb = (Path(__file__).resolve().parents[2] / "RUNBOOK.md").read_text(encoding="utf-8")
     for section in ("Ten-minute orientation", "Scheduled automation", "Calculated scores",
                     "Forecast engines", "AI engines", "Emergency levers", "Alert engine reference",
                     "Fallback matrix", "Troubleshooting", "Disaster recovery", "Glossary",
