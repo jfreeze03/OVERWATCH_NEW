@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.6.3 — V022 apply failure: comma-eating comment + a parse gate (2026-07-08)
+
+- FIXED: V022's ALERT_DELIVERIES CREATE TABLE was unparseable — the inline
+  ROUTE_ID comment swallowed the column-list comma (caught by the user in
+  Snowsight; the guard had run, nothing else applied, so re-running the
+  fixed file from the top is clean).
+- NEW GATE: tests/test_migrations_parse.py parses every migration/script's
+  plain SQL with sqlglot (snowflake dialect) — CREATE TABLE/VIEW, INSERT,
+  MERGE, UPDATE, DELETE, SELECT — with a real statement splitter that
+  respects strings and comments. Scripting blocks and dialect gaps (tasks,
+  alerts, grants, procs) remain Snowsight-only. The gate provably fails on
+  the exact V022 bug class. sqlglot added to requirements-dev.
+
 ## 4.6.2 — Trexis-PROD lock + teardown integration audit (2026-07-08)
 
 - V023's PROD volume scope verified and LOCKED for both companies:
