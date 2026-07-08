@@ -676,3 +676,99 @@ SELECT KIND,
 FROM touches
 GROUP BY KIND
 """
+
+
+def measured_query_costs(days: int, company: str = "ALL", database: str = "",
+                         schema_contains: str = "", warehouse_contains: str = "",
+                         user_contains: str = "", limit: int = 50) -> str:
+    """Top queries by MEASURED compute credits (QUERY_ATTRIBUTION_HISTORY).
+
+    Attribution excludes warehouse idle time: this answers "what did running
+    THIS query cost" — the complement of expensive_queries_usd's allocated
+    lens (which spreads the whole warehouse-hour bill, idle included).
+    ~6h view lag; rows without attributed credits are omitted.
+    """
+    from app.core.sqlsafe import contains_filter
+
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 50), 200))
+    where = and_where(
+        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "q.DATABASE_NAME"),
+        contains_filter("q.SCHEMA_NAME", schema_contains),
+        contains_filter("q.WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("q.USER_NAME", user_contains),
+    )
+    return f"""
+WITH att AS (
+    SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    GROUP BY QUERY_ID
+)
+SELECT
+    q.QUERY_ID, q.USER_NAME, q.WAREHOUSE_NAME, q.DATABASE_NAME, q.SCHEMA_NAME,
+    q.QUERY_TYPE, q.EXECUTION_STATUS, q.START_TIME,
+    ROUND(COALESCE(q.TOTAL_ELAPSED_TIME, 0) / 1000.0, 1) AS ELAPSED_SEC,
+    ROUND(att.CREDITS, 6) AS CREDITS,
+    LEFT(q.QUERY_TEXT, 140) AS QUERY_SNIPPET
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+JOIN att ON att.QUERY_ID = q.QUERY_ID
+WHERE {where}
+  AND att.CREDITS > 0
+ORDER BY att.CREDITS DESC
+LIMIT {limit}
+"""
+
+
+def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
+                        schema_contains: str = "", limit: int = 50) -> str:
+    """$/call leaderboard for EVERY stored procedure (measured credits).
+
+    Child statements roll up to the CALL via ROOT_QUERY_ID, so a procedure's
+    cost includes everything it ran. DATABASE/SCHEMA are the CALL's session
+    context (the proc may read other databases — labeled in the UI).
+    Complements change-impact, which prices only changed objects.
+    """
+    from app.core.sqlsafe import contains_filter
+
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 50), 200))
+    where = and_where(
+        f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "c.QUERY_TYPE = 'CALL'",
+        companies.warehouse_clause(company, "c.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "c.DATABASE_NAME"),
+        contains_filter("c.SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+WITH att AS (
+    SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+           SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    GROUP BY 1
+),
+calls AS (
+    SELECT c.QUERY_ID, c.DATABASE_NAME, c.SCHEMA_NAME, c.EXECUTION_STATUS,
+           COALESCE(c.TOTAL_ELAPSED_TIME, 0) AS ELAPSED_MS,
+           REGEXP_SUBSTR(UPPER(c.QUERY_TEXT), 'CALL\\s+([A-Z0-9_.$]+)', 1, 1, 'e', 1) AS PROC_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY c
+    WHERE {where}
+)
+SELECT
+    calls.PROC_NAME, calls.DATABASE_NAME, calls.SCHEMA_NAME,
+    COUNT(*) AS CALLS,
+    ROUND(100 * COUNT_IF(calls.EXECUTION_STATUS <> 'SUCCESS') / COUNT(*), 1) AS FAIL_PCT,
+    ROUND(APPROX_PERCENTILE(calls.ELAPSED_MS, 0.95) / 1000, 1) AS P95_S,
+    ROUND(SUM(COALESCE(att.CREDITS, 0)), 4) AS TOTAL_CREDITS,
+    ROUND(SUM(COALESCE(att.CREDITS, 0)) / COUNT(*), 6) AS CREDITS_PER_CALL
+FROM calls
+LEFT JOIN att ON att.RID = calls.QUERY_ID
+WHERE calls.PROC_NAME IS NOT NULL
+GROUP BY 1, 2, 3
+HAVING SUM(COALESCE(att.CREDITS, 0)) > 0
+ORDER BY TOTAL_CREDITS DESC
+LIMIT {limit}
+"""

@@ -47,6 +47,7 @@ from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
 from app.ui.pages.cost_parts.contract import _contract_tab  # noqa: E402
 from app.ui.pages.cost_parts.optimize import _optimization_tab, _savings_tab  # noqa: E402
 from app.ui.pages.cost_parts.spend import _attribution_tab, _categorize, _spend_tab  # noqa: E402,F401
+from app.ui.pages.cost_parts.unit_costs import _unit_costs_tab  # noqa: E402
 
 
 def render() -> None:
@@ -63,7 +64,7 @@ def render() -> None:
     # group renders its related sub-panels under labeled section headers.
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
-         "Optimization & Savings"], key="cost_section")
+         "Unit costs", "Optimization & Savings"], key="cost_section")
     if section == "Spend & Attribution":
         section_header("Spend", "info", "spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate)
@@ -106,6 +107,9 @@ def render() -> None:
         st.divider()
         section_header("AI users", "info", "operations")
         _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
+    elif section == "Unit costs":
+        section_header("Unit costs — one query, one call, one AI request", "info", "cost")
+        _unit_costs_tab(f, rate, ai_rate)
     else:
         section_header("Optimization", "info", "optimize")
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator)

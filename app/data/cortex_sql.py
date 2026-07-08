@@ -114,3 +114,29 @@ WHERE F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1
 ORDER BY DAY
 """
+
+
+def cortex_model_costs(days: int) -> str:
+    """AI credits by function and model, with a credits/1M-token unit rate.
+
+    CORTEX_FUNCTIONS_USAGE_HISTORY carries no database dimension — this is
+    account-wide by definition; per-user attribution stays in the rollup.
+    View/column availability varies by account: the runtime error path is
+    the compatibility guard (same pattern as cortex_ai_functions_daily).
+    """
+    days = bounded_days(days)
+    return f"""
+SELECT
+    FUNCTION_NAME,
+    COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+    SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 4) AS CREDITS,
+    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
+          / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1, 2
+HAVING SUM(COALESCE(TOKEN_CREDITS, 0)) > 0
+ORDER BY CREDITS DESC
+LIMIT 200
+"""

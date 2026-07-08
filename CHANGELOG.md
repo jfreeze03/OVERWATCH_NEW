@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.8.0 — unit costs: the price tag on one query, one CALL, one AI request (2026-07-08)
+
+- NEW (Cost & Contract → Unit costs): MEASURED per-unit dollars, no
+  migration needed. Most expensive individual queries (attribution credits,
+  idle excluded — the "what did THIS cost" lens, alongside Optimization's
+  allocated "who owns the bill" lens); a $/call leaderboard for EVERY
+  stored procedure via ROOT_QUERY_ID roll-up (change-impact keeps watching
+  the changed ones); AI spend by function + model with $/1M tokens.
+  Queries and procedures honor company/Database/Schema (+ warehouse/user
+  contains for queries); the Cortex usage view has no database dimension
+  and is labeled account-wide.
+
 ## 4.7.0 — task-graph cost trends + warehouse change scorecard (2026-07-08)
 
 - NEW (Operations → Task graphs ($)): pipeline cost over time — one row per
