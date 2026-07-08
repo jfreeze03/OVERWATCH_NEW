@@ -1,7 +1,7 @@
 # CI / local development toolchain.
 # app/logic and app/data are Streamlit-free by design, so tests only need these.
 pandas~=2.2
-pytest~=8.3
+pytest~=9.1
 ruff~=0.9
 # AppTest page-smoke suite (tests/test_pages_apptest.py)
 streamlit~=1.45
