@@ -2,7 +2,7 @@
 # app/logic and app/data are Streamlit-free by design, so tests only need these.
 pandas~=2.2
 pytest~=8.3
-ruff~=0.9
+ruff~=0.15
 # AppTest page-smoke suite (tests/test_pages_apptest.py)
 streamlit~=1.45
 altair~=5.4
