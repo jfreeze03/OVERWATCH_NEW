@@ -21,15 +21,24 @@ CPR_SPIKE_THRESHOLD = 0.10  # credits per request
 _SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 
 
-def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float) -> pd.DataFrame:
-    """Add projected-30d credits/cost columns to the SQL rollup."""
+def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
+                       window_days: int = 30) -> pd.DataFrame:
+    """Add projected-30d credits/cost columns to the SQL rollup.
+
+    Projection basis is the CALENDAR window (TOTAL_CREDITS / window * 30) —
+    the same basis rollup_summary uses. The old basis (active-day average
+    x30) projected a user active 2 of 30 days at 15x their real monthly
+    burn, and the two surfaces on the same page disagreed (review finding
+    #11). AVG_DAILY_CREDITS stays as the intensity-on-active-days metric.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
     for col in ("TOTAL_CREDITS", "AVG_DAILY_CREDITS", "CREDITS_PER_REQUEST", "TOTAL_REQUESTS"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
-    out["PROJECTED_30D_CREDITS"] = out.get("AVG_DAILY_CREDITS", 0.0) * 30.0
+    window = max(int(window_days or 30), 1)
+    out["PROJECTED_30D_CREDITS"] = out.get("TOTAL_CREDITS", 0.0) / window * 30.0
     rate = safe_float(ai_rate_usd, 2.20)
     out["SPEND_USD"] = (out.get("TOTAL_CREDITS", 0.0) * rate).round(2)
     out["PROJECTED_30D_USD"] = (out["PROJECTED_30D_CREDITS"] * rate).round(2)

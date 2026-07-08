@@ -94,7 +94,18 @@ def allocate_by_share(total: float, weights: Sequence[float]) -> list[float]:
     weight_sum = sum(clean)
     if weight_sum <= 0.0:
         return [0.0 for _ in clean]
-    return [round(total_v * w / weight_sum, 2) for w in clean]
+    # Largest-remainder in cents: naive per-part rounding drifted (100 across
+    # [1,1,1] -> 33.33*3 = 99.99) and chargeback tables leaked pennies vs the
+    # exact warehouse total they must reconcile to by construction.
+    total_cents = round(total_v * 100)
+    raw = [total_v * 100 * w / weight_sum for w in clean]
+    floors = [int(x) for x in raw]
+    shortfall = int(total_cents - sum(floors))
+    order = sorted(range(len(raw)), key=lambda i: raw[i] - floors[i], reverse=True)
+    step = 1 if shortfall >= 0 else -1
+    for i in order[: abs(shortfall)]:
+        floors[i] += step
+    return [cents / 100.0 for cents in floors]
 
 
 def month_days(day: date) -> tuple[int, int, int]:

@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.5.1 — formula fact-check: three corrections (2026-07-07)
+
+Every number-producing function hand-verified (tests/test_formula_audit.py
+pins the results). Three discrepancies found and fixed:
+
+- allocate_by_share leaked pennies: naive per-part rounding made chargeback
+  parts sum to 99.99 against a 100.00 warehouse total. Largest-remainder
+  allocation now sums exactly, preserving proportionality.
+- Day-replay activity baseline divided by a fixed 14: loader gaps and quiet
+  days deflated the baseline and over-flagged replay days. Divides by days
+  actually present.
+- Cortex per-user 30d projection used an active-day basis (a user active 2
+  of 30 days projected at 15x real burn) while the page's rollup used the
+  calendar window — the two surfaces disagreed (review finding #11). Both
+  now use the calendar basis; AVG_DAILY_CREDITS stays as the intensity
+  metric.
+
+Verified correct as-built (no change): credits/billed/pct math, month_days,
+contract_pace, flat-series forecast (+collapsing band), scoring weights and
+caps, price-per-run bounds, steering math, MTTA/MTTR NULL handling,
+restatement anchor, spend-movers per-warehouse baselines.
+
 ## 4.5.0 — differentiators: what Snowsight structurally can't do (2026-07-07)
 
 No migration; one OPT-IN script (snowflake/alert_drill.sql).

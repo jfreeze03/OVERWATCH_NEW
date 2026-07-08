@@ -682,8 +682,10 @@ WITH day_of AS (
     WHERE DATE(HOUR_TS) = {lit}
 ),
 base AS (
-    SELECT SUM(QUERY_COUNT) / 14 AS BASELINE_QUERIES,
-           SUM(FAILED_COUNT) / 14 AS BASELINE_FAILED
+    -- Divide by days PRESENT in the window: a loader gap or quiet weekend
+    -- must not deflate the baseline and over-flag the replay day.
+    SELECT SUM(QUERY_COUNT) / NULLIF(COUNT(DISTINCT DATE(HOUR_TS)), 0) AS BASELINE_QUERIES,
+           SUM(FAILED_COUNT) / NULLIF(COUNT(DISTINCT DATE(HOUR_TS)), 0) AS BASELINE_FAILED
     FROM {core_object("FACT_QUERY_HOURLY")}
     WHERE DATE(HOUR_TS) BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit})
 )

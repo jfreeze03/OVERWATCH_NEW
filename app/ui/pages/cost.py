@@ -870,7 +870,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                  setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
         return
 
-    enriched = enrich_user_rollup(rollup_res.df, ai_rate)
+    enriched = enrich_user_rollup(rollup_res.df, ai_rate, days)
     summary = rollup_summary(enriched, days)
     budget_kpi_item = (
         {"label": "AI monthly budget", "value": format_usd(ai_budget),
