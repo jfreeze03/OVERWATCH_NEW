@@ -7,6 +7,7 @@ ACCOUNT_USAGE column drift or object loss before a user hits it. Pure module.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date, timedelta
 
 from app.data import (
     change_impact_sql,
@@ -21,6 +22,14 @@ from app.data import (
     recheck_sql,
     security_sql,
 )
+
+
+def _recent_release_iso() -> str:
+    """Canary anchor for the release-compare builders. A fixed old date made
+    the canary scan half a year of TASK/QUERY_HISTORY (153s in production
+    telemetry); anchoring 3 days back keeps the scan inside warm partitions."""
+    return (date.today() - timedelta(days=3)).isoformat()
+
 
 CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.metering_daily_by_service", lambda: cost_sql.metering_daily_by_service(2)),
@@ -78,8 +87,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),
     ("insights.repeat_query_fingerprints", lambda: insights_sql.repeat_query_fingerprints(1, "ALFA", 2)),
     ("insights.storage_growth_by_database", lambda: insights_sql.storage_growth_by_database(2, "ALFA")),
-    ("insights.release_query_compare", lambda: insights_sql.release_query_compare("2026-01-01", 1)),
-    ("insights.release_task_compare", lambda: insights_sql.release_task_compare("2026-01-01", 1)),
+    ("insights.release_query_compare", lambda: insights_sql.release_query_compare(_recent_release_iso(), 1)),
+    ("insights.release_task_compare", lambda: insights_sql.release_task_compare(_recent_release_iso(), 1)),
     ("insights.task_failure_details", lambda: insights_sql.task_failure_details(1, "ALFA")),
     ("insights.dormant_users", lambda: insights_sql.dormant_users(30, "ALFA")),
     ("insights.warehouse_sizing_profile", lambda: insights_sql.warehouse_sizing_profile(1, "ALFA")),

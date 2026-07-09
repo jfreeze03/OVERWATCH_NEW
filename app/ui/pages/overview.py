@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.result import QueryResult
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
@@ -72,10 +72,11 @@ def _live_fallback_daily(company: str, days: int, rate: float) -> tuple[pd.DataF
     return daily[["DAY", "USD"]], res
 
 
-def _mtd_spend_usd(rate: float) -> tuple[float, str]:
+def _mtd_spend_usd(rate: float, preloaded: QueryResult | None = None) -> tuple[float, str]:
     """MTD account billed spend (adjustment applied) from the daily fact."""
-    res = run(mart_sql.fact_daily_spend(45), page=_PAGE, key="fact_daily_45",
-              tier="recent", source="FACT_METERING_DAILY")
+    res = preloaded if preloaded is not None and preloaded.ok else run(
+        mart_sql.fact_daily_spend(45), page=_PAGE, key="fact_daily_45",
+        tier="recent", source="FACT_METERING_DAILY")
     if not res.usable():
         return 0.0, ""
     frame = res.df.copy()
@@ -111,7 +112,13 @@ def render() -> None:
     )
 
     # ---- data loads (mart-first, labeled live fallback) --------------------
-    board_res = _load_board(company, days)
+    # First paint: the two headline reads go out in ONE parallel batch
+    # (Codex #7); any batch failure falls back to the serial cached path.
+    _b = run_batch([
+        {"key": "board", "sql": mart_sql.exec_board(company, days), "source": "MART_EXEC_BOARD"},
+        {"key": "mtd45", "sql": mart_sql.fact_daily_spend(45), "source": "FACT_METERING_DAILY"},
+    ], page=_PAGE, tier="recent")
+    board_res = _b["board"] if _b is not None else _load_board(company, days)
     board = board_res.df if board_res.usable() else pd.DataFrame(
         columns=["PANEL", "METRIC", "DIMENSION", "PERIOD_START", "VALUE", "VALUE_USD"]
     )
@@ -127,7 +134,7 @@ def render() -> None:
         daily, trend_source = _live_fallback_daily(company, days, rate)
 
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
-    mtd_spend, mtd_source = _mtd_spend_usd(rate)
+    mtd_spend, mtd_source = _mtd_spend_usd(rate, preloaded=(_b or {}).get("mtd45"))
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(company)
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None

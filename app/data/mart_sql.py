@@ -146,6 +146,33 @@ ORDER BY FAILED DESC, DAY DESC
 """
 
 
+def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
+    """Window-vs-prior warehouse credits from FACT_WAREHOUSE_DAILY.
+
+    Same output contract as cost_sql.warehouse_window_vs_prior but reads the
+    hourly-loaded fact instead of scanning WAREHOUSE_METERING_HISTORY live
+    (perf pass: Control Room movers). Inherits up-to-an-hour loader lag —
+    callers keep the live builder as fallback and label the source.
+    """
+    days = bounded_days(days)
+    where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())"]
+    if str(company).upper() != "ALL":
+        where.append(f"COMPANY = {sql_literal(company)}")
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    COMPANY,
+    ROUND(SUM(IFF(DAY >= DATEADD('day', -{days}, CURRENT_DATE()), CREDITS_TOTAL, 0)), 4) AS CREDITS_CURRENT,
+    ROUND(SUM(IFF(DAY < DATEADD('day', -{days}, CURRENT_DATE()), CREDITS_TOTAL, 0)), 4) AS CREDITS_PRIOR
+FROM {mart_object("FACT_WAREHOUSE_DAILY")}
+WHERE {and_where(*where)}
+GROUP BY 1, 2
+HAVING CREDITS_CURRENT > 0 OR CREDITS_PRIOR > 0
+ORDER BY CREDITS_CURRENT DESC
+LIMIT 500
+"""
+
+
 def open_alert_events(limit: int = 200, company: str = "ALL") -> str:
     """Open/ack events, most severe first, honoring the company filter.
 

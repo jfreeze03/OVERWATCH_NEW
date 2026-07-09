@@ -12,7 +12,7 @@ import streamlit as st
 
 from app.config import THRESHOLDS
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.state import filters
 from app.data import cost_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import triage_queue
@@ -48,21 +48,44 @@ def _day_replay() -> None:
                          max_value=account_today(), key="cr_replay_day")
     day_iso = pick.isoformat()
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
-    movers = run(mart_sql.day_spend_movers(day_iso), page=_PAGE, key=f"rp_mv_{day_iso}",
-                 tier="recent", source="FACT_WAREHOUSE_DAILY vs 14d baseline")
-    activity = run(mart_sql.day_activity(day_iso), page=_PAGE, key=f"rp_act_{day_iso}",
-                   tier="recent", source="FACT_QUERY_HOURLY (day vs baseline)")
     rp_company = filters()["company"]
-    ddl = run(security_sql.day_ddl(day_iso, rp_company), page=_PAGE,
-              key=f"rp_ddl_{rp_company}_{day_iso}",
-              tier="historical", source="QUERY_HISTORY (DDL that day)")
-    grants = run(security_sql.day_grants(day_iso, rp_company), page=_PAGE,
-                 key=f"rp_gr_{rp_company}_{day_iso}",
-                 tier="historical", source="GRANTS_TO_USERS (that day)")
-    tasks = run(mart_sql.day_task_failures(day_iso), page=_PAGE, key=f"rp_tf_{day_iso}",
-                tier="recent", source="FACT_TASK_DAILY (failures that day)")
-    alerts_d = run(mart_sql.day_alerts(day_iso), page=_PAGE, key=f"rp_al_{day_iso}",
-                   tier="recent", source="ALERT_EVENTS (that day)")
+    # Six independent reads -> two tier-grouped parallel batches (Codex #7);
+    # any batch failure falls back to the original serial per-query path.
+    _b_recent = run_batch([
+        {"key": "mv", "sql": mart_sql.day_spend_movers(day_iso),
+         "source": "FACT_WAREHOUSE_DAILY vs 14d baseline"},
+        {"key": "act", "sql": mart_sql.day_activity(day_iso),
+         "source": "FACT_QUERY_HOURLY (day vs baseline)"},
+        {"key": "tf", "sql": mart_sql.day_task_failures(day_iso),
+         "source": "FACT_TASK_DAILY (failures that day)"},
+        {"key": "al", "sql": mart_sql.day_alerts(day_iso),
+         "source": "ALERT_EVENTS (that day)"},
+    ], page=_PAGE, tier="recent")
+    _b_hist = run_batch([
+        {"key": "ddl", "sql": security_sql.day_ddl(day_iso, rp_company),
+         "source": "QUERY_HISTORY (DDL that day)", "max_rows": 300},
+        {"key": "gr", "sql": security_sql.day_grants(day_iso, rp_company),
+         "source": "GRANTS_TO_USERS (that day)", "max_rows": 200},
+    ], page=_PAGE, tier="historical")
+    if _b_recent is not None and _b_hist is not None:
+        movers, activity = _b_recent["mv"], _b_recent["act"]
+        tasks, alerts_d = _b_recent["tf"], _b_recent["al"]
+        ddl, grants = _b_hist["ddl"], _b_hist["gr"]
+    else:
+        movers = run(mart_sql.day_spend_movers(day_iso), page=_PAGE, key=f"rp_mv_{day_iso}",
+                     tier="recent", source="FACT_WAREHOUSE_DAILY vs 14d baseline")
+        activity = run(mart_sql.day_activity(day_iso), page=_PAGE, key=f"rp_act_{day_iso}",
+                       tier="recent", source="FACT_QUERY_HOURLY (day vs baseline)")
+        ddl = run(security_sql.day_ddl(day_iso, rp_company), page=_PAGE,
+                  key=f"rp_ddl_{rp_company}_{day_iso}",
+                  tier="historical", source="QUERY_HISTORY (DDL that day)")
+        grants = run(security_sql.day_grants(day_iso, rp_company), page=_PAGE,
+                     key=f"rp_gr_{rp_company}_{day_iso}",
+                     tier="historical", source="GRANTS_TO_USERS (that day)")
+        tasks = run(mart_sql.day_task_failures(day_iso), page=_PAGE, key=f"rp_tf_{day_iso}",
+                    tier="recent", source="FACT_TASK_DAILY (failures that day)")
+        alerts_d = run(mart_sql.day_alerts(day_iso), page=_PAGE, key=f"rp_al_{day_iso}",
+                       tier="recent", source="ALERT_EVENTS (that day)")
     crit_n = int((alerts_d.df["SEVERITY"].astype(str).str.upper() == "CRITICAL").sum()) \
         if alerts_d.usable() else 0
     heads = replay_headlines(
@@ -150,9 +173,20 @@ def render() -> None:
                 scope_note=f"{company} · last {days} days")
 
     # ---- 24h pulse -----------------------------------------------------------
-    pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
-                page=_PAGE, key=f"pulse_{company}",
-                tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
+    # Fact-first 24h pulse (Codex #4): the hourly fact answers this without
+    # a live QUERY_HISTORY scan; schema filter (no schema grain) or an empty
+    # fact falls back to live, exactly like the Operations page.
+    pulse, pulse_from_mart = None, False
+    if not f["schema_contains"]:
+        m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+                      page=_PAGE, key=f"pulse_fact_{company}", tier="recent",
+                      source="FACT_QUERY_HOURLY (mart, loaded hourly)")
+        if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
+            pulse, pulse_from_mart = m_pulse, True
+    if pulse is None:
+        pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
+                    page=_PAGE, key=f"pulse_{company}",
+                    tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
     act = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="cr_activity",
               tier="recent", source="FACT_QUERY_HOURLY (daily)")
     q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
@@ -168,7 +202,8 @@ def render() -> None:
              "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
              "delta_color": "inverse" if _fail_bad else "off",
              "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
-            {"label": "p95 runtime", "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
+            {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
+             "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
             {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.1f} min"},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
         ])
@@ -256,9 +291,13 @@ def render() -> None:
         result_caption(tl)
 
     st.subheader("Spend movers (window vs prior)")
-    movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
-                 key=f"cr_movers_{company}_{days}", tier="historical",
-                 source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
+    movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
+                 key=f"cr_movers_fact_{company}_{days}", tier="recent",
+                 source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+    if not movers.usable():  # mart not deployed/loaded yet -> bounded live scan
+        movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
+                     key=f"cr_movers_{company}_{days}", tier="historical",
+                     source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
     if guard(movers, "No warehouse spend to compare in this window."):
         view = movers.df.copy()
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))

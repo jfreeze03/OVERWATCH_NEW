@@ -748,6 +748,13 @@ WITH att AS (
            SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+      -- Prune before the GROUP BY: only rows rolling up to a CALL matter
+      -- (children carry the CALL's id as ROOT_QUERY_ID). Perf pass #9.
+      AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (
+          SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+          WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+            AND QUERY_TYPE = 'CALL'
+      )
     GROUP BY 1
 ),
 calls AS (

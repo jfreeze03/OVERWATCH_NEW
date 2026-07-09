@@ -47,6 +47,13 @@ WITH runs AS (
         SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
         FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
         WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())
+          -- Prune before the GROUP BY: only task-run queries matter here.
+          -- Aggregating the whole view was the 139s family (perf pass #9).
+          AND QUERY_ID IN (
+              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+              WHERE QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+                AND STATE IN ('SUCCEEDED', 'FAILED')
+          )
         GROUP BY QUERY_ID
     ) a ON a.QUERY_ID = h.QUERY_ID
     WHERE {where}

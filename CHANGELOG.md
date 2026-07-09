@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.8.2 — perf pass: fewer scans, parallel first paints (2026-07-08)
+
+Codex-informed review, verified against our own telemetry (renders 63%
+sub-50ms; the pain is warehouse scans). No behavior changes — same numbers,
+fewer/faster queries.
+
+- Optimization ran the identical idle-warehouse scan twice under different
+  cache tiers (advisor vs remediation) — different TTLs could even disagree
+  about what "idle" is mid-session. One tier, one cache entry, one scan.
+- Control Room 24h pulse is fact-first (FACT_QUERY_HOURLY, live fallback,
+  p95 labeled "peak hourly") and spend movers read the new
+  fact_warehouse_window_vs_prior instead of scanning metering live.
+- Overview first paint and day replay batch their independent reads in
+  parallel (tier-grouped; serial cached path on any failure).
+- The jump box no longer costs queries on normal paints — SHOW WAREHOUSES
+  and alert rules load once per session via an explicit "load all" row.
+- The 139s attribution family: graph and procedure cost builders prune
+  QUERY_ATTRIBUTION_HISTORY to task/CALL queries BEFORE the big GROUP BY.
+- Canary release-compare anchors were pinned to 2026-01-01 (a half-year
+  scan, 153s); they now anchor 3 days back.
+- Declined from the review: cache-scope sharing (SiS runs one container
+  per viewer — no cross-user cache exists to share, and it reintroduces
+  the USER_PREFS leak class); use_container_width migration (blocked by
+  the streamlit 1.45 SiS floor; becomes a shim when the channel moves).
+
 ## 4.8.1 — live round 3: six fixes from the first full day on v4.8 (2026-07-08)
 
 - POLICY (V025): SEC_BREAK_GLASS_USE disabled — ACCOUNTADMIN /

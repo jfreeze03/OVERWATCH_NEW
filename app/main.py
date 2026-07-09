@@ -254,25 +254,37 @@ def _global_jump(pages: tuple) -> None:
 
     options = [f"Page · {p}" for p in pages]
     options += [f"DB · {d}" for d in sorted(set(ALFA_DATABASES) | set(TREXIS_DATABASES))]
-    wh_names = list(TREXIS_WAREHOUSES)
-    whs = run(security_sql.show_warehouses_sql(), page="Sidebar", key="jump_wh",
-              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-    if whs.ok and not whs.empty:
-        wdf = whs.df.copy()
-        wdf.columns = [str(c).lower() for c in wdf.columns]
-        if "name" in wdf.columns:
-            wh_names = sorted(set(wdf["name"].astype(str)))
-    options += [f"WH · {w}" for w in wh_names]
-    rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
-                source="ALERT_CONFIG")
-    if rules.usable() and "RULE_ID" in rules.df.columns:
-        options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
+    # Live targets (SHOW WAREHOUSES + alert rules) load on demand: a normal
+    # page paint pays ZERO queries for the jump box (Codex #3). Static pages,
+    # databases, and the known Trexis warehouses are always offered; picking
+    # the loader row fetches the full account list once per session.
+    if bool(st.session_state.get("_ow_jump_loaded")):
+        wh_names = list(TREXIS_WAREHOUSES)
+        whs = run(security_sql.show_warehouses_sql(), page="Sidebar", key="jump_wh",
+                  tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        if whs.ok and not whs.empty:
+            wdf = whs.df.copy()
+            wdf.columns = [str(c).lower() for c in wdf.columns]
+            if "name" in wdf.columns:
+                wh_names = sorted(set(wdf["name"].astype(str)))
+        options += [f"WH · {w}" for w in wh_names]
+        rules = run(mart_sql.alert_rules(), page="Sidebar", key="jump_rules", tier="recent",
+                    source="ALERT_CONFIG")
+        if rules.usable() and "RULE_ID" in rules.df.columns:
+            options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
+    else:
+        options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
+        options.append("More · load all warehouses & alert rules…")
     pick = st.selectbox("Jump to", options, index=None, placeholder="Jump to…",
                         key="_ow_jump", label_visibility="collapsed")
     if not pick:
         return
     kind, _, name = pick.partition(" · ")
-    if kind == "Page":
+    if kind == "More":
+        st.session_state["_ow_jump_loaded"] = True
+        st.session_state.pop("_ow_jump", None)
+        st.rerun()
+    elif kind == "Page":
         request_navigation(name)
     elif kind == "DB":
         request_navigation("Operations", "Queries", {"database": name})
