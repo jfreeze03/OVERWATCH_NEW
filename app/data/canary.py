@@ -110,6 +110,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_daily_spend", lambda: mart_sql.fact_daily_spend(2)),
     ("mart.fact_warehouse_daily", lambda: mart_sql.fact_warehouse_daily(2, "ALFA")),
     ("mart.fact_task_daily", lambda: mart_sql.fact_task_daily(2, "ALFA")),
+    ("mart.fact_wh_window_vs_prior", lambda: mart_sql.fact_warehouse_window_vs_prior(2, "ALFA")),
+    ("mart.fact_cloud_services_ratio", lambda: mart_sql.fact_cloud_services_ratio(2, "ALFA")),
     ("mart.open_alert_events", lambda: mart_sql.open_alert_events(1)),
     ("mart.alert_event_history", lambda: mart_sql.alert_event_history(2)),
     ("mart.alert_mttr", lambda: mart_sql.alert_mttr(7)),

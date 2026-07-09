@@ -61,7 +61,9 @@ def test_fix_targets_and_render_capture():
     assert fix_target("SEC_CRED_EXPIRY") is None        # no mechanical fix
 
     main_src = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "_render_started = time.perf_counter()" in main_src
+    # v4.8.3: the clock moved to main() entry so RENDER_MS spans chrome too
+    # (Codex #18) — the lock pins that a render clock EXISTS and is persisted.
+    assert "_main_started = time.perf_counter()" in main_src
     assert "RENDER_MS" in main_src
     alerts_src = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert "Generate fix →" in alerts_src

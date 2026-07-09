@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.data import cortex_sql, insights_sql
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.ui.components import guard, kpi_row, result_caption, styled_table
@@ -32,18 +32,33 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "use Optimization's allocated view; for pipelines, Operations → Task graphs ($)."
     )
 
-    # ---- most expensive individual queries (measured) ----------------------
-    q_res = run(insights_sql.measured_query_costs(
-                    days, company, database, schema_contains,
-                    f["warehouse_contains"], f["user_contains"], 50),
-                page=_PAGE, key=f"unit_q_{company}_{days}_{database}", tier="historical",
-                source="QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY")
-    p_res = run(insights_sql.procedure_costs_usd(days, company, database, schema_contains, 50),
-                page=_PAGE, key=f"unit_p_{company}_{days}_{database}", tier="historical",
-                source="QUERY_ATTRIBUTION_HISTORY (rolled up to CALL)")
-    ai_res = run(cortex_sql.cortex_model_costs(days), page=_PAGE,
-                 key=f"unit_ai_{days}", tier="historical",
-                 source="CORTEX_FUNCTIONS_USAGE_HISTORY")
+    # ---- three independent historical reads -> one parallel batch ----------
+    # (Codex #15). All share the same filter inputs so the batch cache stays
+    # coherent; any failure falls back to the serial cached path.
+    _ub = run_batch([
+        {"key": "q", "sql": insights_sql.measured_query_costs(
+            days, company, database, schema_contains,
+            f["warehouse_contains"], f["user_contains"], 50),
+         "source": "QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY", "max_rows": 50},
+        {"key": "p", "sql": insights_sql.procedure_costs_usd(days, company, database, schema_contains, 50),
+         "source": "QUERY_ATTRIBUTION_HISTORY (rolled up to CALL)", "max_rows": 50},
+        {"key": "ai", "sql": cortex_sql.cortex_model_costs(days),
+         "source": "CORTEX_FUNCTIONS_USAGE_HISTORY", "max_rows": 200},
+    ], page=_PAGE, tier="historical")
+    if _ub is not None:
+        q_res, p_res, ai_res = _ub["q"], _ub["p"], _ub["ai"]
+    else:
+        q_res = run(insights_sql.measured_query_costs(
+                        days, company, database, schema_contains,
+                        f["warehouse_contains"], f["user_contains"], 50),
+                    page=_PAGE, key=f"unit_q_{company}_{days}_{database}", tier="historical",
+                    source="QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY")
+        p_res = run(insights_sql.procedure_costs_usd(days, company, database, schema_contains, 50),
+                    page=_PAGE, key=f"unit_p_{company}_{days}_{database}", tier="historical",
+                    source="QUERY_ATTRIBUTION_HISTORY (rolled up to CALL)")
+        ai_res = run(cortex_sql.cortex_model_costs(days), page=_PAGE,
+                     key=f"unit_ai_{days}", tier="historical",
+                     source="CORTEX_FUNCTIONS_USAGE_HISTORY")
 
     kpis = []
     if q_res.usable():

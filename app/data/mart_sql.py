@@ -173,6 +173,40 @@ LIMIT 500
 """
 
 
+def fact_cloud_services_ratio(days: int, company: str = "ALL") -> str:
+    """Cloud-services share per warehouse from FACT_WAREHOUSE_DAILY.
+
+    The fact already stores CREDITS_TOTAL and CREDITS_COMPUTE, so cloud
+    services = TOTAL - COMPUTE — same thresholds as the live builder, no
+    schema change needed (Codex #6, improved: they assumed a migration).
+    Daily grain vs the live builder's hourly precision; identical for the
+    windowed ratio this panel shows.
+    """
+    days = bounded_days(days)
+    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
+    if str(company).upper() != "ALL":
+        where.append(f"COMPANY = {sql_literal(company)}")
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    ROUND(SUM(CREDITS_COMPUTE), 2) AS COMPUTE_CREDITS,
+    ROUND(SUM(CREDITS_TOTAL - CREDITS_COMPUTE), 2) AS CLOUD_SVC_CREDITS,
+    ROUND(SUM(CREDITS_TOTAL), 2) AS TOTAL_CREDITS,
+    ROUND(SUM(CREDITS_TOTAL - CREDITS_COMPUTE) / NULLIF(SUM(CREDITS_TOTAL), 0) * 100, 1) AS CLOUD_SVC_PCT,
+    CASE
+        WHEN SUM(CREDITS_TOTAL - CREDITS_COMPUTE) / NULLIF(SUM(CREDITS_TOTAL), 0) > 0.20 THEN 'ELEVATED'
+        WHEN SUM(CREDITS_TOTAL - CREDITS_COMPUTE) / NULLIF(SUM(CREDITS_TOTAL), 0) > 0.10 THEN 'WATCH'
+        ELSE 'NORMAL'
+    END AS STATUS
+FROM {mart_object("FACT_WAREHOUSE_DAILY")}
+WHERE {and_where(*where)}
+GROUP BY 1
+HAVING SUM(CREDITS_TOTAL) > 0
+ORDER BY CLOUD_SVC_PCT DESC
+LIMIT 500
+"""
+
+
 def open_alert_events(limit: int = 200, company: str = "ALL") -> str:
     """Open/ack events, most severe first, honoring the company filter.
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.8.3 — Codex round 2: caching economics + the healthy baseline (2026-07-08)
+
+Nine of the twenty adopted (several improved on); the mart-family items
+(role/schema facts, optimization/security/timeline/graph marts) are deferred
+to a designed V026 batch, and partial-success batching is declined until the
+batch_fallback telemetry says it matters.
+
+- Health strip fetched+parsed ONCE per rerun in main() and passed to the
+  sidebar strip, top bar, and status bar (#1 — third time Codex flagged it,
+  now actually fixed rather than argued with).
+- run_batch covers all four tiers (live/metadata added) (#2).
+- Overview UN-batched (#4, Codex was right): coupling the filter-scoped
+  board with the fixed 45d MTD read cold-started the fixed read on every
+  filter change. Each read keeps its own cache key now.
+- Cost -> Attribution movers and the cloud-services ratio are fact-first
+  with live fallback (#5, #6). Improvement on #6: FACT_WAREHOUSE_DAILY
+  already stores TOTAL and COMPUTE credits, so cloud services = the
+  difference — no migration, contra the recommendation.
+- measured_query_costs joins the filtered window FIRST, then aggregates —
+  the whole attribution view is never pre-aggregated (#11, same fix the
+  graph/proc builders got).
+- Unit costs' three reads go out as one parallel batch (#15).
+- APP_USAGE.RENDER_MS now spans sidebar/topbar/status chrome (#18).
+- Telemetry persists a ~2% sample of ALL fetches, so the fleet view sees
+  the healthy baseline, not just the slow tail (#19).
+
 ## 4.8.2 — perf pass: fewer scans, parallel first paints (2026-07-08)
 
 Codex-informed review, verified against our own telemetry (renders 63%

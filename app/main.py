@@ -66,7 +66,8 @@ _RENDERERS = {
 }
 
 
-def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
+def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
+             health_vals: dict | None = None) -> str:
     """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
         st.markdown(
@@ -97,7 +98,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
 
         st.divider()
         _global_jump(pages)
-        _health_strip()
+        _health_strip(health_vals)
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
             # Re-resolve the role too: a grant/role change mid-session should
@@ -322,10 +323,10 @@ def _health_values() -> dict[str, tuple[str, str]]:
     return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
 
 
-def _health_strip() -> None:
+def _health_strip(vals: dict | None = None) -> None:
     """Always-visible pulse: criticals, telemetry freshness, MTD credits.
     You should not have to visit Overview to know something is red."""
-    vals = _health_values()
+    vals = _health_values() if vals is None else vals
     if not vals:
         return
     crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
@@ -343,10 +344,10 @@ def _health_strip() -> None:
         _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
 
 
-def _persistent_status_bar() -> None:
+def _persistent_status_bar(vals: dict | None = None) -> None:
     """The 3-4 numbers that matter, on every page (CoCo high item)."""
     from app.ui.components import status_bar
-    vals = _health_values()
+    vals = _health_values() if vals is None else vals
     if not vals:
         return
     crit, _ = vals.get("OPEN_CRITICAL", ("0", "OK"))
@@ -367,7 +368,7 @@ def _persistent_status_bar() -> None:
     status_bar(stats)
 
 
-def _topbar_scope() -> None:
+def _topbar_scope(health_vals: dict | None = None) -> None:
     """Triage filter strip above every page, like the original OVERWATCH."""
     box = st.container(border=True)
     with box:
@@ -375,7 +376,7 @@ def _topbar_scope() -> None:
         with head_l:
             st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
         with head_m:
-            vals = _health_values()
+            vals = _health_values() if health_vals is None else health_vals
             stale_h = vals.get("STALEST_SOURCE_H", ("-1", ""))[0] if vals else "-1"
             if stale_h not in ("-1", ""):
                 st.caption(f"Telemetry ≤ {stale_h}h old")
@@ -416,6 +417,7 @@ def _topbar_scope_controls() -> None:
 
 
 def main() -> None:
+    _main_started = time.perf_counter()  # full render incl. chrome (Codex #18)
     consume_pending_navigation()
     _apply_default_landing()
     inject_theme()
@@ -428,9 +430,12 @@ def main() -> None:
     profile = resolve_role_profile(role)
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 
-    page = _sidebar(pages, role, profile, connected)
+    # One health fetch + parse per rerun, shared by the sidebar strip, the
+    # top bar, and the status bar (Codex #1 — was fetched/parsed three times).
+    health_vals = _health_values() if connected else {}
+    page = _sidebar(pages, role, profile, connected, health_vals)
     if connected:
-        _topbar_scope()
+        _topbar_scope(health_vals)
 
     if not connected:
         st.title("OVERWATCH")
@@ -453,10 +458,11 @@ def main() -> None:
         return
 
     if page != "Brief":  # Brief is already the compact status view
-        _persistent_status_bar()
-    _render_started = time.perf_counter()
+        _persistent_status_bar(health_vals)
     _RENDERERS[page]()
-    _log_usage(page, int((time.perf_counter() - _render_started) * 1000))
+    # RENDER_MS now spans sidebar/topbar/status chrome too, not just the page
+    # body — chrome overhead was invisible in APP_USAGE (Codex #18).
+    _log_usage(page, int((time.perf_counter() - _main_started) * 1000))
 
 
 if __name__ == "__main__":

@@ -97,7 +97,11 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
         "metadata-heavy patterns, or compile-heavy SQL. The COST_CLOUD_SVC_RATIO alert "
         "fires at the ELEVATED threshold (editable on the Alerts page)."
     )
-    csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
+    csr = run(mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
+              key=f"csr_fact_{company}_{days}", tier="recent",
+              source="FACT_WAREHOUSE_DAILY (cloud-services share)")
+    if not csr.usable():  # mart not deployed/loaded yet -> bounded live scan
+        csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
               key=f"cs_ratio_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
     if guard(csr, "No warehouse metering in this window."):
@@ -115,9 +119,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
                 result_caption(comp)
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
-    wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
-             key=f"wh_vs_prior_{company}_{days}", tier="historical",
-             source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
+    wh = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
+             key=f"wh_vs_prior_fact_{company}_{days}", tier="recent",
+             source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+    if not wh.usable():  # mart not deployed/loaded yet -> bounded live scan
+        wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
+                 key=f"wh_vs_prior_{company}_{days}", tier="historical",
+                 source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
     st.markdown("**By warehouse (exact metering)**")
     if guard(wh, "No warehouse credits in this window."):
         view = wh.df.copy()

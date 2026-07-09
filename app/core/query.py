@@ -44,11 +44,20 @@ _TELEMETRY_PERSIST_CAP = 60  # rows per session: a broken page can't spam
 
 def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
                              threshold_ms: float = TELEMETRY_PERSIST_MS,
-                             cap: int = _TELEMETRY_PERSIST_CAP) -> bool:
-    """Pure gate: failed always qualifies, slow qualifies, capped per session."""
+                             cap: int = _TELEMETRY_PERSIST_CAP,
+                             sample_roll: float | None = None,
+                             sample_rate: float = 0.02) -> bool:
+    """Pure gate: failed always qualifies, slow qualifies, capped per session.
+
+    ``sample_roll`` (caller passes random()) additionally persists ~2% of ALL
+    fetches so the fleet view sees the healthy baseline, not just the tail —
+    without it, p50 by page is invisible in APP_QUERY_TELEMETRY (Codex #19).
+    """
     if persisted >= cap:
         return False
-    return (not ok) or float(elapsed_ms) >= float(threshold_ms)
+    if (not ok) or float(elapsed_ms) >= float(threshold_ms):
+        return True
+    return sample_roll is not None and float(sample_roll) < float(sample_rate)
 
 
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
@@ -57,7 +66,8 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
         if st.session_state.get("_ow_qtel_off"):
             return
         done = int(st.session_state.get("_ow_qtel_n", 0))
-        if not should_persist_telemetry(elapsed_ms, ok, done):
+        import random as _random
+        if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random()):
             return
         st.session_state["_ow_qtel_n"] = done + 1
         session = get_session()
@@ -201,7 +211,18 @@ def _fetch_historical_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "historical", _page)
 
 
-_BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch}
+@st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False)
+def _fetch_live_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
+    return _execute_batch(sqls, "live", _page)
+
+
+@st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False)
+def _fetch_metadata_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
+    return _execute_batch(sqls, "metadata", _page)
+
+
+_BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch,
+                   "live": _fetch_live_batch, "metadata": _fetch_metadata_batch}
 
 
 def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
