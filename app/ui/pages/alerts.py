@@ -244,6 +244,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                     if is_operator:
                         from app.ui.components import blast_radius
                         blast_radius(wh_inline, _PAGE)
+                        st.caption(remediation.reverse_hint(
+                            "STATEMENT_TIMEOUT" if "STATEMENT_TIMEOUT" in stmt_cl else "CLUSTER_RANGE",
+                            wh_inline))
                         conf_cl = st.text_input("Type the warehouse name to confirm",
                                                 key=f"clf_confirm_{event_id[:8]}")
                         if st.button("Execute + audit + book estimate", key=f"clf_exec_{event_id[:8]}",
@@ -256,6 +259,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                                 f"{sql_literal(stmt_cl)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, "
                                 f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}",
                                 page=_PAGE)
+                            if ok:
+                                from app.ui.components import log_ui_event
+                                log_ui_event("remediation_exec", page=_PAGE)
                             if ok:
                                 execute_statement(
                                     f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
@@ -360,6 +366,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                         ok_all = ok_all and ok
                         messages.append(msg)
                     notify(ok_all, " / ".join(messages))
+                    if ok_all:
+                        from app.ui.components import log_ui_event
+                        log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
+                                     page=_PAGE)
             else:
                 st.caption("Executing requires the OVERWATCH_OPERATOR role; the SQL is copyable for review.")
 
@@ -373,6 +383,12 @@ def _open_events_section(events, is_operator: bool) -> None:
             chosen = st.multiselect("Events", list(options), key="alert_bulk_pick")
             b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
                                 key="alert_bulk_action")
+            b_kind = ""
+            if b_action == "RESOLVE":
+                b_kind = st.radio("How were these closed?", RESOLUTION_KINDS, horizontal=True,
+                                  key="alert_bulk_kind",
+                                  help="Required — untagged closes drop out of the per-rule "
+                                       "precision score (bulk closes used to skip this).")
             b_note = st.text_input("Bulk note (applies to every selected event)",
                                    key="alert_bulk_note", max_chars=500)
             confirm_b = st.text_input(
@@ -382,7 +398,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                          disabled=(not chosen or confirm_b != f"BULK {b_action}")):
                 done = 0
                 for label in chosen:
-                    script = _lifecycle_sql(options[label], b_action, b_note)
+                    script = _lifecycle_sql(options[label], b_action, b_note, b_kind)
                     ok_one = True
                     for stmt in [s for s in script.split(";") if s.strip()]:
                         ok, _msg = execute_statement(stmt + ";", page=_PAGE)
@@ -390,6 +406,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                     done += int(ok_one)
                 notify(done == len(chosen),
                        f"{b_action} applied to {done}/{len(chosen)} event(s); audit rows written.")
+                if done:
+                    from app.ui.components import log_ui_event
+                    log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
+                                 page=_PAGE)
 
 
 @safe_page(_PAGE)
@@ -514,6 +534,46 @@ def render() -> None:
             styled_table(df, height=240)
         else:
             st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
+
+        st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
+        slo = run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
+                  tier="recent", source="ALERT_DELIVERIES + ALERT_EVENTS + APP_ERROR_LOG")
+        if slo.usable():
+            row0 = slo.df.iloc[0]
+            _und = int(safe_float(row0.get("UNDELIVERED_CRITICALS_30M")))
+            kpi_row([
+                {"label": "Events delivered (30d)",
+                 "value": f"{safe_float(row0.get('EVENTS_DELIVERED')):,.0f} / {safe_float(row0.get('EVENTS_RAISED')):,.0f}",
+                 "help": "Raised events with at least one delivery row. Routes filter by "
+                         "severity, so 100% is not the target."},
+                {"label": "Latency p50 / p95",
+                 "value": f"{safe_float(row0.get('MEDIAN_MIN')):,.0f} / {safe_float(row0.get('P95_MIN')):,.0f} min",
+                 "help": "RAISED_AT -> first SENT_AT; the notify task rides the hourly chain."},
+                {"label": "Undelivered criticals (30m+)", "value": f"{_und}",
+                 "severity": "bad" if _und else "ok",
+                 "delta_color": "inverse" if _und else "off"},
+                {"label": "Route failures (30d)",
+                 "value": f"{safe_float(row0.get('ROUTE_FAILURES')):,.0f}",
+                 "help": "route_send_failed rows in APP_ERROR_LOG — RUNBOOK section 19 has the Teams debugging path."},
+            ])
+            rt = run(mart_sql.delivery_by_route(30), page=_PAGE, key="delivery_routes",
+                     tier="recent", source="ALERT_DELIVERIES by route")
+            if rt.usable():
+                styled_table(rt.df, height=170)
+        else:
+            st.caption("Delivery SLOs appear once the per-route ledger has rows (V022+).")
+
+        st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
+        fat = run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
+                  tier="recent", source="ALERT_EVENTS (resolution kinds + dedupe repeats)")
+        if fat.usable():
+            styled_table(fat.df, height=240, column_config={
+                "PER_WEEK": st.column_config.NumberColumn("Events/week", format="%.1f"),
+            })
+            st.caption("High NOISE or UNTAGGED at high volume = tune or retire the rule — "
+                       "the precision panel under Rules has suggested thresholds.")
+        else:
+            st.caption("Fatigue metrics appear once events exist in the window.")
 
     else:
         st.markdown("**Routing (family → channel)**")

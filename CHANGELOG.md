@@ -31,8 +31,28 @@ tasks running; every adoption degrades to its live builder otherwise).
   security 18) — counts only go down from here. Honest non-adoptions:
   tag coverage (needs user grain the family mart lacks) and pruning
   (needs partition stats) stay live by design.
-- Tests: tests/test_wave2_adoptions.py (14 locks: helper, contracts,
-  wiring, canaries). 557 green + floor leg.
+- **Rider panels** (approved r5, refined r6): Alerts -> History gains
+  Delivery health (events delivered, p50/p95 raise->send latency,
+  undelivered criticals 30m+, route failures with the RUNBOOK 19 pointer)
+  and Alert fatigue (events/week per rule, ACTIONED/NOISE/EXPECTED mix,
+  UNTAGGED closes, dedupe repeats). Admin -> Performance gains per-page
+  fleet telemetry from the V027 rider (p95, cache-hit % — labeled as a
+  floor over persisted fetches — batch size, truncation), usage events by
+  EVENT_KIND, and the remediation acceptance funnel (executed/copied/
+  failed -> estimated/verified/rejected + verified $, audit rows only).
+  Overview promotes forecast quality to a page-level readout (per-engine
+  ±MAPE, most-reliable engine named) with the monthly evidence kept in
+  the expander.
+- **Bulk RESOLVE now requires a resolution kind** (r6 #11, verified: the
+  single flow forced it since V021, bulk skipped it — untagged closes
+  fell out of the precision score). **Reverse guidance** (r6 #18):
+  remediation.reverse_hint at the resize and closed-loop exec sites —
+  points at WAREHOUSE_CHANGE_REGISTRY for the prior value and
+  REMEDIATION_LOG.STATEMENT_SQL for what ran, never invents values.
+  **Usage events**: alert_ack / alert_resolve (single + bulk) and
+  remediation_exec now log through log_ui_event (r6 #7).
+- Tests: tests/test_wave2_adoptions.py (14 locks) +
+  tests/test_wave2_riders.py (12 locks). 568 green + floor leg.
 
 ## 4.11.0 — V028: live round 4 — replay scope, 10-day creds, readable trends, driver inventory (2026-07-09)
 

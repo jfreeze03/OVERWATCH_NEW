@@ -267,29 +267,32 @@ def render() -> None:
             ("Failures, 14d", adf, "DAY", "FAILS"),
         ])
         result_caption(trend_source, note="mart-first" if using_mart else "live fallback — deploy marts for cheaper loads")
-        with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
-            hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
+        _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
                        tier="recent", source="FACT_METERING_DAILY (150d)")
-            if not hist.usable() or len(hist.df) < 50:
+        _bt = pd.DataFrame()
+        if _bt_hist.usable() and len(_bt_hist.df) >= 50:
+            _bt_daily = _bt_hist.df.copy()
+            _bt_daily["USD"] = _bt_daily["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+            _bt = backtest_forecasts(_bt_daily[["DAY", "USD"]])
+        if not _bt.empty:
+            # Compact forecast-quality readout (Codex r6 #17): the number
+            # rides the page; per-month evidence stays in the expander.
+            _mae = _bt.groupby("ENGINE")["ERROR_PCT"].apply(lambda x: x.abs().mean())
+            _best = _mae.idxmin()
+            st.caption("Forecast quality (3-month backtest): "
+                       + " · ".join(f"{eng} ±{err:.1f}%" for eng, err in _mae.items())
+                       + f" — '{_best}' most reliable; running '{engine}'.")
+        with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
+            if not _bt_hist.usable() or len(_bt_hist.df) < 50:
                 st.info("Needs ~2 months of daily facts before a backtest says anything.")
+            elif _bt.empty:
+                st.info("No complete months in the window yet.")
             else:
-                bt_daily = hist.df.copy()
-                bt_daily["USD"] = bt_daily["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
-                bt = backtest_forecasts(bt_daily.rename(columns={"DAY": "DAY"})[["DAY", "USD"]])
-                if bt.empty:
-                    st.info("No complete months in the window yet.")
-                else:
-                    styled_table(bt, height=240, column_config={
-                        "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
-                    })
-                    mae = bt.groupby("ENGINE")["ERROR_PCT"].apply(lambda x: x.abs().mean())
-                    best = mae.idxmin()
-                    st.caption(
-                        "Mean absolute error — "
-                        + " · ".join(f"{eng}: {err:.1f}%" for eng, err in mae.items())
-                        + f". '{best}' has been the more reliable engine; the current engine "
-                          f"is '{engine}' (FORECAST_ENGINE on Admin → Settings)."
-                    )
+                styled_table(_bt, height=240, column_config={
+                    "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
+                })
+                st.caption("Mean absolute error per engine, per held-out month. Change "
+                           "engines via FORECAST_ENGINE on Admin → Settings.")
 
     if score.drivers:
         with st.expander(f"Platform score deductions ({score.score}/100 · {score.state})"):

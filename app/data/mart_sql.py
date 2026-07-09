@@ -836,3 +836,146 @@ HAVING RESTATED_HOURS_AFTER_CLOSE >= 48
 ORDER BY DAY DESC
 LIMIT 60
 """
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 riders (v4.12.0): delivery SLOs, fatigue, acceptance, app telemetry.
+# All read OVERWATCH-owned tables — no ACCOUNT_USAGE.
+# ---------------------------------------------------------------------------
+
+def delivery_slo_summary(days: int = 30) -> str:
+    """One row: did alerts leave the building, how fast, which criticals
+    never did (30+ min old, zero delivery rows), and route failures."""
+    days = bounded_days(days, 90)
+    return f"""
+WITH d AS (
+    SELECT EVENT_ID, MIN(SENT_AT) AS FIRST_SENT
+    FROM {core_object("ALERT_DELIVERIES")}
+    WHERE SENT_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    GROUP BY EVENT_ID
+),
+e AS (
+    SELECT EVENT_ID, RAISED_AT, SEVERITY, STATUS
+    FROM {core_object("ALERT_EVENTS")}
+    WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+)
+SELECT
+    (SELECT COUNT(*) FROM e) AS EVENTS_RAISED,
+    (SELECT COUNT(*) FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS EVENTS_DELIVERED,
+    (SELECT ROUND(MEDIAN(DATEDIFF('second', e.RAISED_AT, d.FIRST_SENT)) / 60.0, 1)
+       FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS MEDIAN_MIN,
+    (SELECT ROUND(APPROX_PERCENTILE(DATEDIFF('second', e.RAISED_AT, d.FIRST_SENT), 0.95) / 60.0, 1)
+       FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS P95_MIN,
+    (SELECT COUNT(*) FROM e LEFT JOIN d ON d.EVENT_ID = e.EVENT_ID
+      WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
+        AND d.EVENT_ID IS NULL
+        AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())) AS UNDELIVERED_CRITICALS_30M,
+    (SELECT COUNT(*) FROM {core_object("APP_ERROR_LOG")}
+      WHERE ERROR_TYPE = 'route_send_failed'
+        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES
+"""
+
+
+def delivery_by_route(days: int = 30) -> str:
+    days = bounded_days(days, 90)
+    return f"""
+SELECT ROUTE_ID, COUNT(*) AS SENDS, COUNT(DISTINCT EVENT_ID) AS EVENTS,
+       MAX(SENT_AT) AS LAST_SENT
+FROM {core_object("ALERT_DELIVERIES")}
+WHERE SENT_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY ROUTE_ID
+ORDER BY SENDS DESC
+LIMIT 50
+"""
+
+
+def alert_fatigue(days: int = 30) -> str:
+    """Per rule: volume, weekly rate, resolution-kind mix, untagged closes,
+    and dedupe repeats — the attention-cost sheet (Codex r6 #10)."""
+    days = bounded_days(days, 180)
+    return f"""
+SELECT RULE_ID,
+       COUNT(*) AS EVENTS,
+       ROUND(COUNT(*) / ({days} / 7.0), 1) AS PER_WEEK,
+       COUNT_IF(UPPER(COALESCE(RESOLUTION_KIND, '')) = 'ACTIONED') AS ACTIONED,
+       COUNT_IF(UPPER(COALESCE(RESOLUTION_KIND, '')) = 'NOISE') AS NOISE,
+       COUNT_IF(UPPER(COALESCE(RESOLUTION_KIND, '')) = 'EXPECTED') AS EXPECTED,
+       COUNT_IF(STATUS = 'RESOLVED' AND COALESCE(RESOLUTION_KIND, '') = '') AS UNTAGGED,
+       COUNT(*) - COUNT(DISTINCT COALESCE(DEDUPE_KEY, EVENT_ID)) AS REPEAT_EVENTS,
+       MAX(RAISED_AT) AS LAST_RAISED
+FROM {core_object("ALERT_EVENTS")}
+WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY RULE_ID
+ORDER BY EVENTS DESC
+LIMIT 100
+"""
+
+
+def acceptance_funnel(days: int = 90) -> str:
+    """Generated -> executed -> verified, from audit rows (honest subset of
+    Codex r5 #4 / r6 #12 — no impression tracking, Streamlit cannot measure
+    'viewed' truthfully)."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT
+    (SELECT COUNT(*) FROM {core_object("REMEDIATION_LOG")}
+      WHERE EXECUTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATUS = 'EXECUTED') AS FIXES_EXECUTED,
+    (SELECT COUNT(*) FROM {core_object("REMEDIATION_LOG")}
+      WHERE EXECUTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATUS = 'COPIED') AS FIXES_COPIED,
+    (SELECT COUNT(*) FROM {core_object("REMEDIATION_LOG")}
+      WHERE EXECUTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATUS = 'FAILED') AS FIXES_FAILED,
+    (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATE = 'ESTIMATED') AS SAVINGS_ESTIMATED,
+    (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATE = 'VERIFIED') AS SAVINGS_VERIFIED,
+    (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATE = 'REJECTED') AS SAVINGS_REJECTED,
+    (SELECT ROUND(COALESCE(SUM(VERIFIED_USD), 0), 2) FROM {core_object("SAVINGS_LEDGER")}
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+        AND STATE = 'VERIFIED') AS VERIFIED_USD
+"""
+
+
+def telemetry_by_page(days: int = 7) -> str:
+    """Per-page fetch health from the V027 telemetry rider. Cache-hit % is
+    computed over rows where CACHE_HIT is known (pre-V027 rows excluded) —
+    and it measures PERSISTED fetches (slow/failed + 2% sample), a floor."""
+    days = bounded_days(days, 90)
+    return f"""
+SELECT PAGE,
+       COUNT(*) AS FETCHES,
+       ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
+       ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
+       COUNT_IF(NOT OK) AS FAILED,
+       COUNT_IF(ELAPSED_MS >= 2000) AS SLOW_2S,
+       ROUND(AVG(COALESCE(BATCH_SIZE, 1)), 1) AS AVG_BATCH,
+       COUNT_IF(COALESCE(TRUNCATED, FALSE)) AS TRUNCATED_N
+FROM {core_object("APP_QUERY_TELEMETRY")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY PAGE
+ORDER BY FETCHES DESC
+LIMIT 50
+"""
+
+
+def usage_event_summary(days: int = 30) -> str:
+    """What operators actually do, by EVENT_KIND (V027 rider) — curation
+    calls follow this table, not opinions (Codex r6 #19)."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT COALESCE(EVENT_KIND, 'page_visit') AS EVENT_KIND,
+       COUNT(*) AS EVENTS,
+       COUNT(DISTINCT USER_NAME) AS USERS,
+       MAX(AT) AS LAST_SEEN
+FROM {core_object("APP_USAGE")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1
+ORDER BY EVENTS DESC
+LIMIT 40
+"""

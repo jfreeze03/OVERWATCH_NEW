@@ -566,6 +566,49 @@ def _performance_tab() -> None:
             "— this is the regression surface across every user, not a complete census. "
             "The session table above shows only YOUR session."
         )
+    _perf_rider_panels()
+
+
+def _perf_rider_panels() -> None:
+    """V027 telemetry-rider readouts (Codex r6 #8, #12, #19)."""
+    st.markdown("**Fleet telemetry by page (7d)**")
+    tbp = run(mart_sql.telemetry_by_page(7), page=_PAGE, key="tel_by_page", tier="recent",
+              source="APP_QUERY_TELEMETRY (persisted = slow/failed + 2% sample)")
+    if tbp.usable():
+        styled_table(tbp.df, height=260, column_config={
+            "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
+        })
+        st.caption("Cache-hit % covers PERSISTED fetches only (slow/failed always + the 2% "
+                   "healthy sample) and rows new enough to carry CACHE_HIT — a floor, not a census.")
+    else:
+        st.caption("Per-page telemetry appears after V027 and a day of traffic.")
+
+    st.markdown("**Usage events (30d) & remediation acceptance (90d)**")
+    ue = run(mart_sql.usage_event_summary(30), page=_PAGE, key="usage_events", tier="recent",
+             source="APP_USAGE.EVENT_KIND (V027 rider)")
+    if ue.usable():
+        styled_table(ue.df, height=190)
+        st.caption("page_visit dominates by design; the interaction kinds (acks, resolves, "
+                   "exports, remediations) are the operator-effectiveness signal.")
+    acc = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="acceptance_funnel", tier="recent",
+              source="REMEDIATION_LOG + SAVINGS_LEDGER")
+    if acc.usable():
+        a = acc.df.iloc[0]
+        def _n(k):
+            try:
+                return f"{float(a.get(k) or 0):,.0f}"
+            except (TypeError, ValueError):
+                return "0"
+        kpi_row([
+            {"label": "Fixes executed / copied / failed",
+             "value": f"{_n('FIXES_EXECUTED')} / {_n('FIXES_COPIED')} / {_n('FIXES_FAILED')}"},
+            {"label": "Savings est -> verified / rejected",
+             "value": f"{_n('SAVINGS_ESTIMATED')} -> {_n('SAVINGS_VERIFIED')} / {_n('SAVINGS_REJECTED')}"},
+            {"label": "Verified savings (90d)",
+             "value": f"${float(a.get('VERIFIED_USD') or 0):,.0f}"},
+        ])
+        st.caption("Generated -> executed -> verified, from audit rows. No impression "
+                   "tracking — Streamlit cannot measure viewed truthfully (r5 #4 decision).")
 
 
 def _canary_tab() -> None:

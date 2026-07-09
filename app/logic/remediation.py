@@ -191,3 +191,20 @@ def account_statement_timeout(seconds: int) -> str:
     """ACCOUNT-level default statement timeout (needs the break-glass role)."""
     seconds = max(0, min(int(seconds), 604800))
     return f"ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = {seconds};"
+
+
+def reverse_hint(finding_type: str, target: str) -> str:
+    """One line of how-to-undo, shown wherever a fix executes (Codex r6 #18).
+    Prior values are never guessed here: warehouse changes land old->new in
+    WAREHOUSE_CHANGE_REGISTRY within the hour, and the executed statement is
+    always auditable in REMEDIATION_LOG.STATEMENT_SQL."""
+    kind = str(finding_type or "").upper()
+    tgt = str(target or "<object>")
+    lead = {
+        "RESIZE": f"Reverse: ALTER WAREHOUSE {tgt} SET WAREHOUSE_SIZE = '<previous>'",
+        "AUTO_SUSPEND": f"Reverse: ALTER WAREHOUSE {tgt} SET AUTO_SUSPEND = <previous seconds>",
+        "STATEMENT_TIMEOUT": f"Reverse: ALTER WAREHOUSE {tgt} SET STATEMENT_TIMEOUT_IN_SECONDS = <previous>",
+        "CLUSTER_RANGE": f"Reverse: ALTER WAREHOUSE {tgt} SET MIN_CLUSTER_COUNT/MAX_CLUSTER_COUNT = <previous>",
+    }.get(kind, f"Reverse: re-apply the previous setting on {tgt}")
+    return (lead + ". Previous value: WAREHOUSE_CHANGE_REGISTRY (old->new, within the "
+            "hour). What ran: REMEDIATION_LOG.STATEMENT_SQL.")

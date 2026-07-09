@@ -217,6 +217,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
                 st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until the verifier proves it).")
             blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
+            from app.logic import remediation as _remediation
+            st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
             confirm_sz = st.text_input("Type the warehouse name to confirm resize", key="sizing_confirm")
             if st.button("Execute resize + log", key="sizing_exec",
                          disabled=(confirm_sz != str(srow["WAREHOUSE_NAME"]))):
@@ -227,6 +229,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
                     f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
                     page=_PAGE)
+                if ok:
+                    from app.ui.components import log_ui_event
+                    log_ui_event("remediation_exec", page=_PAGE)
                 if ok and est_sz > 0:
                     execute_statement(
                         f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
