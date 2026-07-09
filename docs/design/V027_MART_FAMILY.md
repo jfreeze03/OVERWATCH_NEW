@@ -97,12 +97,20 @@ Fold into the V027 build — panels over existing/new data, no extra programs:
 
 ## Approved sequence after V027
 
-1. **V028 — Incident object (design doc first)**: rolls alerts, DDL, task
-   failures, warehouse changes, and fixes into one lifecycle object.
-   Metrics: incident count, MTTA/MTTR, time-to-detect, reopen rate.
-2. **V029 — Owner registry**: generalize DEPARTMENT_MAP to OBJECT_OWNERS
+Numbering updated 2026-07-09: V028 shipped as the credential-expiry policy
+change (live round 4), so the initiatives below shift one slot. Initiatives
+are named, not numbered — the next free migration slot at build time wins.
+
+1. **Incident object (design doc first; migration ~V029)**: rolls alerts,
+   DDL, task failures, warehouse changes, and fixes into one lifecycle
+   object. Metrics: incident count, MTTA/MTTR, time-to-detect, reopen
+   rate. The design also defines recommendation lineage (explicit
+   RECOMMENDATION_ID/EVENT_ID/ACTION_ID links instead of notes-text
+   references in SAVINGS_LEDGER — Codex r6 #6).
+2. **Owner registry (~V030)**: generalize DEPARTMENT_MAP to OBJECT_OWNERS
    (warehouse/db/schema/task/pipeline/rule). Headline metric: unowned
-   spend %. Feeds budget-by-owner (r5 #12) and data-product scorecards.
+   spend %. Feeds budget-by-owner (r5 #12), data-product scorecards, and
+   owners for the client-driver inventory (r6 #16).
 3. Re-assess the program-shaped items (r5 #9 data quality, #10 product
    scorecards, #17 classification) once 1-2 land — they need config
    owners, not just code.
