@@ -45,6 +45,7 @@ _EXPECTED_MIGRATIONS = {
     17: "hardening v7", 18: "delivery first-class", 19: "scoping fixes", 20: "credentials column",
     21: "precision + telemetry", 22: "delivery per route", 23: "prod-scoped volume",
     24: "warehouse change scorecard", 25: "break-glass policy", 26: "teams-safe delivery",
+    27: "mart family + telemetry rider",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -599,3 +599,21 @@ def last_refreshed_note() -> str:
 def download_text_button(label: str, text: str, filename: str) -> None:
     """A real download (the old app's 'copy' button that didn't copy is dead)."""
     st.download_button(label, data=text, file_name=filename, mime="text/plain")
+
+
+def log_ui_event(kind: str, page: str = "") -> None:
+    """Product-usage event (V027 rider): saved_view_apply, csv_export,
+    remediation_exec, ... — APP_USAGE rows with RENDER_MS NULL. Best-effort;
+    silently no-ops pre-V027 (missing columns) or when usage is disabled."""
+    import streamlit as st
+
+    from app.core.query import execute_statement_async
+    from app.core.sqlsafe import sql_literal
+
+    if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_usage_oldshape"):
+        return
+    execute_statement_async(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN) "
+        f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE",
+        page="Usage")
+

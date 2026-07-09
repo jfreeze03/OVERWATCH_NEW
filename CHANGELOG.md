@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.10.0 — V027: the mart family ships (2026-07-08)
+
+Migration V027 (apply after V026, then re-run roles.sql + validate.sql):
+
+- Nine scheduled marts per the approved design: warehouse efficiency,
+  query families (top 2000/day by exec time), role-hour + schema-hour
+  query facts, cost allocation (exec-time share of each warehouse-hour,
+  four dimensions), task-graph daily, security posture history, 48h
+  incident timeline, AI usage (Cortex Code per user + Functions per
+  model).
+- ONE loader, SP_LOAD_MARTS_V27(scope, days_back): hourly leg chained
+  AFTER TASK_LOAD_HOURLY, daily leg AFTER TASK_LOAD_DAILY; per-mart
+  EXCEPTION isolation (one mart's source drift never starves the rest);
+  MERGE-idempotent on every grain; the migration runs a first fill so
+  panels aren't empty until the next task tick. Backfill calls the SAME
+  proc with big windows (one loading codepath).
+- MART_SOURCE_FRESHNESS gains all nine arms — the freshness board and
+  stale labels cover the new marts unchanged.
+- Telemetry rider: APP_QUERY_TELEMETRY + CACHE_HIT (real detection via
+  the fetcher-body sentinel, not an elapsed-ms guess), SQL_HASH,
+  BATCH_SIZE, TRUNCATED; APP_USAGE + EVENT_KIND/IS_RERUN with sampled
+  (10%) rerun rows (RENDER_MS NULL so the first-paint p95 sentinel stays
+  honest) and interaction events (saved_view_apply, csv_export via
+  components.log_ui_event). App inserts degrade gracefully pre-apply.
+- Readers for all nine marts (app/data/mart27_sql.py), all canaried.
+- WAVE 2 (deliberately separate): panel adoptions go fact-first once the
+  marts hold data — adopting before data exists only exercises fallbacks.
+
 ## 4.9.1 — visual pass (Codex round 4, Streamlit-reality-checked) (2026-07-08)
 
 Eleven adopted, four declined with rationale, five deferred. Streamlit 1.45

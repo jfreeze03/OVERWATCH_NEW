@@ -214,6 +214,8 @@ def _export_pack(company: str, days: int) -> None:
     st.caption("Dormant users, MFA gaps, break-glass holders, and window grants as a timestamped zip of CSVs.")
     if not st.button("Build access-review pack", key="sec_pack_build"):
         return
+    from app.ui.components import log_ui_event
+    log_ui_event("csv_export", page="Security")
     import io
     import zipfile
     from datetime import datetime

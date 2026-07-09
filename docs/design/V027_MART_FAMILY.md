@@ -1,6 +1,6 @@
 # V027 — the mart family (design)
 
-Status: APPROVED 2026-07-08 (owner: Joe) — build next session, riders included. Consolidates Codex rounds 2–3 items #2-4, #6-11,
+Status: SHIPPED (schema + loaders + readers + telemetry rider) in V027__mart_family.sql, 2026-07-08. WAVE 2 (next app release): panel adoptions go fact-first through app/data/mart27_sql.py once the marts hold data, each adoption lowering a pinned live-scan budget; plus the rider PANELS (delivery SLO, fatigue, acceptance, forecast quality). Consolidates Codex rounds 2–3 items #2-4, #6-11,
 #13-14, #17, #19 into one migration batch. Build AFTER a few days of v4.9
 telemetry (the 2% sampled baseline + slow sink) confirms priority order.
 

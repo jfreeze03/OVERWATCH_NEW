@@ -61,7 +61,12 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
 
 
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
-                       rows: int, ok: bool) -> None:
+                       rows: int, ok: bool, cache_hit: bool | None = None,
+                       sql_hash: str | None = None, batch_size: int | None = None,
+                       truncated: bool | None = None) -> None:
+    def _b(v):
+        return "NULL" if v is None else ("TRUE" if v else "FALSE")
+
     try:
         if st.session_state.get("_ow_qtel_off"):
             return
@@ -71,12 +76,32 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
             return
         st.session_state["_ow_qtel_n"] = done + 1
         session = get_session()
-        statement = session.sql(
-            f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
-            "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) VALUES ("
+        base = (
             f"{sql_literal(str(page)[:80])}, {sql_literal(str(tier)[:20])}, "
             f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
-            f"{int(rows)}, {'TRUE' if ok else 'FALSE'})"
+            f"{int(rows)}, {'TRUE' if ok else 'FALSE'}"
+        )
+        if not st.session_state.get("_ow_qtel_oldshape"):
+            # V027 shape; one failure (pre-V027 live) drops to the old shape.
+            statement = session.sql(
+                f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+                "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
+                "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED) VALUES ("
+                + base + f", {_b(cache_hit)}, "
+                f"{sql_literal(str(sql_hash)[:64]) if sql_hash else 'NULL'}, "
+                f"{int(batch_size) if batch_size is not None else 'NULL'}, {_b(truncated)})"
+            )
+            try:
+                try:
+                    statement.collect_nowait()
+                except AttributeError:
+                    statement.collect()
+                return
+            except Exception:
+                st.session_state["_ow_qtel_oldshape"] = True
+        statement = session.sql(
+            f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+            "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) VALUES (" + base + ")"
         )
         try:
             statement.collect_nowait()
@@ -105,7 +130,14 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Cache-hit detection (V027 telemetry rider): the tier fetchers are
+# st.cache_data-wrapped, so their BODY only runs on a miss. _execute flips
+# this sentinel; run() resets it before the fetch and reads it after.
+_FETCH_MISS = {"v": False}
+
+
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
+    _FETCH_MISS["v"] = True
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
@@ -163,7 +195,9 @@ def _cache_scope() -> str:
     return f"role={role}|user={user}|salt={salt}"
 
 
-def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool) -> None:
+def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool,
+               cache_hit: bool | None = None, sql_hash: str | None = None,
+               batch_size: int | None = None, truncated: bool | None = None) -> None:
     try:
         entries = st.session_state.setdefault(_TELEMETRY_KEY, [])
         entries.append({
@@ -174,11 +208,14 @@ def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok:
             "elapsed_ms": round(elapsed_ms, 1),
             "rows": int(rows),
             "ok": bool(ok),
+            "cache_hit": cache_hit,
         })
         del entries[:-_TELEMETRY_MAX]
     except Exception:
         pass
-    _persist_telemetry(page, tier, key, elapsed_ms, rows, ok)
+    _persist_telemetry(page, tier, key, elapsed_ms, rows, ok,
+                       cache_hit=cache_hit, sql_hash=sql_hash,
+                       batch_size=batch_size, truncated=truncated)
 
 
 def query_telemetry() -> pd.DataFrame:
@@ -257,7 +294,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
-        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1), len(df), ok=True)
+        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1), len(df), ok=True,
+                   batch_size=len(specs), truncated=truncated)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
@@ -283,12 +321,18 @@ def run(
     started = time.perf_counter()
     try:
         cap = int(max_rows) if max_rows else 0
+        _FETCH_MISS["v"] = False
         df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(), page)
+        cache_hit = not _FETCH_MISS["v"]
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
         elapsed = (time.perf_counter() - started) * 1000
-        _telemetry(page, tier, key, elapsed, len(df), ok=True)
+        import hashlib as _hashlib
+        _telemetry(page, tier, key, elapsed, len(df), ok=True,
+                   cache_hit=cache_hit,
+                   sql_hash=_hashlib.sha1(sql.encode()).hexdigest()[:16],
+                   truncated=truncated)
         return QueryResult(
             df=df, ok=True, truncated=truncated, source=source, tier=tier,
             fetched_at=datetime.now(), elapsed_ms=elapsed,

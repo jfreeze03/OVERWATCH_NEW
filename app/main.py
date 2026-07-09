@@ -161,6 +161,8 @@ def _views_popover() -> None:
             pick = st.selectbox("Saved views", sorted(views), key="views_pick")
             c1, c2, c3 = st.columns(3)
             if c1.button("Apply", key="views_apply", use_container_width=True):
+                from app.ui.components import log_ui_event
+                log_ui_event("saved_view_apply")
                 data = _parse_view(views.get(pick, ""))
                 if data:
                     request_navigation(str(data.get("page") or st.session_state.get("_ow_page") or ""),
@@ -240,13 +242,34 @@ def _apply_default_landing() -> None:
 
 
 def _log_usage(page: str, render_ms: int | None = None) -> None:
-    """Usage analytics (APP_USAGE): one row per page change per session,
-    carrying the FIRST paint's render time — the p95 the OPS_SLOW_RENDER
-    sentinel checks. Best-effort; first failure disables for the session."""
-    if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_last_logged") == page:
+    """Usage analytics (APP_USAGE). First paint per page logs RENDER_MS (the
+    p95 the OPS_SLOW_RENDER sentinel checks); same-page reruns log a sampled
+    (10%) EVENT_KIND='rerun' row with RENDER_MS NULL so interaction volume is
+    measurable WITHOUT polluting the first-paint p95 (V027 rider; the scan
+    gains an IS_RERUN filter with V028). Best-effort; degrades to the
+    pre-V027 column shape, then off entirely."""
+    if st.session_state.get("_ow_usage_off"):
         return
-    st.session_state["_ow_last_logged"] = page
-    ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
+    is_rerun = st.session_state.get("_ow_last_logged") == page
+    if is_rerun:
+        import random as _random
+        if _random.random() >= 0.10:
+            return
+        kind, ms = "rerun", "NULL"
+    else:
+        st.session_state["_ow_last_logged"] = page
+        kind = "page_visit"
+        ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
+    if not st.session_state.get("_ow_usage_oldshape"):
+        ok = execute_statement_async(
+            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN) "
+            f"SELECT {sql_literal(str(page)[:80])}, {ms}, {sql_literal(kind)}, "
+            f"{'TRUE' if is_rerun else 'FALSE'}", page="Sidebar")
+        if ok:
+            return
+        st.session_state["_ow_usage_oldshape"] = True
+    if is_rerun:
+        return
     ok = execute_statement_async(
         "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
         f"SELECT {sql_literal(str(page)[:80])}, {ms}", page="Sidebar")

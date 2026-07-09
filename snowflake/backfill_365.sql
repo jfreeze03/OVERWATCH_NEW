@@ -96,3 +96,15 @@ UNION ALL SELECT 'FACT_WAREHOUSE_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OV
 UNION ALL SELECT 'FACT_TASK_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
 UNION ALL SELECT 'FACT_LOGIN_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
 UNION ALL SELECT 'FACT_STORAGE_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY;
+
+-- ---------------------------------------------------------------------------
+-- V027 mart family backfill (same loader codepath as the tasks — one truth).
+-- QUERY_HISTORY-derived marts see at most ~365d. The two high-cardinality
+-- marts (query families, cost allocation) default to 90d here on purpose:
+-- widen deliberately if you accept the scan cost.
+-- ---------------------------------------------------------------------------
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
+-- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs):
+-- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 365);
+
