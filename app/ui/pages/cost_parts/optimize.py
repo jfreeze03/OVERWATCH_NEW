@@ -164,10 +164,17 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         "Mechanical scenario model: one Snowflake size step halves or doubles the credit rate. "
         "Runtime effects depend on the workload - the rationale says why; you decide."
     )
-    prof_res = run(insights_sql.warehouse_sizing_profile(days, company), page=_PAGE,
-                   key=f"sizing_{company}_{days}", tier="historical",
-                   source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (profile)")
-    if guard(prof_res, "No warehouse activity to profile in this window."):
+    # On-demand (Codex r3 #5): the profile joins metering x QUERY_HISTORY over
+    # the whole window (~90s cold at 60d in production telemetry). The idle
+    # advisor above answers the everyday question; load this when sizing.
+    if not st.toggle("Load right-sizing profile (heavy scan)", key="sizing_load",
+                     help="Profiles every warehouse over the window: queueing, spill, "
+                          "p95, idle share, and x0.5/x2 cost scenarios."):
+        st.caption("Toggle to run the per-warehouse sizing profile on demand.")
+    elif guard((prof_res := run(insights_sql.warehouse_sizing_profile(days, company), page=_PAGE,
+                                key=f"sizing_{company}_{days}", tier="historical",
+                                source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (profile)")),
+               "No warehouse activity to profile in this window."):
         sized = size_recommendations(prof_res.df, rate, days)
         summary = sizing_summary(sized)
         kpi_row([

@@ -233,10 +233,17 @@ def _export_pack(company: str, days: int) -> None:
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     buffer = io.BytesIO()
     rows_written = {}
+    # Ten sheets, one parallel batch (Codex r3 #12); any batch failure falls
+    # back to the original serial per-sheet path with its own caching.
+    _pack_batch = run_batch(
+        [{"key": name, "sql": sql, "source": name, "max_rows": 10_000}
+         for name, sql in sheets.items()],
+        page=_PAGE, tier="recent")
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
         for name, sql in sheets.items():
-            res = run(sql, page=_PAGE, key=f"pack_{name}", tier="recent",
-                      source=name, max_rows=10_000)
+            res = (_pack_batch or {}).get(name) or run(
+                sql, page=_PAGE, key=f"pack_{name}", tier="recent",
+                source=name, max_rows=10_000)
             frame = res.df if res.ok else __import__("pandas").DataFrame({"ERROR": [res.error]})
             bundle.writestr(f"{name}.csv", frame.to_csv(index=False))
             rows_written[name] = len(frame) if res.ok else 0

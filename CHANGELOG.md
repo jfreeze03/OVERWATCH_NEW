@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.8.4 — Codex round 3: the migration-contract bug + on-demand heavies (2026-07-08)
+
+Round 3 was mostly the already-queued V026 mart family; five items were
+actionable now. Best catch of the round was real: Admin's expected-migrations
+dict stopped at V020, so the panel could report "all applied" while
+V021-V025 were missing.
+
+- FIXED (#1): _EXPECTED_MIGRATIONS covers V021-V025 — and a new CI lock
+  scrapes snowflake/migrations/ so the dict AND validate.sql can never
+  trail the repo again.
+- #5: the right-sizing profile (the ~90s Optimization scan) is on-demand
+  behind a toggle; the idle advisor stays default.
+- #12: the Security access-review pack fetches all ten sheets in one
+  parallel batch (serial cached fallback kept).
+- #15: batch_fallback telemetry now records tier, batch size, keys, and
+  exception class — the data that decides whether partial-success
+  batching (#16) is ever worth building.
+- #20 (test half): hot pages carry pinned live-scan budgets — a new
+  ACCOUNT_USAGE reference on Brief/Overview/Control Room fails CI with
+  instructions to go fact-first instead.
+- Deferred to the designed V026 batch: schema/role query facts, warehouse
+  efficiency + query-family + cost-allocation + task-graph + incident +
+  security + AI marts (#2-4, #6-11, #13-14), telemetry schema additions
+  (#17, #19). Declined: #18 (sampled+capped telemetry is <=60 async
+  inserts/session; buffering saves little and risks losing the tail).
+
 ## 4.8.3 — Codex round 2: caching economics + the healthy baseline (2026-07-08)
 
 Nine of the twenty adopted (several improved on); the mart-family items

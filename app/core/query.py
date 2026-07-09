@@ -245,8 +245,11 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         scope = _cache_scope()
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except Exception as exc:
-        _telemetry(page, tier, "batch_fallback", (time.perf_counter() - started) * 1000, 0, ok=False)
-        record_error(page, exc, context=f"run_batch fallback ({len(specs)} queries)")
+        _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
+                   (time.perf_counter() - started) * 1000, 0, ok=False)
+        keys = ",".join(str(s.get("key")) for s in specs)[:160]
+        record_error(page, exc, context=(f"run_batch fallback tier={tier} n={len(specs)} "
+                                         f"[{keys}] {type(exc).__name__}"))
         return None
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}

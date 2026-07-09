@@ -43,7 +43,12 @@ _EXPECTED_MIGRATIONS = {
     11: "proactive alerts", 12: "routing + anomaly sweep", 13: "user prefs",
     14: "lifecycle hardening", 15: "DT pilot + backups", 16: "closing loops",
     17: "hardening v7", 18: "delivery first-class", 19: "scoping fixes", 20: "credentials column",
+    21: "precision + telemetry", 22: "delivery per route", 23: "prod-scoped volume",
+    24: "warehouse change scorecard", 25: "break-glass policy",
 }
+# tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
+# adding a migration without updating it fails CI (Codex r3 #1: the panel
+# reported "all applied" while V021-V025 were missing from the expectation).
 
 
 def _context_section() -> None:
