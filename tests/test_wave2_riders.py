@@ -119,3 +119,12 @@ def test_exec_sites_show_reverse_and_log_the_event():
     assert "remediation.reverse_hint(" in _ALERTS
     # lifecycle actions log too — single + bulk paths
     assert _ALERTS.count('log_ui_event("alert_resolve" if') == 2
+
+
+def test_incident_object_design_doc_exists():
+    doc = (_ROOT / "docs" / "design" / "V029_INCIDENT_OBJECT.md").read_text(encoding="utf-8")
+    assert "INCIDENT_MEMBERS" in doc and "REOPENED_FROM" in doc
+    assert "SHIPS DISABLED" in doc                    # IaC rules wait for the tools
+    assert "TAG_REFERENCES" in doc                    # V030 decision gate recorded
+    assert "IS_RERUN" in doc                          # the V027 scan-hygiene rider rides along
+    assert "Nothing is grouped silently" in doc       # proposals need a human

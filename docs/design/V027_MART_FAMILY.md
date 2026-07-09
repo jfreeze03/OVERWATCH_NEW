@@ -101,7 +101,9 @@ Numbering updated 2026-07-09: V028 shipped as the credential-expiry policy
 change (live round 4), so the initiatives below shift one slot. Initiatives
 are named, not numbered — the next free migration slot at build time wins.
 
-1. **Incident object (design doc first; migration ~V029)**: rolls alerts,
+1. **Incident object (design doc first; migration ~V029)** — DESIGN DRAFTED
+   2026-07-09: docs/design/V029_INCIDENT_OBJECT.md (includes the Flyway/
+   Terraform integration assumptions). Rolls alerts,
    DDL, task failures, warehouse changes, and fixes into one lifecycle
    object. Metrics: incident count, MTTA/MTTR, time-to-detect, reopen
    rate. The design also defines recommendation lineage (explicit
