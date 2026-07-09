@@ -56,6 +56,8 @@ STATUS_COLOR_MAP = {
     "ALERT": _BAD, "TASK FAILURE": _WARN, "SPEND ANOMALY": _INFO,
     # credential expiry
     "EXPIRED": _BAD, "EXPIRING": _WARN,
+    # client driver versions (Security -> Clients)
+    "BEHIND": _WARN, "CURRENT": _OK,
     "ELEVATED": _BAD, "WATCH": _WARN, "NORMAL": _OK, "STALE": _WARN, "ACTIVE": _OK,
 }
 

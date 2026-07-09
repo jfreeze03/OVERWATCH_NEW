@@ -282,7 +282,7 @@ SELECT
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
       WHERE EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
-      WHERE EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
+      WHERE EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())) AS EXPIRING_CREDENTIALS,
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
       WHERE DELETED_ON IS NULL
         AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
@@ -355,6 +355,65 @@ WHERE CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY CHANGED_AT DESC
 LIMIT 2000
 """
+
+def client_drivers(days: int = 30, company: str = "ALL") -> str:
+    """Driver/version inventory from ACCOUNT_USAGE.SESSIONS: which driver,
+    which version, reported by which program, used by whom — the "when do
+    we need to upgrade" sheet.
+
+    PROGRAM is what the client self-reports in CLIENT_ENVIRONMENT: JDBC and
+    Python tools usually set it (DBeaver, VS Code); plenty of ODBC tools
+    (Erwin) do not, so '(not reported)' is honest, not a bug. STATUS compares
+    each version against the newest version of the SAME driver seen in this
+    account this window — the only latest-version truth available from
+    inside Snowflake. Version key pads dot-segments so 3.10.2 > 3.9.1.
+    SESSIONS lags up to ~3h; POSIX classes only (no backslashes survive
+    the string layers — V022 lesson).
+    """
+    days = bounded_days(days, maximum=90)
+    where = and_where(
+        f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "CLIENT_APPLICATION_ID IS NOT NULL",
+        companies.user_clause(company, "USER_NAME"),
+    )
+    return f"""
+WITH s AS (
+    SELECT
+        USER_NAME,
+        CREATED_ON,
+        COALESCE(NULLIF(TRIM(REGEXP_REPLACE(CLIENT_APPLICATION_ID, ' [0-9][0-9.]*$', '')), ''),
+                 CLIENT_APPLICATION_ID) AS DRIVER,
+        COALESCE(NULLIF(TRIM(REGEXP_SUBSTR(CLIENT_APPLICATION_ID, '[0-9][0-9.]*$')), ''), '?') AS VERSION,
+        COALESCE(TRY_PARSE_JSON(CLIENT_ENVIRONMENT):APPLICATION::STRING, '(not reported)') AS PROGRAM
+    FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS
+    WHERE {where}
+),
+keyed AS (
+    SELECT s.*,
+           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 1), ''), '0'), 6, '0') ||
+           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 2), ''), '0'), 6, '0') ||
+           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 3), ''), '0'), 6, '0') ||
+           LPAD(COALESCE(NULLIF(SPLIT_PART(VERSION, '.', 4), ''), '0'), 6, '0') AS VKEY
+    FROM s
+),
+grouped AS (
+    SELECT DRIVER, VERSION, PROGRAM, MAX(VKEY) AS VKEY,
+           COUNT(DISTINCT USER_NAME) AS USERS,
+           COUNT(*) AS SESSIONS,
+           MIN(DATE(CREATED_ON)) AS FIRST_SEEN,
+           MAX(DATE(CREATED_ON)) AS LAST_SEEN,
+           LEFT(LISTAGG(DISTINCT USER_NAME, ', ') WITHIN GROUP (ORDER BY USER_NAME), 160) AS SAMPLE_USERS
+    FROM keyed
+    GROUP BY DRIVER, VERSION, PROGRAM
+)
+SELECT DRIVER, VERSION, PROGRAM, USERS, SESSIONS, FIRST_SEEN, LAST_SEEN, SAMPLE_USERS,
+       FIRST_VALUE(VERSION) OVER (PARTITION BY DRIVER ORDER BY VKEY DESC) AS NEWEST_IN_ACCOUNT,
+       IFF(VKEY < MAX(VKEY) OVER (PARTITION BY DRIVER), 'BEHIND', 'CURRENT') AS STATUS
+FROM grouped
+ORDER BY DRIVER, VKEY DESC, SESSIONS DESC
+LIMIT 500
+"""
+
 
 def day_ddl(day: object, company: str = "ALL") -> str:
     """Replay: DDL that landed on one day. Role-grain company scoping —

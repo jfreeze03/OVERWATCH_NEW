@@ -37,7 +37,7 @@ def _access_tab(company: str, days: int) -> None:
     batch = run_batch([
         {"key": "mfa", "sql": security_sql.users_without_mfa(company),
          "source": "ACCOUNT_USAGE.USERS + LOGIN_HISTORY"},
-        {"key": "creds", "sql": security_sql.expiring_credentials(30, company),
+        {"key": "creds", "sql": security_sql.expiring_credentials(10, company),
          "source": "ACCOUNT_USAGE.CREDENTIALS"},
         {"key": "logins", "sql": security_sql.failed_logins(days, company),
          "source": "ACCOUNT_USAGE.LOGIN_HISTORY"},
@@ -87,24 +87,24 @@ def _access_tab(company: str, days: int) -> None:
             st.dataframe(res.df, hide_index=True, use_container_width=True)
             st.caption("This list should be short and every name should be expected.")
 
-    st.markdown("**Expiring credentials (30-day horizon)**")
-    creds = batch.get("creds") or run(security_sql.expiring_credentials(30, company), page=_PAGE,
+    st.markdown("**Expiring credentials (10-day horizon)**")
+    creds = batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
     if creds.ok and creds.empty:
-        st.success("No credentials expiring within 30 days for this scope.")
+        st.success("No credentials expiring within 10 days for this scope.")
     elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
         cdf = creds.df.copy()
         expired = int((cdf["STATUS"].astype(str).str.upper() == "EXPIRED").sum())
         kpi_row([
-            {"label": "Expiring ≤30d", "value": f"{len(cdf) - expired}",
+            {"label": "Expiring ≤10d", "value": f"{len(cdf) - expired}",
              "delta_color": "inverse" if len(cdf) - expired else "off"},
             {"label": "Already expired", "value": f"{expired}",
              "delta_color": "inverse" if expired else "off",
              "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
         ])
         styled_table(cdf, height=280)
-        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated.")
+        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated (10-day horizon since V028).")
         result_caption(creds)
 
     st.markdown("**Dormant users still holding access (90d+)**")
@@ -226,7 +226,7 @@ def _export_pack(company: str, days: int) -> None:
         "break_glass_holders": security_sql.admin_role_holders(),
         "role_grants_window": security_sql.recent_role_grants(days),
         "failed_logins_window": security_sql.failed_logins(days, company),
-        "expiring_credentials_30d": security_sql.expiring_credentials(30, company),
+        "expiring_credentials_10d": security_sql.expiring_credentials(10, company),
         "role_privilege_matrix": security_sql.role_privilege_matrix(),
         "unused_roles_90d": security_sql.unused_roles(90),
         "direct_role_grants": security_sql.direct_role_grants(),
@@ -263,6 +263,57 @@ def _export_pack(company: str, days: int) -> None:
     st.caption(f"{sum(rows_written.values()):,} rows across {len(sheets)} files.")
 
 
+def _change_kind(qt: object) -> str:
+    """Collapse QUERY_TYPE into four readable change families."""
+    s = str(qt or "").upper()
+    if s.startswith("CREATE"):
+        return "Create"
+    if s.startswith("ALTER"):
+        return "Alter"
+    if s in ("DROP", "TRUNCATE_TABLE", "RENAME_TABLE", "RENAME"):
+        return "Drop / truncate"
+    if s in ("GRANT", "REVOKE"):
+        return "Grants"
+    return "Other"
+
+
+def _clients_tab(company: str, days: int) -> None:
+    """Driver/version inventory — the 'when do we need to upgrade' sheet."""
+    st.markdown("**Client drivers & versions — who connects with what**")
+    panel_help(
+        "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
+        "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
+        "self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC "
+        "tools such as Erwin do not — '(not reported)' means exactly that). "
+        "BEHIND = an older version than the newest of the same driver seen in this "
+        "account this window: those rows are the upgrade list."
+    )
+    res = run(security_sql.client_drivers(days, company), page=_PAGE,
+              key=f"clients_{company}_{days}", tier="historical",
+              source="ACCOUNT_USAGE.SESSIONS")
+    if res.ok and res.empty:
+        st.info("No sessions recorded in this window for this scope.")
+        return
+    if not guard(res, "", setup_hint="Needs the ACCOUNT_USAGE.SESSIONS view (IMPORTED PRIVILEGES on the SNOWFLAKE db)."):
+        return
+    df = res.df.copy()
+    behind = int((df["STATUS"].astype(str) == "BEHIND").sum())
+    kpi_row([
+        {"label": "Driver families", "value": f"{df['DRIVER'].nunique()}"},
+        {"label": "Driver+version combos", "value": f"{len(df)}"},
+        {"label": "Versions behind newest", "value": f"{behind}",
+         "delta_color": "inverse" if behind else "off",
+         "help": "Older than the newest version of the SAME driver seen here — "
+                 "Snowflake's support policy drops drivers older than ~2 years, "
+                 "so stale LAST_SEEN + BEHIND is the upgrade shortlist."},
+    ])
+    styled_table(df, height=380)
+    st.download_button("Download driver inventory (CSV)", data=df.to_csv(index=False),
+                       file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
+                       mime="text/csv", key="sec_drivers_csv")
+    result_caption(res)
+
+
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     st.markdown("**Who changed what (DDL/DCL)**")
     res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
@@ -272,8 +323,23 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         st.success("No DDL/DCL changes recorded in this window for this scope.")
         return
     if guard(res, ""):
-        daily = res.df.groupby("DAY", as_index=False)["STATEMENTS"].sum()
-        charts.daily_count_bars(daily.sort_values("DAY"), "DAY", "STATEMENTS", title="Change statements/day")
+        # Redesign 2026-07-09: the flat total/day bar answered neither of the
+        # questions people ask ("what kind of change?", "who?"). Stack by
+        # change kind; put the who right beside it.
+        ddl_df = res.df.copy()
+        ddl_df["CHANGE_KIND"] = ddl_df["QUERY_TYPE"].map(_change_kind)
+        left, right = st.columns((3, 2))
+        with left:
+            daily = ddl_df.groupby(["DAY", "CHANGE_KIND"], as_index=False)["STATEMENTS"].sum()
+            charts.daily_stacked_count(daily.sort_values("DAY"), "DAY", "CHANGE_KIND",
+                                       "STATEMENTS", title="Change statements/day")
+        with right:
+            by_user = (ddl_df.groupby("USER_NAME", as_index=False)["STATEMENTS"].sum()
+                       .sort_values("STATEMENTS", ascending=False))
+            charts.bar_count(by_user, "USER_NAME", "STATEMENTS",
+                             title="Statements by user", top_n=8)
+        st.caption("Left: what kind of change landed each day (create / alter / "
+                   "drop / grants). Right: who made them. Rows below have the objects.")
         st.dataframe(res.df, hide_index=True, use_container_width=True)
         result_caption(res)
 
@@ -320,12 +386,14 @@ def render() -> None:
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
     _governance_score_panel()
-    section = lazy_sections(["Access", "Changes", "Trust Center"], key="sec_section")
+    section = lazy_sections(["Access", "Changes", "Clients", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
         _export_pack(f["company"], f["days"])
     elif section == "Changes":
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+    elif section == "Clients":
+        _clients_tab(f["company"], f["days"])
     else:
         _trust_center_tab()

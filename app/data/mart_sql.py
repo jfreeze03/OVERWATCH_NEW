@@ -713,22 +713,26 @@ LEFT JOIN a ON a.DAY = spend.DAY
 ORDER BY spend.DAY
 """
 
-def day_spend_movers(day: object) -> str:
-    """Replay: each warehouse's credits on DAY vs its trailing-14d baseline."""
+def day_spend_movers(day: object, company: str = "ALL") -> str:
+    """Replay: each warehouse's credits on DAY vs its trailing-14d baseline.
+    Company-scoped on BOTH CTEs — Trexis rows must not surface under an
+    ALFA replay (live finding, 2026-07-09)."""
     from app.data.common import day_literal
 
     lit = day_literal(day)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND COMPANY = {sql_literal(company)}")
     return f"""
 WITH base AS (
     SELECT WAREHOUSE_NAME, AVG(CREDITS_TOTAL) AS BASELINE_CREDITS
     FROM {core_object("FACT_WAREHOUSE_DAILY")}
-    WHERE DAY BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit})
+    WHERE DAY BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit}){comp}
     GROUP BY WAREHOUSE_NAME
 ),
 day_of AS (
     SELECT WAREHOUSE_NAME, COMPANY, SUM(CREDITS_TOTAL) AS CREDITS_TOTAL
     FROM {core_object("FACT_WAREHOUSE_DAILY")}
-    WHERE DAY = {lit}
+    WHERE DAY = {lit}{comp}
     GROUP BY WAREHOUSE_NAME, COMPANY
 )
 SELECT d.WAREHOUSE_NAME, d.COMPANY, d.CREDITS_TOTAL,
@@ -741,17 +745,20 @@ LIMIT 40
 """
 
 
-def day_activity(day: object) -> str:
-    """Replay: the day's query totals next to the trailing-14d daily baseline."""
+def day_activity(day: object, company: str = "ALL") -> str:
+    """Replay: the day's query totals next to the trailing-14d daily baseline.
+    Both the day and its baseline honor the company scope."""
     from app.data.common import day_literal
 
     lit = day_literal(day)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND COMPANY = {sql_literal(company)}")
     return f"""
 WITH day_of AS (
     SELECT SUM(QUERY_COUNT) AS QUERY_COUNT, SUM(FAILED_COUNT) AS FAILED_COUNT,
            SUM(QUEUED_SEC_SUM) AS QUEUED_SEC, SUM(SPILL_REMOTE_GB) AS SPILL_GB
     FROM {core_object("FACT_QUERY_HOURLY")}
-    WHERE DATE(HOUR_TS) = {lit}
+    WHERE DATE(HOUR_TS) = {lit}{comp}
 ),
 base AS (
     -- Divide by days PRESENT in the window: a loader gap or quiet weekend
@@ -759,33 +766,39 @@ base AS (
     SELECT SUM(QUERY_COUNT) / NULLIF(COUNT(DISTINCT DATE(HOUR_TS)), 0) AS BASELINE_QUERIES,
            SUM(FAILED_COUNT) / NULLIF(COUNT(DISTINCT DATE(HOUR_TS)), 0) AS BASELINE_FAILED
     FROM {core_object("FACT_QUERY_HOURLY")}
-    WHERE DATE(HOUR_TS) BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit})
+    WHERE DATE(HOUR_TS) BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit}){comp}
 )
 SELECT day_of.*, base.BASELINE_QUERIES, base.BASELINE_FAILED FROM day_of, base
 """
 
 
-def day_task_failures(day: object) -> str:
+def day_task_failures(day: object, company: str = "ALL") -> str:
     from app.data.common import day_literal
 
     lit = day_literal(day)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND COMPANY = {sql_literal(company)}")
     return f"""
 SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, LAST_ERROR
 FROM {core_object("FACT_TASK_DAILY")}
-WHERE DAY = {lit} AND FAILED > 0
+WHERE DAY = {lit} AND FAILED > 0{comp}
 ORDER BY FAILED DESC
 LIMIT 50
 """
 
 
-def day_alerts(day: object) -> str:
+def day_alerts(day: object, company: str = "ALL") -> str:
+    """Replay alerts: company rows PLUS account-level (COMPANY='ALL') rows —
+    same convention as open_alert_events."""
     from app.data.common import day_literal
 
     lit = day_literal(day)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
     return f"""
 SELECT RAISED_AT, SEVERITY, RULE_ID, COMPANY, TITLE, STATUS
 FROM {core_object("ALERT_EVENTS")}
-WHERE DATE(RAISED_AT) = {lit}
+WHERE DATE(RAISED_AT) = {lit}{comp}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END, RAISED_AT
 LIMIT 200
 """

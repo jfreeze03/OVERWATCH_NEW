@@ -236,7 +236,7 @@ def test_charts_at_density():
         from app.ui import charts
         days = pd.DataFrame({"DAY": pd.date_range("2025-07-07", periods=365, freq="D"),
                              "USD": [100.0 + i for i in range(365)]})
-        charts.spend_trend(days, daily_budget_usd=250.0, band=(30000.0, 40000.0))
+        charts.spend_trend(days, daily_budget_usd=250.0)
         ev = pd.DataFrame({
             "AT": pd.date_range("2026-07-01", periods=2000, freq="4min"),
             "EVENT_TYPE": ["ALERT" if i % 2 else "DDL" for i in range(2000)],

@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.11.0 — V028: live round 4 — replay scope, 10-day creds, readable trends, driver inventory (2026-07-09)
+
+Migration V028 (apply after V027, then validate.sql — expects V001..V028):
+
+- **Credential expiry policy: 30d -> 10d** (owner decision). One UPDATE to
+  ALERT_CONFIG.THRESHOLD_NUM (the scan reads it at runtime, since V009) +
+  the posture mart bucket follows (metric EXPIRING_CRED_10D). The bucket
+  ships as a replacement SP_LOAD_MARTS_V27 derived VERBATIM from V027 with
+  exactly two edits — a lock asserts the equality so the copies can't
+  drift. App side moves with it: Security panel (10-day horizon), export
+  pack sheet, governance counts + deduction message, canary.
+- **Day replay now honors the company filter on every metric** (live
+  finding: Trexis rows under an ALFA replay). day_spend_movers /
+  day_activity / day_task_failures / day_alerts all take company —
+  baselines scoped too, alerts keep account-level rows (open_alert_events
+  convention); both batch and serial call sites pass the scope and the
+  caption says so.
+- **Spend trend redesigned** (owner: "not sure what they mean… people will
+  ask", twice). Daily bars + 7-day average line instead of the gradient
+  wash; the newest day renders dimmed with a caption naming the 24h
+  metering lag (partial, not a drop); the forecast band rectangle is gone
+  — the Projected month-end KPI already carries the range. Caption states
+  window total + week-over-week pace.
+- **Security Changes redesigned**: kind-stacked daily bars (create /
+  alter / drop / grants) with a statements-by-user bar beside it — the
+  chart now answers "what kind" and "who", not just "how many".
+- **Client driver inventory** (Security -> Clients, owner ask): driver +
+  version parsed from SESSIONS.CLIENT_APPLICATION_ID, PROGRAM from the
+  client-reported CLIENT_ENVIRONMENT (VS Code/DBeaver report; many ODBC
+  tools like Erwin don't — labeled honestly), users/sessions/first/last
+  seen, and BEHIND vs the newest version of the same driver seen in the
+  account (padded segment compare, so 3.10 > 3.9). CSV export; canaried.
+- README migration list de-duplicated (V021-V026 appeared twice) and both
+  install lists gain V027/V028. RUNBOOK: spend-trend + Security sections
+  refreshed, new §20 on the SiS 600s statement-timeout restart loop (the
+  p95 601s / 33-fails signature) and idle-cost bounds.
+- Tests: tests/test_live_round4.py (12 locks incl. the V027/V028 proc
+  equality); spend-trend locks in test_ui_round4/test_stress updated to
+  the bar design. 542 tests green.
+
 ## 4.10.0 — V027: the mart family ships (2026-07-08)
 
 Migration V027 (apply after V026, then re-run roles.sql + validate.sql):

@@ -15,10 +15,12 @@ _CHARTS = (_ROOT / "app" / "ui" / "charts.py").read_text(encoding="utf-8")
 _MAIN = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
 
 
-def test_spend_gradient_actually_fades():
+def test_spend_trend_bars_carry_the_gradient():
+    # v4.11: the area wash is gone (owner, twice) — bars + 7d average now.
+    # The vertical accent gradient must still actually fade (r4 #16 spirit).
     seg = _CHARTS.split("def spend_trend", 1)[1].split("def bar_usd", 1)[0]
-    assert seg.count("offset=0.0") == 1 and "offset=1.0" in seg   # was 0.0 twice — flat
-    assert "rgba(56,189,248,0.03)" in seg                          # transparent floor
+    assert seg.count("offset=0.0") == 1 and "offset=1.0" in seg
+    assert "mark_bar" in seg and "mark_area" not in seg
 
 
 def test_budget_rule_is_labeled_without_hover():

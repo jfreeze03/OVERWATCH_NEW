@@ -52,13 +52,13 @@ def _day_replay() -> None:
     # Six independent reads -> two tier-grouped parallel batches (Codex #7);
     # any batch failure falls back to the original serial per-query path.
     _b_recent = run_batch([
-        {"key": "mv", "sql": mart_sql.day_spend_movers(day_iso),
+        {"key": "mv", "sql": mart_sql.day_spend_movers(day_iso, rp_company),
          "source": "FACT_WAREHOUSE_DAILY vs 14d baseline"},
-        {"key": "act", "sql": mart_sql.day_activity(day_iso),
+        {"key": "act", "sql": mart_sql.day_activity(day_iso, rp_company),
          "source": "FACT_QUERY_HOURLY (day vs baseline)"},
-        {"key": "tf", "sql": mart_sql.day_task_failures(day_iso),
+        {"key": "tf", "sql": mart_sql.day_task_failures(day_iso, rp_company),
          "source": "FACT_TASK_DAILY (failures that day)"},
-        {"key": "al", "sql": mart_sql.day_alerts(day_iso),
+        {"key": "al", "sql": mart_sql.day_alerts(day_iso, rp_company),
          "source": "ALERT_EVENTS (that day)"},
     ], page=_PAGE, tier="recent")
     _b_hist = run_batch([
@@ -72,9 +72,11 @@ def _day_replay() -> None:
         tasks, alerts_d = _b_recent["tf"], _b_recent["al"]
         ddl, grants = _b_hist["ddl"], _b_hist["gr"]
     else:
-        movers = run(mart_sql.day_spend_movers(day_iso), page=_PAGE, key=f"rp_mv_{day_iso}",
+        movers = run(mart_sql.day_spend_movers(day_iso, rp_company), page=_PAGE,
+                     key=f"rp_mv_{rp_company}_{day_iso}",
                      tier="recent", source="FACT_WAREHOUSE_DAILY vs 14d baseline")
-        activity = run(mart_sql.day_activity(day_iso), page=_PAGE, key=f"rp_act_{day_iso}",
+        activity = run(mart_sql.day_activity(day_iso, rp_company), page=_PAGE,
+                       key=f"rp_act_{rp_company}_{day_iso}",
                        tier="recent", source="FACT_QUERY_HOURLY (day vs baseline)")
         ddl = run(security_sql.day_ddl(day_iso, rp_company), page=_PAGE,
                   key=f"rp_ddl_{rp_company}_{day_iso}",
@@ -82,9 +84,11 @@ def _day_replay() -> None:
         grants = run(security_sql.day_grants(day_iso, rp_company), page=_PAGE,
                      key=f"rp_gr_{rp_company}_{day_iso}",
                      tier="historical", source="GRANTS_TO_USERS (that day)")
-        tasks = run(mart_sql.day_task_failures(day_iso), page=_PAGE, key=f"rp_tf_{day_iso}",
+        tasks = run(mart_sql.day_task_failures(day_iso, rp_company), page=_PAGE,
+                    key=f"rp_tf_{rp_company}_{day_iso}",
                     tier="recent", source="FACT_TASK_DAILY (failures that day)")
-        alerts_d = run(mart_sql.day_alerts(day_iso), page=_PAGE, key=f"rp_al_{day_iso}",
+        alerts_d = run(mart_sql.day_alerts(day_iso, rp_company), page=_PAGE,
+                       key=f"rp_al_{rp_company}_{day_iso}",
                        tier="recent", source="ALERT_EVENTS (that day)")
     crit_n = int((alerts_d.df["SEVERITY"].astype(str).str.upper() == "CRITICAL").sum()) \
         if alerts_d.usable() else 0
@@ -131,7 +135,8 @@ def _day_replay() -> None:
         st.success("No alerts raised that day.")
     elif guard(alerts_d, ""):
         styled_table(alerts_d.df, height=200)
-    st.caption("Baselines are each entity's own trailing 14 days; account time throughout.")
+    st.caption(f"Scoped to {rp_company} (alerts include account-level rows). Baselines are "
+               "each entity's own trailing 14 days; account time throughout.")
 
 
 def _freshness_board() -> None:

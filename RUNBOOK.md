@@ -171,9 +171,11 @@ Admin → Settings, never in code.
   and the engine named in the help text.
 - **Open alerts** — COUNT of OPEN `ALERT_EVENTS` by severity.
 - **Platform score** — §6.
-- **Spend trend** — daily billed $ (mart-first), budget/day rule when a
-  budget exists, forecast band shading; sparkline strip beneath = 14-day
-  spend / query count / failures (from FACT_QUERY_HOURLY).
+- **Spend trend** — daily billed $ as bars (mart-first) with a 7-day
+  average line; the newest day renders dimmed (metering lags up to 24h —
+  partial, not a drop). Budget/day rule when a budget exists; the forecast
+  range lives in the Projected KPI, not on the chart. Sparkline strip
+  beneath = 14-day spend / query count / failures (from FACT_QUERY_HOURLY).
 - **Top actions** — top 5 OPEN `ACTION_QUEUE` rows ranked by severity, due
   date, estimated dollars (`logic/actions.rank_actions`).
 - **Cost drivers** — exec-board mart panel rows.
@@ -250,11 +252,18 @@ Honest framing: hygiene and governance posture, **not** a threat-detection
 SOC. **Governance drift score** at top (§6). Sections:
 - **Access** — MFA gaps (password-login users without MFA, with login
   evidence), failed logins, break-glass role holders, expiring credentials
-  (30d horizon, EXPIRED/EXPIRING), dormant-user scan (toggled; 90d no
+  (10d horizon since V028, EXPIRED/EXPIRING), dormant-user scan (toggled; 90d no
   login but roles still granted, severity by age/role count), role grants
   in window, auditor export pack (multi-sheet download).
-- **Changes** — recent DDL by database/schema, failed-login reasons
+- **Changes** — recent DDL stacked by change kind (create/alter/drop/
+  grants) with a who-changed-most bar beside it, failed-login reasons
   (network-policy vs credential), break-glass activity trend.
+- **Clients** — driver/version inventory from ACCOUNT_USAGE.SESSIONS
+  (lags ~3h): driver + version from CLIENT_APPLICATION_ID, PROGRAM from
+  the client-reported CLIENT_ENVIRONMENT (VS Code/DBeaver report; many
+  ODBC tools like Erwin do not). BEHIND = older than the newest version
+  of the same driver seen in the account — the upgrade shortlist. CSV
+  export on the panel.
 - **Trust Center** — latest findings per scanner (needs
   TRUST_CENTER_VIEWER).
 
@@ -439,7 +448,7 @@ blocks others).
 | PIPE_COPY_FAILURES | PIPELINE | failed/partial file loads 24h (CRITICAL ≥10 files) | daily per table |
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
-| SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days (CRITICAL if expired) | weekly until rotated |
+| SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired) | weekly until rotated |
 | SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day under admin roles | daily per user |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |
@@ -637,3 +646,33 @@ Symptoms → fixes:
 - Success returns **202 Accepted** (asynchronous) — a 202 with no card means
   the flow ran and failed internally; check the flow's run history.
 
+
+## §20 App session timeout & idle cost (Streamlit-in-Snowflake)
+
+Symptom (live, 2026-07-09): the app "restarts itself" about every 10 minutes
+and anything still running dies with it. Admin → Performance shows the tell:
+`execute streamlit ... OVERWATCH_APP()` median ~550s, p95 ~601s, high fail
+count — the app's own keep-alive statement is being killed at a 600-second
+STATEMENT_TIMEOUT_IN_SECONDS. The kill does NOT save money: a connected
+browser relaunches the parent statement immediately, and every restart
+cold-starts the caches (the expensive scans re-run).
+
+Diagnose where the 600 lives, then raise it for the app's execution path:
+
+```sql
+SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_OVERWATCH;
+SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN ACCOUNT;
+-- warehouse-level 600 (likely): raise just the app warehouse
+ALTER WAREHOUSE WH_ALFA_OVERWATCH SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;  -- 8h
+-- account-level 600: leave the account guard; raise per app user instead
+-- (effective timeout is the LOWEST of warehouse vs session level)
+ALTER USER <app_user> SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;
+```
+
+Idle cost is bounded by two existing controls, not by the statement timeout:
+Streamlit-in-Snowflake ends the app session after ~15 minutes without
+browser interaction (platform behavior, not configurable), and V002 set
+`AUTO_SUSPEND = 60` on WH_ALFA_OVERWATCH — so a forgotten tab costs at most
+~16 minutes of XS credits. Hard backstop if wanted: a resource monitor with
+a daily quota on WH_ALFA_OVERWATCH. The app's own queries stay bounded by
+window clamps and row caps regardless of the parent statement's ceiling.

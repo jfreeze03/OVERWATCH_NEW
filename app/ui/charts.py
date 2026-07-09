@@ -76,28 +76,44 @@ def spend_trend(
     day_col: str = "DAY",
     usd_col: str = "USD",
     daily_budget_usd: float = 0.0,
-    band: tuple[float, float] | None = None,
 ) -> None:
-    """Daily spend line with optional daily-budget rule and forecast band."""
+    """Daily spend as bars with a 7-day average line (redesign, 2026-07-09).
+
+    The old gradient area read as "abstract wash" — nobody could say what it
+    meant (owner feedback, twice). Bars answer "how much did THAT day cost";
+    the average line answers "which way is it heading"; the newest day
+    renders dimmed because metering lags up to 24h — partial, not a crash
+    (the question every viewer asked of the old chart). The forecast range
+    lives in the Projected month-end KPI, not as a floating rectangle here.
+    Dataset embeds ONCE on the layer (most-viewed chart, page-payload rule).
+    """
     data = df[[day_col, usd_col]].copy()
     data.columns = ["Day", "USD"]
-    enc_x = alt.X("Day:T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy"))
-    enc_y = alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f"))
-    tip = [alt.Tooltip("Day:T"), alt.Tooltip("USD:Q", format="$,.2f", title="Spend")]
-    # Data-less child specs + data on the layer: the frame ships in the page
-    # payload ONCE instead of once per mark (this is the most-viewed chart).
-    area = (alt.Chart().mark_area(
-                line={"color": _ACCENT, "strokeWidth": 2.4},
-                color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
-                    # was two stops at offset 0.0 — a flat wash, never a fade
-                    # (Codex r4 #16). Transparent floor -> accent crest.
-                    stops=[alt.GradientStop(color="rgba(56,189,248,0.03)", offset=0.0),
-                           alt.GradientStop(color=_ACCENT, offset=1.0)]),
-                opacity=0.35)
-            .encode(x=enc_x, y=enc_y, tooltip=tip))
-    line = (alt.Chart().mark_line(point={"filled": True, "size": 34}, strokeWidth=2.4)
-            .encode(x=enc_x, y=enc_y, tooltip=tip))
-    layers = [alt.layer(area, line, data=data).properties(height=_HEIGHT)]
+    data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+    data["USD"] = pd.to_numeric(data["USD"], errors="coerce").fillna(0.0)
+    data = data.dropna(subset=["Day"]).sort_values("Day")
+    if data.empty:
+        return
+    data["AVG7"] = data["USD"].rolling(7, min_periods=3).mean().round(2)
+    data["PROVISIONAL"] = data["Day"] == data["Day"].max()
+    grad = alt.Gradient(gradient="linear", x1=0, x2=0, y1=1, y2=0,
+                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
+                               alt.GradientStop(color=_ACCENT, offset=1.0)])
+    bar_size = max(4, min(20, int(660 / max(len(data), 1))))
+    enc_x = alt.X("yearmonthdate(Day):T", title=None,
+                  axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy"))
+    tip = [alt.Tooltip("Day:T"),
+           alt.Tooltip("USD:Q", format="$,.2f", title="Spend"),
+           alt.Tooltip("AVG7:Q", format="$,.0f", title="7-day avg")]
+    bars = (alt.Chart().mark_bar(color=grad, cornerRadiusEnd=2, size=bar_size)
+            .encode(x=enc_x,
+                    y=alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
+                    opacity=alt.condition("datum.PROVISIONAL",
+                                          alt.value(0.45), alt.value(1.0)),
+                    tooltip=tip))
+    avg = (alt.Chart().mark_line(color="#c3cddb", strokeWidth=2, interpolate="monotone")
+           .encode(x=enc_x, y=alt.Y("AVG7:Q"), tooltip=tip))
+    layers = [alt.layer(bars, avg, data=data).properties(height=_HEIGHT)]
     if daily_budget_usd and daily_budget_usd > 0:
         rule_df = pd.DataFrame({"y": [daily_budget_usd]})
         layers.append(
@@ -112,13 +128,15 @@ def spend_trend(
                        text=f"budget ${daily_budget_usd:,.0f}/day")
             .encode(y="y:Q", x=alt.value(6))
         )
-    if band:
-        band_df = pd.DataFrame({"low": [band[0]], "high": [band[1]]})
-        layers.append(
-            alt.Chart(band_df).mark_rect(opacity=0.08, color="#38bdf8").encode(y="low:Q", y2="high:Q")
-        )
     st.altair_chart(alt.layer(*layers), use_container_width=True)
-
+    total = float(data["USD"].sum())
+    note = f"Bars = each day's spend (window total ${total:,.0f}); line = 7-day average"
+    if len(data) >= 14:
+        last7 = float(data["USD"].tail(7).mean())
+        prior7 = float(data["USD"].iloc[-14:-7].mean())
+        if prior7 > 0:
+            note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
+    st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")
 
 def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10) -> None:
     data = df[[label_col, usd_col]].head(top_n).copy()
@@ -157,6 +175,29 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
             y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
             tooltip=[alt.Tooltip("Day:T", title="Day"),
                      alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
+                        value_col: str, title: str = "Count") -> None:
+    """Per-day stacked bars by category (counts) over a TIME axis — the
+    'what kind of change, which day' view. Same day-grain axis contract as
+    daily_stacked_usd; counts instead of dollars."""
+    data = df[[day_col, category_col, value_col]].copy()
+    data.columns = ["Day", "Category", "Value"]
+    data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+    chart = (
+        _base(data)
+        .mark_bar(cornerRadiusEnd=2)
+        .encode(
+            x=alt.X("yearmonthdate(Day):T", title=None,
+                    axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
+            y=alt.Y("sum(Value):Q", title=title, axis=alt.Axis(format=",.0f")),
+            color=alt.Color("Category:N", legend=alt.Legend(orient="bottom", title=None)),
+            tooltip=[alt.Tooltip("Day:T"), alt.Tooltip("Category:N"),
+                     alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
     st.altair_chart(chart, use_container_width=True)

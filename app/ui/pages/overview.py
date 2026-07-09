@@ -251,8 +251,9 @@ def render() -> None:
             )
     else:
         daily_budget = (budget / month_days(account_today())[0]) if budget > 0 else 0.0
-        band = (forecast.low_usd, forecast.high_usd) if forecast.ok and budget > 0 else None
-        charts.spend_trend(daily, daily_budget_usd=daily_budget, band=None if band is None else band)
+        # Forecast range lives in the Projected month-end KPI — the floating
+        # rectangle was the "what does this mean" magnet (owner, twice).
+        charts.spend_trend(daily, daily_budget_usd=daily_budget)
         activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="spark_activity",
                        tier="recent", source="FACT_QUERY_HOURLY (daily)")
         adf = activity.df if activity.ok and not activity.empty else None

@@ -32,6 +32,8 @@ snowflake/migrations/V023__prod_scoped_volume.sql
 snowflake/migrations/V024__warehouse_change_scorecard.sql
 snowflake/migrations/V025__break_glass_policy.sql
 snowflake/migrations/V026__teams_safe_delivery.sql
+snowflake/migrations/V027__mart_family.sql
+snowflake/migrations/V028__cred_expiry_10d.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

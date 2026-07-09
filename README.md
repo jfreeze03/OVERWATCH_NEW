@@ -89,12 +89,8 @@ snowflake/migrations/V023__prod_scoped_volume.sql -- PROD-only volume-drop sweep
 snowflake/migrations/V024__warehouse_change_scorecard.sql -- SHOW WAREHOUSES snapshots, change registry, WH_CHANGE_REGRESSION
 snowflake/migrations/V025__break_glass_policy.sql -- SEC_BREAK_GLASS_USE disabled (routine admin roles here)
 snowflake/migrations/V026__teams_safe_delivery.sql -- sender v3: JSON-safe payloads (Teams Workflows compatible)
-snowflake/migrations/V021__precision_telemetry.sql -- rule precision, fleet query telemetry, app self-cost
-snowflake/migrations/V022__delivery_per_route.sql -- per-route delivery ledger; additive fan-out + honest retries
-snowflake/migrations/V023__prod_scoped_volume.sql -- PROD-only volume-drop sweep; scan v9 (CREDENTIALS columns)
-snowflake/migrations/V024__warehouse_change_scorecard.sql -- SHOW WAREHOUSES snapshots, change registry, WH_CHANGE_REGRESSION
-snowflake/migrations/V025__break_glass_policy.sql -- SEC_BREAK_GLASS_USE disabled (routine admin roles here)
-snowflake/migrations/V026__teams_safe_delivery.sql -- sender v3: JSON-safe payloads (Teams Workflows compatible)
+snowflake/migrations/V027__mart_family.sql -- 9 scheduled marts + SP_LOAD_MARTS_V27 + telemetry rider
+snowflake/migrations/V028__cred_expiry_10d.sql -- credential expiry: 10-day horizon (rule + posture bucket)
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

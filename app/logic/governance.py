@@ -70,7 +70,7 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
     if expiring > 0:
         drivers.append(ScoreDriver(
             "Expiring credentials", _cap(expiring * w["GOV_PTS_EXPIRING_CRED"], 10),
-            f"{expiring:.0f} credentials expire within 30 days."))
+            f"{expiring:.0f} credentials expire within 10 days."))
 
     breakglass = safe_float(inputs.get("breakglass_grants_30d"))
     if breakglass > 0:
