@@ -378,7 +378,7 @@ def _open_events_section(events, is_operator: bool) -> None:
             confirm_b = st.text_input(
                 f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
                 key="alert_bulk_confirm")
-            if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec",
+            if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec", type="primary",
                          disabled=(not chosen or confirm_b != f"BULK {b_action}")):
                 done = 0
                 for label in chosen:
@@ -406,10 +406,16 @@ def render() -> None:
                  else f"ALERT_EVENTS ({company} + account-level)")
     if events.ok:
         sev = events.df["SEVERITY"].astype(str).str.upper() if not events.empty else None
+        crit_n = int((sev == "CRITICAL").sum()) if sev is not None else 0
+        high_n = int((sev == "HIGH").sum()) if sev is not None else 0
         kpi_row([
-            {"label": "Open critical", "value": f"{int((sev == 'CRITICAL').sum()) if sev is not None else 0}"},
-            {"label": "Open high", "value": f"{int((sev == 'HIGH').sum()) if sev is not None else 0}"},
-            {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}"},
+            {"label": "Open critical", "value": f"{crit_n}",
+             "severity": "bad" if crit_n else "ok",
+             "delta_color": "inverse" if crit_n else "off"},
+            {"label": "Open high", "value": f"{high_n}",
+             "severity": "warn" if high_n else "ok"},
+            {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}",
+             "severity": "info"},
         ])
 
     _delivery_status()

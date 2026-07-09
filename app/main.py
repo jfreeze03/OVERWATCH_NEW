@@ -142,7 +142,7 @@ def _views_popover() -> None:
     from app.core.state import request_navigation
     from app.data import prefs_sql
 
-    with st.popover("💾 Views"):
+    with st.popover("Views"):
         prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                     source="USER_PREFS")
         views: dict[str, str] = {}
@@ -184,6 +184,11 @@ def _views_popover() -> None:
                 prefs_sql.upsert_pref_sql(f"VIEW:{clean}", _current_view_payload()), page="Views")
             notify(ok, msg if not ok else f"Saved '{clean}' (page, section, and filters).")
         st.divider()
+        compact = st.toggle("Compact density", key="views_density",
+                            value=st.session_state.get("_ow_density") == "compact",
+                            help="Tighter cards and tables for triage screens; "
+                                 "hierarchy and colors unchanged.")
+        st.session_state["_ow_density"] = "compact" if compact else "comfortable"
         current_tz = st.session_state.get("_ow_display_tz") or prefs_sql.DISPLAY_TIMEZONES[0]
         tz_idx = (prefs_sql.DISPLAY_TIMEZONES.index(current_tz)
                   if current_tz in prefs_sql.DISPLAY_TIMEZONES else 0)
@@ -354,7 +359,11 @@ def _persistent_status_bar(vals: dict | None = None) -> None:
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
+    from app.core.state import filters as _flt
+    _f = _flt()
     stats = [
+        {"k": "Scope", "v": f"{_f['company']} · {_f['environment']} · {_f['days']}d",
+         "icon": "refresh", "sev": ""},
         {"k": "Open criticals", "v": crit, "icon": "alerts",
          "sev": "bad" if crit not in ("0", "") else "ok"},
         {"k": "Telemetry age", "v": (f"{stale}h" if stale != "-1" else "n/a"),
@@ -406,14 +415,20 @@ def _topbar_scope_controls() -> None:
                      format_func=lambda v: v or "All databases",
                      help="Applies to query, task, DDL, attribution, and storage panels. "
                           "Options track the Company and Environment filters.")
-    c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
-    with c_wh:
-        st.text_input("Warehouse contains", key="flt_warehouse_contains")
-    with c_user:
-        st.text_input("User contains", key="flt_user_contains")
-    with c_schema:
-        st.text_input("Schema contains", key="flt_schema_contains",
-                      help="Case-insensitive match where the source has schema grain.")
+    # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
+    # visits; the contains-filters open automatically whenever one is active
+    # so a live filter can never hide.
+    _adv_on = any(str(st.session_state.get(k) or "").strip() for k in
+                  ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"))
+    with st.expander("More filters — warehouse / user / schema contains", expanded=_adv_on):
+        c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
+        with c_wh:
+            st.text_input("Warehouse contains", key="flt_warehouse_contains")
+        with c_user:
+            st.text_input("User contains", key="flt_user_contains")
+        with c_schema:
+            st.text_input("Schema contains", key="flt_schema_contains",
+                          help="Case-insensitive match where the source has schema grain.")
 
 
 def main() -> None:

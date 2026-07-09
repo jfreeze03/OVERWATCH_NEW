@@ -223,10 +223,15 @@ def kpi_row(items: list[dict], columns: int | None = None) -> None:
     items = [i for i in items if i]
     if not items:
         return
-    cols = st.columns(columns or len(items))
-    for idx, item in enumerate(items):
-        with cols[idx % len(cols)]:
-            st.markdown(metric_card_html(item), unsafe_allow_html=True)
+    # Cap rows at four cards (Codex r4 #3): five-plus equal columns cramp on
+    # laptops and squish on tablets; overflow wraps to the next row instead.
+    width = max(1, min(columns or 4, 4, len(items)))
+    for start in range(0, len(items), width):
+        chunk = items[start:start + width]
+        cols = st.columns(width)
+        for idx, item in enumerate(chunk):
+            with cols[idx]:
+                st.markdown(metric_card_html(item), unsafe_allow_html=True)
 
 
 def section_header(title: str, health: str = "", icon_name: str = "",

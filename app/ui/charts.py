@@ -89,9 +89,11 @@ def spend_trend(
     area = (alt.Chart().mark_area(
                 line={"color": _ACCENT, "strokeWidth": 2.4},
                 color=alt.Gradient(gradient="linear", x1=1, x2=1, y1=1, y2=0,
-                    stops=[alt.GradientStop(color=_ACCENT, offset=0.0),
-                           alt.GradientStop(color=_ACCENT, offset=0.0)]),
-                opacity=0.16)
+                    # was two stops at offset 0.0 — a flat wash, never a fade
+                    # (Codex r4 #16). Transparent floor -> accent crest.
+                    stops=[alt.GradientStop(color="rgba(56,189,248,0.03)", offset=0.0),
+                           alt.GradientStop(color=_ACCENT, offset=1.0)]),
+                opacity=0.35)
             .encode(x=enc_x, y=enc_y, tooltip=tip))
     line = (alt.Chart().mark_line(point={"filled": True, "size": 34}, strokeWidth=2.4)
             .encode(x=enc_x, y=enc_y, tooltip=tip))
@@ -102,6 +104,13 @@ def spend_trend(
             alt.Chart(rule_df)
             .mark_rule(strokeDash=[6, 4], color="#f87171")
             .encode(y="y:Q", tooltip=alt.value(f"Daily budget rate ${daily_budget_usd:,.0f}"))
+        )
+        # Visible without hover (screenshots, phones) — Codex r4 #17.
+        layers.append(
+            alt.Chart(rule_df)
+            .mark_text(align="left", dx=6, dy=-7, fontSize=10, color="#f87171",
+                       text=f"budget ${daily_budget_usd:,.0f}/day")
+            .encode(y="y:Q", x=alt.value(6))
         )
     if band:
         band_df = pd.DataFrame({"low": [band[0]], "high": [band[1]]})

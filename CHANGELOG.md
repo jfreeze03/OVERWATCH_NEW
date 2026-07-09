@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.9.1 — visual pass (Codex round 4, Streamlit-reality-checked) (2026-07-08)
+
+Eleven adopted, four declined with rationale, five deferred. Streamlit 1.45
+constraints shaped the calls: no sticky positioning, no side drawers.
+
+- FIXED: the spend-trend area gradient had both stops at offset 0.0 — a
+  flat wash that never faded (Codex caught a real rendering bug). Now a
+  transparent-floor -> accent fade.
+- KPI rows cap at four cards and wrap (five-up rows cramped laptops).
+- Alerts KPIs are severity-colored (critical=red rail, high=amber) and the
+  bulk-execute button is primary — faster reads under pressure.
+- The warehouse/user/schema contains-filters collapse into "More filters",
+  auto-expanded whenever one is active so a live filter can never hide.
+- Compact density toggle (Views popover): tighter cards/tables for triage
+  screens; hierarchy and colors unchanged. Session-scoped v1.
+- Calm surfaces: hover motion removed (border/shadow response only),
+  radii tightened 12/16 -> 8/12, heading letter-spacing zeroed (the
+  uppercase kicker tracking stays — that's a label convention).
+- Budget line on the spend trend now labels itself without hover
+  (screenshots and phones); 💾 emoji retired from the Views control.
+- Scope (company · env · days) rides the persistent status bar — the
+  1.45-compatible answer to "sticky filter bar".
+- Declined: freshness-caption reduction (that trust surface caught a live
+  regression; it gets quieter, not fewer), drawer detail views (no side
+  drawers in Streamlit; dialogs hide the list being triaged), storm view
+  (already exists — Alerts "Group by rule"), broad semantic recolor (cyan
+  is the deliberate data brand; status colors already live where status
+  does). Deferred: panel-shell component, small multiples, DAG polish,
+  Brief redesign (it already has the Now/Fires/Asks bands).
+
 ## 4.9.0 — Teams-safe delivery (V026), docs sync, mart-family design (2026-07-08)
 
 - FIXED (V026, sender v3): webhook payloads are JSON-escaped before the

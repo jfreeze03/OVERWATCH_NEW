@@ -27,7 +27,7 @@ _TOKENS = """
   --ow-ok-dim:rgba(52,211,153,0.14); --ow-warn-dim:rgba(251,191,36,0.14);
   --ow-bad-dim:rgba(251,113,133,0.14); --ow-info-dim:rgba(56,189,248,0.14);
   --ow-1:4px; --ow-2:8px; --ow-3:12px; --ow-4:16px; --ow-5:24px; --ow-6:32px;
-  --ow-r:12px; --ow-r-sm:8px; --ow-r-lg:16px; --ow-r-pill:999px;
+  --ow-r:8px; --ow-r-sm:6px; --ow-r-lg:12px; --ow-r-pill:999px;
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
   --ow-shadow2:0 2px 6px rgba(0,0,0,0.35),0 18px 40px -18px rgba(0,0,0,0.65);
   --ow-ease:150ms cubic-bezier(0.22,1,0.36,1);
@@ -42,7 +42,7 @@ _CSS = """
 .block-container { padding-top:1.1rem; padding-bottom:2.4rem; max-width:1360px; }
 .main .block-container > div { gap:0.55rem; }
 html, body, [class*="css"] { font-family:var(--ow-font); }
-h1,h2,h3,h4 { letter-spacing:-0.015em; color:var(--ow-ink); }
+h1,h2,h3,h4 { letter-spacing:0; color:var(--ow-ink); }
 h1 { font-weight:750; font-size:1.72rem; } h2 { font-weight:700; }
 h3 { font-weight:680; font-size:1.06rem; }
 p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
@@ -52,10 +52,10 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 div[data-testid="stMetric"] {
   position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 12px 18px;
-  box-shadow:var(--ow-shadow); transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); overflow:hidden; }
+  box-shadow:var(--ow-shadow); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); overflow:hidden; }
 div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
   background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); opacity:0.85; }
-div[data-testid="stMetric"]:hover { transform:translateY(-2px); box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
+div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
 [data-testid="stMetricLabel"] p { font-size:0.70rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
 [data-testid="stMetricValue"] { font-size:1.62rem; font-weight:720; color:var(--ow-ink); }
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
@@ -65,8 +65,8 @@ div[data-testid="stMetric"]:hover { transform:translateY(-2px); box-shadow:var(-
 
 .ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
-  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); transition:transform var(--ow-ease),box-shadow var(--ow-ease); }
-.ow-card:hover { transform:translateY(-1px); box-shadow:var(--ow-shadow2); }
+  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); }
+.ow-card:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
@@ -121,7 +121,7 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
-.stButton > button:hover { transform:translateY(-1px); border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
+.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
 .stButton > button[kind="primary"] { background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#06121f; border:none; }
 
 button[data-baseweb="tab"] { font-weight:640; }
@@ -153,9 +153,26 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
 """
 
 
+_COMPACT_CSS = """
+<style>
+/* Compact density (Views popover toggle): more rows per screen, same order.
+   Ops/DBA scanning mode — spacing shrinks, hierarchy and colors do not. */
+.block-container { padding-top:0.6rem; padding-bottom:1.4rem; }
+.main .block-container > div { gap:0.35rem; }
+div[data-testid="stMetric"] { padding:8px 10px 7px 12px; }
+[data-testid="stMetricValue"] { font-size:1.3rem !important; }
+.ow-card { padding:8px 10px 8px 12px; margin-bottom:var(--ow-2); }
+.ow-section { padding:4px 10px; margin:4px 0; }
+div[data-testid="stDataFrame"] { font-size:0.82rem; }
+</style>
+"""
+
+
 def inject_theme() -> None:
     """Inject tokens + component CSS once per render. Cheap; no network."""
     st.markdown(_TOKENS + _CSS, unsafe_allow_html=True)
+    if st.session_state.get("_ow_density") == "compact":
+        st.markdown(_COMPACT_CSS, unsafe_allow_html=True)
 
 
 def chip(text: str, state: str = "") -> str:
