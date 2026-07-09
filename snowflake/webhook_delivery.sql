@@ -19,7 +19,30 @@ CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL
     WEBHOOK_BODY_TEMPLATE = '{"text": "SNOWFLAKE_WEBHOOK_MESSAGE"}'
     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
--- Teams: use the Teams incoming-webhook URL; same body template works.
+
+-- ---------------------------------------------------------------------------
+-- MICROSOFT TEAMS (Workflows / Power Automate) — live lesson 2026-07-08.
+-- The retired O365 "incoming webhook" connectors accepted {"text": ...};
+-- Teams WORKFLOWS URLs (prod-XX.*.logic.azure.com/...) do NOT — the flow's
+-- "Send each adaptive card" action rejects it (the "text card" error).
+-- Setup: Teams channel -> Workflows -> "Post to a channel when a webhook
+-- request is received", copy the HTTP URL, then:
+--
+-- CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+--     TYPE = GENERIC_STRING
+--     SECRET_STRING = 'https://prod-XX.westus.logic.azure.com:443/workflows/...';
+-- CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
+--     TYPE = WEBHOOK ENABLED = TRUE
+--     WEBHOOK_URL = 'https://prod-XX.westus.logic.azure.com:443/workflows/...'
+--     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+--     WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
+--     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+-- INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
+-- SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS';
+--
+-- V026's sender JSON-escapes the message (quotes, newlines, tabs), so
+-- multi-alert digests render as line breaks in the card instead of
+-- breaking the flow. Workflows replies 202 Accepted on success.
 
 -- ---------------------------------------------------------------------------
 -- Severity-based multi-channel routing (the sender already walks

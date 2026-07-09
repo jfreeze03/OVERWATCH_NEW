@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.9.0 — Teams-safe delivery (V026), docs sync, mart-family design (2026-07-08)
+
+- FIXED (V026, sender v3): webhook payloads are JSON-escaped before the
+  integration body template splices them into a JSON string — raw newlines
+  (the LISTAGG separator + prefix) and quotes in alert titles produced
+  invalid JSON: Slack partially tolerated it, Microsoft Teams Workflows
+  rejected the card (the "text card" error and the hourly
+  route_send_failed rows). CHR()-code escaping only — backslashes don't
+  survive multiple string layers (V022/CALLs+ lessons). Everything else in
+  the sender is byte-identical to v2.
+- webhook_delivery.sql v2: real Microsoft Teams (Workflows) recipe — the
+  retired O365 {"text"} shape replaced with the Adaptive-Card
+  WEBHOOK_BODY_TEMPLATE, ALERT_ROUTES row, 202-Accepted note; teardown
+  covers OVERWATCH_WEBHOOK_TEAMS. RUNBOOK §19: setup + symptom->fix table.
+- Docs synced to v4.9: README/DEPLOYMENT migration lists through V026,
+  RUNBOOK object table V021-V026, FEATURES "Cost intelligence (v4.7-4.9)"
+  section, ARCHITECTURE "Performance model" (fact-first, join-then-group,
+  tier batching, telemetry loop).
+- docs/design/V027_MART_FAMILY.md: the designed mart batch (9 marts +
+  telemetry schema rider, grains, cadences, loader isolation, backfill,
+  bookkeeping checklist). Build order finalizes on ~3 days of v4.9
+  sampled telemetry.
+
+Deploy: apply V026 in Snowsight (after V025), re-run validate.sql
+(V001..V026), recreate the Teams integration per webhook_delivery.sql v2.
+
 ## 4.8.4 — Codex round 3: the migration-contract bug + on-demand heavies (2026-07-08)
 
 Round 3 was mostly the already-queued V026 mart family; five items were

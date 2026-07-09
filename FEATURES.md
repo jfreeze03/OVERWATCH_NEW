@@ -82,3 +82,15 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Dynamic Table pilot with measured cost | `MART_SPEND_ROLLUP_DT` |
 | Parallel batch fetch, lazy sections, SQL-keyed cache, fragments | core runtime |
 | **Design system**: token layer, card variants, severity stripes, SVG icons, sparklines, persistent status bar, refined charts, responsive | app/theme.py, app/ui/icons.py, app/ui/components.py |
+
+## Cost intelligence (v4.7–v4.9)
+| Capability | Where |
+|---|---|
+| Unit costs: measured $ per query, $/call per stored proc (every proc), AI $ by function/model with $/1M tokens; Cortex-Code fallback | Cost → Unit costs |
+| Task-graph cost trends: $/run, success %, p95 wall, CHEAPER/PRICIER/FLAT per pipeline (db/schema filterable) | Operations → Task graphs ($) |
+| Warehouse change scorecard (V024): snapshot-diff detection, frozen 14d baselines, WH_CHANGE_REGRESSION alerts | Operations → Change impact |
+| Contract billing truth: ORGANIZATION_USAGE balance burn-down, runway, on-demand overrun (zero config) | Cost → Contract & Forecast |
+| Spend tie-out: billed vs warehouse-exact vs Snowsight (storage/transfer) explained with live numbers | Cost → Spend expander |
+| Fact-first hot paths + pinned live-scan budgets (CI fails on new ACCOUNT_USAGE scans on Brief/Overview/Control Room) | tests/test_perf_budgets.py |
+| Teams-safe delivery (V026): JSON-escaped payloads + Workflows Adaptive-Card recipe | snowflake/webhook_delivery.sql · RUNBOOK §19 |
+

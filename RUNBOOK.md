@@ -96,6 +96,12 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | V013 user prefs | `USER_PREFS` (saved views / default landing / display TZ) |
 | V014 lifecycle | `COST_CONTRACT_BREACH` (scan v5), `PERF_FINGERPRINT_DRIFT` (sweep v2, Mondays), `SP_PURGE_FACTS` + monthly task |
 | V015 pilot+backups | `MART_SPEND_ROLLUP_DT` (Dynamic Table pilot), `SP_BACKUP_OPERATOR_TABLES` + Sunday task |
+| V021 precision+telemetry | `RESOLUTION_KIND` precision, `APP_QUERY_TELEMETRY` fleet sink, app self-cost |
+| V022 per-route delivery | `ALERT_DELIVERIES` ledger, sender v2 (additive fan-out, honest retries) |
+| V023 prod-scoped volume | sweep v4 (PIPE_VOLUME_DROP = PROD DBs only), scan v9 (CREDENTIALS columns) |
+| V024 warehouse scorecard | `WAREHOUSE_CONFIG_SNAPSHOT` + `WAREHOUSE_CHANGE_REGISTRY`, `SP_WAREHOUSE_CHANGE_SCAN` + 06:40 task, `WH_CHANGE_REGRESSION` |
+| V025 break-glass policy | `SEC_BREAK_GLASS_USE` disabled (ACCOUNTADMIN/SNOW_ACCOUNTADMINS are routine here) |
+| V026 teams-safe delivery | sender v3: JSON-escaped payloads (quotes/newlines/tabs); Teams Workflows compatible |
 
 App files deploy to the dedicated stage
 **`DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE`** (V017; `snowflake.yml` pins it —
@@ -107,7 +113,8 @@ Then `roles.sql` (idempotent; re-run after every upgrade) and
 `snow streamlit deploy --replace`.
 
 **Opt-in scripts** (run deliberately, not part of the chain):
-`webhook_delivery.sql` (notification integration + sender task),
+`webhook_delivery.sql` (notification integration + sender task — Microsoft
+Teams needs the Workflows Adaptive-Card recipe in that file, see §19),
 `native_alert_templates.sql` (CREATE ALERT equivalents if you prefer
 native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfill_365.sql`
 (one-time year of daily facts — run before ACCOUNT_USAGE history ages out).
@@ -609,3 +616,24 @@ first. Window anchoring convention lives in `app/data/common.py`.
 `app/ui/pages/cost_parts/{spend,contract,ai_chargeback,optimize}.py`;
 `cost.py` is dispatch only. Wave-era test locks live under
 `tests/history_locks/` (see `tests/README.md`).
+
+## §19 Microsoft Teams delivery (Workflows) — setup & troubleshooting
+
+Teams retired the O365 incoming-webhook connectors; channel webhooks are now
+Power Automate **Workflows** URLs (`prod-XX.*.logic.azure.com/...`), and they
+require an Adaptive Card envelope — `{"text": "..."}` fails inside the flow
+("text card" error). Setup lives in `snowflake/webhook_delivery.sql` v2: a
+`OVERWATCH_WEBHOOK_TEAMS` integration whose `WEBHOOK_BODY_TEMPLATE` wraps
+`SNOWFLAKE_WEBHOOK_MESSAGE` in the card envelope, plus an `ALERT_ROUTES` row.
+
+Symptoms → fixes:
+- `route_send_failed` hourly with a Teams route → integration still uses the
+  `{"text"}` template: recreate it with the Adaptive-Card template.
+- Card arrives but truncated/garbled line breaks → V026 not applied (sender
+  v3 JSON-escapes quotes/newlines/tabs; `\n` renders as a line break in the
+  card). `SELECT MAX(VERSION) FROM SCHEMA_VERSION;` should be ≥ 26.
+- Flow shows runs but channel silent → the flow's "Post card in a chat or
+  channel" action points at the wrong team/channel; fix in Power Automate.
+- Success returns **202 Accepted** (asynchronous) — a 202 with no card means
+  the flow ran and failed internally; check the flow's run history.
+

@@ -154,3 +154,23 @@ sends via `SYSTEM$SEND_SNOWFLAKE_NOTIFICATION` through per-family
 `ALERT_ROUTES`. The one manual step Snowflake requires — an ACCOUNTADMIN
 creating the NOTIFICATION INTEGRATION holding the webhook secret — is
 documented in `webhook_delivery.sql` and the RUNBOOK.
+
+## Performance model (v4.8+)
+
+Render is not the bottleneck; warehouse scans are. The standing rules:
+1. **Fact-first with labeled live fallback** — hot panels read the hourly
+   facts; the live ACCOUNT_USAGE path survives only as a fallback whose
+   source label says so. Hot pages carry pinned live-scan budgets
+   (`tests/test_perf_budgets.py`) — new live scans fail CI.
+2. **Join-then-group for attribution** — never pre-aggregate all of
+   QUERY_ATTRIBUTION_HISTORY; filter the driving window first (the 139s
+   lesson).
+3. **Tier-grouped batching** — independent same-tier reads go out in one
+   `run_batch` (all four tiers); filter-scoped and fixed reads are never
+   coupled in one batch cache. Serial cached paths remain as fallback.
+4. **Telemetry closes the loop** — slow/failed fetches persist always, plus
+   a ~2% sample of everything for the healthy baseline; `batch_fallback`
+   events carry tier/size/keys/exception. The Admin → Performance fleet
+   table is the optimization queue, ordered by evidence.
+The next planned step is the V027 mart family (docs/design/V027_MART_FAMILY.md).
+

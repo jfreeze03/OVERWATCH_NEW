@@ -26,6 +26,12 @@ snowflake/migrations/V017__hardening_v7.sql
 snowflake/migrations/V018__delivery_first_class.sql
 snowflake/migrations/V019__scoping_fixes.sql
 snowflake/migrations/V020__credentials_column.sql
+snowflake/migrations/V021__precision_telemetry.sql
+snowflake/migrations/V022__delivery_per_route.sql
+snowflake/migrations/V023__prod_scoped_volume.sql
+snowflake/migrations/V024__warehouse_change_scorecard.sql
+snowflake/migrations/V025__break_glass_policy.sql
+snowflake/migrations/V026__teams_safe_delivery.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

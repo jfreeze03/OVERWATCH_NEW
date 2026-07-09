@@ -107,3 +107,57 @@ def test_new_cost_builders_are_canaried():
     for name in ("measured_query_costs", "procedure_costs_usd", "graph_daily_costs",
                  "serverless_task_daily", "warehouse_change_registry", "cortex_source_costs"):
         assert name in src, name
+
+
+# ---------------------------------------------------------------------------
+# V026 — teams-safe delivery (v4.9.0)
+# ---------------------------------------------------------------------------
+
+_MIG26 = (_ROOT / "snowflake" / "migrations" / "V026__teams_safe_delivery.sql").read_text(encoding="utf-8")
+
+
+def test_v026_guard_version_and_scope():
+    assert "EXCEPTION (-20026" in _MIG26
+    assert "IF (v < 25) THEN" in _MIG26
+    assert "SELECT 26 AS VERSION" in _MIG26
+    assert "SP_NOTIFY_WEBHOOK" in _MIG26                # sender replaced, nothing else
+    assert "CREATE TABLE" not in _MIG26.upper()
+
+
+def test_v026_sender_escapes_json_via_chr_codes():
+    # CHR() codes only — backslashes must not survive multiple string layers
+    # (the V022 comma-eater and CALLs+ lessons). Order matters: backslash first.
+    body = _MIG26.split("BEGIN", 2)[2]
+    for esc in ("CHR(92), CHR(92) || CHR(92)",          # backslash doubled FIRST
+                "CHR(34), CHR(92) || CHR(34)",          # quote
+                "CHR(10), CHR(92) || 'n'",              # newline -> \n
+                "CHR(13), ''",                          # CR dropped
+                "CHR(9),  CHR(92) || 't'"):             # tab
+        assert esc in body, esc
+    assert body.index("CHR(92) || CHR(92)") < body.index("CHR(92) || CHR(34)")
+    # the prefix newline is escaped too (a raw one re-breaks the JSON)
+    assert "'OVERWATCH alerts:' || CHR(92) || 'n'" in _MIG26
+
+
+def test_v026_keeps_v22_delivery_semantics():
+    # per-route ledger, retries, and the loud expiry path all survive v3
+    for marker in ("ALERT_DELIVERIES", "route_send_failed", "undelivered_expired",
+                   "NOTIFIED_AT"):
+        assert marker in _MIG26, marker
+
+
+def test_webhook_script_carries_the_teams_recipe():
+    script = (_ROOT / "snowflake" / "webhook_delivery.sql").read_text(encoding="utf-8")
+    assert "vnd.microsoft.card.adaptive" in script       # Workflows envelope
+    assert "SNOWFLAKE_WEBHOOK_MESSAGE" in script.split("card.adaptive", 1)[1]
+    assert "same body template works" not in script      # the retired-connector lie
+    assert "OVERWATCH_WEBHOOK_TEAMS" in script
+    teardown = (_ROOT / "snowflake" / "teardown.sql").read_text(encoding="utf-8")
+    assert "OVERWATCH_WEBHOOK_TEAMS" in teardown
+
+
+def test_mart_family_design_doc_exists():
+    doc = (_ROOT / "docs" / "design" / "V027_MART_FAMILY.md").read_text(encoding="utf-8")
+    assert "MART_WAREHOUSE_EFFICIENCY_DAILY" in doc
+    assert "test_perf_budgets" in doc                    # adoption lowers budgets
+
