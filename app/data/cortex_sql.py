@@ -136,7 +136,26 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1, 2
-HAVING SUM(COALESCE(TOKEN_CREDITS, 0)) > 0
 ORDER BY CREDITS DESC
 LIMIT 200
+"""
+
+
+def cortex_source_costs(days: int) -> str:
+    """AI credits by SOURCE from the Cortex Code usage views — the views
+    that actually bill this account (live finding 2026-07-08: the model
+    view was empty while Snowsight/CLI code credits carried the AI spend)."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    SOURCE AS FUNCTION_NAME,
+    'Cortex Code' AS MODEL_NAME,
+    COUNT(*) AS REQUESTS,
+    SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 4) AS CREDITS,
+    ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
+          / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
+FROM ({_COMBINED_CODE_USAGE.format(days=days)})
+GROUP BY 1
+ORDER BY CREDITS DESC
 """

@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.8.1 — live round 3: six fixes from the first full day on v4.8 (2026-07-08)
+
+- POLICY (V025): SEC_BREAK_GLASS_USE disabled — ACCOUNTADMIN /
+  SNOW_ACCOUNTADMINS are this account's routine operating roles, and the
+  rule watches only those two. The Security page panel keeps the
+  visibility; bulk-resolve the open events as NOISE.
+- FIXED: stored-proc $/call leaderboard was empty — the CALL-name regex
+  reached Snowflake as 'CALLs+' (the string literal ate the backslash; the
+  V022 lesson, one layer deeper). POSIX [[:space:]] now — zero backslashes
+  at any layer. $0-attribution procs stay visible with an ATTRIBUTED_CALLS
+  count instead of vanishing.
+- FIXED: AI unit costs fall back to the Cortex CODE usage views
+  (Snowsight/CLI token credits) — that's where this account's AI spend
+  actually bills; the Functions/model view stays primary where populated.
+- FIXED: Trexis roles no longer leak into ALFA's role-usage chart and day
+  replay — new companies.role_clause (name heuristic) on role-grain
+  builders (role share, day DDL, day grants).
+- CHARTS: axis labels no longer truncate mid-name (labelLimit 260, value
+  headroom on bar charts); every daily chart now labels DAYS ("Jul 05")
+  instead of "12 PM" hour ticks that read as intra-day data.
+- CLARITY: Overview spend KPI documents its warehouse-exact lens; Cost →
+  Spend gains "Why totals differ across pages (and vs Snowsight)" with the
+  actual split (billed vs warehouse-exact vs storage/transfer).
+- New cost builders registered in the canary (column drift pages us, not
+  a user); locks updated.
+
 ## 4.8.0 — unit costs: the price tag on one query, one CALL, one AI request (2026-07-08)
 
 - NEW (Cost & Contract → Unit costs): MEASURED per-unit dollars, no

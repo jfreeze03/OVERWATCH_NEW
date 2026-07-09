@@ -161,6 +161,24 @@ def environment_clause(environment: str, column: str = "DATABASE_NAME") -> str:
     return assert_no_control_tokens(clause)
 
 
+def role_clause(company: str, column: str = "ROLE_NAME") -> str:
+    """Company scope for ROLE-grain rows (heuristic: _TRXS_ in the name).
+
+    Live finding 2026-07-08: Trexis Terraform roles (TF_O_TRXS_SYSADMIN_*)
+    topped ALFA's role-usage chart because they run on shared/default
+    warehouses that classify ALFA. Role names are the only company signal
+    at role grain; mirrors classify_user's prefix heuristic.
+    """
+    company = str(company or DEFAULT_COMPANY)
+    if company == "Trexis":
+        clause = f"UPPER({column}) LIKE '%TRXS%'"
+    elif company == "ALFA":
+        clause = f"(COALESCE(UPPER({column}), '') NOT LIKE '%TRXS%')"
+    else:
+        clause = ""
+    return assert_no_control_tokens(clause)
+
+
 def database_options(company: str) -> tuple[str, ...]:
     """Known databases for the sidebar picker, scoped to the company."""
     company = str(company or DEFAULT_COMPANY)

@@ -195,8 +195,11 @@ def render() -> None:
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
             "spark": _spend_spark,
-            "help": "Warehouse metering credits x configured rate "
-                    f"(${rate:.2f}/credit from {settings.get('_source')}).",
+            "help": "Warehouse-exact metering credits x rate "
+                    f"(${rate:.2f}/credit from {settings.get('_source')}) — the "
+                    "company-scopable lens. Serverless/AI and the cloud-services rebate "
+                    "live on Cost -> Spend (account billed total); Snowsight's Cost "
+                    "Management adds storage and data transfer, so it reads higher.",
         },
         budget_kpi(settings, mtd_spend) if mtd_source else {
             "label": "MTD spend",

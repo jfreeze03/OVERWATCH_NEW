@@ -63,10 +63,11 @@ def test_teardown_covers_v024_objects():
     assert "'WAREHOUSE_CONFIG_SNAPSHOT'" in teardown
 
 
-def test_validate_expects_v024():
+def test_validate_expects_at_least_v024():
+    import re
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V024 applied" in validate
-    assert "BETWEEN 1 AND 24) = 24" in validate
+    m = re.search(r"V001\.\.V0(\d+) applied", validate)
+    assert m and int(m.group(1)) >= 24                 # floor, not tip: V025+ must not break this
 
 
 # ---------------------------------------------------------------------------

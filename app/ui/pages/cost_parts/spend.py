@@ -73,6 +73,22 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
     ])
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
+    with st.expander("Why totals differ across pages (and vs Snowsight)"):
+        cat_usd = df.groupby("CATEGORY")["USD"].sum().to_dict()
+        wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
+        other_usd = float(sum(cat_usd.values())) - wh_usd
+        st.markdown(
+            f"- **This page — billed spend ({days}d): {format_usd(billed_usd)}.** Account-wide, "
+            "every compute service, cloud-services rebate applied. The number that ties to the bill.\n"
+            f"- **Overview / company cards — warehouse-exact: {format_usd(wh_usd)}** of the above is "
+            "warehouse metering, the only grain Snowflake scopes per warehouse — which is why the "
+            f"company filter lives there. The remaining {format_usd(other_usd)} (serverless, AI, "
+            "replication, reader) has no warehouse to scope by.\n"
+            "- **Snowsight → Cost Management reads higher than both:** it adds storage and data "
+            "transfer dollars and prices from USAGE_IN_CURRENCY (list/contract currency), and its "
+            "MTD window follows calendar-month boundaries in account time.\n"
+            "- Same telemetry, different lenses — each number is exact for its own question."
+        )
     result_caption(res)
 
     st.markdown("**Cloud-services health by warehouse**")

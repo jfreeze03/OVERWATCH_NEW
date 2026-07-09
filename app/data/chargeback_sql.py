@@ -52,6 +52,9 @@ def role_share_within_warehouse(days: int, company: str = "ALL") -> str:
         "WAREHOUSE_NAME IS NOT NULL",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.warehouse_clause(company),
+        # Role-grain leak fix (2026-07-08): Trexis roles on shared warehouses
+        # must not appear under an ALFA scope.
+        companies.role_clause(company),
     )
     return f"""
 SELECT

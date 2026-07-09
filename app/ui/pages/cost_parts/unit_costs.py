@@ -88,16 +88,27 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             "FAIL_PCT": st.column_config.NumberColumn("Fail %", format="%.1f%%"),
         })
         result_caption(p_res, note="Database/schema = the CALL's session context; a proc "
-                                   "may read other databases. Change-impact (Operations) "
-                                   "watches these same numbers around each ALTER.")
+                                   "may read other databases. ATTRIBUTED_CALLS counts calls "
+                                   "the attribution view matched — $0 rows with calls mean "
+                                   "attribution hasn't caught up (~6h) or the children ran "
+                                   "without a warehouse. Change-impact (Operations) watches "
+                                   "these same numbers around each ALTER.")
 
     st.divider()
     st.markdown("**AI — $ by function and model**")
+    if not ai_res.usable():
+        # This account bills AI through Cortex CODE (Snowsight/CLI token
+        # credits), not SQL Cortex functions — fall back to those views
+        # (live finding 2026-07-08: model view empty, code credits real).
+        ai_res = run(cortex_sql.cortex_source_costs(days), page=_PAGE,
+                     key=f"unit_ai_src_{days}", tier="historical",
+                     source="CORTEX_CODE_*_USAGE_HISTORY (source grain)")
     if not ai_res.ok:
-        st.caption("CORTEX_FUNCTIONS_USAGE_HISTORY is not accessible on this account/role — "
-                   "per-user AI spend remains available under Chargeback & AI.")
+        st.caption("Neither CORTEX_FUNCTIONS_USAGE_HISTORY nor the Cortex Code usage views "
+                   "are accessible on this account/role — per-user AI spend remains "
+                   "available under Chargeback & AI.")
     elif ai_res.empty:
-        st.caption("No Cortex function usage in this window.")
+        st.caption("No Cortex usage recorded in this window (functions or code).")
     else:
         adf = ai_res.df.copy()
         adf["USD"] = adf["CREDITS"].map(lambda c: credits_to_usd(c, ai_rate))

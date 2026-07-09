@@ -52,9 +52,12 @@ def _day_replay() -> None:
                  tier="recent", source="FACT_WAREHOUSE_DAILY vs 14d baseline")
     activity = run(mart_sql.day_activity(day_iso), page=_PAGE, key=f"rp_act_{day_iso}",
                    tier="recent", source="FACT_QUERY_HOURLY (day vs baseline)")
-    ddl = run(security_sql.day_ddl(day_iso), page=_PAGE, key=f"rp_ddl_{day_iso}",
+    rp_company = filters()["company"]
+    ddl = run(security_sql.day_ddl(day_iso, rp_company), page=_PAGE,
+              key=f"rp_ddl_{rp_company}_{day_iso}",
               tier="historical", source="QUERY_HISTORY (DDL that day)")
-    grants = run(security_sql.day_grants(day_iso), page=_PAGE, key=f"rp_gr_{day_iso}",
+    grants = run(security_sql.day_grants(day_iso, rp_company), page=_PAGE,
+                 key=f"rp_gr_{rp_company}_{day_iso}",
                  tier="historical", source="GRANTS_TO_USERS (that day)")
     tasks = run(mart_sql.day_task_failures(day_iso), page=_PAGE, key=f"rp_tf_{day_iso}",
                 tier="recent", source="FACT_TASK_DAILY (failures that day)")

@@ -48,9 +48,11 @@ def test_procedure_costs_roll_children_to_the_call():
     sql = insights_sql.procedure_costs_usd(30)
     assert "COALESCE(ROOT_QUERY_ID, QUERY_ID)" in sql  # children roll up to the CALL
     assert "QUERY_TYPE = 'CALL'" in sql
-    assert "REGEXP_SUBSTR" in sql and "CALL" in sql    # proc name from the statement
+    assert "CALL[[:space:]]+" in sql                   # POSIX class: NO backslashes at any
+    assert chr(92) not in sql                          # layer (the 'CALLs+' live bug, r3)
     assert "CREDITS_PER_CALL" in sql
-    assert "HAVING SUM(COALESCE(att.CREDITS, 0)) > 0" in sql
+    assert "ATTRIBUTED_CALLS" in sql                   # $0 rows stay visible + diagnosable
+    assert "HAVING" not in sql
 
 
 def test_procedure_costs_honor_db_and_schema_filters():
@@ -74,8 +76,16 @@ def test_cortex_model_costs_shape():
     assert "CORTEX_FUNCTIONS_USAGE_HISTORY" in sql
     assert "MODEL_NAME" in sql and "FUNCTION_NAME" in sql
     assert "CREDITS_PER_1M_TOKENS" in sql              # unit rate, not just totals
-    assert "HAVING SUM(COALESCE(TOKEN_CREDITS, 0)) > 0" in sql
     assert "-30," in sql and "-90," in cortex_sql.cortex_model_costs(999999)
+
+
+def test_cortex_source_costs_covers_code_billing():
+    # This account's AI spend arrives via Cortex CODE (Snowsight/CLI) —
+    # the fallback grain must read those views and price per 1M tokens.
+    sql = cortex_sql.cortex_source_costs(30)
+    assert "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY" in sql
+    assert "CORTEX_CODE_CLI_USAGE_HISTORY" in sql
+    assert "CREDITS_PER_1M_TOKENS" in sql
 
 
 # ---------------------------------------------------------------------------

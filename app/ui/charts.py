@@ -81,7 +81,7 @@ def spend_trend(
     """Daily spend line with optional daily-budget rule and forecast band."""
     data = df[[day_col, usd_col]].copy()
     data.columns = ["Day", "USD"]
-    enc_x = alt.X("Day:T", title=None)
+    enc_x = alt.X("Day:T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy"))
     enc_y = alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f"))
     tip = [alt.Tooltip("Day:T"), alt.Tooltip("USD:Q", format="$,.2f", title="Spend")]
     # Data-less child specs + data on the layer: the frame ships in the page
@@ -117,8 +117,11 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
                         stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
-    enc_y = alt.Y("Label:N", sort="-x", title=None)
-    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"))
+    enc_y = alt.Y("Label:N", sort="-x", title=None,
+                  axis=alt.Axis(labelLimit=260))  # full names (hover for longer)
+    dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
+    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"),
+                  scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
     base = _base(data, height=max(_HEIGHT, 30 * len(data)))
     bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
@@ -141,7 +144,7 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
         _base(data)
         .mark_bar(color=grad, cornerRadiusEnd=3, size=18)
         .encode(
-            x=alt.X("Day:T", title=None),
+            x=alt.X("yearmonthdate(Day):T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
             y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
             tooltip=[alt.Tooltip("Day:T", title="Day"),
                      alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
@@ -157,7 +160,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         _base(data)
         .mark_bar()
         .encode(
-            y=alt.Y("Label:N", sort="-x", title=None),
+            y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
             x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
             tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Value:Q", format=",.0f")],
         )
@@ -172,7 +175,7 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
         _base(data)
         .mark_bar()
         .encode(
-            x=alt.X("Day:T", title=None),
+            x=alt.X("yearmonthdate(Day):T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
             y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
             color=alt.Color("Category:N", legend=alt.Legend(orient="bottom", title=None)),
             tooltip=[
@@ -291,7 +294,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
         _base(data)
         .mark_line(point=True)
         .encode(
-            x=alt.X("Day:T", title=None),
+            x=alt.X("Day:T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
             y=alt.Y("Value:Q", title=title or value_col),
             tooltip=["Day:T", "Value:Q"],
         )
