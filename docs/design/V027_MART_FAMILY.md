@@ -1,6 +1,6 @@
 # V027 — the mart family (design)
 
-Status: DESIGNED, not built. Consolidates Codex rounds 2–3 items #2-4, #6-11,
+Status: APPROVED 2026-07-08 (owner: Joe) — build next session, riders included. Consolidates Codex rounds 2–3 items #2-4, #6-11,
 #13-14, #17, #19 into one migration batch. Build AFTER a few days of v4.9
 telemetry (the 2% sampled baseline + slow sink) confirms priority order.
 
@@ -78,3 +78,32 @@ in the Admin → Performance panel once `CACHE_HIT` telemetry exists.
   telemetry, not by this batch.
 - Dynamic Tables for these marts: the V015 DT pilot's cost review decides
   whether marts 1-2 convert later; V027 ships tasks (predictable, provable).
+
+## Approved riders (Codex round 5, owner-approved 2026-07-08)
+
+Fold into the V027 build — panels over existing/new data, no extra programs:
+- **Delivery SLOs** (r5 #14): panel over ALERT_DELIVERIES + APP_ERROR_LOG —
+  send success %, latency (RAISED_AT->SENT_AT), retries, unacked criticals.
+- **Alert fatigue** (r5 #15): alerts/user/week, NOISE/EXPECTED/ACTIONED mix,
+  repeated dedupe keys — over ALERT_EVENTS/ALERT_AUDIT.
+- **Usage events** (r5 #19): APP_USAGE gains EVENT_KIND (page_visit, rerun,
+  saved_view_apply, csv_export, remediation_exec) in the telemetry rider;
+  the operator-effectiveness view (r5 #20) derives from it.
+- **Acceptance metrics** (r5 #4, honest subset): generated -> executed ->
+  verified/rejected derived from REMEDIATION_LOG + SAVINGS_LEDGER. No
+  impression tracking — Streamlit cannot measure "viewed" truthfully.
+- **Forecast quality** (r5 #11): extend the existing backtest panel with
+  MAPE/bias per engine.
+
+## Approved sequence after V027
+
+1. **V028 — Incident object (design doc first)**: rolls alerts, DDL, task
+   failures, warehouse changes, and fixes into one lifecycle object.
+   Metrics: incident count, MTTA/MTTR, time-to-detect, reopen rate.
+2. **V029 — Owner registry**: generalize DEPARTMENT_MAP to OBJECT_OWNERS
+   (warehouse/db/schema/task/pipeline/rule). Headline metric: unowned
+   spend %. Feeds budget-by-owner (r5 #12) and data-product scorecards.
+3. Re-assess the program-shaped items (r5 #9 data quality, #10 product
+   scorecards, #17 classification) once 1-2 land — they need config
+   owners, not just code.
+
