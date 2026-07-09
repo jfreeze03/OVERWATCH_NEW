@@ -16,7 +16,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.core.query import run, run_batch
-from app.data import cortex_sql, insights_sql
+from app.data import cortex_sql, insights_sql, mart27_sql
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.ui.components import guard, kpi_row, result_caption, styled_table
 
@@ -59,6 +59,14 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         ai_res = run(cortex_sql.cortex_model_costs(days), page=_PAGE,
                      key=f"unit_ai_{days}", tier="historical",
                      source="CORTEX_FUNCTIONS_USAGE_HISTORY")
+
+    # AI goes mart-first (FACT_AI_USAGE_DAILY unifies Code + Functions,
+    # loaded daily) so the KPI and the panel read the same source; the
+    # batch/live results remain the fallback chain below.
+    _ai_m = run(mart27_sql.ai_costs_by_model(days), page=_PAGE, key=f"unit_ai_mart_{days}",
+                tier="recent", source="FACT_AI_USAGE_DAILY (mart, loaded daily — Code + Functions)")
+    if _ai_m.usable():
+        ai_res = _ai_m
 
     kpis = []
     if q_res.usable():

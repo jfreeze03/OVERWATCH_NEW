@@ -10,7 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.core.query import run
-from app.data import cost_sql, mart_sql
+from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.ui import charts
@@ -18,6 +18,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     result_caption,
+    run_mart_first,
     styled_table,
 )
 
@@ -110,9 +111,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
         elevated = csr.df[csr.df["STATUS"].astype(str) == "ELEVATED"]
         if not elevated.empty:
             st.markdown("**Why is it elevated? Compile-heavy query families**")
-            comp = run(cost_sql.compile_heavy_families(days, company), page=_PAGE,
-                       key=f"compile_fams_{company}_{days}", tier="historical",
-                       source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME)")
+            comp = run_mart_first(
+                mart27_sql.family_compile_heavy(days, company),
+                cost_sql.compile_heavy_families(days, company),
+                page=_PAGE, key=f"compile_fams_{company}_{days}",
+                mart_source="MART_QUERY_FAMILY_DAILY (mart, run-weighted averages)",
+                live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
             if guard(comp, "No query family with 20+ runs averages >0.5s compile time — "
                            "the ratio driver is likely many tiny/metadata queries instead."):
                 st.dataframe(comp.df, hide_index=True, use_container_width=True)
@@ -152,9 +156,17 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
             with col:
-                res = run(cost_sql.allocated_attribution(days, dim, company, database, schema_contains), page=_PAGE,
-                          key=f"alloc_{dim}_{company}_{days}", tier="historical",
-                          source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
+                _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains)
+                if database or schema_contains:
+                    # the allocation mart has no schema sub-filter — live only
+                    res = run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
+                else:
+                    res = run_mart_first(
+                        mart27_sql.alloc_attribution(days, dim.replace("_NAME", ""), company),
+                        _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                        mart_source="MART_COST_ALLOCATION_DAILY (mart — warehouse-hour credit share)",
+                        live_source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share, live fallback)")
                 if guard(res, f"No query history to allocate by {label}."):
                     vdf = res.df.copy()
                     usd_col = next((c for c in vdf.columns if str(c).upper().endswith('_USD') or str(c).upper() == 'ALLOCATED_USD'), None)
@@ -163,7 +175,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                         charts.waterfall_usd(vdf, label_col, usd_col)
                         st.caption('Waterfall: how the window total builds up, largest contributors first (allocated).')
                     alloc = res.df.copy()
-                    alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
+                    if "ALLOC_CREDITS" in alloc.columns:
+                        # mart path: dollarize allocated credits directly —
+                        # better than share x window (idle handling included)
+                        alloc["ALLOCATED_USD"] = alloc["ALLOC_CREDITS"].map(safe_float) * rate
+                    else:
+                        alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
                     charts.bar_usd(alloc, "DIMENSION", "ALLOCATED_USD", title=f"Allocated $ by {label}")
 
     st.markdown("**Daily anomaly check (per warehouse)**")

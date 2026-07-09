@@ -1,6 +1,6 @@
 # V027 — the mart family (design)
 
-Status: SHIPPED (schema + loaders + readers + telemetry rider) in V027__mart_family.sql, 2026-07-08. WAVE 2 (next app release): panel adoptions go fact-first through app/data/mart27_sql.py once the marts hold data, each adoption lowering a pinned live-scan budget; plus the rider PANELS (delivery SLO, fatigue, acceptance, forecast quality). Consolidates Codex rounds 2–3 items #2-4, #6-11,
+Status: SHIPPED end to end. Schema + loaders + readers + telemetry rider in V027__mart_family.sql (2026-07-08); WAVE 2 panel adoptions SHIPPED 2026-07-09 (v4.12.0) — ten surfaces go mart-first through app/data/mart27_sql.py aggregate readers via components.run_mart_first, live builders retained as labeled fallbacks, six more pages pinned in tests/test_perf_budgets.py (only go down). Rider PANELS (delivery SLO, fatigue, acceptance, forecast quality) land in the same release. Consolidates Codex rounds 2–3 items #2-4, #6-11,
 #13-14, #17, #19 into one migration batch. Build AFTER a few days of v4.9
 telemetry (the 2% sampled baseline + slow sink) confirms priority order.
 

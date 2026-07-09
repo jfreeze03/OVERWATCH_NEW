@@ -280,6 +280,26 @@ def result_caption(result: QueryResult, note: str = "") -> None:
     st.caption(" · ".join(bits))
 
 
+
+def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
+                   mart_source: str, live_source: str,
+                   mart_tier: str = "recent", live_tier: str = "historical",
+                   max_rows: int | None = None):
+    """Fact-first read with the live builder as labeled fallback — the
+    Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
+    result must be usable (ok AND non-empty) or the live path runs under
+    its own cache key; callers surface the source via result_caption, so
+    a viewer can always tell which path served the panel."""
+    from app.core.query import run
+    kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
+    res = run(mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
+              source=mart_source, **kwargs)
+    if res.usable():
+        return res
+    return run(live_sql, page=page, key=key, tier=live_tier,
+               source=live_source, **kwargs)
+
+
 def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool:
     """Standard render gate: labeled error / labeled empty / truncation banner.
 

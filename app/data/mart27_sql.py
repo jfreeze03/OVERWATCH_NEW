@@ -9,8 +9,9 @@ log before it pages a user.
 
 from __future__ import annotations
 
+from app import companies
 from app.config import mart_object
-from app.core.sqlsafe import sql_literal
+from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days
 
 
@@ -95,11 +96,15 @@ LIMIT 5000
 """
 
 
-def task_graphs(days: int, company_database: str = "") -> str:
+def task_graphs(days: int, company: str = "ALL", database: str = "",
+                schema_contains: str = "") -> str:
+    """Same filter surface as graph_sql.graph_daily_costs (wave 2 parity)."""
     days = bounded_days(days, 400)
-    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
-    if str(company_database or "").strip():
-        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(company_database).upper())}")
+    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             companies.database_clause(company, "DATABASE_NAME"),
+             contains_filter("SCHEMA_NAME", schema_contains)]
+    if str(database or "").strip():
+        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
     return f"""
 SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
        TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS
@@ -123,13 +128,14 @@ LIMIT 10000
 
 def incident_timeline(hours: int = 48, company: str = "ALL") -> str:
     hours = max(1, min(int(hours or 48), 96))
-    where = and_where(f"EVENT_TS >= DATEADD('hour', -{hours}, CURRENT_TIMESTAMP())",
-                      _company_arm(company))
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f"(COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    where = and_where(f"EVENT_TS >= DATEADD('hour', -{hours}, CURRENT_TIMESTAMP())", comp)
     return f"""
-SELECT EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID
+SELECT EVENT_TS AS AT, KIND AS EVENT_TYPE, SEVERITY, TITLE AS LABEL, COMPANY, REF_ID
 FROM {mart_object("MART_INCIDENT_TIMELINE")}
 WHERE {where}
-ORDER BY EVENT_TS DESC
+ORDER BY AT DESC
 LIMIT 2000
 """
 
@@ -145,4 +151,214 @@ FROM {mart_object("FACT_AI_USAGE_DAILY")}
 WHERE {and_where(*parts)}
 ORDER BY DAY, CREDITS DESC
 LIMIT 5000
+"""
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 (v4.12.0): aggregate readers matching each live builder's output
+# contract, so panels swap mart-first without page rewrites. Sources of
+# truth: the loaders in V027/V028; grain caveats live in the source labels
+# (e.g. p95 here is the PEAK DAILY p95 of the mart, not a raw-row p95).
+# ---------------------------------------------------------------------------
+
+def eff_idle_analysis(days: int, company: str = "ALL") -> str:
+    """insights_sql.idle_warehouse_analysis contract from the efficiency mart.
+    IDLE_CREDITS uses each day's IDLE_PCT x credits (loader-computed from
+    billed-vs-active hours), so no metering/query-history join at read time."""
+    days = bounded_days(days, 400)
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      _company_arm(company))
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    ANY_VALUE(COMPANY) AS COMPANY,
+    SUM(BILLED_HOURS) AS METERED_HOURS,
+    GREATEST(SUM(BILLED_HOURS) - SUM(ACTIVE_HOURS), 0) AS IDLE_HOURS,
+    ROUND(SUM(CREDITS_TOTAL), 4) AS TOTAL_CREDITS,
+    ROUND(SUM(CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100), 4) AS IDLE_CREDITS
+FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
+WHERE {where}
+GROUP BY WAREHOUSE_NAME
+HAVING SUM(CREDITS_TOTAL) > 0
+ORDER BY IDLE_CREDITS DESC
+LIMIT 100
+"""
+
+
+def eff_sizing_profile(days: int, company: str = "ALL") -> str:
+    """insights_sql.warehouse_sizing_profile contract from the efficiency
+    mart. P95_ELAPSED_SEC is the peak daily p95 (callers label it)."""
+    days = bounded_days(days, 400)
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      _company_arm(company))
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    ANY_VALUE(COMPANY) AS COMPANY,
+    ROUND(SUM(CREDITS_TOTAL), 4) AS CREDITS_TOTAL,
+    ROUND(SUM(CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100)
+          / NULLIF(SUM(CREDITS_TOTAL), 0) * 100, 1) AS IDLE_PCT,
+    SUM(QUERIES) AS QUERY_COUNT,
+    MAX(COALESCE(P95_S, 0)) AS P95_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(QUEUED_MIN, 0)) * 60, 1) AS QUEUED_SEC,
+    ROUND(SUM(COALESCE(SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
+FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
+WHERE {where}
+GROUP BY WAREHOUSE_NAME
+HAVING SUM(CREDITS_TOTAL) > 0
+ORDER BY CREDITS_TOTAL DESC
+LIMIT 100
+"""
+
+
+def family_compile_heavy(days: int, company: str = "ALL") -> str:
+    """cost_sql.compile_heavy_families contract from the family mart.
+    Company scoping is database-heuristic (the mart has no user grain);
+    averages are run-weighted across days."""
+    days = bounded_days(days, 400)
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      companies.database_clause(company, "DATABASE_NAME"))
+    return f"""
+SELECT
+    QUERY_HASH AS QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT,
+    SUM(RUNS) AS RUNS,
+    ROUND(SUM(COMPILE_MS_AVG * RUNS) / NULLIF(SUM(RUNS), 0) / 1000, 2) AS AVG_COMPILE_S,
+    ROUND(SUM(TOTAL_EXEC_SEC) / NULLIF(SUM(RUNS), 0), 2) AS AVG_TOTAL_S,
+    ROUND(SUM(COMPILE_MS_AVG * RUNS) / 1000
+          / NULLIF(SUM(TOTAL_EXEC_SEC), 0) * 100, 1) AS COMPILE_PCT,
+    ROUND(SUM(COMPILE_MS_AVG * RUNS) / 3600000, 2) AS TOTAL_COMPILE_HOURS
+FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
+WHERE {where}
+GROUP BY QUERY_HASH
+HAVING SUM(RUNS) >= 20 AND SUM(COMPILE_MS_AVG * RUNS) / NULLIF(SUM(RUNS), 0) > 500
+ORDER BY SUM(COMPILE_MS_AVG * RUNS) DESC
+LIMIT 25
+"""
+
+
+def family_repeat_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
+                               database: str = "", schema_contains: str = "") -> str:
+    """insights_sql.repeat_query_fingerprints contract from the family mart.
+    ELAPSED here is exec-time (the mart's grain) — callers label the source.
+    LAST_RUN degrades to the day grain."""
+    days = bounded_days(days, 400)
+    min_runs = max(2, min(int(min_runs or 10), 1000))
+    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             companies.database_clause(company, "DATABASE_NAME"),
+             contains_filter("SCHEMA_NAME", schema_contains)]
+    if str(database or "").strip():
+        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+    where = and_where(*parts)
+    return f"""
+SELECT
+    QUERY_HASH AS FINGERPRINT,
+    SUM(RUNS) AS RUNS,
+    MAX(USERS) AS USERS,
+    MAX(WAREHOUSES) AS WAREHOUSES,
+    ROUND(SUM(TOTAL_EXEC_SEC) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
+    ROUND(SUM(TOTAL_EXEC_SEC) / NULLIF(SUM(RUNS), 0), 2) AS AVG_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(GB_SCANNED_AVG, 0) * RUNS) / 1024, 4) AS TOTAL_TB_SCANNED,
+    ROUND(SUM(COALESCE(CACHE_PCT_AVG, 0) * RUNS) / NULLIF(SUM(RUNS), 0), 1) AS AVG_CACHE_PCT,
+    ANY_VALUE(SAMPLE_TEXT) AS QUERY_PREVIEW,
+    MAX(DAY) AS LAST_RUN
+FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
+WHERE {where}
+GROUP BY QUERY_HASH
+HAVING SUM(RUNS) >= {min_runs}
+ORDER BY TOTAL_ELAPSED_HOURS DESC
+LIMIT 50
+"""
+
+
+def role_share(days: int, company: str = "ALL") -> str:
+    """chargeback_sql.role_share_within_warehouse contract from the role-hour
+    fact. Keeps BOTH guards: the fact's COMPANY column and the TRXS role
+    heuristic (a Trexis automation role on an ALFA warehouse must not leak
+    into ALFA's share — the live-round-3 lesson)."""
+    days = bounded_days(days, 400)
+    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+                      _company_arm(company),
+                      companies.role_clause(company, "ROLE_NAME"))
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+    SUM(QUERIES) AS QUERY_COUNT,
+    ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
+    RATIO_TO_REPORT(SUM(EXEC_SEC)) OVER (PARTITION BY WAREHOUSE_NAME) AS ELAPSED_SHARE
+FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
+WHERE {where}
+GROUP BY WAREHOUSE_NAME, ROLE_NAME
+ORDER BY WAREHOUSE_NAME, ELAPSED_SEC DESC
+LIMIT 2000
+"""
+
+
+def alloc_attribution(days: int, dimension: str, company: str = "ALL") -> str:
+    """cost_sql.allocated_attribution contract (+ ALLOC_CREDITS, which the
+    live builder cannot offer): share still ships for the fallback-parity
+    path, but mart callers can dollarize ALLOC_CREDITS directly."""
+    days = bounded_days(days, 400)
+    dim = str(dimension or "USER").upper()
+    if dim not in ("USER", "DATABASE", "SCHEMA", "ROLE"):
+        raise ValueError(f"dimension must be USER/DATABASE/SCHEMA/ROLE, got {dimension!r}")
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      f"DIMENSION = {sql_literal(dim)}",
+                      _company_arm(company))
+    return f"""
+SELECT
+    COALESCE(KEY_NAME, 'UNKNOWN') AS DIMENSION,
+    ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
+    RATIO_TO_REPORT(SUM(ALLOC_CREDITS)) OVER () AS ELAPSED_SHARE,
+    ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
+FROM {mart_object("MART_COST_ALLOCATION_DAILY")}
+WHERE {where}
+GROUP BY KEY_NAME
+ORDER BY ALLOC_CREDITS DESC
+LIMIT 100
+"""
+
+
+def schema_window_summary(days: int, company: str = "ALL", database: str = "",
+                          schema_contains: str = "") -> str:
+    """ops_sql.query_window_summary contract from the schema-hour fact — the
+    read that used to force a live QUERY_HISTORY scan whenever a schema
+    filter was active. P95 is the peak hourly-group p95 (callers label it)."""
+    days = bounded_days(days, 400)
+    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+             _company_arm(company),
+             contains_filter("SCHEMA_NAME", schema_contains)]
+    if str(database or "").strip():
+        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+    return f"""
+SELECT
+    SUM(QUERIES) AS QUERY_COUNT,
+    SUM(FAILS) AS FAILED_COUNT,
+    MAX(COALESCE(P95_S, 0)) AS P95_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(QUEUED_SEC, 0)), 1) AS QUEUED_SEC,
+    ROUND(SUM(COALESCE(SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
+FROM {mart_object("FACT_QUERY_SCHEMA_HOURLY")}
+WHERE {and_where(*parts)}
+"""
+
+
+def ai_costs_by_model(days: int) -> str:
+    """cortex_sql model/source cost contract from FACT_AI_USAGE_DAILY —
+    Code + Functions in one read, loaded daily."""
+    days = bounded_days(days, 400)
+    return f"""
+SELECT
+    SOURCE AS FUNCTION_NAME,
+    COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+    SUM(COALESCE(REQUESTS, 0)) AS REQUESTS,
+    SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+    ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS,
+    ROUND(SUM(COALESCE(CREDITS, 0)) * 1000000
+          / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
+FROM {mart_object("FACT_AI_USAGE_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY SOURCE, MODEL_NAME
+ORDER BY CREDITS DESC
+LIMIT 200
 """

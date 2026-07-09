@@ -14,7 +14,7 @@ from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
-from app.data import insights_sql, mart_sql, ops_sql, security_sql
+from app.data import insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
@@ -30,6 +30,7 @@ from app.ui.components import (
     notify,
     panel_help,
     result_caption,
+    run_mart_first,
     selectable_table,
     styled_table,
 )
@@ -112,9 +113,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # ---- 1. Idle warehouse advisor -------------------------------------------
     st.markdown("**Idle warehouse advisor**")
     st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
-    idle_res = run(insights_sql.idle_warehouse_analysis(days, company), page=_PAGE,
-                   key=f"idle_{company}_{days}", tier="historical",
-                   source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (hourly join)")
+    idle_res = run_mart_first(
+        mart27_sql.eff_idle_analysis(days, company),
+        insights_sql.idle_warehouse_analysis(days, company),
+        page=_PAGE, key=f"idle_{company}_{days}",
+        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+        live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if guard(idle_res, "No warehouse metering in this window."):
         advisor = idle_advisor(idle_res.df, rate, days)
         flagged = advisor[advisor["FLAGGED"]]
@@ -171,9 +175,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                      help="Profiles every warehouse over the window: queueing, spill, "
                           "p95, idle share, and x0.5/x2 cost scenarios."):
         st.caption("Toggle to run the per-warehouse sizing profile on demand.")
-    elif guard((prof_res := run(insights_sql.warehouse_sizing_profile(days, company), page=_PAGE,
-                                key=f"sizing_{company}_{days}", tier="historical",
-                                source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (profile)")),
+    elif guard((prof_res := run_mart_first(
+                    mart27_sql.eff_sizing_profile(days, company),
+                    insights_sql.warehouse_sizing_profile(days, company),
+                    page=_PAGE, key=f"sizing_{company}_{days}",
+                    mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
+                    live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                "No warehouse activity to profile in this window."):
         sized = size_recommendations(prof_res.df, rate, days)
         summary = sizing_summary(sized)
@@ -307,12 +314,18 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        help="The heaviest scan on this page — runs only when you ask.")
     if _rq_on:
         with st.spinner("Fingerprinting the window's QUERY_HISTORY…"):
-            rq_res = run(insights_sql.repeat_query_fingerprints(
-            days, company,
-            database=st.session_state.get("flt_database", ""),
-            schema_contains=st.session_state.get("flt_schema_contains", "")), page=_PAGE,
-                     key=f"repeatq_{company}_{days}", tier="historical",
-                     source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH)")
+            rq_res = run_mart_first(
+                mart27_sql.family_repeat_fingerprints(
+                    days, company,
+                    database=st.session_state.get("flt_database", ""),
+                    schema_contains=st.session_state.get("flt_schema_contains", "")),
+                insights_sql.repeat_query_fingerprints(
+                    days, company,
+                    database=st.session_state.get("flt_database", ""),
+                    schema_contains=st.session_state.get("flt_schema_contains", "")),
+                page=_PAGE, key=f"repeatq_{company}_{days}",
+                mart_source="MART_QUERY_FAMILY_DAILY (mart — exec-time grain, day-level LAST_RUN)",
+                live_source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live fallback)")
         if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
                  setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
             candidates = flag_repeat_candidates(rq_res.df)

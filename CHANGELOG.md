@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.12.0 — WAVE 2: the marts take over the panels (2026-07-09)
+
+No migration — app release only (needs V027/V028 applied and the loader
+tasks running; every adoption degrades to its live builder otherwise).
+
+- **Ten surfaces go mart-first** via the new components.run_mart_first
+  helper (mart read under `<key>_fact`, live fallback under the original
+  key, source labeled either way): idle advisor, sizing profile and
+  repeat-query scan (optimize — the 90s metering x history joins become
+  mart reads), compile-heavy families and allocated attribution (spend —
+  the mart path dollarizes ALLOC_CREDITS directly instead of share x
+  window), role share (chargeback — keeps BOTH the COMPANY column and the
+  TRXS role-heuristic guards), task graphs and schema-filtered summaries
+  (operations), schema-filtered 24h pulse and the 48h incident timeline
+  (control room), AI by function/model (unit costs — FACT_AI_USAGE_DAILY
+  unifies Code + Functions, KPI and panel now share one source).
+- **Security posture trend** (Codex r6 #15): 90-day direction per metric
+  from MART_SECURITY_POSTURE_DAILY under the governance score — unlocks
+  at 2+ days of loader history; default metric follows the V028 10-day
+  credential bucket.
+- **Eight new contract-matched aggregate readers** in mart27_sql (idle,
+  sizing, compile, repeat, role share, allocation, schema summary, AI by
+  model) + task_graphs gains full filter parity + the timeline reader
+  emits the live column contract (AT/EVENT_TYPE/LABEL, account-level rows
+  kept). All canaried. Grain caveats ride the source labels (peak-daily
+  p95, exec-time hours, day-grain LAST_RUN).
+- **Perf budgets**: six more pages pinned in tests/test_perf_budgets.py
+  (optimize 2, spend 8, chargeback 5, operations 25, unit_costs 0,
+  security 18) — counts only go down from here. Honest non-adoptions:
+  tag coverage (needs user grain the family mart lacks) and pruning
+  (needs partition stats) stay live by design.
+- Tests: tests/test_wave2_adoptions.py (14 locks: helper, contracts,
+  wiring, canaries). 557 green + floor leg.
+
 ## 4.11.0 — V028: live round 4 — replay scope, 10-day creds, readable trends, driver inventory (2026-07-09)
 
 Migration V028 (apply after V027, then validate.sql — expects V001..V028):

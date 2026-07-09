@@ -12,7 +12,7 @@ import streamlit as st
 from app.core.errors import safe_page
 from app.core.query import run, run_batch
 from app.core.state import filters
-from app.data import insights_sql, security_sql
+from app.data import insights_sql, mart27_sql, security_sql
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.ui import charts
@@ -277,6 +277,31 @@ def _change_kind(qt: object) -> str:
     return "Other"
 
 
+def _posture_trend_panel() -> None:
+    """Posture as direction, not just today (Codex r6 #15) — one cheap mart
+    read; renders nothing until the daily loader has 2+ days of history."""
+    trend = run(mart27_sql.security_posture(90), page=_PAGE, key="posture_trend",
+                tier="recent", source="MART_SECURITY_POSTURE_DAILY (loaded daily 06:30)")
+    if not trend.usable():
+        return
+    pdf = trend.df.copy()
+    if pdf["DAY"].nunique() < 2:
+        st.caption("Posture trend unlocks after the daily loader has 2+ days of history.")
+        return
+    with st.expander("Posture trend (90d) — is hygiene getting better or worse?"):
+        metrics = sorted(pdf["METRIC"].astype(str).unique())
+        default_ix = metrics.index("EXPIRING_CRED_10D") if "EXPIRING_CRED_10D" in metrics else 0
+        metric = st.selectbox("Metric", metrics, index=default_ix, key="posture_metric")
+        one = pdf[pdf["METRIC"].astype(str) == metric][["DAY", "VALUE"]].sort_values("DAY")
+        charts.daily_metric_line(one, "DAY", "VALUE", title=metric)
+        latest = float(one["VALUE"].iloc[-1]) if len(one) else 0.0
+        first = float(one["VALUE"].iloc[0]) if len(one) else 0.0
+        arrow = "flat" if latest == first else ("down " + f"{first - latest:,.0f}" if latest < first
+                                                else "up " + f"{latest - first:,.0f}")
+        st.caption(f"{metric}: {first:,.0f} -> {latest:,.0f} over the window ({arrow}). "
+                   "Loaded daily at 06:30; EXPIRING_CRED_10D replaced the 30-day bucket at V028.")
+
+
 def _clients_tab(company: str, days: int) -> None:
     """Driver/version inventory — the 'when do we need to upgrade' sheet."""
     st.markdown("**Client drivers & versions — who connects with what**")
@@ -386,6 +411,7 @@ def render() -> None:
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
     _governance_score_panel()
+    _posture_trend_panel()
     section = lazy_sections(["Access", "Changes", "Clients", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])

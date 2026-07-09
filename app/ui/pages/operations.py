@@ -12,7 +12,7 @@ from app.core.query import execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import change_impact_sql, graph_sql, insights_sql, mart_sql, ops_sql
+from app.data import change_impact_sql, graph_sql, insights_sql, mart27_sql, mart_sql, ops_sql
 from app.logic import graphs, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
@@ -29,6 +29,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    run_mart_first,
     section_header,
     selectable_table,
     styled_table,
@@ -48,6 +49,14 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         m = run(mart_sql.fact_query_window_summary(days, company, wh_filter, user_filter, database),
                 page=_PAGE, key=f"q_fact_summary_{company}_{days}", tier="recent",
                 source="FACT_QUERY_HOURLY (mart, loaded hourly)")
+        if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
+            summary, used_mart = m, True
+    elif not wh_filter and not user_filter:
+        # schema filter active: the schema-hour fact answers it (V027) —
+        # the read that used to force a live QUERY_HISTORY scan.
+        m = run(mart27_sql.schema_window_summary(days, company, database, schema_contains),
+                page=_PAGE, key=f"q_schema_fact_{company}_{days}", tier="recent",
+                source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
         if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
             summary, used_mart = m, True
     if summary is None:
@@ -520,9 +529,12 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         "$/run is a day's cost over that day's runs — allocated, not per-run metered. "
         "Serverless tasks bill separately and are listed below at task-day grain."
     )
-    res = run(graph_sql.graph_daily_costs(days, company, database, schema_contains),
-              page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
-              tier="historical", source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY")
+    res = run_mart_first(
+        mart27_sql.task_graphs(days, company, database, schema_contains),
+        graph_sql.graph_daily_costs(days, company, database, schema_contains),
+        page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
+        mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
+        live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
     if not guard(res, "No task-graph runs in this scope/window."):
         return
     daily = graphs.enrich_graph_daily(res.df, rate)

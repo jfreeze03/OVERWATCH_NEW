@@ -12,7 +12,7 @@ import streamlit as st
 from app.config import core_object
 from app.core.query import execute_statement, run
 from app.core.sqlsafe import sql_literal, sql_number
-from app.data import chargeback_sql, cortex_sql, cost_sql, mart_sql
+from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
 from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
 from app.logic.formulas import account_today, credits_to_usd, format_usd, safe_float
 from app.ui import charts
@@ -22,6 +22,7 @@ from app.ui.components import (
     notify,
     panel_help,
     result_caption,
+    run_mart_first,
     styled_table,
 )
 
@@ -272,9 +273,12 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         "Elapsed-time share per role inside each warehouse x that warehouse's exact spend. "
         "Usage lens for conversations, not the billing number."
     )
-    share_res = run(chargeback_sql.role_share_within_warehouse(days, company), page=_PAGE,
-                    key=f"cb_share_{company}_{days}", tier="historical",
-                    source="QUERY_HISTORY (elapsed share per warehouse)")
+    share_res = run_mart_first(
+        mart27_sql.role_share(days, company),
+        chargeback_sql.role_share_within_warehouse(days, company),
+        page=_PAGE, key=f"cb_share_{company}_{days}",
+        mart_source="FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)",
+        live_source="QUERY_HISTORY (elapsed share per warehouse, live fallback)")
     if share_res.usable():
         wh_usd = df.set_index("WAREHOUSE_NAME")["USD"].to_dict()
         share = share_res.df.copy()

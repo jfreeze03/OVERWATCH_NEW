@@ -61,6 +61,15 @@ _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/brief.py": 0,
     "app/ui/pages/overview.py": 1,        # _live_fallback_daily (mart-first)
     "app/ui/pages/control_room.py": 3,    # pulse/movers/task live fallbacks
+    # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
+    # under mart-first reads, or panels the marts genuinely cannot serve
+    # (tag coverage needs user grain; pruning needs partition stats).
+    "app/ui/pages/cost_parts/optimize.py": 2,
+    "app/ui/pages/cost_parts/spend.py": 8,
+    "app/ui/pages/cost_parts/ai_chargeback.py": 5,
+    "app/ui/pages/operations.py": 25,
+    "app/ui/pages/cost_parts/unit_costs.py": 0,
+    "app/ui/pages/security.py": 18,
 }
 
 

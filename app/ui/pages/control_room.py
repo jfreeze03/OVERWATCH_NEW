@@ -14,7 +14,7 @@ from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run, run_batch
 from app.core.state import filters
-from app.data import cost_sql, mart_sql, ops_sql, security_sql
+from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import triage_queue
 from app.logic.anomaly import anomaly_summary, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
@@ -188,6 +188,12 @@ def render() -> None:
                       source="FACT_QUERY_HOURLY (mart, loaded hourly)")
         if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
             pulse, pulse_from_mart = m_pulse, True
+    else:
+        s_pulse = run(mart27_sql.schema_window_summary(1, company, f["database"], f["schema_contains"]),
+                      page=_PAGE, key=f"pulse_schema_fact_{company}", tier="recent",
+                      source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
+        if s_pulse.ok and not s_pulse.empty and safe_float(s_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
+            pulse, pulse_from_mart = s_pulse, True
     if pulse is None:
         pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
                     page=_PAGE, key=f"pulse_{company}",
@@ -270,9 +276,19 @@ def render() -> None:
                       help="Mid-incident you want fresh; the 7-day retrospective is the "
                            "heavy three-source join, so it caches for an hour.")
     tl_days, tl_tier = (2, "recent") if tl_win.startswith("48h") else (7, "historical")
-    tl = run(mart_sql.incident_timeline(tl_days, f["company"] if isinstance(f, dict) and "company" in f else "ALL"),
-             page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
-             source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL)")
+    _tl_company = f["company"] if isinstance(f, dict) and "company" in f else "ALL"
+    tl = None
+    if tl_win.startswith("48h"):
+        _tl_m = run(mart27_sql.incident_timeline(48, _tl_company), page=_PAGE,
+                    key=f"incident_tl_mart_{_tl_company}", tier="recent",
+                    source="MART_INCIDENT_TIMELINE (mart, rebuilt hourly)")
+        if _tl_m.usable():
+            tl = _tl_m
+    if tl is None:
+        tl = run(mart_sql.incident_timeline(tl_days, _tl_company),
+                 page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
+                 source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL"
+                        + (", live fallback)" if tl_win.startswith("48h") else ")"))
     if tl.ok and tl.empty:
         st.success("Quiet week: no alerts, task failures, or DDL in the window.")
     elif guard(tl, ""):
