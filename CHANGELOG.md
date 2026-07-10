@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.21.0 — second-tier batch: environments, badges, the queue (2026-07-10)
+
+- **Lock waits name their environment** (owner ask): DATABASE_NAME and
+  SCHEMA_NAME join the contention table so a wait on PC_PAMODIFIER in SAN
+  reads differently from the same table in PRD. Grain widened to match;
+  never-acquired-first ranking unchanged.
+- **KPI cards carry source badges** (r7 #12, the deferred lead): a tiny
+  mart/live/stale chip inside the card — trust at eye level instead of a
+  caption below the fold. Wired on the Brief's money and criticals cards
+  first; any kpi_row item can opt in via "badge".
+- **Admin ranks the next tuning targets** (r7 #3, honest version): pain =
+  p95 x slow-fetch count from the existing per-page telemetry frame, top
+  five — the telemetry picks, not opinions; no speculative "likely fix"
+  text, because guessing fixes without reading the code is how reviews
+  go wrong.
+- Still queued with reasons: prior-period deltas on more charts (#6,
+  per-chart work), breadcrumbs (#7, needs UX design against 1.45
+  constraints), more heatmaps (#9, where data supports them).
+
 ## 4.20.0 — polish batch + partial-success batching (2026-07-10)
 
 Codex r7 adopts (owner-approved, including #1 over the evidence gate):

@@ -61,6 +61,7 @@ def render() -> None:
     # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
         {"label": "MTD spend (account)",
+         "badge": "mart" if strip_up else "stale",
          "value": format_usd(mtd_credits * rate) if strip_up else "n/a",
          "delta": (f"{mtd_credits:,.0f} credits" if strip_up else "telemetry unreachable"),
          "delta_color": "off",
@@ -68,6 +69,7 @@ def render() -> None:
          "help": "Account-wide billed credits this month. Metering-daily has no company "
                  "dimension; the company filter scopes warehouse, attribution, and user views."},
         {"label": "Open criticals",
+         "badge": "live" if strip_up else "stale",
          "value": vals.get("OPEN_CRITICAL", "0") if strip_up else "?",
          "severity": "" if strip_up else "warn",
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},

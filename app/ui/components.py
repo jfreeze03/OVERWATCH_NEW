@@ -211,8 +211,17 @@ def metric_card_html(item: dict) -> str:
                  + spark_svg(item["spark"], color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
     delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
     title_attr = f' title="{help_t}"' if help_t else ""
+    # Codex r7 #12: a tiny source badge INSIDE the card — the trust caption
+    # was honest but below the fold. Free text; convention: mart|live|stale.
+    badge = ""
+    _b = str(item.get("badge", "") or "")
+    if _b:
+        _bcol = {"mart": "#34d399", "live": "#38bdf8", "stale": "#fbbf24"}.get(_b.lower(), "#8b98ad")
+        badge = (f'<span style="float:right;font-size:9px;letter-spacing:0.08em;'
+                 f'text-transform:uppercase;color:{_bcol};border:1px solid {_bcol}40;'
+                 f'border-radius:8px;padding:1px 6px">{html.escape(_b)}</span>')
     return (f'<div class="{cls}" style="min-height:96px"{title_attr}>'
-            f'<div class="ow-card__title">{label}</div>'
+            f'<div class="ow-card__title">{label}{badge}</div>'
             f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
 
 

@@ -596,6 +596,18 @@ def _perf_rider_panels() -> None:
         })
         st.caption("Cache-hit % covers PERSISTED fetches only (slow/failed always + the 2% "
                    "healthy sample) and rows new enough to carry CACHE_HIT — a floor, not a census.")
+        # Ranked next-tuning-targets (Codex r7 #3, minus the speculative
+        # "likely fix" text): pain = p95 x slow-count, from the same frame.
+        _tt = tbp.df.copy()
+        try:
+            _tt["PAIN"] = (_tt["P95_S"].astype(float) * _tt["SLOW_2S"].astype(float)).round(1)
+            _tt = _tt.sort_values("PAIN", ascending=False).head(5)
+            st.markdown("**Next tuning targets** — pain = p95 x slow fetches; "
+                        "the telemetry picks, not opinions.")
+            styled_table(_tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "CACHE_HIT_PCT", "PAIN"]],
+                         height=160)
+        except (KeyError, TypeError, ValueError):
+            pass
     else:
         st.caption("Per-page telemetry appears after V027 and a day of traffic.")
 
