@@ -216,10 +216,8 @@ def metric_card_html(item: dict) -> str:
     badge = ""
     _b = str(item.get("badge", "") or "")
     if _b:
-        _bcol = {"mart": "#34d399", "live": "#38bdf8", "stale": "#fbbf24"}.get(_b.lower(), "#8b98ad")
-        badge = (f'<span style="float:right;font-size:9px;letter-spacing:0.08em;'
-                 f'text-transform:uppercase;color:{_bcol};border:1px solid {_bcol}40;'
-                 f'border-radius:8px;padding:1px 6px">{html.escape(_b)}</span>')
+        _bk = _b.lower() if _b.lower() in ("mart", "live", "stale") else "other"
+        badge = f'<span class="ow-src-badge ow-src-badge--{_bk}">{html.escape(_b)}</span>'
     return (f'<div class="{cls}" style="min-height:96px"{title_attr}>'
             f'<div class="ow-card__title">{label}{badge}</div>'
             f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')

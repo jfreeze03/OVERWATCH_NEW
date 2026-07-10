@@ -46,7 +46,7 @@ def _access_tab(company: str, days: int) -> None:
          "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
         {"key": "grants", "sql": security_sql.recent_role_grants(days),
          "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
-    ], page=_PAGE, tier="historical") or {}
+    ], page=_PAGE, tier="historical")
 
     mfa = batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
               tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")

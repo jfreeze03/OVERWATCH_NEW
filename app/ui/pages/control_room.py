@@ -437,6 +437,15 @@ def render() -> None:
                            f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")
         result_caption(tl)
 
+    _spk = run(mart27_sql.lock_wait_spikes(company), page=_PAGE,
+               key=f"cr_lockspike_{company}", tier="recent",
+               source="MART_LOCK_WAIT_DAILY (spikes)")
+    if _spk.ok and not _spk.empty:
+        st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
+        styled_table(_spk.df, height=180)
+        st.caption("Objects locking >=3x their own baseline — the Operations "
+                   "contention tab has the full table and history.")
+
     st.subheader("Spend movers (window vs prior)")
     movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"cr_movers_fact_{company}_{days}", tier="recent",

@@ -145,6 +145,35 @@ def _migrations_tab() -> None:
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
         styled_table(fresh.df)
+        with st.expander("Why stale? — diagnose without reading raw errors"):
+            # The deploy-gap week (2026-07): stale marts meant a failing
+            # loader, a never-run backfill, or a suspended task. Map each
+            # stale source to its likeliest cause from evidence we hold.
+            errs = run(mart_sql.app_error_log(100), page=_PAGE, key="adm_stale_errs",
+                       tier="live", source="APP_ERROR_LOG")
+            try:
+                stale = fresh.df[fresh.df["HOURS_SINCE_LOAD"].astype(float) > 26]
+            except (KeyError, TypeError, ValueError):
+                stale = fresh.df.iloc[0:0]
+            if stale.empty:
+                st.success("Nothing stale past 26h — the loaders are keeping up.")
+            for _, s in stale.iterrows():
+                name = str(s["SOURCE_NAME"])
+                hint = ""
+                if float(s.get("ROW_COUNT", 0) or 0) == 0:
+                    hint = ("never filled — run the backfill "
+                            "(RUNBOOK: SP_LOAD_MARTS_V27 HOURLY 90, then DAILY 3).")
+                if errs.ok and not errs.empty:
+                    _m = errs.df[errs.df.apply(
+                        lambda r, _n=name: _n in str(r.get("CONTEXT", ""))
+                        or _n in str(r.get("ERROR_MESSAGE", "")), axis=1)]
+                    if not _m.empty:
+                        _r0 = _m.iloc[0]
+                        hint = (f"last loader error {_r0['LOGGED_AT']}: "
+                                f"{str(_r0['ERROR_MESSAGE'])[:160]}")
+                st.markdown(f"- **{name}** — {float(s['HOURS_SINCE_LOAD']):.0f}h since load. "
+                            + (hint or "no matching error logged — check SHOW TASKS "
+                                       "(tasks suspend if a migration half-applied)."))
 
 
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
@@ -583,10 +612,10 @@ def _performance_tab() -> None:
             "— this is the regression surface across every user, not a complete census. "
             "The session table above shows only YOUR session."
         )
-    _perf_rider_panels()
+    _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
 
 
-def _perf_rider_panels() -> None:
+def _perf_rider_panels(fq_df=None) -> None:
     """V027 telemetry-rider readouts (Codex r6 #8, #12, #19)."""
     st.markdown("**Fleet telemetry by page (7d)**")
     tbp = run(mart_sql.telemetry_by_page(7), page=_PAGE, key="tel_by_page", tier="recent",
@@ -605,8 +634,16 @@ def _perf_rider_panels() -> None:
             _tt = _tt.sort_values("PAIN", ascending=False).head(5)
             st.markdown("**Next tuning targets** — pain = p95 x slow fetches; "
                         "the telemetry picks, not opinions.")
-            styled_table(_tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "CACHE_HIT_PCT", "PAIN"]],
-                         height=160)
+            _sel = selectable_table(
+                _tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "CACHE_HIT_PCT", "PAIN"]],
+                key="adm_tt_sel", height=160)
+            # Codex r8 #1: click a target, see the slow keys behind the pain
+            if _sel is not None and fq_df is not None:
+                _pg = str(_sel["PAGE"])
+                _det = fq_df[fq_df["PAGE"].astype(str) == _pg]
+                if not _det.empty:
+                    st.markdown(f"**{_pg} — the slow keys behind the pain (7d persisted)**")
+                    styled_table(_det, height=200)
         except (KeyError, TypeError, ValueError):
             pass
     else:

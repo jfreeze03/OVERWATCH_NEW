@@ -79,7 +79,7 @@ def test_alerts_history_gains_slo_and_fatigue():
 
 def test_admin_performance_gains_rider_panels():
     assert "def _perf_rider_panels" in _ADMIN
-    assert "_perf_rider_panels()" in _ADMIN                    # actually called
+    assert "_perf_rider_panels(fq.df" in _ADMIN                # called, fed the fleet frame
     assert "mart_sql.telemetry_by_page(7)" in _ADMIN
     assert "mart_sql.usage_event_summary(30)" in _ADMIN
     assert "mart_sql.acceptance_funnel(90)" in _ADMIN

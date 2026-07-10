@@ -39,7 +39,7 @@ def render() -> None:
         {"key": "events", "sql": mart_sql.open_alert_events(50, company),
          "source": "ALERT_EVENTS"},
         {"key": "acts", "sql": mart_sql.action_queue(100), "source": "ACTION_QUEUE"},
-    ], page=_PAGE, tier="live") or {}
+    ], page=_PAGE, tier="live")
     _b_rec = run_batch([
         {"key": "exh", "sql": mart_sql.contract_exhaustion(),
          "source": "SETTINGS + FACT_METERING_DAILY"},
@@ -49,7 +49,7 @@ def render() -> None:
         {"key": "spark", "sql": mart_sql.fact_daily_spend(14), "source": "FACT_METERING_DAILY"},
         {"key": "digest", "sql": mart_sql.latest_digest(),
          "source": "DAILY_DIGEST (Cortex, grounded)"},
-    ], page=_PAGE, tier="recent") or {}
+    ], page=_PAGE, tier="recent")
 
     strip = _b_live.get("strip") or run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
                 source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")

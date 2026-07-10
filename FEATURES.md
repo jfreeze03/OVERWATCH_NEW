@@ -106,3 +106,8 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Client driver/version inventory with BEHIND flags | Security -> Clients |
 | Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
 | Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
+| Partial-success batching (one bad member no longer drags siblings serial) | app-wide (v4.20) |
+| KPI source badges (mart/live/stale) + legend popover | Brief first, opt-in everywhere (v4.21+) |
+| Tuning queue: pain-ranked targets with click-through to the slow keys | Admin -> Performance (v4.21/4.23) |
+| Lock waits marted (46-56 GB scans off page views) + spike watch + source caption | Operations, Control Room (V035/v4.23) |
+| "Why stale?" freshness diagnostics (backfill/loader-error/task hints) | Admin -> Migrations & freshness (v4.23) |

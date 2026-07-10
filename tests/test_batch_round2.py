@@ -22,7 +22,9 @@ def test_kpi_cards_carry_source_badges():
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     body = comp.split("def metric_card_html", 1)[1].split("\ndef ", 1)[0]
     assert 'item.get("badge"' in body
-    assert '"mart": "#34d399"' in body and '"stale": "#fbbf24"' in body
+    assert 'ow-src-badge ow-src-badge--' in body                  # theme classes, not inline CSS
+    theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
+    assert ".ow-src-badge--mart" in theme and ".ow-src-badge--stale" in theme
     brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
     assert '"badge": "mart" if strip_up else "stale"' in brief    # money KPI says its source
     assert '"badge": "live" if strip_up else "stale"' in brief

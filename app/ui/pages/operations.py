@@ -95,7 +95,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
          "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
         {"key": "fails", "sql": ops_sql.failures_by_error(days, company, database, schema_contains),
          "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-    ], page=_PAGE, tier="recent") or {}
+    ], page=_PAGE, tier="recent")
 
     st.markdown("**Heaviest queries**")
     top = _qb.get("top") or run(
@@ -499,7 +499,7 @@ def _contention_tab(company: str, days: int) -> None:
     _cb = run_batch([
         {"key": "pressure", "sql": ops_sql.warehouse_pressure(days, company),
          "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-    ], page=_PAGE, tier="recent") or {}
+    ], page=_PAGE, tier="recent")
     left, right = st.columns(2)
     with left:
         st.markdown("**Warehouse queue & spill pressure**")
@@ -522,6 +522,7 @@ def _contention_tab(company: str, days: int) -> None:
             live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)")
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
             styled_table(res.df)
+            result_caption(res)
 
 
 

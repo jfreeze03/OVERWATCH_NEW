@@ -14,7 +14,9 @@ _BRIEF = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8
 def test_brief_reads_go_out_as_two_batches():
     assert _BRIEF.count("run_batch(") == 2                    # live + recent groups
     assert _BRIEF.count(") or run(") == 9                     # every read keeps its serial fallback
-    assert 'tier="live") or {}' in _BRIEF and 'tier="recent") or {}' in _BRIEF
+    # v4.23: `or {}` dropped — run_batch guarantees a dict since v4.20
+    assert 'tier="live")' in _BRIEF and 'tier="recent")' in _BRIEF
+    assert ') or {}' not in _BRIEF
 
 
 def test_brief_keeps_its_honesty_and_scope():

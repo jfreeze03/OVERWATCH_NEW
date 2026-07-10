@@ -429,8 +429,8 @@ def lock_wait_daily(days: int, company: str = "ALL") -> str:
     d = max(1, min(int(days), 90))
     comp = ""
     if company and company != "ALL":
-        c = company.replace("'", "''")
-        comp = f"    AND (c.COMPANY = '{c}' OR UPPER(c.COMPANY) = 'ALL')\n"
+        comp = (f"    AND (c.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(c.COMPANY) = 'ALL')\n")
     return f"""SELECT
     c.DATABASE_NAME,
     c.SCHEMA_NAME,
@@ -445,3 +445,28 @@ WHERE c.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
 {comp}GROUP BY 1, 2, 3, 4
 ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
 LIMIT 50"""
+
+
+def lock_wait_spikes(company: str = "ALL") -> str:
+    """Objects whose last-day lock waits run >=3x their prior 6-day daily
+    average (Codex r8 #13) — mart-only by design; pre-V035 this is empty
+    and the panel stays quiet."""
+    comp = ""
+    if company and company != "ALL":
+        comp = (f"        AND (c.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(c.COMPANY) = 'ALL')\n")
+    return f"""SELECT * FROM (
+    SELECT
+        c.DATABASE_NAME, c.SCHEMA_NAME, c.OBJECT_NAME,
+        SUM(IFF(c.DAY >= DATEADD('day', -1, CURRENT_DATE()), c.WAIT_EVENTS, 0)) AS LAST_DAY_WAITS,
+        ROUND(SUM(IFF(c.DAY < DATEADD('day', -1, CURRENT_DATE()), c.WAIT_EVENTS, 0)) / 6.0, 1)
+            AS PRIOR_DAILY_AVG,
+        SUM(IFF(c.DAY >= DATEADD('day', -1, CURRENT_DATE()), c.NEVER_ACQUIRED, 0))
+            AS LAST_DAY_NEVER_ACQ
+    FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY c
+    WHERE c.DAY >= DATEADD('day', -7, CURRENT_DATE())
+{comp}    GROUP BY 1, 2, 3
+) g
+WHERE g.LAST_DAY_WAITS >= 5 AND g.LAST_DAY_WAITS > 3 * GREATEST(g.PRIOR_DAILY_AVG, 1)
+ORDER BY g.LAST_DAY_WAITS DESC
+LIMIT 20"""

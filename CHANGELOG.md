@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.23.0 — Codex r8 adopts: drill-downs, diagnostics, consistency (2026-07-10)
+
+- **Tuning targets drill down** (#1): click a pain-ranked page on Admin ->
+  Performance and the slow keys behind it appear (7d persisted telemetry).
+- **"Why stale?" diagnostics** (#16): stale freshness rows now map to their
+  likeliest cause — never-backfilled (with the RUNBOOK call), the last
+  matching loader error, or a suspended-task hint. This week's deploy-gap
+  archaeology, turned into a panel.
+- **Lock-wait spike watch** (#13): Control Room flags objects locking >=3x
+  their prior 6-day baseline; quiet pre-V035 and when calm. The Operations
+  panel also names its source now (#14, house result_caption).
+- Consistency set: run_batch callers drop the dead `or {}` (#3 — the
+  contract guarantees a dict since v4.20); the new lock readers use the
+  shared sql_literal helper (#15 — older locked builders keep their
+  pinned text); KPI badges moved from inline CSS to .ow-src-badge theme
+  classes (#8).
+- Declined with reasons: #2 per-key fallback evidence already exists (the
+  bfb: key prefix in persisted telemetry names the failing member); #4
+  fleet-p95 toggle hints cost a query to decorate a caption; #7 the legend
+  already sits in the topbar; #9 the 8 styled_table holdouts are deliberate
+  and locked at <=8; #12 blocker/waiter attribution waits for the mart to
+  accumulate real data; #18 AppTests cover smoke and snapshot infra costs
+  more than it catches; #20 evidence bundles belong to incidents (wave 2),
+  not a parallel export. Deferred: #5 workload split (needs builder recon),
+  #6 badges-everywhere (opt-in exists; wire per-panel as touched),
+  #10/#11/#17 stay queued per r7 reasoning.
+
 ## 4.22.1 — V035 guard fix, owner-diagnosed in Snowsight (2026-07-10)
 
 - **V035's guard used invalid scripting** — RAISE only accepts a DECLAREd
