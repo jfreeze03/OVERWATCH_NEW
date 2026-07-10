@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.22.1 — V035 guard fix, owner-diagnosed in Snowsight (2026-07-10)
+
+- **V035's guard used invalid scripting** — RAISE only accepts a DECLAREd
+  exception name; the inline RAISE EXCEPTION (code, msg) form fails to
+  compile ("unexpected (" — the paren after EXCEPTION). Joe hit it live,
+  moved the exception into DECLARE, and it worked; the repo file now
+  matches that fix (the house pattern every applied migration V001-V034
+  already used — V035 alone drifted). If V035 already applied with the
+  hand-fix, re-running the fixed file is safe but unnecessary.
+- New repo-wide lock: no migration may ever contain "RAISE EXCEPTION (" —
+  the sqlglot gate can't see inside $$ bodies, so this class gets its own
+  gate.
+
 ## 4.22.0 — V035: page views never scan LOCK_WAIT_HISTORY again (2026-07-10)
 
 - **The lock-wait mart** (live finding, owner's Heaviest-queries panel):

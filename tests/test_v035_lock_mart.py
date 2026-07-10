@@ -18,6 +18,15 @@ _MIG = (_ROOT / "snowflake" / "migrations" / "V035__lock_wait_mart.sql").read_te
 
 def test_v035_guard_version_and_pieces():
     assert "EXCEPTION (-20035" in _MIG
+    assert "RAISE not_ready;" in _MIG                               # declared, then raised
+
+
+def test_guards_declare_their_exceptions_everywhere():
+    """Live failure 2026-07-10 (owner-diagnosed): RAISE only accepts a
+    DECLAREd exception name — the inline RAISE EXCEPTION (code, msg) form
+    is invalid scripting and the sqlglot gate cannot see $$ bodies."""
+    for p in sorted((_ROOT / "snowflake" / "migrations").glob("V0*.sql")):
+        assert "RAISE EXCEPTION (" not in p.read_text(encoding="utf-8"), p.name
     assert "IF (v < 34) THEN" in _MIG
     assert "SELECT 35 AS VERSION" in _MIG
     assert "CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY" in _MIG

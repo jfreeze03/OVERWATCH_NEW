@@ -11,10 +11,11 @@ EXECUTE IMMEDIATE
 $$
 DECLARE
     v NUMBER;
+    not_ready EXCEPTION (-20035, 'V035 requires V034 first - apply migrations in order.');
 BEGIN
     SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
     IF (v < 34) THEN
-        RAISE EXCEPTION (-20035, 'V035 requires V034 first — apply migrations in order.');
+        RAISE not_ready;
     END IF;
 END;
 $$;
