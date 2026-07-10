@@ -134,8 +134,11 @@ LIMIT 50
 
 
 def lock_contention(days: int) -> str:
-    """Lock waits (account-wide; LOCK_WAIT_HISTORY has no warehouse grain)."""
-    days = bounded_days(days, maximum=14)
+    """Lock waits (account-wide; LOCK_WAIT_HISTORY has no warehouse grain).
+    Window capped at 7d (was 14): the 14-day scan read ~56GB per run on this
+    account (fleet board, 2026-07-10) and lock triage is a this-week
+    question — history beyond that lives in the incident timeline."""
+    days = bounded_days(days, maximum=7)
     return f"""
 SELECT
     OBJECT_NAME,

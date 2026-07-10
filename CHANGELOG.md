@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.14.0 — V031: the tuning trio (2026-07-10)
+
+Migration V031 (apply after V030):
+
+- **Change-impact scan v2** (first replacement since V010; median 278s/call
+  was the biggest statement family on the shared warehouse). The
+  after-window joins now bound to the OLDEST STILL-TRACKING change
+  (:trk_lo) instead of a blanket -18d — nothing tracking means near-zero
+  scan — and a cheap ILIKE pre-filter runs before the double-REPLACE
+  POSITION match, so full-text normalization only touches plausible CALLs.
+  Verdict semantics unchanged; derived VERBATIM from V010 with enumerated
+  edits, locked.
+- **MART_TAG_COVERAGE_DAILY** closes wave 2's last honest non-adoption:
+  day x user tagged/untagged exec-time, loaded hourly under the V030 shape
+  law (UDF only ever touches a plain column of an aggregated derived
+  table). Freshness view re-emitted with the 17th arm; Cost -> Query-tag
+  governance goes mart-first with the live scan as labeled fallback
+  (tagcov was p95 35.8s live).
+- **lock_contention capped at 7 days** (was 14; ~56GB per run on this
+  account). Lock triage is a this-week question.
+- Tests: tests/test_live_round7.py (derivation, prefilter counts, tag arm
+  shape, reader contract, adoption, freshness 17th arm, clamp). 596 green.
+
 ## 4.13.0 — V030: the correct loader shape + measured CALL pricing (2026-07-10)
 
 Live round 6. Migration V030 (apply after V029; run the two backfill CALLs

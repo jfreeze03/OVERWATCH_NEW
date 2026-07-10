@@ -93,6 +93,7 @@ snowflake/migrations/V027__mart_family.sql -- 9 scheduled marts + SP_LOAD_MARTS_
 snowflake/migrations/V028__cred_expiry_10d.sql -- credential expiry: 10-day horizon (rule + posture bucket)
 snowflake/migrations/V029__loader_fix.sql -- role/schema-hour loader arms: GROUP BY fix (superseded by V030)
 snowflake/migrations/V030__loader_fix2.sql -- correct arm shape (UDF outside aggregation) + posture MFA/breakglass
+snowflake/migrations/V031__scan_tuning_and_tagcov.sql -- change-impact scan v2 (tracking-bounded) + tag-coverage mart
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

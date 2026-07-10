@@ -49,6 +49,7 @@ _EXPECTED_MIGRATIONS = {
     28: "credential expiry 10d (rule + posture bucket)",
     29: "loader fix: role/schema-hour GROUP BY",
     30: "loader fix 2 (UDF outside aggregation) + posture inputs",
+    31: "change-impact scan v2 + tag-coverage mart",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

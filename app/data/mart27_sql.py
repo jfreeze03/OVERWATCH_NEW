@@ -397,3 +397,26 @@ WHERE r.DELETED_ON IS NULL AND q.ROLE_NAME IS NULL
 ORDER BY GRANTED_TO_USERS DESC, r.CREATED_ON
 LIMIT 500
 """
+
+
+def tag_coverage_daily(days: int, company: str = "ALL") -> str:
+    """cost_sql.tag_coverage contract from MART_TAG_COVERAGE_DAILY (V031) —
+    the user-grain column the family mart could not carry. Qualified (c.)
+    per the alias-shadow rule; same 60s exec floor as live."""
+    days = bounded_days(days, 400)
+    where = and_where(f"c.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      _company_arm(company, "c.COMPANY"))
+    return f"""
+SELECT
+    c.USER_NAME,
+    ROUND(SUM(c.EXEC_SEC), 1) AS EXEC_SEC,
+    ROUND(SUM(c.UNTAGGED_EXEC_SEC), 1) AS UNTAGGED_EXEC_SEC,
+    ROUND(100 * (1 - SUM(c.UNTAGGED_EXEC_SEC) / NULLIF(SUM(c.EXEC_SEC), 0)), 1) AS TAGGED_PCT,
+    SUM(c.QUERIES) AS QUERIES
+FROM {mart_object("MART_TAG_COVERAGE_DAILY")} c
+WHERE {where}
+GROUP BY c.USER_NAME
+HAVING SUM(c.EXEC_SEC) > 60
+ORDER BY UNTAGGED_EXEC_SEC DESC
+LIMIT 30
+"""

@@ -10,10 +10,9 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, resolve_role_profile
-from app.core.query import run
 from app.core.session import current_role
 from app.core.state import filters
-from app.data import cost_sql
+from app.data import cost_sql, mart27_sql
 from app.logic.formulas import safe_float
 from app.ui.components import (
     guard,
@@ -21,6 +20,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     page_header,
+    run_mart_first,
     section_header,
     styled_table,
 )
@@ -75,9 +75,12 @@ def render() -> None:
         section_header("Query-tag governance", "info", "chargeback")
         st.caption("Chargeback precision is capped by tag coverage — untagged execution "
                    "time can only be allocated, never attributed.")
-        tags_res = run(cost_sql.tag_coverage(f["days"], f["company"]), page=_PAGE,
-                       key=f"tagcov_{f['company']}_{f['days']}", tier="historical",
-                       source="QUERY_HISTORY (exec-time-weighted tag coverage)")
+        tags_res = run_mart_first(
+            mart27_sql.tag_coverage_daily(f["days"], f["company"]),
+            cost_sql.tag_coverage(f["days"], f["company"]),
+            page=_PAGE, key=f"tagcov_{f['company']}_{f['days']}",
+            mart_source="MART_TAG_COVERAGE_DAILY (mart, loaded hourly)",
+            live_source="QUERY_HISTORY (exec-time-weighted, live fallback)")
         if guard(tags_res, "No workloads above the 60s floor in this window."):
             tdf_g = tags_res.df.copy()
             total_exec = float(tdf_g["EXEC_SEC"].sum())

@@ -44,7 +44,7 @@ def test_day_windows_are_clamped():
     sql = cost_sql.metering_daily_by_service(10_000)
     assert "-90," in sql.replace(" ", "")  # MAX_LIVE_WINDOW_DAYS
     sql = ops_sql.lock_contention(10_000)
-    assert "-14," in sql.replace(" ", "")  # builder-specific tighter cap
+    assert "-7," in sql.replace(" ", "")   # v4.14: week cap (56GB/run at 14d)
 
 
 def test_company_scope_present_when_requested():

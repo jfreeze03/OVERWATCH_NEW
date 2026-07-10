@@ -132,6 +132,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart27.schema_window_summary", lambda: mart27_sql.schema_window_summary(1, "ALFA")),
     ("mart27.ai_costs_by_model", lambda: mart27_sql.ai_costs_by_model(2)),
     ("mart27.unused_roles_via_fact", lambda: mart27_sql.unused_roles_via_fact(90)),
+    ("mart27.tag_coverage_daily", lambda: mart27_sql.tag_coverage_daily(2, "ALFA")),
     ("insights.call_cost_lookup", lambda: insights_sql.call_cost_lookup("canary-probe", 1)),
     ("insights.call_children_costs", lambda: insights_sql.call_children_costs("canary-probe", 1)),
     ("riders.delivery_slo_summary", lambda: mart_sql.delivery_slo_summary(7)),
