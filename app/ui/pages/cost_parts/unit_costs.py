@@ -18,6 +18,7 @@ import streamlit as st
 from app.core.query import run, run_batch
 from app.data import cortex_sql, insights_sql, mart27_sql
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.ui import charts
 from app.ui.components import guard, kpi_row, result_caption, styled_table
 
 _PAGE = "Cost & Contract"
@@ -116,6 +117,40 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "attribution hasn't caught up (~6h) or the children ran "
                                    "without a warehouse. Change-impact (Operations) watches "
                                    "these same numbers around each ALTER.")
+
+    with st.expander("Trend one procedure — total $ and $/call over time"):
+        st.caption(
+            "Type a procedure name (bare or db.schema-qualified — paste PROC_NAME "
+            "from the leaderboard above). Same measured rollup as the leaderboard "
+            "(children via ROOT_QUERY_ID), sliced by day; honors the page filters. "
+            "Attribution lags ~6h; idle time excluded."
+        )
+        _pname = st.text_input("Procedure name", key="uc_proc_trend_name")
+        if _pname.strip():
+            tres = run(insights_sql.proc_cost_trend(
+                           _pname.strip(), days, company, database, schema_contains),
+                       page=_PAGE, key=f"proc_trend_{_pname.strip()[:30]}_{company}_{days}",
+                       tier="historical",
+                       source="QUERY_ATTRIBUTION_HISTORY rolled to CALLs, day grain")
+            if guard(tres, "No CALLs matched that name in this window/scope — "
+                           "check spelling (bare names match any db.schema)."):
+                tdf = tres.df.copy()
+                tdf["USD"] = tdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                _tot = float(tdf["USD"].sum())
+                _calls = int(tdf["CALLS"].sum())
+                kpi_row([
+                    {"label": f"Total, {days}d", "value": format_usd(_tot)},
+                    {"label": "Calls", "value": f"{_calls:,}"},
+                    {"label": "Avg $/call",
+                     "value": format_usd(_tot / _calls) if _calls else "n/a"},
+                ])
+                charts.spend_trend(tdf, day_col="DAY", usd_col="USD")
+                styled_table(tdf, height=200, column_config={
+                    "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                    "CREDITS_PER_CALL": st.column_config.NumberColumn("cr/call", format="%.6f"),
+                })
+                st.caption("$0 days with calls = attribution not caught up (~6h) or "
+                           "children ran without a warehouse — same caveats as the leaderboard.")
 
     with st.expander("Price a specific CALL or session (measured)"):
         st.caption(

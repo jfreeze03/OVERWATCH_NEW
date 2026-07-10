@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.18.0 — trend one procedure, by name (2026-07-11)
+
+App-only release (owner ask: "can I enter it myself" — yes):
+
+- **Cost & Contract -> Unit costs -> "Trend one procedure"**: type a proc
+  name (bare or db.schema-qualified; bare matches any qualification via
+  the suffix arm) and get its daily measured $ — total, calls, $/call,
+  fails, attributed-calls diagnostics — as the standard bars + 7d-average
+  chart plus detail table. Same REGEXP extraction and ROOT_QUERY_ID
+  rollup as the $/call leaderboard, so the two always agree; honors the
+  page filters (company/database/schema/window) per the triage-filter
+  law. On-demand live scan (bounded, cached hourly) — occasional-use
+  cost profile, no mart needed.
+- Existing answers for context: leaderboard = window totals for EVERY
+  proc; Price-a-CALL = one run's children; change-impact = before/after
+  around an ALTER. This closes the by-name daily-trend gap.
+
 ## 4.17.0 — V034 + live round 8: delivery scoping and the triage-filter law (2026-07-10)
 
 Migration V034 (apply after V033):

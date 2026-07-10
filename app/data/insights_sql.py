@@ -840,3 +840,59 @@ WHERE a.ROOT_QUERY_ID = {lit} OR a.QUERY_ID = {lit}
 ORDER BY CREDITS DESC
 LIMIT 500
 """
+
+
+def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
+                    database: str = "", schema_contains: str = "") -> str:
+    """Daily measured $ for ONE named procedure (owner ask 2026-07-11:
+    "can I enter it myself" — yes, this is the type-the-name panel).
+
+    Same extraction and ROOT_QUERY_ID rollup as the $/call leaderboard, so
+    the two always agree; a bare name matches qualified CALLs via the
+    suffix arm. Attribution lags ~6h; idle excluded; DATABASE/SCHEMA are
+    the CALL's session context. POSIX classes only.
+    """
+    from app.core.sqlsafe import contains_filter, sql_literal
+
+    days = bounded_days(days)
+    name = str(proc_name or "").strip().upper().rstrip("(")
+    lit = sql_literal(name)
+    suffix = sql_literal("%." + name)
+    where = and_where(
+        f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "c.QUERY_TYPE = 'CALL'",
+        companies.warehouse_clause(company, "c.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "c.DATABASE_NAME"),
+        contains_filter("c.SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+WITH calls AS (
+    SELECT c.QUERY_ID, DATE(c.START_TIME) AS DAY, c.EXECUTION_STATUS,
+           REGEXP_SUBSTR(UPPER(c.QUERY_TEXT), 'CALL[[:space:]]+([A-Z0-9_.$]+)', 1, 1, 'e', 1) AS PROC_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY c
+    WHERE {where}
+),
+named AS (
+    SELECT * FROM calls
+    WHERE PROC_NAME = {lit} OR PROC_NAME LIKE {suffix}
+),
+att AS (
+    SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+           SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+      AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (SELECT QUERY_ID FROM named)
+    GROUP BY 1
+)
+SELECT n.DAY,
+       COUNT(*) AS CALLS,
+       COUNT_IF(n.EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+       ROUND(SUM(COALESCE(a.CREDITS, 0)), 6) AS CREDITS,
+       ROUND(SUM(COALESCE(a.CREDITS, 0)) / NULLIF(COUNT(*), 0), 6) AS CREDITS_PER_CALL,
+       COUNT(a.CREDITS) AS ATTRIBUTED_CALLS
+FROM named n
+LEFT JOIN att a ON a.RID = n.QUERY_ID
+GROUP BY n.DAY
+ORDER BY n.DAY
+LIMIT 400
+"""
