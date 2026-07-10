@@ -323,11 +323,17 @@ def run(
     tier: str = "recent",
     source: str = "",
     max_rows: int = DEFAULT_MAX_ROWS,
+    probe: bool = False,
 ) -> QueryResult:
     """Execute through the tiered cache and return a typed QueryResult.
 
     Never raises: failures come back as ok=False with a friendly error string,
     and are recorded to the error buffer/sink. Failures are never cached.
+
+    probe=True marks an optional-object read (e.g. the Flyway ledger before
+    Flyway exists): an object-does-not-exist failure is the EXPECTED answer,
+    so it is neither error-logged nor counted as a failed fetch — the panel's
+    absent branch is the record. Every other failure still records normally.
     """
     tier = tier if tier in _FETCHERS else "recent"
     started = time.perf_counter()
@@ -351,8 +357,10 @@ def run(
         )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
-        _telemetry(page, tier, key, elapsed, 0, ok=False)
-        record_error(page, exc, context=f"query key={key} tier={tier}")
+        _expected_absence = probe and "does not exist or not authorized" in str(exc)
+        if not _expected_absence:
+            _telemetry(page, tier, key, elapsed, 0, ok=False)
+            record_error(page, exc, context=f"query key={key} tier={tier}")
         return QueryResult(
             df=pd.DataFrame(), ok=False, error=format_snowflake_error(exc),
             source=source, tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,

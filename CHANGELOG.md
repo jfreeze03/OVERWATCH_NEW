@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.23.1 — the Flyway probe stops crying wolf (2026-07-10)
+
+- The Admin Flyway panel always degraded honestly ("Flyway not detected"),
+  but the probe's failure still landed in APP_ERROR_LOG and the failed-
+  fetch telemetry on every visit — a recurring 'flyway_schema_history does
+  not exist' error for a table we know does not exist yet. run() gains
+  probe=True for optional-object reads: expected absence is neither
+  error-logged nor counted as a failure; every other error on the same
+  read still records normally. The panel lights up on its own when
+  Flyway lands, exactly as before.
+
 ## 4.23.0 — Codex r8 adopts: drill-downs, diagnostics, consistency (2026-07-10)
 
 - **Tuning targets drill down** (#1): click a pain-ranked page on Admin ->

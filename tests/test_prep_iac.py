@@ -81,6 +81,12 @@ def test_flyway_reader_is_quoted_and_uncanaried():
 
 def test_admin_panel_degrades_honestly_without_flyway():
     assert "mart_sql.flyway_history()" in _ADMIN
+    assert 'probe=True' in _ADMIN                                  # absence is the answer,
+    q = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
+    assert "probe and " in q and "does not exist or not authorized" in q
+    body = q.split("_expected_absence", 2)[2].split("return QueryResult", 1)[0]
+    assert "record_error" in body                                  # ...but ONLY absence: every
+    assert "_telemetry" in body                                    # other failure still records
     assert "Flyway deploy history" in _ADMIN                       # present branch
     assert "Flyway not detected" in _ADMIN                         # absent branch
     assert "docs/FLYWAY_ADOPTION.md" in _ADMIN

@@ -127,7 +127,7 @@ def _migrations_tab() -> None:
         st.success(f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
 
     fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="live",
-             source="flyway_schema_history (Flyway ledger)")
+             source="flyway_schema_history (Flyway ledger)", probe=True)
     if fh.usable():
         st.markdown("**Flyway deploy history** — the transport's own ledger")
         styled_table(fh.df, height=220)
