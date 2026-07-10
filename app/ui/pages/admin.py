@@ -691,8 +691,12 @@ def _canary_tab() -> None:
         progress = st.progress(0.0, text="Running canary...")
         for idx, (name, builder) in enumerate(CANARIES):
             res = run(builder(), page=_PAGE, key=f"canary_{name}", tier="live",
-                      source=name, max_rows=1)
-            results.append({"CHECK": name, "STATUS": "PASS" if res.ok else "FAIL",
+                      source=name, max_rows=1, probe=True)
+            _err = str(res.error or "")
+            _gap = ("Unknown function" in _err                   # gated feature (002139)
+                    or "does not exist or not authorized" in _err)  # object pre-migration
+            results.append({"CHECK": name,
+                            "STATUS": "PASS" if res.ok else ("GAP" if _gap else "FAIL"),
                             "ROWS": len(res.df), "ERROR": res.error[:160]})
             progress.progress((idx + 1) / len(CANARIES), text=f"{name}")
         progress.empty()
@@ -700,8 +704,12 @@ def _canary_tab() -> None:
 
         frame = _pd.DataFrame(results)
         failed = frame[frame["STATUS"] == "FAIL"]
+        gaps = frame[frame["STATUS"] == "GAP"]
+        if not gaps.empty:
+            st.caption(f"{len(gaps)} GAP: feature/object not in this account (e.g. Cortex "
+                       "Code pre-subscription, pre-migration objects) — absence, not drift.")
         if failed.empty:
-            st.success(f"All {len(frame)} canary statements passed.")
+            st.success(f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:
             st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
         st.session_state["_adm_canary_results"] = frame

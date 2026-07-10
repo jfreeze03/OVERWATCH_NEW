@@ -90,7 +90,16 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     ai_budget = safe_float(settings.get("AI_MONTHLY_BUDGET_USD"))
     rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
                      key=f"cortex_users_{company}_{days}", tier="historical",
-                     source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY")
+                     source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
+    if not rollup_res.ok and "Unknown function" in str(rollup_res.error or ""):
+        # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
+        # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
+        # Cortex Code subscription that function does not exist (002139), so
+        # OUR read throws even though our SQL never names it.
+        st.info("Cortex Code usage telemetry is not available in this account/region yet - "
+                "Snowflake's usage views probe a subscription that is not present (002139). "
+                "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
+        return
     if not guard(rollup_res,
                  "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
                  setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
@@ -125,7 +134,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         st.markdown("**Daily usage by source**")
         daily_res = run(cortex_sql.cortex_code_daily(days, company), page=_PAGE,
                         key=f"cortex_daily_{company}_{days}", tier="historical",
-                        source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY")
+                        source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
         if guard(daily_res, "No daily Cortex Code usage rows."):
             daily = daily_res.df.copy()
             daily["USD"] = daily["TOTAL_CREDITS"].map(safe_float) * ai_rate

@@ -87,6 +87,17 @@ def test_admin_panel_degrades_honestly_without_flyway():
     body = q.split("_expected_absence", 2)[2].split("return QueryResult", 1)[0]
     assert "record_error" in body                                  # ...but ONLY absence: every
     assert "_telemetry" in body                                    # other failure still records
+    assert "Unknown function" in q                                 # gated-view class (002139)
+
+
+def test_cortex_code_reads_are_probes_with_a_truthful_note():
+    ai = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
+    assert ai.count('_USAGE_HISTORY", probe=True)') == 2           # both reads
+    assert "SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION" in ai         # the why, in the code
+    assert "nothing is misconfigured" in ai                        # honest, not alarming
+    adm2 = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
+    assert "max_rows=1, probe=True" in adm2                        # sweep table IS the alarm
+    assert '("GAP" if _gap else "FAIL")' in adm2                   # gaps are not drift
     assert "Flyway deploy history" in _ADMIN                       # present branch
     assert "Flyway not detected" in _ADMIN                         # absent branch
     assert "docs/FLYWAY_ADOPTION.md" in _ADMIN

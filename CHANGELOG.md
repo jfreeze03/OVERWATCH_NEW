@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.23.2 — the Cortex Code 002139, traced to us after all (2026-07-10)
+
+- Joe ran the QUERY_HISTORY diagnostic and the caller was the dashboard:
+  our AI-chargeback reads of ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY.
+  We never name SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION, but those views
+  call it INTERNALLY; without a Cortex Code subscription the function
+  does not exist (002139), so our query throws it for us. The tab now
+  shows a truthful "not available in this account/region" note instead
+  of a red box, both reads are probe=True (no error-log/failure spam),
+  and probe learned the gated-view class ("Unknown function").
+- Canary sweep: feature gaps and pre-migration objects now report GAP,
+  not FAIL — absence is not drift; the sweep table stays the alarm and
+  stops double-logging to APP_ERROR_LOG.
+
 ## 4.23.1 — the Flyway probe stops crying wolf (2026-07-10)
 
 - The Admin Flyway panel always degraded honestly ("Flyway not detected"),

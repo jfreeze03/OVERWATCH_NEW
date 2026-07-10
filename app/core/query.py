@@ -357,7 +357,10 @@ def run(
         )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
-        _expected_absence = probe and "does not exist or not authorized" in str(exc)
+        _expected_absence = probe and (
+            "does not exist or not authorized" in str(exc)
+            or "Unknown function" in str(exc)   # gated ACCOUNT_USAGE views (002139,
+        )                                       # e.g. CORTEX_CODE_* pre-subscription)
         if not _expected_absence:
             _telemetry(page, tier, key, elapsed, 0, ok=False)
             record_error(page, exc, context=f"query key={key} tier={tier}")
