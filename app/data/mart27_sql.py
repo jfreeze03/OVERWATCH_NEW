@@ -187,89 +187,92 @@ LIMIT 100
 
 def eff_sizing_profile(days: int, company: str = "ALL") -> str:
     """insights_sql.warehouse_sizing_profile contract from the efficiency
-    mart. P95_ELAPSED_SEC is the peak daily p95 (callers label it)."""
+    mart. P95_ELAPSED_SEC is the peak daily p95 (callers label it).
+    Qualified (e.) — the CREDITS_TOTAL output alias shadowed the column in
+    later aggregates (same class as the compile-heavy live failure)."""
     days = bounded_days(days, 400)
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      _company_arm(company))
+    where = and_where(f"e.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      _company_arm(company, "e.COMPANY"))
     return f"""
 SELECT
-    WAREHOUSE_NAME,
-    ANY_VALUE(COMPANY) AS COMPANY,
-    ROUND(SUM(CREDITS_TOTAL), 4) AS CREDITS_TOTAL,
-    ROUND(SUM(CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100)
-          / NULLIF(SUM(CREDITS_TOTAL), 0) * 100, 1) AS IDLE_PCT,
-    SUM(QUERIES) AS QUERY_COUNT,
-    MAX(COALESCE(P95_S, 0)) AS P95_ELAPSED_SEC,
-    ROUND(SUM(COALESCE(QUEUED_MIN, 0)) * 60, 1) AS QUEUED_SEC,
-    ROUND(SUM(COALESCE(SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
-FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
+    e.WAREHOUSE_NAME,
+    ANY_VALUE(e.COMPANY) AS COMPANY,
+    ROUND(SUM(e.CREDITS_TOTAL), 4) AS CREDITS_TOTAL,
+    ROUND(SUM(e.CREDITS_TOTAL * COALESCE(e.IDLE_PCT, 0) / 100)
+          / NULLIF(SUM(e.CREDITS_TOTAL), 0) * 100, 1) AS IDLE_PCT,
+    SUM(e.QUERIES) AS QUERY_COUNT,
+    MAX(COALESCE(e.P95_S, 0)) AS P95_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(e.QUEUED_MIN, 0)) * 60, 1) AS QUEUED_SEC,
+    ROUND(SUM(COALESCE(e.SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
+FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")} e
 WHERE {where}
-GROUP BY WAREHOUSE_NAME
-HAVING SUM(CREDITS_TOTAL) > 0
+GROUP BY e.WAREHOUSE_NAME
+HAVING SUM(e.CREDITS_TOTAL) > 0
 ORDER BY CREDITS_TOTAL DESC
 LIMIT 100
 """
 
-
 def family_compile_heavy(days: int, company: str = "ALL") -> str:
     """cost_sql.compile_heavy_families contract from the family mart.
     Company scoping is database-heuristic (the mart has no user grain);
-    averages are run-weighted across days."""
+    averages are run-weighted across days. Every column is QUALIFIED (f.) —
+    Snowflake resolved the bare RUNS inside later aggregates to the
+    SUM(RUNS) AS RUNS alias and raised 'aggregate functions cannot be
+    nested' (live, 2026-07-10). Qualified references cannot be shadowed."""
     days = bounded_days(days, 400)
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      companies.database_clause(company, "DATABASE_NAME"))
+    where = and_where(f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                      companies.database_clause(company, "f.DATABASE_NAME"))
     return f"""
 SELECT
-    QUERY_HASH AS QUERY_PARAMETERIZED_HASH,
-    ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT,
-    SUM(RUNS) AS RUNS,
-    ROUND(SUM(COMPILE_MS_AVG * RUNS) / NULLIF(SUM(RUNS), 0) / 1000, 2) AS AVG_COMPILE_S,
-    ROUND(SUM(TOTAL_EXEC_SEC) / NULLIF(SUM(RUNS), 0), 2) AS AVG_TOTAL_S,
-    ROUND(SUM(COMPILE_MS_AVG * RUNS) / 1000
-          / NULLIF(SUM(TOTAL_EXEC_SEC), 0) * 100, 1) AS COMPILE_PCT,
-    ROUND(SUM(COMPILE_MS_AVG * RUNS) / 3600000, 2) AS TOTAL_COMPILE_HOURS
-FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
+    f.QUERY_HASH AS QUERY_PARAMETERIZED_HASH,
+    ANY_VALUE(f.SAMPLE_TEXT) AS SAMPLE_TEXT,
+    SUM(f.RUNS) AS RUNS,
+    ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / NULLIF(SUM(f.RUNS), 0) / 1000, 2) AS AVG_COMPILE_S,
+    ROUND(SUM(f.TOTAL_EXEC_SEC) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_TOTAL_S,
+    ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / 1000
+          / NULLIF(SUM(f.TOTAL_EXEC_SEC), 0) * 100, 1) AS COMPILE_PCT,
+    ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / 3600000, 2) AS TOTAL_COMPILE_HOURS
+FROM {mart_object("MART_QUERY_FAMILY_DAILY")} f
 WHERE {where}
-GROUP BY QUERY_HASH
-HAVING SUM(RUNS) >= 20 AND SUM(COMPILE_MS_AVG * RUNS) / NULLIF(SUM(RUNS), 0) > 500
-ORDER BY SUM(COMPILE_MS_AVG * RUNS) DESC
+GROUP BY f.QUERY_HASH
+HAVING SUM(f.RUNS) >= 20 AND SUM(f.COMPILE_MS_AVG * f.RUNS) / NULLIF(SUM(f.RUNS), 0) > 500
+ORDER BY SUM(f.COMPILE_MS_AVG * f.RUNS) DESC
 LIMIT 25
 """
-
 
 def family_repeat_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
                                database: str = "", schema_contains: str = "") -> str:
     """insights_sql.repeat_query_fingerprints contract from the family mart.
     ELAPSED here is exec-time (the mart's grain) — callers label the source.
-    LAST_RUN degrades to the day grain."""
+    LAST_RUN degrades to the day grain. Qualified (f.) — see
+    family_compile_heavy for the alias-shadow lesson."""
     days = bounded_days(days, 400)
     min_runs = max(2, min(int(min_runs or 10), 1000))
-    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-             companies.database_clause(company, "DATABASE_NAME"),
-             contains_filter("SCHEMA_NAME", schema_contains)]
+    parts = [f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             companies.database_clause(company, "f.DATABASE_NAME"),
+             contains_filter("f.SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
-        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+        parts.append(f"UPPER(f.DATABASE_NAME) = {sql_literal(str(database).upper())}")
     where = and_where(*parts)
     return f"""
 SELECT
-    QUERY_HASH AS FINGERPRINT,
-    SUM(RUNS) AS RUNS,
-    MAX(USERS) AS USERS,
-    MAX(WAREHOUSES) AS WAREHOUSES,
-    ROUND(SUM(TOTAL_EXEC_SEC) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
-    ROUND(SUM(TOTAL_EXEC_SEC) / NULLIF(SUM(RUNS), 0), 2) AS AVG_ELAPSED_SEC,
-    ROUND(SUM(COALESCE(GB_SCANNED_AVG, 0) * RUNS) / 1024, 4) AS TOTAL_TB_SCANNED,
-    ROUND(SUM(COALESCE(CACHE_PCT_AVG, 0) * RUNS) / NULLIF(SUM(RUNS), 0), 1) AS AVG_CACHE_PCT,
-    ANY_VALUE(SAMPLE_TEXT) AS QUERY_PREVIEW,
-    MAX(DAY) AS LAST_RUN
-FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
+    f.QUERY_HASH AS FINGERPRINT,
+    SUM(f.RUNS) AS RUNS,
+    MAX(f.USERS) AS USERS,
+    MAX(f.WAREHOUSES) AS WAREHOUSES,
+    ROUND(SUM(f.TOTAL_EXEC_SEC) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
+    ROUND(SUM(f.TOTAL_EXEC_SEC) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(f.GB_SCANNED_AVG, 0) * f.RUNS) / 1024, 4) AS TOTAL_TB_SCANNED,
+    ROUND(SUM(COALESCE(f.CACHE_PCT_AVG, 0) * f.RUNS) / NULLIF(SUM(f.RUNS), 0), 1) AS AVG_CACHE_PCT,
+    ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW,
+    MAX(f.DAY) AS LAST_RUN
+FROM {mart_object("MART_QUERY_FAMILY_DAILY")} f
 WHERE {where}
-GROUP BY QUERY_HASH
-HAVING SUM(RUNS) >= {min_runs}
+GROUP BY f.QUERY_HASH
+HAVING SUM(f.RUNS) >= {min_runs}
 ORDER BY TOTAL_ELAPSED_HOURS DESC
 LIMIT 50
 """
-
 
 def role_share(days: int, company: str = "ALL") -> str:
     """chargeback_sql.role_share_within_warehouse contract from the role-hour
@@ -345,20 +348,23 @@ WHERE {and_where(*parts)}
 
 def ai_costs_by_model(days: int) -> str:
     """cortex_sql model/source cost contract from FACT_AI_USAGE_DAILY —
-    Code + Functions in one read, loaded daily."""
+    Code + Functions in one read, loaded daily. Qualified (a.) — TOKENS and
+    CREDITS output aliases shadowed the columns in the per-1M expression
+    (same class as the compile-heavy live failure)."""
     days = bounded_days(days, 400)
     return f"""
 SELECT
-    SOURCE AS FUNCTION_NAME,
-    COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
-    SUM(COALESCE(REQUESTS, 0)) AS REQUESTS,
-    SUM(COALESCE(TOKENS, 0)) AS TOKENS,
-    ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS,
-    ROUND(SUM(COALESCE(CREDITS, 0)) * 1000000
-          / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
-FROM {mart_object("FACT_AI_USAGE_DAILY")}
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-GROUP BY SOURCE, MODEL_NAME
+    a.SOURCE AS FUNCTION_NAME,
+    COALESCE(a.MODEL_NAME, 'n/a') AS MODEL_NAME,
+    SUM(COALESCE(a.REQUESTS, 0)) AS REQUESTS,
+    SUM(COALESCE(a.TOKENS, 0)) AS TOKENS,
+    ROUND(SUM(COALESCE(a.CREDITS, 0)), 4) AS CREDITS,
+    ROUND(SUM(COALESCE(a.CREDITS, 0)) * 1000000
+          / NULLIF(SUM(COALESCE(a.TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
+FROM {mart_object("FACT_AI_USAGE_DAILY")} a
+WHERE a.DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY a.SOURCE, a.MODEL_NAME
 ORDER BY CREDITS DESC
 LIMIT 200
 """
+

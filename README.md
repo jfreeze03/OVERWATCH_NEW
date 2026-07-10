@@ -91,6 +91,7 @@ snowflake/migrations/V025__break_glass_policy.sql -- SEC_BREAK_GLASS_USE disable
 snowflake/migrations/V026__teams_safe_delivery.sql -- sender v3: JSON-safe payloads (Teams Workflows compatible)
 snowflake/migrations/V027__mart_family.sql -- 9 scheduled marts + SP_LOAD_MARTS_V27 + telemetry rider
 snowflake/migrations/V028__cred_expiry_10d.sql -- credential expiry: 10-day horizon (rule + posture bucket)
+snowflake/migrations/V029__loader_fix.sql -- role/schema-hour loader arms: GROUP BY fix (never loaded before this)
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

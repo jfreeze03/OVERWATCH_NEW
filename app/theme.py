@@ -125,6 +125,14 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 .stButton > button[kind="primary"] { background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#06121f; border:none; }
 
 button[data-baseweb="tab"] { font-weight:640; }
+
+/* Multiselect chips: the default BaseWeb tag rendered as a pale wash —
+   selections were unreadable (live finding 2026-07-10, Alerts bulk picker).
+   Dark chip, accent hairline, real text. */
+.stMultiSelect [data-baseweb="tag"] { background:rgba(56,189,248,0.16) !important;
+  border:1px solid rgba(56,189,248,0.55) !important; border-radius:var(--ow-r-sm); }
+.stMultiSelect [data-baseweb="tag"] span { color:#dbeafe !important; }
+.stMultiSelect [data-baseweb="tag"] svg { fill:#dbeafe !important; }
 [data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; box-shadow:var(--ow-shadow); }
 [data-testid="stExpander"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); background:var(--ow-surface); }
 [data-testid="stExpander"] summary:hover { color:var(--ow-accent); }

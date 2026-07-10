@@ -45,6 +45,7 @@ def top_queries_by_elapsed(days: int, company: str = "ALL", limit: int = 50,
     return f"""
 SELECT
     QUERY_ID,
+    START_TIME,
     USER_NAME,
     WAREHOUSE_NAME,
     WAREHOUSE_SIZE,

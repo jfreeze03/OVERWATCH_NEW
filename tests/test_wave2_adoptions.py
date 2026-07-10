@@ -66,7 +66,7 @@ def test_family_readers_match_live_contracts():
     for col in ("FINGERPRINT", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
                 "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "QUERY_PREVIEW", "LAST_RUN"):
         assert col in rq, col
-    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_PRD'" in rq          # filter parity
+    assert "UPPER(f.DATABASE_NAME) = 'ALFA_EDW_PRD'" in rq        # filter parity (qualified)
 
 
 def test_role_share_keeps_both_leak_guards():

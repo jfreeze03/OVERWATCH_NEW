@@ -101,7 +101,8 @@ Numbering updated 2026-07-09: V028 shipped as the credential-expiry policy
 change (live round 4), so the initiatives below shift one slot. Initiatives
 are named, not numbered — the next free migration slot at build time wins.
 
-1. **Incident object (design doc first; migration ~V029)** — DESIGN DRAFTED
+1. **Incident object (design doc first; migration ~V030 — V029 became the
+   2026-07-10 loader hotfix)** — DESIGN DRAFTED
    2026-07-09: docs/design/V029_INCIDENT_OBJECT.md (includes the Flyway/
    Terraform integration assumptions). Rolls alerts,
    DDL, task failures, warehouse changes, and fixes into one lifecycle
@@ -109,7 +110,7 @@ are named, not numbered — the next free migration slot at build time wins.
    rate. The design also defines recommendation lineage (explicit
    RECOMMENDATION_ID/EVENT_ID/ACTION_ID links instead of notes-text
    references in SAVINGS_LEDGER — Codex r6 #6).
-2. **Owner registry (~V030)**: generalize DEPARTMENT_MAP to OBJECT_OWNERS
+2. **Owner registry (~V031)**: generalize DEPARTMENT_MAP to OBJECT_OWNERS
    (warehouse/db/schema/task/pipeline/rule). Headline metric: unowned
    spend %. Feeds budget-by-owner (r5 #12), data-product scorecards, and
    owners for the client-driver inventory (r6 #16).

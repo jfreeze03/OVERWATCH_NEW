@@ -104,10 +104,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
         sel_q = selectable_table(
-            top.df[["USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
+            top.df[["START_TIME", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
                      "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]],
             key="ops_top_sel",
             column_config={
+                "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
                 "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed s", format="%.1f"),
                 "QUEUED_SEC": st.column_config.NumberColumn("Queued s", format="%.1f"),
                 "SPILL_REMOTE_GB": st.column_config.NumberColumn("Spill GB", format="%.2f"),

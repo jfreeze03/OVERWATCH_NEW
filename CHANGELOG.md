@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.12.1 — V029 hotfix: the loader arms that never loaded (2026-07-10)
+
+Live round 5. Migration V029 (apply after V028; then optionally run the
+90-day backfill CALL noted in the file header once):
+
+- **FACT_QUERY_ROLE_HOURLY / FACT_QUERY_SCHEMA_HOURLY never loaded** — the
+  V027 loader's COMPANY expressions called COMPANY_FOR_*() on the raw
+  column while GROUP BY covered COALESCE(col, 'NONE'), so both arms failed
+  hourly since apply (the per-mart EXCEPTION isolation kept the other
+  seven loading, and role share / schema summaries silently used their
+  live fallbacks — the fallback pattern worked; the facts were empty).
+  V029 replaces the proc, derived VERBATIM from V028's with exactly two
+  edits: COMPANY_FOR_*(MAX(COALESCE(col, ''))) — the derivation lock chain
+  extends V027 -> V028 -> V029.
+- **compile-heavy mart reader crashed Cost & Contract** ('aggregate
+  functions cannot be nested'): Snowflake resolved the bare RUNS inside
+  later aggregates to the SUM(RUNS) AS RUNS alias. Fixed by qualifying
+  every column (f.) in family_compile_heavy — and the same latent bug in
+  family_repeat_fingerprints, eff_sizing_profile (behind the sizing
+  toggle) and ai_costs_by_model before they fired live. New discipline:
+  an output alias must never share a name with a column referenced later
+  in the same select list; qualified references cannot be shadowed.
+- **Multiselect chips are readable** (Alerts bulk picker was a pale wash):
+  dark chip, accent hairline, real text color.
+- **Heaviest queries gains the date**: START_TIME first column with a
+  Started (MMM DD, HH:mm) format, from the same builder.
+- Design-doc numbering: incident object -> ~V030, owner registry ->
+  ~V031 (V029 became this hotfix).
+- Tests: tests/test_live_round5.py (derivation chain, healed arms,
+  qualified-aggregate locks, chip CSS, date column). 574 green.
+
 ## 4.12.0 — WAVE 2: the marts take over the panels (2026-07-09)
 
 No migration — app release only (needs V027/V028 applied and the loader
