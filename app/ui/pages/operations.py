@@ -394,9 +394,9 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
                 if not stale.empty:
                     show_cols = [c for c in ("NAME", "DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME",
                                              "STALE_AFTER", "MODE") if c in stale.columns]
-                    st.dataframe(stale[show_cols], hide_index=True, use_container_width=True)
+                    styled_table(stale[show_cols])
             else:
-                st.dataframe(sdf, hide_index=True, use_container_width=True)
+                styled_table(sdf)
 
 
 def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
@@ -491,7 +491,7 @@ def _warehouses_tab(company: str, rate: float) -> None:
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
                    "or split workloads — before users feel it.")
-        st.dataframe(peaks.df, hide_index=True, use_container_width=True)
+        styled_table(peaks.df)
         result_caption(peaks)
 
 
@@ -511,14 +511,14 @@ def _contention_tab(company: str, days: int) -> None:
         if guard(res, "No queueing or spill pressure in this window."):
             charts.bar_count(res.df.sort_values("QUEUED_SEC", ascending=False),
                              "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds")
-            st.dataframe(res.df, hide_index=True, use_container_width=True)
+            styled_table(res.df)
     with right:
         st.markdown("**Lock waits (account-wide)**")
         res = _cb.get("locks") or run(ops_sql.lock_contention(min(days, 14)), page=_PAGE,
                   key=f"c_locks_{days}",
                   tier="recent", source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY")
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
-            st.dataframe(res.df, hide_index=True, use_container_width=True)
+            styled_table(res.df)
 
 
 
@@ -709,7 +709,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                     rule_at = match["CHANGE_SEEN_AT"].max()
                 charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime (s)", rule_date=rule_at)
                 st.caption("Dashed line marks the registered change.")
-                st.dataframe(hist.df, hide_index=True, use_container_width=True)
+                styled_table(hist.df)
                 result_caption(hist)
 
     if is_operator:

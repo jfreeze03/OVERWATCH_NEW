@@ -587,7 +587,7 @@ def render() -> None:
                      source="ALERT_ROUTES")
         if guard(routes, "No routes configured yet.",
                  setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness."):
-            st.dataframe(routes.df, hide_index=True, use_container_width=True)
+            styled_table(routes.df)
             st.code(
                 "-- add a route (operator): send all PIPELINE alerts of MEDIUM+ to #dataeng\n"
                 "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)\n"

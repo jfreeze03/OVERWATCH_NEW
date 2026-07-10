@@ -307,7 +307,7 @@ def render() -> None:
             mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
                       key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
             if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
-                st.dataframe(mem.df, hide_index=True, use_container_width=True)
+                styled_table(mem.df)
             if _is_op:
                 with st.expander("Close this incident (audited, forward-only)"):
                     _kind = st.selectbox("Root cause",
@@ -328,7 +328,7 @@ def render() -> None:
                 source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")
     if props.usable() and _is_op:
         with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
-            st.dataframe(props.df, hide_index=True, use_container_width=True)
+            styled_table(props.df)
             _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
                                  key="inc_prop_pick")
             _prow = props.df[props.df["PROPOSAL_KEY"].astype(str) == _pick].iloc[0]
@@ -431,7 +431,7 @@ def render() -> None:
                 lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
                 nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
                 st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
-                st.dataframe(nearby, hide_index=True, use_container_width=True)
+                styled_table(nearby)
             except (KeyError, ValueError, TypeError) as exc:
                 st.caption(f"±30 min window unavailable for this row — {type(exc).__name__}: "
                            f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")

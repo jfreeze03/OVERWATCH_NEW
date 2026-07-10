@@ -1,6 +1,33 @@
 # Changelog
 
-## 4.19.0 — the Brief gets fast + the everything-check (2026-07-11)
+## 4.20.0 — polish batch + partial-success batching (2026-07-10)
+
+Codex r7 adopts (owner-approved, including #1 over the evidence gate):
+
+- **run_batch is partial-success aware**: the cached batch unit stays
+  all-or-nothing (failures are never cached), but a failed batch now
+  retries PER KEY through run() — individual caching, telemetry and error
+  isolation per query; one bad member no longer drags its siblings back
+  to serial-cold. Always returns every key; callers unchanged; the
+  batch_fallback evidence stream survives.
+- **Heavy toggles price themselves**: dormant-user, right-sizing and
+  repeat-query toggles show the last observed runtime this session
+  before you click.
+- **The proc trend is discoverable**: click a $/call leaderboard row and
+  the trend panel prefills with that procedure.
+- **Legend popover** beside Views: severity colors, mart/live/stale
+  source labels, measured/allocated/ESTIMATED-vs-VERIFIED money
+  semantics — for operators who didn't sit through the design reviews.
+- **30 raw st.dataframe calls migrated to styled_table** (shared
+  formatting, pinning, status colors); the 8 holdouts carry bespoke
+  kwargs and are deliberate.
+- **Docs pass**: CHANGELOG date drift fixed (07-11 -> 07-10), FEATURES.md
+  gains the since-v4.9 capability table. Deferred with reasons: KPI
+  source badges (#12 — needs kpi_row surgery, next batch), attention
+  dashboard (#8 — Control Room IS that view), scorecards/campaigns
+  (#10/#11 — owner registry first).
+
+## 4.19.0 — the Brief gets fast + the everything-check (2026-07-10)
 
 App-only release:
 
@@ -34,7 +61,7 @@ App-only release:
   the volume-drop panel is the PREVIOUS app's orphaned mart (shared
   schema), not an OVERWATCH loader failure — drops with OVERWATCHV2.
 
-## 4.18.0 — trend one procedure, by name (2026-07-11)
+## 4.18.0 — trend one procedure, by name (2026-07-10)
 
 App-only release (owner ask: "can I enter it myself" — yes):
 

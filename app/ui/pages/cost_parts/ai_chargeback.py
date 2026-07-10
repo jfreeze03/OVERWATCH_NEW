@@ -307,7 +307,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     bud = run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
               source="DEPT_BUDGETS")
     if bud.ok and not bud.empty:
-        st.dataframe(bud.df, hide_index=True, use_container_width=True)
+        styled_table(bud.df)
     elif bud.ok:
         st.info("No department budgets set yet — add one below and the pace alert goes live.")
     if is_operator:

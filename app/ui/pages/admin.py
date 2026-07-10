@@ -83,7 +83,7 @@ def _settings_tab(is_operator: bool) -> None:
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
               source="SETTINGS")
     if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
-        st.dataframe(res.df, hide_index=True, use_container_width=True)
+        styled_table(res.df)
         result_caption(res)
 
     st.markdown("**Change a setting**")
@@ -118,7 +118,7 @@ def _migrations_tab() -> None:
     applied = set()
     if not res.empty:
         applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
-        st.dataframe(res.df, hide_index=True, use_container_width=True)
+        styled_table(res.df)
     missing = [f"V{n:03d} ({name})" for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
         st.warning("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md).")
@@ -143,7 +143,7 @@ def _migrations_tab() -> None:
                 source="MART_SOURCE_FRESHNESS")
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
-        st.dataframe(fresh.df, hide_index=True, use_container_width=True)
+        styled_table(fresh.df)
 
 
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "
@@ -167,7 +167,7 @@ def _self_cost_tab() -> None:
             {"label": "Failed", "value": f"{failed:,}",
              "delta_color": "inverse" if failed else "off"},
         ])
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        styled_table(df)
         result_caption(res)
 
 
@@ -177,23 +177,21 @@ def _observability_tab() -> None:
     if not buffer:
         st.success("No errors recorded in this session.")
     else:
-        st.dataframe(pd.DataFrame(buffer)[["at", "page", "type", "message"]],
-                     hide_index=True, use_container_width=True)
+        styled_table(pd.DataFrame(buffer)[["at", "page", "type", "message"]])
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
                source="APP_ERROR_LOG")
     st.markdown("**Persisted error log (all sessions)**")
     if sink.ok and sink.empty:
         st.success("Error sink is empty.")
     elif guard(sink, "", setup_hint="Sink table comes from V001."):
-        st.dataframe(sink.df, hide_index=True, use_container_width=True)
+        styled_table(sink.df)
 
     st.markdown("**Query telemetry (this session)**")
     telemetry = query_telemetry()
     if telemetry.empty:
         st.caption("No queries have run yet this session.")
     else:
-        st.dataframe(telemetry.sort_values("at", ascending=False),
-                     hide_index=True, use_container_width=True)
+        styled_table(telemetry.sort_values("at", ascending=False))
 
     if st.button("Refresh all cached data", key="adm_refresh"):
         bump_refresh_salt()
@@ -494,8 +492,7 @@ def _emergency_extras(is_operator: bool) -> None:
             sug = (j.groupby("resource_monitor")["MONTHLY_BUDGET_USD"].sum()
                     .reset_index())
             sug["SUGGESTED_QUOTA_CREDITS"] = (sug["MONTHLY_BUDGET_USD"] / rate2).round(0)
-            st.dataframe(sug.rename(columns={"resource_monitor": "MONITOR"}),
-                         hide_index=True, use_container_width=True)
+            styled_table(sug.rename(columns={"resource_monitor": "MONITOR"}))
             if is_operator and not sug.empty:
                 pick_m = st.selectbox("Monitor", sorted(sug["resource_monitor"].astype(str)),
                                       key="emg_sync_mon")
@@ -567,7 +564,7 @@ def _performance_tab() -> None:
     if usage.ok and usage.empty:
         st.info("No visits logged yet (logging starts after V016 + a roles.sql re-run).")
     elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
-        st.dataframe(usage.df, hide_index=True, use_container_width=True)
+        styled_table(usage.df)
         st.caption("Curation calls (merge/kill sections) should follow this table, not opinions.")
 
     st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")

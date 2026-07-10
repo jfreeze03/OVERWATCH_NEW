@@ -300,6 +300,42 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                source=live_source, **kwargs)
 
 
+
+
+def legend_popover() -> None:
+    """The app's color/source semantics in one popover (Codex r7 #18) —
+    for operators who didn't sit through the design reviews."""
+    import streamlit as st
+    with st.popover("Legend"):
+        st.markdown(
+            "**Severity** — :red[CRITICAL] page-me-now · :orange[HIGH] today · "
+            ":blue[MEDIUM/INFO] awareness · :green[OK] healthy.\n\n"
+            "**Source labels** — *mart* = loaded on schedule (cheap, up to ~1h behind); "
+            "*live fallback* = scanned ACCOUNT_USAGE just now (exact, slower); "
+            "*stale* = the loader is behind, numbers are labeled accordingly.\n\n"
+            "**Dollars** — *measured* = attribution credits; *allocated* = shared "
+            "spend split by usage share; *ESTIMATED vs VERIFIED* savings never mix."
+        )
+
+
+def toggle_cost_hint(key_contains: str) -> str:
+    """'What will this cost me?' for heavy on-demand toggles (Codex r7 #15):
+    the last observed runtime for a matching query key from THIS session's
+    telemetry, or an honest 'first run this session' when unknown."""
+    try:
+        from app.core.query import query_telemetry
+        t = query_telemetry()
+        if t.empty:
+            return "First run this session — expect a live scan."
+        hits = t[t["key"].astype(str).str.contains(key_contains, regex=False)]
+        if hits.empty:
+            return "First run this session — expect a live scan."
+        last_ms = float(hits.iloc[-1]["elapsed_ms"])
+        return f"Last run took ~{last_ms / 1000:.1f}s this session (cached repeats are instant)."
+    except Exception:  # noqa: BLE001 - a hint must never break a page
+        return ""
+
+
 def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool:
     """Standard render gate: labeled error / labeled empty / truncation banner.
 

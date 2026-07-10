@@ -265,10 +265,12 @@ _BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historica
 def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
     """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
 
-    Returns {key: QueryResult} on success or None when the parallel path is
-    unavailable or ANY query fails — callers then use serial run() per query,
-    which restores per-query caching, error isolation, and original tiers.
-    The batch caches as one unit (same-section queries share filter inputs).
+    ALWAYS returns {key: QueryResult} with every key present (v4.20, Codex
+    r7 #1, owner-approved). The cached batch unit stays all-or-nothing —
+    failures are never cached — but when the parallel path fails, the
+    fallback now runs PER KEY through run(): successes cache individually
+    and one bad query no longer drags its siblings back to serial-cold.
+    Callers' `(_b or {}).get(k) or run(...)` pattern still works unchanged.
     """
     tier = tier if tier in _BATCH_FETCHERS else "recent"
     started = time.perf_counter()
@@ -287,7 +289,17 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         keys = ",".join(str(s.get("key")) for s in specs)[:160]
         record_error(page, exc, context=(f"run_batch fallback tier={tier} n={len(specs)} "
                                          f"[{keys}] {type(exc).__name__}"))
-        return None
+        # Partial-success: retry each spec individually — run() brings its
+        # own per-query cache, telemetry, and error isolation. Failed keys
+        # come back as ok=False results (same surface the caller's own
+        # serial fallback would produce).
+        out: dict = {}
+        for spec in specs:
+            out[str(spec["key"])] = run(
+                str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
+                source=str(spec.get("source", "")),
+                max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+        return out
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}
     for spec, df, cap in zip(specs, frames, caps, strict=True):

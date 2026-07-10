@@ -67,7 +67,7 @@ def _access_tab(company: str, days: int) -> None:
             "value": f"{len(mfa.df)}",
             "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
         }])
-        st.dataframe(mfa.df, hide_index=True, use_container_width=True)
+        styled_table(mfa.df)
         result_caption(mfa)
 
     left, right = st.columns(2)
@@ -79,13 +79,13 @@ def _access_tab(company: str, days: int) -> None:
         if res.ok and res.empty:
             st.success("No failed logins in this window.")
         elif guard(res, ""):
-            st.dataframe(res.df, hide_index=True, use_container_width=True)
+            styled_table(res.df)
     with right:
         st.markdown("**Break-glass role holders**")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No ACCOUNTADMIN/SECURITYADMIN/ORGADMIN grants visible to this role."):
-            st.dataframe(res.df, hide_index=True, use_container_width=True)
+            styled_table(res.df)
             st.caption("This list should be short and every name should be expected.")
 
     st.markdown("**Expiring credentials (10-day horizon)**")
@@ -109,6 +109,8 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(creds)
 
     st.markdown("**Dormant users still holding access (90d+)**")
+    from app.ui.components import toggle_cost_hint
+    st.caption(toggle_cost_hint("dormant"))
     _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
                          key="sec_dormant_toggle",
                          help="The heaviest scan on this page — runs only when you ask. The export pack always includes it.")
@@ -138,7 +140,7 @@ def _access_tab(company: str, days: int) -> None:
     if res.ok and res.empty:
         st.success("No new role grants in this window.")
     elif guard(res, ""):
-        st.dataframe(res.df, hide_index=True, use_container_width=True)
+        styled_table(res.df)
         result_caption(res)
 
 
@@ -384,7 +386,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
                              title="Statements by user", top_n=8)
         st.caption("Left: what kind of change landed each day (create / alter / "
                    "drop / grants). Right: who made them. Rows below have the objects.")
-        st.dataframe(res.df, hide_index=True, use_container_width=True)
+        styled_table(res.df)
         result_caption(res)
 
     st.markdown("**Failed-login reasons (network policy vs credentials)**")
@@ -394,7 +396,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     if reasons.ok and reasons.empty:
         st.success("No failed logins in the window.")
     elif guard(reasons, ""):
-        st.dataframe(reasons.df, hide_index=True, use_container_width=True)
+        styled_table(reasons.df)
         result_caption(reasons)
 
     st.markdown("**Unused roles (90d) — revoke fodder**")
@@ -406,7 +408,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     if ur.ok and ur.empty:
         st.success("Every active role was assumed in the last 90 days.")
     elif guard(ur, ""):
-        st.dataframe(ur.df, hide_index=True, use_container_width=True)
+        styled_table(ur.df)
         st.caption("Also in the quarterly export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
 
@@ -417,7 +419,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     if bga.ok and bga.empty:
         st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
-        st.dataframe(bga.df, hide_index=True, use_container_width=True)
+        styled_table(bga.df)
         st.caption("Evidence only — the SEC_BREAK_GLASS_USE alert was retired at V034 "
                    "(owner decision: admins know what they are doing). Routine work "
                    "still belongs on SNOW_SYSADMINS.")

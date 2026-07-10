@@ -64,12 +64,15 @@ def test_localize_timestamps_is_display_only():
         st.session_state.pop("_ow_display_tz", None)
 
 
-def test_run_batch_returns_none_without_session():
-    """The parallel path degrades to None (serial fallback) — never raises."""
+def test_run_batch_degrades_per_key_without_session():
+    """v4.20 contract evolution (was: returns None): the parallel path now
+    degrades PER KEY through run() — every key present, failures as
+    ok=False results, and it still never raises."""
     from app.core.query import run_batch
 
     out = run_batch([{"key": "a", "sql": "SELECT 1 AS X"}], page="Test", tier="recent")
-    assert out is None  # no Snowflake session in CI
+    assert out is not None and set(out) == {"a"}   # every key present
+    assert out["a"].ok is False                    # no Snowflake session in CI
 
 
 def test_run_batch_contract_in_source():

@@ -171,6 +171,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # On-demand (Codex r3 #5): the profile joins metering x QUERY_HISTORY over
     # the whole window (~90s cold at 60d in production telemetry). The idle
     # advisor above answers the everyday question; load this when sizing.
+    from app.ui.components import toggle_cost_hint
+    st.caption(toggle_cost_hint("sizing"))
     if not st.toggle("Load right-sizing profile (heavy scan)", key="sizing_load",
                      help="Profiles every warehouse over the window: queueing, spill, "
                           "p95, idle share, and x0.5/x2 cost scenarios."):
@@ -314,6 +316,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.divider()
     # ---- 2. Repeat-query candidates -------------------------------------------
     st.markdown("**Repeat-query candidates (cache / materialization)**")
+    st.caption(toggle_cost_hint("repeatq"))
     _rq_on = st.toggle("Run repeat-query scan (fingerprints the window's QUERY_HISTORY)",
                        key="cost_repeatq_toggle",
                        help="The heaviest scan on this page — runs only when you ask.")
@@ -395,7 +398,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         elif guard(prune, ""):
             st.caption("These families read almost every micro-partition — clustering keys or "
                        "better predicates would cut both runtime and credits.")
-            st.dataframe(prune.df, hide_index=True, use_container_width=True)
+            styled_table(prune.df)
             result_caption(prune)
         cache = run(ops_sql.result_cache_daily(days, company), page=_PAGE,
                     key=f"cachehit_{company}_{days}", tier="historical",

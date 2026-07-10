@@ -141,7 +141,8 @@ def _views_popover() -> None:
     """Saved filter views + default landing (USER_PREFS, V013)."""
     from app.core.state import request_navigation
     from app.data import prefs_sql
-
+    from app.ui.components import legend_popover
+    legend_popover()
     with st.popover("Views"):
         prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                     source="USER_PREFS")

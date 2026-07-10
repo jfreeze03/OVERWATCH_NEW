@@ -119,7 +119,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
                 live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
             if guard(comp, "No query family with 20+ runs averages >0.5s compile time — "
                            "the ratio driver is likely many tiny/metadata queries instead."):
-                st.dataframe(comp.df, hide_index=True, use_container_width=True)
+                styled_table(comp.df)
                 result_caption(comp)
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:

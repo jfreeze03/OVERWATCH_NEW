@@ -104,13 +104,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     st.markdown("**Stored procedures — $/call leaderboard (every proc, not just changed ones)**")
     if guard(p_res, "No CALLs with attributed credits in this scope/window."):
         pdf = p_res.df.copy()
+        # Click a row -> the trend panel below prefills with that proc
+        # (Codex r7 #5: the trend was findable only by typing).
         pdf["USD_TOTAL"] = pdf["TOTAL_CREDITS"].map(lambda c: credits_to_usd(c, rate))
         pdf["USD_PER_CALL"] = pdf["CREDITS_PER_CALL"].map(lambda c: credits_to_usd(c, rate))
-        styled_table(pdf, height=280, column_config={
+        from app.ui.components import selectable_table
+        _psel = selectable_table(pdf, key="uc_proc_sel", height=280, column_config={
             "USD_TOTAL": st.column_config.NumberColumn("$ (window)", format="$%.2f"),
             "USD_PER_CALL": st.column_config.NumberColumn("$/call", format="$%.4f"),
             "FAIL_PCT": st.column_config.NumberColumn("Fail %", format="%.1f%%"),
         })
+        if _psel is not None:
+            st.session_state["uc_proc_trend_name"] = str(pdf.iloc[int(_psel)]["PROC_NAME"])
+            st.caption(f"Selected **{st.session_state['uc_proc_trend_name']}** — "
+                       "the trend panel below is prefilled.")
         result_caption(p_res, note="Database/schema = the CALL's session context; a proc "
                                    "may read other databases. ATTRIBUTED_CALLS counts calls "
                                    "the attribution view matched — $0 rows with calls mean "

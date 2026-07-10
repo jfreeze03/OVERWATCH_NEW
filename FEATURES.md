@@ -94,3 +94,15 @@ features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 | Fact-first hot paths + pinned live-scan budgets (CI fails on new ACCOUNT_USAGE scans on Brief/Overview/Control Room) | tests/test_perf_budgets.py |
 | Teams-safe delivery (V026): JSON-escaped payloads + Workflows Adaptive-Card recipe | snowflake/webhook_delivery.sql · RUNBOOK §19 |
 
+## Since v4.9 (July 2026 sprint)
+
+| Capability | Where |
+|---|---|
+| Nine scheduled marts + tag coverage, fact-first panels with labeled live fallbacks | everywhere (V027-V031) |
+| Incident object: declare/auto-declare/proposals, TTD/MTTA/MTTR/reopen/compression, lineage joins | Control Room, Brief (V032) |
+| Change attribution: CHANGED_BY + MANAGED/MANUAL vs DEPLOY_ACTORS | Operations scorecard (V033) |
+| Per-route company delivery filters (Teams = ALFA-only for now) | alert sender v4 (V034) |
+| Measured proc costs: $/call leaderboard, price-a-CALL/session, trend-one-procedure by name | Cost -> Unit costs |
+| Client driver/version inventory with BEHIND flags | Security -> Clients |
+| Delivery SLOs, alert fatigue, acceptance funnel, per-page cache-hit telemetry | Alerts -> History, Admin -> Performance |
+| Flyway-readiness (ledger panel + adoption runbook) | Admin, docs/FLYWAY_ADOPTION.md |
