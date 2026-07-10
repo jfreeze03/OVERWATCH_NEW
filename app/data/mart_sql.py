@@ -985,15 +985,20 @@ LIMIT 40
 # V032 incident object — readers (tiny operator-curated tables, live tier).
 # ---------------------------------------------------------------------------
 
-def open_incidents(limit: int = 50) -> str:
+def open_incidents(limit: int = 50, company: str = "ALL") -> str:
+    """Company keeps that company's rows PLUS account-level (COMPANY='ALL')
+    incidents — the open_alert_events convention (live round 8: the panel
+    ignored the triage filter and showed both companies under ALFA)."""
     limit = max(1, min(int(limit or 50), 200))
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND (i.COMPANY = {sql_literal(company)} OR UPPER(i.COMPANY) = 'ALL')")
     return f"""
 SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
        i.DETECTED_AT, i.STARTED_AT, i.DECLARED_BY,
        (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
          WHERE m.INCIDENT_ID = i.INCIDENT_ID) AS MEMBERS
 FROM {core_object("INCIDENTS")} i
-WHERE i.STATUS IN ('OPEN', 'MITIGATED')
+WHERE i.STATUS IN ('OPEN', 'MITIGATED'){comp}
 ORDER BY CASE UPPER(i.SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
          i.DETECTED_AT DESC
 LIMIT {limit}
@@ -1015,30 +1020,37 @@ LIMIT 500
 """
 
 
-def incident_proposals(limit: int = 20) -> str:
+def incident_proposals(limit: int = 20, company: str = "ALL") -> str:
+    """Same company convention as open_incidents — proposals for the other
+    company must not surface under an ALFA scope (live round 8)."""
     limit = max(1, min(int(limit or 20), 100))
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f"WHERE (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')\n")
     return f"""
 SELECT PROPOSAL_KEY, SUGGESTED_TITLE, SEVERITY, COMPANY, FIRST_TS, LAST_TS,
        ALERTS, NEARBY_WH_CHANGES
 FROM {core_object("INCIDENT_PROPOSALS")}
+{comp}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
          LAST_TS DESC
 LIMIT {limit}
 """
 
 
-def incident_metrics(days: int = 90) -> str:
+def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate over
     the owner-decided 14-day window, storm compression, change-correlated %."""
     days = bounded_days(days, 365)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
     return f"""
 WITH w AS (
     SELECT * FROM {core_object("INCIDENTS")}
-    WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){comp}
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
-      WHERE STATUS IN ('OPEN', 'MITIGATED')) AS OPEN_NOW,
+      WHERE STATUS IN ('OPEN', 'MITIGATED'){comp}) AS OPEN_NOW,
     (SELECT COUNT(*) FROM w) AS DECLARED_N,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
       WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,

@@ -98,8 +98,10 @@ def render() -> None:
                 "help": "Open ESTIMATED items awaiting the monthly verifier. "
                         "Deliberately shown apart from verified.",
             })
-    _inc = run(mart_sql.open_incidents(5), page=_PAGE, key="brief_incidents", tier="live",
-               source="INCIDENTS (open + mitigated)")
+    _inc_company = filters()["company"]
+    _inc = run(mart_sql.open_incidents(5, _inc_company), page=_PAGE,
+               key=f"brief_incidents_{_inc_company}", tier="live",
+               source=f"INCIDENTS (open, {_inc_company} + account-level)")
     if _inc.ok:
         _n_inc = len(_inc.df)
         kpis.append({

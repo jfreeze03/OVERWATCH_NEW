@@ -106,8 +106,8 @@ def test_incident_readers_shapes():
 def test_control_room_incidents_section():
     assert 'st.subheader("Incidents")' in _CR
     assert "resolve_role_profile(current_role()) in OPERATOR_PROFILES" in _CR
-    assert "mart_sql.incident_metrics(90)" in _CR
-    assert "mart_sql.open_incidents(50)" in _CR
+    assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
+    assert "mart_sql.open_incidents(50, company)" in _CR
     assert "nothing groups silently" in _CR                   # proposals expander says so
 
 

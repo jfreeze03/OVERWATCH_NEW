@@ -449,6 +449,7 @@ blocks others).
 | PIPE_DT_FAILURES | PIPELINE | dynamic-table refresh failures 24h (CRITICAL ≥5) | daily per DT |
 | SEC_FAILED_LOGINS | SECURITY | failed logins over threshold | daily |
 | SEC_CRED_EXPIRY | SECURITY | credential expires ≤ threshold days — 10 by default since V028 (CRITICAL if expired) | weekly until rotated |
+| ~~SEC_BREAK_GLASS_USE~~ | SECURITY | retired at V034 (muted since V025) — admin-role activity stays as evidence on Security -> Changes | — |
 | SEC_BREAK_GLASS_USE | SECURITY | > threshold statements/day under admin roles | daily per user |
 | COST_DEPT_BUDGET_PACE | COST | department MTD > budget pace by threshold % (DEPT_BUDGETS) | daily per dept |
 | COST_ORG_ACCOUNT_CREEP | COST | org account currency spend up threshold % WoW | weekly per account |

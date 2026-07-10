@@ -418,8 +418,9 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
         st.dataframe(bga.df, hide_index=True, use_container_width=True)
-        st.caption("SEC_BREAK_GLASS_USE alerts when a user exceeds the daily threshold. "
-                   "Routine work belongs on SNOW_SYSADMINS.")
+        st.caption("Evidence only — the SEC_BREAK_GLASS_USE alert was retired at V034 "
+                   "(owner decision: admins know what they are doing). Routine work "
+                   "still belongs on SNOW_SYSADMINS.")
         result_caption(bga)
 
 

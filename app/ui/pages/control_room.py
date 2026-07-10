@@ -54,6 +54,9 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
         f"FROM {core_object('ALERT_EVENTS')} e "
         "WHERE e.STATUS IN ('OPEN', 'ACK') "
         "AND e.RAISED_AT >= DATEADD('day', -2, CURRENT_TIMESTAMP()) "
+        # both companies share rule families — members must match the
+        # proposal's company too (live round 8), account-level rides along
+        f"AND (e.COMPANY = {sql_literal(str(company))} OR UPPER(e.COMPANY) = 'ALL') "
         f"AND SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) = {fam} "
         f"AND NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
         "WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID);"
@@ -274,8 +277,9 @@ def render() -> None:
     from app.core.session import current_role
     from app.ui.components import log_ui_event, notify
     _is_op = resolve_role_profile(current_role()) in OPERATOR_PROFILES
-    inc_met = run(mart_sql.incident_metrics(90), page=_PAGE, key="inc_metrics",
-                  tier="recent", source="INCIDENTS lifecycle (90d)")
+    inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
+                  key=f"inc_metrics_{company}", tier="recent",
+                  source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
     if inc_met.usable():
         im = inc_met.df.iloc[0]
         kpi_row([
@@ -291,8 +295,9 @@ def render() -> None:
             {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
              "help": "Incidents carrying a WH_CHANGE/DEPLOY member — the IaC payoff number."},
         ])
-    oi = run(mart_sql.open_incidents(50), page=_PAGE, key="open_incidents", tier="live",
-             source="INCIDENTS (open + mitigated)")
+    oi = run(mart_sql.open_incidents(50, company), page=_PAGE,
+             key=f"open_incidents_{company}", tier="live",
+             source=f"INCIDENTS (open + mitigated, {company} + account-level)")
     if oi.ok and oi.empty:
         st.success("No open incidents.")
     elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
@@ -318,8 +323,9 @@ def render() -> None:
                         notify(ok, msg)
                         if ok:
                             log_ui_event("incident_close", page=_PAGE)
-    props = run(mart_sql.incident_proposals(), page=_PAGE, key="inc_props", tier="live",
-                source="INCIDENT_PROPOSALS (suggestions — a human confirms)")
+    props = run(mart_sql.incident_proposals(20, company), page=_PAGE,
+                key=f"inc_props_{company}", tier="live",
+                source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")
     if props.usable() and _is_op:
         with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
             st.dataframe(props.df, hide_index=True, use_container_width=True)

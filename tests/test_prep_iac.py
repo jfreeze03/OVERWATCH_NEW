@@ -110,6 +110,6 @@ def test_runbook_gains_the_incidents_sop():
 
 def test_brief_shows_open_incidents_guarded():
     brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "mart_sql.open_incidents(5)" in brief
+    assert "mart_sql.open_incidents(5, _inc_company)" in brief  # triage filter honored
     assert "if _inc.ok:" in brief                                  # silent pre-V032
     assert brief.count("ACCOUNT_USAGE") == 0                       # budget stays zero

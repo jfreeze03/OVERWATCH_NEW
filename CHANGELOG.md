@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.17.0 — V034 + live round 8: delivery scoping and the triage-filter law (2026-07-10)
+
+Migration V034 (apply after V033):
+
+- **Teams delivery is ALFA-only for now** (owner decision): ALERT_ROUTES
+  gains COMPANY_FILTER ('ALL' default; every existing route flips to
+  'ALFA'); sender v4 carries a route's company plus account-level events —
+  the open_alert_events convention applied to delivery. The expiry
+  watchdog learns the same policy, so company-filtered-out events can
+  never spam undelivered_expired. In-app visibility untouched. Derived
+  VERBATIM from V026's sender with five enumerated edits, revert-locked.
+- **Incidents honor the triage filter everywhere** (live round 8: the new
+  section showed both companies under ALFA): open_incidents,
+  incident_proposals and incident_metrics all take company (company rows +
+  account-level, keys scoped); the Brief chip reads the page filter; and
+  the declare flow now matches members on the proposal's COMPANY as well
+  as its dedupe family — both companies share rule families, so
+  family-only linking could have attached Trexis alerts to an ALFA
+  incident.
+- **The triage-filter law, recorded**: every new metric/panel takes the
+  page filters (company at minimum) at birth — locked per-surface and
+  written into the SQL discipline notes so review catches it before
+  production does.
+- **SEC_BREAK_GLASS_USE retired** (owner: admins know what they are
+  doing): rule row deleted, lingering open events resolved EXPECTED,
+  activity panel stays as evidence. Muted since V025; gone at V034.
+- Tests: tests/test_live_round8.py. 623 green.
+
 ## 4.16.0 — V033: attribution + Flyway-readiness + incidents SOP (2026-07-10)
 
 The in-the-meantime batch (migration V033, apply after V032):

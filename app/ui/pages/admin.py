@@ -52,6 +52,7 @@ _EXPECTED_MIGRATIONS = {
     31: "change-impact scan v2 + tag-coverage mart",
     32: "incident object (tables + lineage + auto-declare)",
     33: "change attribution (CHANGED_BY + DEPLOY_ACTORS)",
+    34: "route company filter (sender v4, ALFA-only for now)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
