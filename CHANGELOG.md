@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.16.0 — V033: attribution + Flyway-readiness + incidents SOP (2026-07-10)
+
+The in-the-meantime batch (migration V033, apply after V032):
+
+- **Who made each warehouse change**: WAREHOUSE_CHANGE_REGISTRY gains
+  CHANGED_BY via SP_CHANGE_ATTRIBUTION (hourly, chained after
+  TASK_LOAD_HOURLY): best-effort join to the successful ALTER in the 65
+  minutes before the snapshot saw the change — evidence, not lineage (the
+  V010 rule). MANAGED vs MANUAL derives AT READ TIME from the new
+  DEPLOY_ACTORS setting (empty today, so everything honestly reads MANUAL
+  or UNKNOWN); the scorecard shows both columns with a caption. The
+  OPS_UNMANAGED_CHANGE rule deliberately does NOT ship — an alert with no
+  populated actors would be decorative config (review #8); it arrives with
+  its scan arm the day DEPLOY_ACTORS is populated.
+- **Flyway-readiness**: Admin -> Migrations reads flyway_schema_history
+  when it exists (quoted-lowercase, deliberately NOT canaried — absence is
+  legitimate until adoption) and says plainly which ledger is
+  authoritative; docs/FLYWAY_ADOPTION.md is the adoption runbook (service
+  user, DEPLOY_ACTORS entry, baseline-at-tip, compatibility replay, what
+  changes vs what stays); snowflake/flyway.toml.example ships key-pair
+  auth with cleanDisabled.
+- **Incidents are documented and visible**: RUNBOOK section 21 (declare /
+  auto-declare / close SOP, metric definitions, attribution semantics);
+  the Brief gains an Open-incidents chip (guarded — silent pre-V032).
+- Tests: tests/test_prep_iac.py (10 locks). 615 green.
+
 ## 4.15.0 — V032: the incident object ships (2026-07-10)
 
 Migration V032 (apply after V031, then RE-RUN roles.sql — operator DML

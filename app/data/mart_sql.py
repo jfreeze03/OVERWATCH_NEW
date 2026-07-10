@@ -1058,3 +1058,21 @@ SELECT
          ON m.INCIDENT_ID = w.INCIDENT_ID
       WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')) AS CHANGE_PCT
 """
+
+
+def flyway_history(limit: int = 50) -> str:
+    """Flyway's own ledger, when present. Quoted lowercase — Flyway creates
+    the table case-sensitive. Deliberately NOT canaried: the table is
+    legitimately absent until Flyway is adopted, and an hourly canary
+    failure would be pure error-log noise (the Admin panel degrades to a
+    caption instead)."""
+    limit = max(1, min(int(limit or 50), 200))
+    return f"""
+SELECT "installed_rank" AS INSTALLED_RANK, "version" AS VERSION,
+       "description" AS DESCRIPTION, "installed_by" AS INSTALLED_BY,
+       "installed_on" AS INSTALLED_ON, "execution_time" AS EXECUTION_MS,
+       "success" AS SUCCESS
+FROM {core_object('"flyway_schema_history"')}
+ORDER BY "installed_rank" DESC
+LIMIT {limit}
+"""

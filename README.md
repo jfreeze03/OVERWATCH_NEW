@@ -95,6 +95,7 @@ snowflake/migrations/V029__loader_fix.sql -- role/schema-hour loader arms: GROUP
 snowflake/migrations/V030__loader_fix2.sql -- correct arm shape (UDF outside aggregation) + posture MFA/breakglass
 snowflake/migrations/V031__scan_tuning_and_tagcov.sql -- change-impact scan v2 (tracking-bounded) + tag-coverage mart
 snowflake/migrations/V032__incident_object.sql -- INCIDENTS + members + lineage + proposals + auto-declare
+snowflake/migrations/V033__change_attribution.sql -- CHANGED_BY on the change registry + DEPLOY_ACTORS setting
 snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
 snowflake/validate.sql                   -- post-install checks
 ```

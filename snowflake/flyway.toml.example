@@ -1,0 +1,21 @@
+# Flyway config template for OVERWATCH (docs/FLYWAY_ADOPTION.md).
+# Copy next to your Flyway install, fill the placeholders. Never commit a
+# filled copy — the private key path is machine-local.
+
+[environments.prod]
+url = "jdbc:snowflake://<account>.snowflakecomputing.com/?db=DBA_MAINT_DB&schema=OVERWATCH&warehouse=WH_ALFA_OVERWATCH&role=OVERWATCH_DEPLOY"
+user = "FLYWAY_SVC"
+# key-pair auth (JDBC >= 3.11): no password in this file, ever
+jdbcProperties = { authenticator = "SNOWFLAKE_JWT", private_key_file = "/path/to/flyway_svc_rsa_key.p8" }
+
+[flyway]
+environment = "prod"
+locations = ["filesystem:snowflake/migrations"]
+# our files are V###__description.sql since V001 — Flyway's own convention
+sqlMigrationPrefix = "V"
+sqlMigrationSeparator = "__"
+# baseline at the applied tip on first adoption (see the runbook):
+#   flyway baseline -baselineVersion=033
+baselineOnMigrate = false
+# never let Flyway clean a schema that holds operator history
+cleanDisabled = true

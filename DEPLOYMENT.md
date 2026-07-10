@@ -38,6 +38,7 @@ snowflake/migrations/V029__loader_fix.sql
 snowflake/migrations/V030__loader_fix2.sql
 snowflake/migrations/V031__scan_tuning_and_tagcov.sql
 snowflake/migrations/V032__incident_object.sql
+snowflake/migrations/V033__change_attribution.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

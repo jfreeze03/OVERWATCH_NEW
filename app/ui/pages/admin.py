@@ -51,6 +51,7 @@ _EXPECTED_MIGRATIONS = {
     30: "loader fix 2 (UDF outside aggregation) + posture inputs",
     31: "change-impact scan v2 + tag-coverage mart",
     32: "incident object (tables + lineage + auto-declare)",
+    33: "change attribution (CHANGED_BY + DEPLOY_ACTORS)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -122,6 +123,19 @@ def _migrations_tab() -> None:
         st.warning("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md).")
     else:
         st.success(f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
+
+    fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="live",
+             source="flyway_schema_history (Flyway ledger)")
+    if fh.usable():
+        st.markdown("**Flyway deploy history** — the transport's own ledger")
+        styled_table(fh.df, height=220)
+        st.caption("Flyway owns WHAT ran WHEN once adopted; SCHEMA_VERSION above stays "
+                   "the app's contract check (and the in-file guards stay as defense "
+                   "against Snowsight bypass). Adoption runbook: docs/FLYWAY_ADOPTION.md.")
+    else:
+        st.caption("Flyway not detected — SCHEMA_VERSION above is authoritative. When "
+                   "procurement lands, docs/FLYWAY_ADOPTION.md is the adoption runbook; "
+                   "this panel lights up on its own once flyway_schema_history exists.")
 
     st.markdown("**Telemetry freshness**")
     fresh = run(mart_sql.source_freshness(), page=_PAGE, key="adm_freshness", tier="live",

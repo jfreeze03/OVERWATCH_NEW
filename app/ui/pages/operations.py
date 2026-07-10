@@ -594,6 +594,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         "spill, failures. Confirmed regressions raise WH_CHANGE_REGRESSION alerts."
     )
     wh_contains = str(st.session_state.get("flt_warehouse_contains", "") or "")
+    st.caption("CHANGE_SOURCE: MANAGED = made by a DEPLOY_ACTORS service user (Settings; empty until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER found near the snapshot.")
     res = run(change_impact_sql.warehouse_change_registry(90, company, wh_contains),
               page=_PAGE, key=f"whchg_{company}_{wh_contains}", tier="recent",
               source="WAREHOUSE_CHANGE_REGISTRY")

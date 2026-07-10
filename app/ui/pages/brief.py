@@ -98,6 +98,17 @@ def render() -> None:
                 "help": "Open ESTIMATED items awaiting the monthly verifier. "
                         "Deliberately shown apart from verified.",
             })
+    _inc = run(mart_sql.open_incidents(5), page=_PAGE, key="brief_incidents", tier="live",
+               source="INCIDENTS (open + mitigated)")
+    if _inc.ok:
+        _n_inc = len(_inc.df)
+        kpis.append({
+            "label": "Open incidents",
+            "value": f"{_n_inc}",
+            "severity": "bad" if _n_inc else "ok",
+            "help": "Lifecycle objects — declared or auto-declared CRITICALs. "
+                    "The Control Room owns the queue; this is the executive glance.",
+        })
     kpi_row(kpis)
 
     spend = run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",

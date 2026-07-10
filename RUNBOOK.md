@@ -676,3 +676,39 @@ browser interaction (platform behavior, not configurable), and V002 set
 ~16 minutes of XS credits. Hard backstop if wanted: a resource monitor with
 a daily quota on WH_ALFA_OVERWATCH. The app's own queries stay bounded by
 window clamps and row caps regardless of the parent statement's ceiling.
+
+## §21 Incidents — the operator SOP (V032)
+
+One incident = one story: alerts, task failures, warehouse changes, DDL and
+fixes under a single key. Alert-grain panels stay; incidents answer the
+question storms obscure ("how many real problems, how fast did we recover").
+
+**Where:** Control Room -> Incidents (queue above triage; Brief shows the
+open count). All state changes are DBA-gated, generate-then-run, audited,
+forward-only — reopen is a NEW incident carrying REOPENED_FROM.
+
+**Declaring.** Three paths, none silent:
+1. Proposals expander — open alert families (48h) with nearby warehouse
+   changes counted; pick one, review the generated SQL, type DECLARE. The
+   family's open alerts link as members automatically, never double-linked.
+2. Auto-declare — CRITICALs open an incident when their dedupe family has
+   no open one: hourly, one per family per 24h. Toggle:
+   Settings -> INCIDENT_AUTO_DECLARE_CRITICAL.
+3. Manual SQL — the panels show every statement they would run; copy and
+   adapt for unusual cases (members: ALERT | TASK_FAIL | WH_CHANGE | DDL |
+   DEPLOY | REMEDIATION).
+
+**Closing.** Select the incident, pick a ROOT_CAUSE_KIND (DEPLOY /
+CONFIG_CHANGE / DATA / CAPACITY / EXTERNAL / UNKNOWN), one-line note, type
+RESOLVE. Only OPEN/MITIGATED rows move — resolved history never rewrites.
+
+**Metrics** (Control Room KPI strip, 90d): TTD (earliest evidence ->
+detection), incident MTTA/MTTR, reopen rate (14d window —
+INCIDENT_REOPEN_DAYS), alerts-per-incident compression, change-correlated %
+(incidents with a WH_CHANGE/DEPLOY member — rises as IaC attribution lands).
+
+**Attribution (V033):** the warehouse-change scorecard shows CHANGED_BY and
+CHANGE_SOURCE. MANAGED = a DEPLOY_ACTORS service user (Settings; empty
+until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER
+found near the snapshot. Populate DEPLOY_ACTORS the day a deploy tool gets
+a service user.
