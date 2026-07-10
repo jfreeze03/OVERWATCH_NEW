@@ -34,6 +34,48 @@ from app.ui.components import (
 _PAGE = "Control Room"
 
 
+
+def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> str:
+    """Generate-then-run declare: one incident + every open alert of the
+    proposal's dedupe family as members (48h window). Three statements
+    sharing a session variable — same review-then-execute flow as alerts."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    fam = sql_literal(str(proposal_key).split("|", 1)[0])
+    return (
+        "SET OW_INC_ID = UUID_STRING();\n"
+        f"INSERT INTO {core_object('INCIDENTS')} "
+        "(INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, ROOT_CAUSE_KIND) "
+        f"SELECT $OW_INC_ID, {sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
+        f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN';\n"
+        f"INSERT INTO {core_object('INCIDENT_MEMBERS')} "
+        "(INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED) "
+        f"SELECT $OW_INC_ID, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE "
+        f"FROM {core_object('ALERT_EVENTS')} e "
+        "WHERE e.STATUS IN ('OPEN', 'ACK') "
+        "AND e.RAISED_AT >= DATEADD('day', -2, CURRENT_TIMESTAMP()) "
+        f"AND SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) = {fam} "
+        f"AND NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
+        "WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID);"
+    )
+
+
+def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
+    """Forward-only close: only OPEN/MITIGATED rows move; reopen is a NEW
+    incident with REOPENED_FROM — history never rewrites."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"UPDATE {core_object('INCIDENTS')} "
+        f"SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), "
+        f"ROOT_CAUSE_KIND = {sql_literal(str(kind).upper())}, "
+        f"ROOT_CAUSE_NOTE = {sql_literal(str(note)[:2000])}, "
+        "UPDATED_AT = CURRENT_TIMESTAMP() "
+        f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} "
+        "AND STATUS IN ('OPEN', 'MITIGATED');"
+    )
+
+
 def _day_replay() -> None:
     """One day, every domain, one story — the flight recorder Snowsight
     can't assemble from its silos."""
@@ -223,6 +265,84 @@ def render() -> None:
         st.error(f"24h pulse unavailable: {pulse.error}")
     else:
         st.info("No queries recorded in the last 24h for this scope.")
+
+
+    # ---- Incidents (V032) ------------------------------------------------------
+    st.subheader("Incidents")
+    from app.config import OPERATOR_PROFILES, resolve_role_profile
+    from app.core.query import execute_statement
+    from app.core.session import current_role
+    from app.ui.components import log_ui_event, notify
+    _is_op = resolve_role_profile(current_role()) in OPERATOR_PROFILES
+    inc_met = run(mart_sql.incident_metrics(90), page=_PAGE, key="inc_metrics",
+                  tier="recent", source="INCIDENTS lifecycle (90d)")
+    if inc_met.usable():
+        im = inc_met.df.iloc[0]
+        kpi_row([
+            {"label": "Open incidents", "value": f"{safe_float(im.get('OPEN_NOW')):,.0f}",
+             "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok"},
+            {"label": "MTTA / MTTR (90d)",
+             "value": f"{safe_float(im.get('MTTA_MIN')):,.0f} / {safe_float(im.get('MTTR_MIN')):,.0f} min",
+             "help": "Detected -> acknowledged / resolved, incident grain (alert-grain lives on Alerts -> History)."},
+            {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
+             "help": "Reopens within 14 days of a close / closed incidents (owner-set window)."},
+            {"label": "Alerts / incident", "value": f"{safe_float(im.get('COMPRESSION')):,.1f}",
+             "help": "Storm compression — the fatigue denominator done right."},
+            {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
+             "help": "Incidents carrying a WH_CHANGE/DEPLOY member — the IaC payoff number."},
+        ])
+    oi = run(mart_sql.open_incidents(50), page=_PAGE, key="open_incidents", tier="live",
+             source="INCIDENTS (open + mitigated)")
+    if oi.ok and oi.empty:
+        st.success("No open incidents.")
+    elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
+        sel_i = selectable_table(oi.df, key="cr_inc_sel", height=190)
+        if sel_i is not None:
+            _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
+            mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
+                      key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
+            if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
+                st.dataframe(mem.df, hide_index=True, use_container_width=True)
+            if _is_op:
+                with st.expander("Close this incident (audited, forward-only)"):
+                    _kind = st.selectbox("Root cause",
+                                         ["DEPLOY", "CONFIG_CHANGE", "DATA", "CAPACITY", "EXTERNAL", "UNKNOWN"],
+                                         key=f"inc_rc_{_iid[:8]}")
+                    _note = st.text_input("Root-cause note", key=f"inc_note_{_iid[:8]}", max_chars=500)
+                    _close = _incident_close_sql(_iid, _kind, _note)
+                    st.code(_close, language="sql")
+                    _conf = st.text_input("Type RESOLVE to confirm", key=f"inc_conf_{_iid[:8]}")
+                    if st.button("Execute close", key=f"inc_close_{_iid[:8]}",
+                                 disabled=(_conf != "RESOLVE")):
+                        ok, msg = execute_statement(_close, page=_PAGE)
+                        notify(ok, msg)
+                        if ok:
+                            log_ui_event("incident_close", page=_PAGE)
+    props = run(mart_sql.incident_proposals(), page=_PAGE, key="inc_props", tier="live",
+                source="INCIDENT_PROPOSALS (suggestions — a human confirms)")
+    if props.usable() and _is_op:
+        with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
+            st.dataframe(props.df, hide_index=True, use_container_width=True)
+            _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
+                                 key="inc_prop_pick")
+            _prow = props.df[props.df["PROPOSAL_KEY"].astype(str) == _pick].iloc[0]
+            _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
+                                         str(_prow["COMPANY"]), _pick)
+            st.code(_dec, language="sql")
+            _confd = st.text_input("Type DECLARE to confirm", key="inc_prop_conf")
+            if st.button("Declare incident + link alerts", key="inc_prop_exec", type="primary",
+                         disabled=(_confd != "DECLARE")):
+                _ok_all = True
+                for _stmt in [s for s in _dec.split(";") if s.strip()]:
+                    _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
+                    _ok_all = _ok_all and _ok
+                notify(_ok_all, "Incident declared with members linked." if _ok_all
+                       else "Declare failed — see the error log.")
+                if _ok_all:
+                    log_ui_event("incident_declare", page=_PAGE)
+    st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
+               "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
+               "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")
 
     # ---- Triage queue ----------------------------------------------------------
     st.subheader("Triage queue")

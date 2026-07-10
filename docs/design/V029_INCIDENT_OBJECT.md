@@ -1,7 +1,10 @@
 # V029 — the incident object (design)
 
-Status: DESIGN, 2026-07-09 — build after owner sign-off (same doc-first flow
-as V027). Consolidates Codex r6 #4 (incident object) and #6 (recommendation
+Status: BUILT as V032__incident_object.sql (2026-07-10, v4.15.0) — owner
+answers: auto-declare ON, reopen 14d, declare DBA-only. IS_RERUN rider
+closed as already-safe (rerun rows carry NULL RENDER_MS; the sentinel has
+filtered NULLs since V017). IaC hooks still SHIP DISABLED until the tools
+land. Original design (doc-first flow, same as V027): Consolidates Codex r6 #4 (incident object) and #6 (recommendation
 lineage), the V027-era note on IS_RERUN scan hygiene, and the 2026-07-09
 IaC decisions (Flyway for migrations, Terraform for account topology —
 both probable, neither landed; every IaC hook below degrades to today's

@@ -979,3 +979,82 @@ GROUP BY 1
 ORDER BY EVENTS DESC
 LIMIT 40
 """
+
+
+# ---------------------------------------------------------------------------
+# V032 incident object — readers (tiny operator-curated tables, live tier).
+# ---------------------------------------------------------------------------
+
+def open_incidents(limit: int = 50) -> str:
+    limit = max(1, min(int(limit or 50), 200))
+    return f"""
+SELECT i.INCIDENT_ID, i.SEVERITY, i.STATUS, i.COMPANY, i.TITLE,
+       i.DETECTED_AT, i.STARTED_AT, i.DECLARED_BY,
+       (SELECT COUNT(*) FROM {core_object("INCIDENT_MEMBERS")} m
+         WHERE m.INCIDENT_ID = i.INCIDENT_ID) AS MEMBERS
+FROM {core_object("INCIDENTS")} i
+WHERE i.STATUS IN ('OPEN', 'MITIGATED')
+ORDER BY CASE UPPER(i.SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
+         i.DETECTED_AT DESC
+LIMIT {limit}
+"""
+
+
+def incident_members_detail(incident_id: str) -> str:
+    from app.core.sqlsafe import sql_literal
+    lit = sql_literal(str(incident_id or "").strip())
+    return f"""
+SELECT m.MEMBER_KIND, m.REF_ID, m.EVIDENCE_TS, m.AUTO_LINKED, m.LINKED_BY, m.LINKED_AT,
+       COALESCE(e.TITLE, '') AS ALERT_TITLE, COALESCE(e.STATUS, '') AS ALERT_STATUS
+FROM {core_object("INCIDENT_MEMBERS")} m
+LEFT JOIN {core_object("ALERT_EVENTS")} e
+       ON m.MEMBER_KIND = 'ALERT' AND e.EVENT_ID = m.REF_ID
+WHERE m.INCIDENT_ID = {lit}
+ORDER BY m.EVIDENCE_TS
+LIMIT 500
+"""
+
+
+def incident_proposals(limit: int = 20) -> str:
+    limit = max(1, min(int(limit or 20), 100))
+    return f"""
+SELECT PROPOSAL_KEY, SUGGESTED_TITLE, SEVERITY, COMPANY, FIRST_TS, LAST_TS,
+       ALERTS, NEARBY_WH_CHANGES
+FROM {core_object("INCIDENT_PROPOSALS")}
+ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
+         LAST_TS DESC
+LIMIT {limit}
+"""
+
+
+def incident_metrics(days: int = 90) -> str:
+    """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate over
+    the owner-decided 14-day window, storm compression, change-correlated %."""
+    days = bounded_days(days, 365)
+    return f"""
+WITH w AS (
+    SELECT * FROM {core_object("INCIDENTS")}
+    WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+)
+SELECT
+    (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
+      WHERE STATUS IN ('OPEN', 'MITIGATED')) AS OPEN_NOW,
+    (SELECT COUNT(*) FROM w) AS DECLARED_N,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
+      WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, ACK_AT)), 1) FROM w
+      WHERE ACK_AT IS NOT NULL) AS MTTA_MIN,
+    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
+      WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
+    (SELECT ROUND(100.0 * COUNT_IF(REOPENED_FROM IS NOT NULL)
+            / NULLIF(COUNT_IF(RESOLVED_AT IS NOT NULL), 0), 1) FROM w) AS REOPEN_PCT,
+    (SELECT ROUND(COUNT(*) / NULLIF((SELECT COUNT(*) FROM w), 0), 1)
+       FROM {core_object("INCIDENT_MEMBERS")} m
+       JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
+      WHERE m.MEMBER_KIND = 'ALERT') AS COMPRESSION,
+    (SELECT ROUND(100.0 * COUNT(DISTINCT w.INCIDENT_ID) / NULLIF((SELECT COUNT(*) FROM w), 0), 1)
+       FROM w
+       JOIN {core_object("INCIDENT_MEMBERS")} m
+         ON m.INCIDENT_ID = w.INCIDENT_ID
+      WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')) AS CHANGE_PCT
+"""

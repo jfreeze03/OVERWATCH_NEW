@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.15.0 — V032: the incident object ships (2026-07-10)
+
+Migration V032 (apply after V031, then RE-RUN roles.sql — operator DML
+grants on the two new tables):
+
+- **INCIDENTS + INCIDENT_MEMBERS** — permanent, operator-curated, PRESERVED
+  in teardown: alerts, task failures, warehouse changes, DDL, deploys and
+  remediations under one lifecycle key. Forward-only statuses; reopen is a
+  NEW incident carrying REOPENED_FROM (14-day window, owner-set).
+- **Three births, none silent**: manual declare (Control Room, DBA-gated,
+  generate-then-run — three statements sharing one session-var id, family
+  alerts linked without doubling); auto-declare for CRITICALs
+  (SP_INCIDENT_AUTODECLARE chained after TASK_LOAD_HOURLY — one incident
+  per dedupe family per 24h, never doubles an open family, SETTINGS
+  toggle ON per owner decision); INCIDENT_PROPOSALS view (open alert
+  families + nearby warehouse changes — suggestions a human confirms).
+- **Lineage becomes joins** (Codex r6 #6): REMEDIATION_LOG +EVENT_ID/
+  INCIDENT_ID, SAVINGS_LEDGER +REMEDIATION_ID. Additive; history stays
+  NULL — no invented lineage.
+- **Control Room -> Incidents**: lifecycle KPI strip (open now, incident
+  MTTA/MTTR, reopen rate, alerts-per-incident compression,
+  change-correlated % — the IaC payoff number), open-incident queue with
+  member detail, close flow with root-cause kind + note,
+  incident_declare/incident_close usage events.
+- The design doc's IS_RERUN scan rider closed as ALREADY-SAFE: rerun rows
+  persist RENDER_MS NULL (V027) and OPS_SLOW_RENDER has filtered NULLs
+  since V17 — documented in the migration header.
+- IaC hooks (deploy members, OPS_MIGRATION_FAILED, OPS_UNMANAGED_CHANGE)
+  still SHIP DISABLED until Flyway/Terraform land, per the design doc.
+- Tests: tests/test_v032_incidents.py (11 locks). 604 green.
+
 ## 4.14.0 — V031: the tuning trio (2026-07-10)
 
 Migration V031 (apply after V030):
