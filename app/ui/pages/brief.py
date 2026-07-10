@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
 from app.logic.actions import rank_actions
@@ -26,8 +26,32 @@ def render() -> None:
     page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    company = filters()["company"]
 
-    strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+    # Two tier-grouped parallel batches (live round 10: ten serial reads made
+    # the exec page the slow one — p95 8.9s). Any batch failure falls back to
+    # the original serial per-query path below, unchanged.
+    _b_live = run_batch([
+        {"key": "strip", "sql": mart_sql.health_strip(),
+         "source": "ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY"},
+        {"key": "inc", "sql": mart_sql.open_incidents(5, company),
+         "source": f"INCIDENTS (open, {company} + account-level)"},
+        {"key": "events", "sql": mart_sql.open_alert_events(50, company),
+         "source": "ALERT_EVENTS"},
+        {"key": "acts", "sql": mart_sql.action_queue(100), "source": "ACTION_QUEUE"},
+    ], page=_PAGE, tier="live") or {}
+    _b_rec = run_batch([
+        {"key": "exh", "sql": mart_sql.contract_exhaustion(),
+         "source": "SETTINGS + FACT_METERING_DAILY"},
+        {"key": "roi", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER"},
+        {"key": "appq", "sql": mart_sql.app_cost_quarter(),
+         "source": "WAREHOUSE_METERING_HISTORY (WH_ALFA_OVERWATCH)"},
+        {"key": "spark", "sql": mart_sql.fact_daily_spend(14), "source": "FACT_METERING_DAILY"},
+        {"key": "digest", "sql": mart_sql.latest_digest(),
+         "source": "DAILY_DIGEST (Cortex, grounded)"},
+    ], page=_PAGE, tier="recent") or {}
+
+    strip = _b_live.get("strip") or run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
                 source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
     strip_up = strip.ok and not strip.empty
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}
@@ -54,7 +78,7 @@ def render() -> None:
     if not strip_up:
         st.warning("Telemetry marts unreachable — the Brief refuses to invent numbers. "
                    + (strip.error or ""))
-    exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
+    exh = _b_rec.get("exh") or run(mart_sql.contract_exhaustion(), page=_PAGE, key="brief_exhaustion",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
     if exh.usable():
         erow = exh.df.iloc[0]
@@ -69,9 +93,9 @@ def render() -> None:
                 "help": "Straight-line on trailing 30d billed credits vs contracted credits. "
                         "Scenarios: Cost > Contract > Renewal planner.",
             })
-    roi = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
+    roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
-    cost_q = run(mart_sql.app_cost_quarter(), page=_PAGE, key="brief_app_cost",
+    cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_quarter(), page=_PAGE, key="brief_app_cost",
                  tier="recent", source="WAREHOUSE_METERING_HISTORY (WH_ALFA_OVERWATCH)")
     if roi.usable():
         rrow = roi.df.iloc[0]
@@ -98,8 +122,8 @@ def render() -> None:
                 "help": "Open ESTIMATED items awaiting the monthly verifier. "
                         "Deliberately shown apart from verified.",
             })
-    _inc_company = filters()["company"]
-    _inc = run(mart_sql.open_incidents(5, _inc_company), page=_PAGE,
+    _inc_company = company
+    _inc = _b_live.get("inc") or run(mart_sql.open_incidents(5, _inc_company), page=_PAGE,
                key=f"brief_incidents_{_inc_company}", tier="live",
                source=f"INCIDENTS (open, {_inc_company} + account-level)")
     if _inc.ok:
@@ -113,12 +137,12 @@ def render() -> None:
         })
     kpi_row(kpis)
 
-    spend = run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
+    spend = _b_rec.get("spark") or run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
                 source="FACT_METERING_DAILY")
     if spend.ok and not spend.empty:
         charts.sparkline_row([("Spend, 14 days", spend.df, "DAY", "CREDITS_BILLED")])
 
-    digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
+    digest = _b_rec.get("digest") or run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
                  source="DAILY_DIGEST (Cortex, grounded)")
     if digest.usable():
         drow = digest.df.iloc[0]
@@ -128,8 +152,7 @@ def render() -> None:
     st.markdown("**Fires**")
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
     # fires showed under an ALFA scope). Account-level events always show.
-    company = filters()["company"]
-    events = run(mart_sql.open_alert_events(50, company), page=_PAGE,
+    events = _b_live.get("events") or run(mart_sql.open_alert_events(50, company), page=_PAGE,
                  key=f"brief_events_{company}", tier="live", source="ALERT_EVENTS")
     if events.ok and not events.empty:
         crit = events.df[events.df["SEVERITY"].astype(str).isin(["CRITICAL", "HIGH"])]
@@ -145,7 +168,7 @@ def render() -> None:
         st.success("No open alerts." if events.ok else "Alerting not installed yet.")
 
     st.markdown("**Asks**")
-    actions = run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",
+    actions = _b_live.get("acts") or run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",
                   source="ACTION_QUEUE")
     if actions.ok and not actions.empty:
         ranked = rank_actions(actions.df, limit=3)

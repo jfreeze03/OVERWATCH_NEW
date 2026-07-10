@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.19.0 — the Brief gets fast + the everything-check (2026-07-11)
+
+App-only release:
+
+- **Brief: ten serial reads -> two tier-grouped batches** (fleet board:
+  p95 8.9s, 18/19 fetches slow — unacceptable for the exec page). One
+  live batch (health strip, incidents, alerts, actions) + one recent
+  batch (exhaustion, savings, app cost, sparkline, digest), serial
+  per-query fallbacks unchanged, honesty contract and company scoping
+  intact, budget still zero live scans.
+- **Full repo sweep came back clean**: migrations V001..V034 contiguous
+  with sequential guards; all five replaced procs owned by their latest
+  migration (derivation chains intact); 135 canaries; every live-scan
+  budget exactly at its pin; zero correlated-subquery or alias-shadow
+  landmines in any builder (the sweep's four hits were a docstring and
+  three cross-scope CTE false positives — verified by eye).
+
 ## 4.18.1 — live round 9: the scorecard's CHANGE_SOURCE runs (2026-07-10)
 
 - **Warehouse-setting-changes panel crashed** ('unsupported subquery type'):
