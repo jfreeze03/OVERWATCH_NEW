@@ -58,7 +58,9 @@ def test_registry_reader_derives_source_at_read_time():
     for word in ("'MANAGED'", "'MANUAL'", "'UNKNOWN'"):
         assert word in sql, word
     assert "'DEPLOY_ACTORS'" in sql                                # setting drives the split
-    assert "WAREHOUSE_CHANGE_REGISTRY" in sql and " w" in sql      # aliased for the correlate
+    assert "CROSS JOIN" in sql and "da.ACTORS" in sql              # uncorrelated by construction
+    # the correlated-aggregate shape that failed live (round 9) can't return:
+    assert "SELECT POSITION" not in sql
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
     assert "CHANGE_SOURCE: MANAGED" in ops                         # semantics on the panel
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.18.1 — live round 9: the scorecard's CHANGE_SOURCE runs (2026-07-10)
+
+- **Warehouse-setting-changes panel crashed** ('unsupported subquery type'):
+  the v4.16 CHANGE_SOURCE derivation used a CORRELATED aggregate subquery
+  (outer w.CHANGED_BY inside a MAX over SETTINGS) — Snowflake rejects that
+  shape at runtime and the sqlglot gate can't see it (semantic, and app
+  builders aren't gated). Fixed uncorrelated-by-construction: the
+  DEPLOY_ACTORS setting resolves once via CROSS JOIN, POSITION runs per
+  row. Empty actors still reads honestly as MANUAL/UNKNOWN. Lock forbids
+  the correlated shape returning. Lesson recorded with the alias-shadow
+  rule: correlated scalar subqueries in select lists are a runtime
+  landmine — resolve settings once, join them in.
+- Noted from the owner's fleet graphics: Brief p95 8.9s (18/19 fetches
+  slow) is the next tuning target; MART_SECTION_DECISION_CURRENT_FLAT in
+  the volume-drop panel is the PREVIOUS app's orphaned mart (shared
+  schema), not an OVERWATCH loader failure — drops with OVERWATCHV2.
+
 ## 4.18.0 — trend one procedure, by name (2026-07-11)
 
 App-only release (owner ask: "can I enter it myself" — yes):
