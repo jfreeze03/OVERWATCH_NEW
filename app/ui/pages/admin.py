@@ -53,6 +53,7 @@ _EXPECTED_MIGRATIONS = {
     32: "incident object (tables + lineage + auto-declare)",
     33: "change attribution (CHANGED_BY + DEPLOY_ACTORS)",
     34: "route company filter (sender v4, ALFA-only for now)",
+    35: "lock-wait mart (page views never scan LOCK_WAIT_HISTORY)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

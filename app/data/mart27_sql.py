@@ -420,3 +420,28 @@ HAVING SUM(c.EXEC_SEC) > 60
 ORDER BY UNTAGGED_EXEC_SEC DESC
 LIMIT 30
 """
+
+
+def lock_wait_daily(days: int, company: str = "ALL") -> str:
+    """Lock waits from MART_LOCK_WAIT_DAILY (V035) — the live scan read
+    46-56 GB per view; the daily task pays that once. Same ranking as the
+    live builder: never-acquired first (those are the aborted statements)."""
+    d = max(1, min(int(days), 90))
+    comp = ""
+    if company and company != "ALL":
+        c = company.replace("'", "''")
+        comp = f"    AND (c.COMPANY = '{c}' OR UPPER(c.COMPANY) = 'ALL')\n"
+    return f"""SELECT
+    c.DATABASE_NAME,
+    c.SCHEMA_NAME,
+    c.OBJECT_NAME,
+    c.LOCK_TYPE,
+    SUM(c.WAIT_EVENTS) AS WAIT_EVENTS,
+    SUM(c.ACQUIRED_WAIT_SEC) AS ACQUIRED_WAIT_SEC,
+    SUM(c.NEVER_ACQUIRED) AS NEVER_ACQUIRED,
+    MAX(c.LAST_SEEN) AS LAST_SEEN
+FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY c
+WHERE c.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
+{comp}GROUP BY 1, 2, 3, 4
+ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
+LIMIT 50"""

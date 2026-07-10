@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.22.0 — V035: page views never scan LOCK_WAIT_HISTORY again (2026-07-10)
+
+- **The lock-wait mart** (live finding, owner's Heaviest-queries panel):
+  the contention reads were scanning 46-56 GB at 74-259s per page view —
+  the single heaviest thing the app did. MART_LOCK_WAIT_DAILY now carries
+  day x db x schema x object x lock-type (with COMPANY via the object's
+  database), loaded by TASK_LOCK_WAIT_DAILY on a 3-day increment after the
+  daily fact load; the migration backfills 45 days once. The panel reads
+  the mart first and keeps the live scan only as the pre-V035 fallback.
+- Screenshot triage, recorded honestly: everything else on the board is
+  the deploy gap, not new bugs — the 08:44 loader error is V029's shape
+  (V030 not applied), the compile_fams compilation error is the alias
+  shadow fixed in v4.13, the Brief 8.9s p95 predates the batch split, and
+  unused_roles/gov_counts burn 12-32s live because their marts never fill
+  while the loader fails. One deploy clears the set.
+- Admin's 0% cache / 30s p95 deliberately NOT tuned this round: those
+  fetches queue behind the lock scans and loader retries on the same
+  warehouse — re-measure after V030-V035 land before touching code.
+
 ## 4.21.0 — second-tier batch: environments, badges, the queue (2026-07-10)
 
 - **Lock waits name their environment** (owner ask): DATABASE_NAME and

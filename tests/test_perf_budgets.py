@@ -67,7 +67,7 @@ _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/cost_parts/optimize.py": 2,
     "app/ui/pages/cost_parts/spend.py": 8,
     "app/ui/pages/cost_parts/ai_chargeback.py": 5,
-    "app/ui/pages/operations.py": 25,
+    "app/ui/pages/operations.py": 24,
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/security.py": 18,
 }

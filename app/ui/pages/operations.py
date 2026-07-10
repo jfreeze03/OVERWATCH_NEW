@@ -499,8 +499,6 @@ def _contention_tab(company: str, days: int) -> None:
     _cb = run_batch([
         {"key": "pressure", "sql": ops_sql.warehouse_pressure(days, company),
          "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-        {"key": "locks", "sql": ops_sql.lock_contention(min(days, 14)),
-         "source": "ACCOUNT_USAGE.LOCK_WAIT_HISTORY"},
     ], page=_PAGE, tier="recent") or {}
     left, right = st.columns(2)
     with left:
@@ -513,10 +511,15 @@ def _contention_tab(company: str, days: int) -> None:
                              "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds")
             styled_table(res.df)
     with right:
-        st.markdown("**Lock waits (account-wide)**")
-        res = _cb.get("locks") or run(ops_sql.lock_contention(min(days, 14)), page=_PAGE,
-                  key=f"c_locks_{days}",
-                  tier="recent", source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY")
+        st.markdown("**Lock waits**")
+        # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
+        # Heaviest-queries panel, 2026-07-10) — mart-first, always.
+        res = run_mart_first(
+            mart27_sql.lock_wait_daily(min(days, 14), company),
+            ops_sql.lock_contention(min(days, 14)),
+            page=_PAGE, key=f"c_locks_{company}_{days}",
+            mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
+            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)")
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
             styled_table(res.df)
 
