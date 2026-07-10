@@ -24,6 +24,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    run_mart_first,
     styled_table,
 )
 
@@ -168,19 +169,37 @@ def _trust_center_tab() -> None:
 
 def _governance_score_panel() -> None:
     """Governance debt as a number with named deductions (CoCo item 14a)."""
-    counts = run(security_sql.governance_counts(), page=_PAGE, key="gov_counts",
-                 tier="historical", source="USERS + CREDENTIALS + GRANTS_TO_USERS")
+    # Posture-snapshot-first (live round 6: gov_counts topped the fleet
+    # slow-fetch board — 13 hits, p95 12.3s). The daily 06:30 posture mart
+    # carries all four score inputs since V030; the 4-subquery live scan
+    # stays as the fallback and the pre-V030 path. Hygiene counts a day old
+    # are fine — the source label says which path served.
+    inputs: dict = {}
+    post = run(mart27_sql.security_posture(3), page=_PAGE, key="gov_posture", tier="recent",
+               source="MART_SECURITY_POSTURE_DAILY (daily 06:30 snapshot)")
+    if post.usable():
+        pdf_ = post.df.copy()
+        snap = pdf_[pdf_["DAY"] == pdf_["DAY"].max()].set_index("METRIC")["VALUE"]
+        if {"MFA_GAP_USERS", "EXPIRED_CRED", "BREAKGLASS_GRANTS_30D"} <= set(snap.index.astype(str)):
+            inputs = {
+                "mfa_gap_users": snap.get("MFA_GAP_USERS"),
+                "expired_credentials": snap.get("EXPIRED_CRED"),
+                "expiring_credentials": snap.get("EXPIRING_CRED_10D", 0),
+                "breakglass_grants_30d": snap.get("BREAKGLASS_GRANTS_30D"),
+            }
     whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-    inputs: dict = {}
-    if counts.usable():
-        row = counts.df.iloc[0]
-        inputs = {
-            "mfa_gap_users": row.get("MFA_GAP_USERS"),
-            "expired_credentials": row.get("EXPIRED_CREDENTIALS"),
-            "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
-            "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
-        }
+    if not inputs:
+        counts = run(security_sql.governance_counts(), page=_PAGE, key="gov_counts",
+                     tier="historical", source="USERS + CREDENTIALS + GRANTS_TO_USERS (live fallback)")
+        if counts.usable():
+            row = counts.df.iloc[0]
+            inputs = {
+                "mfa_gap_users": row.get("MFA_GAP_USERS"),
+                "expired_credentials": row.get("EXPIRED_CREDENTIALS"),
+                "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
+                "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
+            }
     if whs.ok and not whs.empty:
         wdf = whs.df.copy()
         wdf.columns = [str(c).lower() for c in wdf.columns]
@@ -379,8 +398,11 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         result_caption(reasons)
 
     st.markdown("**Unused roles (90d) — revoke fodder**")
-    ur = run(security_sql.unused_roles(90), page=_PAGE, key="unused_roles", tier="historical",
-             source="ROLES x QUERY_HISTORY (90d)")
+    ur = run_mart_first(
+        mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
+        page=_PAGE, key="unused_roles",
+        mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
+        live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
     if ur.ok and ur.empty:
         st.success("Every active role was assumed in the last 90 days.")
     elif guard(ur, ""):

@@ -368,3 +368,32 @@ ORDER BY CREDITS DESC
 LIMIT 200
 """
 
+
+
+def unused_roles_via_fact(days: int = 90) -> str:
+    """security_sql.unused_roles contract from FACT_QUERY_ROLE_HOURLY (live
+    round 6: the live version was p95 32s). Coverage-guarded: returns ZERO
+    rows unless the fact actually spans the window — an empty result makes
+    run_mart_first fall back to live, so a young fact can never fake
+    'unused' (a role used 60d ago must not be revoke fodder because the
+    fact is 3 days old). Run the 90d backfill to activate this path."""
+    days = bounded_days(days, 400)
+    return f"""
+WITH cov AS (
+    SELECT MIN(HOUR_TS) AS FIRST_TS FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
+)
+SELECT r.NAME AS ROLE_NAME, r.CREATED_ON,
+       (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
+         WHERE g.ROLE = r.NAME AND g.DELETED_ON IS NULL) AS GRANTED_TO_USERS
+FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+LEFT JOIN (
+    SELECT DISTINCT ROLE_NAME
+    FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
+    WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+) q ON q.ROLE_NAME = r.NAME
+WHERE r.DELETED_ON IS NULL AND q.ROLE_NAME IS NULL
+  AND r.NAME NOT IN ('PUBLIC')
+  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_TIMESTAMP())
+ORDER BY GRANTED_TO_USERS DESC, r.CREATED_ON
+LIMIT 500
+"""

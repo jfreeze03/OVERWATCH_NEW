@@ -122,7 +122,18 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
 .stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
-.stButton > button[kind="primary"] { background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#06121f; border:none; }
+.stButton > button[kind="primary"],
+.stButton > button[data-testid="stBaseButton-primary"],
+button[data-testid="stBaseButton-primary"],
+button[data-testid="baseButton-primary"] {
+  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
+  color:#06121f !important; border:none !important; }
+/* SiS builds vary the button markup; force dark ink on every descendant so
+   an accent pill can never render pale-on-pale (live finding 2026-07-10:
+   the '2 open critical(s)' chip and Execute bulk RESOLVE were unreadable). */
+.stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span,
+button[data-testid="stBaseButton-primary"] p, button[data-testid="stBaseButton-primary"] span {
+  color:#06121f !important; }
 
 button[data-baseweb="tab"] { font-weight:640; }
 

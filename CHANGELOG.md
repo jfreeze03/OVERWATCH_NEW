@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.13.0 — V030: the correct loader shape + measured CALL pricing (2026-07-10)
+
+Live round 6. Migration V030 (apply after V029; run the two backfill CALLs
+in the file header once for history):
+
+- **Loader fix 2** — V029's MAX() wrap failed differently: COMPANY_FOR_* is
+  a SQL UDF that CORRELATES its argument into a subquery, so the aggregate
+  landed inside the inlined WHERE ('invalid aggregate function in where
+  clause'). V030 uses the bulletproof shape: aggregate first in a derived
+  table, UDF applied to a plain column outside — the same reason the other
+  seven arms never failed. Derivation lock chain now V027->V028->V029->V030.
+- **Posture snapshot completes the governance inputs** (MFA_GAP_USERS,
+  BREAKGLASS_GRANTS_30D join the daily 06:30 arm) and the Security first
+  paint reads it mart-first — gov_counts topped the fleet slow-fetch board
+  (13 hits, p95 12.3s) and now runs only as the labeled live fallback.
+- **Unused roles go mart-first** (p95 32s live) via FACT_QUERY_ROLE_HOURLY
+  with a coverage guard: a young fact returns zero rows and the live path
+  serves — a role used 60 days ago can never be called unused because the
+  fact is 3 days old. Activates after the 90d backfill.
+- **Price a CALL or session** (owner question: 'three procs in one session,
+  no graph id'): Unit costs gains a measured-pricing panel — paste a CALL's
+  QUERY_ID or a SESSION_ID; children roll up via
+  QUERY_ATTRIBUTION_HISTORY.ROOT_QUERY_ID (no task graph needed), and a
+  single CALL also shows the per-child breakdown ('where the money went
+  inside this CALL', root's own time labeled). ~6h lag, idle excluded —
+  same caveats as the proc leaderboard, stated on the panel.
+- **Primary buttons force dark ink across Streamlit markups** ('2 open
+  critical(s)' chip and Execute bulk RESOLVE rendered pale-on-pale): the
+  accent-pill rule now covers kind= and data-testid variants with
+  !important on every descendant.
+- Numbering: incident object -> ~V031, owner registry -> ~V032.
+- Tests: tests/test_live_round6.py (9 locks incl. the four-link derivation
+  chain). 587 green.
+
 ## 4.12.1 — V029 hotfix: the loader arms that never loaded (2026-07-10)
 
 Live round 5. Migration V029 (apply after V028; then optionally run the

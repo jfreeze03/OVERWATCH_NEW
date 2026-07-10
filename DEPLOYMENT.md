@@ -35,6 +35,7 @@ snowflake/migrations/V026__teams_safe_delivery.sql
 snowflake/migrations/V027__mart_family.sql
 snowflake/migrations/V028__cred_expiry_10d.sql
 snowflake/migrations/V029__loader_fix.sql
+snowflake/migrations/V030__loader_fix2.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

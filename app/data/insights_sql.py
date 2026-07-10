@@ -787,3 +787,56 @@ GROUP BY 1, 2, 3
 ORDER BY TOTAL_CREDITS DESC
 LIMIT {limit}
 """
+
+
+def call_cost_lookup(ident: str, days: int = 7) -> str:
+    """Measured $ per stored-proc CALL: pass a CALL's QUERY_ID or a
+    SESSION_ID (owner question 2026-07-10: 'three procs in one session, no
+    graph id'). No task graph needed — children roll up to their CALL via
+    QUERY_ATTRIBUTION_HISTORY.ROOT_QUERY_ID for ad-hoc sessions too.
+    ~6h attribution lag; idle time excluded; children that ran without a
+    warehouse don't appear (same caveats as the proc leaderboard)."""
+    from app.core.sqlsafe import sql_literal
+    days = bounded_days(days, 30)
+    lit = sql_literal(str(ident or "").strip())
+    return f"""
+WITH calls AS (
+    SELECT QUERY_ID, SESSION_ID, START_TIME, LEFT(QUERY_TEXT, 80) AS CALL_TEXT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND QUERY_TYPE = 'CALL'
+      AND (QUERY_ID = {lit} OR SESSION_ID::VARCHAR = {lit})
+)
+SELECT c.QUERY_ID, c.START_TIME, c.CALL_TEXT,
+       COUNT(a.QUERY_ID) AS ATTRIBUTED_QUERIES,
+       ROUND(SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0)), 6) AS CREDITS
+FROM calls c
+LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+       ON a.ROOT_QUERY_ID = c.QUERY_ID OR a.QUERY_ID = c.QUERY_ID
+GROUP BY c.QUERY_ID, c.START_TIME, c.CALL_TEXT
+ORDER BY c.START_TIME
+LIMIT 100
+"""
+
+
+def call_children_costs(call_query_id: str, days: int = 7) -> str:
+    """The child breakdown for ONE CALL: every attributed statement under
+    ROOT_QUERY_ID with its own credits — 'where inside the proc did the
+    money go'. The CALL's own row is included and labeled."""
+    from app.core.sqlsafe import sql_literal
+    days = bounded_days(days, 30)
+    lit = sql_literal(str(call_query_id or "").strip())
+    return f"""
+SELECT a.QUERY_ID,
+       IFF(a.QUERY_ID = {lit}, 'CALL (own time)', COALESCE(q.QUERY_TYPE, '?')) AS STEP_TYPE,
+       LEFT(COALESCE(q.QUERY_TEXT, '(history pruned)'), 120) AS STEP_PREVIEW,
+       ROUND(COALESCE(q.TOTAL_ELAPSED_TIME, 0) / 1000.0, 1) AS ELAPSED_SEC,
+       ROUND(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0), 6) AS CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+       ON q.QUERY_ID = a.QUERY_ID
+      AND q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE a.ROOT_QUERY_ID = {lit} OR a.QUERY_ID = {lit}
+ORDER BY CREDITS DESC
+LIMIT 500
+"""

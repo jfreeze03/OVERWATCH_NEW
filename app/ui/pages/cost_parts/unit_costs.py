@@ -117,6 +117,39 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "without a warehouse. Change-impact (Operations) watches "
                                    "these same numbers around each ALTER.")
 
+    with st.expander("Price a specific CALL or session (measured)"):
+        st.caption(
+            "Paste a CALL's QUERY_ID for that one proc run, or a SESSION_ID to price "
+            "every proc the session ran (e.g. your three ad-hoc CALLs). Children roll "
+            "up via QUERY_ATTRIBUTION_HISTORY.ROOT_QUERY_ID — no task graph id needed. "
+            "Attribution lags ~6h; idle time excluded."
+        )
+        _ident = st.text_input("QUERY_ID or SESSION_ID", key="uc_call_ident")
+        if _ident.strip():
+            cres = run(insights_sql.call_cost_lookup(_ident.strip()), page=_PAGE,
+                       key=f"call_cost_{_ident.strip()[:24]}", tier="historical",
+                       source="QUERY_ATTRIBUTION_HISTORY (ROOT_QUERY_ID rollup, 7d)")
+            if guard(cres, "No CALLs matched in the last 7 days — check the id; "
+                           "attribution lags ~6h, so very recent runs may not price yet."):
+                cdf = cres.df.copy()
+                cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                styled_table(cdf, height=170, column_config={
+                    "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                })
+                st.caption(f"{len(cdf)} CALL(s) — the summary line per proc run.")
+                if len(cdf) == 1:
+                    _cid = str(cdf.iloc[0]["QUERY_ID"])
+                    kids = run(insights_sql.call_children_costs(_cid), page=_PAGE,
+                               key=f"call_kids_{_cid[:24]}", tier="historical",
+                               source="attribution children of this CALL")
+                    if kids.usable():
+                        kdf = kids.df.copy()
+                        kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                        st.markdown("**Where the money went inside this CALL**")
+                        styled_table(kdf, height=240, column_config={
+                            "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                        })
+
     st.divider()
     st.markdown("**AI — $ by function and model**")
     if not ai_res.usable():
