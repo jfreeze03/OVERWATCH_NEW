@@ -60,6 +60,20 @@ exec-sec, compile — per env), FACT_QUERY_SCHEMA_HOURLY (volume per env).
 - Locks: pairing math (period boundary edges), partial-month exclusion,
   triage-filter law, movers parity with the CR pattern.
 
+## Owner answers (2026-07-11) — all three resolved
+
+1. **V037: YES** — DATABASE_NAME joins MART_PATTERN_COST_DAILY grain now.
+2. **Default pairing: last full month vs prior.**
+3. **The ALFA promotion channel (authoritative, from the owner):**
+   `ALFA_EDW_DEV` (DEV) -> four UAT environments: `ALFA_EDW_PHX`,
+   `ALFA_EDW_SAN`, `ALFA_EDW_SEA`, `ALFA_EDW_SIT` (all UAT) ->
+   `ALFA_EDW_MGM` (PREPROD) -> `ALFA_EDW_PRD` (PRD).
+
+   ENV mapping therefore: `_DEV`->DEV; `_PHX/_SAN/_SEA/_SIT`->UAT;
+   `_MGM`->PREPROD; `_PRD`->PRD; else OTHER. Trexis reuses the subset it
+   has (`_DEV`->DEV, `_SIT`->UAT, `_PRD`->PRD). The env lens shows the
+   channel in promotion order, not alphabetical — DEV, UAT, PREPROD, PRD.
+
 ## Open questions for the owner
 
 1. V037 database column on the pattern mart now? (recommended: yes)
