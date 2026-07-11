@@ -124,7 +124,9 @@ def test_compare_tab_is_wired_mart_only_and_honest():
                  "compare_billed", "compare_pattern_costs"):
         assert f"mart27_sql.{name}" in canary, name
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V037 applied" in val
+    import re
+    m = re.search(r"V001\.\.V(\d+) applied", val)
+    assert m and int(m.group(1)) >= 37                    # floor, not a pin (tip moves)
 
 
 def test_delta_chip_survives_an_empty_b_side():

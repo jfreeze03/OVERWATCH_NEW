@@ -615,18 +615,26 @@ def _savings_tab() -> None:
         st.info("Savings ledger is not installed yet — an admin can verify on Admin → Migrations & freshness.")
         return
     totals = ledger_totals(res.df)
+    st.caption("Books itself since V038: the daily scan detects cost-lever changes "
+               "(auto-suspend, size, clusters, scaling policy) wherever they were "
+               "made — Snowsight included — and settles each against 14 days of "
+               "measured actuals. Manual items remain for one-offs.")
     kpi_row([
         {"label": "Verified savings", "value": format_usd(totals["verified_usd"]),
          "delta": f"{totals['verified_count']} items",
-         "help": "Post-period proof attached. This is the number to quote."},
+         "help": "Measured post-period proof. This is the number to quote."},
         {"label": "Estimated (unverified)", "value": format_usd(totals["estimated_usd"]),
          "delta": f"{totals['estimated_count']} items", "delta_color": "off",
-         "help": "Never added to verified. Verify or reject each item."},
+         "help": "Never added to verified. Auto-booked items settle themselves "
+                 "when the 14-day verdict lands; manual items use the verify flow."},
     ])
     if res.empty:
-        st.info("Ledger is empty. Add an item below when an optimization ships.")
+        st.info("Nothing booked yet — the autobook task fills this as warehouse "
+                "cost-lever changes are detected (needs migration V038).")
     else:
-        styled_table(res.df[["CREATED_AT", "DESCRIPTION", "STATE", "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY"]])
+        styled_table(res.df[[c for c in ("CREATED_AT", "SOURCE", "DESCRIPTION", "STATE",
+                                          "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY")
+                             if c in res.df.columns]])
 
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES

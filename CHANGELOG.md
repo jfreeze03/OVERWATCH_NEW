@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.29.0 — V038: the savings ledger books itself (2026-07-11)
+
+Owner, looking at an empty ledger: "how can we automate the savings ledger
+— I don't think anyone will use this. I'm not even using it." Root cause:
+booking required executing fixes THROUGH the app, and real changes happen
+in Snowsight. Detection already existed — the V024 warehouse-change scan
+sees every setting change within a day and measures 14 days of before/after
+actuals. V038 connects the two:
+
+- **SP_LEDGER_AUTOBOOK + TASK_LEDGER_AUTOBOOK** (chained after the daily
+  change scan): a detected cost-lever change (AUTO_SUSPEND down, SIZE down,
+  MAX_CLUSTERS down, SCALING_POLICY STANDARD→ECONOMY) books an ESTIMATED
+  item at $0 the day it is seen — no invented numbers, the item is
+  pipeline visibility. When the registry verdict lands (~14d), the item
+  settles ITSELF: VERIFIED with measured credits/day delta x rate x 30
+  ($5/mo noise floor, rate from SETTINGS) or REJECTED with the measured
+  evidence in the note. Forward-only — settled items never rewrite.
+  VERIFIED_BY = 'AUTO:TASK_LEDGER_AUTOBOOK' keeps auto and human verifies
+  distinguishable. Dedupe via new SAVINGS_LEDGER.SOURCE_CHANGE_ID.
+- **The migration runs a first pass on apply** against the registry's
+  existing 90 days — the ledger stops being empty the moment V038 lands.
+- Ledger UI reframed: SOURCE column (auto/manual), caption says the ledger
+  books itself, manual add stays for one-offs (index rebuilds, contract
+  renegotiations — things no scan can see). Monthly TASK_VERIFY_SAVINGS
+  continues to own app-booked auto-suspend estimates; autobook items are
+  settled by their own 14d verdicts.
+
+Deploy: apply V038 after V037, redeploy. Nothing else to do — that is the
+point.
+
 ## 4.28.1 — Compare survives an empty side (2026-07-11)
 
 - Live crash (owner screenshots, both trailing pairings): `pct_delta`
