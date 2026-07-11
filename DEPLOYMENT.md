@@ -177,6 +177,14 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
   tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the
   previous git tag; migrations are additive so no schema rollback is needed.
+- **"Failed to retrieve packages... Have you enabled External Access
+  Integration (EAI)?" / pypi.org DNS errors on load:** the app is running on
+  the CONTAINER runtime. Snowsight's editor defaults new deploys to it, and
+  the container runtime installs from PyPI (blocked here — no EAI). The
+  warehouse runtime installs from Snowflake's Anaconda channel via
+  `environment.yml`. Fix: app settings → **Run on warehouse**. The CLI path
+  (`snow streamlit deploy --replace`) pins the warehouse runtime and never
+  hits this — prefer it for redeploys.
 
 ## 7. Release checklist
 
@@ -184,9 +192,12 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 2. New migration file if schema changed (never edit an applied `V00x` file).
 3. Run migrations, then `snowflake/validate.sql` — all rows OK.
 4. `snow streamlit deploy --replace`.
-5. Open Admin → Migration status (no drift), Source freshness (all fresh),
+5. If the deploy happened through SNOWSIGHT instead of the CLI: check app
+   settings → runtime = **Run on warehouse** (Snowsight resets it to the
+   container runtime, which fails on PyPI/EAI at load — see §6).
+6. Open Admin → Migration status (no drift), Source freshness (all fresh),
    Self-cost (task + app spend sane).
-6. Tag the release; update `CHANGELOG.md`.
+7. Tag the release; update `CHANGELOG.md`.
 
 
 ## Mid-migration expectations (append-only history)
