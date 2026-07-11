@@ -20,6 +20,11 @@ class QueryResult:
     df: pd.DataFrame = field(default_factory=pd.DataFrame)
     ok: bool = True
     error: str = ""
+    # Classified from the RAW exception (Codex r10 #4): format_snowflake_error
+    # rewrites messages for humans, which silently broke marker-string checks
+    # downstream (canary GAP never matched). Kinds: absent | unknown_function
+    # | timeout | other | "" (no error).
+    error_kind: str = ""
     truncated: bool = False
     source: str = ""
     tier: str = "recent"

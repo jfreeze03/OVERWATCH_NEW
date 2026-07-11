@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.25.0 — Codex r10 fix-now batch (2026-07-11)
+
+- **Typed error kinds (#4 — fixed a v4.23.2 bug)**: the friendly error
+  formatter had erased the marker text my canary GAP classifier searched
+  for, so missing objects still read FAIL. Errors are now classified from
+  the RAW exception into QueryResult.error_kind (absent / unknown_function
+  / timeout / other); the canary, the AI tab, and probe reads all consume
+  the kind instead of parsing prettified strings.
+- **Prefs bootstrap commits on success (#1)**: a failed first read retries
+  (3 tries) instead of silently skipping your saved landing all session.
+- **Batch submission harvest (#3)**: if submission dies at member N, the
+  already-submitted jobs' results are collected instead of discarded —
+  those queries run server-side either way; dropping handles re-paid them.
+- **Session quarantine (#2)**: a key that fails inside a batch runs solo
+  from then on while the healthy remainder re-batches smaller and CACHES —
+  one persistently broken query no longer makes siblings re-execute every
+  rerun. Manual refresh clears the quarantine.
+- **Tail-aware row caps (#6)**: only a TRAILING limit counts as the outer
+  bound; a subquery's LIMIT no longer disables the cap. Executable tests.
+- **Query drill always available (#14)**: manual ID entry no longer
+  disappears when the candidates table is empty.
+- Already true, verified: #11's cheap half (the fact-window p95 is labeled
+  as the PEAK hourly p95 in code and UI). Declined: #7 SiS cancel loop
+  (warehouse timeout per RUNBOOK Section 20 is the designed backstop), #12
+  salt generations (TTL-bounded; clear() would nuke every user), #9
+  sampling weights (the floor is deliberate and labeled). Design-first
+  next: #17 Compare mode, then #15 Action-Queue workbench, #19 blast
+  radius, #18 predictive SLA; #8+#11-full = mart wave 3 note
+  (APPROX_PERCENTILE_ACCUMULATE makes true percentiles buildable).
+
 ## 4.24.0 — Codex r9: the correctness batch, four real bugs (2026-07-11)
 
 - **Pre-identity pref caching (#1, real)**: the USER_PREFS landing read ran

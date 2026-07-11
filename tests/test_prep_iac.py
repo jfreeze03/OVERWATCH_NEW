@@ -83,11 +83,15 @@ def test_admin_panel_degrades_honestly_without_flyway():
     assert "mart_sql.flyway_history()" in _ADMIN
     assert 'probe=True' in _ADMIN                                  # absence is the answer,
     q = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
-    assert "probe and " in q and "does not exist or not authorized" in q
-    body = q.split("_expected_absence", 2)[2].split("return QueryResult", 1)[0]
+    # r10 #4 evolution: markers live in ONE raw-text classifier now — the
+    # friendly formatter had erased them for downstream string checks.
+    assert 'kind in ("absent", "unknown_function")' in q           # probe uses typed kinds
+    cls = q.split("def _classify_error", 1)[1].split("\ndef ", 1)[0]
+    assert "does not exist or not authorized" in cls
+    assert "unknown function" in cls                               # gated-view class (002139)
+    body = q.split("_expected_absence", 1)[1].split("return QueryResult", 1)[0]
     assert "record_error" in body                                  # ...but ONLY absence: every
     assert "_telemetry" in body                                    # other failure still records
-    assert "Unknown function" in q                                 # gated-view class (002139)
 
 
 def test_cortex_code_reads_are_probes_with_a_truthful_note():

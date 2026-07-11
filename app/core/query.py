@@ -34,6 +34,10 @@ _TELEMETRY_MAX = 200
 # somewhere in a column name (RATE_LIMIT) or comment — those used to disable
 # the cap silently, leaving the query unbounded.
 _LIMIT_RE = re.compile(r"\bLIMIT\s+\d+", re.IGNORECASE)
+# r10 #6: only a TRAILING limit bounds the OUTER result — a subquery's
+# LIMIT deep inside the text used to disable the cap and leave the outer
+# statement unbounded.
+_TAIL_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\s*;?\s*$", re.IGNORECASE)
 
 # Fleet telemetry (V021): persist only what matters for regressions — slow or
 # failed fetches — so viewers' sessions feed Admin > Performance without an
@@ -112,13 +116,26 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
         st.session_state["_ow_qtel_off"] = True
 
 
+def _classify_error(exc: object) -> str:
+    """Typed failure kind from the RAW exception text (Codex r10 #4) —
+    classify BEFORE format_snowflake_error prettifies the markers away."""
+    s = str(exc or "").lower()
+    if "does not exist or not authorized" in s:
+        return "absent"
+    if "unknown function" in s:
+        return "unknown_function"
+    if "statement reached its statement or warehouse timeout" in s or "timeout" in s:
+        return "timeout"
+    return "other"
+
+
 def _with_row_cap(sql: str, cap: int) -> str:
     """Append ``LIMIT cap+1`` unless the SQL already carries a LIMIT clause.
 
     Fetching cap+1 lets the caller detect truncation honestly (n+1 rows back
     means the cap was hit) — see run()/run_batch().
     """
-    if cap <= 0 or _LIMIT_RE.search(sql):
+    if cap <= 0 or _TAIL_LIMIT_RE.search(sql.rstrip()):
         return sql
     return f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
 
@@ -251,7 +268,21 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
-    jobs = [session.sql(sql).to_pandas(block=False) for sql in sqls]  # AsyncJobs
+    jobs: list = []
+    try:
+        for sql in sqls:
+            jobs.append(session.sql(sql).to_pandas(block=False))  # noqa: PERF401 — incremental on purpose: a comprehension loses the in-flight handles when submission N fails (r10 #3)
+    except Exception as sub_exc:
+        frames0: dict = {}        # those queries RUN server-side either way, and
+        errors0: dict = {}        # dropping the handles re-paid them in fallback.
+        for idx, job in enumerate(jobs):
+            try:
+                frames0[idx] = _normalize(job.result())
+            except Exception as exc2:
+                errors0[idx] = exc2
+        for idx in range(len(jobs), len(sqls)):
+            errors0[idx] = sub_exc
+        raise _BatchPartial(frames0, errors0) from sub_exc
     frames: dict = {}
     errors: dict = {}
     for idx, job in enumerate(jobs):
@@ -300,8 +331,28 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     """
     tier = tier if tier in _BATCH_FETCHERS else "recent"
     started = time.perf_counter()
-    capped, caps = [], []
+    # r10 #2: a key that failed inside a batch this session is quarantined —
+    # it runs individually (own cache, failures never cached) while the
+    # healthy remainder re-batches SMALLER and caches normally. Cleared by
+    # manual refresh (salt change), so recovery is one click away.
+    _salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
+    _q = st.session_state.get("_ow_batch_quarantine") or {}
+    if _q.get("salt") != _salt:
+        _q = {"salt": _salt, "keys": set()}
+    out_direct: dict = {}
+    bspecs = []
     for spec in specs:
+        if str(spec["key"]) in _q["keys"]:
+            out_direct[str(spec["key"])] = run(
+                str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
+                source=str(spec.get("source", "")),
+                max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+        else:
+            bspecs.append(spec)
+    if not bspecs:
+        return out_direct
+    capped, caps = [], []
+    for spec in bspecs:
         sql = str(spec["sql"])
         cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
         capped.append(_with_row_cap(sql, cap))
@@ -311,20 +362,22 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except _BatchPartial as bp:
         elapsed = (time.perf_counter() - started) * 1000
-        failed_keys = ",".join(str(specs[i].get("key")) for i in bp.errors)[:160]
-        _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
+        _q["keys"] |= {str(bspecs[i]["key"]) for i in bp.errors}
+        st.session_state["_ow_batch_quarantine"] = _q
+        failed_keys = ",".join(str(bspecs[i].get("key")) for i in bp.errors)[:160]
+        _telemetry(page, tier, f"batch_fallback:{tier}:n{len(bspecs)}",
                    elapsed, 0, ok=False)
         record_error(page, next(iter(bp.errors.values())),
                      context=f"run_batch partial tier={tier} failed=[{failed_keys}]")
         out: dict = {}
-        for idx, spec in enumerate(specs):
+        for idx, spec in enumerate(bspecs):
             if idx in bp.frames:
                 df = bp.frames[idx]
                 truncated = bool(caps[idx]) and len(df) > caps[idx]
                 if truncated:
                     df = df.head(caps[idx])
-                _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1),
-                           len(df), ok=True, batch_size=len(specs), truncated=truncated)
+                _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(bspecs), 1),
+                           len(df), ok=True, batch_size=len(bspecs), truncated=truncated)
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
@@ -334,11 +387,11 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                     str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                     source=str(spec.get("source", "")),
                     max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
-        return out
+        return {**out, **out_direct}
     except Exception as exc:
         _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
                    (time.perf_counter() - started) * 1000, 0, ok=False)
-        keys = ",".join(str(s.get("key")) for s in specs)[:160]
+        keys = ",".join(str(s.get("key")) for s in bspecs)[:160]
         record_error(page, exc, context=(f"run_batch fallback tier={tier} n={len(specs)} "
                                          f"[{keys}] {type(exc).__name__}"))
         # Partial-success: retry each spec individually — run() brings its
@@ -346,25 +399,25 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         # come back as ok=False results (same surface the caller's own
         # serial fallback would produce).
         out: dict = {}
-        for spec in specs:
+        for spec in bspecs:
             out[str(spec["key"])] = run(
                 str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                 source=str(spec.get("source", "")),
                 max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
-        return out
+        return {**out, **out_direct}
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}
-    for spec, df, cap in zip(specs, frames, caps, strict=True):
+    for spec, df, cap in zip(bspecs, frames, caps, strict=True):
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
-        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1), len(df), ok=True,
-                   batch_size=len(specs), truncated=truncated)
+        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(bspecs), 1), len(df), ok=True,
+                   batch_size=len(bspecs), truncated=truncated)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
         )
-    return out
+    return {**out, **out_direct}
 
 
 def run(
@@ -409,16 +462,15 @@ def run(
         )
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
-        _expected_absence = probe and (
-            "does not exist or not authorized" in str(exc)
-            or "Unknown function" in str(exc)   # gated ACCOUNT_USAGE views (002139,
-        )                                       # e.g. CORTEX_CODE_* pre-subscription)
+        kind = _classify_error(exc)
+        _expected_absence = probe and kind in ("absent", "unknown_function")
         if not _expected_absence:
             _telemetry(page, tier, key, elapsed, 0, ok=False)
             record_error(page, exc, context=f"query key={key} tier={tier}")
         return QueryResult(
             df=pd.DataFrame(), ok=False, error=format_snowflake_error(exc),
-            source=source, tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
+            error_kind=kind, source=source, tier=tier,
+            fetched_at=datetime.now(), elapsed_ms=elapsed,
         )
 
 

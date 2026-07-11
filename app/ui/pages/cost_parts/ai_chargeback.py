@@ -91,7 +91,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
                      key=f"cortex_users_{company}_{days}", tier="historical",
                      source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
-    if not rollup_res.ok and "Unknown function" in str(rollup_res.error or ""):
+    if not rollup_res.ok and rollup_res.error_kind == "unknown_function":
         # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
         # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
         # Cortex Code subscription that function does not exist (002139), so

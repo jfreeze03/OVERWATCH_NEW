@@ -692,9 +692,9 @@ def _canary_tab() -> None:
         for idx, (name, builder) in enumerate(CANARIES):
             res = run(builder(), page=_PAGE, key=f"canary_{name}", tier="live",
                       source=name, max_rows=1, probe=True)
-            _err = str(res.error or "")
-            _gap = ("Unknown function" in _err                   # gated feature (002139)
-                    or "does not exist or not authorized" in _err)  # object pre-migration
+            # r10 #4: classified from the RAW exception in run() — the friendly
+            # formatter had erased these markers, so GAP could never match.
+            _gap = res.error_kind in ("absent", "unknown_function")
             results.append({"CHECK": name,
                             "STATUS": "PASS" if res.ok else ("GAP" if _gap else "FAIL"),
                             "ROWS": len(res.df), "ERROR": res.error[:160]})

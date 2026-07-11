@@ -213,9 +213,9 @@ def _apply_default_landing() -> None:
     ?page= deep link always wins over the default."""
     if st.session_state.get("_ow_default_applied"):
         return
-    st.session_state["_ow_default_applied"] = True
     try:
         if st.query_params.get("page"):
+            st.session_state["_ow_default_applied"] = True   # deep link wins, done
             return
     except Exception:  # noqa: BLE001
         pass
@@ -224,7 +224,16 @@ def _apply_default_landing() -> None:
 
     prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                 source="USER_PREFS")
-    if not prefs.ok or prefs.empty:
+    if not prefs.ok:
+        # r10 #1: commit-on-success — a transient failure retries next rerun
+        # instead of silently skipping the saved landing for the session.
+        tries = int(st.session_state.get("_ow_default_attempts", 0)) + 1
+        st.session_state["_ow_default_attempts"] = tries
+        if tries >= 3:
+            st.session_state["_ow_default_applied"] = True
+        return
+    st.session_state["_ow_default_applied"] = True
+    if prefs.empty:
         return
     tz_pref = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                     if str(r["PREF_KEY"]) == "DISPLAY_TZ"), "")
