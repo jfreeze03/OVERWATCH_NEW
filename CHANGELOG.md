@@ -1,5 +1,58 @@
 # Changelog
 
+## 4.27.0 — Codex r11 fix-first: the batch tells the truth about who failed (2026-07-11)
+
+- **Boss chart coverage gate (r11 #2).** `run_mart_first` gains an optional
+  `mart_accept` predicate: a usable-but-thin mart can now defer to the live
+  view instead of suppressing it. Overview's monthly-spend chart requires
+  12 distinct months from the accruing efficiency mart, else the 13-month
+  WAREHOUSE_METERING_HISTORY view serves; a broken predicate accepts the
+  mart (never breaks a page); if live cannot answer, the partial mart still
+  beats an empty panel. Caption states the rate basis: "Dollars at today's
+  $X/credit" (r11 #11).
+- **Quarantine only confirmed failers (r11 #4).** A submission failure at
+  batch member N used to stamp N and every UNSUBMITTED member with the same
+  error — innocent keys got quarantined into solo-run purgatory.
+  `_BatchPartial` now carries `pending` (unsubmitted ≠ failed): only the
+  member whose submit raised is quarantined; pending members take the
+  normal run() fallback untainted.
+- **Quarantine heals itself (r11 #5).** A quarantined key's next clean solo
+  run removes it from quarantine — it re-batches on the following rerun.
+  Salt refresh is no longer the only exit. (The suggested reorder of
+  healthy-batch-before-singles is a no-op: both paths complete within one
+  run_batch call before anything renders — declined as such.)
+- **Prefs attempts only post-identity (r11 #3).** `_apply_default_landing`
+  returns without spending an attempt until `_ow_current_user` is hydrated
+  — disconnected reruns no longer burn the 3-attempt budget, and the
+  pre-identity read (the r9 #1 anonymous-scope cache leak class) cannot
+  happen at all.
+- **Environment filter stops lying (r11 #1, honesty half).** The
+  Environment picker only ever narrowed the Database list, but the scope
+  chip and the Scope stat claimed it scoped results. Chip and stat dropped;
+  the picker's help now says exactly what it does. The MGM=PREPROD lane
+  reconcile (companies.py + the V023-seeded volume scope) rides with the
+  Compare env lens, where environments get real grain — the binary
+  PROD/NONPROD classifier is replaced there anyway.
+- **Canary gaps are declarative (r11 #7).** GAP status now requires the
+  entry to be listed in `EXPECTED_GAPS` (the five cortex.* canaries — the
+  002139 subscription class). An absent CORE object (mart.*, chargeback.*)
+  is drift and FAILS loudly; fresh installs read Migrations & freshness for
+  the calm view.
+- **Behavioral failure-path tests (r11 #14).** tests/test_codex_r11.py:
+  fake-session batch submission/gather failures, quarantine membership,
+  rehab on clean solo run, mart_accept fall-through/keep/never-break,
+  identity-gated prefs attempts, EXPECTED_GAPS hygiene. Two r10 source
+  locks updated WITH the semantics they pin.
+- **Repair:** v4.26.2's copy-pass commit shipped `operations.py` with its
+  last two dispatch lines truncated (mount cp mid-line truncation that
+  still compiled — Pipeline SLA / Release compare sections unreachable).
+  Restored; ruff (F821) joins the gate so compile-clean truncations get
+  caught before commit.
+- r11 disposition elsewhere: #9 pattern USERS grain + #12 Compare doc
+  grains + #17 promotion-lane framing land with V037/Compare next session;
+  #10/#18/#19/#20 already on the roadmap; #6 #8 #13 #15(bridge) #16
+  deferred with reasons (see session notes).
+
 ## 4.26.2 — the copy polish pass (2026-07-11)
 
 Owner ask: "people understand what they are seeing but not bogged down

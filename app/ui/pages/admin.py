@@ -682,7 +682,7 @@ def _canary_tab() -> None:
         "ACCOUNT_USAGE column drift or missing OVERWATCH objects before a user does. "
         "Failures are logged to APP_ERROR_LOG."
     )
-    from app.data.canary import CANARIES
+    from app.data.canary import CANARIES, EXPECTED_GAPS
 
     st.markdown(f"**{len(CANARIES)} registered statements**")
     if st.button("Run canary now", key="adm_canary_run"):
@@ -691,9 +691,11 @@ def _canary_tab() -> None:
         for idx, (name, builder) in enumerate(CANARIES):
             res = run(builder(), page=_PAGE, key=f"canary_{name}", tier="live",
                       source=name, max_rows=1, probe=True)
-            # r10 #4: classified from the RAW exception in run() — the friendly
-            # formatter had erased these markers, so GAP could never match.
-            _gap = res.error_kind in ("absent", "unknown_function")
+            # r10 #4: classified from the RAW exception in run(). r11 #7: GAP
+            # must be DECLARED per entry — an absent core object is drift and
+            # FAILS; only account-feature absences read as a calm GAP.
+            _gap = (res.error_kind in ("absent", "unknown_function")
+                    and name in EXPECTED_GAPS)
             results.append({"CHECK": name,
                             "STATUS": "PASS" if res.ok else ("GAP" if _gap else "FAIL"),
                             "ROWS": len(res.df), "ERROR": res.error[:160]})
@@ -705,8 +707,9 @@ def _canary_tab() -> None:
         failed = frame[frame["STATUS"] == "FAIL"]
         gaps = frame[frame["STATUS"] == "GAP"]
         if not gaps.empty:
-            st.caption(f"{len(gaps)} GAP: feature/object not in this account (e.g. Cortex "
-                       "Code pre-subscription, pre-migration objects) — absence, not drift.")
+            st.caption(f"{len(gaps)} GAP: declared account-feature absences (Cortex "
+                       "subscription/region) — absence, not drift. Anything absent "
+                       "WITHOUT a declaration fails instead.")
         if failed.empty:
             st.success(f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:

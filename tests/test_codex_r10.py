@@ -57,8 +57,8 @@ def test_batch_quarantine_and_submission_harvest():
     assert '_q["keys"] |= {str(bspecs[i]["key"]) for i in bp.errors}' in rb
     assert "if not bspecs:" in rb                                      # all-quarantined shortcut
     eb = q.split("def _execute_batch", 1)[1].split("\ndef ", 1)[0]
-    assert "jobs.append(" in eb and "for idx in range(len(jobs), len(sqls)):" in eb
-    assert "raise _BatchPartial(frames0, errors0) from sub_exc" in eb  # in-flight harvested
+    assert "jobs.append(" in eb and "pending0 = set(range(len(jobs) + 1, len(sqls)))" in eb  # r11 #4: unsubmitted = pending, not failed
+    assert "raise _BatchPartial(frames0, errors0, pending0) from sub_exc" in eb  # in-flight harvested
 
 
 def test_drill_survives_an_empty_candidate_list():

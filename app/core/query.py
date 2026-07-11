@@ -255,10 +255,14 @@ class _BatchPartial(Exception):
     computed server-side and paid for (Codex r9 #3: re-running them through
     the fallback duplicated scans and credits)."""
 
-    def __init__(self, frames: dict, errors: dict) -> None:
+    def __init__(self, frames: dict, errors: dict, pending: set | None = None) -> None:
         super().__init__(f"{len(errors)} of {len(frames) + len(errors)} batch members failed")
         self.frames = frames
         self.errors = errors
+        # r11 #4: indices whose submission never happened. Unsubmitted is NOT
+        # failed — these rerun through the normal fallback and must never be
+        # quarantined alongside the member that actually raised.
+        self.pending = pending or set()
 
 
 def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
@@ -280,9 +284,9 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
                 frames0[idx] = _normalize(job.result())
             except Exception as exc2:
                 errors0[idx] = exc2
-        for idx in range(len(jobs), len(sqls)):
-            errors0[idx] = sub_exc
-        raise _BatchPartial(frames0, errors0) from sub_exc
+        errors0[len(jobs)] = sub_exc          # the member whose submit raised
+        pending0 = set(range(len(jobs) + 1, len(sqls)))
+        raise _BatchPartial(frames0, errors0, pending0) from sub_exc
     frames: dict = {}
     errors: dict = {}
     for idx, job in enumerate(jobs):
@@ -334,7 +338,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     # r10 #2: a key that failed inside a batch this session is quarantined —
     # it runs individually (own cache, failures never cached) while the
     # healthy remainder re-batches SMALLER and caches normally. Cleared by
-    # manual refresh (salt change), so recovery is one click away.
+    # manual refresh (salt change) or by the key's next clean solo run
+    # (r11 #5 rehab), so recovery needs no click at all.
     _salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
     _q = st.session_state.get("_ow_batch_quarantine") or {}
     if _q.get("salt") != _salt:
@@ -343,10 +348,14 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     bspecs = []
     for spec in specs:
         if str(spec["key"]) in _q["keys"]:
-            out_direct[str(spec["key"])] = run(
+            _solo = run(
                 str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                 source=str(spec.get("source", "")),
                 max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+            if _solo.ok:
+                _q["keys"].discard(str(spec["key"]))
+                st.session_state["_ow_batch_quarantine"] = _q
+            out_direct[str(spec["key"])] = _solo
         else:
             bspecs.append(spec)
     if not bspecs:
@@ -362,6 +371,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except _BatchPartial as bp:
         elapsed = (time.perf_counter() - started) * 1000
+        # r11 #4: only CONFIRMED failers are quarantined — bp.pending members
+        # (never submitted) fall through to the run() fallback below untainted.
         _q["keys"] |= {str(bspecs[i]["key"]) for i in bp.errors}
         st.session_state["_ow_batch_quarantine"] = _q
         failed_keys = ",".join(str(bspecs[i].get("key")) for i in bp.errors)[:160]

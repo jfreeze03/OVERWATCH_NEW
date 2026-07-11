@@ -25,8 +25,8 @@ def _scope_chip_html() -> str:
     except Exception:  # noqa: BLE001 - header chrome must never break a page
         return ""
     chips = [chip(html.escape(f["company"]), "ok"), chip(f"{f['days']}d")]
-    if f["environment"] != "ALL":
-        chips.append(chip(html.escape(f["environment"])))
+    # No environment chip (r11 #1): the Environment picker only narrows the
+    # Database list — a chip here claimed a scope no page query applies.
     for key, label in (("database", ""), ("schema_contains", "schema~"),
                         ("warehouse_contains", "wh~"), ("user_contains", "user~")):
         value = str(f.get(key) or "").strip()
@@ -291,7 +291,8 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "recent", live_tier: str = "historical",
-                   max_rows: int | None = None, empty_is_answer: bool = False):
+                   max_rows: int | None = None, empty_is_answer: bool = False,
+                   mart_accept=None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -302,7 +303,19 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     res = run(mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
               source=mart_source, **kwargs)
     if res.usable():
-        return res
+        try:
+            accepted = mart_accept is None or bool(mart_accept(res.df))
+        except Exception:  # noqa: BLE001 — a coverage probe must never break a page
+            accepted = True
+        if accepted:
+            return res
+        # r11 #2: the mart answered but does not cover enough of the asked
+        # window (an accruing mart holds weeks of a 13-month chart). Prefer
+        # live; if live cannot answer, the partial mart still beats an empty
+        # panel — and the source label says which path served.
+        live = run(live_sql, page=page, key=key, tier=live_tier,
+                   source=live_source, **kwargs)
+        return live if live.usable() else res
     # Codex r9 #2: for marts whose table only exists once loaded (V035), a
     # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
     # scan would pay 46-56 GB to confirm an answer we already hold. Marts

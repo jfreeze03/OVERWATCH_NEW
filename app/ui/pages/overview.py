@@ -247,7 +247,10 @@ def render() -> None:
         mart27_sql.live_monthly_spend_by_warehouse(12, company),
         page=_PAGE, key=f"ov_monthly_{company}",
         mart_source=f"MART_WAREHOUSE_EFFICIENCY_DAILY ({company} + account-level, accruing)",
-        live_source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (13-month view)")
+        live_source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (13-month view)",
+        # r11 #2: the eff mart accrues from deploy day — until it spans a
+        # year, the 13-month live view is the truer boss chart.
+        mart_accept=lambda df: df["MONTH"].nunique() >= 12)
     if _mres.ok and not _mres.empty:
         _md = _mres.df.copy()
         _md["USD"] = _md["CREDITS"].map(safe_float) * rate
@@ -260,7 +263,8 @@ def render() -> None:
             _mom = (_full.iloc[-1] - _full.iloc[-2]) / max(_full.iloc[-2], 0.01) * 100
             st.caption(f"Last full month {_full.index[-1]}: "
                        f"{format_usd(_full.iloc[-1])} ({_mom:+.1f}% vs prior). "
-                       "Current month is dimmed — partial, not a drop.")
+                       "Current month is dimmed — partial, not a drop. "
+                       f"Dollars at today's ${rate:.2f}/credit.")
         result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------

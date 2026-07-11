@@ -763,4 +763,6 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipe
+        _pipeline_sla_tab(is_operator)
+    else:
+        _release_compare_tab(f["company"])

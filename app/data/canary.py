@@ -187,3 +187,19 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("ops.warehouse_blast_radius", lambda: ops_sql.warehouse_blast_radius("WH_ALFA_OVERWATCH", 1)),
     ("cost.tag_coverage", lambda: cost_sql.tag_coverage(1, "ALFA")),
 )
+
+# r11 #7: names whose ABSENCE is an account-feature state, not drift — only
+# these may report GAP. Anything else absent (a dropped core object, a
+# mistyped function, a revoked grant) must FAIL loudly. Fresh deployments:
+# missing-migration objects FAIL here by design — Admin > Migrations &
+# freshness is the calm view for that state.
+EXPECTED_GAPS: frozenset[str] = frozenset({
+    # Cortex Code / AI usage views probe a subscription internally (002139
+    # without one — Joe's live trace, 2026-07-10); model view needs the
+    # feature enabled in-region.
+    "cortex.code_user_rollup",
+    "cortex.code_daily",
+    "cortex.ai_functions_daily",
+    "cortex.model_costs",
+    "cortex.source_costs",
+})

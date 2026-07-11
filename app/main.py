@@ -222,6 +222,11 @@ def _apply_default_landing() -> None:
     from app.core.state import consume_pending_navigation
     from app.data import prefs_sql
 
+    if not str(st.session_state.get("_ow_current_user") or ""):
+        # r11 #3: identity not hydrated (or no connection yet) — retry next
+        # rerun WITHOUT spending an attempt. Pre-identity reads would also
+        # cache under the anonymous scope (the r9 #1 leak class).
+        return
     prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                 source="USER_PREFS")
     if not prefs.ok:
@@ -395,7 +400,7 @@ def _persistent_status_bar(vals: dict | None = None) -> None:
     from app.core.state import filters as _flt
     _f = _flt()
     stats = [
-        {"k": "Scope", "v": f"{_f['company']} · {_f['environment']} · {_f['days']}d",
+        {"k": "Scope", "v": f"{_f['company']} · {_f['days']}d",
          "icon": "refresh", "sev": ""},
         {"k": "Open criticals", "v": crit, "icon": "alerts",
          "sev": "bad" if crit not in ("0", "") else "ok"},
@@ -433,7 +438,9 @@ def _topbar_scope_controls() -> None:
         st.selectbox("Company", COMPANIES, key="flt_company")
     with c_env:
         st.selectbox("Environment", ENVIRONMENTS, key="flt_environment",
-                     help="PROD = *_PRD and ALFA_EDW_PROD/MGM databases.")
+                     help="Narrows the Database picker only — pick a database to "
+                          "scope results. Page queries filter by Company and "
+                          "Database; the per-environment lens ships with Compare.")
     with c_days:
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
     with c_db:
