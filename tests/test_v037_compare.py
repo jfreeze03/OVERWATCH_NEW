@@ -125,3 +125,18 @@ def test_compare_tab_is_wired_mart_only_and_honest():
         assert f"mart27_sql.{name}" in canary, name
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
     assert "V001..V037 applied" in val
+
+
+def test_delta_chip_survives_an_empty_b_side():
+    """Live crash 2026-07-11 (Joe's screenshot): pct_delta returns None when
+    the prior side is zero — the chip and the volume table must render, not
+    raise. Behavioral, per r11 #14."""
+    from app.logic.formulas import pct_delta
+    from app.ui.pages.cost_parts.compare import _delta_chip
+
+    assert pct_delta(42.0, 0.0) is None                   # the documented contract
+    assert _delta_chip(42.0, 0.0) == "no B-side data"     # never formats None
+    assert _delta_chip(110.0, 100.0) == "+10.0% vs B"
+    src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "compare.py").read_text(encoding="utf-8")
+    assert "pct_delta(a, b):+" not in src                 # no direct format of pct_delta
+    assert "round(pct_delta" not in src                   # round(None) is the same crash

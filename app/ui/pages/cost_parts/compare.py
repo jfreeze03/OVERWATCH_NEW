@@ -39,7 +39,12 @@ def _side_value(df: pd.DataFrame, side: str, col: str) -> float:
 
 
 def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
-    return f"{pct_delta(a, b):+.{decimals}f}% vs B"
+    """pct_delta returns None when B is zero (its documented contract —
+    live crash 2026-07-11: an empty B side met an f-string format spec)."""
+    d = pct_delta(a, b)
+    if d is None:
+        return "no B-side data"
+    return f"{d:+.{decimals}f}% vs B"
 
 
 def _compare_tab(company: str, rate: float) -> None:
@@ -179,8 +184,9 @@ def _compare_tab(company: str, rate: float) -> None:
                                    ("Queued min", "QUEUED_SEC", 1 / 60), ("Remote spill GB", "SPILL_REMOTE_GB", 1.0)):
             a_v = _side_value(act.df, "A", col) * scale
             b_v = _side_value(act.df, "B", col) * scale
+            d = pct_delta(a_v, b_v)          # None when B is zero — never format it
             rows.append({"METRIC": metric, "A": round(a_v, 1), "B": round(b_v, 1),
-                         "DELTA_PCT": round(pct_delta(a_v, b_v), 1)})
+                         "DELTA_PCT": d})
         styled_table(pd.DataFrame(rows), height=180, column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%")})
         result_caption(act)

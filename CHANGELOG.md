@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.28.1 — Compare survives an empty side (2026-07-11)
+
+- Live crash (owner screenshots, both trailing pairings): `pct_delta`
+  returns None when the B side is zero — its documented contract — and the
+  new KPI delta chip formatted it (`NoneType.__format__`), with the same
+  landmine in the volume-shape `round()`. Chips now say "no B-side data";
+  the volume table carries a blank delta. Regression locks forbid
+  formatting or rounding `pct_delta` output directly in compare.py, and a
+  behavioral test pins the empty-B path.
+
 ## 4.28.0 — V037 + Compare Phase 1: which warehouses did it? (2026-07-11)
 
 The spreadsheet-killer, built to the design doc (docs/design/COMPARE_MODE.md,
