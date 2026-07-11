@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.26.1 — the pain table read correctly (2026-07-11)
+
+- Today's Cost & Contract slow keys (reclaim 25s, prune/cachehit 15s) are
+  the TOGGLE-GATED deep scans — operator-invoked forensics, slow by
+  nature and by design (V038 on-demand pattern). Marting rarely-clicked
+  scans is poor value; what they lacked was the last-runtime hint the
+  other heavy toggles got in v4.20. Both toggles now show it, so the
+  next click comes with an expectation instead of a surprise.
+
 ## 4.26.0 — V036: the boss chart + measured pattern costs (2026-07-11)
 
 - **Monthly spend by warehouse** (Overview): stacked monthly bars, company-

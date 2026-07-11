@@ -33,6 +33,7 @@ from app.ui.components import (
     run_mart_first,
     selectable_table,
     styled_table,
+    toggle_cost_hint,
 )
 
 _PAGE = "Cost & Contract"
@@ -171,7 +172,6 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # On-demand (Codex r3 #5): the profile joins metering x QUERY_HISTORY over
     # the whole window (~90s cold at 60d in production telemetry). The idle
     # advisor above answers the everyday question; load this when sizing.
-    from app.ui.components import toggle_cost_hint
     st.caption(toggle_cost_hint("sizing"))
     if not st.toggle("Load right-sizing profile (heavy scan)", key="sizing_load",
                      help="Profiles every warehouse over the window: queueing, spill, "
@@ -385,6 +385,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
     st.divider()
     st.markdown("**Query efficiency (pruning + result cache)**")
+    toggle_cost_hint("prune_")   # v4.26.1: the pain table counted these
     if st.toggle("Run query-efficiency scan", key="cost_eff_toggle",
                  help="Scans the window's QUERY_HISTORY for full-table-scan families and the zero-scan share."):
         prune = run(ops_sql.poor_pruning_queries(
@@ -409,6 +410,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        "metadata). A falling line means redundant recomputation.")
 
     st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
+    toggle_cost_hint("reclaim_")
     if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                  help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
         with st.spinner("Scanning table storage + 90 days of read/DML history…"):
