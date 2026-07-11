@@ -64,7 +64,7 @@ def render() -> None:
     # group renders its related sub-panels under labeled section headers.
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
-         "Unit costs", "Optimization & Savings"], key="cost_section")
+         "Unit costs", "Compare", "Optimization & Savings"], key="cost_section")
     if section == "Spend & Attribution":
         section_header("Spend", "info", "spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate)
@@ -113,6 +113,10 @@ def render() -> None:
     elif section == "Unit costs":
         section_header("Unit costs — one query, one call, one AI request", "info", "cost")
         _unit_costs_tab(f, rate, ai_rate)
+    elif section == "Compare":
+        section_header("Compare — period vs period", "info", "cost")
+        from app.ui.pages.cost_parts.compare import _compare_tab
+        _compare_tab(f["company"], rate)
     else:
         section_header("Optimization", "info", "optimize")
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator)

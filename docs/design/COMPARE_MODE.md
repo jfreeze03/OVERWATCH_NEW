@@ -29,15 +29,35 @@ Panels, all from EXISTING marts (no new scans):
 
 | Panel | Source | Δ shown |
 |---|---|---|
-| Paired KPI strip | FACT_METERING_DAILY | spend, credits, fails, queued — value + delta chip per side |
-| Warehouse movers | MART_WAREHOUSE_EFFICIENCY_DAILY | top ± Δcredits by warehouse (reuses the CR spend-movers pattern) |
-| Pattern movers | MART_PATTERN_COST_DAILY (V036) | top ± Δ$ by parameterized hash — MEASURED, the silent-spend delta |
-| Volume shape | FACT_QUERY_HOURLY | queries/fails/exec-sec by side |
+| Paired KPI strip | FACT_WAREHOUSE_DAILY (company spend $) + FACT_QUERY_HOURLY (queries/fail%/queued) + FACT_METERING_DAILY (account-billed $, labeled account-wide) | value + delta chip per side |
+| Warehouse movers | FACT_WAREHOUSE_DAILY | top ± Δ$ by warehouse (reuses the CR spend-movers pattern) |
+| Pattern movers | MART_PATTERN_COST_DAILY v2 (V037) | top ± Δ$ by parameterized hash — MEASURED, the silent-spend delta |
+| Volume shape | FACT_QUERY_HOURLY | queries/fails/queued/spill by side |
+
+Grain corrections (Codex r11 #12, adopted before build): metering-daily has
+neither company grain nor failure/queue columns — company spend comes from
+the warehouse fact, operational metrics from the query fact, and the
+account-billed total stays its own labeled line. SHIPPED as Phase 1
+(v4.28.0): tab on Cost & Contract, pairing picker (last-full-month default,
+partial month only via the equal-length labeled toggle), paired KPI strip,
+warehouse + pattern movers, volume shape, `charts.paired_bars`.
 
 kpi_row already supports value+delta+badge; charts add one
 `paired_bars()` helper (two-side grouped bars, side B hatched/dimmed).
 
-## Axis 2 — environment vs environment
+## Axis 2 — environment vs environment (Phase 2 shape: the promotion lane)
+
+Adopted framing (Codex r11 #17): render environments as the ORDERED
+promotion lane — DEV -> UAT (PHX/SAN/SEA/SIT) -> PREPROD (MGM) -> PRD —
+not generic paired bars. Each stage shows cost / p95 / fail-rate for the
+period with stage-over-stage deltas; regressions flag where the channel
+degrades. The MGM=PREPROD reconcile (companies.py `_PROD_DB_EXACT` still
+counts MGM as PROD for the binary picker; the V023-seeded volume-scan
+scope pins MGM too) lands HERE, with the lane replacing the binary
+PROD/NONPROD classifier — changing companies.py alone would drift code
+from seed (r11 #1 deferral, 2026-07-11).
+
+## Axis 2 — original notes
 
 `ENV` derives from DATABASE_NAME suffix: `_PRD` / `_SIT` / `_DEV` →
 PRD/SIT/DEV, else OTHER. One pure helper in companies.py + the same CASE

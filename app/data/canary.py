@@ -32,6 +32,15 @@ def _recent_release_iso() -> str:
     return (date.today() - timedelta(days=3)).isoformat()
 
 
+def _recent_pair() -> tuple[str, str, str, str]:
+    """Recent contiguous week-vs-week windows for the compare canaries —
+    same recency rule as the release anchor (fixed dates are forbidden
+    here, and recent windows exercise warm fact partitions)."""
+    a1 = date.today() - timedelta(days=1)
+    a0, b0 = a1 - timedelta(days=7), a1 - timedelta(days=14)
+    return a0.isoformat(), a1.isoformat(), b0.isoformat(), a0.isoformat()
+
+
 CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.metering_daily_by_service", lambda: cost_sql.metering_daily_by_service(2)),
     ("cost.warehouse_daily_credits", lambda: cost_sql.warehouse_daily_credits(2, "ALFA")),
@@ -186,6 +195,13 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.day_grants", lambda: security_sql.day_grants("2026-01-02")),
     ("ops.warehouse_blast_radius", lambda: ops_sql.warehouse_blast_radius("WH_ALFA_OVERWATCH", 1)),
     ("cost.tag_coverage", lambda: cost_sql.tag_coverage(1, "ALFA")),
+    ("mart27.compare_warehouse_credits", lambda: mart27_sql.compare_warehouse_credits(
+        *_recent_pair(), "ALFA")),
+    ("mart27.compare_activity", lambda: mart27_sql.compare_activity(
+        *_recent_pair(), "ALFA")),
+    ("mart27.compare_billed", lambda: mart27_sql.compare_billed(*_recent_pair())),
+    ("mart27.compare_pattern_costs", lambda: mart27_sql.compare_pattern_costs(
+        *_recent_pair(), "ALFA", 5)),
 )
 
 # r11 #7: names whose ABSENCE is an account-feature state, not drift — only

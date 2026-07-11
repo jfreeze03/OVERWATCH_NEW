@@ -1,5 +1,48 @@
 # Changelog
 
+## 4.28.0 — V037 + Compare Phase 1: which warehouses did it? (2026-07-11)
+
+The spreadsheet-killer, built to the design doc (docs/design/COMPARE_MODE.md,
+owner decisions 2026-07-11: V037 yes, last-full-month default, promotion
+channel authoritative).
+
+- **V037 (`V037__pattern_env_grain.sql`)** — MART_PATTERN_COST_DAILY v2:
+  DATABASE_NAME joins the grain while the mart is days old (the Compare env
+  lens's measured-$ source), and the USERS metric becomes honest (Codex r11
+  #9): V036 stored per-warehouse daily distincts summed and readers took the
+  max day — neither is window-distinct. The mart now stores a mergeable
+  HLL_ACCUMULATE state; readers HLL_COMBINE + HLL_ESTIMATE, so USERS is a
+  true approximate distinct over any day range. CREATE OR REPLACE + fresh
+  30d backfill (cheaper than in-place while the mart is young). V030 shape
+  law throughout; guard = declared-exception pattern.
+- **Compare tab on Cost & Contract (Phase 1, period vs period).** Pairing
+  picker: last full month vs prior (default), trailing 7d/30d vs prior —
+  the current partial day/month is NEVER a side by default; the labeled
+  escape hatch pairs MTD against the same day-count of the prior month
+  (equal-length windows or nothing, clamped at short months). Paired KPI
+  strip with the r11 #12 corrected grains: warehouse spend from
+  FACT_WAREHOUSE_DAILY (exact, company-scopable), queries/fail-rate/queued
+  from FACT_QUERY_HOURLY (company-scoped), account-billed from
+  FACT_METERING_DAILY (account-wide, labeled so). Warehouse movers
+  (paired_bars + table, ranked by |Δ$|), pattern movers (measured
+  attribution $ per hash from the V037 mart — new-in-A patterns show B=$0),
+  volume shape table. One parallel batch (Brief pattern) with serial
+  fallbacks; period math in app/logic/compare.py (pure, boundary-tested).
+- **charts.paired_bars** — two-side grouped bars, side B dimmed gray.
+- Live-scan budget: compare.py pinned at 0 (mart/fact-only forever).
+  Compare canaries anchor to recent windows (the fixed-date lock holds).
+- **Design doc updated:** Phase-1 KPI grain table corrected (r11 #12);
+  Phase 2 env axis recorded as the ORDERED promotion lane
+  DEV→UAT→PREPROD→PRD (r11 #17) — the MGM=PREPROD reconcile lands there,
+  replacing the binary PROD/NONPROD classifier (V023 seed stays in sync).
+- 13 new locks/behavior tests (test_v037_compare.py): pairing edges incl.
+  year boundary + Feb clamp, partial exclusion, grain assertions, injection
+  + date validation, V037 guard/HLL/MERGE-key locks, budget-0 pin.
+
+Deploy: apply V037 in Snowsight (after V036), redeploy the app. The
+backfill runs inside the migration; the Compare tab and pattern panels
+light up as soon as it lands.
+
 ## 4.27.0 — Codex r11 fix-first: the batch tells the truth about who failed (2026-07-11)
 
 - **Boss chart coverage gate (r11 #2).** `run_mart_first` gains an optional

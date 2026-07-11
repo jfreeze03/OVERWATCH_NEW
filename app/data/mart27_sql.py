@@ -531,7 +531,7 @@ def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
     SUM(p.RUNS) AS RUNS,
     SUM(p.CREDITS_ATTRIBUTED) AS CREDITS,
     SUM(p.CREDITS_ATTRIBUTED) / NULLIF(SUM(p.RUNS), 0) AS CREDITS_PER_RUN,
-    MAX(p.USERS) AS USERS
+    HLL_ESTIMATE(HLL_COMBINE(p.USERS_HLL)) AS USERS
 FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
 LEFT JOIN (
     SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
@@ -542,4 +542,109 @@ WHERE p.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
 {comp}GROUP BY p.QUERY_HASH
 HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01
 ORDER BY CREDITS DESC
+LIMIT {lim}"""
+
+
+# ---------------------------------------------------------------------------
+# Compare mode (Phase 1, period vs period) — every reader takes explicit
+# half-open ISO windows [a0, a1) / [b0, b1) computed by app.logic.compare.
+# All facts/marts, zero ACCOUNT_USAGE — the compare tab is pinned at a live
+# -scan budget of 0.
+# ---------------------------------------------------------------------------
+
+def _iso(d: object) -> str:
+    """Validated ISO date literal for the compare windows."""
+    from datetime import date
+    return date.fromisoformat(str(d)).isoformat()
+
+
+def _side_windows(a_start: str, a_end: str, b_start: str, b_end: str,
+                  col: str = "DAY") -> tuple[str, str, str]:
+    a0, a1 = _iso(a_start), _iso(a_end)
+    b0, b1 = _iso(b_start), _iso(b_end)
+    in_a = f"({col} >= '{a0}' AND {col} < '{a1}')"
+    in_b = f"({col} >= '{b0}' AND {col} < '{b1}')"
+    return in_a, in_b, f"(({in_a}) OR ({in_b}))"
+
+
+def compare_warehouse_credits(a_start: str, a_end: str, b_start: str, b_end: str,
+                              company: str = "ALL") -> str:
+    """Per-warehouse credits for both sides — movers AND the strip's
+    company-scopable spend total (FACT_WAREHOUSE_DAILY, exact metering)."""
+    in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end)
+    comp = ""
+    if company and company != "ALL":
+        comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
+    return f"""SELECT
+    WAREHOUSE_NAME,
+    SUM(IFF({in_a}, CREDITS_TOTAL, 0)) AS A_CREDITS,
+    SUM(IFF({in_b}, CREDITS_TOTAL, 0)) AS B_CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+WHERE {either}
+{comp}GROUP BY WAREHOUSE_NAME
+HAVING SUM(CREDITS_TOTAL) > 0
+ORDER BY ABS(A_CREDITS - B_CREDITS) DESC
+LIMIT 100"""
+
+
+def compare_activity(a_start: str, a_end: str, b_start: str, b_end: str,
+                     company: str = "ALL") -> str:
+    """Volume shape per side from FACT_QUERY_HOURLY (company-scoped ops
+    grain — r11 #12: these metrics never come from metering-daily)."""
+    in_a, _in_b, either = _side_windows(a_start, a_end, b_start, b_end,
+                                        col="CAST(HOUR_TS AS DATE)")
+    comp = ""
+    if company and company != "ALL":
+        comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
+    return f"""SELECT
+    IFF({in_a}, 'A', 'B') AS SIDE,
+    SUM(QUERY_COUNT) AS QUERIES,
+    SUM(FAILED_COUNT) AS FAILS,
+    SUM(QUEUED_SEC_SUM) AS QUEUED_SEC,
+    SUM(SPILL_REMOTE_GB) AS SPILL_REMOTE_GB
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+WHERE {either}
+{comp}GROUP BY 1"""
+
+
+def compare_billed(a_start: str, a_end: str, b_start: str, b_end: str) -> str:
+    """Account-billed credits per side (FACT_METERING_DAILY — account-wide
+    by construction; the strip labels it so)."""
+    in_a, _in_b, either = _side_windows(a_start, a_end, b_start, b_end)
+    return f"""SELECT
+    IFF({in_a}, 'A', 'B') AS SIDE,
+    SUM(CREDITS_BILLED) AS CREDITS_BILLED
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+WHERE {either}
+GROUP BY 1"""
+
+
+def compare_pattern_costs(a_start: str, a_end: str, b_start: str, b_end: str,
+                          company: str = "ALL", limit: int = 25) -> str:
+    """Pattern movers: measured attribution $ per parameterized hash, both
+    sides (MART_PATTERN_COST_DAILY v2). The silent-spend delta."""
+    in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end, col="p.DAY")
+    lim = max(5, min(int(limit), 100))
+    comp = ""
+    if company and company != "ALL":
+        comp = (f"  AND (p.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(p.COMPANY) = 'ALL')\n")
+    return f"""SELECT
+    p.QUERY_HASH,
+    ANY_VALUE(f.SAMPLE_TEXT) AS SAMPLE_TEXT,
+    SUM(IFF({in_a}, p.RUNS, 0)) AS A_RUNS,
+    SUM(IFF({in_b}, p.RUNS, 0)) AS B_RUNS,
+    SUM(IFF({in_a}, p.CREDITS_ATTRIBUTED, 0)) AS A_CREDITS,
+    SUM(IFF({in_b}, p.CREDITS_ATTRIBUTED, 0)) AS B_CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
+LEFT JOIN (
+    SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
+    FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+    GROUP BY QUERY_HASH
+) f ON f.QUERY_HASH = p.QUERY_HASH
+WHERE {either}
+{comp}GROUP BY p.QUERY_HASH
+HAVING GREATEST(SUM(IFF({in_a}, p.CREDITS_ATTRIBUTED, 0)),
+                SUM(IFF({in_b}, p.CREDITS_ATTRIBUTED, 0))) > 0.01
+ORDER BY ABS(A_CREDITS - B_CREDITS) DESC
 LIMIT {lim}"""

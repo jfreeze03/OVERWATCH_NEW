@@ -145,7 +145,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     elif _pc.ok:
         st.success("No repeated pattern crossed the $0.01 floor in this window.")
     else:
-        st.info("Pattern costs arrive with migration V036 (MART_PATTERN_COST_DAILY) — "
+        st.info("Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "
                 "an admin can apply the pending schema update on Admin → Migrations & freshness.")
 
     with st.expander("Trend one procedure — total $ and $/call over time"):

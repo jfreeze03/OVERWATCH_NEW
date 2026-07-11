@@ -398,3 +398,31 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
     ))
     st.altair_chart(bars, use_container_width=True)
+
+
+def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
+                a_label: str = "A", b_label: str = "B", title: str = "",
+                top_n: int = 10, unit: str = "$") -> None:
+    """Two-side grouped bars for compare mode: side A in accent, side B
+    dimmed gray — the eye reads 'now vs then' without a legend hunt."""
+    data = df[[label_col, a_col, b_col]].head(top_n).copy()
+    data.columns = ["Label", a_label, b_label]
+    folded = data.melt("Label", var_name="Side", value_name="Value")
+    chart = (
+        alt.Chart(folded)
+        .mark_bar()
+        .encode(
+            x=alt.X("Label:N", sort=None, title=None,
+                    axis=alt.Axis(labelAngle=-30, labelLimit=140)),
+            xOffset=alt.XOffset("Side:N", sort=[a_label, b_label]),
+            y=alt.Y("Value:Q", title=unit or None),
+            color=alt.Color("Side:N",
+                            scale=alt.Scale(domain=[a_label, b_label],
+                                            range=[_ACCENT, "#64748b"]),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=["Label:N", "Side:N",
+                     alt.Tooltip("Value:Q", format=",.2f")],
+        )
+        .properties(height=260, title=title or "")
+    )
+    st.altair_chart(chart, use_container_width=True)
