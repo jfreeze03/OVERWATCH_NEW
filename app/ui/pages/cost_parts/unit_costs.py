@@ -125,6 +125,29 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "without a warehouse. Change-impact (Operations) watches "
                                    "these same numbers around each ALTER.")
 
+    st.markdown("**Repeated patterns — the silent spend (measured $)**")
+    # Owner ask (2026-07-11): "a visual of bad code and how it could cost us
+    # silently." Unlike the POC's estimates these are MEASURED attribution
+    # credits per parameterized hash — one cheap query run thousands of
+    # times shows its real bill.
+    _pc = run(mart27_sql.pattern_cost(days, company, 25), page=_PAGE,
+              key=f"patterns_{company}_{days}", tier="recent",
+              source=f"MART_PATTERN_COST_DAILY ({company} + account-level)", probe=True)
+    if _pc.ok and not _pc.empty:
+        _pd_df = _pc.df.copy()
+        _pd_df["USD"] = _pd_df["CREDITS"].map(safe_float) * rate
+        _pd_df["USD_PER_RUN"] = _pd_df["CREDITS_PER_RUN"].map(safe_float) * rate
+        styled_table(_pd_df[["SAMPLE_TEXT", "RUNS", "USD", "USD_PER_RUN", "USERS"]],
+                     height=260)
+        st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
+                   "parameterized hash — cheap-but-constant beats expensive-but-rare "
+                   "more often than teams expect.")
+    elif _pc.ok:
+        st.success("No repeated pattern crossed the $0.01 floor in this window.")
+    else:
+        st.info("Pattern costs arrive with migration V036 (MART_PATTERN_COST_DAILY) — "
+                "an admin can apply the pending schema update on Admin → Migrations & freshness.")
+
     with st.expander("Trend one procedure — total $ and $/call over time"):
         st.caption(
             "Type a procedure name (bare or db.schema-qualified — paste PROC_NAME "

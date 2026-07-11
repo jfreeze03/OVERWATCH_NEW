@@ -380,3 +380,21 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
         )
     )
     st.altair_chart(chart, use_container_width=True)
+
+def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
+                        usd_col: str, partial_month: str = "") -> None:
+    """The boss chart: monthly spend stacked by warehouse. The in-flight
+    month renders dimmed (partial, not a drop) — same honesty rule as the
+    daily spend trend."""
+    d = df.copy()
+    d["_PARTIAL"] = d[month_col].astype(str) == str(partial_month)
+    bars = (_base(d, 280).mark_bar().encode(
+        x=alt.X(f"{month_col}:O", title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y(f"{usd_col}:Q", title="USD", stack="zero"),
+        color=alt.Color(f"{category_col}:N",
+                        legend=alt.Legend(orient="bottom", title=None)),
+        opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
+        tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
+                 alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
+    ))
+    st.altair_chart(bars, use_container_width=True)

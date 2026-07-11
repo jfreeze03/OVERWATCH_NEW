@@ -59,7 +59,7 @@ def test_validate_matches_the_repo_tip():
 # pattern). Lowering is always welcome.
 _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/brief.py": 0,
-    "app/ui/pages/overview.py": 1,        # _live_fallback_daily (mart-first)
+    "app/ui/pages/overview.py": 2,  # v4.26: +1 = the monthly-spend 13-month live fallback (mart accrues, label honest)        # _live_fallback_daily (mart-first)
     "app/ui/pages/control_room.py": 3,    # pulse/movers/task live fallbacks
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve

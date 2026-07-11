@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.26.0 — V036: the boss chart + measured pattern costs (2026-07-11)
+
+- **Monthly spend by warehouse** (Overview): stacked monthly bars, company-
+  scoped, in-flight month dimmed (partial, not a drop), MoM delta on the
+  last full month. Mart-first over MART_WAREHOUSE_EFFICIENCY_DAILY as it
+  accrues history; 13-month WAREHOUSE_METERING_HISTORY live fallback until
+  then (overview budget 1 -> 2, labeled). Better than the POC's version:
+  scoped, sourced, and honest about the partial month.
+- **Repeated patterns — the silent spend** (Cost -> Unit costs): measured
+  QUERY_ATTRIBUTION_HISTORY compute per parameterized hash (V036 mart,
+  daily 3d increment + 30d backfill in-migration), $0.01 floor, sample
+  text joined from the family mart. The POC estimates; ours bills.
+- Telemetry read honestly: SP_LOAD_MARTS_V27 at 1,144s was the ONE-TIME
+  90d backfill (RUNS=1), not a regression — watch the hourly cadence
+  number instead. Lock-mart MERGE averaged 84 GB because the 45d backfill
+  dominated; if tomorrow's 3d increments stay heavy, the increment window
+  gets bounded next round. Today's slow keys (reclaim/cachehit/prune on
+  Cost & Contract) are the next marting targets per the pain table.
+
 ## 4.25.0 — Codex r10 fix-now batch (2026-07-11)
 
 - **Typed error kinds (#4 — fixed a v4.23.2 bug)**: the friendly error

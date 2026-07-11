@@ -19,7 +19,7 @@ from app.core.errors import safe_page
 from app.core.query import run
 from app.core.result import QueryResult
 from app.core.state import filters
-from app.data import cost_sql, mart_sql
+from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
@@ -32,6 +32,7 @@ from app.ui.components import (
     load_settings,
     page_header,
     result_caption,
+    run_mart_first,
     styled_table,
 )
 
@@ -238,6 +239,29 @@ def render() -> None:
         },
     ]
     kpi_row(kpis)
+
+    # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
+    st.subheader("Monthly spend by warehouse")
+    _mres = run_mart_first(
+        mart27_sql.monthly_spend_by_warehouse(12, company),
+        mart27_sql.live_monthly_spend_by_warehouse(12, company),
+        page=_PAGE, key=f"ov_monthly_{company}",
+        mart_source=f"MART_WAREHOUSE_EFFICIENCY_DAILY ({company} + account-level, accruing)",
+        live_source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (13-month view)")
+    if _mres.ok and not _mres.empty:
+        _md = _mres.df.copy()
+        _md["USD"] = _md["CREDITS"].map(safe_float) * rate
+        _cur = pd.Timestamp.now().strftime("%Y-%m")
+        charts.monthly_stacked_usd(_md, "MONTH", "WAREHOUSE_NAME", "USD",
+                                   partial_month=_cur)
+        _tot = _md.groupby("MONTH")["USD"].sum().sort_index()
+        _full = _tot[_tot.index < _cur]
+        if len(_full) >= 2:
+            _mom = (_full.iloc[-1] - _full.iloc[-2]) / max(_full.iloc[-2], 0.01) * 100
+            st.caption(f"Last full month {_full.index[-1]}: "
+                       f"{format_usd(_full.iloc[-1])} ({_mom:+.1f}% vs prior). "
+                       "Current month is dimmed — partial, not a drop.")
+        result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
     st.subheader("Spend trend")

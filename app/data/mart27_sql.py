@@ -470,3 +470,76 @@ def lock_wait_spikes(company: str = "ALL") -> str:
 WHERE g.LAST_DAY_WAITS >= 5 AND g.LAST_DAY_WAITS > 3 * GREATEST(g.PRIOR_DAILY_AVG, 1)
 ORDER BY g.LAST_DAY_WAITS DESC
 LIMIT 20"""
+
+
+def monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
+    """Monthly credits by warehouse from the efficiency mart — the boss chart.
+    The mart accrues history going forward; the live WMH fallback carries the
+    13-month back view until then."""
+    m = max(2, min(int(months), 13))
+    comp = ""
+    if company and company != "ALL":
+        comp = (f"    AND (c.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(c.COMPANY) = 'ALL')\n")
+    return f"""SELECT
+    TO_CHAR(DATE_TRUNC('month', c.DAY), 'YYYY-MM') AS MONTH,
+    c.WAREHOUSE_NAME,
+    SUM(c.CREDITS_TOTAL) AS CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY c
+WHERE c.DAY >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
+{comp}GROUP BY 1, 2
+ORDER BY 1, 2"""
+
+
+def live_monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
+    """13-month live fallback over WAREHOUSE_METERING_HISTORY; company via
+    COMPANY_FOR_WAREHOUSE outside the aggregation (V030 shape law)."""
+    m = max(2, min(int(months), 13))
+    comp = ""
+    if company and company != "ALL":
+        comp = (f"WHERE (w.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(w.COMPANY) = 'ALL')\n")
+    return f"""SELECT w.MONTH, w.WAREHOUSE_NAME, w.CREDITS
+FROM (
+    SELECT g.MONTH, g.WAREHOUSE_NAME, g.CREDITS,
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY
+    FROM (
+        SELECT TO_CHAR(DATE_TRUNC('month', START_TIME), 'YYYY-MM') AS MONTH,
+               WAREHOUSE_NAME,
+               SUM(CREDITS_USED) AS CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+        WHERE START_TIME >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
+        GROUP BY 1, 2
+    ) g
+) w
+{comp}ORDER BY w.MONTH, w.WAREHOUSE_NAME"""
+
+
+def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
+    """Measured $ per repeated statement pattern (V036) — the silent-spend
+    table. Attribution credits are MEASURED compute; the sample text rides
+    in from the family mart by hash."""
+    d = max(1, min(int(days), 90))
+    lim = max(5, min(int(limit), 100))
+    comp = ""
+    if company and company != "ALL":
+        comp = (f"    AND (p.COMPANY = {companies.sql_literal(company)}"
+                " OR UPPER(p.COMPANY) = 'ALL')\n")
+    return f"""SELECT
+    p.QUERY_HASH,
+    ANY_VALUE(f.SAMPLE_TEXT) AS SAMPLE_TEXT,
+    SUM(p.RUNS) AS RUNS,
+    SUM(p.CREDITS_ATTRIBUTED) AS CREDITS,
+    SUM(p.CREDITS_ATTRIBUTED) / NULLIF(SUM(p.RUNS), 0) AS CREDITS_PER_RUN,
+    MAX(p.USERS) AS USERS
+FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
+LEFT JOIN (
+    SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
+    FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+    GROUP BY QUERY_HASH
+) f ON f.QUERY_HASH = p.QUERY_HASH
+WHERE p.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
+{comp}GROUP BY p.QUERY_HASH
+HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01
+ORDER BY CREDITS DESC
+LIMIT {lim}"""
