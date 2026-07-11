@@ -55,6 +55,11 @@ def test_table_consistency_progress():
 
 def test_docs_match_the_app():
     c = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "(2026-07-11)" not in c                           # date drift fixed
+    # (v4.24) the original assert pinned "no entries dated 2026-07-11" to catch
+    # future-dating; the calendar reached 07-11 legitimately, so the lock now
+    # checks the general rule instead: no entry dated beyond today.
+    import datetime as _dt
+    _tomorrow = (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+    assert f"({_tomorrow})" not in c
     f = (_ROOT / "FEATURES.md").read_text(encoding="utf-8")
     assert "Since v4.9" in f and "Incident object" in f

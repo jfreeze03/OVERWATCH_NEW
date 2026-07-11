@@ -133,11 +133,15 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 # Cache-hit detection (V027 telemetry rider): the tier fetchers are
 # st.cache_data-wrapped, so their BODY only runs on a miss. _execute flips
 # this sentinel; run() resets it before the fetch and reads it after.
-_FETCH_MISS = {"v": False}
+from contextvars import ContextVar  # noqa: E402  (kept beside its single use)
+
+# Context-local (Codex r9 #4): the old module dict raced across concurrent
+# Streamlit session threads, corrupting cache-hit telemetry either way.
+_FETCH_MISS: ContextVar[bool] = ContextVar("ow_fetch_miss", default=False)
 
 
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
-    _FETCH_MISS["v"] = True
+    _FETCH_MISS.set(True)
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
@@ -227,15 +231,37 @@ def bump_refresh_salt() -> None:
     st.session_state["_ow_refresh_salt"] = datetime.now().isoformat()
 
 
+class _BatchPartial(Exception):
+    """Some batch members failed. Raising out of the cache_data-wrapped
+    fetcher keeps the all-or-nothing cache invariant (a partial batch is
+    never cached) while CARRYING the survivors — their frames were already
+    computed server-side and paid for (Codex r9 #3: re-running them through
+    the fallback duplicated scans and credits)."""
+
+    def __init__(self, frames: dict, errors: dict) -> None:
+        super().__init__(f"{len(errors)} of {len(frames) + len(errors)} batch members failed")
+        self.frames = frames
+        self.errors = errors
+
+
 def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     """Submit every statement server-side async (collect on one connection is
-    serialized; async jobs are not), then gather. Raises on ANY failure so a
-    failed batch is never cached — callers fall back to serial run()."""
+    serialized; async jobs are not), then gather. Full success returns (and
+    caches); any failure raises — _BatchPartial when there are survivors."""
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
     jobs = [session.sql(sql).to_pandas(block=False) for sql in sqls]  # AsyncJobs
-    return tuple(_normalize(job.result()) for job in jobs)
+    frames: dict = {}
+    errors: dict = {}
+    for idx, job in enumerate(jobs):
+        try:
+            frames[idx] = _normalize(job.result())
+        except Exception as exc:
+            errors[idx] = exc
+    if errors:
+        raise _BatchPartial(frames, errors)
+    return tuple(frames[i] for i in range(len(jobs)))
 
 
 @st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
@@ -283,6 +309,32 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     try:
         scope = _cache_scope()
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
+    except _BatchPartial as bp:
+        elapsed = (time.perf_counter() - started) * 1000
+        failed_keys = ",".join(str(specs[i].get("key")) for i in bp.errors)[:160]
+        _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
+                   elapsed, 0, ok=False)
+        record_error(page, next(iter(bp.errors.values())),
+                     context=f"run_batch partial tier={tier} failed=[{failed_keys}]")
+        out: dict = {}
+        for idx, spec in enumerate(specs):
+            if idx in bp.frames:
+                df = bp.frames[idx]
+                truncated = bool(caps[idx]) and len(df) > caps[idx]
+                if truncated:
+                    df = df.head(caps[idx])
+                _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(specs), 1),
+                           len(df), ok=True, batch_size=len(specs), truncated=truncated)
+                out[str(spec["key"])] = QueryResult(
+                    df=df, ok=True, truncated=truncated,
+                    source=str(spec.get("source", "")), tier=tier,
+                    fetched_at=datetime.now(), elapsed_ms=elapsed)
+            else:
+                out[str(spec["key"])] = run(
+                    str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
+                    source=str(spec.get("source", "")),
+                    max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+        return out
     except Exception as exc:
         _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
                    (time.perf_counter() - started) * 1000, 0, ok=False)
@@ -339,9 +391,9 @@ def run(
     started = time.perf_counter()
     try:
         cap = int(max_rows) if max_rows else 0
-        _FETCH_MISS["v"] = False
+        _FETCH_MISS.set(False)
         df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(), page)
-        cache_hit = not _FETCH_MISS["v"]
+        cache_hit = not _FETCH_MISS.get()
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)

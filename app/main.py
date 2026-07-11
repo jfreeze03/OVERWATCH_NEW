@@ -458,14 +458,18 @@ def _topbar_scope_controls() -> None:
 def main() -> None:
     _main_started = time.perf_counter()  # full render incl. chrome (Codex #18)
     consume_pending_navigation()
-    _apply_default_landing()
     inject_theme()
     if "_ow_refreshed_at" not in st.session_state:
         mark_refreshed()
     init_filters()
 
     connected = connection_available()
-    role = current_role() if connected else ""
+    role = current_role() if connected else ""   # hydrates role+user scope keys
+    # Codex r9 #1 (real): the USER_PREFS read used to run BEFORE identity
+    # hydrated, so it cached under the anonymous scope — and since the SQL
+    # text is identical across users, one user's prefs frame could serve
+    # another in-process. Identity first, THEN the first cached read.
+    _apply_default_landing()
     profile = resolve_role_profile(role)
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 

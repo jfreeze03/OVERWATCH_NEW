@@ -291,7 +291,7 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "recent", live_tier: str = "historical",
-                   max_rows: int | None = None):
+                   max_rows: int | None = None, empty_is_answer: bool = False):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -302,6 +302,12 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     res = run(mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
               source=mart_source, **kwargs)
     if res.usable():
+        return res
+    # Codex r9 #2: for marts whose table only exists once loaded (V035), a
+    # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
+    # scan would pay 46-56 GB to confirm an answer we already hold. Marts
+    # with young-coverage ambiguity keep the default (fallback on empty).
+    if empty_is_answer and res.ok:
         return res
     return run(live_sql, page=page, key=key, tier=live_tier,
                source=live_source, **kwargs)
@@ -403,8 +409,13 @@ def status_chips(pairs: list[tuple[str, str]]) -> None:
 def _settings_frame_cached(scope: str):
     from app.core.query import run  # local import: avoid module cycle
 
-    return run(mart_sql.settings(), page="Settings", key="settings", tier="recent",
-               source="SETTINGS").df
+    res = run(mart_sql.settings(), page="Settings", key="settings", tier="recent",
+              source="SETTINGS")
+    if not res.ok:
+        # cache_data never caches a raise (Codex r9 #5): a transient failure
+        # used to cache an empty frame and pin code defaults for 5 minutes.
+        raise RuntimeError(res.error or "settings read failed")
+    return res.df
 
 
 def load_settings(page: str) -> dict:

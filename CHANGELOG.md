@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.24.0 — Codex r9: the correctness batch, four real bugs (2026-07-11)
+
+- **Pre-identity pref caching (#1, real)**: the USER_PREFS landing read ran
+  before current_role() hydrated the cache scope, so it cached under the
+  anonymous scope — and with SQL text identical across users, one user's
+  prefs frame could serve another in-process. Identity now hydrates first.
+- **Empty mart revived the giant scan (#2, real)**: run_mart_first treated
+  a HEALTHY empty mart as a miss, so "no lock waits" re-paid the 46-56 GB
+  live scan to confirm an answer we held. New opt-in empty_is_answer=True
+  on the lock panel; marts with young-coverage ambiguity keep the default.
+- **One failure re-ran the whole batch (#3, real)**: _execute_batch threw
+  away already-computed survivor frames. _BatchPartial now carries them out
+  of the cached fetcher (a partial batch is STILL never cached) and only
+  failed members retry through run(). History lock evolved with the note.
+- **Racy cache-hit sentinel (#4, real)**: _FETCH_MISS was a module dict
+  shared across concurrent session threads; now a ContextVar. The batch
+  wall-time-split telemetry compromise stays (schema change, deferred).
+- **Failed settings reads cached defaults for 5 min (#5, real)**: the
+  settings frame cache now raises on not-ok (cache_data never caches a
+  raise), so a transient failure costs one render, not five minutes.
+- Adoption metric counts first-paint page_visit rows only, plus WAU (#9);
+  source-badge microtext 9px -> 11px (#18).
+- Deferred with reasons: #6 Overview batching (absent from the slow board —
+  telemetry picks batching targets); #7 lazy expanders, #10 SECTION+flow,
+  #11 central interaction logging, #19 chart semantics, #17 aria pass
+  (next polish round, together); #12 Action Queue workbench and #13
+  maintenance windows are feature rounds that deserve design docs; #14
+  shareable links queued with breadcrumbs; #20 behavioral tests adopted
+  narrowly as this round's locks. Declined: #8 per-statement query tags
+  (an ALTER SESSION per fetch doubles statements; key-level telemetry
+  already attributes cost); #15 per-panel filter muting (account-level
+  labels + legend already declare scope); #16 sticky strip (fights SiS
+  DOM under Streamlit 1.45 — revisit on upgrade).
+
 ## 4.23.2 — the Cortex Code 002139, traced to us after all (2026-07-10)
 
 - Joe ran the QUERY_HISTORY diagnostic and the caller was the dashboard:

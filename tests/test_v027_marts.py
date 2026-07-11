@@ -120,9 +120,11 @@ def test_all_nine_readers_are_canaried():
 
 def test_cache_hit_is_detected_not_guessed():
     src = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
-    assert '_FETCH_MISS = {"v": False}' in src
-    assert '_FETCH_MISS["v"] = True' in src.split("def _execute", 1)[1].split("def ", 1)[0]
-    assert "cache_hit = not _FETCH_MISS" in src
+    # v4.24 (Codex r9 #4): sentinel became context-local — the module dict
+    # raced across concurrent session threads and corrupted hit telemetry.
+    assert "_FETCH_MISS: ContextVar[bool]" in src
+    assert "_FETCH_MISS.set(True)" in src.split("def _execute", 1)[1].split("def ", 1)[0]
+    assert "cache_hit = not _FETCH_MISS.get()" in src
     # new-shape insert degrades to the pre-V027 shape, then off entirely
     assert "_ow_qtel_oldshape" in src
     assert "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED" in src

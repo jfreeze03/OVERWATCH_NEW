@@ -519,7 +519,8 @@ def _contention_tab(company: str, days: int) -> None:
             ops_sql.lock_contention(min(days, 14)),
             page=_PAGE, key=f"c_locks_{company}_{days}",
             mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
-            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)")
+            live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)",
+            empty_is_answer=True)
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
             styled_table(res.df)
             result_caption(res)

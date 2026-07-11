@@ -84,4 +84,8 @@ def test_run_batch_contract_in_source():
     assert "None" in src and "fallback" in src.lower()
     batch_src = inspect.getsource(query._execute_batch)
     assert "block=False" in batch_src            # true server-side async
-    assert "raises on any failure" in batch_src.lower() or "Raises on ANY failure" in batch_src
+    # v4.24 evolution (Codex r9 #3): any failure STILL raises — so a partial
+    # batch is never cached — but survivors ride out on the exception now
+    # instead of being re-executed (duplicated scans were real credits).
+    assert "raise _BatchPartial(frames, errors)" in batch_src
+    assert "any failure raises" in batch_src or "if errors:" in batch_src

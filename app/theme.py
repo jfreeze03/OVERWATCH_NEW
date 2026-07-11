@@ -70,7 +70,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
-.ow-src-badge { float:right; font-size:9px; letter-spacing:0.08em; text-transform:uppercase; border:1px solid; border-radius:8px; padding:1px 6px; }
+.ow-src-badge { float:right; font-size:11px; letter-spacing:0.08em; text-transform:uppercase; border:1px solid; border-radius:8px; padding:1px 6px; }
 .ow-src-badge--mart { color:#34d399; border-color:rgba(52,211,153,0.3); }
 .ow-src-badge--live { color:#38bdf8; border-color:rgba(56,189,248,0.3); }
 .ow-src-badge--stale { color:#fbbf24; border-color:rgba(251,191,36,0.3); }

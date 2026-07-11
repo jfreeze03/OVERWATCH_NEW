@@ -457,9 +457,12 @@ def app_usage_summary(days: int = 30) -> str:
     days = bounded_days(days)
     return f"""
 SELECT PAGE, COUNT(*) AS VISITS, COUNT(DISTINCT USER_NAME) AS USERS,
+       COUNT(DISTINCT IFF(AT >= DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                          USER_NAME, NULL)) AS WAU,
        MAX(AT) AS LAST_VISIT
 FROM {core_object("APP_USAGE")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  AND COALESCE(EVENT_KIND, 'page_visit') = 'page_visit'
 GROUP BY PAGE
 ORDER BY VISITS DESC
 """
