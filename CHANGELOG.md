@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.31.0 — Codex r13: the cache stops re-paying hourly data every 5 minutes (2026-07-11)
+
+Driven by the owner's fleet screenshots (1.5-3.4% cache hits on the top
+pages with ONE viewer = TTL exhaustion, not user fan-out): the perf batch.
+
+- **V040 (`V040__freshness_state.sql`) — freshness is a lookup (r13 #2).**
+  SOURCE_FRESHNESS_STATE: one row per source, snapshotted from the
+  19-aggregate view every 10 minutes server-side by SP_SNAPSHOT_FRESHNESS +
+  TASK_SNAPSHOT_FRESHNESS (seeded on apply). The health strip and both
+  freshness boards read the tiny table (staleness computed from
+  LAST_LOAD_TS at render); the view remains the writer and the pre-V040
+  fallback.
+- **"hourly" cache tier (r13 #3).** TTL 3600 for reads whose sources load
+  hourly/daily; `run_mart_first`'s mart side now defaults to it. The
+  Refresh button still invalidates everything instantly. Loader-generation
+  invalidation stays a design note — this captures most of the win for
+  none of the plumbing.
+- **Contract & Forecast sheds its live scans (r13 #6/#7).** Steering levers
+  build from the efficiency mart + the V037 pattern mart (measured, with a
+  shape adapter; live joins remain fallbacks), and contract consumption
+  sums FACT_METERING_DAILY gated by a coverage predicate — the fact must
+  actually REACH the contract start (FIRST_DAY) or the live rescan serves.
+- **Compare pruning finished (r13 #11/#12).** Adjacent A/B windows predicate
+  as one contiguous range; the pattern sample-text subquery is bounded on
+  both ends.
+- **Rendering (r13 #19).** STYLER_MAX_ROWS 1500→400 (Arrow-native formats
+  above); table exports are two-step beyond 200 rows so big frames stop
+  serializing CSV on every rerun.
+- r13 disposition elsewhere: #1 cache policy deferred until a second viewer
+  exists (r9 leak guardrail stands); #4+#17 = query-core v2 design note;
+  #5 rides the V27 re-derivation (now with freshness-state + pseudo-warehouse
+  riders); #8 self-retires as the mart accrues; #9 readiness-by-freshness
+  joins the registry design (the state table is its foundation); #10's hot
+  case covered by the hourly tier; #13/#14/#15 = R3/R4/usage-first law;
+  #16 declined (sampled + capped, no reliable flush hook); #18/#20 queued
+  (registry design / fragments polish round).
+
+Deploy: apply V040 after V039, redeploy.
+
 ## 4.30.0 — COST_DB adoptions: the phantom warehouse dies (2026-07-11)
 
 The approved batch from docs/design/COSTDB_RECONCILIATION.md — R1 plus the

@@ -385,12 +385,13 @@ SELECT 'OPEN_CRITICAL' AS METRIC, TO_VARCHAR(COUNT(*)) AS VALUE,
 FROM {core_object("ALERT_EVENTS")}
 WHERE STATUS = 'OPEN' AND SEVERITY = 'CRITICAL'
 UNION ALL
-SELECT 'STALEST_SOURCE_H', TO_VARCHAR(COALESCE(ROUND(MAX(HOURS_SINCE_LOAD), 1), -1)),
-       CASE WHEN MAX(HOURS_SINCE_LOAD) IS NULL THEN 'MUTED'
-            WHEN MAX(HOURS_SINCE_LOAD) > 26 THEN 'BAD'
-            WHEN MAX(HOURS_SINCE_LOAD) > 3 THEN 'WARN'
+SELECT 'STALEST_SOURCE_H',
+       TO_VARCHAR(COALESCE(ROUND(MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0, 1), -1)),
+       CASE WHEN MAX(LAST_LOAD_TS) IS NULL THEN 'MUTED'
+            WHEN MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0 > 26 THEN 'BAD'
+            WHEN MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0 > 3 THEN 'WARN'
             ELSE 'OK' END
-FROM {mart_object("MART_SOURCE_FRESHNESS")}
+FROM {core_object("SOURCE_FRESHNESS_STATE")}
 UNION ALL
 SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
 FROM {mart_object("FACT_METERING_DAILY")}
@@ -1104,4 +1105,31 @@ SELECT "installed_rank" AS INSTALLED_RANK, "version" AS VERSION,
 FROM {core_object('"flyway_schema_history"')}
 ORDER BY "installed_rank" DESC
 LIMIT {limit}
+"""
+
+
+def source_freshness_state() -> str:
+    """Freshness as a lookup (V040): the 10-minute snapshot table, staleness
+    computed from LAST_LOAD_TS at read — same contract as source_freshness()
+    so every board renders unchanged whichever path serves."""
+    return f"""
+SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT,
+       DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM {core_object("SOURCE_FRESHNESS_STATE")}
+ORDER BY HOURS_SINCE_LOAD DESC
+"""
+
+
+def fact_contract_consumed(start_iso: str) -> str:
+    """Contract-period billed credits from the daily fact (r13 #7) — the live
+    METERING_DAILY_HISTORY rescan becomes the coverage-guarded fallback.
+    FIRST_DAY lets the caller verify the fact actually reaches the contract
+    start before trusting the sum."""
+    from datetime import date
+    start = date.fromisoformat(str(start_iso)).isoformat()
+    return f"""
+SELECT SUM(CREDITS_BILLED) AS CREDITS_BILLED_TO_DATE,
+       MIN(DAY) AS FIRST_DAY
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= '{start}'
 """

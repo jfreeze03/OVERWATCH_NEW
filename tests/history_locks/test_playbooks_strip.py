@@ -20,6 +20,8 @@ def test_playbook_family_fallback():
 def test_health_strip_builder():
     sql = mart_sql.health_strip()
     assert "'OPEN_CRITICAL'" in sql and "'STALEST_SOURCE_H'" in sql and "'MTD_CREDITS'" in sql
-    assert "ALERT_EVENTS" in sql and "MART_SOURCE_FRESHNESS" in sql and "FACT_METERING_DAILY" in sql
+    # SOURCE_FRESHNESS_STATE since V040 (r13 #2): the strip reads the 10-min
+    # snapshot table, not the 19-aggregate view, every 30s per viewer.
+    assert "ALERT_EVENTS" in sql and "SOURCE_FRESHNESS_STATE" in sql and "FACT_METERING_DAILY" in sql
     assert "SEVERITY = 'CRITICAL'" in sql
     assert "DATE_TRUNC('month', CURRENT_DATE())" in sql

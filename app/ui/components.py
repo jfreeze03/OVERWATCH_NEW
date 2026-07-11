@@ -290,7 +290,7 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
-                   mart_tier: str = "recent", live_tier: str = "historical",
+                   mart_tier: str = "hourly", live_tier: str = "historical",
                    max_rows: int | None = None, empty_is_answer: bool = False,
                    mart_accept=None):
     """Fact-first read with the live builder as labeled fallback — the
@@ -501,7 +501,7 @@ def _auto_formats(df, skip: set) -> dict:
 
 # Above this row count, pandas Styler (per-cell styles for the WHOLE frame)
 # dominates paint time — fall back to Arrow-native printf formats instead.
-STYLER_MAX_ROWS = 1500
+STYLER_MAX_ROWS = 400   # r13 #19: Styler is per-cell Python; Arrow-native formats above this
 
 # Styler format -> printf equivalent for the large-frame path. Commas are
 # lost above the cap (printf has no grouping); that trade is deliberate.
@@ -599,10 +599,24 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         if len(df) >= 4:
             seq = int(st.session_state.get("_ow_dl_seq", 0))
             st.session_state["_ow_dl_seq"] = seq + 1
-            st.download_button("⬇", df.to_csv(index=False).encode("utf-8"),
-                               file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
-                               key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
-                               help="Download this table as CSV (account time).")
+            if len(df) <= 200:
+                # Small frame: CSV cost is negligible; keep one-click export.
+                st.download_button("⬇", df.to_csv(index=False).encode("utf-8"),
+                                   file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                                   key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
+                                   help="Download this table as CSV (account time).")
+            else:
+                # r13 #19: big frames serialized eagerly on EVERY rerun —
+                # two-step so the CSV builds only when asked.
+                _prep_key = f"ow_dlprep_{key or ''}_{seq}"
+                if st.session_state.get(_prep_key):
+                    st.download_button("⬇ CSV ready", df.to_csv(index=False).encode("utf-8"),
+                                       file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                                       key=f"ow_dl_{key or ''}_{seq}", type="tertiary")
+                elif st.button("⬇", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
+                               help=f"Prepare {len(df):,} rows as CSV (account time)."):
+                    st.session_state[_prep_key] = True
+                    st.rerun()
     except Exception:  # noqa: BLE001 - export is a convenience, never break the table
         pass
     return selected

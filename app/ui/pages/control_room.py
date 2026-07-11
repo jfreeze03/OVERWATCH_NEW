@@ -27,6 +27,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    run_mart_first,
     selectable_table,
     styled_table,
 )
@@ -185,8 +186,12 @@ def _day_replay() -> None:
 
 
 def _freshness_board() -> None:
-    res = run(mart_sql.source_freshness(), page=_PAGE, key="freshness", tier="live",
-              source="MART_SOURCE_FRESHNESS")
+    res = run_mart_first(
+        mart_sql.source_freshness_state(), mart_sql.source_freshness(),
+        page=_PAGE, key="freshness",
+        mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
+        live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
+        mart_tier="live", live_tier="live")
     st.subheader("Telemetry freshness")
     if not res.ok:
         st.info("Freshness board is not installed yet; the live fallbacks below still work.")

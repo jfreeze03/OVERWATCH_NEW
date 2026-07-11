@@ -33,7 +33,7 @@ def render() -> None:
     # the original serial per-query path below, unchanged.
     _b_live = run_batch([
         {"key": "strip", "sql": mart_sql.health_strip(),
-         "source": "ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY"},
+         "source": "ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY"},
         {"key": "inc", "sql": mart_sql.open_incidents(5, company),
          "source": f"INCIDENTS (open, {company} + account-level)"},
         {"key": "events", "sql": mart_sql.open_alert_events(50, company),
@@ -52,7 +52,7 @@ def render() -> None:
     ], page=_PAGE, tier="recent")
 
     strip = _b_live.get("strip") or run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
-                source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+                source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     strip_up = strip.ok and not strip.empty
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}
             if strip_up else {})

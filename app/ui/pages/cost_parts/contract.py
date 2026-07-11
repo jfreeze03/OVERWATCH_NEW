@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import run
-from app.data import cost_sql, insights_sql, mart_sql
+from app.data import cost_sql, insights_sql, mart27_sql, mart_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
 from app.logic.formulas import account_today, format_usd, safe_float
@@ -24,6 +24,7 @@ from app.ui.components import (
     kpi_row,
     panel_help,
     result_caption,
+    run_mart_first,
     styled_table,
 )
 
@@ -158,8 +159,17 @@ def _contract_tab(settings: dict) -> None:
     except ValueError:
         st.error(f"Contract dates in SETTINGS are not YYYY-MM-DD: {start_s!r} / {end_s!r}.")
         return
-    res = run(cost_sql.contract_consumed_credits(start_s), page=_PAGE, key="contract_consumed",
-              tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
+    # r13 #7: facts first — the live reader rescans METERING_DAILY_HISTORY
+    # from contract start on every cold cache. mart_accept verifies the fact
+    # actually REACHES the contract start before trusting the sum.
+    res = run_mart_first(
+        mart_sql.fact_contract_consumed(start_s),
+        cost_sql.contract_consumed_credits(start_s),
+        page=_PAGE, key="contract_consumed",
+        mart_source="FACT_METERING_DAILY (contract window)",
+        live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (coverage fallback)",
+        mart_accept=lambda df: (not df.empty and df.iloc[0].get("FIRST_DAY") is not None
+                                and str(pd.to_datetime(df.iloc[0]["FIRST_DAY"]).date()) <= start_s))
     if not guard(res, "No metering rows since the contract start."):
         return
     consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))
@@ -180,12 +190,21 @@ def _contract_tab(settings: dict) -> None:
     result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
 
     st.markdown("**Steering to commit — the levers, in dollars per day**")
-    idle_lv = run(insights_sql.idle_warehouse_analysis(30, "ALL"), page=_PAGE,
-                  key="steer_idle", tier="historical",
-                  source="idle advisor (30d, account-wide)")
-    pats_lv = run(insights_sql.expensive_patterns_usd(30, "ALL", 10), page=_PAGE,
-                  key="steer_pats", tier="historical",
-                  source="recurring patterns (30d, account-wide)")
+    # r13 #6: mart-first steering — the live idle join and pattern
+    # allocation were the last Account Usage scans on this section's
+    # default render (fleet slow-key evidence 2026-07-11).
+    idle_lv = run_mart_first(
+        mart27_sql.eff_idle_analysis(30, "ALL"),
+        insights_sql.idle_warehouse_analysis(30, "ALL"),
+        page=_PAGE, key="steer_idle",
+        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (idle contract)",
+        live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
+    pats_lv = run_mart_first(
+        mart27_sql.pattern_cost(30, "ALL", 10),
+        insights_sql.expensive_patterns_usd(30, "ALL", 10),
+        page=_PAGE, key="steer_pats",
+        mart_source="MART_PATTERN_COST_DAILY (measured, V037)",
+        live_source="QUERY_HISTORY x METERING (hour-share, live fallback)")
     rate_st = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     levers: dict = {}
     if idle_lv.usable():
@@ -194,8 +213,13 @@ def _contract_tab(settings: dict) -> None:
             adv_st["PROJECTED_MONTHLY_IDLE_USD"].sum())
     if pats_lv.usable():
         top5 = pats_lv.df.head(5)
-        levers["Top-5 recurring patterns (cache/materialize)"] = float(
-            (pd.to_numeric(top5["CREDITS_PER_DAY"], errors="coerce").fillna(0) * rate_st).sum() * 30)
+        if "CREDITS_PER_DAY" in top5.columns:      # live shape: per-day allocated
+            _pat_monthly = float((pd.to_numeric(top5["CREDITS_PER_DAY"],
+                                                errors="coerce").fillna(0) * rate_st).sum() * 30)
+        else:                                      # mart shape: measured window total
+            _pat_monthly = float(pd.to_numeric(top5.get("CREDITS"),
+                                               errors="coerce").fillna(0).sum() / 30 * 30 * rate_st)
+        levers["Top-5 recurring patterns (cache/materialize)"] = _pat_monthly
     plan = steering.steering_plan(
         projected_term_credits=pace["projected_term_credits"],
         contract_credits=contract_credits,

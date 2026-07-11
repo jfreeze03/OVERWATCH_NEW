@@ -118,6 +118,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cortex.source_costs", lambda: cortex_sql.cortex_source_costs(1)),
     ("mart.exec_board", lambda: mart_sql.exec_board("ALFA", 7)),
     ("mart.source_freshness", mart_sql.source_freshness),
+    ("mart.source_freshness_state", mart_sql.source_freshness_state),
+    ("mart.fact_contract_consumed", lambda: mart_sql.fact_contract_consumed(
+        (date.today() - timedelta(days=30)).isoformat())),
     ("mart.fact_daily_spend", lambda: mart_sql.fact_daily_spend(2)),
     ("mart.fact_warehouse_daily", lambda: mart_sql.fact_warehouse_daily(2, "ALFA")),
     ("mart.fact_task_daily", lambda: mart_sql.fact_task_daily(2, "ALFA")),

@@ -57,5 +57,5 @@ def test_printf_equivalents_cover_auto_formats():
 
 
 def test_pipeline_constants_sane():
-    assert 500 <= STYLER_MAX_ROWS <= 5000
+    assert 200 <= STYLER_MAX_ROWS <= 5000        # floor lowered with r13 #19 (Styler is per-cell Python)
     assert 10 <= HEATMAP_MAX_ROWS <= 40

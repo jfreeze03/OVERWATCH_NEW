@@ -569,6 +569,8 @@ def _side_windows(a_start: str, a_end: str, b_start: str, b_end: str,
     b0, b1 = _iso(b_start), _iso(b_end)
     in_a = f"({col} >= '{a0}' AND {col} < '{a1}')"
     in_b = f"({col} >= '{b0}' AND {col} < '{b1}')"
+    if b1 == a0:  # adjacent windows (the default pairings): one contiguous
+        return in_a, in_b, f"({col} >= '{b0}' AND {col} < '{a1}')"  # range prunes best (r13 #11)
     return in_a, in_b, f"(({in_a}) OR ({in_b}))"
 
 
@@ -648,6 +650,7 @@ LEFT JOIN (
     SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
     FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
     WHERE DAY >= LEAST('{_iso(a_start)}'::DATE, '{_iso(b_start)}'::DATE)
+      AND DAY < GREATEST('{_iso(a_end)}'::DATE, '{_iso(b_end)}'::DATE)
     GROUP BY QUERY_HASH
 ) f ON f.QUERY_HASH = p.QUERY_HASH
 WHERE {either}

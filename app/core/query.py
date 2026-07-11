@@ -24,8 +24,11 @@ from app.core.result import QueryResult
 from app.core.session import apply_query_tag, apply_statement_timeout, build_query_tag, get_session
 from app.core.sqlsafe import sql_literal
 
-CACHE_TTLS = {"live": 30, "recent": 300, "historical": 3600, "metadata": 14400}
-STATEMENT_TIMEOUTS = {"live": 30, "recent": 120, "historical": 180, "metadata": 30}
+CACHE_TTLS = {"live": 30, "recent": 300, "hourly": 3600, "historical": 3600, "metadata": 14400}
+# "hourly" (r13 #3): mart/fact reads whose SOURCES load hourly or daily -
+# a 300s TTL re-paid them 12x/hour (fleet evidence 2026-07-11: 1.5-3.4%
+# cache hits with one viewer). Refresh button still clears instantly.
+STATEMENT_TIMEOUTS = {"live": 30, "recent": 120, "hourly": 120, "historical": 180, "metadata": 30}
 
 _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
@@ -188,9 +191,15 @@ def _fetch_metadata(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "metadata", _page)
 
 
+@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False)
+def _fetch_hourly(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
+    return _execute(sql, "hourly", _page)
+
+
 _FETCHERS = {
     "live": _fetch_live,
     "recent": _fetch_recent,
+    "hourly": _fetch_hourly,
     "historical": _fetch_historical,
     "metadata": _fetch_metadata,
 }
@@ -319,7 +328,13 @@ def _fetch_metadata_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "metadata", _page)
 
 
+@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False)
+def _fetch_hourly_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
+    return _execute_batch(sqls, "hourly", _page)
+
+
 _BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch,
+                   "hourly": _fetch_hourly_batch,
                    "live": _fetch_live_batch, "metadata": _fetch_metadata_batch}
 
 

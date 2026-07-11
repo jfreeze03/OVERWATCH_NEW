@@ -32,6 +32,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    run_mart_first,
     selectable_table,
     styled_table,
 )
@@ -58,6 +59,7 @@ _EXPECTED_MIGRATIONS = {
     37: "pattern mart v2: DATABASE_NAME grain + HLL users (compare env prep)",
     38: "ledger autobook (detected cost-lever changes settle themselves)",
     39: "pseudo-warehouse filter (CLOUD_SERVICES_ONLY out of the warehouse fact)",
+    40: "freshness state table + 10-min snapshot (lookup, not 19 aggregates)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -144,8 +146,12 @@ def _migrations_tab() -> None:
                    "this panel lights up on its own once flyway_schema_history exists.")
 
     st.markdown("**Telemetry freshness**")
-    fresh = run(mart_sql.source_freshness(), page=_PAGE, key="adm_freshness", tier="live",
-                source="MART_SOURCE_FRESHNESS")
+    fresh = run_mart_first(
+        mart_sql.source_freshness_state(), mart_sql.source_freshness(),
+        page=_PAGE, key="adm_freshness",
+        mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
+        live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
+        mart_tier="live", live_tier="live")
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
         styled_table(fresh.df)

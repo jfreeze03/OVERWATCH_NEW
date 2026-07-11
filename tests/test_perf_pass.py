@@ -113,8 +113,12 @@ def test_health_values_fetched_once_and_passed_down():
 
 
 def test_batch_supports_all_four_tiers():
-    from app.core.query import _BATCH_FETCHERS
-    assert set(_BATCH_FETCHERS) == {"recent", "historical", "live", "metadata"}
+    from app.core.query import _BATCH_FETCHERS, _FETCHERS, CACHE_TTLS
+    # five since v4.31: "hourly" (r13 #3) — mart/fact sources load hourly,
+    # a 300s TTL re-paid them 12x/hour (fleet evidence 2026-07-11).
+    assert set(_BATCH_FETCHERS) == {"recent", "historical", "live", "metadata", "hourly"}
+    assert set(_FETCHERS) == set(_BATCH_FETCHERS)
+    assert CACHE_TTLS["hourly"] == 3600
 
 
 def test_render_ms_spans_chrome():
