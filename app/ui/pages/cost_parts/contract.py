@@ -58,10 +58,9 @@ def _org_truth_panel() -> bool:
               tier="historical", source="ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY")
     if not bal.usable():
         st.caption(
-            "Snowflake's own contract balance (SNOWFLAKE.ORGANIZATION_USAGE."
-            "REMAINING_BALANCE_DAILY) is not visible to this role/account, so pacing "
-            "relies on SETTINGS below. Org visibility would unlock automatic balance, "
-            "burn, and runway with no configuration."
+            "Snowflake's contract balance (ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY) "
+            "isn't visible to this role, so pacing uses SETTINGS below. Granting org "
+            "visibility unlocks balance, burn, and runway automatically."
         )
         return False
     summary = contract_planner.remaining_balance_summary(bal.df)

@@ -80,7 +80,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "severity": "warn" if failed else ""},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
              "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s",
-             "help": "Peak hourly-cohort p95 from the fact table; open with a schema filter for the exact raw p95."
+             "help": "Highest hourly p95 from the fact table — a peak, not the whole-window "
+                     "p95. Add a schema filter for the exact live number."
                      if used_mart else None},
             {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.0f} min"},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
@@ -158,7 +159,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                      "delta": f"{safe_float(row.get('CACHE_PCT')):,.0f}% cache", "delta_color": "off"},
                     {"label": "Partitions", "value": (f"{int(safe_float(row.get('PARTITIONS_SCANNED'))):,}"
                                                       f"/{int(safe_float(row.get('PARTITIONS_TOTAL'))):,}"),
-                     "help": "Scanned vs total - high ratios suggest missing pruning."},
+                     "help": "Scanned vs total — a high ratio means the query reads almost the whole table."},
                     {"label": "Spill", "value": f"{safe_float(row.get('REMOTE_SPILL_GB')):,.2f} GB remote"},
                     {"label": "Status", "value": str(row.get("EXECUTION_STATUS", "?"))},
                 ])
@@ -762,6 +763,4 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipeline_sla_tab(is_operator)
-    else:
-        _release_compare_tab(f["company"])
+        _pipe

@@ -560,9 +560,7 @@ def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
         "Every statement family the app has run on WH_ALFA_OVERWATCH, grouped by "
-        "parameterized hash — the slowest rows are the builders worth optimizing next. "
-        "Section navigation is lazy and filters no longer cold the cache, so most "
-        "interactions should be cache hits."
+        "parameterized hash — the slowest rows are the builders worth optimizing next."
     )
     telemetry = query_telemetry()
     if not telemetry.empty:
@@ -596,7 +594,7 @@ def _performance_tab() -> None:
         st.info("No visits logged yet (logging starts after V016 + a roles.sql re-run).")
     elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
         styled_table(usage.df)
-        st.caption("Curation calls (merge/kill sections) should follow this table, not opinions.")
+        st.caption("Merging or retiring sections should follow this table, not opinions.")
 
     st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
@@ -675,7 +673,7 @@ def _perf_rider_panels(fq_df=None) -> None:
              "value": f"${float(a.get('VERIFIED_USD') or 0):,.0f}"},
         ])
         st.caption("Generated -> executed -> verified, from audit rows. No impression "
-                   "tracking — Streamlit cannot measure viewed truthfully (r5 #4 decision).")
+                   "tracking — Streamlit cannot measure 'viewed' truthfully.")
 
 
 def _canary_tab() -> None:
@@ -789,8 +787,7 @@ def _canary_tab() -> None:
         st.caption(
             "These days' metering changed ≥48h after the day ended (late-arriving rows or "
             "re-runs). If finance got a figure before the restatement, this is the receipt "
-            "explaining the move. v1 flags restated days; first-reported snapshots would "
-            "need a snapshot fact."
+            "explaining the move."
         )
 
 

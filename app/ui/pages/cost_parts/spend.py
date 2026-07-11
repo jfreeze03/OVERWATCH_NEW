@@ -68,7 +68,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
         {"label": f"Billed spend, {days}d (account)", "value": format_usd(billed_usd),
          "help": "Billed credits x rate. Includes the cloud-services adjustment."},
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
-         "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — money the old dashboard ignored."},
+         "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
         {"label": "Compute rate", "value": f"${rate:.2f}/cr", "help": "SETTINGS CREDIT_PRICE_USD."},
         {"label": "Cortex rate", "value": f"${ai_rate:.2f}/cr", "help": "SETTINGS AI_CREDIT_PRICE_USD."},
     ])
@@ -94,9 +94,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
 
     st.markdown("**Cloud-services health by warehouse**")
     st.caption(
-        "Cloud services above ~10% of a warehouse's credits means many tiny queries, "
-        "metadata-heavy patterns, or compile-heavy SQL. The COST_CLOUD_SVC_RATIO alert "
-        "fires at the ELEVATED threshold (editable on the Alerts page)."
+        "Above ~10% of a warehouse's credits usually means many tiny queries, "
+        "metadata-heavy patterns, or compile-heavy SQL. The COST_CLOUD_SVC_RATIO "
+        "alert fires at ELEVATED (editable on Alerts)."
     )
     csr = run(mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
               key=f"csr_fact_{company}_{days}", tier="recent",
@@ -194,7 +194,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         hits = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
         if hits:
             for h in hits[:5]:
-                st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} (robust z {h['z']:+.1f}) — investigate.")
+                st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} is a statistical outlier (z {h['z']:+.1f}) — investigate.")
         else:
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:

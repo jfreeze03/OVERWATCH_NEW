@@ -101,7 +101,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "the idle advisor, not the query that happened to run.")
 
     st.divider()
-    st.markdown("**Stored procedures — $/call leaderboard (every proc, not just changed ones)**")
+    st.markdown("**Stored procedures — $/call leaderboard**")
     if guard(p_res, "No CALLs with attributed credits in this scope/window."):
         pdf = p_res.df.copy()
         # Click a row -> the trend panel below prefills with that proc
@@ -118,12 +118,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             st.session_state["uc_proc_trend_name"] = str(pdf.iloc[int(_psel)]["PROC_NAME"])
             st.caption(f"Selected **{st.session_state['uc_proc_trend_name']}** — "
                        "the trend panel below is prefilled.")
-        result_caption(p_res, note="Database/schema = the CALL's session context; a proc "
-                                   "may read other databases. ATTRIBUTED_CALLS counts calls "
-                                   "the attribution view matched — $0 rows with calls mean "
-                                   "attribution hasn't caught up (~6h) or the children ran "
-                                   "without a warehouse. Change-impact (Operations) watches "
-                                   "these same numbers around each ALTER.")
+        result_caption(p_res, note="Database/schema = the CALL's session context; procs may "
+                                   "read other databases. ATTRIBUTED_CALLS = calls the "
+                                   "attribution view matched; $0 with calls = attribution "
+                                   "lag (~6h) or children ran without a warehouse. "
+                                   "Change-impact (Operations) watches these numbers around "
+                                   "each ALTER.")
 
     st.markdown("**Repeated patterns — the silent spend (measured $)**")
     # Owner ask (2026-07-11): "a visual of bad code and how it could cost us
@@ -140,8 +140,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         styled_table(_pd_df[["SAMPLE_TEXT", "RUNS", "USD", "USD_PER_RUN", "USERS"]],
                      height=260)
         st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
-                   "parameterized hash — cheap-but-constant beats expensive-but-rare "
-                   "more often than teams expect.")
+                   "parameterized hash — cheap-but-constant often out-bills "
+                   "expensive-but-rare.")
     elif _pc.ok:
         st.success("No repeated pattern crossed the $0.01 floor in this window.")
     else:
@@ -201,7 +201,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 styled_table(cdf, height=170, column_config={
                     "USD": st.column_config.NumberColumn("$", format="$%.4f"),
                 })
-                st.caption(f"{len(cdf)} CALL(s) — the summary line per proc run.")
+                st.caption(f"{len(cdf)} CALL(s) — one row per proc run.")
                 if len(cdf) == 1:
                     _cid = str(cdf.iloc[0]["QUERY_ID"])
                     kids = run(insights_sql.call_children_costs(_cid), page=_PAGE,

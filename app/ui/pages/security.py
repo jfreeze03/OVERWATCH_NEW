@@ -60,7 +60,7 @@ def _access_tab(company: str, days: int) -> None:
             mfa = live_mfa
     st.markdown("**MFA gaps with password-login evidence (30d)**")
     if mfa.ok and mfa.empty:
-        st.success("No active users are password-logging-in without MFA. SSO/key-pair users are excluded by design.")
+        st.success("No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
         kpi_row([{
             "label": "Users needing MFA now",
@@ -105,7 +105,7 @@ def _access_tab(company: str, days: int) -> None:
              "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
         ])
         styled_table(cdf, height=280)
-        st.caption("The hourly alert scan raises SEC_CRED_EXPIRY events for these weekly until rotated (10-day horizon since V028).")
+        st.caption("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
     st.markdown("**Dormant users still holding access (90d+)**")
@@ -320,7 +320,7 @@ def _posture_trend_panel() -> None:
         arrow = "flat" if latest == first else ("down " + f"{first - latest:,.0f}" if latest < first
                                                 else "up " + f"{latest - first:,.0f}")
         st.caption(f"{metric}: {first:,.0f} -> {latest:,.0f} over the window ({arrow}). "
-                   "Loaded daily at 06:30; EXPIRING_CRED_10D replaced the 30-day bucket at V028.")
+                   "Loaded daily at 06:30.")
 
 
 def _clients_tab(company: str, days: int) -> None:
@@ -399,7 +399,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         styled_table(reasons.df)
         result_caption(reasons)
 
-    st.markdown("**Unused roles (90d) — revoke fodder**")
+    st.markdown("**Unused roles (90d) — revoke candidates**")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",
@@ -420,8 +420,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
         styled_table(bga.df)
-        st.caption("Evidence only — the SEC_BREAK_GLASS_USE alert was retired at V034 "
-                   "(owner decision: admins know what they are doing). Routine work "
+        st.caption("Evidence only — no alert fires on admin-role use. Routine work "
                    "still belongs on SNOW_SYSADMINS.")
         result_caption(bga)
 
@@ -429,7 +428,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
-    page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC (that scope is roadmap, deliberately).", icon_name="security",
+    page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC.", icon_name="security",
                 scope_note=f"{f['company']} · last {f['days']} days")
     st.caption(
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "

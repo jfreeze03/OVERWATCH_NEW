@@ -201,11 +201,11 @@ def render() -> None:
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
             "spark": _spend_spark,
-            "help": "Warehouse-exact metering credits x rate "
-                    f"(${rate:.2f}/credit from {settings.get('_source')}) — the "
+            "help": "Warehouse metering credits x "
+                    f"${rate:.2f}/credit ({settings.get('_source')}) — the "
                     "company-scopable lens. Serverless/AI and the cloud-services rebate "
-                    "live on Cost -> Spend (account billed total); Snowsight's Cost "
-                    "Management adds storage and data transfer, so it reads higher.",
+                    "are on Cost -> Spend; Snowsight adds storage and transfer, so it "
+                    "reads higher.",
         },
         budget_kpi(settings, mtd_spend) if mtd_source else {
             "label": "MTD spend",
@@ -234,7 +234,7 @@ def render() -> None:
             "severity": _score_sev,
             "spark": (score_series["SCORE"].tail(14).tolist()
                       if not score_series.empty else None),
-            "help": "Evidence-based; every deduction is listed below the trend. "
+            "help": "Every deduction is itemized below the trend. "
                     "Sparkline = 14d retro score from facts.",
         },
     ]
@@ -270,8 +270,8 @@ def render() -> None:
             st.error(f"Spend history unavailable: {trend_source.error}")
         else:
             st.info(
-                "No spend history loaded yet for this scope. Once installed, the hourly "
-                "task fills this in; the chart stays empty rather than showing invented numbers."
+                "No spend history for this scope yet — the hourly task fills it in "
+                "once installed. Empty until then, never invented."
             )
     else:
         daily_budget = (budget / month_days(account_today())[0]) if budget > 0 else 0.0
@@ -327,11 +327,10 @@ def render() -> None:
         with st.expander("Score trend — 30 days, retro-computed from facts"):
             charts.daily_metric_line(score_series, "DAY", "SCORE", title="Platform score (retro)")
             st.caption(
-                "Same weights as the live score, replayed against each day's facts and "
-                "alert history. RETRO: stale-source and open-action penalties aren't in "
-                "the facts, so absolute values can sit a few points above the live score — "
-                "judge the TREND. This history is also the raw material for calibrating "
-                "the score weights on Admin → Settings."
+                "Live-score weights replayed over each day's facts. Stale-source and "
+                "open-action penalties aren't in the facts, so retro sits a few points "
+                "high — judge the trend, not the level. Weights calibrate on "
+                "Admin → Settings."
             )
 
     # ---- Two-column: actions + cost drivers ---------------------------------
@@ -343,7 +342,7 @@ def render() -> None:
         actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
                           tier="live", source="ACTION_QUEUE")
         if not actions_res.ok:
-            st.info("Action queue is not installed yet. No placeholder rows are shown.")
+            st.info("Action queue isn't installed yet — no placeholder rows.")
         elif actions_res.empty:
             st.success("Action queue is empty — nothing is waiting on an owner.")
         else:

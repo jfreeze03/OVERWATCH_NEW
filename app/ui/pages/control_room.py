@@ -289,11 +289,13 @@ def render() -> None:
              "value": f"{safe_float(im.get('MTTA_MIN')):,.0f} / {safe_float(im.get('MTTR_MIN')):,.0f} min",
              "help": "Detected -> acknowledged / resolved, incident grain (alert-grain lives on Alerts -> History)."},
             {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
-             "help": "Reopens within 14 days of a close / closed incidents (owner-set window)."},
+             "help": "Share of closed incidents reopened within 14 days (owner-set window)."},
             {"label": "Alerts / incident", "value": f"{safe_float(im.get('COMPRESSION')):,.1f}",
-             "help": "Storm compression — the fatigue denominator done right."},
+             "help": "How many alerts each incident absorbs — higher means storms "
+                     "compress into one object instead of many pages."},
             {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
-             "help": "Incidents carrying a WH_CHANGE/DEPLOY member — the IaC payoff number."},
+             "help": "Incidents with a warehouse-change or deploy member — how often "
+                     "a change explains the breakage."},
         ])
     oi = run(mart_sql.open_incidents(50, company), page=_PAGE,
              key=f"open_incidents_{company}", tier="live",

@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.26.2 — the copy polish pass (2026-07-11)
+
+Owner ask: "people understand what they are seeing but not bogged down
+by unnecessary wording." Copy only — no SQL, keys, thresholds, or layout.
+
+- Sweep of every page's captions, help text, info/empty states against
+  six editorial rules: captions carry the verdict in one sentence where
+  possible; detail moves to help= tooltips; plain words over jargon
+  ("reads almost the whole table", not "missing pruning"); honesty
+  labels (measured vs allocated, partial-not-a-drop, floor-not-census,
+  account-level scope) all survive, said in fewer words; changelog
+  archaeology dropped from user-facing copy ("(V021)", "retired at
+  V034", "r5 #4 decision", "bulk closes used to skip this" and kin —
+  version references stay only on Admin setup hints, where admins act
+  on them); personality phrases kept only where they are the clearest
+  way to say the thing ("the telemetry picks, not opinions" and
+  "nothing groups silently" stay, "the fatigue denominator done right"
+  and "revoke fodder" go).
+- Files touched: overview, spend, unit_costs, contract, operations,
+  security, alerts, control_room, admin. Already at standard, untouched:
+  brief, cost, optimize, ai_chargeback, components, ai_panel, charts,
+  main.
+- One caption lock updated WITH its copy (test_live_round8: break-glass
+  panel now pinned to "no alert fires on admin-role use").
+
 ## 4.26.1 — the pain table read correctly (2026-07-11)
 
 - Today's Cost & Contract slow keys (reclaim 25s, prune/cachehit 15s) are

@@ -347,7 +347,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                     "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}",
                     help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
-                         "on the Rules section (V021).")
+                         "on the Rules section.")
             sql_script = _lifecycle_sql(event_id, action, note, kind)
             with st.expander("SQL that will run"):
                 st.code(sql_script, language="sql")
@@ -388,7 +388,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                 b_kind = st.radio("How were these closed?", RESOLUTION_KINDS, horizontal=True,
                                   key="alert_bulk_kind",
                                   help="Required — untagged closes drop out of the per-rule "
-                                       "precision score (bulk closes used to skip this).")
+                                       "precision score.")
             b_note = st.text_input("Bulk note (applies to every selected event)",
                                    key="alert_bulk_note", max_chars=500)
             confirm_b = st.text_input(
@@ -561,7 +561,7 @@ def render() -> None:
             if rt.usable():
                 styled_table(rt.df, height=170)
         else:
-            st.caption("Delivery SLOs appear once the per-route ledger has rows (V022+).")
+            st.caption("Delivery SLOs appear once the per-route ledger has rows.")
 
         st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
         fat = run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",

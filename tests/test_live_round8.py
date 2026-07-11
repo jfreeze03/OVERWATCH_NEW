@@ -105,7 +105,7 @@ def test_break_glass_rule_is_gone_events_closed_evidence_stays():
     assert "WHERE RULE_ID = 'SEC_BREAK_GLASS_USE'" in _MIG34
     assert "RESOLUTION_KIND = 'EXPECTED'" in _MIG34                  # lingering opens close tagged
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
-    assert "retired at V034" in sec                                  # panel says so
+    assert "no alert fires on admin-role use" in sec                 # panel says so
     assert "admin_role_activity" in sec                              # evidence panel survives
     rb = (_ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
     assert "~~SEC_BREAK_GLASS_USE~~" in rb                           # catalogue marks it retired
