@@ -263,7 +263,9 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
 
     kpi_row([
         {"label": f"Chargeback total ({days}d)", "value": format_usd(total_usd),
-         "help": "Exact warehouse metering x rate. Reconciles to the scoped spend by construction."},
+         "help": "Exact warehouse metering x rate — includes each warehouse's "
+                 "cloud-services credits, unadjusted (the account-level rebate lives "
+                 "on Cost → Spend). Reconciles to the scoped spend by construction."},
         {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},
         {"label": "Unmapped", "value": format_usd(unmapped_usd),
          "delta": "map warehouses below" if unmapped_usd > 0 else "fully mapped",

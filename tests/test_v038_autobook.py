@@ -59,4 +59,6 @@ def test_ui_and_reader_carry_the_source_and_the_reframe():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
     assert "ledger autobook" in adm
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V038 applied" in val
+    import re
+    m = re.search(r"V001\.\.V(\d+) applied", val)
+    assert m and int(m.group(1)) >= 38                    # floor, not a pin (tip moves)

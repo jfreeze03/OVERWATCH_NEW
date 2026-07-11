@@ -202,6 +202,9 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart27.compare_billed", lambda: mart27_sql.compare_billed(*_recent_pair())),
     ("mart27.compare_pattern_costs", lambda: mart27_sql.compare_pattern_costs(
         *_recent_pair(), "ALFA", 5)),
+    ("cost.cs_by_query_type", lambda: cost_sql.cs_by_query_type(1, "ALFA")),
+    ("insights.clustering_by_table", lambda: insights_sql.clustering_by_table(7, "ALFA")),
+    ("mart.fact_daily_spend_year", mart_sql.fact_daily_spend_year),
 )
 
 # r11 #7: names whose ABSENCE is an account-feature state, not drift — only

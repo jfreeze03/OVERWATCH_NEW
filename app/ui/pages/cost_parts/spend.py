@@ -32,6 +32,7 @@ _SERVICE_CATEGORY = {
     "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
     "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
     "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
+    "OPENFLOW_COMPUTE_SNOWFLAKE": "Serverless", "HYBRID_TABLE_REQUESTS": "Storage",
     "REPLICATION": "Replication", "STORAGE": "Storage",
 }
 
@@ -121,6 +122,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
                            "the ratio driver is likely many tiny/metadata queries instead."):
                 styled_table(comp.df)
                 result_caption(comp)
+            st.markdown("**Cloud-services credits by statement type**")
+            cs_types = run(cost_sql.cs_by_query_type(days, company), page=_PAGE,
+                           key=f"cs_types_{company}_{days}", tier="historical",
+                           source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE)")
+            if guard(cs_types, "No cloud-services credits recorded on queries in this window."):
+                styled_table(cs_types.df, height=220)
+                st.caption("Metadata storms show up here — SHOW/DESCRIBE floods bill "
+                           "cloud services without ever touching a warehouse.")
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
     wh = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
@@ -146,7 +155,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             },
         )
         window_usd = float(view["USD_CURRENT"].sum())
-        result_caption(wh, note="Both windows offset 24h for ACCOUNT_USAGE completeness.")
+        result_caption(wh, note="Both windows offset 24h for ACCOUNT_USAGE completeness. "
+                                "Totals include per-warehouse cloud-services credits, "
+                                "unadjusted — the account rebate lives on the Spend panel.")
 
         st.markdown("**By user and database (allocated — estimate)**")
         st.caption(

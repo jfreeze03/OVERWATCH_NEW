@@ -7,7 +7,7 @@ and says so; estimated and verified savings never mix.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -104,7 +104,37 @@ def _org_truth_panel() -> bool:
     return True
 
 
+def _year_projection_strip(settings: dict) -> None:
+    """Calendar-year framing (COST_DB recon R9): the exec asks "what will
+    this YEAR total?" Straight-line here, honestly labeled — the
+    seasonality-aware month-end engines live on Overview."""
+    cy = run(mart_sql.fact_daily_spend_year(), page=_PAGE, key="cy_projection",
+             tier="recent", source="FACT_METERING_DAILY (calendar year)")
+    if not cy.usable():
+        return
+    cydf = cy.df.copy()
+    cydf["DAY"] = pd.to_datetime(cydf["DAY"], errors="coerce").dt.date
+    today = account_today()
+    ytd = float(cydf["CREDITS_BILLED"].map(safe_float).sum())
+    tail = cydf[cydf["DAY"] >= today - timedelta(days=30)]
+    burn = (float(tail["CREDITS_BILLED"].map(safe_float).sum()) / max(len(tail), 1))
+    days_left = (date(today.year, 12, 31) - today).days
+    rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    projected = ytd + burn * days_left
+    kpi_row([
+        {"label": f"{today.year} YTD (billed)", "value": f"{ytd:,.0f} cr",
+         "delta": format_usd(ytd * rate_now), "delta_color": "off"},
+        {"label": f"Projected {today.year} total", "value": f"{projected:,.0f} cr",
+         "delta": format_usd(projected * rate_now), "delta_color": "off",
+         "help": "Straight-line: YTD billed credits + trailing-30d daily burn x "
+                 f"{days_left} days remaining (early in a year the burn basis is "
+                 "YTD itself). Seasonality-aware month-end projections live on "
+                 "Overview; contract pacing below is term-aware."},
+    ])
+
+
 def _contract_tab(settings: dict) -> None:
+    _year_projection_strip(settings)
     org_shown = _org_truth_panel()
     contract_credits = safe_float(settings.get("CONTRACT_CREDITS"))
     start_s = str(settings.get("CONTRACT_START_DATE") or "").strip()

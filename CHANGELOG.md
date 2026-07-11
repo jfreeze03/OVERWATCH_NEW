@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.30.0 — COST_DB adoptions: the phantom warehouse dies (2026-07-11)
+
+The approved batch from docs/design/COSTDB_RECONCILIATION.md — R1 plus the
+quick wins. R3 (storage truth pass) and R4 (client-app cost lens) are queued
+behind Compare Phase 2.
+
+- **R1 / V039 (`V039__pseudo_warehouse_filter.sql`).** Accounts emit a
+  CLOUD_SERVICES_ONLY row in WAREHOUSE_METERING_HISTORY (WAREHOUSE_ID = 0,
+  compute = 0) for cloud services consumed outside any warehouse. Our fact
+  loader ingested it: a phantom ALFA "warehouse" — 100% idle in the advisor
+  with nothing to suspend, a chargeback-unmapped row, a movers/Compare/boss-
+  chart slice. SP_LOAD_HOURLY_FACTS is re-derived VERBATIM from V002 plus
+  exactly one predicate (WAREHOUSE_ID > 0 — the docs-sanctioned filter
+  COST_DB carried and we missed); equality-locked in tests. Same filter in
+  every live WMH builder (daily credits, window-vs-prior, CS ratio, idle,
+  sizing, hourly activity, 13-month monthly) and backfill_365.sql (the
+  loader mirror). Phantom rows deleted from FACT_WAREHOUSE_DAILY and the
+  efficiency mart; eff-mart READERS filter by name until the V27-family
+  loader's next planned re-derivation (that proc pair is equality-locked —
+  not churned for one row a day).
+- **R2.** Per-warehouse dollars say the quiet part: chargeback KPI help and
+  the attribution note now state that warehouse totals include unadjusted
+  cloud-services credits, with the account-level rebate on Spend.
+- **R5.** `_categorize` gains OPENFLOW_COMPUTE_SNOWFLAKE (Serverless) and
+  HYBRID_TABLE_REQUESTS (Storage) — Spend's "Other" stays honest.
+- **R6.** The ELEVATED cloud-services drill gains a by-QUERY_TYPE cut
+  (metadata storms — SHOW/DESCRIBE floods — visible beside compile-heavy
+  families). Budget: spend.py 8→9, justified in the pin.
+- **R7.** Optimization gains a toggled per-table automatic-clustering scan
+  (serverless reclustering credits + TB reclustered — the classic silent
+  burner). Budget: optimize.py 2→3, justified.
+- **R9.** Contract & Forecast opens with the calendar-year strip: YTD billed
+  credits + straight-line projected year total at trailing-30d burn, labeled
+  as such (new unclamped fact_daily_spend_year builder — bounded_days'
+  90-day default would have silently turned YTD into "last 90 days").
+- Canaries for all three new builders; 10 new locks including the V039
+  derivation-equality law.
+
+Deploy: apply V039 after V038, redeploy. The phantom disappears from every
+panel on the next loader run.
+
 ## 4.29.0 — V038: the savings ledger books itself (2026-07-11)
 
 Owner, looking at an empty ledger: "how can we automate the savings ledger

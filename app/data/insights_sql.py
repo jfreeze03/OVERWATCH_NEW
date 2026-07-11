@@ -54,6 +54,7 @@ LEFT JOIN query_hours Q
        ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
       AND Q.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
 WHERE {where}
+  AND M.WAREHOUSE_ID > 0
 GROUP BY 1, 2
 HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
 ORDER BY IDLE_CREDITS DESC
@@ -271,6 +272,7 @@ LEFT JOIN query_hours H
        ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
       AND H.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
 LEFT JOIN query_stats Q ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+WHERE M.WAREHOUSE_ID > 0
 WHERE {where_m}
 GROUP BY 1, 2
 HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
@@ -423,6 +425,7 @@ WITH m AS (
            COUNT(DISTINCT DATE(START_TIME)) AS DAYS_SEEN
     FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
     WHERE {where_m}
+      AND WAREHOUSE_ID > 0
     GROUP BY 1, 2
 ),
 q AS (
@@ -895,4 +898,28 @@ LEFT JOIN att a ON a.RID = n.QUERY_ID
 GROUP BY n.DAY
 ORDER BY n.DAY
 LIMIT 400
+"""
+
+
+def clustering_by_table(days: int = 30, company: str = "ALL") -> str:
+    """Automatic-clustering spend per table (COST_DB recon R7) — serverless
+    reclustering credits are the classic silent burner; a table rewriting
+    itself daily shows up here long before anyone looks for it."""
+    days = bounded_days(days, 90)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "CREDITS_USED > 0",
+        companies.database_clause(company, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TABLE_NAME AS TABLE_FQN,
+    ROUND(SUM(CREDITS_USED), 4) AS CREDITS,
+    ROUND(SUM(COALESCE(NUM_BYTES_RECLUSTERED, 0)) / POWER(1024, 4), 3) AS TB_RECLUSTERED,
+    COUNT(*) AS RECLUSTER_RUNS
+FROM SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY
+WHERE {where}
+GROUP BY 1
+ORDER BY CREDITS DESC
+LIMIT 25
 """

@@ -106,6 +106,19 @@ LIMIT 30
 """
 
 
+def fact_daily_spend_year() -> str:
+    """Calendar-year billed credits per day (COST_DB recon R9). Own builder:
+    bounded_days clamps at 90 by default, which would silently turn "YTD"
+    into "last 90 days" in the back half of a year."""
+    return f"""
+SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATE_TRUNC('year', CURRENT_DATE())
+GROUP BY DAY
+ORDER BY DAY
+"""
+
+
 def fact_daily_spend(days: int) -> str:
     """Account billed credits per day from the daily fact (adjustment applied)."""
     days = bounded_days(days)

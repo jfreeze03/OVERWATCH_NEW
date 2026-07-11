@@ -57,6 +57,7 @@ _EXPECTED_MIGRATIONS = {
     36: "pattern-cost mart (measured $ per repeated statement)",
     37: "pattern mart v2: DATABASE_NAME grain + HLL users (compare env prep)",
     38: "ledger autobook (detected cost-lever changes settle themselves)",
+    39: "pseudo-warehouse filter (CLOUD_SERVICES_ONLY out of the warehouse fact)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

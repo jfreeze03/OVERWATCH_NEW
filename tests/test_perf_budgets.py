@@ -64,8 +64,8 @@ _LIVE_SCAN_BUDGETS = {
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).
-    "app/ui/pages/cost_parts/optimize.py": 2,
-    "app/ui/pages/cost_parts/spend.py": 8,
+    "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
+    "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
     "app/ui/pages/cost_parts/ai_chargeback.py": 5,
     "app/ui/pages/operations.py": 24,
     "app/ui/pages/cost_parts/unit_costs.py": 0,

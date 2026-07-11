@@ -523,6 +523,22 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "'Booked from storage-waste scan.'", page=_PAGE)
                     notify(ok, msg)
 
+    st.markdown("**Automatic clustering spend (per table)**")
+    st.caption(toggle_cost_hint("clustering_"))
+    if st.toggle("Run clustering-spend scan", key="cost_clustering_toggle",
+                 help="Serverless reclustering credits per table over the window — "
+                      "a table rewriting itself daily is a silent burner."):
+        clu = run(insights_sql.clustering_by_table(max(days, 30), company), page=_PAGE,
+                  key=f"clustering_{company}_{days}", tier="historical",
+                  source="ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY")
+        if clu.ok and clu.empty:
+            st.success("No automatic-clustering credits in this window.")
+        elif guard(clu, ""):
+            styled_table(clu.df, height=240)
+            st.caption("High credits with high TB reclustered = revisit the clustering "
+                       "key or the load pattern; dollars = credits x your compute rate.")
+            result_caption(clu)
+
     st.divider()
     st.markdown("**Guarded remediation (generate → review → execute)**")
     panel_help(
