@@ -382,17 +382,28 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
     st.altair_chart(chart, use_container_width=True)
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
-                        usd_col: str, partial_month: str = "") -> None:
+                        usd_col: str, partial_month: str = "",
+                        top_n: int = 8) -> None:
     """The boss chart: monthly spend stacked by warehouse. The in-flight
     month renders dimmed (partial, not a drop) — same honesty rule as the
-    daily spend trend."""
+    daily spend trend. Top-N categories + "Other" (owner report 2026-07-11:
+    the legend clipped past ~8 warehouses; Codex r12 #20: unbounded
+    warehouse-month payloads) — totals are unchanged, small movers group."""
     d = df.copy()
+    totals = d.groupby(category_col)[usd_col].sum().sort_values(ascending=False)
+    if len(totals) > top_n:
+        keep = set(totals.head(top_n).index)
+        d[category_col] = d[category_col].map(lambda c: c if c in keep else "Other")
+        d = d.groupby([month_col, category_col], as_index=False)[usd_col].sum()
     d["_PARTIAL"] = d[month_col].astype(str) == str(partial_month)
+    order = list(totals.head(top_n).index) + (["Other"] if len(totals) > top_n else [])
     bars = (_base(d, 280).mark_bar().encode(
         x=alt.X(f"{month_col}:O", title=None, axis=alt.Axis(labelAngle=0)),
         y=alt.Y(f"{usd_col}:Q", title="USD", stack="zero"),
-        color=alt.Color(f"{category_col}:N",
-                        legend=alt.Legend(orient="bottom", title=None)),
+        color=alt.Color(f"{category_col}:N", sort=order,
+                        legend=alt.Legend(orient="bottom", title=None,
+                                          columns=4, symbolLimit=top_n + 1,
+                                          labelLimit=160)),
         opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
         tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],

@@ -281,14 +281,25 @@ def show_streams_sql() -> str:
     return "SHOW STREAMS IN ACCOUNT LIMIT 200"
 
 
-def running_queries() -> str:
+def running_queries(warehouse: str) -> str:
     """Live in-flight statements (INFORMATION_SCHEMA function — real time,
-    unlike the lagged ACCOUNT_USAGE view). Feeds the kill-switch panel."""
-    return """
+    unlike the lagged ACCOUNT_USAGE view). Feeds the kill-switch panel.
+
+    BY_WAREHOUSE variant (live error 2026-07-11, code 090234): the no-arg
+    QUERY_HISTORY() defaults to CURRENT-USER scoping, and owner's-rights
+    procedures — which is what Streamlit-in-Snowflake runs as — cannot
+    access current-user information. Per-warehouse also matches the
+    kill-switch flow: you already know which warehouse is burning."""
+    from app.core.sqlsafe import sql_literal
+    wh = str(warehouse or "").strip()
+    if not wh:
+        raise ValueError("running_queries needs a warehouse name")
+    return f"""
 SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, EXECUTION_STATUS,
        START_TIME, ROUND(TOTAL_ELAPSED_TIME / 1000, 1) AS ELAPSED_S,
        LEFT(QUERY_TEXT, 90) AS QUERY_PREVIEW
-FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY(RESULT_LIMIT => 1000))
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE(
+    WAREHOUSE_NAME => {sql_literal(wh.upper())}, RESULT_LIMIT => 1000))
 WHERE EXECUTION_STATUS IN ('RUNNING', 'QUEUED', 'RESUMING_WAREHOUSE', 'BLOCKED')
 ORDER BY START_TIME
 LIMIT 100

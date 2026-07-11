@@ -472,8 +472,24 @@ def _emergency_extras(is_operator: bool) -> None:
         "either way. Suspending a warehouse does NOT kill these — this does."
     )
     if st.toggle("Show running queries now", key="emg_rq_toggle"):
-        rq = run(ops_sql.running_queries(), page=_PAGE, key="emg_running", tier="live",
-                 source="INFORMATION_SCHEMA.QUERY_HISTORY (live)", max_rows=0)
+        _rq_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="emg_show_wh",
+                      tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        _rq_names: list = []
+        if _rq_whs.ok and not _rq_whs.empty:
+            _rqdf = _rq_whs.df.copy()
+            _rqdf.columns = [str(c).lower() for c in _rqdf.columns]
+            if "name" in _rqdf.columns:
+                _rq_names = sorted(_rqdf["name"].astype(str))
+        _rq_pick = (st.selectbox("Warehouse to inspect", _rq_names, key="emg_rq_wh")
+                    if _rq_names else st.text_input("Warehouse to inspect", key="emg_rq_wh_txt"))
+        if not _rq_pick:
+            st.caption("Pick a warehouse — the in-flight view is per warehouse "
+                       "(current-user scoping is unavailable inside SiS).")
+            return
+        rq = run(ops_sql.running_queries(_rq_pick), page=_PAGE,
+                 key=f"emg_running_{_rq_pick}", tier="live",
+                 source=f"INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE ({_rq_pick}, live)",
+                 max_rows=0)
         if rq.ok and rq.empty:
             st.success("Nothing running or queued right now.")
         elif guard(rq, ""):

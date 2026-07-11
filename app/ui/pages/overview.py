@@ -261,10 +261,14 @@ def render() -> None:
         _full = _tot[_tot.index < _cur]
         if len(_full) >= 2:
             _mom = (_full.iloc[-1] - _full.iloc[-2]) / max(_full.iloc[-2], 0.01) * 100
+            # Escaped dollars: two bare $ in one st.caption pair into a LaTeX
+            # math span (live render bug 2026-07-11 — half the caption went
+            # monospace and the $ vanished).
             st.caption(f"Last full month {_full.index[-1]}: "
-                       f"{format_usd(_full.iloc[-1])} ({_mom:+.1f}% vs prior). "
+                       f"{format_usd(_full.iloc[-1]).replace('$', chr(92) + '$')} "
+                       f"({_mom:+.1f}% vs prior). "
                        "Current month is dimmed — partial, not a drop. "
-                       f"Dollars at today's ${rate:.2f}/credit.")
+                       f"Dollars at today's {chr(92)}${rate:.2f}/credit.")
         result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------

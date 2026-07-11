@@ -58,8 +58,14 @@ def test_round3_builders():
     from app.data import ops_sql as _o
     from app.data import security_sql as _s
 
-    rq = _o.running_queries()
-    assert "INFORMATION_SCHEMA.QUERY_HISTORY" in rq and "'RUNNING'" in rq and "LIMIT" in rq
+    rq = _o.running_queries("WH_ALFA_OVERWATCH")
+    # BY_WAREHOUSE since v4.30.1: the no-arg form scopes to CURRENT USER,
+    # which owner's-rights (SiS) execution cannot access — live 090234.
+    assert "QUERY_HISTORY_BY_WAREHOUSE" in rq and "'RUNNING'" in rq and "LIMIT" in rq
+    assert "'WH_ALFA_OVERWATCH'" in rq
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        _o.running_queries("")                            # warehouse is required now
     assert "DEPT_BUDGETS" in _m.dept_budgets()
     assert "GRANTS_TO_ROLES" in _s.role_privilege_matrix()
     ur = _s.unused_roles(9999)

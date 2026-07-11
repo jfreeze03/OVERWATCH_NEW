@@ -540,6 +540,7 @@ FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
 LEFT JOIN (
     SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
     FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+    WHERE DAY >= DATEADD('day', -{d}, CURRENT_DATE())
     GROUP BY QUERY_HASH
 ) f ON f.QUERY_HASH = p.QUERY_HASH
 WHERE p.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
@@ -595,8 +596,10 @@ def compare_activity(a_start: str, a_end: str, b_start: str, b_end: str,
                      company: str = "ALL") -> str:
     """Volume shape per side from FACT_QUERY_HOURLY (company-scoped ops
     grain — r11 #12: these metrics never come from metering-daily)."""
+    # r12 #10: direct bounds on HOUR_TS — CAST(col) in the WHERE defeats
+    # partition pruning; timestamp-vs-date-literal comparison prunes fine.
     in_a, _in_b, either = _side_windows(a_start, a_end, b_start, b_end,
-                                        col="CAST(HOUR_TS AS DATE)")
+                                        col="HOUR_TS")
     comp = ""
     if company and company != "ALL":
         comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
@@ -644,6 +647,7 @@ FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
 LEFT JOIN (
     SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
     FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+    WHERE DAY >= LEAST('{_iso(a_start)}'::DATE, '{_iso(b_start)}'::DATE)
     GROUP BY QUERY_HASH
 ) f ON f.QUERY_HASH = p.QUERY_HASH
 WHERE {either}
