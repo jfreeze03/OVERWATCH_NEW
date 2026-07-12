@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import sqlglot
+import pytest
 
 from app import companies
 from app.core.query import _with_row_cap
 from app.data import chargeback_sql, insights_sql, mart27_sql
+
+# skip cleanly on the CI floor-compat job, which installs no sqlglot
+sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[1]
 _UC = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")

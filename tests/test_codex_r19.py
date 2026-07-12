@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import sqlglot
+import pytest
 
 from app.data import cost_sql, mart_sql
 from app.logic import actions as actions_logic
+
+# skip cleanly on the CI floor-compat job, which installs no sqlglot
+sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CR = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")

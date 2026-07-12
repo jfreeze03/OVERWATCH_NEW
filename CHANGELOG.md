@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.34.3 — CI hotfix: floor-compat job vs bare sqlglot imports (2026-07-12)
+
+The v4.34.1/v4.34.2 test files imported sqlglot at module level; CI's
+floor-compat job installs only the Streamlit/pandas floor pins, so test
+collection failed there (the local gates — pytest + ruff — never saw it).
+Both files now use pytest.importorskip like the migrations gate. Local
+gates gain CI parity permanently: mypy and a floor simulation (pytest with
+sqlglot absent) run before every ship. mypy is clean on all 39 files.
+
 ## 4.34.2 — Codex r19: six page-level ships, the rest routed (2026-07-12)
 
 Shipped (all verified in code first):
