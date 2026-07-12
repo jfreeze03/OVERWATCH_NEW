@@ -236,6 +236,7 @@ def warehouse_sizing_profile(days: int, company: str = "ALL") -> str:
     days = bounded_days(days)
     where_m = and_where(
         f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "M.WAREHOUSE_ID > 0",
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
     return f"""
@@ -272,7 +273,6 @@ LEFT JOIN query_hours H
        ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
       AND H.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
 LEFT JOIN query_stats Q ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
-WHERE M.WAREHOUSE_ID > 0
 WHERE {where_m}
 GROUP BY 1, 2
 HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
@@ -476,7 +476,7 @@ LIMIT 15
 
 
 def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
-                          database: str = "") -> str:
+                          database: str = "", schema_contains: str = "") -> str:
     """Top queries by ALLOCATED credits — warehouse-hour credits split across
     that hour's queries by execution-time share.
 
@@ -485,7 +485,14 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
     are attributed to its first — documented approximation). Idle credits in
     an hour with queries are carried pro-rata; fully idle hours are excluded
     (the idle advisor owns those).
+
+    Attribution law (v4.34.1): the database/schema filter picks DISPLAY rows
+    in the outer query only — the warehouse-hour denominator always counts
+    every query in the hour. The old form filtered the q CTE that also built
+    the denominator, inflating each surviving query's share.
     """
+    from app.core.sqlsafe import contains_filter
+
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
     where_q = and_where(
@@ -493,7 +500,10 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         companies.warehouse_clause(company),
-        companies.database_equals_clause(database),
+    )
+    vis = and_where(
+        companies.database_equals_clause(database, "q.DATABASE_NAME"),
+        contains_filter("q.SCHEMA_NAME", schema_contains),
     )
     where_m = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
@@ -502,6 +512,7 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
     return f"""
 WITH q AS (
     SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, QUERY_TYPE, EXECUTION_STATUS,
+           DATABASE_NAME, SCHEMA_NAME,
            START_TIME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
            COALESCE(EXECUTION_TIME, 0) AS EXEC_MS,
            COALESCE(TOTAL_ELAPSED_TIME, 0) / 1000.0 AS ELAPSED_SEC,
@@ -532,6 +543,7 @@ SELECT
 FROM q
 JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS
 JOIN m ON m.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND m.HOUR_TS = q.HOUR_TS
+WHERE {vis}
 GROUP BY q.QUERY_ID
 HAVING ALLOCATED_CREDITS > 0
 ORDER BY ALLOCATED_CREDITS DESC

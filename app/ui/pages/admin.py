@@ -662,14 +662,22 @@ def _perf_rider_panels(fq_df=None) -> None:
                 _tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "CACHE_HIT_PCT", "PAIN"]],
                 key="adm_tt_sel", height=160)
             # Codex r8 #1: click a target, see the slow keys behind the pain
-            if _sel is not None and fq_df is not None:
-                _pg = str(_sel["PAGE"])
-                _det = fq_df[fq_df["PAGE"].astype(str) == _pg]
-                if not _det.empty:
+            if _sel is not None:
+                # selectable_table returns a POSITIONAL index into the frame
+                # it displayed. v4.23.0 subscripted the int like a row, hit
+                # TypeError, and the except below silently ate every click
+                # (Joe 2026-07-11: "the screen flashes and does nothing").
+                _pg = str(_tt.iloc[int(_sel)]["PAGE"])
+                _det = None if fq_df is None else fq_df[fq_df["PAGE"].astype(str) == _pg]
+                if _det is None or _det.empty:
+                    st.caption(f"{_pg}: nothing slow or failed persisted for this page "
+                               "in 7d — its pain is spread across sub-2s fetches.")
+                else:
                     st.markdown(f"**{_pg} — the slow keys behind the pain (7d persisted)**")
                     styled_table(_det, height=200)
-        except (KeyError, TypeError, ValueError):
-            pass
+        except (KeyError, TypeError, ValueError) as exc:
+            # never silent: a broken drill must say so, not flash and shrug
+            st.caption(f"Tuning-target drill unavailable — {type(exc).__name__}: {str(exc)[:80]}")
     else:
         st.caption("Per-page telemetry appears after V027 and a day of traffic.")
 

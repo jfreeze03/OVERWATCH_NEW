@@ -45,28 +45,39 @@ ORDER BY DEPARTMENT, CREDITS_TOTAL DESC
 
 def role_share_within_warehouse(days: int, company: str = "ALL") -> str:
     """Elapsed-time share per (warehouse, role) — multiply by that warehouse's
-    exact credits for the allocated role slice. Shares sum to 1 per warehouse."""
+    exact credits for the allocated role slice.
+
+    Attribution law (v4.34.1): shares are computed over the WHOLE warehouse
+    partition first; role visibility (the 2026-07-08 Trexis-leak fix) picks
+    display rows AFTER. An excluded role keeps its slice of the denominator,
+    so displayed shares can sum below 1 on shared warehouses — the old form
+    renormalized to 1 over this company's roles and over-billed them."""
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "WAREHOUSE_NAME IS NOT NULL",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.warehouse_clause(company),
-        # Role-grain leak fix (2026-07-08): Trexis roles on shared warehouses
-        # must not appear under an ALFA scope.
-        companies.role_clause(company),
     )
+    vis = and_where(companies.role_clause(company, "ROLE_NAME"))
     return f"""
-SELECT
-    WAREHOUSE_NAME,
-    COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
-    COUNT(*) AS QUERY_COUNT,
-    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS ELAPSED_SEC,
-    RATIO_TO_REPORT(SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)))
-        OVER (PARTITION BY WAREHOUSE_NAME) AS ELAPSED_SHARE
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {where}
-GROUP BY 1, 2
+WITH scoped AS (
+    SELECT
+        WAREHOUSE_NAME,
+        COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+        COUNT(*) AS QUERY_COUNT,
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS ELAPSED_SEC
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+    GROUP BY 1, 2
+), shared AS (
+    SELECT scoped.*,
+           RATIO_TO_REPORT(ELAPSED_SEC) OVER (PARTITION BY WAREHOUSE_NAME) AS ELAPSED_SHARE
+    FROM scoped
+)
+SELECT WAREHOUSE_NAME, ROLE_NAME, QUERY_COUNT, ELAPSED_SEC, ELAPSED_SHARE
+FROM shared
+WHERE {vis}
 ORDER BY WAREHOUSE_NAME, ELAPSED_SEC DESC
 LIMIT 2000
 """

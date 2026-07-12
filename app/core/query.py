@@ -133,13 +133,22 @@ def _classify_error(exc: object) -> str:
 
 
 def _with_row_cap(sql: str, cap: int) -> str:
-    """Append ``LIMIT cap+1`` unless the SQL already carries a LIMIT clause.
+    """Make max_rows authoritative (Codex r18 #1).
 
-    Fetching cap+1 lets the caller detect truncation honestly (n+1 rows back
-    means the cap was hit) — see run()/run_batch().
+    No trailing LIMIT: append ``LIMIT cap+1``. A trailing LIMIT larger than
+    cap+1 is rewritten DOWN to cap+1 — a 20,000-row detail reader must honor
+    a 1-row canary cap. A smaller trailing LIMIT already answers within
+    budget and is kept. Fetching cap+1 lets the caller detect truncation
+    honestly (n+1 rows back means the cap was hit) — see run()/run_batch().
     """
-    if cap <= 0 or _TAIL_LIMIT_RE.search(sql.rstrip()):
+    if cap <= 0:
         return sql
+    tail = _TAIL_LIMIT_RE.search(sql.rstrip())
+    if tail:
+        n = int(re.search(r"\d+", tail.group(0)).group(0))
+        if n <= cap + 1:
+            return sql
+        return _TAIL_LIMIT_RE.sub(f"LIMIT {cap + 1}", sql.rstrip())
     return f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"
 
 

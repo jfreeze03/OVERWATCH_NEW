@@ -119,3 +119,27 @@ def test_gate_catches_the_v022_class_of_bug():
     )
     with pytest.raises(sqlglot.errors.ParseError):
         sqlglot.parse(broken, dialect="snowflake")
+
+
+def test_every_registered_builder_parses():
+    """r18 #2 class-killer. The V039 edit pass left a DOUBLE WHERE in the
+    warehouse-sizing live fallback and nothing parsed app-side SQL — the
+    builder failed on every render for two days. Every canary-registered
+    builder must be valid Snowflake, forever."""
+    from app.data import canary as _canary
+
+    registry = next(v for v in vars(_canary).values()
+                    if isinstance(v, (list, tuple)) and v
+                    and isinstance(v[0], tuple) and callable(v[0][1]))
+    failures = []
+    for name, fn in registry:
+        try:
+            sql = fn()
+        except Exception as exc:  # noqa: BLE001 — any raise is a gate failure
+            failures.append(f"{name}: builder raised {type(exc).__name__}: {exc}")
+            continue
+        try:
+            sqlglot.parse(sql, dialect="snowflake")
+        except sqlglot.errors.ParseError as exc:
+            failures.append(f"{name}: {str(exc)[:160]}")
+    assert not failures, f"{len(failures)} builder(s) failed: {failures[:5]}"

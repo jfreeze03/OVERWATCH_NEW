@@ -252,8 +252,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  help="Splits each warehouse-hour's credits across that hour's queries "
                       "by execution-time share. The heaviest scan after repeat-queries."):
         with st.spinner("Allocating warehouse-hour credits across queries…"):
-            expq = run(insights_sql.expensive_queries_usd(days, company, 50), page=_PAGE,
-                       key=f"expq_{company}_{days}", tier="historical",
+            expq = run(insights_sql.expensive_queries_usd(
+                           days, company, 50,
+                           database=st.session_state.get("flt_database", ""),
+                           schema_contains=st.session_state.get("flt_schema_contains", "")),
+                       page=_PAGE, key=f"expq_{company}_{days}", tier="historical",
                        source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share allocation)")
         if guard(expq, "No warehouse queries in this window."):
             edf_q = expq.df.copy()

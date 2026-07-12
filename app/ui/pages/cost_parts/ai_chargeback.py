@@ -291,7 +291,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     st.markdown("**Role usage within warehouses (allocated)**")
     st.caption(
         "Elapsed-time share per role inside each warehouse x that warehouse's exact spend. "
-        "Usage lens for conversations, not the billing number."
+        "Usage lens for conversations, not the billing number. Shares are whole-warehouse: "
+        "roles outside this scope keep their slice, so a warehouse's rows can sum below 1."
     )
     share_res = run_mart_first(
         mart27_sql.role_share(days, company),
@@ -302,10 +303,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     if share_res.usable():
         wh_usd = df.set_index("WAREHOUSE_NAME")["USD"].to_dict()
         share = share_res.df.copy()
-        share["ALLOCATED_USD"] = share.apply(
-            lambda r: round(safe_float(r["ELAPSED_SHARE"]) * wh_usd.get(str(r["WAREHOUSE_NAME"]), 0.0), 2),
-            axis=1,
-        )
+        # vectorized (r18 #16) — same math, Series-wise instead of per-row
+        share["ALLOCATED_USD"] = (
+            share["ELAPSED_SHARE"].map(safe_float)
+            * share["WAREHOUSE_NAME"].astype(str).map(wh_usd).fillna(0.0)
+        ).round(2)
         by_role = (share.groupby("ROLE_NAME", as_index=False)["ALLOCATED_USD"].sum()
                    .sort_values("ALLOCATED_USD", ascending=False))
         charts.bar_usd(by_role, "ROLE_NAME", "ALLOCATED_USD", title="Allocated $ by role", top_n=12)

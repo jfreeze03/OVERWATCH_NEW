@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.34.1 — Correctness audit batch 1 + Codex r18 verified fixes (2026-07-12)
+
+Full-app filter/metric audit (owner ask) merged with r18 verification.
+Confirmed and fixed:
+
+- **Broken sizing fallback (r18 #2, REAL — my V039 edit).** The
+  warehouse-sizing live builder carried a bare second WHERE and failed on
+  every render since v4.30.0; nothing parsed app-side SQL. Fixed, and the
+  class is dead: the parse gate now runs sqlglot over EVERY canary-registered
+  builder (~165), not just migrations.
+- **Admin tuning-target drill (owner report: "flashes and does nothing").**
+  selectable_table returns a positional index; the drill subscripted it like
+  a row since v4.23.0 and a silent except ate the TypeError on every click.
+  Fixed with iloc, and the except now reports instead of passing.
+- **Two more attribution-law violations.** Role shares (live + mart) filtered
+  roles inside the per-warehouse denominator — excluded roles' slices were
+  re-absorbed by this company's roles on shared warehouses. expensive_queries_usd
+  filtered the q CTE that also built its warehouse-hour denominator (dead
+  param masked it). Both now: whole-scope denominator, filters pick display
+  rows after. Optimize's expensive-query scan now honors the sidebar
+  database/schema filters.
+- **max_rows authoritative (r18 #1).** A trailing LIMIT larger than the cap
+  is rewritten down (a 20,000-row reader must honor a 1-row canary cap);
+  small trailing limits still win.
+- **AI fact-first ordering (r18 #3).** Unit Costs read FACT_AI_USAGE_DAILY
+  only after paying the live Cortex scan in its batch, then usually threw
+  the live result away. The live member now joins the batch only when the
+  fact can't answer. Role-allocation math vectorized (r18 #16).
+
+Audit sweep found no further violations: dept chargeback, CS drills,
+fingerprints and pattern movers are measured/exact; deep-scan KPIs label
+top-N sums as top-N. r18 #4/#5/#7/#8 (fact-first reader swaps) = approved
+next fix-batch; #9-#15/#17-#20 map to V041, registry design, and
+query-core v2 (details in the session log).
+
 ## 4.34.0 — Control Room follows the database filter (2026-07-11)
 
 Owner ask: "i should be able to filter in Control room using database."

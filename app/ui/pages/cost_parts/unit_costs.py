@@ -33,21 +33,30 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "use Optimization's allocated view; for pipelines, Operations → Task graphs ($)."
     )
 
-    # ---- three independent historical reads -> one parallel batch ----------
-    # (Codex #15). All share the same filter inputs so the batch cache stays
-    # coherent; any failure falls back to the serial cached path.
-    _ub = run_batch([
+    # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and
+    # pay the live Cortex scan only when the fact can't answer — the old
+    # order paid the live scan in every batch, then usually threw it away.
+    _ai_m = run(mart27_sql.ai_costs_by_model(days), page=_PAGE, key=f"unit_ai_mart_{days}",
+                tier="recent", source="FACT_AI_USAGE_DAILY (mart, loaded daily — Code + Functions)")
+
+    # ---- independent historical reads -> one parallel batch (Codex #15).
+    # All share the same filter inputs so the batch cache stays coherent;
+    # any failure falls back to the serial cached path.
+    _jobs = [
         {"key": "q", "sql": insights_sql.measured_query_costs(
             days, company, database, schema_contains,
             f["warehouse_contains"], f["user_contains"], 50),
          "source": "QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY", "max_rows": 50},
         {"key": "p", "sql": insights_sql.procedure_costs_usd(days, company, database, schema_contains, 50),
          "source": "QUERY_ATTRIBUTION_HISTORY (rolled up to CALL)", "max_rows": 50},
-        {"key": "ai", "sql": cortex_sql.cortex_model_costs(days),
-         "source": "CORTEX_FUNCTIONS_USAGE_HISTORY", "max_rows": 200},
-    ], page=_PAGE, tier="historical")
+    ]
+    if not _ai_m.usable():
+        _jobs.append({"key": "ai", "sql": cortex_sql.cortex_model_costs(days),
+                      "source": "CORTEX_FUNCTIONS_USAGE_HISTORY", "max_rows": 200})
+    _ub = run_batch(_jobs, page=_PAGE, tier="historical")
     if _ub is not None:
-        q_res, p_res, ai_res = _ub["q"], _ub["p"], _ub["ai"]
+        q_res, p_res = _ub["q"], _ub["p"]
+        ai_res = _ai_m if _ai_m.usable() else _ub["ai"]
     else:
         q_res = run(insights_sql.measured_query_costs(
                         days, company, database, schema_contains,
@@ -57,17 +66,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         p_res = run(insights_sql.procedure_costs_usd(days, company, database, schema_contains, 50),
                     page=_PAGE, key=f"unit_p_{company}_{days}_{database}", tier="historical",
                     source="QUERY_ATTRIBUTION_HISTORY (rolled up to CALL)")
-        ai_res = run(cortex_sql.cortex_model_costs(days), page=_PAGE,
-                     key=f"unit_ai_{days}", tier="historical",
-                     source="CORTEX_FUNCTIONS_USAGE_HISTORY")
-
-    # AI goes mart-first (FACT_AI_USAGE_DAILY unifies Code + Functions,
-    # loaded daily) so the KPI and the panel read the same source; the
-    # batch/live results remain the fallback chain below.
-    _ai_m = run(mart27_sql.ai_costs_by_model(days), page=_PAGE, key=f"unit_ai_mart_{days}",
-                tier="recent", source="FACT_AI_USAGE_DAILY (mart, loaded daily — Code + Functions)")
-    if _ai_m.usable():
-        ai_res = _ai_m
+        ai_res = _ai_m if _ai_m.usable() else run(
+            cortex_sql.cortex_model_costs(days), page=_PAGE,
+            key=f"unit_ai_{days}", tier="historical",
+            source="CORTEX_FUNCTIONS_USAGE_HISTORY")
 
     kpis = []
     if q_res.usable():

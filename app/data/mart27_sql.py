@@ -278,23 +278,32 @@ LIMIT 50
 
 def role_share(days: int, company: str = "ALL") -> str:
     """chargeback_sql.role_share_within_warehouse contract from the role-hour
-    fact. Keeps BOTH guards: the fact's COMPANY column and the TRXS role
-    heuristic (a Trexis automation role on an ALFA warehouse must not leak
-    into ALFA's share — the live-round-3 lesson)."""
+    fact. Attribution law (v4.34.1): the fact's COMPANY column scopes
+    warehouses in the denominator; the TRXS role heuristic (live-round-3
+    lesson) only picks display rows AFTER the share is computed, so an
+    excluded role keeps its slice and this company's roles never absorb it."""
     days = bounded_days(days, 400)
     where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-                      _company_arm(company),
-                      companies.role_clause(company, "ROLE_NAME"))
+                      _company_arm(company))
+    vis = and_where(companies.role_clause(company, "ROLE_NAME"))
     return f"""
-SELECT
-    WAREHOUSE_NAME,
-    COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
-    SUM(QUERIES) AS QUERY_COUNT,
-    ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
-    RATIO_TO_REPORT(SUM(EXEC_SEC)) OVER (PARTITION BY WAREHOUSE_NAME) AS ELAPSED_SHARE
-FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
-WHERE {where}
-GROUP BY WAREHOUSE_NAME, ROLE_NAME
+WITH scoped AS (
+    SELECT
+        WAREHOUSE_NAME,
+        COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+        SUM(QUERIES) AS QUERY_COUNT,
+        SUM(EXEC_SEC) AS ELAPSED_SEC
+    FROM {mart_object("FACT_QUERY_ROLE_HOURLY")}
+    WHERE {where}
+    GROUP BY WAREHOUSE_NAME, ROLE_NAME
+), shared AS (
+    SELECT scoped.*,
+           RATIO_TO_REPORT(ELAPSED_SEC) OVER (PARTITION BY WAREHOUSE_NAME) AS ELAPSED_SHARE
+    FROM scoped
+)
+SELECT WAREHOUSE_NAME, ROLE_NAME, QUERY_COUNT, ROUND(ELAPSED_SEC, 1) AS ELAPSED_SEC, ELAPSED_SHARE
+FROM shared
+WHERE {vis}
 ORDER BY WAREHOUSE_NAME, ELAPSED_SEC DESC
 LIMIT 2000
 """

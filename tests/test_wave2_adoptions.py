@@ -73,7 +73,10 @@ def test_role_share_keeps_both_leak_guards():
     sql = mart27_sql.role_share(7, "ALFA")
     assert "COMPANY = 'ALFA'" in sql                              # fact company column
     assert "NOT LIKE '%TRXS%'" in sql                             # TRXS role heuristic (r3 lesson)
-    assert "RATIO_TO_REPORT(SUM(EXEC_SEC)) OVER (PARTITION BY WAREHOUSE_NAME)" in sql
+    # v4.34.1 attribution law: the share is computed over the whole
+    # warehouse partition in a CTE; role visibility filters display rows
+    # after (law locks live in test_r18_batch1).
+    assert "RATIO_TO_REPORT(ELAPSED_SEC) OVER (PARTITION BY WAREHOUSE_NAME)" in sql
     assert "LIKE '%TRXS%'" in mart27_sql.role_share(7, "Trexis")
 
 
