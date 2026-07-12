@@ -188,9 +188,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         styled_table(fails.df)
 
 
-def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "") -> None:
+def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
+                              known_failures: float | None = None) -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
     st.markdown("**Failure root-cause timeline (7d)**")
+    if known_failures is not None and known_failures <= 0:
+        st.success("No task failures in the last 7 days for this scope.")
+        return
     res = run(insights_sql.task_failure_details(7, company, database, schema_contains), page=_PAGE,
               key=f"t_rca_{company}", tier="recent",
               source="ACCOUNT_USAGE.TASK_HISTORY (failures)")
@@ -417,6 +421,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
         if failed_col:
             total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
             total_failed = safe_float(df[failed_col].sum())
+            _known_failed = total_failed
             kpi_row([
                 {"label": f"Task runs ({days}d)", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
@@ -427,7 +432,10 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
         styled_table(df)
         result_caption(res)
     st.divider()
-    _failure_timeline_section(company, database, schema_contains)
+    # r19 #6: the summary window (>=7d, same scope) already counted failures
+    # — when it says zero, skip the 7d TASK_HISTORY detail scan entirely.
+    _failure_timeline_section(company, database, schema_contains,
+                              known_failures=locals().get("_known_failed") if days >= 7 else None)
 
     st.markdown("**Task graph (DAG)**")
     if st.toggle("Render account task topology", key="ops_dag_toggle",
@@ -502,14 +510,12 @@ def _warehouses_tab(company: str, rate: float) -> None:
 
 
 def _contention_tab(company: str, days: int) -> None:
-    _cb = run_batch([
-        {"key": "pressure", "sql": ops_sql.warehouse_pressure(days, company),
-         "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-    ], page=_PAGE, tier="recent")
     left, right = st.columns(2)
     with left:
         st.markdown("**Warehouse queue & spill pressure**")
-        res = _cb.get("pressure") or run(ops_sql.warehouse_pressure(days, company), page=_PAGE,
+        # r19 #18: a one-member batch paid submission machinery for zero
+        # parallelism — the plain cached path is strictly better here.
+        res = run(ops_sql.warehouse_pressure(days, company), page=_PAGE,
                   key=f"c_pressure_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.QUERY_HISTORY")
         if guard(res, "No queueing or spill pressure in this window."):

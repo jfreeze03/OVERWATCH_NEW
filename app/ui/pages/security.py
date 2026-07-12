@@ -282,7 +282,7 @@ def _export_pack(company: str, days: int) -> None:
     st.download_button(
         "Download access-review pack (.zip)", data=buffer.getvalue(),
         file_name=f"overwatch_access_review_{company}_{stamp}.zip", mime="application/zip",
-        key="sec_pack_dl",
+        key="sec_pack_dl", on_click="ignore",
     )
     st.caption(f"{sum(rows_written.values()):,} rows across {len(sheets)} files.")
 
@@ -358,7 +358,7 @@ def _clients_tab(company: str, days: int) -> None:
     styled_table(df, height=380)
     st.download_button("Download driver inventory (CSV)", data=df.to_csv(index=False),
                        file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
-                       mime="text/csv", key="sec_drivers_csv")
+                       mime="text/csv", key="sec_drivers_csv", on_click="ignore")
     result_caption(res)
 
 

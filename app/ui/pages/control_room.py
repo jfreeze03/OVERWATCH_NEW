@@ -491,4 +491,9 @@ def render() -> None:
 
     _freshness_board()
     st.divider()
-    _day_replay()
+    # r19 #2: six reads for a bottom-of-page feature ran on every rerun —
+    # the flight recorder now loads only when asked (results stay cached).
+    if st.toggle("Load day replay", key="cr_replay_on",
+                 help="Six reads across spend, activity, DDL, grants, tasks, and "
+                      "alerts for one chosen day. Loads when on; caches after."):
+        _day_replay()

@@ -62,14 +62,17 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
     with right:
         st.markdown("**Storage by database**")
+        # r19 #7: both builders return only the latest loaded day now (the
+        # panel is a snapshot; it discarded the window anyway). Label was
+        # stale too — the first read has been the FACT since R-adoption.
         res = run(cost_sql.storage_by_database(days, company, st.session_state.get("flt_database", "")), page=_PAGE,
                   key=f"storage_{company}_{days}", tier="historical",
-                  source="ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY")
+                  source="FACT_STORAGE_DAILY (latest day)")
         if not res.ok or res.empty:
             res = run(cost_sql.storage_by_database_live(days, company,
                                                         st.session_state.get("flt_database", "")),
                       page=_PAGE, key=f"storage_live_{company}_{days}", tier="historical",
-                      source="DATABASE_STORAGE_USAGE_HISTORY (live fallback)")
+                      source="DATABASE_STORAGE_USAGE_HISTORY (latest day, live fallback)")
         if guard(res, "No storage rows for this scope."):
             df = res.df.copy()
             latest_day = df["DAY"].max()
@@ -252,7 +255,7 @@ def _statement_export(company: str, rate: float) -> None:
             st.download_button(
                 "Download statements (.zip)", data=buffer.getvalue(),
                 file_name=f"overwatch_chargeback_{company}_{month}.zip",
-                mime="application/zip", key="cb_dl",
+                mime="application/zip", key="cb_dl", on_click="ignore",
             )
             st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
 

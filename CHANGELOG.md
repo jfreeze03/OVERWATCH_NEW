@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.34.2 — Codex r19: six page-level ships, the rest routed (2026-07-12)
+
+Shipped (all verified in code first):
+
+- **Day replay on demand (#2).** Six reads for a bottom-of-page feature ran
+  on every Control Room rerun; now behind a Load toggle.
+- **Open actions can't age out (#5).** The action reader fetched the newest
+  200 of ANY status, then Python dropped closed rows — an old open critical
+  could fall outside the window. Status now filters in SQL (literals
+  cross-locked to logic.OPEN_STATUSES); ranking stays in one place.
+- **Zero-failure scan skip (#6, task side).** When the >=7d task summary in
+  the same scope counts zero failures, the 7d TASK_HISTORY root-cause scan
+  is skipped. Query side declined: those members run in one parallel batch,
+  and serializing them trades latency for bytes.
+- **Storage snapshot fetches a snapshot (#7).** Both storage builders now
+  QUALIFY to the latest loaded day (the panel discarded the window anyway,
+  up to ~90x rows). Also fixed a stale source label that still claimed the
+  live view after the fact swap.
+- **One-member batch removed (#18)** — contention pressure uses plain run().
+- **Exports (#19/#20).** Big-table prep now stores the CSV BYTES (the old
+  boolean reserialized on every later rerun); every download_button is
+  frontend-only (on_click="ignore", Streamlit >=1.44 — we pin ~=1.45), so
+  downloads no longer rerun the app.
+
+Routed: #1 board windows, #3 score snapshot, #8/#9/#10 exec-board rework ->
+V041 loader pass (board rider). #4/#11/#12/#13/#14 -> next fix-batch with
+r18 #4/#5/#7/#8. #15 canary concurrency, #19-full fingerprint cache ->
+query-core v2. #16 declined (the live settings read is the operator
+edit-freshness path; the table is tiny). #17 declined (ORDER BY is part of
+reader contracts — sparklines and .iloc[0] depend on it; savings negligible
+on aggregate outputs).
+
 ## 4.34.1 — Correctness audit batch 1 + Codex r18 verified fixes (2026-07-12)
 
 Full-app filter/metric audit (owner ask) merged with r18 verification.

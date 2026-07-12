@@ -280,11 +280,16 @@ ORDER BY FAMILY, RULE_ID
 
 
 def action_queue(limit: int = 200) -> str:
+    """Newest OPEN actions (r19 #5): status filters in SQL so an old open
+    critical can never age out of the newest-N fetch window. Ranking stays
+    in logic.rank_actions — one place; the literals here mirror
+    logic.actions.OPEN_STATUSES (cross-locked in tests)."""
     limit = max(1, min(int(limit), 1000))
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, DUE_DATE,
        SOURCE, PROOF_SQL, ESTIMATED_USD, UPDATED_AT
 FROM {core_object("ACTION_QUEUE")}
+WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS')
 ORDER BY CREATED_AT DESC
 LIMIT {limit}
 """

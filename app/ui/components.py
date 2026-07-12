@@ -601,21 +601,26 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             st.session_state["_ow_dl_seq"] = seq + 1
             if len(df) <= 200:
                 # Small frame: CSV cost is negligible; keep one-click export.
+                # Downloads are frontend-only, no rerun (r19 #20).
                 st.download_button("⬇", df.to_csv(index=False).encode("utf-8"),
                                    file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
+                                   on_click="ignore",
                                    help="Download this table as CSV (account time).")
             else:
-                # r13 #19: big frames serialized eagerly on EVERY rerun —
-                # two-step so the CSV builds only when asked.
+                # r13 #19 + r19 #19: big frames build their CSV ONCE at prep
+                # (bytes stored, not a boolean that reserialized every rerun)
+                # and the download no longer reruns the app.
                 _prep_key = f"ow_dlprep_{key or ''}_{seq}"
-                if st.session_state.get(_prep_key):
-                    st.download_button("⬇ CSV ready", df.to_csv(index=False).encode("utf-8"),
+                _blob = st.session_state.get(_prep_key)
+                if isinstance(_blob, (bytes, bytearray)):
+                    st.download_button("⬇ CSV ready", bytes(_blob),
                                        file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
-                                       key=f"ow_dl_{key or ''}_{seq}", type="tertiary")
+                                       key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
+                                       on_click="ignore")
                 elif st.button("⬇", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
                                help=f"Prepare {len(df):,} rows as CSV (account time)."):
-                    st.session_state[_prep_key] = True
+                    st.session_state[_prep_key] = df.to_csv(index=False).encode("utf-8")
                     st.rerun()
     except Exception:  # noqa: BLE001 - export is a convenience, never break the table
         pass
@@ -699,7 +704,8 @@ def last_refreshed_note() -> str:
 
 def download_text_button(label: str, text: str, filename: str) -> None:
     """A real download (the old app's 'copy' button that didn't copy is dead)."""
-    st.download_button(label, data=text, file_name=filename, mime="text/plain")
+    st.download_button(label, data=text, file_name=filename, mime="text/plain",
+                       on_click="ignore")
 
 
 def log_ui_event(kind: str, page: str = "") -> None:

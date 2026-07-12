@@ -420,6 +420,6 @@ def render() -> None:
     with c_html:
         st.download_button("Download executive summary (HTML)", html,
                            file_name="overwatch_executive_summary.html", mime="text/html",
-                           use_container_width=True)
+                           use_container_width=True, on_click="ignore")
     with c_txt:
         download_text_button("Plain-text version (.txt)", summary, "overwatch_executive_summary.txt")
