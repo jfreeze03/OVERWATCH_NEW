@@ -45,16 +45,28 @@ WHERE RAISED_AT >= DATEADD('day', -14, CURRENT_TIMESTAMP())
 GROUP BY 1, 2 ORDER BY 1 DESC, 2;
 
 -- ---------------------------------------------------------------------------
--- STEP 4: are deliveries being ATTEMPTED, and how do they end?
--- No rows at all         -> TASK_ALERT_NOTIFY not running (STEP 1/2, FIX A).
--- error_type rows        -> read them: 'undelivered_expired' = event was
---                           already >24h old when the sender saw it;
---                           webhook/HTTP errors = integration (STEP 6).
+-- STEP 4a: successful deliveries per day/route. This table records
+-- SUCCESSES only (EVENT_ID, ROUTE_ID, SENT_AT). The last DAY here is the
+-- last time a Teams card actually went out.
 -- ---------------------------------------------------------------------------
-SELECT DATE(ATTEMPTED_AT) AS DAY, ROUTE_NAME, STATUS, ERROR_TYPE, COUNT(*) AS N
+SELECT DATE(SENT_AT) AS DAY, ROUTE_ID, COUNT(*) AS SENT
 FROM ALERT_DELIVERIES
-WHERE ATTEMPTED_AT >= DATEADD('day', -14, CURRENT_TIMESTAMP())
-GROUP BY 1, 2, 3, 4 ORDER BY 1 DESC, 2, 3;
+WHERE SENT_AT >= DATEADD('day', -14, CURRENT_TIMESTAMP())
+GROUP BY 1, 2 ORDER BY 1 DESC, 2;
+
+-- ---------------------------------------------------------------------------
+-- STEP 4b: sender-side failures and the expiry watchdog (these log to
+-- APP_ERROR_LOG, not the deliveries table).
+-- 'undelivered_expired'   -> events aged past 24h with no successful send
+--                            (sender running but nothing eligible reached it
+--                            in time, or the send kept failing).
+-- webhook/notification errors -> the Teams integration end (STEP 6, FIX C).
+-- ---------------------------------------------------------------------------
+SELECT DATE(LOGGED_AT) AS DAY, ERROR_TYPE, LEFT(ERROR_MESSAGE, 140) AS MSG, COUNT(*) AS N
+FROM APP_ERROR_LOG
+WHERE PAGE = 'NotifyWebhook'
+  AND LOGGED_AT >= DATEADD('day', -14, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3 ORDER BY 1 DESC, 2;
 
 -- ---------------------------------------------------------------------------
 -- STEP 5: routes and rule config. Look for ENABLED = FALSE where you expect
