@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.34.0 — Control Room follows the database filter (2026-07-11)
+
+Owner ask: "i should be able to filter in Control room using database."
+The pulse KPIs and task panels already followed it; now the whole page
+answers coherently:
+
+- Activity sparkline: fact_daily_activity gains company + database args
+  (FACT_QUERY_HOURLY carries both), so the 14-day spark matches the pulse
+  KPIs beside it. Defaults keep every other caller's SQL byte-identical.
+- Lock-wait spikes: MART_LOCK_WAIT_DAILY has carried DATABASE_NAME since
+  v4.21 — the spike scan now narrows to the selected database.
+- Grain honesty where the filter can't reach: the incident timeline
+  (company events), spend movers (warehouse grain), and the triage queue's
+  alert/anomaly rows say so in one line each, only while a database is
+  selected. The header scope chip shows the active database.
+- Sidebar help updated: query, task, DDL, attribution, storage, and lock
+  panels. Locks in tests/test_cr_db_filter.py.
+
 ## 4.33.2 — Codex r17: one new item in a fourth convergent round (2026-07-11)
 
 18 of r17's 20 items restate the adjudicated queue (V041 loader riders,

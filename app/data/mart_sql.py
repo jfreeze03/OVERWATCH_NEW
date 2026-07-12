@@ -433,15 +433,24 @@ LIMIT 400
 """
 
 
-def fact_daily_activity(days: int) -> str:
-    """Daily query volume + failures from the hourly fact (sparkline feed)."""
+def fact_daily_activity(days: int, company: str = "ALL", database: str = "") -> str:
+    """Daily query volume + failures from the hourly fact (sparkline feed).
+
+    Defaults keep the account-wide shape; Control Room passes company +
+    database so the sparkline matches the pulse KPIs beside it."""
+    from app import companies
+
     days = bounded_days(days, 30)
+    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"]
+    if str(company or "ALL").upper() != "ALL":
+        where.append(f"COMPANY = {sql_literal(company)}")
+    where.append(companies.database_equals_clause(database, "DATABASE_NAME"))
     return f"""
 SELECT DATE_TRUNC('day', HOUR_TS)::DATE AS DAY,
        SUM(QUERY_COUNT) AS QUERIES,
        SUM(FAILED_COUNT) AS FAILS
 FROM {mart_object("FACT_QUERY_HOURLY")}
-WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {and_where(*where)}
 GROUP BY 1
 ORDER BY 1
 """

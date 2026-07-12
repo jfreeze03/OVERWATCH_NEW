@@ -463,14 +463,18 @@ ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
 LIMIT 50"""
 
 
-def lock_wait_spikes(company: str = "ALL") -> str:
+def lock_wait_spikes(company: str = "ALL", database: str = "") -> str:
     """Objects whose last-day lock waits run >=3x their prior 6-day daily
     average (Codex r8 #13) — mart-only by design; pre-V035 this is empty
-    and the panel stays quiet."""
+    and the panel stays quiet. The mart carries DATABASE_NAME, so the
+    sidebar database filter narrows it (Joe 2026-07-11)."""
     comp = ""
     if company and company != "ALL":
         comp = (f"        AND (c.COMPANY = {companies.sql_literal(company)}"
                 " OR UPPER(c.COMPANY) = 'ALL')\n")
+    dbf = companies.database_equals_clause(database, "c.DATABASE_NAME")
+    if dbf:
+        comp += f"        AND {dbf}\n"
     return f"""SELECT * FROM (
     SELECT
         c.DATABASE_NAME, c.SCHEMA_NAME, c.OBJECT_NAME,

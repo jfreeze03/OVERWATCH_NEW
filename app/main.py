@@ -453,7 +453,7 @@ def _topbar_scope_controls() -> None:
             st.session_state["flt_database"] = ""
         st.selectbox("Database", db_options, key="flt_database",
                      format_func=lambda v: v or "All databases",
-                     help="Applies to query, task, DDL, attribution, and storage panels. "
+                     help="Applies to query, task, DDL, attribution, storage, and lock panels. "
                           "Options track the Company and Environment filters.")
     # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
     # visits; the contains-filters open automatically whenever one is active

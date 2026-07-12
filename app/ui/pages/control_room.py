@@ -225,7 +225,8 @@ def render() -> None:
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.", icon_name="control",
-                scope_note=f"{company} · last {days} days")
+                scope_note=f"{company} · last {days} days"
+                           + (f" · {f['database']}" if f["database"] else ""))
 
     # ---- 24h pulse -----------------------------------------------------------
     # Fact-first 24h pulse (Codex #4): the hourly fact answers this without
@@ -248,8 +249,8 @@ def render() -> None:
         pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
                     page=_PAGE, key=f"pulse_{company}",
                     tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
-    act = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="cr_activity",
-              tier="recent", source="FACT_QUERY_HOURLY (daily)")
+    act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
+              key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
     q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
     f_spark = act.df["FAILS"].tolist() if act.ok and not act.empty else None
     if pulse.usable():
@@ -395,7 +396,9 @@ def render() -> None:
                     + ("task facts not installed." if not tasks.ok else ""))
     else:
         styled_table(queue)
-        st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies.")
+        st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies."
+                   + (" Task failures follow the database filter; alerts and "
+                      "spend anomalies don't have database grain." if f["database"] else ""))
 
     # ---- Spend movers ----------------------------------------------------------
     st.subheader("Incident correlation timeline")
@@ -404,6 +407,8 @@ def render() -> None:
         "below the chart to see everything else that happened within ±30 minutes — the "
         "'what changed right before this broke?' view."
     )
+    if f["database"]:
+        st.caption("Company events — the database filter doesn't apply here.")
     tl_win = st.radio("Window", ["48h (fresh)", "7d (cached hourly)"], horizontal=True,
                       key="cr_tl_win", label_visibility="collapsed",
                       help="Mid-incident you want fresh; the 7-day retrospective is the "
@@ -444,7 +449,7 @@ def render() -> None:
                            f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")
         result_caption(tl)
 
-    _spk = run(mart27_sql.lock_wait_spikes(company), page=_PAGE,
+    _spk = run(mart27_sql.lock_wait_spikes(company, f["database"]), page=_PAGE,
                key=f"cr_lockspike_{company}", tier="recent",
                source="MART_LOCK_WAIT_DAILY (spikes)")
     if _spk.ok and not _spk.empty:
@@ -454,6 +459,8 @@ def render() -> None:
                    "contention tab has the full table and history.")
 
     st.subheader("Spend movers (window vs prior)")
+    if f["database"]:
+        st.caption("Warehouse grain — the database filter doesn't narrow this.")
     movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"cr_movers_fact_{company}_{days}", tier="recent",
                  source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
