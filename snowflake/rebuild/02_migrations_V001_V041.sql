@@ -1,0 +1,14258 @@
+-- 02_migrations_V001_V041.sql — GENERATED: the 41 migration files,
+-- byte-concatenated in order (locked by tests/test_rebuild_bundle.py).
+-- Snowsight 'Run All' executes top to bottom and HALTS at the first
+-- error — exactly the rule from docs/FULL_REBUILD.md. If it halts,
+-- read the failing statement, fix, and resume FROM THAT FILE's banner;
+-- everything is idempotent, so re-running a completed file is safe.
+-- Expect several minutes total: V027/V029/V030/V031/V041 end with
+-- first-fill CALLs.
+
+-- ===========================================================================
+-- >>> V001__core.sql
+-- ===========================================================================
+-- V001__core.sql — database, schemas, settings, company scope, versioning.
+-- Idempotent. Run as a deployment role (see DEPLOYMENT.md).
+
+-- Owner decision 2026-07: objects live in the existing DBA_MAINT_DB.OVERWATCH
+-- schema, shared with the previous OVERWATCH app. Everything here is
+-- CREATE IF NOT EXISTS / MERGE — nothing existing is dropped or replaced
+-- except OVERWATCH-owned functions/procedures listed in these migrations.
+CREATE DATABASE IF NOT EXISTS DBA_MAINT_DB;
+CREATE SCHEMA IF NOT EXISTS DBA_MAINT_DB.OVERWATCH;
+
+-- ---------------------------------------------------------------------------
+-- Migration bookkeeping
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (
+    VERSION      NUMBER        NOT NULL,
+    DESCRIPTION  VARCHAR(200)  NOT NULL,
+    APPLIED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    APPLIED_BY   VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
+);
+
+-- ---------------------------------------------------------------------------
+-- Settings — the authoritative rates/budget/contract store.
+-- The app reads these; code constants are offline fallbacks only.
+-- Confirmed 2026-07: $3.68 compute credit, $2.20 Cortex credit.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SETTINGS (
+    KEY        VARCHAR(80)   NOT NULL PRIMARY KEY,
+    VALUE      VARCHAR(400),
+    UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (
+    SELECT * FROM VALUES
+        ('CREDIT_PRICE_USD',        '3.68'),
+        ('AI_CREDIT_PRICE_USD',     '2.20'),
+        ('STORAGE_USD_PER_TB_MONTH','23.00'),
+        ('MONTHLY_BUDGET_USD',      '0'),      -- 0 = not configured; set in Admin
+        ('AI_MONTHLY_BUDGET_USD',   '0'),      -- 0 = not configured; Cortex user severities
+        ('CORTEX_MODEL',            'llama3.1-8b'), -- model for in-app AI evaluations
+        ('CONTRACT_CREDITS',        '0'),      -- 0 = not configured
+        ('CONTRACT_START_DATE',     ''),
+        ('CONTRACT_END_DATE',       '')
+    AS s(KEY, VALUE)
+) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+-- ---------------------------------------------------------------------------
+-- Company scope seed — MUST mirror app/companies.py.
+-- tests/test_companies.py::test_company_scope_seed_matches_code enforces it.
+-- KEBARR1 holds both companies' roles; policy: classified as ALFA.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (
+    COMPANY    VARCHAR(40)  NOT NULL,
+    SCOPE_TYPE VARCHAR(40)  NOT NULL,   -- WAREHOUSE | DATABASE | USER_PREFIX | USER_OVERRIDE
+    PATTERN    VARCHAR(200) NOT NULL,
+    NOTE       VARCHAR(400)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE t
+USING (
+    SELECT * FROM VALUES
+        ('Trexis', 'WAREHOUSE',     'WH_TRXS_LOAD',          'Trexis load compute'),
+        ('Trexis', 'WAREHOUSE',     'WH_TRXS_QUERY',         'Trexis query compute'),
+        ('Trexis', 'WAREHOUSE',     'WH_TRXS_TRANSFORM',     'Trexis transform compute'),
+        ('Trexis', 'WAREHOUSE',     'WH_TRXS_UNLOAD',        'Trexis unload compute'),
+        ('Trexis', 'DATABASE',      'TRXS_ABC_METADATA_DEV', 'Trexis metadata DEV'),
+        ('Trexis', 'DATABASE',      'TRXS_ABC_METADATA_PRD', 'Trexis metadata PRD'),
+        ('Trexis', 'DATABASE',      'TRXS_ABC_METADATA_SIT', 'Trexis metadata SIT'),
+        ('Trexis', 'DATABASE',      'TRXS_EDW_DEV',          'Trexis EDW DEV'),
+        ('Trexis', 'DATABASE',      'TRXS_EDW_PRD',          'Trexis EDW PRD'),
+        ('Trexis', 'DATABASE',      'TRXS_EDW_SIT',          'Trexis EDW SIT'),
+        ('Trexis', 'DATABASE',      'TRXS_GW_DATA_DEV',      'Trexis GW data DEV'),
+        ('Trexis', 'DATABASE',      'TRXS_GW_DATA_PRD',      'Trexis GW data PRD'),
+        ('Trexis', 'DATABASE',      'TRXS_GW_DATA_SIT',      'Trexis GW data SIT'),
+        ('Trexis', 'USER_PREFIX',   'TRXS_',                 'Trexis service/user prefix'),
+        ('ALFA',   'USER_OVERRIDE', 'KEBARR1',               'Holds both companies'' roles; treated as ALFA by policy')
+    AS s(COMPANY, SCOPE_TYPE, PATTERN, NOTE)
+) s
+ON t.COMPANY = s.COMPANY AND t.SCOPE_TYPE = s.SCOPE_TYPE AND t.PATTERN = s.PATTERN
+WHEN MATCHED THEN UPDATE SET NOTE = s.NOTE
+WHEN NOT MATCHED THEN INSERT (COMPANY, SCOPE_TYPE, PATTERN, NOTE)
+                      VALUES (s.COMPANY, s.SCOPE_TYPE, s.PATTERN, s.NOTE);
+
+-- ---------------------------------------------------------------------------
+-- Company classification helpers (single-sourced from COMPANY_SCOPE)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WH VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    COALESCE(
+        (SELECT MAX(COMPANY) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
+          WHERE SCOPE_TYPE = 'WAREHOUSE' AND PATTERN = UPPER(COALESCE(WH, ''))),
+        'ALFA'
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(U VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    COALESCE(
+        (SELECT MAX(COMPANY) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
+          WHERE SCOPE_TYPE = 'USER_OVERRIDE' AND PATTERN = UPPER(COALESCE(U, ''))),
+        IFF(UPPER(COALESCE(U, '')) LIKE 'TRXS!_%' ESCAPE '!', 'Trexis', 'ALFA')
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DB VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    IFF(UPPER(COALESCE(DB, '')) LIKE 'TRXS!_%' ESCAPE '!', 'Trexis', 'ALFA')
+$$;
+
+-- ---------------------------------------------------------------------------
+-- App error sink (populated best-effort by the app's error boundary)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (
+    LOGGED_AT     TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    PAGE          VARCHAR(80),
+    ERROR_TYPE    VARCHAR(200),
+    ERROR_MESSAGE VARCHAR(2000),
+    CONTEXT       VARCHAR(2000),
+    ROLE_NAME     VARCHAR(200)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 1 AS VERSION, 'core: db, schemas, settings, company scope, error log' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V001 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V002__facts.sql
+-- ===========================================================================
+-- V002__facts.sql — app warehouse + resource monitor, compact fact tables,
+-- bounded MERGE load procs, and the scheduled task chain root.
+-- Idempotent. Adjust OVERWATCH_RM quota before running if 30 cr/mo is wrong.
+
+-- ---------------------------------------------------------------------------
+-- Dedicated compute with a hard monthly cap (the monitoring app must never
+-- become the cost problem it monitors).
+-- ---------------------------------------------------------------------------
+CREATE WAREHOUSE IF NOT EXISTS WH_ALFA_OVERWATCH
+    WAREHOUSE_SIZE = XSMALL
+    AUTO_SUSPEND = 60
+    AUTO_RESUME = TRUE
+    INITIALLY_SUSPENDED = TRUE
+    STATEMENT_TIMEOUT_IN_SECONDS = 300
+    COMMENT = 'OVERWATCH app + telemetry tasks. Keep XSMALL.';
+
+-- Warehouse-level timeout is the runaway backstop: Streamlit-in-Snowflake
+-- runs in an owner's-rights procedure where ALTER SESSION (and therefore
+-- session-level timeouts/query tags) is unsupported.
+ALTER WAREHOUSE WH_ALFA_OVERWATCH SET STATEMENT_TIMEOUT_IN_SECONDS = 300;
+
+CREATE RESOURCE MONITOR IF NOT EXISTS OVERWATCH_RM
+    WITH CREDIT_QUOTA = 30
+    FREQUENCY = MONTHLY
+    START_TIMESTAMP = IMMEDIATELY
+    TRIGGERS
+        ON 80 PERCENT DO NOTIFY
+        ON 100 PERCENT DO SUSPEND;
+
+ALTER WAREHOUSE WH_ALFA_OVERWATCH SET RESOURCE_MONITOR = OVERWATCH_RM;
+
+-- COLLISION GUARD: the previous app may already own tables with these names
+-- (notably FACT_QUERY_HOURLY) in DBA_MAINT_DB.OVERWATCH with different
+-- columns. CREATE IF NOT EXISTS will keep the OLD shape and this app's
+-- queries will fail cleanly. Run snowflake/validate.sql after migrating —
+-- it checks the shapes — and ALTER TABLE ... RENAME the old ones first
+-- (e.g. TO FACT_QUERY_HOURLY_V3) if flagged.
+-- ---------------------------------------------------------------------------
+-- Fact tables (transient: rebuildable from ACCOUNT_USAGE)
+-- ---------------------------------------------------------------------------
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY (
+    DAY                DATE          NOT NULL,
+    SERVICE_TYPE       VARCHAR(100)  NOT NULL,
+    CREDITS_COMPUTE    NUMBER(18,6),
+    CREDITS_CLOUD_SVCS NUMBER(18,6),
+    CREDITS_ADJUSTMENT NUMBER(18,6),
+    CREDITS_USED       NUMBER(18,6),
+    CREDITS_BILLED     NUMBER(18,6),
+    LOAD_TS            TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY (
+    DAY             DATE          NOT NULL,
+    WAREHOUSE_NAME  VARCHAR(200)  NOT NULL,
+    COMPANY         VARCHAR(40)   NOT NULL,
+    CREDITS_COMPUTE NUMBER(18,6),
+    CREDITS_TOTAL   NUMBER(18,6),
+    LOAD_TS         TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY (
+    HOUR_TS         TIMESTAMP_NTZ NOT NULL,
+    WAREHOUSE_NAME  VARCHAR(200),
+    DATABASE_NAME   VARCHAR(200),
+    USER_NAME       VARCHAR(200),
+    COMPANY         VARCHAR(40)   NOT NULL,
+    QUERY_COUNT     NUMBER(12,0),
+    FAILED_COUNT    NUMBER(12,0),
+    ELAPSED_SEC_SUM NUMBER(18,3),
+    P95_ELAPSED_SEC NUMBER(18,3),
+    QUEUED_SEC_SUM  NUMBER(18,3),
+    SPILL_REMOTE_GB NUMBER(18,4),
+    LOAD_TS         TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY (
+    DAY           DATE          NOT NULL,
+    DATABASE_NAME VARCHAR(200),
+    SCHEMA_NAME   VARCHAR(200),
+    TASK_NAME     VARCHAR(300)  NOT NULL,
+    COMPANY       VARCHAR(40)   NOT NULL,
+    RUNS          NUMBER(12,0),
+    FAILED        NUMBER(12,0),
+    AVG_SEC       NUMBER(18,3),
+    LAST_STATE    VARCHAR(60),
+    LAST_ERROR    VARCHAR(500),
+    LOAD_TS       TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY (
+    DAY             DATE          NOT NULL,
+    USER_NAME       VARCHAR(200)  NOT NULL,
+    COMPANY         VARCHAR(40)   NOT NULL,
+    LOGINS          NUMBER(12,0),
+    FAILED_LOGINS   NUMBER(12,0),
+    PASSWORD_LOGINS NUMBER(12,0),
+    LOAD_TS         TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY (
+    DAY           DATE          NOT NULL,
+    DATABASE_NAME VARCHAR(200)  NOT NULL,
+    COMPANY       VARCHAR(40)   NOT NULL,
+    DB_BYTES      NUMBER(24,0),
+    FAILSAFE_BYTES NUMBER(24,0),
+    LOAD_TS       TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- ---------------------------------------------------------------------------
+-- Hourly loader: query facts (48h re-scan) + warehouse daily (3d re-scan)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        (HOUR_TS, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, COMPANY, QUERY_COUNT,
+         FAILED_COUNT, ELAPSED_SEC_SUM, P95_ELAPSED_SEC, QUEUED_SEC_SUM, SPILL_REMOTE_GB)
+    SELECT
+        DATE_TRUNC('hour', START_TIME),
+        WAREHOUSE_NAME,
+        DATABASE_NAME,
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME),
+        COUNT(*),
+        SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)),
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000,
+        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95),
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000,
+        SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3)
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+    GROUP BY 1, 2, 3, 4, 5;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY t
+    USING (
+        SELECT
+            DATE(START_TIME) AS DAY,
+            WAREHOUSE_NAME,
+            DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) AS COMPANY,
+            SUM(COALESCE(CREDITS_USED_COMPUTE, CREDITS_USED)) AS CREDITS_COMPUTE,
+            SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_TOTAL
+        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+        WHERE START_TIME >= DATEADD('day', -3, CURRENT_DATE())
+        GROUP BY 1, 2, 3
+    ) s
+    ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+    WHEN MATCHED THEN UPDATE SET
+        COMPANY = s.COMPANY, CREDITS_COMPUTE = s.CREDITS_COMPUTE,
+        CREDITS_TOTAL = s.CREDITS_TOTAL, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_COMPUTE, CREDITS_TOTAL)
+        VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_COMPUTE, s.CREDITS_TOTAL);
+
+    RETURN 'hourly facts loaded';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Daily loader: metering-daily (5d re-scan, adjustment applied), tasks,
+-- logins, storage (3d re-scans)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY t
+    USING (
+        SELECT
+            USAGE_DATE AS DAY,
+            UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+            SUM(COALESCE(CREDITS_USED_COMPUTE, 0)) AS CREDITS_COMPUTE,
+            SUM(COALESCE(CREDITS_USED_CLOUD_SERVICES, 0)) AS CREDITS_CLOUD_SVCS,
+            SUM(COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0)) AS CREDITS_ADJUSTMENT,
+            SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_USED,
+            SUM(COALESCE(CREDITS_BILLED,
+                GREATEST(0, COALESCE(CREDITS_USED, 0) + COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0)))) AS CREDITS_BILLED
+        FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+        WHERE USAGE_DATE >= DATEADD('day', -5, CURRENT_DATE())
+        GROUP BY 1, 2
+    ) s
+    ON t.DAY = s.DAY AND t.SERVICE_TYPE = s.SERVICE_TYPE
+    WHEN MATCHED THEN UPDATE SET
+        CREDITS_COMPUTE = s.CREDITS_COMPUTE, CREDITS_CLOUD_SVCS = s.CREDITS_CLOUD_SVCS,
+        CREDITS_ADJUSTMENT = s.CREDITS_ADJUSTMENT, CREDITS_USED = s.CREDITS_USED,
+        CREDITS_BILLED = s.CREDITS_BILLED, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, SERVICE_TYPE, CREDITS_COMPUTE, CREDITS_CLOUD_SVCS, CREDITS_ADJUSTMENT, CREDITS_USED, CREDITS_BILLED)
+        VALUES (s.DAY, s.SERVICE_TYPE, s.CREDITS_COMPUTE, s.CREDITS_CLOUD_SVCS, s.CREDITS_ADJUSTMENT, s.CREDITS_USED, s.CREDITS_BILLED);
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+        (DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR)
+    SELECT
+        DATE(QUERY_START_TIME),
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+        COUNT(*),
+        SUM(IFF(STATE = 'FAILED', 1, 0)),
+        AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)),
+        MAX_BY(STATE, QUERY_START_TIME),
+        MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 500), QUERY_START_TIME)
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE QUERY_START_TIME >= DATEADD('day', -3, CURRENT_DATE())
+    GROUP BY 1, 2, 3, 4, 5;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+        (DAY, USER_NAME, COMPANY, LOGINS, FAILED_LOGINS, PASSWORD_LOGINS)
+    SELECT
+        DATE(EVENT_TIMESTAMP),
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME),
+        COUNT(*),
+        SUM(IFF(IS_SUCCESS = 'NO', 1, 0)),
+        SUM(IFF(FIRST_AUTHENTICATION_FACTOR = 'PASSWORD' AND IS_SUCCESS = 'YES', 1, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
+    WHERE EVENT_TIMESTAMP >= DATEADD('day', -3, CURRENT_DATE())
+    GROUP BY 1, 2, 3;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+        (DAY, DATABASE_NAME, COMPANY, DB_BYTES, FAILSAFE_BYTES)
+    SELECT
+        USAGE_DATE,
+        DATABASE_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+        AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)),
+        AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+    WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+    GROUP BY 1, 2, 3;
+
+    RETURN 'daily facts loaded';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Task chain roots (children are added by V003/V004 with AFTER)
+-- ---------------------------------------------------------------------------
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 7 * * * * America/Chicago'
+    COMMENT = 'Hourly query/warehouse facts; exec board + alert scan chain after this.'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 45 6 * * * America/Chicago'
+    COMMENT = 'Daily metering (billed w/ adjustment), tasks, logins, storage.'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();
+
+-- Tasks are created suspended; V003 resumes the chain after children exist.
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 2 AS VERSION, 'facts: warehouse+monitor, 6 fact tables, loaders, task roots' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V002 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V003__marts.sql
+-- ===========================================================================
+-- V003__marts.sql — first-paint executive board, source freshness, task chain.
+-- Idempotent.
+
+-- ---------------------------------------------------------------------------
+-- MART_EXEC_BOARD: the one deliberate first-paint aggregate. Rebuilt hourly
+-- for (ALFA, Trexis, ALL) x (7, 30) day windows. Panel/metric/dimension rows
+-- keep the reader trivial and the page instant.
+-- ---------------------------------------------------------------------------
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD (
+    COMPANY      VARCHAR(40)   NOT NULL,
+    WINDOW_DAYS  NUMBER(4,0)   NOT NULL,
+    PANEL        VARCHAR(60)   NOT NULL,
+    METRIC       VARCHAR(80)   NOT NULL,
+    DIMENSION    VARCHAR(300),
+    PERIOD_START DATE,
+    VALUE        NUMBER(24,6),
+    VALUE_USD    NUMBER(24,2),
+    UNIT         VARCHAR(40),
+    SORT_ORDER   NUMBER(6,0),
+    REFRESHED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(VALUE)), 3.68) INTO :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'CREDIT_PRICE_USD';
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD;
+
+    -- One scoped fact view per company label, reused by every panel below.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+        (COMPANY, WINDOW_DAYS, PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER)
+    WITH scopes AS (
+        SELECT 'ALFA' AS COMPANY UNION ALL SELECT 'Trexis' UNION ALL SELECT 'ALL'
+    ),
+    windows AS (
+        SELECT 7 AS WINDOW_DAYS UNION ALL SELECT 30
+    ),
+    wh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.DAY, f.WAREHOUSE_NAME,
+               f.CREDITS_TOTAL
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    ),
+    qh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.*
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.HOUR_TS >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    ),
+    tk AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.*
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    )
+    -- KPI panel -------------------------------------------------------------
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'CREDITS', NULL, NULL,
+           SUM(CREDITS_TOTAL), ROUND(SUM(CREDITS_TOTAL) * :credit_price, 2), 'credits', 10
+    FROM wh GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUERIES', NULL, NULL,
+           SUM(QUERY_COUNT), NULL, 'count', 20
+    FROM qh GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'FAILED_QUERIES', NULL, NULL,
+           SUM(FAILED_COUNT), NULL, 'count', 30
+    FROM qh GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUEUED_MINUTES', NULL, NULL,
+           ROUND(SUM(QUEUED_SEC_SUM) / 60, 1), NULL, 'minutes', 40
+    FROM qh GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'SPILL_GB', NULL, NULL,
+           ROUND(SUM(SPILL_REMOTE_GB), 2), NULL, 'gb', 50
+    FROM qh GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_RUNS', NULL, NULL,
+           SUM(RUNS), NULL, 'count', 60
+    FROM tk GROUP BY 1, 2
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_FAILURES', NULL, NULL,
+           SUM(FAILED), NULL, 'count', 70
+    FROM tk GROUP BY 1, 2
+    -- Daily spend panel -----------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'DAILY_SPEND', 'CREDITS', NULL, DAY,
+           SUM(CREDITS_TOTAL), ROUND(SUM(CREDITS_TOTAL) * :credit_price, 2), 'credits/day', 10
+    FROM wh GROUP BY 1, 2, DAY
+    -- Cost drivers ------------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', WAREHOUSE_NAME, NULL,
+           SUM(CREDITS_TOTAL), ROUND(SUM(CREDITS_TOTAL) * :credit_price, 2), 'credits', 10
+    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME
+    -- Warehouse pressure ------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'PRESSURE_QUEUE', 'QUEUED_SEC', WAREHOUSE_NAME, NULL,
+           ROUND(SUM(QUEUED_SEC_SUM), 1), NULL, 'seconds', 10
+    FROM qh WHERE WAREHOUSE_NAME IS NOT NULL GROUP BY 1, 2, WAREHOUSE_NAME
+    HAVING SUM(QUEUED_SEC_SUM) > 0
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'PRESSURE_SPILL', 'SPILL_GB', WAREHOUSE_NAME, NULL,
+           ROUND(SUM(SPILL_REMOTE_GB), 2), NULL, 'gb', 10
+    FROM qh WHERE WAREHOUSE_NAME IS NOT NULL GROUP BY 1, 2, WAREHOUSE_NAME
+    HAVING SUM(SPILL_REMOTE_GB) > 0
+    -- Database mix ------------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'DB_MIX', 'QUERIES', COALESCE(DATABASE_NAME, 'UNKNOWN'), NULL,
+           SUM(QUERY_COUNT), NULL, 'count', 10
+    FROM qh GROUP BY 1, 2, COALESCE(DATABASE_NAME, 'UNKNOWN');
+
+    RETURN 'exec board refreshed';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Source freshness (drives honest staleness labels in the app)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD;
+
+-- ---------------------------------------------------------------------------
+-- Chain: refresh the board right after each hourly fact load
+-- ---------------------------------------------------------------------------
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 3 AS VERSION, 'marts: exec board + refresh proc/task, source freshness view' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V003 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V004__alerts.sql
+-- ===========================================================================
+-- V004__alerts.sql — alert rules, events, lifecycle audit, hourly scan.
+-- Consolidated to 3 tables (the old app had 9). Idempotent.
+--
+-- COLLISION GUARD: the previous app also created ALERT_CONFIG and
+-- ALERT_EVENTS in DBA_MAINT_DB.OVERWATCH with different columns. If they
+-- exist, RENAME them first (e.g. TO ALERT_CONFIG_V3) — IF NOT EXISTS below
+-- will otherwise keep the old shape and validate.sql will flag it.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG (
+    RULE_ID       VARCHAR(60)   NOT NULL PRIMARY KEY,
+    FAMILY        VARCHAR(40)   NOT NULL,   -- COST | PERFORMANCE | PIPELINE | SECURITY
+    NAME          VARCHAR(200)  NOT NULL,
+    ENABLED       BOOLEAN       NOT NULL DEFAULT TRUE,
+    SEVERITY      VARCHAR(20)   NOT NULL DEFAULT 'HIGH',
+    THRESHOLD_NUM NUMBER(18,4),
+    WINDOW_HOURS  NUMBER(6,0)   NOT NULL DEFAULT 24,
+    OWNER         VARCHAR(200)  NOT NULL DEFAULT 'DBA',
+    CHANNEL       VARCHAR(60)   NOT NULL DEFAULT 'IN_APP',
+    UPDATED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT * FROM VALUES
+        ('COST_DAILY_CREDITS',   'COST',        'Account daily credits above threshold',            TRUE, 'HIGH',     100,  24),
+        ('COST_WH_DAILY_CREDITS','COST',        'Single warehouse daily credits above threshold',   TRUE, 'MEDIUM',    25,  24),
+        ('PERF_QUERY_FAIL_PCT',  'PERFORMANCE', 'Query failure rate above threshold (pct)',         TRUE, 'HIGH',       5,  24),
+        ('PERF_QUEUED_MINUTES',  'PERFORMANCE', 'Warehouse queueing above threshold (minutes)',     TRUE, 'MEDIUM',    30,  24),
+        ('PERF_SPILL_GB',        'PERFORMANCE', 'Remote spill above threshold (GB)',                TRUE, 'MEDIUM',    10,  24),
+        ('PIPE_TASK_FAILURES',   'PIPELINE',    'Task failures above threshold (count)',            TRUE, 'HIGH',       3,  24),
+        ('SEC_FAILED_LOGINS',    'SECURITY',    'Failed logins for one user above threshold',       TRUE, 'HIGH',      10,  24)
+    AS s(RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS (
+    EVENT_ID     VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    RULE_ID      VARCHAR(60)   NOT NULL,
+    RAISED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    COMPANY      VARCHAR(40)   NOT NULL DEFAULT 'ALL',
+    SEVERITY     VARCHAR(20)   NOT NULL,
+    TITLE        VARCHAR(300)  NOT NULL,
+    DETAIL       VARCHAR(2000),
+    METRIC_VALUE NUMBER(18,4),
+    STATUS       VARCHAR(20)   NOT NULL DEFAULT 'OPEN',  -- OPEN | ACK | RESOLVED
+    ACK_BY       VARCHAR(200),
+    ACK_AT       TIMESTAMP_NTZ,
+    RESOLVED_AT  TIMESTAMP_NTZ,
+    DEDUPE_KEY   VARCHAR(300)
+);
+
+-- Lifecycle + remediation audit: who did what, with what proof.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT (
+    AUDIT_ID    VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    EVENT_ID    VARCHAR(80)   NOT NULL,
+    ACTION      VARCHAR(40)   NOT NULL,   -- ACK | RESOLVE | REMEDIATE | NOTE
+    ACTED_BY    VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER(),
+    ACTED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    NOTE        VARCHAR(2000),
+    PROOF_SQL   VARCHAR(4000)
+);
+
+-- ---------------------------------------------------------------------------
+-- Hourly scan over facts. Deterministic thresholds live here; statistical
+-- anomaly detection stays in-app (labeled) by design.
+-- Dedupe: one event per rule+scope+day.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    candidates AS (
+        -- COST_DAILY_CREDITS: account credits yesterday+today
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_WH_DAILY_CREDITS: single warehouse
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PERF_QUERY_FAIL_PCT over the rule window
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PERF_QUEUED_MINUTES per warehouse
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PERF_SPILL_GB per warehouse
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PIPE_TASK_FAILURES per task
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        -- SEC_FAILED_LOGINS per user
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan complete';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_SCAN
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN();
+
+-- Resume the whole chain now that all children exist (children first).
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_SCAN RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 4 AS VERSION, 'alerts: config/events/audit, hourly scan, task chain resumed' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V004 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V005__actions.sql
+-- ===========================================================================
+-- V005__actions.sql — owner-routed action queue + verified savings ledger.
+-- Permanent tables: this is operator-entered evidence that must survive
+-- mart rebuilds. Idempotent.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ACTION_QUEUE (
+    ACTION_ID    VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    CREATED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    COMPANY      VARCHAR(40)   NOT NULL DEFAULT 'ALL',
+    SEVERITY     VARCHAR(20)   NOT NULL DEFAULT 'MEDIUM',   -- CRITICAL|HIGH|MEDIUM|LOW
+    TITLE        VARCHAR(300)  NOT NULL,
+    DETAIL       VARCHAR(2000),
+    OWNER        VARCHAR(200)  NOT NULL DEFAULT 'DBA',
+    STATUS       VARCHAR(30)   NOT NULL DEFAULT 'OPEN',     -- OPEN|IN_PROGRESS|DONE|DROPPED
+    DUE_DATE     DATE,
+    SOURCE       VARCHAR(120),                              -- page/rule that raised it
+    PROOF_SQL    VARCHAR(4000),
+    ESTIMATED_USD NUMBER(18,2),
+    UPDATED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY   VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
+);
+
+-- Savings ledger: ESTIMATED -> VERIFIED (with proof) or REJECTED.
+-- Estimated and verified dollars are never summed together anywhere.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER (
+    ITEM_ID      VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    ACTION_ID    VARCHAR(80),
+    CREATED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    DESCRIPTION  VARCHAR(500)  NOT NULL,
+    STATE        VARCHAR(20)   NOT NULL DEFAULT 'ESTIMATED',  -- ESTIMATED|VERIFIED|REJECTED
+    ESTIMATED_USD NUMBER(18,2),
+    VERIFIED_USD NUMBER(18,2),
+    VERIFIED_AT  TIMESTAMP_NTZ,
+    VERIFIED_BY  VARCHAR(200),
+    PROOF_SQL    VARCHAR(4000),
+    NOTES        VARCHAR(2000)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 5 AS VERSION, 'actions: owner-routed action queue + verified savings ledger' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V005 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V006__pipeline_sla.sql
+-- ===========================================================================
+-- V006__pipeline_sla.sql — metadata-driven pipeline freshness SLAs.
+-- Ported from the original OVERWATCH pipeline SLA contract. Idempotent.
+--
+-- DBAs register critical tables + a max age; the status view scores them
+-- against ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h — the
+-- app labels it). No Streamlit code changes needed to add/remove tables.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG (
+    DATABASE_NAME VARCHAR(200) NOT NULL,
+    SCHEMA_NAME   VARCHAR(200) NOT NULL,
+    TABLE_NAME    VARCHAR(200) NOT NULL,
+    MAX_AGE_HOURS NUMBER(6,1)  NOT NULL DEFAULT 24,
+    OWNER         VARCHAR(200) NOT NULL DEFAULT 'Data Engineering',
+    ENABLED       BOOLEAN      NOT NULL DEFAULT TRUE,
+    UPDATED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY    VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
+);
+
+-- Example rows (add real ones via the Operations > Pipeline SLA tab):
+-- INSERT INTO DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG
+--     (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)
+-- VALUES ('ALFA_EDW_PROD', 'DW', 'FACT_POLICY', 6, 'ALFA EDW Team');
+
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_STATUS AS
+SELECT
+    C.DATABASE_NAME,
+    C.SCHEMA_NAME,
+    C.TABLE_NAME,
+    C.OWNER,
+    C.MAX_AGE_HOURS,
+    T.LAST_ALTERED,
+    ROUND(DATEDIFF('minute', T.LAST_ALTERED, CURRENT_TIMESTAMP()) / 60.0, 1) AS HOURS_SINCE,
+    IFF(T.LAST_ALTERED IS NOT NULL
+        AND DATEDIFF('minute', T.LAST_ALTERED, CURRENT_TIMESTAMP()) / 60.0 <= C.MAX_AGE_HOURS,
+        TRUE, FALSE) AS SLA_MET
+FROM DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG C
+LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.TABLES T
+       ON T.TABLE_CATALOG = C.DATABASE_NAME
+      AND T.TABLE_SCHEMA = C.SCHEMA_NAME
+      AND T.TABLE_NAME = C.TABLE_NAME
+      AND T.DELETED IS NULL
+WHERE C.ENABLED;
+
+GRANT SELECT ON TABLE DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG TO ROLE OVERWATCH_MONITOR;
+GRANT SELECT ON VIEW DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_STATUS TO ROLE OVERWATCH_MONITOR;
+GRANT INSERT, UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG TO ROLE OVERWATCH_OPERATOR;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 6 AS VERSION, 'pipeline sla: config table + freshness status view' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V006 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V007__automation.sql
+-- ===========================================================================
+-- V007__automation.sql — budget alerting, notification readiness, AI digest,
+-- and savings auto-verification. Idempotent. Supersedes SP_ALERT_SCAN (V004).
+
+-- ---------------------------------------------------------------------------
+-- Budget-aware alert rules (fire only when MONTHLY_BUDGET_USD > 0 in SETTINGS)
+-- ---------------------------------------------------------------------------
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT * FROM VALUES
+        ('COST_BUDGET_PACE',     'COST', 'MTD spend ahead of budget pace (ratio threshold)', TRUE, 'HIGH',     1.10, 24),
+        ('COST_FORECAST_BREACH', 'COST', 'Projected month-end spend exceeds monthly budget', TRUE, 'CRITICAL', 1.00, 24)
+    AS s(RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+-- Webhook delivery bookkeeping (see snowflake/webhook_delivery.sql, opt-in)
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ADD COLUMN IF NOT EXISTS NOTIFIED_AT TIMESTAMP_NTZ;
+
+-- ---------------------------------------------------------------------------
+-- SP_ALERT_SCAN v2: all V004 rules + budget pace/forecast rules
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    ),
+    candidates AS (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        -- Budget pace: MTD spend vs time-elapsed share of the monthly budget
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        -- Forecast breach: MTD + run-rate x remaining days exceeds budget
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan v2 complete';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Daily AI digest (grounded in the exec board; model from SETTINGS)
+-- ---------------------------------------------------------------------------
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (
+    DIGEST_DATE DATE          NOT NULL,
+    COMPANY     VARCHAR(40)   NOT NULL DEFAULT 'ALL',
+    MODEL       VARCHAR(80),
+    BODY        VARCHAR(8000),
+    CREATED_AT  TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    model VARCHAR;
+    facts VARCHAR;
+    alerts VARCHAR;
+    prompt VARCHAR;
+    body VARCHAR;
+BEGIN
+    SELECT COALESCE(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)), 'llama3.1-8b')
+      INTO :model FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    SELECT COALESCE(LISTAGG(METRIC || '=' || COALESCE(VALUE_USD, VALUE)::VARCHAR, '; ')
+           WITHIN GROUP (ORDER BY SORT_ORDER), 'no board rows')
+      INTO :facts
+    FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+    WHERE COMPANY = 'ALL' AND WINDOW_DAYS = 7 AND PANEL = 'KPI';
+
+    SELECT 'open_critical=' || SUM(IFF(SEVERITY = 'CRITICAL' AND STATUS IN ('OPEN','ACK'), 1, 0))
+           || '; open_high=' || SUM(IFF(SEVERITY = 'HIGH' AND STATUS IN ('OPEN','ACK'), 1, 0))
+           || '; raised_24h=' || SUM(IFF(RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP()), 1, 0))
+      INTO :alerts
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS;
+
+    prompt := LEFT(
+        'You are a senior Snowflake DBA writing the morning digest for ALFA/Trexis leadership. '
+        || 'Use ONLY these 7-day platform facts and alert counts - never invent numbers. '
+        || 'Write 3 short paragraphs: (1) platform health and spend in plain language, '
+        || '(2) what needs attention today and why, (3) one recommended focus. No preamble. '
+        || 'FACTS: ' || COALESCE(:facts, 'none') || '. ALERTS: ' || COALESCE(:alerts, 'none') || '.',
+        6000);
+
+    BEGIN
+        body := SNOWFLAKE.CORTEX.COMPLETE(:model, :prompt);
+    EXCEPTION
+        WHEN OTHER THEN
+            body := 'Digest unavailable: Cortex COMPLETE failed for model ' || :model
+                    || '. Check SNOWFLAKE.CORTEX_USER grant and regional model availability.';
+    END;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
+    VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));
+
+    RETURN 'digest written';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_DAILY_DIGEST
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 20 7 * * * America/Chicago'
+    COMMENT = 'Grounded Cortex digest after the morning loads. Uses Cortex credits (~1 call/day).'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();
+
+-- ---------------------------------------------------------------------------
+-- Savings auto-verification: re-measure idle spend behind ESTIMATED items
+-- ---------------------------------------------------------------------------
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS (
+    RUN_AT              TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    ITEM_ID             VARCHAR(80)   NOT NULL,
+    WAREHOUSE_NAME      VARCHAR(200),
+    BASELINE_EST_USD    NUMBER(18,2),
+    MEASURED_IDLE_USD_30D NUMBER(18,2),
+    PROPOSED_VERIFIED_USD NUMBER(18,2)
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_VERIFY_IDLE_SAVINGS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :credit_price FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS
+        (ITEM_ID, WAREHOUSE_NAME, BASELINE_EST_USD, MEASURED_IDLE_USD_30D, PROPOSED_VERIFIED_USD)
+    WITH items AS (
+        SELECT ITEM_ID,
+               TRIM(REPLACE(DESCRIPTION, 'Auto-suspend tune: ', '')) AS WAREHOUSE_NAME,
+               ESTIMATED_USD
+        FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER
+        WHERE STATE = 'ESTIMATED' AND DESCRIPTION LIKE 'Auto-suspend tune: %'
+    ),
+    query_hours AS (
+        SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        WHERE START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+          AND WAREHOUSE_NAME IS NOT NULL
+    ),
+    idle_now AS (
+        SELECT M.WAREHOUSE_NAME,
+               SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) * :credit_price AS IDLE_USD_30D
+        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+        LEFT JOIN query_hours Q
+               ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+              AND Q.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
+        WHERE M.START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+        GROUP BY M.WAREHOUSE_NAME
+    )
+    SELECT i.ITEM_ID, i.WAREHOUSE_NAME, i.ESTIMATED_USD,
+           ROUND(COALESCE(n.IDLE_USD_30D, 0), 2),
+           ROUND(GREATEST(0, i.ESTIMATED_USD - COALESCE(n.IDLE_USD_30D, 0)), 2)
+    FROM items i
+    LEFT JOIN idle_now n ON UPPER(n.WAREHOUSE_NAME) = UPPER(i.WAREHOUSE_NAME);
+
+    RETURN 'savings verification run complete';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_VERIFY_SAVINGS
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 40 7 1 * * America/Chicago'
+    COMMENT = 'Monthly re-measurement of ESTIMATED auto-suspend savings; operator approves VERIFIED.'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_VERIFY_IDLE_SAVINGS();
+
+GRANT SELECT ON TABLE DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST TO ROLE OVERWATCH_MONITOR;
+GRANT SELECT ON TABLE DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS TO ROLE OVERWATCH_MONITOR;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_DAILY_DIGEST RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_VERIFY_SAVINGS RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 7 AS VERSION, 'automation: budget alerts, scan v2, AI digest, savings verification, NOTIFIED_AT' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V007 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V008__chargeback.sql
+-- ===========================================================================
+-- V008__chargeback.sql — department chargeback by warehouse (exact) and role
+-- (allocated). No object tags required: every department owns its warehouses,
+-- so DEPARTMENT_MAP is the billing truth. Idempotent.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP (
+    MAP_TYPE   VARCHAR(20)  NOT NULL,   -- WAREHOUSE | ROLE
+    NAME       VARCHAR(200) NOT NULL,   -- exact object name (uppercased on match)
+    DEPARTMENT VARCHAR(120) NOT NULL,
+    OWNER      VARCHAR(200) NOT NULL DEFAULT 'DBA',
+    UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER(),
+    CONSTRAINT PK_DEPARTMENT_MAP PRIMARY KEY (MAP_TYPE, NAME)
+);
+
+-- Seed from the known warehouse estate. Adjust departments in the app
+-- (Cost & Contract > Chargeback > Manage mapping) — these are starting names.
+MERGE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP t
+USING (
+    SELECT * FROM VALUES
+        -- ALFA
+        ('WAREHOUSE', 'WH_ALFA_ANALYTICS',            'ALFA Analytics',        'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_LOAD',                 'ALFA Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_TRANSFORM',            'ALFA Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_UNLOAD',               'ALFA Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_QUERY',                'ALFA BI / Reporting',   'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_QA',                   'ALFA QA',               'DBA'),
+        ('WAREHOUSE', 'COMPUTE_WH',                   'ALFA Shared / Legacy',  'DBA'),
+        ('WAREHOUSE', 'BLCOMPUTE_WH',                 'ALFA Shared / Legacy',  'DBA'),
+        ('WAREHOUSE', 'CROWDSTRIKE_WH',               'Security Tooling',      'DBA'),
+        ('WAREHOUSE', 'DOC_ALWH',                     'ALFA Shared / Legacy',  'DBA'),
+        ('WAREHOUSE', 'POSIT_WORKBENCH',              'ALFA Analytics',        'DBA'),
+        ('WAREHOUSE', 'SNOWFLAKE_LEARNING_WH',        'Platform / DBA',        'DBA'),
+        ('WAREHOUSE', 'SYSTEM$STREAMLIT_NOTEBOOK_WH', 'Platform / DBA',        'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_OVERWATCH',            'Platform / DBA',        'DBA'),
+        -- Trexis
+        ('WAREHOUSE', 'WH_TRXS_LOAD',                 'Trexis Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_TRXS_TRANSFORM',            'Trexis Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_TRXS_UNLOAD',               'Trexis Data Engineering', 'DBA'),
+        ('WAREHOUSE', 'WH_TRXS_QUERY',                'Trexis BI / Reporting',   'DBA'),
+        -- Role lens starters (usage attribution, not billing)
+        ('ROLE', 'SNOW_ACCOUNTADMINS',                'Platform / DBA',        'DBA'),
+        ('ROLE', 'SNOW_SYSADMINS',                    'Platform / DBA',        'DBA'),
+        ('ROLE', 'OVERWATCH_MONITOR',                 'Platform / DBA',        'DBA'),
+        ('ROLE', 'OVERWATCH_OPERATOR',                'Platform / DBA',        'DBA')
+    AS s(MAP_TYPE, NAME, DEPARTMENT, OWNER)
+) s
+ON t.MAP_TYPE = s.MAP_TYPE AND t.NAME = s.NAME
+WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER)
+     VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER);
+
+GRANT SELECT ON TABLE DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP TO ROLE OVERWATCH_MONITOR;
+GRANT INSERT, UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP TO ROLE OVERWATCH_OPERATOR;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 8 AS VERSION, 'chargeback: DEPARTMENT_MAP (warehouse=billing, role=usage lens)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V008 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V009__credentials.sql
+-- ===========================================================================
+-- V009__credentials.sql — credential-expiry alerting (30-day horizon).
+-- Seeds the rule and supersedes SP_ALERT_SCAN (V007) with a v3 that also
+-- scans ACCOUNT_USAGE.CREDENTIALS. Weekly-recurring dedupe: an unrotated
+-- credential re-alerts every Monday until fixed. Idempotent.
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'SEC_CRED_EXPIRY' AS RULE_ID, 'SECURITY' AS FAMILY,
+           'Credential expires within threshold days' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 30 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    ),
+    candidates AS (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        UNION ALL
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRES_AT, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRES_AT IS NOT NULL
+         AND cr.EXPIRES_AT <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan v3 complete';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 9 AS VERSION, 'credentials: 30-day expiry rule, scan v3 with CREDENTIALS source' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+SELECT 'V009 applied' AS STATUS;
+
+-- ===========================================================================
+-- >>> V010__change_impact.sql
+-- ===========================================================================
+-- V010__change_impact.sql — object-change performance regression tracking.
+--
+-- Answers: "we updated a stored procedure — did it get slower or more
+-- expensive?" When a PROCEDURE or TASK changes, the daily scan freezes a
+-- 14-day pre-change baseline (runs, runtime, failure rate, credits/call)
+-- and compares the 14 days after the change against it. Confirmed
+-- regressions raise PERF_CHANGE_REGRESSION alert events, which flow through
+-- the normal alert/webhook pipeline.
+--
+-- Credits/call come from SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY:
+-- every child statement a procedure or task runs rolls up to its CALL via
+-- ROOT_QUERY_ID, so cost is measured, not estimated. If the view is not
+-- available on this account the scan logs one APP_ERROR_LOG row and verdicts
+-- fall back to runtime + failure rate. Idempotent.
+
+-- One row per detected object change. DATABASE_NAME / SCHEMA_NAME are stored
+-- as their own columns so every change is attributable to its schema and the
+-- app's database/schema filters apply. Baselines are FROZEN at detection
+-- (source history ages out of ACCOUNT_USAGE); AFTER_* refresh daily until
+-- TRACKING_UNTIL.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY (
+    CHANGE_ID         VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    OBJECT_TYPE       VARCHAR(20)   NOT NULL,          -- PROCEDURE | TASK
+    DATABASE_NAME     VARCHAR(200)  NOT NULL,
+    SCHEMA_NAME       VARCHAR(200)  NOT NULL,
+    OBJECT_NAME       VARCHAR(600)  NOT NULL,          -- DB.SCHEMA.NAME
+    COMPANY           VARCHAR(40)   NOT NULL DEFAULT 'ALFA',
+    CHANGE_SEEN_AT    TIMESTAMP_LTZ NOT NULL,
+    CHANGED_BY        VARCHAR(200),
+    CHANGE_DDL        VARCHAR(1000),
+    BASELINE_FROM     TIMESTAMP_LTZ,                   -- freeze marker (set once)
+    BASELINE_CALLS    NUMBER(12,0),
+    BASELINE_FAILS    NUMBER(12,0),
+    BASELINE_MEDIAN_MS NUMBER(18,2),
+    BASELINE_P95_MS   NUMBER(18,2),
+    BASELINE_CREDITS_PER_CALL NUMBER(18,6),
+    AFTER_CALLS       NUMBER(12,0),
+    AFTER_FAILS       NUMBER(12,0),
+    AFTER_MEDIAN_MS   NUMBER(18,2),
+    AFTER_P95_MS      NUMBER(18,2),
+    AFTER_CREDITS_PER_CALL NUMBER(18,6),
+    VERDICT           VARCHAR(30)   NOT NULL DEFAULT 'PENDING',
+    -- PENDING (after-window still thin) | REGRESSED | IMPROVED | NEUTRAL
+    -- NO_BASELINE (new or previously idle object)
+    -- INSUFFICIENT_AFTER (tracking ended with too few runs to judge)
+    VERDICT_DETAIL    VARCHAR(500),
+    TRACKING_UNTIL    DATE,
+    ALERTED           BOOLEAN       NOT NULL DEFAULT FALSE,
+    LAST_EVALUATED_AT TIMESTAMP_LTZ
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'PERF_CHANGE_REGRESSION' AS RULE_ID, 'PERFORMANCE' AS FAMILY,
+           'Procedure/task runs worse after a change (threshold = % increase)' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 50 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    pct FLOAT;                 -- regression threshold, % increase (ALERT_CONFIG)
+    min_calls FLOAT DEFAULT 5; -- both windows need this many runs for a verdict
+    emsg VARCHAR;
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 50) INTO :pct
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'PERF_CHANGE_REGRESSION';
+
+    -- 1a) Register changed/replaced procedures. CREATE OR REPLACE resets
+    --     CREATED = LAST_ALTERED, so replaced and brand-new procs both land
+    --     here; never-called objects finalize as NO_BASELINE, never alerts.
+    --     Overloads share one row (call matching is by name).
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+    USING (
+        SELECT 'PROCEDURE' AS OBJECT_TYPE,
+               PROCEDURE_CATALOG AS DATABASE_NAME,
+               PROCEDURE_SCHEMA AS SCHEMA_NAME,
+               PROCEDURE_CATALOG || '.' || PROCEDURE_SCHEMA || '.' || PROCEDURE_NAME AS OBJECT_NAME,
+               IFF(PROCEDURE_CATALOG LIKE 'TRXS%', 'Trexis', 'ALFA') AS COMPANY,
+               MAX(LAST_ALTERED) AS CHANGE_SEEN_AT
+        FROM SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES
+        WHERE DELETED IS NULL
+          AND PROCEDURE_CATALOG IS NOT NULL
+          AND LAST_ALTERED >= DATEADD('day', -3, CURRENT_TIMESTAMP())
+        GROUP BY 1, 2, 3, 4, 5
+    ) s
+    ON t.OBJECT_TYPE = s.OBJECT_TYPE AND t.OBJECT_NAME = s.OBJECT_NAME
+       AND t.CHANGE_SEEN_AT = s.CHANGE_SEEN_AT
+    WHEN NOT MATCHED THEN INSERT
+        (OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, COMPANY, CHANGE_SEEN_AT, TRACKING_UNTIL)
+        VALUES (s.OBJECT_TYPE, s.DATABASE_NAME, s.SCHEMA_NAME, s.OBJECT_NAME, s.COMPANY,
+                s.CHANGE_SEEN_AT, DATEADD('day', 14, s.CHANGE_SEEN_AT)::DATE);
+
+    -- 1b) Register task definition changes. TASK_VERSIONS keeps every graph
+    --     version; only genuine definition/schedule/warehouse diffs register,
+    --     so suspend/resume churn is ignored. Guarded: an account without
+    --     TASK_VERSIONS still tracks procedures.
+    BEGIN
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+        USING (
+            SELECT 'TASK' AS OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME,
+                   IFF(DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA') AS COMPANY,
+                   CHANGE_SEEN_AT
+            FROM (
+                SELECT DATABASE_NAME, SCHEMA_NAME,
+                       DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS OBJECT_NAME,
+                       GRAPH_VERSION_CREATED_ON AS CHANGE_SEEN_AT,
+                       DEFINITION, SCHEDULE, WAREHOUSE_NAME,
+                       LAG(DEFINITION) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                             ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_DEFINITION,
+                       LAG(SCHEDULE) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                           ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_SCHEDULE,
+                       LAG(WAREHOUSE_NAME) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                                 ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_WAREHOUSE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
+            )
+            WHERE CHANGE_SEEN_AT >= DATEADD('day', -3, CURRENT_TIMESTAMP())
+              AND PREV_DEFINITION IS NOT NULL
+              AND (NOT EQUAL_NULL(DEFINITION, PREV_DEFINITION)
+                   OR NOT EQUAL_NULL(SCHEDULE, PREV_SCHEDULE)
+                   OR NOT EQUAL_NULL(WAREHOUSE_NAME, PREV_WAREHOUSE))
+        ) s
+        ON t.OBJECT_TYPE = s.OBJECT_TYPE AND t.OBJECT_NAME = s.OBJECT_NAME
+           AND t.CHANGE_SEEN_AT = s.CHANGE_SEEN_AT
+        WHEN NOT MATCHED THEN INSERT
+            (OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, COMPANY, CHANGE_SEEN_AT, TRACKING_UNTIL)
+            VALUES (s.OBJECT_TYPE, s.DATABASE_NAME, s.SCHEMA_NAME, s.OBJECT_NAME, s.COMPANY,
+                    s.CHANGE_SEEN_AT, DATEADD('day', 14, s.CHANGE_SEEN_AT)::DATE);
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ChangeImpactScan', 'task_versions_unavailable', :emsg,
+                   'TASK registration skipped; procedures still tracked', CURRENT_ROLE();
+    END;
+
+    -- 2) Best-effort DDL evidence: who ran the CREATE/ALTER near the change.
+    --    Multi-match picks one arbitrarily — evidence, not lineage.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET CHANGED_BY = d.USER_NAME,
+           CHANGE_DDL = LEFT(d.QUERY_TEXT, 1000)
+      FROM (
+          SELECT USER_NAME, QUERY_TEXT, START_TIME
+          FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+          WHERE START_TIME >= DATEADD('day', -4, CURRENT_TIMESTAMP())
+            AND EXECUTION_STATUS = 'SUCCESS'
+            AND (QUERY_TYPE ILIKE 'CREATE%' OR QUERY_TYPE ILIKE 'ALTER%')
+      ) d
+     WHERE t.CHANGE_DDL IS NULL
+       AND t.CHANGE_SEEN_AT >= DATEADD('day', -4, CURRENT_TIMESTAMP())
+       AND d.START_TIME BETWEEN DATEADD('hour', -3, t.CHANGE_SEEN_AT)
+                            AND DATEADD('hour', 3, t.CHANGE_SEEN_AT)
+       AND POSITION(SPLIT_PART(t.OBJECT_NAME, '.', 3) IN UPPER(d.QUERY_TEXT)) > 0;
+
+    -- 3) Freeze pre-change baselines (14 days before the change, once).
+    --    Procedure calls are matched by 'NAME(' in normalized CALL text; a
+    --    same-named proc in another schema would co-match — acceptable noise,
+    --    flagged here rather than hidden.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),
+           BASELINE_CALLS = s.CALLS, BASELINE_FAILS = s.FAILS,
+           BASELINE_MEDIAN_MS = s.MED_MS, BASELINE_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(q.EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                 MEDIAN(q.TOTAL_ELAPSED_TIME) AS MED_MS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND q.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND q.START_TIME < r.CHANGE_SEEN_AT
+           AND q.QUERY_TYPE = 'CALL'
+           AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                        REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+          WHERE r.OBJECT_TYPE = 'PROCEDURE' AND r.BASELINE_FROM IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),
+           BASELINE_CALLS = s.CALLS, BASELINE_FAILS = s.FAILS,
+           BASELINE_MEDIAN_MS = s.MED_MS, BASELINE_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(h.STATE = 'FAILED') AS FAILS,
+                 MEDIAN(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME)) AS MED_MS,
+                 APPROX_PERCENTILE(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME), 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+            ON h.SCHEDULED_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND h.QUERY_START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND h.QUERY_START_TIME < r.CHANGE_SEEN_AT
+           AND h.STATE IN ('SUCCEEDED', 'FAILED')
+           AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+          WHERE r.OBJECT_TYPE = 'TASK' AND r.BASELINE_FROM IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- Idle-before objects: freeze an explicit zero baseline (-> NO_BASELINE).
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET BASELINE_FROM = DATEADD('day', -14, CHANGE_SEEN_AT),
+           BASELINE_CALLS = 0, BASELINE_FAILS = 0
+     WHERE BASELINE_FROM IS NULL;
+
+    -- 4) Refresh post-change stats while the tracking window is open.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET AFTER_CALLS = s.CALLS, AFTER_FAILS = s.FAILS,
+           AFTER_MEDIAN_MS = s.MED_MS, AFTER_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(q.EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                 MEDIAN(q.TOTAL_ELAPSED_TIME) AS MED_MS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+           AND q.START_TIME > r.CHANGE_SEEN_AT
+           AND q.QUERY_TYPE = 'CALL'
+           AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                        REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+          WHERE r.OBJECT_TYPE = 'PROCEDURE' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET AFTER_CALLS = s.CALLS, AFTER_FAILS = s.FAILS,
+           AFTER_MEDIAN_MS = s.MED_MS, AFTER_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(h.STATE = 'FAILED') AS FAILS,
+                 MEDIAN(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME)) AS MED_MS,
+                 APPROX_PERCENTILE(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME), 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+            ON h.SCHEDULED_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+           AND h.QUERY_START_TIME > r.CHANGE_SEEN_AT
+           AND h.STATE IN ('SUCCEEDED', 'FAILED')
+           AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+          WHERE r.OBJECT_TYPE = 'TASK' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- 5) Measured credits/call via QUERY_ATTRIBUTION_HISTORY (~6h lag; the
+    --    baseline freeze waits 8h after the change so the pre-window is
+    --    complete). Guarded: without the view, runtime-only verdicts.
+    BEGIN
+        UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+           SET BASELINE_CREDITS_PER_CALL = s.TOTAL_CR / NULLIF(t.BASELINE_CALLS, 0)
+          FROM (
+              SELECT x.CHANGE_ID, SUM(a.CR) AS TOTAL_CR
+              FROM (
+                  SELECT r.CHANGE_ID, q.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                    ON q.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+                   AND q.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+                   AND q.START_TIME < r.CHANGE_SEEN_AT
+                   AND q.QUERY_TYPE = 'CALL'
+                   AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                                REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+                  WHERE r.OBJECT_TYPE = 'PROCEDURE'
+                    AND r.BASELINE_CREDITS_PER_CALL IS NULL AND r.BASELINE_CALLS > 0
+                    AND r.CHANGE_SEEN_AT < DATEADD('hour', -8, CURRENT_TIMESTAMP())
+                  UNION ALL
+                  SELECT r.CHANGE_ID, h.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    ON h.SCHEDULED_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+                   AND h.QUERY_START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+                   AND h.QUERY_START_TIME < r.CHANGE_SEEN_AT
+                   AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                   AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+                  WHERE r.OBJECT_TYPE = 'TASK'
+                    AND r.BASELINE_CREDITS_PER_CALL IS NULL AND r.BASELINE_CALLS > 0
+                    AND r.CHANGE_SEEN_AT < DATEADD('hour', -8, CURRENT_TIMESTAMP())
+              ) x
+              JOIN (
+                  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+                         SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CR
+                  FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                  WHERE START_TIME >= DATEADD('day', -21, CURRENT_TIMESTAMP())
+                  GROUP BY 1
+              ) a ON a.RID = x.QUERY_ID
+              GROUP BY x.CHANGE_ID
+          ) s
+         WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+        UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+           SET AFTER_CREDITS_PER_CALL = s.TOTAL_CR / NULLIF(t.AFTER_CALLS, 0)
+          FROM (
+              SELECT x.CHANGE_ID, SUM(a.CR) AS TOTAL_CR
+              FROM (
+                  SELECT r.CHANGE_ID, q.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                    ON q.START_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+                   AND q.START_TIME > r.CHANGE_SEEN_AT
+                   AND q.QUERY_TYPE = 'CALL'
+                   AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                                REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+                  WHERE r.OBJECT_TYPE = 'PROCEDURE' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+                  UNION ALL
+                  SELECT r.CHANGE_ID, h.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    ON h.SCHEDULED_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+                   AND h.QUERY_START_TIME > r.CHANGE_SEEN_AT
+                   AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                   AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+                  WHERE r.OBJECT_TYPE = 'TASK' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+              ) x
+              JOIN (
+                  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+                         SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CR
+                  FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                  WHERE START_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+                  GROUP BY 1
+              ) a ON a.RID = x.QUERY_ID
+              GROUP BY x.CHANGE_ID
+          ) s
+         WHERE t.CHANGE_ID = s.CHANGE_ID;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ChangeImpactScan', 'attribution_unavailable', :emsg,
+                   'credits/call omitted - verdicts use runtime + failure rate only', CURRENT_ROLE();
+    END;
+
+    -- 6) Verdicts (rows still inside their tracking window). Regression =
+    --    credits/call up threshold% with a material absolute delta, OR p95 up
+    --    threshold% and at least 30s, OR failure rate up 20 points.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET LAST_EVALUATED_AT = CURRENT_TIMESTAMP(),
+           VERDICT = CASE
+               WHEN BASELINE_CALLS < :min_calls THEN 'NO_BASELINE'
+               WHEN COALESCE(AFTER_CALLS, 0) < :min_calls THEN 'PENDING'
+               WHEN (BASELINE_CREDITS_PER_CALL > 0 AND AFTER_CREDITS_PER_CALL IS NOT NULL
+                     AND AFTER_CREDITS_PER_CALL > BASELINE_CREDITS_PER_CALL * (1 + :pct / 100)
+                     AND (AFTER_CREDITS_PER_CALL - BASELINE_CREDITS_PER_CALL) * AFTER_CALLS >= 0.25)
+                 OR (AFTER_P95_MS > BASELINE_P95_MS * (1 + :pct / 100) AND AFTER_P95_MS >= 30000)
+                 OR (AFTER_FAILS / NULLIF(AFTER_CALLS, 0)
+                     >= BASELINE_FAILS / NULLIF(BASELINE_CALLS, 0) + 0.2)
+                   THEN 'REGRESSED'
+               WHEN (BASELINE_CREDITS_PER_CALL > 0 AND AFTER_CREDITS_PER_CALL IS NOT NULL
+                     AND AFTER_CREDITS_PER_CALL < BASELINE_CREDITS_PER_CALL * 0.7)
+                 OR (AFTER_P95_MS < BASELINE_P95_MS * 0.7)
+                   THEN 'IMPROVED'
+               ELSE 'NEUTRAL'
+           END,
+           VERDICT_DETAIL =
+               'runs ' || COALESCE(BASELINE_CALLS::VARCHAR, '0') || '->' || COALESCE(AFTER_CALLS::VARCHAR, '0')
+               || ' | fails ' || COALESCE(BASELINE_FAILS::VARCHAR, '0') || '->' || COALESCE(AFTER_FAILS::VARCHAR, '0')
+               || ' | p95 ' || COALESCE(ROUND(BASELINE_P95_MS / 1000, 1)::VARCHAR, '?') || 's->'
+               || COALESCE(ROUND(AFTER_P95_MS / 1000, 1)::VARCHAR, '?') || 's'
+               || ' | credits/call ' || COALESCE(ROUND(BASELINE_CREDITS_PER_CALL, 4)::VARCHAR, 'n/a')
+               || '->' || COALESCE(ROUND(AFTER_CREDITS_PER_CALL, 4)::VARCHAR, 'n/a')
+     WHERE CURRENT_DATE() <= TRACKING_UNTIL;
+
+    -- Tracking ended while still thin: close it out honestly.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET VERDICT = 'INSUFFICIENT_AFTER'
+     WHERE CURRENT_DATE() > TRACKING_UNTIL AND VERDICT = 'PENDING';
+
+    -- 7) One alert per confirmed regression (dedupe: object + change day).
+    --    2x credits/call or a 50%+ failure rate escalates to CRITICAL.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    SELECT c.RULE_ID, r.COMPANY,
+           IFF(COALESCE(r.AFTER_CREDITS_PER_CALL / NULLIF(r.BASELINE_CREDITS_PER_CALL, 0), 0) >= 2
+                   OR r.AFTER_FAILS / NULLIF(r.AFTER_CALLS, 0) >= 0.5,
+               'CRITICAL', c.SEVERITY),
+           r.OBJECT_TYPE || ' ' || r.OBJECT_NAME || ' regressed after ' ||
+               TO_VARCHAR(r.CHANGE_SEEN_AT::DATE) || ' change',
+           'Schema ' || r.DATABASE_NAME || '.' || r.SCHEMA_NAME || ' | '
+               || COALESCE(r.VERDICT_DETAIL, '')
+               || IFF(r.CHANGED_BY IS NOT NULL, ' | changed by ' || r.CHANGED_BY, ''),
+           ROUND(COALESCE(100 * (r.AFTER_CREDITS_PER_CALL / NULLIF(r.BASELINE_CREDITS_PER_CALL, 0) - 1),
+                          100 * (r.AFTER_P95_MS / NULLIF(r.BASELINE_P95_MS, 0) - 1)), 1),
+           c.RULE_ID || '|' || r.OBJECT_NAME || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+    FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+      ON c.RULE_ID = 'PERF_CHANGE_REGRESSION' AND c.ENABLED
+    WHERE r.VERDICT = 'REGRESSED' AND NOT r.ALERTED
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || r.OBJECT_NAME || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+      );
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET ALERTED = TRUE
+     WHERE VERDICT = 'REGRESSED' AND NOT ALERTED;
+
+    RETURN 'change impact scan complete';
+END;
+$$;
+
+-- Daily, after the overnight loads; dedicated app warehouse.
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CHANGE_IMPACT_SCAN
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 50 6 * * * America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CHANGE_IMPACT_SCAN RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 10 AS VERSION,
+       'change impact: object-change registry, regression scan, PERF_CHANGE_REGRESSION rule' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V011__proactive_alerts.sql
+-- ===========================================================================
+-- V011__proactive_alerts.sql — the CoCo prevention pack.
+-- Five preventive rules distilled from the metadata review: catch the
+-- failure BEFORE the invoice or the outage. Supersedes SP_ALERT_SCAN (V009)
+-- with a v4 that carries every earlier block unchanged. Idempotent.
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'COST_CLOUD_SVC_RATIO' AS RULE_ID, 'COST' AS FAMILY,
+           'Warehouse cloud-services ratio above threshold % (24h)' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 20 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+    UNION ALL
+    SELECT 'COST_STORAGE_SURGE', 'COST',
+           'Database grew more than threshold GB in a day', TRUE, 'MEDIUM', 100, 24
+    UNION ALL
+    SELECT 'COST_SERVERLESS_CREEP', 'COST',
+           'Serverless service credits up threshold % week-over-week', TRUE, 'MEDIUM', 100, 168
+    UNION ALL
+    SELECT 'PIPE_COPY_FAILURES', 'PIPELINE',
+           'Failed COPY / Snowpipe file loads in 24h (threshold = allowed failures)', TRUE, 'HIGH', 0, 24
+    UNION ALL
+    SELECT 'SEC_BREAK_GLASS_USE', 'SECURITY',
+           'Statements run under break-glass admin roles above threshold (24h)', TRUE, 'MEDIUM', 25, 24
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    ),
+    candidates AS (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        UNION ALL
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRES_AT, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRES_AT IS NOT NULL
+         AND cr.EXPIRES_AT <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        UNION ALL
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        UNION ALL
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan v4 complete';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 11 AS VERSION,
+       'proactive alerts: cloud-svc ratio, storage surge, serverless creep, copy failures, break-glass' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V012__routing_anomaly_remediation.sql
+-- ===========================================================================
+-- V012__routing_anomaly_remediation.sql — alert routing, anomaly sweep,
+-- remediation log, dynamic-table failure alerting.
+--
+-- 1. ALERT_ROUTES: family/severity -> named webhook integration, so finops
+--    alerts hit #finops and security alerts hit #security without triage.
+--    SP_NOTIFY_WEBHOOK v2 walks the routes; unrouted events fall back to
+--    the default OVERWATCH_WEBHOOK integration.
+-- 2. SP_ANOMALY_SWEEP (daily task): robust MAD z-score over every warehouse
+--    and service daily-credit series in the facts; breaches raise
+--    COST_ANOMALY_SWEEP events for the latest complete day.
+-- 3. REMEDIATION_LOG: every generated fix the app executes (or a user
+--    copies), with statement text, outcome, and savings-ledger linkage.
+-- 4. PIPE_DT_FAILURES: dynamic-table refresh failures (guarded block —
+--    accounts without the view keep everything else working). Idempotent.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (
+    ROUTE_ID     VARCHAR(80)  NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    FAMILY       VARCHAR(40)  NOT NULL,             -- COST | PERFORMANCE | PIPELINE | SECURITY | ALL
+    MIN_SEVERITY VARCHAR(20)  NOT NULL DEFAULT 'HIGH',  -- CRITICAL | HIGH | MEDIUM | LOW
+    INTEGRATION_NAME VARCHAR(200) NOT NULL,         -- notification integration to send through
+    ENABLED      BOOLEAN      NOT NULL DEFAULT TRUE,
+    CREATED_BY   VARCHAR(200) NOT NULL DEFAULT CURRENT_USER(),
+    CREATED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Default route: everything HIGH+ through the original integration. Editing
+-- or disabling this row is how you go fully custom.
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES t
+USING (SELECT 'ALL' AS FAMILY, 'HIGH' AS MIN_SEVERITY, 'OVERWATCH_WEBHOOK' AS INTEGRATION_NAME) s
+ON t.FAMILY = s.FAMILY AND t.INTEGRATION_NAME = s.INTEGRATION_NAME
+WHEN NOT MATCHED THEN INSERT (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
+     VALUES (s.FAMILY, s.MIN_SEVERITY, s.INTEGRATION_NAME);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG (
+    REMEDIATION_ID VARCHAR(80)  NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    FINDING_TYPE   VARCHAR(60)  NOT NULL,   -- IDLE_WAREHOUSE | AUTO_SUSPEND | RESIZE | RETENTION | SCHEDULE | OTHER
+    TARGET_OBJECT  VARCHAR(600) NOT NULL,
+    STATEMENT_SQL  VARCHAR(4000) NOT NULL,
+    EST_MONTHLY_SAVINGS_USD NUMBER(18,2),
+    EXECUTED_BY    VARCHAR(200) NOT NULL DEFAULT CURRENT_USER(),
+    EXECUTED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    STATUS         VARCHAR(20)  NOT NULL DEFAULT 'EXECUTED',  -- EXECUTED | COPIED | FAILED
+    RESULT_NOTE    VARCHAR(2000)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'COST_ANOMALY_SWEEP' AS RULE_ID, 'COST' AS FAMILY,
+           'Daily credits anomalous vs trailing 28d (threshold = robust z)' AS NAME,
+           TRUE AS ENABLED, 'MEDIUM' AS SEVERITY, 3.5 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+    UNION ALL
+    SELECT 'PIPE_DT_FAILURES', 'PIPELINE',
+           'Dynamic table refresh failures in 24h (threshold = allowed failures)',
+           TRUE, 'HIGH', 0, 24
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+-- Route-aware webhook sender. Falls back cleanly: no enabled routes match ->
+-- default integration; a route's integration missing -> that route logs one
+-- APP_ERROR_LOG row and the remaining routes still send.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    sent_total INT DEFAULT 0;
+    routes_hit INT DEFAULT 0;
+    message VARCHAR;
+    emsg VARCHAR;
+    r_family VARCHAR;
+    r_minsev VARCHAR;
+    r_integration VARCHAR;
+    c1 CURSOR FOR
+        SELECT r.ROUTE_ID, r.FAMILY, r.MIN_SEVERITY, r.INTEGRATION_NAME
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+        WHERE r.ENABLED
+        ORDER BY r.FAMILY;
+BEGIN
+    FOR rec IN c1 DO
+        r_family := rec.FAMILY;
+        r_minsev := rec.MIN_SEVERITY;
+        r_integration := rec.INTEGRATION_NAME;
+        SELECT LISTAGG('[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140), '\n')
+               WITHIN GROUP (ORDER BY e.RAISED_AT DESC)
+          INTO :message
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+        JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+        WHERE e.STATUS = 'OPEN'
+          AND e.NOTIFIED_AT IS NULL
+          AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+          AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END;
+
+        IF (:message IS NOT NULL AND :message != '') THEN
+            BEGIN
+                CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+                    SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
+                        'OVERWATCH alerts:\n' || LEFT(:message, 3000)),
+                    SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));
+                routes_hit := routes_hit + 1;
+
+                UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                   SET NOTIFIED_AT = CURRENT_TIMESTAMP()
+                  FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+                 WHERE c.RULE_ID = e.RULE_ID
+                   AND e.STATUS = 'OPEN' AND e.NOTIFIED_AT IS NULL
+                   AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+                   AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END;
+                sent_total := sent_total + SQLROWCOUNT;
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                        (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'NotifyWebhook', 'route_send_failed', :emsg,
+                           'integration ' || :r_integration || ' - other routes unaffected',
+                           CURRENT_ROLE();
+            END;
+        END IF;
+    END FOR;
+
+    RETURN 'notified ' || :sent_total || ' event(s) across ' || :routes_hit || ' route(s)';
+END;
+$$;
+
+-- Daily robust-z sweep over every warehouse + service daily-credit series.
+-- Iglewicz-Hoaglin: |0.6745 * (x - median) / MAD| — the same statistic the
+-- in-app anomaly flags use, so chart flags and alerts agree.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ANOMALY_SWEEP()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    zthr FLOAT;
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 3.5) INTO :zthr
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'COST_ANOMALY_SWEEP' AND ENABLED;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH series AS (
+        SELECT 'WAREHOUSE ' || WAREHOUSE_NAME AS SERIES, COMPANY, DAY,
+               SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+        UNION ALL
+        SELECT 'SERVICE ' || SERVICE_TYPE, 'ALL', DAY, SUM(CREDITS_BILLED)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+    ),
+    med AS (
+        SELECT SERIES, MEDIAN(CREDITS) AS MED
+        FROM series GROUP BY 1
+    ),
+    mad AS (
+        SELECT s.SERIES, m.MED, MEDIAN(ABS(s.CREDITS - m.MED)) AS MAD
+        FROM series s JOIN med m ON m.SERIES = s.SERIES
+        GROUP BY 1, 2
+    ),
+    latest AS (
+        SELECT s.SERIES, s.COMPANY, s.DAY, s.CREDITS, m.MED, m.MAD,
+               ABS(0.6745 * (s.CREDITS - m.MED) / NULLIF(m.MAD, 0)) AS ROBUST_Z
+        FROM series s
+        JOIN mad m ON m.SERIES = s.SERIES
+        WHERE s.DAY = (SELECT MAX(DAY) FROM series)
+    )
+    SELECT 'COST_ANOMALY_SWEEP', l.COMPANY,
+           IFF(l.ROBUST_Z >= :zthr * 2, 'HIGH', 'MEDIUM'),
+           l.SERIES || ' spent ' || ROUND(l.CREDITS, 1) || ' credits on ' ||
+               TO_VARCHAR(l.DAY) || ' (z=' || ROUND(l.ROBUST_Z, 1) || ')',
+           'Median ' || ROUND(l.MED, 1) || ' credits/day over the prior 28d. ' ||
+               'Robust z-score ' || ROUND(l.ROBUST_Z, 1) || ' vs threshold ' || :zthr ||
+               '. Investigate: Cost > Spend / Attribution for that day.',
+           l.ROBUST_Z,
+           'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+    FROM latest l
+    WHERE l.MAD > 0 AND l.ROBUST_Z >= :zthr AND l.CREDITS >= 1
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = 'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+      );
+
+    -- Dynamic-table refresh failures (guarded: accounts without the view
+    -- keep the sweep's cost half working).
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(d.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(d.FAILURES >= 5, 'CRITICAL', c.SEVERITY),
+               d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   ': ' || d.FAILURES || ' dynamic-table refresh failure(s) (24h)',
+               'Schema ' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                   ' | last state ' || d.LAST_STATE ||
+                   '. Downstream tables are serving stale data until this refreshes.',
+               d.FAILURES,
+               c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
+                   COUNT_IF(STATE = 'FAILED') AS FAILURES,
+                   MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+            WHERE REFRESH_END_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1, 2, 3
+            HAVING COUNT_IF(STATE = 'FAILED') > 0
+        ) d ON c.RULE_ID = 'PIPE_DT_FAILURES' AND c.ENABLED AND d.FAILURES > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                  '.' || d.NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dynamic_tables_unavailable', 'DT refresh view not readable',
+                   'cost anomaly sweep unaffected', CURRENT_ROLE();
+    END;
+
+    RETURN 'anomaly sweep complete';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ANOMALY_SWEEP
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 40 6 * * * America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_ANOMALY_SWEEP();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ANOMALY_SWEEP RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 12 AS VERSION,
+       'routing + anomaly sweep + remediation log + dynamic-table failure alerts' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V013__user_prefs.sql
+-- ===========================================================================
+-- V013__user_prefs.sql — per-user preferences: saved filter views and a
+-- default landing view. Written by the app as CURRENT_USER(); this is a
+-- convenience store, not a security boundary. Grants for viewer roles are
+-- in roles.sql (re-run it after this migration). Idempotent.
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.USER_PREFS (
+    USER_NAME  VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER(),
+    PREF_KEY   VARCHAR(100)  NOT NULL,   -- 'DEFAULT_VIEW' | 'VIEW:<name>'
+    PREF_VALUE VARCHAR(4000),            -- JSON: {"page", "section", "filters"}
+    UPDATED_AT TIMESTAMP_NTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (USER_NAME, PREF_KEY)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 13 AS VERSION, 'user prefs: saved views + default landing' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V014__lifecycle_hardening.sql
+-- ===========================================================================
+-- V014__lifecycle_hardening.sql — predictive contract breach, fingerprint
+-- drift detection, and fact retention.
+--
+-- 1. COST_CONTRACT_BREACH: SP_ALERT_SCAN v5 (full v4 body carried) projects
+--    contract exhaustion from settings + trailing 30d burn; fires weekly
+--    inside the threshold horizon, CRITICAL inside 14 days.
+-- 2. PERF_FINGERPRINT_DRIFT: SP_ANOMALY_SWEEP v2 (full body carried) adds a
+--    Monday scan of p95 per QUERY_PARAMETERIZED_HASH, 7d vs prior 28d —
+--    regressions with NO change event (complements V010).
+-- 3. SP_PURGE_FACTS + monthly task: settings-driven retention so fact
+--    tables stop growing forever (floors prevent foot-guns). Idempotent.
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'COST_CONTRACT_BREACH' AS RULE_ID, 'COST' AS FAMILY,
+           'Contract projected to exhaust within threshold days' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 30 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+    UNION ALL
+    SELECT 'PERF_FINGERPRINT_DRIFT', 'PERFORMANCE',
+           'Query-family p95 up threshold % (7d vs prior 28d, weekly)',
+           TRUE, 'MEDIUM', 100, 168
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (
+    SELECT * FROM VALUES
+        ('FACT_RETENTION_DAYS_HOURLY', '400'),
+        ('FACT_RETENTION_DAYS_DAILY',  '800'),
+        ('ERROR_LOG_RETENTION_DAYS',   '180')
+    AS s(KEY, VALUE)
+) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    ),
+    candidates AS (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        UNION ALL
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRES_AT, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRES_AT IS NOT NULL
+         AND cr.EXPIRES_AT <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        UNION ALL
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        UNION ALL
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_CONTRACT_BREACH: current contract projected to exhaust within
+        -- threshold days at the trailing 30-day burn rate. Weekly-recurring
+        -- until the contract or the burn changes; CRITICAL inside 14 days.
+        SELECT c.RULE_ID, 'ALL',
+               IFF(p.DAYS_LEFT <= 14, 'CRITICAL', c.SEVERITY),
+               'Contract projected to exhaust in ' || p.DAYS_LEFT || ' day(s) (' ||
+                   TO_VARCHAR(p.EXHAUST_DATE) || ')',
+               'Consumed ' || ROUND(p.CONSUMED, 0) || ' of ' || ROUND(p.TOTAL, 0) ||
+                   ' contracted credits; trailing 30d burn ' || ROUND(p.DAILY_BURN, 1) ||
+                   ' credits/day (straight-line). Scenario planning: Cost > Contract > Renewal planner.',
+               p.DAYS_LEFT,
+               c.RULE_ID || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT TOTAL, CONSUMED, DAILY_BURN,
+                   CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+                   DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+                           CURRENT_DATE()) AS EXHAUST_DATE
+            FROM (
+                SELECT
+                    (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS) AS TOTAL,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= COALESCE(
+                         (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                          FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), CURRENT_DATE())) AS CONSUMED,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+            )
+        ) p ON c.RULE_ID = 'COST_CONTRACT_BREACH'
+           AND p.TOTAL > 0 AND p.DAILY_BURN > 0
+           AND p.DAYS_LEFT BETWEEN 0 AND c.THRESHOLD_NUM
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan v5 complete';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ANOMALY_SWEEP()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    zthr FLOAT;
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 3.5) INTO :zthr
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'COST_ANOMALY_SWEEP' AND ENABLED;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH series AS (
+        SELECT 'WAREHOUSE ' || WAREHOUSE_NAME AS SERIES, COMPANY, DAY,
+               SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+        UNION ALL
+        SELECT 'SERVICE ' || SERVICE_TYPE, 'ALL', DAY, SUM(CREDITS_BILLED)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+    ),
+    med AS (
+        SELECT SERIES, MEDIAN(CREDITS) AS MED
+        FROM series GROUP BY 1
+    ),
+    mad AS (
+        SELECT s.SERIES, m.MED, MEDIAN(ABS(s.CREDITS - m.MED)) AS MAD
+        FROM series s JOIN med m ON m.SERIES = s.SERIES
+        GROUP BY 1, 2
+    ),
+    latest AS (
+        SELECT s.SERIES, s.COMPANY, s.DAY, s.CREDITS, m.MED, m.MAD,
+               ABS(0.6745 * (s.CREDITS - m.MED) / NULLIF(m.MAD, 0)) AS ROBUST_Z
+        FROM series s
+        JOIN mad m ON m.SERIES = s.SERIES
+        WHERE s.DAY = (SELECT MAX(DAY) FROM series)
+    )
+    SELECT 'COST_ANOMALY_SWEEP', l.COMPANY,
+           IFF(l.ROBUST_Z >= :zthr * 2, 'HIGH', 'MEDIUM'),
+           l.SERIES || ' spent ' || ROUND(l.CREDITS, 1) || ' credits on ' ||
+               TO_VARCHAR(l.DAY) || ' (z=' || ROUND(l.ROBUST_Z, 1) || ')',
+           'Median ' || ROUND(l.MED, 1) || ' credits/day over the prior 28d. ' ||
+               'Robust z-score ' || ROUND(l.ROBUST_Z, 1) || ' vs threshold ' || :zthr ||
+               '. Investigate: Cost > Spend / Attribution for that day.',
+           l.ROBUST_Z,
+           'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+    FROM latest l
+    WHERE l.MAD > 0 AND l.ROBUST_Z >= :zthr AND l.CREDITS >= 1
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = 'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+      );
+
+    -- Dynamic-table refresh failures (guarded: accounts without the view
+    -- keep the sweep's cost half working).
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(d.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(d.FAILURES >= 5, 'CRITICAL', c.SEVERITY),
+               d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   ': ' || d.FAILURES || ' dynamic-table refresh failure(s) (24h)',
+               'Schema ' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                   ' | last state ' || d.LAST_STATE ||
+                   '. Downstream tables are serving stale data until this refreshes.',
+               d.FAILURES,
+               c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
+                   COUNT_IF(STATE = 'FAILED') AS FAILURES,
+                   MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+            WHERE REFRESH_END_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1, 2, 3
+            HAVING COUNT_IF(STATE = 'FAILED') > 0
+        ) d ON c.RULE_ID = 'PIPE_DT_FAILURES' AND c.ENABLED AND d.FAILURES > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                  '.' || d.NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dynamic_tables_unavailable', 'DT refresh view not readable',
+                   'cost anomaly sweep unaffected', CURRENT_ROLE();
+    END;
+
+
+    -- PERF_FINGERPRINT_DRIFT (Mondays): p95 per query family, last 7d vs the
+    -- prior 28d — catches regressions that arrive WITHOUT a DDL change
+    -- (data growth, clustering decay, plan changes). Complements the
+    -- change-anchored V010 tracker.
+    IF (DAYOFWEEKISO(CURRENT_DATE()) = 1) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL',
+               IFF(f.P95_RECENT_S >= f.P95_BASE_S * 3, 'HIGH', c.SEVERITY),
+               'Query family p95 ' || f.P95_BASE_S || 's -> ' || f.P95_RECENT_S || 's: ' ||
+                   LEFT(f.SAMPLE_TEXT, 60),
+               'Hash ' || f.QUERY_PARAMETERIZED_HASH || ' | runs ' || f.RUNS_BASE || ' -> ' ||
+                   f.RUNS_RECENT || ' | 7d vs prior 28d, no change event required. ' ||
+                   'Drill: Operations > Queries (heaviest queries).',
+               ROUND(100 * (f.P95_RECENT_S / NULLIF(f.P95_BASE_S, 0) - 1), 1),
+               c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                   TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT QUERY_PARAMETERIZED_HASH,
+                   ANY_VALUE(LEFT(QUERY_TEXT, 80)) AS SAMPLE_TEXT,
+                   COUNT_IF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_RECENT,
+                   COUNT_IF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_BASE,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_RECENT_S,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_BASE_S
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('day', -35, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+            GROUP BY 1
+            HAVING RUNS_RECENT >= 20 AND RUNS_BASE >= 20
+        ) f ON c.RULE_ID = 'PERF_FINGERPRINT_DRIFT' AND c.ENABLED
+           AND f.P95_BASE_S > 0
+           AND f.P95_RECENT_S > f.P95_BASE_S * (1 + c.THRESHOLD_NUM / 100)
+           AND f.P95_RECENT_S >= 10
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    END IF;
+
+    RETURN 'anomaly sweep v2 complete';
+END;
+$$;
+
+-- Retention: facts are TRANSIENT rebuildable telemetry; keeping them forever
+-- just buys storage bills and slower marts. Floors stop a typo from wiping
+-- recent history.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_PURGE_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    hourly_days FLOAT;
+    daily_days FLOAT;
+    err_days FLOAT;
+    total INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'FACT_RETENTION_DAYS_HOURLY', VALUE, NULL))), 400),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'FACT_RETENTION_DAYS_DAILY', VALUE, NULL))), 800),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'ERROR_LOG_RETENTION_DAYS', VALUE, NULL))), 180)
+      INTO :hourly_days, :daily_days, :err_days
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    hourly_days := GREATEST(hourly_days, 90);
+    daily_days := GREATEST(daily_days, 180);
+    err_days := GREATEST(err_days, 30);
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS < DATEADD('day', -1 * :hourly_days, CURRENT_TIMESTAMP());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+     WHERE LOGGED_AT < DATEADD('day', -1 * :err_days, CURRENT_TIMESTAMP());
+    total := total + SQLROWCOUNT;
+
+    RETURN 'purged ' || :total || ' row(s)';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PURGE_FACTS
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 20 5 1 * * America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_PURGE_FACTS();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PURGE_FACTS RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 14 AS VERSION,
+       'lifecycle hardening: contract breach projection, fingerprint drift, fact retention' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V015__pilot_and_backups.sql
+-- ===========================================================================
+-- V015__pilot_and_backups.sql — Dynamic Table pilot + weekly operator backups.
+--
+-- 1. MART_SPEND_ROLLUP_DT: one deliberately low-risk Dynamic Table so the
+--    MERGE-vs-DT question is answered with measured refresh cost (see it in
+--    Operations > Pipeline SLA's DT health panel and METERING service types)
+--    instead of argument. Sources OUR fact (DTs cannot source SNOWFLAKE
+--    share views — no change tracking there). Additive: nothing reads it yet.
+-- 2. SP_BACKUP_OPERATOR_TABLES + weekly task: zero-copy clones of every
+--    operator-editable table to <NAME>_BAK_LAST. Time Travel covers the
+--    fine grain; the weekly clone survives retention windows. Idempotent.
+
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY SET CHANGE_TRACKING = TRUE;
+
+CREATE DYNAMIC TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_SPEND_ROLLUP_DT
+    TARGET_LAG = '6 hours'
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AS
+SELECT DATE_TRUNC('month', DAY)::DATE AS MONTH,
+       SERVICE_TYPE,
+       SUM(CREDITS_USED) AS CREDITS_USED,
+       SUM(CREDITS_BILLED) AS CREDITS_BILLED,
+       COUNT(DISTINCT DAY) AS DAYS_LOADED
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+GROUP BY 1, 2;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_BACKUP_OPERATOR_TABLES()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    tables ARRAY DEFAULT ['SETTINGS', 'COMPANY_SCOPE', 'ALERT_CONFIG', 'ALERT_EVENTS',
+                          'ALERT_AUDIT', 'ACTION_QUEUE', 'SAVINGS_LEDGER', 'DEPARTMENT_MAP',
+                          'ALERT_ROUTES', 'REMEDIATION_LOG', 'USER_PREFS',
+                          'OBJECT_CHANGE_REGISTRY', 'PIPELINE_SLA_CONFIG', 'DAILY_DIGEST'];
+    tname VARCHAR;
+    emsg VARCHAR;
+    done INT DEFAULT 0;
+    i INT;
+BEGIN
+    FOR i IN 0 TO ARRAY_SIZE(:tables) - 1 DO
+        tname := GET(:tables, i)::VARCHAR;
+        BEGIN
+            EXECUTE IMMEDIATE 'CREATE OR REPLACE TABLE DBA_MAINT_DB.OVERWATCH.' || :tname ||
+                              '_BAK_LAST CLONE DBA_MAINT_DB.OVERWATCH.' || :tname;
+            done := done + 1;
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                    (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'BackupOperatorTables', 'clone_failed', :emsg,
+                       'table ' || :tname || ' (missing on this install is fine)', CURRENT_ROLE();
+        END;
+    END FOR;
+    RETURN 'cloned ' || :done || ' operator table(s) to *_BAK_LAST';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 40 5 * * 0 America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_BACKUP_OPERATOR_TABLES();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_BACKUP_OPERATOR RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 15 AS VERSION,
+       'DT pilot (spend rollup) + weekly operator-table clone backups' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V016__closing_loops.sql
+-- ===========================================================================
+-- V016__closing_loops.sql — pre-explained anomalies, department budgets,
+-- org rollup + volume-drop rules, self-monitoring canary, usage analytics.
+-- Scan v6 and sweep v3 carry their full prior bodies (regression-tested).
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS (
+    DEPARTMENT VARCHAR(120) NOT NULL PRIMARY KEY,
+    MONTHLY_BUDGET_USD NUMBER(18,2) NOT NULL,
+    UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    UPDATED_BY VARCHAR(200) NOT NULL DEFAULT CURRENT_USER()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.APP_USAGE (
+    AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    USER_NAME VARCHAR(200) NOT NULL DEFAULT CURRENT_USER(),
+    PAGE VARCHAR(80),
+    SECTION VARCHAR(80)
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS (
+    RUN_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    CHECK_NAME VARCHAR(200) NOT NULL,
+    STATUS VARCHAR(10) NOT NULL,
+    ERROR VARCHAR(500)
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'COST_DEPT_BUDGET_PACE' AS RULE_ID, 'COST' AS FAMILY,
+           'Department MTD spend over budget pace by threshold %' AS NAME,
+           TRUE AS ENABLED, 'MEDIUM' AS SEVERITY, 10 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+    UNION ALL
+    SELECT 'COST_ORG_ACCOUNT_CREEP', 'COST',
+           'Org account currency spend up threshold % week-over-week', TRUE, 'MEDIUM', 50, 168
+    UNION ALL
+    SELECT 'PIPE_VOLUME_DROP', 'PIPELINE',
+           'Table rows-added down threshold % vs prior-7d average', TRUE, 'HIGH', 50, 24
+    UNION ALL
+    SELECT 'OPS_CANARY_FAIL', 'PLATFORM',
+           'Weekly source-canary found failing dependency views', TRUE, 'HIGH', 0, 168
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH cfg AS (
+        SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+    ),
+    mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    ),
+    candidates AS (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        UNION ALL
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        UNION ALL
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRES_AT, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRES_AT IS NOT NULL
+         AND cr.EXPIRES_AT <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        UNION ALL
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        UNION ALL
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_CONTRACT_BREACH: current contract projected to exhaust within
+        -- threshold days at the trailing 30-day burn rate. Weekly-recurring
+        -- until the contract or the burn changes; CRITICAL inside 14 days.
+        SELECT c.RULE_ID, 'ALL',
+               IFF(p.DAYS_LEFT <= 14, 'CRITICAL', c.SEVERITY),
+               'Contract projected to exhaust in ' || p.DAYS_LEFT || ' day(s) (' ||
+                   TO_VARCHAR(p.EXHAUST_DATE) || ')',
+               'Consumed ' || ROUND(p.CONSUMED, 0) || ' of ' || ROUND(p.TOTAL, 0) ||
+                   ' contracted credits; trailing 30d burn ' || ROUND(p.DAILY_BURN, 1) ||
+                   ' credits/day (straight-line). Scenario planning: Cost > Contract > Renewal planner.',
+               p.DAYS_LEFT,
+               c.RULE_ID || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT TOTAL, CONSUMED, DAILY_BURN,
+                   CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+                   DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+                           CURRENT_DATE()) AS EXHAUST_DATE
+            FROM (
+                SELECT
+                    (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS) AS TOTAL,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= COALESCE(
+                         (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                          FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), CURRENT_DATE())) AS CONSUMED,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+            )
+        ) p ON c.RULE_ID = 'COST_CONTRACT_BREACH'
+           AND p.TOTAL > 0 AND p.DAILY_BURN > 0
+           AND p.DAYS_LEFT BETWEEN 0 AND c.THRESHOLD_NUM
+
+        UNION ALL
+        -- COST_DEPT_BUDGET_PACE: department MTD spend ahead of its monthly
+        -- budget pace (threshold = % over pace). Budgets live in
+        -- DEPT_BUDGETS; spend = the department's warehouses (exact billing).
+        SELECT c.RULE_ID, 'ALL',
+               IFF(d.OVER_PCT >= c.THRESHOLD_NUM * 3, 'HIGH', c.SEVERITY),
+               d.DEPARTMENT || ' is ' || ROUND(d.OVER_PCT, 0) || '% over budget pace (MTD ' ||
+                   ROUND(d.MTD_USD, 0) || ' USD of ' || ROUND(d.BUDGET_USD, 0) || ')',
+               'Month is ' || ROUND(d.TIME_SHARE * 100, 0) || '% elapsed. Owner lens: ' ||
+                   'Cost > Chargeback (warehouses are exact; roles are allocated).',
+               d.OVER_PCT,
+               c.RULE_ID || '|' || d.DEPARTMENT || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT DEPARTMENT, BUDGET_USD, MTD_USD, TIME_SHARE,
+                   (MTD_USD / NULLIF(BUDGET_USD * TIME_SHARE, 0) - 1) * 100 AS OVER_PCT
+            FROM (
+                SELECT b.DEPARTMENT, b.MONTHLY_BUDGET_USD AS BUDGET_USD,
+                       COALESCE(SUM(f.CREDITS_TOTAL), 0) * :credit_price AS MTD_USD,
+                       DAY(CURRENT_DATE()) / DAY(LAST_DAY(CURRENT_DATE())) AS TIME_SHARE
+                FROM DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS b
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP m
+                  ON m.MAP_TYPE = 'WAREHOUSE' AND m.DEPARTMENT = b.DEPARTMENT
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+                  ON f.WAREHOUSE_NAME = UPPER(m.NAME)
+                 AND f.DAY >= DATE_TRUNC('month', CURRENT_DATE())
+                WHERE b.MONTHLY_BUDGET_USD > 0
+                GROUP BY 1, 2
+            )
+        ) d ON c.RULE_ID = 'COST_DEPT_BUDGET_PACE'
+           AND d.OVER_PCT > c.THRESHOLD_NUM AND d.MTD_USD >= 50
+    )
+    SELECT c.RULE_ID, c.COMPANY, c.SEVERITY, c.TITLE, c.DETAIL, c.METRIC_VALUE, c.DEDUPE_KEY
+    FROM candidates c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e WHERE e.DEDUPE_KEY = c.DEDUPE_KEY
+    );
+
+    RETURN 'alert scan v6 complete';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ANOMALY_SWEEP()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    zthr FLOAT;
+    ai_model VARCHAR;
+    ev_id VARCHAR;
+    ev_title VARCHAR;
+    day_s VARCHAR;
+    series_s VARCHAR;
+    wh_s VARCHAR;
+    evidence VARCHAR;
+    ai_prompt VARCHAR;
+    ai_resp VARCHAR;
+    c_new CURSOR FOR
+        SELECT EVENT_ID, TITLE, DEDUPE_KEY
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        WHERE RULE_ID = 'COST_ANOMALY_SWEEP'
+          AND RAISED_AT >= DATEADD('minute', -15, CURRENT_TIMESTAMP())
+          AND DETAIL NOT LIKE '%| AI:%'
+        LIMIT 5;
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 3.5) INTO :zthr
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'COST_ANOMALY_SWEEP' AND ENABLED;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH series AS (
+        SELECT 'WAREHOUSE ' || WAREHOUSE_NAME AS SERIES, COMPANY, DAY,
+               SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+        UNION ALL
+        SELECT 'SERVICE ' || SERVICE_TYPE, 'ALL', DAY, SUM(CREDITS_BILLED)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+    ),
+    med AS (
+        SELECT SERIES, MEDIAN(CREDITS) AS MED
+        FROM series GROUP BY 1
+    ),
+    mad AS (
+        SELECT s.SERIES, m.MED, MEDIAN(ABS(s.CREDITS - m.MED)) AS MAD
+        FROM series s JOIN med m ON m.SERIES = s.SERIES
+        GROUP BY 1, 2
+    ),
+    latest AS (
+        SELECT s.SERIES, s.COMPANY, s.DAY, s.CREDITS, m.MED, m.MAD,
+               ABS(0.6745 * (s.CREDITS - m.MED) / NULLIF(m.MAD, 0)) AS ROBUST_Z
+        FROM series s
+        JOIN mad m ON m.SERIES = s.SERIES
+        WHERE s.DAY = (SELECT MAX(DAY) FROM series)
+    )
+    SELECT 'COST_ANOMALY_SWEEP', l.COMPANY,
+           IFF(l.ROBUST_Z >= :zthr * 2, 'HIGH', 'MEDIUM'),
+           l.SERIES || ' spent ' || ROUND(l.CREDITS, 1) || ' credits on ' ||
+               TO_VARCHAR(l.DAY) || ' (z=' || ROUND(l.ROBUST_Z, 1) || ')',
+           'Median ' || ROUND(l.MED, 1) || ' credits/day over the prior 28d. ' ||
+               'Robust z-score ' || ROUND(l.ROBUST_Z, 1) || ' vs threshold ' || :zthr ||
+               '. Investigate: Cost > Spend / Attribution for that day.',
+           l.ROBUST_Z,
+           'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+    FROM latest l
+    WHERE l.MAD > 0 AND l.ROBUST_Z >= :zthr AND l.CREDITS >= 1
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = 'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+      );
+
+    -- Dynamic-table refresh failures (guarded: accounts without the view
+    -- keep the sweep's cost half working).
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(d.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(d.FAILURES >= 5, 'CRITICAL', c.SEVERITY),
+               d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   ': ' || d.FAILURES || ' dynamic-table refresh failure(s) (24h)',
+               'Schema ' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                   ' | last state ' || d.LAST_STATE ||
+                   '. Downstream tables are serving stale data until this refreshes.',
+               d.FAILURES,
+               c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
+                   COUNT_IF(STATE = 'FAILED') AS FAILURES,
+                   MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+            WHERE REFRESH_END_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1, 2, 3
+            HAVING COUNT_IF(STATE = 'FAILED') > 0
+        ) d ON c.RULE_ID = 'PIPE_DT_FAILURES' AND c.ENABLED AND d.FAILURES > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                  '.' || d.NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dynamic_tables_unavailable', 'DT refresh view not readable',
+                   'cost anomaly sweep unaffected', CURRENT_ROLE();
+    END;
+
+
+    -- PERF_FINGERPRINT_DRIFT (Mondays): p95 per query family, last 7d vs the
+    -- prior 28d — catches regressions that arrive WITHOUT a DDL change
+    -- (data growth, clustering decay, plan changes). Complements the
+    -- change-anchored V010 tracker.
+    IF (DAYOFWEEKISO(CURRENT_DATE()) = 1) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL',
+               IFF(f.P95_RECENT_S >= f.P95_BASE_S * 3, 'HIGH', c.SEVERITY),
+               'Query family p95 ' || f.P95_BASE_S || 's -> ' || f.P95_RECENT_S || 's: ' ||
+                   LEFT(f.SAMPLE_TEXT, 60),
+               'Hash ' || f.QUERY_PARAMETERIZED_HASH || ' | runs ' || f.RUNS_BASE || ' -> ' ||
+                   f.RUNS_RECENT || ' | 7d vs prior 28d, no change event required. ' ||
+                   'Drill: Operations > Queries (heaviest queries).',
+               ROUND(100 * (f.P95_RECENT_S / NULLIF(f.P95_BASE_S, 0) - 1), 1),
+               c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                   TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT QUERY_PARAMETERIZED_HASH,
+                   ANY_VALUE(LEFT(QUERY_TEXT, 80)) AS SAMPLE_TEXT,
+                   COUNT_IF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_RECENT,
+                   COUNT_IF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_BASE,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_RECENT_S,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_BASE_S
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('day', -35, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+            GROUP BY 1
+            HAVING RUNS_RECENT >= 20 AND RUNS_BASE >= 20
+        ) f ON c.RULE_ID = 'PERF_FINGERPRINT_DRIFT' AND c.ENABLED
+           AND f.P95_BASE_S > 0
+           AND f.P95_RECENT_S > f.P95_BASE_S * (1 + c.THRESHOLD_NUM / 100)
+           AND f.P95_RECENT_S >= 10
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    END IF;
+
+
+    -- COST_ORG_ACCOUNT_CREEP (guarded): any org account's currency spend up
+    -- threshold% week-over-week — a sibling account can't surprise you.
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               o.ACCOUNT_NAME || ' org spend up ' || ROUND(o.PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(o.CUR, 0) || ' vs prior ' || ROUND(o.PRV, 0) || ' ' || o.CCY ||
+                   '. Breakdown: Admin > Org spend.',
+               o.PCT,
+               c.RULE_ID || '|' || o.ACCOUNT_NAME || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT ACCOUNT_NAME, CCY, CUR, PRV, (CUR / NULLIF(PRV, 0) - 1) * 100 AS PCT
+            FROM (
+                SELECT ACCOUNT_NAME, MAX(CURRENCY) AS CCY,
+                       SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), USAGE_IN_CURRENCY, 0)) AS CUR,
+                       SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), USAGE_IN_CURRENCY, 0)) AS PRV
+                FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+                WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+                GROUP BY 1
+            )
+        ) o ON c.RULE_ID = 'COST_ORG_ACCOUNT_CREEP' AND c.ENABLED
+           AND o.PCT > c.THRESHOLD_NUM AND o.CUR >= 100
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || o.ACCOUNT_NAME || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'org_usage_unavailable', 'ORGANIZATION_USAGE not readable',
+                   'org creep check skipped', CURRENT_ROLE();
+    END;
+
+    -- PIPE_VOLUME_DROP (guarded): yesterday's rows-added collapsed vs the
+    -- prior-7-day average on tables that normally move real volume.
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(v.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               v.DB || '.' || v.SCH || '.' || v.TBL || ' volume down ' || ROUND(v.DROP_PCT, 0) ||
+                   '% (' || v.Y_ROWS || ' rows vs ~' || ROUND(v.AVG_ROWS, 0) || '/day)',
+               'Yesterday vs prior-7d average. Upstream feed, failed COPY, or intentional? ' ||
+                   'Check Operations > Pipeline SLA.',
+               v.DROP_PCT,
+               c.RULE_ID || '|' || v.DB || '.' || v.SCH || '.' || v.TBL || '|' ||
+                   TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DB, SCH, TBL, Y_ROWS, AVG_ROWS,
+                   (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 AS DROP_PCT
+            FROM (
+                SELECT d.DATABASE_NAME AS DB, d.SCHEMA_NAME AS SCH, d.TABLE_NAME AS TBL,
+                       SUM(IFF(DATE(d.START_TIME) = DATEADD('day', -1, CURRENT_DATE()),
+                               d.ROWS_ADDED, 0)) AS Y_ROWS,
+                       SUM(IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE()),
+                               d.ROWS_ADDED, 0)) / 7 AS AVG_ROWS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY d
+                WHERE d.START_TIME >= DATEADD('day', -8, CURRENT_DATE())
+                  AND d.START_TIME < CURRENT_DATE()
+                GROUP BY 1, 2, 3
+                HAVING AVG_ROWS >= 1000
+            )
+        ) v ON c.RULE_ID = 'PIPE_VOLUME_DROP' AND c.ENABLED
+           AND v.DROP_PCT > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || v.DB || '.' || v.SCH || '.' || v.TBL ||
+                  '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dml_history_unavailable', 'TABLE_DML_HISTORY not readable',
+                   'volume-drop check skipped', CURRENT_ROLE();
+    END;
+
+    -- Pre-explain fresh anomalies (guarded): grounded Cortex hypothesis is
+    -- appended to the event DETAIL so the webhook message arrives explained.
+    -- Capped at 5 events/run to bound AI spend.
+    BEGIN
+        SELECT COALESCE(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)), 'llama3.1-8b')
+          INTO :ai_model FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+        FOR e IN c_new DO
+            ev_id := e.EVENT_ID;
+            ev_title := e.TITLE;
+            series_s := SPLIT_PART(e.DEDUPE_KEY, '|', 2);
+            day_s := SPLIT_PART(e.DEDUPE_KEY, '|', 3);
+            wh_s := IFF(series_s LIKE 'WAREHOUSE %', LTRIM(SUBSTR(series_s, 10)), '');
+            SELECT LISTAGG(SAMPLE_TEXT || ' day=' || H_DAY || 'h prior_avg=' || H_PRI || 'h', '; ')
+              INTO :evidence
+            FROM (
+                SELECT ANY_VALUE(LEFT(QUERY_TEXT, 60)) AS SAMPLE_TEXT,
+                       ROUND(SUM(IFF(DATE(START_TIME) = TO_DATE(:day_s), TOTAL_ELAPSED_TIME, 0)) / 3600000, 2) AS H_DAY,
+                       ROUND(SUM(IFF(DATE(START_TIME) < TO_DATE(:day_s), TOTAL_ELAPSED_TIME, 0)) / 7 / 3600000, 2) AS H_PRI
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -7, TO_DATE(:day_s))
+                  AND START_TIME < DATEADD('day', 1, TO_DATE(:day_s))
+                  AND (:wh_s = '' OR WAREHOUSE_NAME = :wh_s)
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY QUERY_PARAMETERIZED_HASH
+                ORDER BY H_DAY DESC
+                LIMIT 10
+            );
+            ai_prompt := 'You are a Snowflake cost analyst. ALERT: ' || :ev_title ||
+                         '. EVIDENCE (top query families, elapsed hours on the day vs prior-7d avg): ' ||
+                         COALESCE(:evidence, 'none') ||
+                         '. Using ONLY this evidence, name the 1-2 most likely drivers with their ' ||
+                         'numbers, or say evidence is inconclusive. Max 80 words. Never invent data.';
+            ai_resp := SNOWFLAKE.CORTEX.COMPLETE(:ai_model, :ai_prompt);
+            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+               SET DETAIL = LEFT(COALESCE(DETAIL, '') || ' | AI: ' || :ai_resp, 2000)
+             WHERE EVENT_ID = :ev_id;
+        END FOR;
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'cortex_pre_explain_unavailable',
+                   'CORTEX.COMPLETE failed - events remain unexplained (drawer AI still works)',
+                   'model or grant issue', CURRENT_ROLE();
+    END;
+
+    RETURN 'anomaly sweep v3 complete';
+END;
+$$;
+
+-- Self-monitoring: weekly 1-row probe of every source view the app depends
+-- on. Results persist; failures raise OPS_CANARY_FAIL. The Admin canary
+-- remains the deep per-builder check; this one runs without humans.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    checks ARRAY DEFAULT [
+        'SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS',
+        'SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.USERS',
+        'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS',
+        'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES',
+        'SNOWFLAKE.ACCOUNT_USAGE.ROLES',
+        'SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS',
+        'SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS',
+        'SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY',
+        'DBA_MAINT_DB.OVERWATCH.SETTINGS',
+        'DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY',
+        'DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD',
+        'DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG'
+    ];
+    cname VARCHAR;
+    emsg VARCHAR;
+    fails INT DEFAULT 0;
+    i INT;
+BEGIN
+    FOR i IN 0 TO ARRAY_SIZE(:checks) - 1 DO
+        cname := GET(:checks, i)::VARCHAR;
+        BEGIN
+            EXECUTE IMMEDIATE 'SELECT 1 FROM ' || :cname || ' LIMIT 1';
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS (CHECK_NAME, STATUS)
+            SELECT :cname, 'PASS';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                fails := fails + 1;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS (CHECK_NAME, STATUS, ERROR)
+                SELECT :cname, 'FAIL', LEFT(:emsg, 500);
+        END;
+    END FOR;
+
+    IF (fails > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               :fails || ' source dependency check(s) failing',
+               'CANARY_RESULTS has the errors. Likely ACCOUNT_USAGE column drift after a ' ||
+                   'Snowflake release, or a revoked grant. Run the Admin canary for the ' ||
+                   'per-builder picture.',
+               :fails,
+               c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        WHERE c.RULE_ID = 'OPS_CANARY_FAIL' AND c.ENABLED
+          AND NOT EXISTS (
+              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+              WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+          );
+    END IF;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS
+     WHERE RUN_AT < DATEADD('day', -180, CURRENT_TIMESTAMP());
+
+    RETURN 'sentinel: ' || :fails || ' failure(s)';
+END;
+$$;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CANARY_SENTINEL
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 30 5 * * 1 America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CANARY_SENTINEL RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 16 AS VERSION,
+       'closing loops: pre-explained anomalies, dept budgets, org creep, volume drop, canary sentinel, app usage' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V017__hardening_v7.sql
+-- ===========================================================================
+-- V017__hardening_v7.sql — scan decomposition, deploy stage, render SLA,
+-- version guard, usage retention.
+--
+-- Opens with the version guard this migration also inaugurates: every
+-- future migration verifies its predecessor ran. Then defuses the review's
+-- 'ticking bomb': SP_ALERT_SCAN v7 runs every rule block in isolation.
+
+-- 0) Version guard: V016 must be applied first.
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20017, 'BLOCKED: SCHEMA_VERSION < 16 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 16) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok: found version ' || v;
+END;
+$$;
+
+-- 1) Deploy stage: the app's files live here (snowflake.yml pins deploys).
+CREATE STAGE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE
+    DIRECTORY = (ENABLE = TRUE)
+    COMMENT = 'Streamlit-in-Snowflake app files (ROOT_LOCATION for OVERWATCH_APP)';
+
+-- 2) New platform rules + usage-retention setting + render-ms column.
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'OPS_SCAN_DEGRADED' AS RULE_ID, 'PLATFORM' AS FAMILY,
+           'One or more alert rule blocks failed in the last scan' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 0 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+    UNION ALL
+    SELECT 'OPS_SLOW_RENDER', 'PLATFORM',
+           'Page p95 first paint above threshold seconds (7d)', TRUE, 'MEDIUM', 5, 168
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (SELECT 'APP_USAGE_RETENTION_DAYS' AS KEY, '365' AS VALUE) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_USAGE ADD COLUMN IF NOT EXISTS RENDER_MS NUMBER(10,0);
+
+-- 3) The decomposed scan.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+-- v7: every rule block runs in its OWN isolated INSERT with per-block
+-- exception capture. One broken rule (revoked view, bad division, drift)
+-- logs and increments a counter instead of silently killing ALL alerting —
+-- the review's 'ticking bomb' finding, defused. Dedupe semantics unchanged.
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+    emsg VARCHAR;
+    fails INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    -- [01] COST_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [02] COST_WH_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_WH_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [03] PERF_QUERY_FAIL_PCT
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUERY_FAIL_PCT - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [04] PERF_QUEUED_MINUTES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUEUED_MINUTES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [05] PERF_SPILL_GB
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_SPILL_GB - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [06] PIPE_TASK_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_TASK_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [07] SEC_FAILED_LOGINS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_FAILED_LOGINS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [08] COST_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [09] COST_FORECAST_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_FORECAST_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [10] SEC_CRED_EXPIRY
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRES_AT < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRES_AT, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRES_AT, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRES_AT),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRES_AT IS NOT NULL
+         AND cr.EXPIRES_AT <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [11] COST_CLOUD_SVC_RATIO
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CLOUD_SVC_RATIO - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [12] COST_STORAGE_SURGE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_STORAGE_SURGE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [13] COST_SERVERLESS_CREEP
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_SERVERLESS_CREEP - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [14] PIPE_COPY_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_COPY_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [15] SEC_BREAK_GLASS_USE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_BREAK_GLASS_USE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [16] COST_CONTRACT_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CONTRACT_BREACH: current contract projected to exhaust within
+        -- threshold days at the trailing 30-day burn rate. Weekly-recurring
+        -- until the contract or the burn changes; CRITICAL inside 14 days.
+        SELECT c.RULE_ID, 'ALL',
+               IFF(p.DAYS_LEFT <= 14, 'CRITICAL', c.SEVERITY),
+               'Contract projected to exhaust in ' || p.DAYS_LEFT || ' day(s) (' ||
+                   TO_VARCHAR(p.EXHAUST_DATE) || ')',
+               'Consumed ' || ROUND(p.CONSUMED, 0) || ' of ' || ROUND(p.TOTAL, 0) ||
+                   ' contracted credits; trailing 30d burn ' || ROUND(p.DAILY_BURN, 1) ||
+                   ' credits/day (straight-line). Scenario planning: Cost > Contract > Renewal planner.',
+               p.DAYS_LEFT,
+               c.RULE_ID || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT TOTAL, CONSUMED, DAILY_BURN,
+                   CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+                   DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+                           CURRENT_DATE()) AS EXHAUST_DATE
+            FROM (
+                SELECT
+                    (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS) AS TOTAL,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= COALESCE(
+                         (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                          FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), CURRENT_DATE())) AS CONSUMED,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+            )
+        ) p ON c.RULE_ID = 'COST_CONTRACT_BREACH'
+           AND p.TOTAL > 0 AND p.DAILY_BURN > 0
+           AND p.DAYS_LEFT BETWEEN 0 AND c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CONTRACT_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [17] COST_DEPT_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_DEPT_BUDGET_PACE: department MTD spend ahead of its monthly
+        -- budget pace (threshold = % over pace). Budgets live in
+        -- DEPT_BUDGETS; spend = the department's warehouses (exact billing).
+        SELECT c.RULE_ID, 'ALL',
+               IFF(d.OVER_PCT >= c.THRESHOLD_NUM * 3, 'HIGH', c.SEVERITY),
+               d.DEPARTMENT || ' is ' || ROUND(d.OVER_PCT, 0) || '% over budget pace (MTD ' ||
+                   ROUND(d.MTD_USD, 0) || ' USD of ' || ROUND(d.BUDGET_USD, 0) || ')',
+               'Month is ' || ROUND(d.TIME_SHARE * 100, 0) || '% elapsed. Owner lens: ' ||
+                   'Cost > Chargeback (warehouses are exact; roles are allocated).',
+               d.OVER_PCT,
+               c.RULE_ID || '|' || d.DEPARTMENT || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT DEPARTMENT, BUDGET_USD, MTD_USD, TIME_SHARE,
+                   (MTD_USD / NULLIF(BUDGET_USD * TIME_SHARE, 0) - 1) * 100 AS OVER_PCT
+            FROM (
+                SELECT b.DEPARTMENT, b.MONTHLY_BUDGET_USD AS BUDGET_USD,
+                       COALESCE(SUM(f.CREDITS_TOTAL), 0) * :credit_price AS MTD_USD,
+                       DAY(CURRENT_DATE()) / DAY(LAST_DAY(CURRENT_DATE())) AS TIME_SHARE
+                FROM DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS b
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP m
+                  ON m.MAP_TYPE = 'WAREHOUSE' AND m.DEPARTMENT = b.DEPARTMENT
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+                  ON f.WAREHOUSE_NAME = UPPER(m.NAME)
+                 AND f.DAY >= DATE_TRUNC('month', CURRENT_DATE())
+                WHERE b.MONTHLY_BUDGET_USD > 0
+                GROUP BY 1, 2
+            )
+        ) d ON c.RULE_ID = 'COST_DEPT_BUDGET_PACE'
+           AND d.OVER_PCT > c.THRESHOLD_NUM AND d.MTD_USD >= 50
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DEPT_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+
+    -- Self-alert when any block failed: the scan reports its own degradation.
+    IF (fails > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               :fails || ' of 17 alert rule block(s) failed this run',
+               'APP_ERROR_LOG has the SQL errors (rule_block_failed). The other rules ' ||
+                   'kept firing - that is the point of the v7 decomposition.',
+               :fails,
+               c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        WHERE c.RULE_ID = 'OPS_SCAN_DEGRADED' AND c.ENABLED
+          AND NOT EXISTS (
+              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+              WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+          );
+    END IF;
+
+    RETURN 'alert scan v7 complete: ' || (17 - :fails) || '/17 rule blocks ok';
+END;
+$$;
+
+-- 4) Sentinel v2 (adds the render-time SLA check).
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CANARY_SENTINEL()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    checks ARRAY DEFAULT [
+        'SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS',
+        'SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.USERS',
+        'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS',
+        'SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES',
+        'SNOWFLAKE.ACCOUNT_USAGE.ROLES',
+        'SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS',
+        'SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS',
+        'SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY',
+        'SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY',
+        'DBA_MAINT_DB.OVERWATCH.SETTINGS',
+        'DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY',
+        'DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD',
+        'DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG'
+    ];
+    cname VARCHAR;
+    emsg VARCHAR;
+    fails INT DEFAULT 0;
+    i INT;
+BEGIN
+    FOR i IN 0 TO ARRAY_SIZE(:checks) - 1 DO
+        cname := GET(:checks, i)::VARCHAR;
+        BEGIN
+            EXECUTE IMMEDIATE 'SELECT 1 FROM ' || :cname || ' LIMIT 1';
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS (CHECK_NAME, STATUS)
+            SELECT :cname, 'PASS';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                fails := fails + 1;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS (CHECK_NAME, STATUS, ERROR)
+                SELECT :cname, 'FAIL', LEFT(:emsg, 500);
+        END;
+    END FOR;
+
+    IF (fails > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               :fails || ' source dependency check(s) failing',
+               'CANARY_RESULTS has the errors. Likely ACCOUNT_USAGE column drift after a ' ||
+                   'Snowflake release, or a revoked grant. Run the Admin canary for the ' ||
+                   'per-builder picture.',
+               :fails,
+               c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        WHERE c.RULE_ID = 'OPS_CANARY_FAIL' AND c.ENABLED
+          AND NOT EXISTS (
+              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+              WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+          );
+    END IF;
+
+
+    -- Render-time SLA (guarded): p95 first-paint per page from APP_USAGE.
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               r.PAGE || ' p95 first paint ' || r.P95_S || 's (7d, n=' || r.N || ')',
+               'Persisted first-paint times (APP_USAGE.RENDER_MS). Admin > Performance ' ||
+                   'shows the slow statement families; lazy sections and run_batch are the levers.',
+               r.P95_S,
+               c.RULE_ID || '|' || r.PAGE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT PAGE, ROUND(APPROX_PERCENTILE(RENDER_MS, 0.95) / 1000, 1) AS P95_S,
+                   COUNT(*) AS N
+            FROM DBA_MAINT_DB.OVERWATCH.APP_USAGE
+            WHERE AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+              AND RENDER_MS IS NOT NULL
+            GROUP BY 1
+            HAVING COUNT(*) >= 20
+        ) r ON c.RULE_ID = 'OPS_SLOW_RENDER' AND c.ENABLED AND r.P95_S > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || r.PAGE || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'CanarySentinel', 'render_check_unavailable',
+                   'APP_USAGE.RENDER_MS not readable', 'source probes unaffected', CURRENT_ROLE();
+    END;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.CANARY_RESULTS
+     WHERE RUN_AT < DATEADD('day', -180, CURRENT_TIMESTAMP());
+
+    RETURN 'sentinel v2: ' || :fails || ' failure(s)';
+END;
+$$;
+
+-- 5) Purge v2 (adds APP_USAGE retention).
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_PURGE_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    hourly_days FLOAT;
+    daily_days FLOAT;
+    err_days FLOAT;
+    usage_days FLOAT;
+    total INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'FACT_RETENTION_DAYS_HOURLY', VALUE, NULL))), 400),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'FACT_RETENTION_DAYS_DAILY', VALUE, NULL))), 800),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'ERROR_LOG_RETENTION_DAYS', VALUE, NULL))), 180),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'APP_USAGE_RETENTION_DAYS', VALUE, NULL))), 365)
+      INTO :hourly_days, :daily_days, :err_days, :usage_days
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    hourly_days := GREATEST(hourly_days, 90);
+    daily_days := GREATEST(daily_days, 180);
+    err_days := GREATEST(err_days, 30);
+    usage_days := GREATEST(usage_days, 90);
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS < DATEADD('day', -1 * :hourly_days, CURRENT_TIMESTAMP());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+     WHERE DAY < DATEADD('day', -1 * :daily_days, CURRENT_DATE());
+    total := total + SQLROWCOUNT;
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+     WHERE LOGGED_AT < DATEADD('day', -1 * :err_days, CURRENT_TIMESTAMP());
+    total := total + SQLROWCOUNT;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.APP_USAGE
+     WHERE AT < DATEADD('day', -1 * :usage_days, CURRENT_TIMESTAMP());
+    total := total + SQLROWCOUNT;
+
+    RETURN 'purged ' || :total || ' row(s)';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 17 AS VERSION,
+       'hardening: scan v7 per-rule isolation, deploy stage, render SLA, version guard, usage retention' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V018__delivery_first_class.sql
+-- ===========================================================================
+-- V018__delivery_first_class.sql — alert delivery joins the numbered chain.
+--
+-- Three review rounds read the opt-in webhook file as 'detection without
+-- delivery'. The wiring always existed; this migration makes it impossible
+-- to misread: the notify task is created here (chained AFTER the scan),
+-- auto-RESUMED when the integration already exists, and the morning digest
+-- gains a guarded send. The only step that can never ship in git remains
+-- creating the NOTIFICATION INTEGRATION itself (it holds the webhook
+-- secret) — see snowflake/webhook_delivery.sql for that one-time setup.
+
+-- 0) Version guard.
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20018, 'BLOCKED: SCHEMA_VERSION < 17 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 17) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok: found version ' || v;
+END;
+$$;
+
+-- 1) Notify task in-chain (idempotent; sender proc ships in V012).
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_ALERT_SCAN
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK();
+
+-- 2) Auto-resume delivery IF the integration exists; no-op otherwise.
+EXECUTE IMMEDIATE $$
+DECLARE
+    n INT DEFAULT 0;
+BEGIN
+    SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH_WEBHOOK';
+    SELECT COUNT(*) INTO :n FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (n > 0) THEN
+        ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
+        RETURN 'delivery LIVE (integration found, notify task resumed)';
+    END IF;
+    RETURN 'integration missing - notify task left suspended (see webhook_delivery.sql)';
+END;
+$$;
+
+-- 3) Digest v2: same narrative, now also delivered through the default route.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    model VARCHAR;
+    facts VARCHAR;
+    alerts VARCHAR;
+    prompt VARCHAR;
+    body VARCHAR;
+BEGIN
+    SELECT COALESCE(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)), 'llama3.1-8b')
+      INTO :model FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    SELECT COALESCE(LISTAGG(METRIC || '=' || COALESCE(VALUE_USD, VALUE)::VARCHAR, '; ')
+           WITHIN GROUP (ORDER BY SORT_ORDER), 'no board rows')
+      INTO :facts
+    FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+    WHERE COMPANY = 'ALL' AND WINDOW_DAYS = 7 AND PANEL = 'KPI';
+
+    SELECT 'open_critical=' || SUM(IFF(SEVERITY = 'CRITICAL' AND STATUS IN ('OPEN','ACK'), 1, 0))
+           || '; open_high=' || SUM(IFF(SEVERITY = 'HIGH' AND STATUS IN ('OPEN','ACK'), 1, 0))
+           || '; raised_24h=' || SUM(IFF(RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP()), 1, 0))
+      INTO :alerts
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS;
+
+    prompt := LEFT(
+        'You are a senior Snowflake DBA writing the morning digest for ALFA/Trexis leadership. '
+        || 'Use ONLY these 7-day platform facts and alert counts - never invent numbers. '
+        || 'Write 3 short paragraphs: (1) platform health and spend in plain language, '
+        || '(2) what needs attention today and why, (3) one recommended focus. No preamble. '
+        || 'FACTS: ' || COALESCE(:facts, 'none') || '. ALERTS: ' || COALESCE(:alerts, 'none') || '.',
+        6000);
+
+    BEGIN
+        body := SNOWFLAKE.CORTEX.COMPLETE(:model, :prompt);
+    EXCEPTION
+        WHEN OTHER THEN
+            body := 'Digest unavailable: Cortex COMPLETE failed for model ' || :model
+                    || '. Check SNOWFLAKE.CORTEX_USER grant and regional model availability.';
+    END;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
+    VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));
+
+
+    -- v2: deliver the narrative through the default webhook route (guarded —
+    -- without the integration the digest still writes, just doesn't send).
+    BEGIN
+        CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+            SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
+                'OVERWATCH morning digest — ' || TO_VARCHAR(CURRENT_DATE()) || CHR(10) ||
+                LEFT(:body, 3000)),
+            SNOWFLAKE.NOTIFICATION.INTEGRATION('OVERWATCH_WEBHOOK'));
+    EXCEPTION
+        WHEN OTHER THEN
+            NULL;  -- integration absent/disabled: in-app digest remains the surface
+    END;
+
+    RETURN 'digest written + delivery attempted';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 18 AS VERSION,
+       'delivery first-class: notify task in-chain, guarded auto-resume, digest webhook send' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V019__scoping_fixes.sql
+-- ===========================================================================
+-- V019__scoping_fixes.sql — role-based user company scoping, WH_TRXS_LINEAGE,
+-- and disable the credential-expiry rule on accounts without EXPIRES_AT.
+--
+-- The account's Trexis users are NOT prefixed TRXS_ — they hold roles that
+-- carry _TRXS_ (e.g. SNOW_PRI_GFR_PRD_TRXS_DATA_TEAM). COMPANY_FOR_USER now
+-- classifies by ROLE membership (KEBARR1 override preserved), so every
+-- user-grained view (Cortex users, logins, grants, chargeback role lens)
+-- separates Trexis from ALFA correctly. Idempotent.
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20019, 'BLOCKED: SCHEMA_VERSION < 18 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 18) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- 1) Seed the new Trexis warehouse (validate.sql now expects 5).
+MERGE INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE t
+USING (SELECT 'Trexis' AS COMPANY, 'WAREHOUSE' AS SCOPE_TYPE,
+              'WH_TRXS_LINEAGE' AS PATTERN, 'Trexis lineage compute' AS NOTE) s
+ON t.COMPANY = s.COMPANY AND t.SCOPE_TYPE = s.SCOPE_TYPE AND t.PATTERN = s.PATTERN
+WHEN NOT MATCHED THEN INSERT (COMPANY, SCOPE_TYPE, PATTERN, NOTE)
+                      VALUES (s.COMPANY, s.SCOPE_TYPE, s.PATTERN, s.NOTE);
+
+-- 2) COMPANY_FOR_USER by role membership. Override table wins first; then a
+--    user holding any _TRXS_ role is Trexis; otherwise ALFA. EXISTS keeps it
+--    a scalar the optimizer can push down.
+CREATE OR REPLACE FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(U VARCHAR)
+RETURNS VARCHAR
+AS
+$$
+    COALESCE(
+        (SELECT MAX(COMPANY) FROM DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE
+          WHERE SCOPE_TYPE = 'USER_OVERRIDE' AND PATTERN = UPPER(COALESCE(U, ''))),
+        IFF(EXISTS (
+                SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
+                WHERE g.DELETED_ON IS NULL
+                  AND UPPER(g.GRANTEE_NAME) = UPPER(COALESCE(U, ''))
+                  AND g.ROLE ILIKE '%TRXS%'),
+            'Trexis', 'ALFA')
+    )
+$$;
+
+-- 3) This account's ACCOUNT_USAGE.CREDENTIALS view does not expose EXPIRES_AT,
+--    so SEC_CRED_EXPIRY can never evaluate — disable it to stop the hourly
+--    OPS_SCAN_DEGRADED noise. Newer accounts: set ENABLED = TRUE to re-arm.
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+   SET ENABLED = FALSE
+ WHERE RULE_ID = 'SEC_CRED_EXPIRY';
+
+-- 4) Department-map the new warehouse so chargeback doesn't bucket it Unmapped.
+MERGE INTO DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP t
+USING (SELECT 'WAREHOUSE' AS MAP_TYPE, 'WH_TRXS_LINEAGE' AS NAME,
+              'Trexis Lineage' AS DEPARTMENT, 'Trexis' AS OWNER) s
+ON t.MAP_TYPE = s.MAP_TYPE AND t.NAME = s.NAME
+WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER)
+                      VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 19 AS VERSION,
+       'scoping: role-based COMPANY_FOR_USER, WH_TRXS_LINEAGE, disable SEC_CRED_EXPIRY (no EXPIRES_AT)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V020__credentials_column.sql
+-- ===========================================================================
+-- V020__credentials_column.sql — the account's ACCOUNT_USAGE.CREDENTIALS
+-- exposes EXPIRATION_DATE (TIMESTAMP_LTZ), not EXPIRES_AT. Point the credential
+-- rule at the real column and re-arm it (V019 had disabled it). Idempotent.
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20020, 'BLOCKED: SCHEMA_VERSION < 19 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 19) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- Re-arm the rule (V019 disabled it while the column was thought missing).
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+   SET ENABLED = TRUE
+ WHERE RULE_ID = 'SEC_CRED_EXPIRY';
+
+-- Scan v8: identical to v7 except the credentials block reads EXPIRATION_DATE.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+-- v7: every rule block runs in its OWN isolated INSERT with per-block
+-- exception capture. One broken rule (revoked view, bad division, drift)
+-- logs and increments a counter instead of silently killing ALL alerting —
+-- the review's 'ticking bomb' finding, defused. Dedupe semantics unchanged.
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+    emsg VARCHAR;
+    fails INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    -- [01] COST_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [02] COST_WH_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_WH_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [03] PERF_QUERY_FAIL_PCT
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUERY_FAIL_PCT - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [04] PERF_QUEUED_MINUTES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUEUED_MINUTES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [05] PERF_SPILL_GB
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_SPILL_GB - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [06] PIPE_TASK_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_TASK_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [07] SEC_FAILED_LOGINS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_FAILED_LOGINS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [08] COST_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [09] COST_FORECAST_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_FORECAST_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [10] SEC_CRED_EXPIRY
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRATION_DATE, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         AND cr.DELETED_ON IS NULL
+         AND cr.EXPIRATION_DATE IS NOT NULL
+         AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [11] COST_CLOUD_SVC_RATIO
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CLOUD_SVC_RATIO - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [12] COST_STORAGE_SURGE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_STORAGE_SURGE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [13] COST_SERVERLESS_CREEP
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_SERVERLESS_CREEP - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [14] PIPE_COPY_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_COPY_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [15] SEC_BREAK_GLASS_USE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_BREAK_GLASS_USE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [16] COST_CONTRACT_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CONTRACT_BREACH: current contract projected to exhaust within
+        -- threshold days at the trailing 30-day burn rate. Weekly-recurring
+        -- until the contract or the burn changes; CRITICAL inside 14 days.
+        SELECT c.RULE_ID, 'ALL',
+               IFF(p.DAYS_LEFT <= 14, 'CRITICAL', c.SEVERITY),
+               'Contract projected to exhaust in ' || p.DAYS_LEFT || ' day(s) (' ||
+                   TO_VARCHAR(p.EXHAUST_DATE) || ')',
+               'Consumed ' || ROUND(p.CONSUMED, 0) || ' of ' || ROUND(p.TOTAL, 0) ||
+                   ' contracted credits; trailing 30d burn ' || ROUND(p.DAILY_BURN, 1) ||
+                   ' credits/day (straight-line). Scenario planning: Cost > Contract > Renewal planner.',
+               p.DAYS_LEFT,
+               c.RULE_ID || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT TOTAL, CONSUMED, DAILY_BURN,
+                   CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+                   DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+                           CURRENT_DATE()) AS EXHAUST_DATE
+            FROM (
+                SELECT
+                    (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS) AS TOTAL,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= COALESCE(
+                         (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                          FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), CURRENT_DATE())) AS CONSUMED,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+            )
+        ) p ON c.RULE_ID = 'COST_CONTRACT_BREACH'
+           AND p.TOTAL > 0 AND p.DAILY_BURN > 0
+           AND p.DAYS_LEFT BETWEEN 0 AND c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CONTRACT_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [17] COST_DEPT_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_DEPT_BUDGET_PACE: department MTD spend ahead of its monthly
+        -- budget pace (threshold = % over pace). Budgets live in
+        -- DEPT_BUDGETS; spend = the department's warehouses (exact billing).
+        SELECT c.RULE_ID, 'ALL',
+               IFF(d.OVER_PCT >= c.THRESHOLD_NUM * 3, 'HIGH', c.SEVERITY),
+               d.DEPARTMENT || ' is ' || ROUND(d.OVER_PCT, 0) || '% over budget pace (MTD ' ||
+                   ROUND(d.MTD_USD, 0) || ' USD of ' || ROUND(d.BUDGET_USD, 0) || ')',
+               'Month is ' || ROUND(d.TIME_SHARE * 100, 0) || '% elapsed. Owner lens: ' ||
+                   'Cost > Chargeback (warehouses are exact; roles are allocated).',
+               d.OVER_PCT,
+               c.RULE_ID || '|' || d.DEPARTMENT || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT DEPARTMENT, BUDGET_USD, MTD_USD, TIME_SHARE,
+                   (MTD_USD / NULLIF(BUDGET_USD * TIME_SHARE, 0) - 1) * 100 AS OVER_PCT
+            FROM (
+                SELECT b.DEPARTMENT, b.MONTHLY_BUDGET_USD AS BUDGET_USD,
+                       COALESCE(SUM(f.CREDITS_TOTAL), 0) * :credit_price AS MTD_USD,
+                       DAY(CURRENT_DATE()) / DAY(LAST_DAY(CURRENT_DATE())) AS TIME_SHARE
+                FROM DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS b
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP m
+                  ON m.MAP_TYPE = 'WAREHOUSE' AND m.DEPARTMENT = b.DEPARTMENT
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+                  ON f.WAREHOUSE_NAME = UPPER(m.NAME)
+                 AND f.DAY >= DATE_TRUNC('month', CURRENT_DATE())
+                WHERE b.MONTHLY_BUDGET_USD > 0
+                GROUP BY 1, 2
+            )
+        ) d ON c.RULE_ID = 'COST_DEPT_BUDGET_PACE'
+           AND d.OVER_PCT > c.THRESHOLD_NUM AND d.MTD_USD >= 50
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DEPT_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+
+    -- Self-alert when any block failed: the scan reports its own degradation.
+    IF (fails > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               :fails || ' of 17 alert rule block(s) failed this run',
+               'APP_ERROR_LOG has the SQL errors (rule_block_failed). The other rules ' ||
+                   'kept firing - that is the point of the v7 decomposition.',
+               :fails,
+               c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        WHERE c.RULE_ID = 'OPS_SCAN_DEGRADED' AND c.ENABLED
+          AND NOT EXISTS (
+              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+              WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+          );
+    END IF;
+
+    RETURN 'alert scan v8 complete (EXPIRATION_DATE): ' || (17 - :fails) || '/17 rule blocks ok';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 20 AS VERSION,
+       'credentials: EXPIRATION_DATE column, re-enable SEC_CRED_EXPIRY, scan v8' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V021__precision_telemetry.sql
+-- ===========================================================================
+-- V021: alert resolution kinds (precision tracking) + fleet query telemetry.
+-- Idempotent. Re-run snowflake/roles.sql afterward so viewer roles can write
+-- telemetry rows and operators can set resolution kinds.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+-- Ordering guard + version row (same contract as every prior migration).
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20021, 'BLOCKED: SCHEMA_VERSION < 20 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 20) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- 1) Resolution kind: how a resolved alert was closed. Powers per-rule
+--    precision (ACTIONED vs NOISE) on Alerts -> Rules for threshold tuning.
+--    Values: ACTIONED | NOISE | EXPECTED (maintenance/known); NULL = untagged.
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+    ADD COLUMN IF NOT EXISTS RESOLUTION_KIND VARCHAR(20);
+
+-- 2) Fleet-wide query telemetry: the in-session ring buffer only shows the
+--    current user's session; this table collects SLOW (>=2s) and FAILED
+--    fetches across every viewer so Admin -> Performance sees the real p95.
+--    Sampled + fire-and-forget from the app; a lost row is acceptable.
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY (
+    AT            TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    PAGE          VARCHAR(80),
+    TIER          VARCHAR(20),
+    QUERY_KEY     VARCHAR(120),
+    ELAPSED_MS    NUMBER(12,1),
+    ROWS_RETURNED NUMBER(12,0),
+    OK            BOOLEAN,
+    ROLE_NAME     VARCHAR(200) DEFAULT CURRENT_ROLE()
+);
+
+-- Retention: piggybacks on SP_PURGE_FACTS' ERROR_LOG_RETENTION_DAYS pass is
+-- NOT automatic for this table; keep it lean here instead (90d sliding).
+CREATE OR REPLACE TASK DBA_MAINT_DB.OVERWATCH.TASK_PURGE_QUERY_TELEMETRY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 20 6 1 * * America/Chicago'
+AS
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY
+    WHERE AT < DATEADD('day', -90, CURRENT_TIMESTAMP());
+
+ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_PURGE_QUERY_TELEMETRY RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 21 AS VERSION, 'precision kinds + fleet telemetry' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V022__delivery_per_route.sql
+-- ===========================================================================
+-- V022: per-route delivery ledger — fixes the two verified delivery bugs
+-- (consolidated review #1/#6):
+--   a) FIRST-ROUTE-WINS: one NOTIFIED_AT per event meant a success on any
+--      route suppressed every other matching route (docs promised additive).
+--   b) A route that failed while another succeeded was never retried; and
+--      events undelivered for >24h silently fell out of the window.
+-- NOT YET RUN AGAINST THE LIVE ACCOUNT — apply, then prove it with the
+-- monthly fire drill (snowflake/alert_drill.sql) or a manual test event.
+-- Idempotent. Re-run snowflake/roles.sql after applying.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20022, 'BLOCKED: SCHEMA_VERSION < 21 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 21) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- One row per (event, route) SUCCESSFUL send. Append-only.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES (
+    EVENT_ID  VARCHAR(80) NOT NULL,
+    -- ROUTE_ID matches ALERT_ROUTES.ROUTE_ID (a UUID string)
+    ROUTE_ID  VARCHAR(80) NOT NULL,
+    SENT_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Sender v2: fan-out is per (event, route); a success on Slack no longer
+-- suppresses PagerDuty, and a failed route retries on every chain run while
+-- the event stays eligible. Events aging out undelivered are logged loudly.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    sent_total INT DEFAULT 0;
+    routes_hit INT DEFAULT 0;
+    expired INT DEFAULT 0;
+    message VARCHAR;
+    emsg VARCHAR;
+    r_route_id VARCHAR;
+    r_family VARCHAR;
+    r_minsev VARCHAR;
+    r_integration VARCHAR;
+    c1 CURSOR FOR
+        SELECT r.ROUTE_ID, r.FAMILY, r.MIN_SEVERITY, r.INTEGRATION_NAME
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+        WHERE r.ENABLED
+        ORDER BY r.ROUTE_ID;
+BEGIN
+    FOR rec IN c1 DO
+        r_route_id := rec.ROUTE_ID;
+        r_family := rec.FAMILY;
+        r_minsev := rec.MIN_SEVERITY;
+        r_integration := rec.INTEGRATION_NAME;
+        -- Eligible = open, young enough, matches this route, and THIS ROUTE
+        -- has not delivered it yet (other routes' successes are irrelevant).
+        SELECT LISTAGG('[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140), '\n')
+               WITHIN GROUP (ORDER BY e.RAISED_AT DESC)
+          INTO :message
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+        JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+        WHERE e.STATUS = 'OPEN'
+          AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+          AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+              >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+          AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                          WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+
+        IF (:message IS NOT NULL AND :message != '') THEN
+            BEGIN
+                CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+                    SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
+                        'OVERWATCH alerts:\n' || LEFT(:message, 3000)),
+                    SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));
+                routes_hit := routes_hit + 1;
+
+                -- Ledger rows for THIS route only (success path).
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES (EVENT_ID, ROUTE_ID)
+                SELECT e.EVENT_ID, :r_route_id
+                FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+                WHERE e.STATUS = 'OPEN'
+                  AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+                  AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                      >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                                  WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+                sent_total := sent_total + SQLROWCOUNT;
+
+                -- Back-compat: NOTIFIED_AT still means "delivered somewhere
+                -- at least once" (the drill, the delivery chip, and MTTA
+                -- surfaces read it).
+                UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                   SET NOTIFIED_AT = CURRENT_TIMESTAMP()
+                 WHERE e.NOTIFIED_AT IS NULL
+                   AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                               WHERE d.EVENT_ID = e.EVENT_ID);
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                        (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'NotifyWebhook', 'route_send_failed', :emsg,
+                           'route ' || :r_route_id || ' integration ' || :r_integration ||
+                           ' - will retry next run; other routes unaffected',
+                           CURRENT_ROLE();
+            END;
+        END IF;
+    END FOR;
+
+    -- Loud, not silent: open events aging past the 24h window with NO
+    -- delivery anywhere get one error-log row each run they linger.
+    SELECT COUNT(*) INTO :expired
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.STATUS = 'OPEN' AND e.NOTIFIED_AT IS NULL
+      AND e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP());
+    IF (expired > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'NotifyWebhook', 'undelivered_expired',
+               :expired || ' open event(s) aged past the 24h delivery window with no successful send',
+               'check ALERT_ROUTES integrations; events remain OPEN in-app',
+               CURRENT_ROLE();
+    END IF;
+
+    RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
+           ' route(s); ' || :expired || ' expired-undelivered flagged';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 22 AS VERSION, 'per-route delivery ledger; additive fan-out + honest retries' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V023__prod_scoped_volume.sql
+-- ===========================================================================
+-- V023: PROD-only volume-drop scanning (sweep v4) + alert-scan v9.
+-- 2026-07-08 live finding: the first production sweep raised 700+ HIGH
+-- PIPE_VOLUME_DROP events from DEV/SIT/SAN/MGM scratch and dated backup
+-- tables. Volume collapse only matters where consumers are: PROD databases
+-- (ALFA_EDW_PRD, ALFA_EDW_MGM, *_PRD). Everything else in the sweep is
+-- byte-identical to V016's version.
+-- Cleanup of the existing storm: bulk-resolve the open DEV/SIT events as
+-- NOISE from Alerts -> Open events (storm view) - they become the training
+-- data for the threshold-suggestion panel.
+-- Idempotent. Apply IN ORDER after V022.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20023, 'BLOCKED: SCHEMA_VERSION < 22 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 22) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ANOMALY_SWEEP()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    zthr FLOAT;
+    ai_model VARCHAR;
+    ev_id VARCHAR;
+    ev_title VARCHAR;
+    day_s VARCHAR;
+    series_s VARCHAR;
+    wh_s VARCHAR;
+    evidence VARCHAR;
+    ai_prompt VARCHAR;
+    ai_resp VARCHAR;
+    c_new CURSOR FOR
+        SELECT EVENT_ID, TITLE, DEDUPE_KEY
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        WHERE RULE_ID = 'COST_ANOMALY_SWEEP'
+          AND RAISED_AT >= DATEADD('minute', -15, CURRENT_TIMESTAMP())
+          AND DETAIL NOT LIKE '%| AI:%'
+        LIMIT 5;
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 3.5) INTO :zthr
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'COST_ANOMALY_SWEEP' AND ENABLED;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    WITH series AS (
+        SELECT 'WAREHOUSE ' || WAREHOUSE_NAME AS SERIES, COMPANY, DAY,
+               SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+        UNION ALL
+        SELECT 'SERVICE ' || SERVICE_TYPE, 'ALL', DAY, SUM(CREDITS_BILLED)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATEADD('day', -29, CURRENT_DATE()) AND DAY < CURRENT_DATE()
+        GROUP BY 1, 2, 3
+    ),
+    med AS (
+        SELECT SERIES, MEDIAN(CREDITS) AS MED
+        FROM series GROUP BY 1
+    ),
+    mad AS (
+        SELECT s.SERIES, m.MED, MEDIAN(ABS(s.CREDITS - m.MED)) AS MAD
+        FROM series s JOIN med m ON m.SERIES = s.SERIES
+        GROUP BY 1, 2
+    ),
+    latest AS (
+        SELECT s.SERIES, s.COMPANY, s.DAY, s.CREDITS, m.MED, m.MAD,
+               ABS(0.6745 * (s.CREDITS - m.MED) / NULLIF(m.MAD, 0)) AS ROBUST_Z
+        FROM series s
+        JOIN mad m ON m.SERIES = s.SERIES
+        WHERE s.DAY = (SELECT MAX(DAY) FROM series)
+    )
+    SELECT 'COST_ANOMALY_SWEEP', l.COMPANY,
+           IFF(l.ROBUST_Z >= :zthr * 2, 'HIGH', 'MEDIUM'),
+           l.SERIES || ' spent ' || ROUND(l.CREDITS, 1) || ' credits on ' ||
+               TO_VARCHAR(l.DAY) || ' (z=' || ROUND(l.ROBUST_Z, 1) || ')',
+           'Median ' || ROUND(l.MED, 1) || ' credits/day over the prior 28d. ' ||
+               'Robust z-score ' || ROUND(l.ROBUST_Z, 1) || ' vs threshold ' || :zthr ||
+               '. Investigate: Cost > Spend / Attribution for that day.',
+           l.ROBUST_Z,
+           'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+    FROM latest l
+    WHERE l.MAD > 0 AND l.ROBUST_Z >= :zthr AND l.CREDITS >= 1
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = 'COST_ANOMALY_SWEEP|' || l.SERIES || '|' || TO_VARCHAR(l.DAY)
+      );
+
+    -- Dynamic-table refresh failures (guarded: accounts without the view
+    -- keep the sweep's cost half working).
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(d.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(d.FAILURES >= 5, 'CRITICAL', c.SEVERITY),
+               d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   ': ' || d.FAILURES || ' dynamic-table refresh failure(s) (24h)',
+               'Schema ' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                   ' | last state ' || d.LAST_STATE ||
+                   '. Downstream tables are serving stale data until this refreshes.',
+               d.FAILURES,
+               c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME || '.' || d.NAME ||
+                   '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
+                   COUNT_IF(STATE = 'FAILED') AS FAILURES,
+                   MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
+            WHERE REFRESH_END_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1, 2, 3
+            HAVING COUNT_IF(STATE = 'FAILED') > 0
+        ) d ON c.RULE_ID = 'PIPE_DT_FAILURES' AND c.ENABLED AND d.FAILURES > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || d.DATABASE_NAME || '.' || d.SCHEMA_NAME ||
+                  '.' || d.NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dynamic_tables_unavailable', 'DT refresh view not readable',
+                   'cost anomaly sweep unaffected', CURRENT_ROLE();
+    END;
+
+
+    -- PERF_FINGERPRINT_DRIFT (Mondays): p95 per query family, last 7d vs the
+    -- prior 28d — catches regressions that arrive WITHOUT a DDL change
+    -- (data growth, clustering decay, plan changes). Complements the
+    -- change-anchored V010 tracker.
+    IF (DAYOFWEEKISO(CURRENT_DATE()) = 1) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL',
+               IFF(f.P95_RECENT_S >= f.P95_BASE_S * 3, 'HIGH', c.SEVERITY),
+               'Query family p95 ' || f.P95_BASE_S || 's -> ' || f.P95_RECENT_S || 's: ' ||
+                   LEFT(f.SAMPLE_TEXT, 60),
+               'Hash ' || f.QUERY_PARAMETERIZED_HASH || ' | runs ' || f.RUNS_BASE || ' -> ' ||
+                   f.RUNS_RECENT || ' | 7d vs prior 28d, no change event required. ' ||
+                   'Drill: Operations > Queries (heaviest queries).',
+               ROUND(100 * (f.P95_RECENT_S / NULLIF(f.P95_BASE_S, 0) - 1), 1),
+               c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                   TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT QUERY_PARAMETERIZED_HASH,
+                   ANY_VALUE(LEFT(QUERY_TEXT, 80)) AS SAMPLE_TEXT,
+                   COUNT_IF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_RECENT,
+                   COUNT_IF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP())) AS RUNS_BASE,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_RECENT_S,
+                   ROUND(APPROX_PERCENTILE(IFF(START_TIME < DATEADD('day', -7, CURRENT_TIMESTAMP()),
+                                               TOTAL_ELAPSED_TIME, NULL) / 1000, 0.95), 1) AS P95_BASE_S
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('day', -35, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+            GROUP BY 1
+            HAVING RUNS_RECENT >= 20 AND RUNS_BASE >= 20
+        ) f ON c.RULE_ID = 'PERF_FINGERPRINT_DRIFT' AND c.ENABLED
+           AND f.P95_BASE_S > 0
+           AND f.P95_RECENT_S > f.P95_BASE_S * (1 + c.THRESHOLD_NUM / 100)
+           AND f.P95_RECENT_S >= 10
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || f.QUERY_PARAMETERIZED_HASH || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    END IF;
+
+
+    -- COST_ORG_ACCOUNT_CREEP (guarded): any org account's currency spend up
+    -- threshold% week-over-week — a sibling account can't surprise you.
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               o.ACCOUNT_NAME || ' org spend up ' || ROUND(o.PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(o.CUR, 0) || ' vs prior ' || ROUND(o.PRV, 0) || ' ' || o.CCY ||
+                   '. Breakdown: Admin > Org spend.',
+               o.PCT,
+               c.RULE_ID || '|' || o.ACCOUNT_NAME || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT ACCOUNT_NAME, CCY, CUR, PRV, (CUR / NULLIF(PRV, 0) - 1) * 100 AS PCT
+            FROM (
+                SELECT ACCOUNT_NAME, MAX(CURRENCY) AS CCY,
+                       SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), USAGE_IN_CURRENCY, 0)) AS CUR,
+                       SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), USAGE_IN_CURRENCY, 0)) AS PRV
+                FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+                WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+                GROUP BY 1
+            )
+        ) o ON c.RULE_ID = 'COST_ORG_ACCOUNT_CREEP' AND c.ENABLED
+           AND o.PCT > c.THRESHOLD_NUM AND o.CUR >= 100
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || o.ACCOUNT_NAME || '|' ||
+                  TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'org_usage_unavailable', 'ORGANIZATION_USAGE not readable',
+                   'org creep check skipped', CURRENT_ROLE();
+    END;
+
+    -- PIPE_VOLUME_DROP (guarded): yesterday's rows-added collapsed vs the
+    -- prior-7-day average on tables that normally move real volume.
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID,
+               IFF(v.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               v.DB || '.' || v.SCH || '.' || v.TBL || ' volume down ' || ROUND(v.DROP_PCT, 0) ||
+                   '% (' || v.Y_ROWS || ' rows vs ~' || ROUND(v.AVG_ROWS, 0) || '/day)',
+               'Yesterday vs prior-7d average. Upstream feed, failed COPY, or intentional? ' ||
+                   'Check Operations > Pipeline SLA.',
+               v.DROP_PCT,
+               c.RULE_ID || '|' || v.DB || '.' || v.SCH || '.' || v.TBL || '|' ||
+                   TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        JOIN (
+            SELECT DB, SCH, TBL, Y_ROWS, AVG_ROWS,
+                   (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 AS DROP_PCT
+            FROM (
+                SELECT d.DATABASE_NAME AS DB, d.SCHEMA_NAME AS SCH, d.TABLE_NAME AS TBL,
+                       SUM(IFF(DATE(d.START_TIME) = DATEADD('day', -1, CURRENT_DATE()),
+                               d.ROWS_ADDED, 0)) AS Y_ROWS,
+                       SUM(IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE()),
+                               d.ROWS_ADDED, 0)) / 7 AS AVG_ROWS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY d
+                WHERE d.START_TIME >= DATEADD('day', -8, CURRENT_DATE())
+                  AND d.START_TIME < CURRENT_DATE()
+                  -- PROD only, BOTH companies (owner decision 2026-07-08
+                  -- after the DEV/SIT storm): ALFA_EDW_PRD + ALFA_EDW_MGM by
+                  -- name, and every *_PRD database by suffix — which is what
+                  -- covers Trexis PROD (TRXS_EDW_PRD, TRXS_GW_DATA_PRD,
+                  -- TRXS_ABC_METADATA_PRD). DEV/SIT/SAN stay silent. Same
+                  -- semantics as app environment_clause('PROD').
+                  AND (UPPER(d.DATABASE_NAME) IN ('ALFA_EDW_PRD', 'ALFA_EDW_MGM')
+                       OR UPPER(d.DATABASE_NAME) LIKE '%!_PRD' ESCAPE '!')
+                GROUP BY 1, 2, 3
+                HAVING AVG_ROWS >= 1000
+            )
+        ) v ON c.RULE_ID = 'PIPE_VOLUME_DROP' AND c.ENABLED
+           AND v.DROP_PCT > c.THRESHOLD_NUM
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || v.DB || '.' || v.SCH || '.' || v.TBL ||
+                  '|' || TO_VARCHAR(CURRENT_DATE())
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'dml_history_unavailable', 'TABLE_DML_HISTORY not readable',
+                   'volume-drop check skipped', CURRENT_ROLE();
+    END;
+
+    -- Pre-explain fresh anomalies (guarded): grounded Cortex hypothesis is
+    -- appended to the event DETAIL so the webhook message arrives explained.
+    -- Capped at 5 events/run to bound AI spend.
+    BEGIN
+        SELECT COALESCE(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)), 'llama3.1-8b')
+          INTO :ai_model FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+        FOR e IN c_new DO
+            ev_id := e.EVENT_ID;
+            ev_title := e.TITLE;
+            series_s := SPLIT_PART(e.DEDUPE_KEY, '|', 2);
+            day_s := SPLIT_PART(e.DEDUPE_KEY, '|', 3);
+            wh_s := IFF(series_s LIKE 'WAREHOUSE %', LTRIM(SUBSTR(series_s, 10)), '');
+            SELECT LISTAGG(SAMPLE_TEXT || ' day=' || H_DAY || 'h prior_avg=' || H_PRI || 'h', '; ')
+              INTO :evidence
+            FROM (
+                SELECT ANY_VALUE(LEFT(QUERY_TEXT, 60)) AS SAMPLE_TEXT,
+                       ROUND(SUM(IFF(DATE(START_TIME) = TO_DATE(:day_s), TOTAL_ELAPSED_TIME, 0)) / 3600000, 2) AS H_DAY,
+                       ROUND(SUM(IFF(DATE(START_TIME) < TO_DATE(:day_s), TOTAL_ELAPSED_TIME, 0)) / 7 / 3600000, 2) AS H_PRI
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -7, TO_DATE(:day_s))
+                  AND START_TIME < DATEADD('day', 1, TO_DATE(:day_s))
+                  AND (:wh_s = '' OR WAREHOUSE_NAME = :wh_s)
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY QUERY_PARAMETERIZED_HASH
+                ORDER BY H_DAY DESC
+                LIMIT 10
+            );
+            ai_prompt := 'You are a Snowflake cost analyst. ALERT: ' || :ev_title ||
+                         '. EVIDENCE (top query families, elapsed hours on the day vs prior-7d avg): ' ||
+                         COALESCE(:evidence, 'none') ||
+                         '. Using ONLY this evidence, name the 1-2 most likely drivers with their ' ||
+                         'numbers, or say evidence is inconclusive. Max 80 words. Never invent data.';
+            ai_resp := SNOWFLAKE.CORTEX.COMPLETE(:ai_model, :ai_prompt);
+            UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+               SET DETAIL = LEFT(COALESCE(DETAIL, '') || ' | AI: ' || :ai_resp, 2000)
+             WHERE EVENT_ID = :ev_id;
+        END FOR;
+    EXCEPTION
+        WHEN OTHER THEN
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AnomalySweep', 'cortex_pre_explain_unavailable',
+                   'CORTEX.COMPLETE failed - events remain unexplained (drawer AI still works)',
+                   'model or grant issue', CURRENT_ROLE();
+    END;
+
+    RETURN 'anomaly sweep v3 complete';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Scan v9: byte-identical to V020's v8 EXCEPT the SEC_CRED_EXPIRY block no
+-- longer filters cr.DELETED_ON (column absent on this account).
+-- ---------------------------------------------------------------------------
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+-- v7: every rule block runs in its OWN isolated INSERT with per-block
+-- exception capture. One broken rule (revoked view, bad division, drift)
+-- logs and increments a counter instead of silently killing ALL alerting —
+-- the review's 'ticking bomb' finding, defused. Dedupe semantics unchanged.
+DECLARE
+    budget_usd FLOAT;
+    credit_price FLOAT;
+    emsg VARCHAR;
+    fails INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'MONTHLY_BUDGET_USD', VALUE, NULL))), 0),
+           COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :budget_usd, :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    -- [01] COST_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL' AS COMPANY, c.SEVERITY,
+               'Account daily credits ' || ROUND(f.CREDITS, 1) || ' >= ' || c.THRESHOLD_NUM AS TITLE,
+               'Warehouse metering total for ' || f.DAY AS DETAIL,
+               f.CREDITS AS METRIC_VALUE,
+               c.RULE_ID || '|ALL|' || f.DAY AS DEDUPE_KEY
+        FROM cfg c
+        JOIN (
+            SELECT DAY, SUM(CREDITS_TOTAL) AS CREDITS
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+            WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+            GROUP BY DAY
+        ) f ON c.RULE_ID = 'COST_DAILY_CREDITS' AND f.CREDITS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [02] COST_WH_DAILY_CREDITS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, f.COMPANY, c.SEVERITY,
+               f.WAREHOUSE_NAME || ' used ' || ROUND(f.CREDITS_TOTAL, 1) || ' credits on ' || f.DAY,
+               'Per-warehouse daily metering.',
+               f.CREDITS_TOTAL,
+               c.RULE_ID || '|' || f.WAREHOUSE_NAME || '|' || f.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+          ON c.RULE_ID = 'COST_WH_DAILY_CREDITS'
+         AND f.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND f.CREDITS_TOTAL >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_WH_DAILY_CREDITS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [03] PERF_QUERY_FAIL_PCT
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               'Query failure rate ' || ROUND(q.FAIL_PCT, 1) || '% >= ' || c.THRESHOLD_NUM || '%',
+               q.FAILED || ' of ' || q.TOTAL || ' queries failed in last ' || c.WINDOW_HOURS || 'h.',
+               q.FAIL_PCT,
+               c.RULE_ID || '|' || q.COMPANY || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, SUM(FAILED_COUNT) AS FAILED, SUM(QUERY_COUNT) AS TOTAL,
+                   IFF(SUM(QUERY_COUNT) = 0, 0, SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS FAIL_PCT
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY COMPANY
+            HAVING SUM(QUERY_COUNT) >= 20
+        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUERY_FAIL_PCT - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [04] PERF_QUEUED_MINUTES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' queued ' || ROUND(q.QUEUED_MIN, 1) || ' min in 24h',
+               'Queued overload + provisioning time.',
+               q.QUEUED_MIN,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(QUEUED_SEC_SUM) / 60 AS QUEUED_MIN
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_QUEUED_MINUTES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [05] PERF_SPILL_GB
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, q.COMPANY, c.SEVERITY,
+               q.WAREHOUSE_NAME || ' spilled ' || ROUND(q.SPILL_GB, 1) || ' GB remote in 24h',
+               'Remote spill indicates undersized memory for the workload.',
+               q.SPILL_GB,
+               c.RULE_ID || '|' || q.WAREHOUSE_NAME || '|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN (
+            SELECT COMPANY, WAREHOUSE_NAME, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND WAREHOUSE_NAME IS NOT NULL
+            GROUP BY COMPANY, WAREHOUSE_NAME
+        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PERF_SPILL_GB - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [06] PIPE_TASK_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, tk.COMPANY, c.SEVERITY,
+               COALESCE(tk.DATABASE_NAME || '.', '') || COALESCE(tk.SCHEMA_NAME || '.', '')
+                   || tk.TASK_NAME || ' failed ' || tk.FAILED || 'x on ' || tk.DAY,
+               'Database: ' || COALESCE(tk.DATABASE_NAME, 'unknown') || '. '
+                   || LEFT(COALESCE(tk.LAST_ERROR, 'No error text captured.'), 450),
+               tk.FAILED,
+               c.RULE_ID || '|' || COALESCE(tk.DATABASE_NAME, '') || '.' || tk.TASK_NAME || '|' || tk.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY tk
+          ON c.RULE_ID = 'PIPE_TASK_FAILURES'
+         AND tk.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND tk.FAILED >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_TASK_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [07] SEC_FAILED_LOGINS
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, lg.COMPANY, c.SEVERITY,
+               lg.USER_NAME || ' had ' || lg.FAILED_LOGINS || ' failed logins on ' || lg.DAY,
+               'Investigate credential stuffing / lockouts.',
+               lg.FAILED_LOGINS,
+               c.RULE_ID || '|' || lg.USER_NAME || '|' || lg.DAY
+        FROM cfg c
+        JOIN DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY lg
+          ON c.RULE_ID = 'SEC_FAILED_LOGINS'
+         AND lg.DAY >= DATEADD('day', -1, CURRENT_DATE())
+         AND lg.FAILED_LOGINS >= c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_FAILED_LOGINS - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [08] COST_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'MTD spend $' || ROUND(m.MTD_USD, 0) || ' is ' ||
+                   ROUND(m.MTD_USD / NULLIF(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0), 2) ||
+                   'x the budget pace',
+               'Budget $' || ROUND(:budget_usd, 0) || '/mo; elapsed-share allowance $' ||
+                   ROUND(:budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH, 0) || '.',
+               m.MTD_USD,
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_BUDGET_PACE'
+         AND :budget_usd > 0
+         AND m.MTD_USD > :budget_usd * m.DAY_OF_MONTH / m.DAYS_IN_MONTH * c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [09] COST_FORECAST_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        ),
+        mtd AS (
+        SELECT
+            SUM(CREDITS_BILLED) * :credit_price AS MTD_USD,
+            DAY(CURRENT_DATE()) AS DAY_OF_MONTH,
+            DAY(LAST_DAY(CURRENT_DATE())) AS DAYS_IN_MONTH,
+            SUM(CREDITS_BILLED) * :credit_price
+                / NULLIF(DAY(CURRENT_DATE()), 0) AS DAILY_RATE_USD
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               'Projected month-end $' ||
+                   ROUND(m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH), 0) ||
+                   ' exceeds budget $' || ROUND(:budget_usd, 0),
+               'MTD $' || ROUND(m.MTD_USD, 0) || ' + $' || ROUND(m.DAILY_RATE_USD, 0) ||
+                   '/day x ' || (m.DAYS_IN_MONTH - m.DAY_OF_MONTH) || ' remaining days.',
+               m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH),
+               c.RULE_ID || '|ALL|' || CURRENT_DATE()
+        FROM cfg c
+        JOIN mtd m
+          ON c.RULE_ID = 'COST_FORECAST_BREACH'
+         AND :budget_usd > 0
+         AND (m.MTD_USD + m.DAILY_RATE_USD * (m.DAYS_IN_MONTH - m.DAY_OF_MONTH))
+             > :budget_usd * c.THRESHOLD_NUM
+
+        -- Credential expiry: one event per credential per week until rotated
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_FORECAST_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [10] SEC_CRED_EXPIRY
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(cr.USER_NAME),
+               IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(), 'CRITICAL', c.SEVERITY),
+               cr.USER_NAME || ' ' || LOWER(cr.TYPE) || ' ''' || cr.NAME || ''' ' ||
+                   IFF(cr.EXPIRATION_DATE < CURRENT_TIMESTAMP(),
+                       'EXPIRED ' || ABS(DATEDIFF('day', cr.EXPIRATION_DATE, CURRENT_TIMESTAMP())) || ' day(s) ago',
+                       'expires in ' || DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE) || ' day(s)'),
+               'Rotate before ' || TO_VARCHAR(cr.EXPIRATION_DATE, 'YYYY-MM-DD') ||
+                   ' to avoid auth failures for jobs and integrations using this credential.',
+               DATEDIFF('day', CURRENT_TIMESTAMP(), cr.EXPIRATION_DATE),
+               c.RULE_ID || '|' || cr.USER_NAME || '|' || cr.NAME || '|' || DATE_TRUNC('week', CURRENT_DATE())
+        FROM cfg c
+        JOIN SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS cr
+          ON c.RULE_ID = 'SEC_CRED_EXPIRY'
+         -- v9: CREDENTIALS on this account has no DELETED_ON column (the
+         -- sibling of the EXPIRES_AT discovery v8 fixed) - live error
+         -- 2026-07-08. Without this fix, applying v8 swaps the hourly
+         -- EXPIRES_AT failure for an hourly DELETED_ON failure.
+         AND cr.EXPIRATION_DATE IS NOT NULL
+         AND cr.EXPIRATION_DATE <= DATEADD('day', c.THRESHOLD_NUM, CURRENT_TIMESTAMP())
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_CRED_EXPIRY - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [11] COST_CLOUD_SVC_RATIO
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CLOUD_SVC_RATIO: cloud-services share of a warehouse's credits
+        -- (CoCo finding: WH_TRXS_TRANSFORM at ~30%; normal is <10%). Fires
+        -- daily per warehouse while the ratio stays above threshold.
+        SELECT c.RULE_ID,
+               IFF(w.WAREHOUSE_NAME LIKE 'WH_TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               w.WAREHOUSE_NAME || ' cloud-services ratio ' || ROUND(w.RATIO_PCT, 1) || '% (24h)',
+               'Cloud services ' || ROUND(w.CS, 2) || ' of ' || ROUND(w.TOT, 2) ||
+                   ' credits. Normal is <10% - look for many tiny queries, heavy metadata ' ||
+                   'operations, or compile-heavy SQL. Diagnostics: Cost > Spend.',
+               w.RATIO_PCT,
+               c.RULE_ID || '|' || w.WAREHOUSE_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT WAREHOUSE_NAME,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) AS CS,
+                   SUM(CREDITS_USED) AS TOT,
+                   SUM(CREDITS_USED_CLOUD_SERVICES) / NULLIF(SUM(CREDITS_USED), 0) * 100 AS RATIO_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+            GROUP BY 1
+            HAVING SUM(CREDITS_USED) >= 1
+        ) w ON c.RULE_ID = 'COST_CLOUD_SVC_RATIO'
+           AND w.RATIO_PCT > c.THRESHOLD_NUM AND w.CS >= 0.5
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CLOUD_SVC_RATIO - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [12] COST_STORAGE_SURGE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_STORAGE_SURGE: day-over-day database growth above threshold GB
+        -- (the '600 GB in 4 days' class of surprise).
+        SELECT c.RULE_ID,
+               IFF(g.DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               c.SEVERITY,
+               g.DATABASE_NAME || ' grew ' || ROUND(g.GROWTH_GB, 1) || ' GB in a day',
+               'From ' || ROUND(g.PREV_GB, 1) || ' GB to ' || ROUND(g.CUR_GB, 1) ||
+                   ' GB on ' || TO_VARCHAR(g.USAGE_DATE) ||
+                   '. Check for unbounded loads, missing retention, or runaway CTAS. Movers: Cost > Optimization.',
+               g.GROWTH_GB,
+               c.RULE_ID || '|' || g.DATABASE_NAME || '|' || TO_VARCHAR(g.USAGE_DATE)
+        FROM cfg c
+        JOIN (
+            SELECT DATABASE_NAME, USAGE_DATE,
+                   AVERAGE_DATABASE_BYTES / POWER(1024, 3) AS CUR_GB,
+                   LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE)
+                       / POWER(1024, 3) AS PREV_GB,
+                   (AVERAGE_DATABASE_BYTES
+                    - LAG(AVERAGE_DATABASE_BYTES) OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE))
+                       / POWER(1024, 3) AS GROWTH_GB
+            FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -3, CURRENT_DATE())
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME ORDER BY USAGE_DATE DESC) = 1
+        ) g ON c.RULE_ID = 'COST_STORAGE_SURGE'
+           AND g.PREV_GB IS NOT NULL AND g.GROWTH_GB > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_STORAGE_SURGE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [13] COST_SERVERLESS_CREEP
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_SERVERLESS_CREEP: any serverless/managed service type doubling
+        -- week-over-week (auto-clustering, MV refresh, search optimization,
+        -- SPCS, serverless tasks, pipes...). Warehouses and AI have their own
+        -- rules, so they are excluded here. Re-alerts weekly while creeping.
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               s.SERVICE_TYPE || ' credits up ' || ROUND(s.GROWTH_PCT, 0) || '% week-over-week',
+               'Last 7d ' || ROUND(s.THIS_WK, 2) || ' credits vs ' || ROUND(s.PRIOR_WK, 2) ||
+                   ' prior. Serverless spend grows silently - verify the feature is intentional ' ||
+                   'and priced in. Breakdown: Cost > Spend (by service).',
+               s.GROWTH_PCT,
+               c.RULE_ID || '|' || s.SERVICE_TYPE || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT SERVICE_TYPE,
+                   SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS THIS_WK,
+                   SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) AS PRIOR_WK,
+                   (SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0))
+                    / NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)), 0)
+                    - 1) * 100 AS GROWTH_PCT
+            FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+            WHERE USAGE_DATE >= DATEADD('day', -14, CURRENT_DATE())
+              AND SERVICE_TYPE NOT IN ('WAREHOUSE_METERING', 'WAREHOUSE_METERING_READER', 'AI_SERVICES')
+            GROUP BY 1
+            HAVING SUM(IFF(USAGE_DATE >= DATEADD('day', -7, CURRENT_DATE()), CREDITS_USED, 0)) >= 5
+        ) s ON c.RULE_ID = 'COST_SERVERLESS_CREEP' AND s.GROWTH_PCT > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_SERVERLESS_CREEP - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [14] PIPE_COPY_FAILURES
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- PIPE_COPY_FAILURES: failed or partial file loads in the last 24h.
+        -- Broken ingestion is the most preventable 'found out too late' class.
+        SELECT c.RULE_ID,
+               IFF(p.DB LIKE 'TRXS%', 'Trexis', 'ALFA'),
+               IFF(p.FAILED_FILES >= 10, 'CRITICAL', c.SEVERITY),
+               p.DB || '.' || p.SCH || '.' || p.TBL || ': ' || p.FAILED_FILES || ' failed file load(s) (24h)',
+               'Schema ' || p.DB || '.' || p.SCH ||
+                   IFF(p.PIPE IS NOT NULL, ' | pipe ' || p.PIPE, ' | bulk COPY') ||
+                   ' | sample error: ' || LEFT(COALESCE(p.SAMPLE_ERROR, 'n/a'), 300),
+               p.FAILED_FILES,
+               c.RULE_ID || '|' || p.DB || '.' || p.SCH || '.' || p.TBL || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT TABLE_CATALOG_NAME AS DB, TABLE_SCHEMA_NAME AS SCH, TABLE_NAME AS TBL,
+                   MAX(PIPE_NAME) AS PIPE,
+                   COUNT(*) AS FAILED_FILES,
+                   MAX(FIRST_ERROR_MESSAGE) AS SAMPLE_ERROR
+            FROM SNOWFLAKE.ACCOUNT_USAGE.COPY_HISTORY
+            WHERE LAST_LOAD_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND STATUS IN ('Load failed', 'Partially loaded')
+            GROUP BY 1, 2, 3
+        ) p ON c.RULE_ID = 'PIPE_COPY_FAILURES' AND p.FAILED_FILES > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule PIPE_COPY_FAILURES - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [15] SEC_BREAK_GLASS_USE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- SEC_BREAK_GLASS_USE: statement volume under the break-glass admin
+        -- roles. Day-to-day work belongs on SNOW_SYSADMINS; a busy
+        -- ACCOUNTADMIN session is either an incident or a habit to fix.
+        SELECT c.RULE_ID,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(b.USER_NAME),
+               c.SEVERITY,
+               b.USER_NAME || ' ran ' || b.STMTS || ' statements as ' || b.ROLE_NAME || ' (24h)',
+               'Break-glass roles are for emergencies and grants, not routine work. ' ||
+                   'If this is expected, raise the threshold on the Alerts page.',
+               b.STMTS,
+               c.RULE_ID || '|' || b.USER_NAME || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT USER_NAME, ROLE_NAME, COUNT(*) AS STMTS
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+              AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+            GROUP BY 1, 2
+        ) b ON c.RULE_ID = 'SEC_BREAK_GLASS_USE' AND b.STMTS > c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule SEC_BREAK_GLASS_USE - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [16] COST_CONTRACT_BREACH
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_CONTRACT_BREACH: current contract projected to exhaust within
+        -- threshold days at the trailing 30-day burn rate. Weekly-recurring
+        -- until the contract or the burn changes; CRITICAL inside 14 days.
+        SELECT c.RULE_ID, 'ALL',
+               IFF(p.DAYS_LEFT <= 14, 'CRITICAL', c.SEVERITY),
+               'Contract projected to exhaust in ' || p.DAYS_LEFT || ' day(s) (' ||
+                   TO_VARCHAR(p.EXHAUST_DATE) || ')',
+               'Consumed ' || ROUND(p.CONSUMED, 0) || ' of ' || ROUND(p.TOTAL, 0) ||
+                   ' contracted credits; trailing 30d burn ' || ROUND(p.DAILY_BURN, 1) ||
+                   ' credits/day (straight-line). Scenario planning: Cost > Contract > Renewal planner.',
+               p.DAYS_LEFT,
+               c.RULE_ID || '|' || TO_VARCHAR(DATE_TRUNC('week', CURRENT_DATE()))
+        FROM cfg c
+        JOIN (
+            SELECT TOTAL, CONSUMED, DAILY_BURN,
+                   CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
+                   DATEADD('day', CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)),
+                           CURRENT_DATE()) AS EXHAUST_DATE
+            FROM (
+                SELECT
+                    (SELECT COALESCE(TRY_TO_DOUBLE(MAX(IFF(KEY = 'CONTRACT_CREDITS', VALUE, NULL))), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.SETTINGS) AS TOTAL,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0)
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= COALESCE(
+                         (SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
+                          FROM DBA_MAINT_DB.OVERWATCH.SETTINGS), CURRENT_DATE())) AS CONSUMED,
+                    (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30
+                     FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+                     WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+            )
+        ) p ON c.RULE_ID = 'COST_CONTRACT_BREACH'
+           AND p.TOTAL > 0 AND p.DAILY_BURN > 0
+           AND p.DAYS_LEFT BETWEEN 0 AND c.THRESHOLD_NUM
+
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_CONTRACT_BREACH - other rules unaffected', CURRENT_ROLE();
+    END;
+    -- [17] COST_DEPT_BUDGET_PACE
+    BEGIN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WITH cfg AS (
+            SELECT * FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG WHERE ENABLED
+        )
+        SELECT b.RULE_ID, b.COMPANY, b.SEVERITY, b.TITLE, b.DETAIL, b.METRIC_VALUE, b.DEDUPE_KEY
+        FROM (
+        -- COST_DEPT_BUDGET_PACE: department MTD spend ahead of its monthly
+        -- budget pace (threshold = % over pace). Budgets live in
+        -- DEPT_BUDGETS; spend = the department's warehouses (exact billing).
+        SELECT c.RULE_ID, 'ALL',
+               IFF(d.OVER_PCT >= c.THRESHOLD_NUM * 3, 'HIGH', c.SEVERITY),
+               d.DEPARTMENT || ' is ' || ROUND(d.OVER_PCT, 0) || '% over budget pace (MTD ' ||
+                   ROUND(d.MTD_USD, 0) || ' USD of ' || ROUND(d.BUDGET_USD, 0) || ')',
+               'Month is ' || ROUND(d.TIME_SHARE * 100, 0) || '% elapsed. Owner lens: ' ||
+                   'Cost > Chargeback (warehouses are exact; roles are allocated).',
+               d.OVER_PCT,
+               c.RULE_ID || '|' || d.DEPARTMENT || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM cfg c
+        JOIN (
+            SELECT DEPARTMENT, BUDGET_USD, MTD_USD, TIME_SHARE,
+                   (MTD_USD / NULLIF(BUDGET_USD * TIME_SHARE, 0) - 1) * 100 AS OVER_PCT
+            FROM (
+                SELECT b.DEPARTMENT, b.MONTHLY_BUDGET_USD AS BUDGET_USD,
+                       COALESCE(SUM(f.CREDITS_TOTAL), 0) * :credit_price AS MTD_USD,
+                       DAY(CURRENT_DATE()) / DAY(LAST_DAY(CURRENT_DATE())) AS TIME_SHARE
+                FROM DBA_MAINT_DB.OVERWATCH.DEPT_BUDGETS b
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP m
+                  ON m.MAP_TYPE = 'WAREHOUSE' AND m.DEPARTMENT = b.DEPARTMENT
+                LEFT JOIN DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY f
+                  ON f.WAREHOUSE_NAME = UPPER(m.NAME)
+                 AND f.DAY >= DATE_TRUNC('month', CURRENT_DATE())
+                WHERE b.MONTHLY_BUDGET_USD > 0
+                GROUP BY 1, 2
+            )
+        ) d ON c.RULE_ID = 'COST_DEPT_BUDGET_PACE'
+           AND d.OVER_PCT > c.THRESHOLD_NUM AND d.MTD_USD >= 50
+        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        WHERE NOT EXISTS (
+            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+        );
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            fails := fails + 1;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'AlertScan', 'rule_block_failed', :emsg,
+                   'rule COST_DEPT_BUDGET_PACE - other rules unaffected', CURRENT_ROLE();
+    END;
+
+    -- Self-alert when any block failed: the scan reports its own degradation.
+    IF (fails > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+        SELECT c.RULE_ID, 'ALL', c.SEVERITY,
+               :fails || ' of 17 alert rule block(s) failed this run',
+               'APP_ERROR_LOG has the SQL errors (rule_block_failed). The other rules ' ||
+                   'kept firing - that is the point of the v7 decomposition.',
+               :fails,
+               c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+        WHERE c.RULE_ID = 'OPS_SCAN_DEGRADED' AND c.ENABLED
+          AND NOT EXISTS (
+              SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+              WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || TO_VARCHAR(CURRENT_DATE())
+          );
+    END IF;
+
+    RETURN 'alert scan v8 complete (EXPIRATION_DATE): ' || (17 - :fails) || '/17 rule blocks ok';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 23 AS VERSION, 'sweep v4 (PROD-only volume) + scan v9 (CREDENTIALS.DELETED_ON removed)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V024__warehouse_change_scorecard.sql
+-- ===========================================================================
+-- V024__warehouse_change_scorecard.sql — did a warehouse setting change make
+-- things better or worse?
+--
+-- Answers: "we resized WH_TRXS_TRANSFORM / changed auto-suspend — did cost,
+-- latency, queueing, spill, or failures move?" This account does NOT expose
+-- ACCOUNT_USAGE.WAREHOUSES, so detection is snapshot-diff: a daily task runs
+-- SHOW WAREHOUSES into WAREHOUSE_CONFIG_SNAPSHOT and diffs the two most
+-- recent snapshots per warehouse. Each detected setting change freezes a
+-- 14-day pre-change baseline ($/day from WAREHOUSE_METERING_HISTORY; p95,
+-- queued min/day, spill GB/day, fail % from QUERY_HISTORY) and compares the
+-- 14 days after. Confirmed regressions raise WH_CHANGE_REGRESSION alerts
+-- through the normal pipeline. Same design as V010's object change impact:
+-- baselines are FROZEN at detection, AFTER_* refresh daily until
+-- TRACKING_UNTIL. Idempotent. Apply IN ORDER after V023.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20024, 'BLOCKED: SCHEMA_VERSION < 23 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 23) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- Daily SHOW WAREHOUSES snapshots. First run seeds the baseline; changes are
+-- detectable from the second snapshot on. Detection granularity is one day —
+-- CHANGE_SEEN_AT is when the DIFF was seen, not the exact ALTER time.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT (
+    SNAPSHOT_AT       TIMESTAMP_LTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    WAREHOUSE_NAME    VARCHAR(200)  NOT NULL,
+    COMPANY           VARCHAR(40)   NOT NULL DEFAULT 'ALFA',
+    WAREHOUSE_SIZE    VARCHAR(40),
+    AUTO_SUSPEND      NUMBER(10,0),
+    MIN_CLUSTER_COUNT NUMBER(6,0),
+    MAX_CLUSTER_COUNT NUMBER(6,0),
+    SCALING_POLICY    VARCHAR(40),
+    AUTO_RESUME       VARCHAR(10),
+    WAREHOUSE_TYPE    VARCHAR(40)
+);
+
+-- One row per detected setting change on one warehouse. Baseline frozen at
+-- detection; AFTER_* stats refresh daily until TRACKING_UNTIL; per-day rates
+-- so a 3-day after-window compares fairly against the 14-day baseline.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY (
+    CHANGE_ID         VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    WAREHOUSE_NAME    VARCHAR(200)  NOT NULL,
+    COMPANY           VARCHAR(40)   NOT NULL DEFAULT 'ALFA',
+    SETTING           VARCHAR(40)   NOT NULL,  -- SIZE | AUTO_SUSPEND | MIN_CLUSTERS | MAX_CLUSTERS | SCALING_POLICY
+    OLD_VALUE         VARCHAR(100),
+    NEW_VALUE         VARCHAR(100),
+    CHANGE_SEEN_AT    TIMESTAMP_LTZ NOT NULL,
+    BASELINE_FROM     TIMESTAMP_LTZ,           -- freeze marker (set once)
+    BASELINE_QUERIES  NUMBER(12,0),
+    BASELINE_CREDITS_PER_DAY NUMBER(18,4),
+    BASELINE_P95_S    NUMBER(18,1),
+    BASELINE_QUEUED_MIN_PER_DAY NUMBER(18,2),
+    BASELINE_SPILL_GB_PER_DAY   NUMBER(18,3),
+    BASELINE_FAIL_PCT NUMBER(6,2),
+    AFTER_DAYS        NUMBER(8,2),
+    AFTER_QUERIES     NUMBER(12,0),
+    AFTER_CREDITS_PER_DAY NUMBER(18,4),
+    AFTER_P95_S       NUMBER(18,1),
+    AFTER_QUEUED_MIN_PER_DAY NUMBER(18,2),
+    AFTER_SPILL_GB_PER_DAY   NUMBER(18,3),
+    AFTER_FAIL_PCT    NUMBER(6,2),
+    VERDICT           VARCHAR(30)   NOT NULL DEFAULT 'PENDING',
+    -- PENDING (after-window still thin) | REGRESSED | IMPROVED | NEUTRAL
+    -- NO_BASELINE (warehouse was idle before the change)
+    -- INSUFFICIENT_AFTER (tracking ended with too little activity to judge)
+    VERDICT_DETAIL    VARCHAR(500),
+    TRACKING_UNTIL    DATE,
+    ALERTED           BOOLEAN       NOT NULL DEFAULT FALSE,
+    LAST_EVALUATED_AT TIMESTAMP_LTZ
+);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t
+USING (
+    SELECT 'WH_CHANGE_REGRESSION' AS RULE_ID, 'WAREHOUSE' AS FAMILY,
+           'Warehouse runs worse after a setting change (threshold = % credits/day increase)' AS NAME,
+           TRUE AS ENABLED, 'HIGH' AS SEVERITY, 15 AS THRESHOLD_NUM, 24 AS WINDOW_HOURS
+) s
+ON t.RULE_ID = s.RULE_ID
+WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, THRESHOLD_NUM, WINDOW_HOURS)
+     VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, s.WINDOW_HOURS);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_WAREHOUSE_CHANGE_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    pct FLOAT;   -- regression threshold, % credits/day increase (ALERT_CONFIG)
+BEGIN
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 15) INTO :pct
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'WH_CHANGE_REGRESSION';
+
+    -- 1) Snapshot current settings (SHOW is the only source on this account:
+    --    no ACCOUNT_USAGE.WAREHOUSES view — see validate.sql note).
+    SHOW WAREHOUSES LIMIT 500;
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT
+        (WAREHOUSE_NAME, COMPANY, WAREHOUSE_SIZE, AUTO_SUSPEND,
+         MIN_CLUSTER_COUNT, MAX_CLUSTER_COUNT, SCALING_POLICY, AUTO_RESUME, WAREHOUSE_TYPE)
+    SELECT "name",
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE("name"),
+           "size",
+           TRY_TO_NUMBER("auto_suspend"::VARCHAR),
+           TRY_TO_NUMBER("min_cluster_count"::VARCHAR),
+           TRY_TO_NUMBER("max_cluster_count"::VARCHAR),
+           "scaling_policy",
+           "auto_resume"::VARCHAR,
+           "type"
+    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+
+    -- 2) Diff the two most recent snapshots per warehouse into the registry.
+    --    One registry row per (warehouse, setting) per day; first-ever run
+    --    has no prior snapshot and registers nothing.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+        (WAREHOUSE_NAME, COMPANY, SETTING, OLD_VALUE, NEW_VALUE, CHANGE_SEEN_AT, TRACKING_UNTIL)
+    SELECT d.WAREHOUSE_NAME, d.COMPANY, d.SETTING, d.OLD_VALUE, d.NEW_VALUE,
+           CURRENT_TIMESTAMP(), DATEADD('day', 14, CURRENT_DATE())
+    FROM (
+        WITH ranked AS (
+            SELECT WAREHOUSE_NAME, COMPANY, WAREHOUSE_SIZE, AUTO_SUSPEND,
+                   MIN_CLUSTER_COUNT, MAX_CLUSTER_COUNT, SCALING_POLICY,
+                   ROW_NUMBER() OVER (PARTITION BY WAREHOUSE_NAME ORDER BY SNAPSHOT_AT DESC) AS RN
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CONFIG_SNAPSHOT
+            WHERE SNAPSHOT_AT >= DATEADD('day', -35, CURRENT_TIMESTAMP())
+        ),
+        cur AS (SELECT * FROM ranked WHERE RN = 1),
+        prev AS (SELECT * FROM ranked WHERE RN = 2)
+        SELECT cur.WAREHOUSE_NAME, cur.COMPANY, 'SIZE' AS SETTING,
+               prev.WAREHOUSE_SIZE AS OLD_VALUE, cur.WAREHOUSE_SIZE AS NEW_VALUE
+        FROM cur JOIN prev ON prev.WAREHOUSE_NAME = cur.WAREHOUSE_NAME
+        WHERE COALESCE(cur.WAREHOUSE_SIZE, '') <> COALESCE(prev.WAREHOUSE_SIZE, '')
+        UNION ALL
+        SELECT cur.WAREHOUSE_NAME, cur.COMPANY, 'AUTO_SUSPEND',
+               prev.AUTO_SUSPEND::VARCHAR, cur.AUTO_SUSPEND::VARCHAR
+        FROM cur JOIN prev ON prev.WAREHOUSE_NAME = cur.WAREHOUSE_NAME
+        WHERE COALESCE(cur.AUTO_SUSPEND, -1) <> COALESCE(prev.AUTO_SUSPEND, -1)
+        UNION ALL
+        SELECT cur.WAREHOUSE_NAME, cur.COMPANY, 'MIN_CLUSTERS',
+               prev.MIN_CLUSTER_COUNT::VARCHAR, cur.MIN_CLUSTER_COUNT::VARCHAR
+        FROM cur JOIN prev ON prev.WAREHOUSE_NAME = cur.WAREHOUSE_NAME
+        WHERE COALESCE(cur.MIN_CLUSTER_COUNT, -1) <> COALESCE(prev.MIN_CLUSTER_COUNT, -1)
+        UNION ALL
+        SELECT cur.WAREHOUSE_NAME, cur.COMPANY, 'MAX_CLUSTERS',
+               prev.MAX_CLUSTER_COUNT::VARCHAR, cur.MAX_CLUSTER_COUNT::VARCHAR
+        FROM cur JOIN prev ON prev.WAREHOUSE_NAME = cur.WAREHOUSE_NAME
+        WHERE COALESCE(cur.MAX_CLUSTER_COUNT, -1) <> COALESCE(prev.MAX_CLUSTER_COUNT, -1)
+        UNION ALL
+        SELECT cur.WAREHOUSE_NAME, cur.COMPANY, 'SCALING_POLICY',
+               prev.SCALING_POLICY, cur.SCALING_POLICY
+        FROM cur JOIN prev ON prev.WAREHOUSE_NAME = cur.WAREHOUSE_NAME
+        WHERE COALESCE(cur.SCALING_POLICY, '') <> COALESCE(prev.SCALING_POLICY, '')
+    ) d
+    WHERE NOT EXISTS (
+        SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+        WHERE r.WAREHOUSE_NAME = d.WAREHOUSE_NAME
+          AND r.SETTING = d.SETTING
+          AND r.CHANGE_SEEN_AT::DATE = CURRENT_DATE()
+    );
+
+    -- 3) Freeze pre-change baselines once. $/day is exact warehouse credits
+    --    (WAREHOUSE_METERING_HISTORY); the rest comes from QUERY_HISTORY.
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),
+           BASELINE_CREDITS_PER_DAY = ROUND(s.CR / 14, 4)
+      FROM (
+          SELECT r.CHANGE_ID, SUM(m.CREDITS_USED) AS CR
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY m
+            ON m.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND m.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND m.START_TIME < r.CHANGE_SEEN_AT
+           AND m.WAREHOUSE_NAME = r.WAREHOUSE_NAME
+          WHERE r.BASELINE_FROM IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET BASELINE_QUERIES = s.QRY,
+           BASELINE_P95_S = ROUND(s.P95_MS / 1000, 1),
+           BASELINE_QUEUED_MIN_PER_DAY = ROUND(s.QUEUED_MS / 60000 / 14, 2),
+           BASELINE_SPILL_GB_PER_DAY = ROUND(s.SPILL_B / POWER(1024, 3) / 14, 3),
+           BASELINE_FAIL_PCT = ROUND(100 * s.FAILS / NULLIF(s.QRY, 0), 2)
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS QRY,
+                 COUNT_IF(q.EXECUTION_STATUS = 'FAILED') AS FAILS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS,
+                 SUM(COALESCE(q.QUEUED_OVERLOAD_TIME, 0)) AS QUEUED_MS,
+                 SUM(COALESCE(q.BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) AS SPILL_B
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND q.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND q.START_TIME < r.CHANGE_SEEN_AT
+           AND q.WAREHOUSE_NAME = r.WAREHOUSE_NAME
+          WHERE r.BASELINE_QUERIES IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- Idle-before warehouses: freeze an explicit zero baseline (-> NO_BASELINE).
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+       SET BASELINE_FROM = DATEADD('day', -14, CHANGE_SEEN_AT),
+           BASELINE_QUERIES = COALESCE(BASELINE_QUERIES, 0),
+           BASELINE_CREDITS_PER_DAY = COALESCE(BASELINE_CREDITS_PER_DAY, 0)
+     WHERE BASELINE_FROM IS NULL OR BASELINE_QUERIES IS NULL;
+
+    -- 4) Refresh post-change stats while the tracking window is open.
+    --    Per-day rates divide by the exact elapsed window (min half a day)
+    --    so short after-windows compare fairly.
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET AFTER_DAYS = ROUND(GREATEST(DATEDIFF('second', t.CHANGE_SEEN_AT, CURRENT_TIMESTAMP()) / 86400.0, 0.5), 2),
+           AFTER_CREDITS_PER_DAY = ROUND(s.CR / GREATEST(DATEDIFF('second', t.CHANGE_SEEN_AT, CURRENT_TIMESTAMP()) / 86400.0, 0.5), 4)
+      FROM (
+          SELECT r.CHANGE_ID, SUM(m.CREDITS_USED) AS CR
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY m
+            ON m.START_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+           AND m.START_TIME > r.CHANGE_SEEN_AT
+           AND m.WAREHOUSE_NAME = r.WAREHOUSE_NAME
+          WHERE CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET AFTER_QUERIES = s.QRY,
+           AFTER_P95_S = ROUND(s.P95_MS / 1000, 1),
+           AFTER_QUEUED_MIN_PER_DAY = ROUND(s.QUEUED_MS / 60000 / GREATEST(DATEDIFF('second', t.CHANGE_SEEN_AT, CURRENT_TIMESTAMP()) / 86400.0, 0.5), 2),
+           AFTER_SPILL_GB_PER_DAY = ROUND(s.SPILL_B / POWER(1024, 3) / GREATEST(DATEDIFF('second', t.CHANGE_SEEN_AT, CURRENT_TIMESTAMP()) / 86400.0, 0.5), 3),
+           AFTER_FAIL_PCT = ROUND(100 * s.FAILS / NULLIF(s.QRY, 0), 2)
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS QRY,
+                 COUNT_IF(q.EXECUTION_STATUS = 'FAILED') AS FAILS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS,
+                 SUM(COALESCE(q.QUEUED_OVERLOAD_TIME, 0)) AS QUEUED_MS,
+                 SUM(COALESCE(q.BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) AS SPILL_B
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -18, CURRENT_TIMESTAMP())
+           AND q.START_TIME > r.CHANGE_SEEN_AT
+           AND q.WAREHOUSE_NAME = r.WAREHOUSE_NAME
+          WHERE CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- 5) Verdicts (rows still inside their tracking window). Regression =
+    --    $/day up threshold% with >= 1 credit/day absolute, OR p95 up 25%
+    --    and >= 30s, OR failure rate up 5 points, OR queueing up 50% and
+    --    >= 10 min/day. Improvement requires the other axis not to have
+    --    been traded away (cheaper but 3x slower is not IMPROVED).
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+       SET LAST_EVALUATED_AT = CURRENT_TIMESTAMP(),
+           VERDICT = CASE
+               WHEN COALESCE(BASELINE_QUERIES, 0) < 20 THEN 'NO_BASELINE'
+               WHEN COALESCE(AFTER_DAYS, 0) < 3 OR COALESCE(AFTER_QUERIES, 0) < 20 THEN 'PENDING'
+               WHEN (AFTER_CREDITS_PER_DAY > BASELINE_CREDITS_PER_DAY * (1 + :pct / 100)
+                     AND AFTER_CREDITS_PER_DAY - BASELINE_CREDITS_PER_DAY >= 1)
+                 OR (AFTER_P95_S > COALESCE(BASELINE_P95_S, 0) * 1.25 AND AFTER_P95_S >= 30)
+                 OR (COALESCE(AFTER_FAIL_PCT, 0) >= COALESCE(BASELINE_FAIL_PCT, 0) + 5)
+                 OR (AFTER_QUEUED_MIN_PER_DAY > COALESCE(BASELINE_QUEUED_MIN_PER_DAY, 0) * 1.5
+                     AND AFTER_QUEUED_MIN_PER_DAY >= 10)
+                   THEN 'REGRESSED'
+               WHEN (AFTER_CREDITS_PER_DAY <= BASELINE_CREDITS_PER_DAY * 0.85
+                     AND COALESCE(AFTER_P95_S, 0) <= COALESCE(BASELINE_P95_S, 0) * 1.10)
+                 OR (COALESCE(AFTER_P95_S, 999999) <= COALESCE(BASELINE_P95_S, 0) * 0.75
+                     AND AFTER_CREDITS_PER_DAY <= BASELINE_CREDITS_PER_DAY * 1.10)
+                   THEN 'IMPROVED'
+               ELSE 'NEUTRAL'
+           END,
+           VERDICT_DETAIL =
+               'credits/day ' || COALESCE(ROUND(BASELINE_CREDITS_PER_DAY, 2)::VARCHAR, '?')
+               || '->' || COALESCE(ROUND(AFTER_CREDITS_PER_DAY, 2)::VARCHAR, '?')
+               || ' | p95 ' || COALESCE(BASELINE_P95_S::VARCHAR, '?') || 's->'
+               || COALESCE(AFTER_P95_S::VARCHAR, '?') || 's'
+               || ' | queue ' || COALESCE(BASELINE_QUEUED_MIN_PER_DAY::VARCHAR, '0') || '->'
+               || COALESCE(AFTER_QUEUED_MIN_PER_DAY::VARCHAR, '0') || ' min/d'
+               || ' | fail ' || COALESCE(BASELINE_FAIL_PCT::VARCHAR, '0') || '->'
+               || COALESCE(AFTER_FAIL_PCT::VARCHAR, '0') || '%'
+               || ' | ' || COALESCE(BASELINE_QUERIES::VARCHAR, '0') || '->'
+               || COALESCE(AFTER_QUERIES::VARCHAR, '0') || ' queries'
+     WHERE CURRENT_DATE() <= TRACKING_UNTIL;
+
+    -- Tracking ended while still thin: close it out honestly.
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+       SET VERDICT = 'INSUFFICIENT_AFTER'
+     WHERE CURRENT_DATE() > TRACKING_UNTIL AND VERDICT = 'PENDING';
+
+    -- 6) One alert per confirmed regression (dedupe: warehouse + setting +
+    --    change day). 2x credits/day escalates to CRITICAL.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    SELECT c.RULE_ID, r.COMPANY,
+           IFF(COALESCE(r.AFTER_CREDITS_PER_DAY / NULLIF(r.BASELINE_CREDITS_PER_DAY, 0), 0) >= 2,
+               'CRITICAL', c.SEVERITY),
+           'Warehouse ' || r.WAREHOUSE_NAME || ' regressed after ' || r.SETTING || ' '
+               || COALESCE(r.OLD_VALUE, '?') || '->' || COALESCE(r.NEW_VALUE, '?')
+               || ' on ' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE),
+           COALESCE(r.VERDICT_DETAIL, ''),
+           ROUND(COALESCE(100 * (r.AFTER_CREDITS_PER_DAY / NULLIF(r.BASELINE_CREDITS_PER_DAY, 0) - 1),
+                          100 * (r.AFTER_P95_S / NULLIF(r.BASELINE_P95_S, 0) - 1)), 1),
+           c.RULE_ID || '|' || r.WAREHOUSE_NAME || '|' || r.SETTING || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+    FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+      ON c.RULE_ID = 'WH_CHANGE_REGRESSION' AND c.ENABLED
+    WHERE r.VERDICT = 'REGRESSED' AND NOT r.ALERTED
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || r.WAREHOUSE_NAME || '|' || r.SETTING || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+      );
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+       SET ALERTED = TRUE
+     WHERE VERDICT = 'REGRESSED' AND NOT ALERTED;
+
+    RETURN 'warehouse change scan complete';
+END;
+$$;
+
+-- Daily at 06:40 (before the object change-impact scan at 06:50); the first
+-- run only seeds the snapshot baseline.
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON 40 6 * * * America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_WAREHOUSE_CHANGE_SCAN();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 24 AS VERSION,
+       'warehouse change scorecard: config snapshots, change registry, WH_CHANGE_REGRESSION rule' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V025__break_glass_policy.sql
+-- ===========================================================================
+-- V025__break_glass_policy.sql — disable SEC_BREAK_GLASS_USE (owner policy).
+--
+-- 2026-07-08 live finding: the rule counts statements under ACCOUNTADMIN /
+-- SNOW_ACCOUNTADMINS — but on this account those roles ARE the routine
+-- operating roles (automation runs as SYSTEM under SNOW_ACCOUNTADMINS every
+-- day: 772 statements = a normal Tuesday, not an incident). The rule watches
+-- ONLY those two roles, so with them declared normal there is nothing left
+-- for it to alert on. Owner decision (Joe, 2026-07-08): disable the rule.
+--
+-- What this does NOT change:
+-- - Security → Changes → "Break-glass role activity" keeps showing the same
+--   statement volumes for visibility — a panel, not a pager.
+-- - The rule row stays in ALERT_CONFIG (audit trail + one-UPDATE re-enable
+--   if the operating model ever changes).
+-- Cleanup: bulk-resolve any open SEC_BREAK_GLASS_USE events as NOISE from
+-- Alerts → Open events; they seed the threshold-suggestion evidence.
+-- Config-as-code so both companies and any rebuild inherit the decision.
+-- Idempotent. Apply IN ORDER after V024.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20025, 'BLOCKED: SCHEMA_VERSION < 24 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 24) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+   SET ENABLED = FALSE
+ WHERE RULE_ID = 'SEC_BREAK_GLASS_USE';
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 25 AS VERSION,
+       'policy: SEC_BREAK_GLASS_USE disabled - ACCOUNTADMIN/SNOW_ACCOUNTADMINS are routine operating roles here' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V026__teams_safe_delivery.sql
+-- ===========================================================================
+-- V026__teams_safe_delivery.sql — sender v3: JSON-safe webhook payloads.
+--
+-- Live finding (2026-07-08): every webhook integration splices the message
+-- INSIDE a JSON string in its WEBHOOK_BODY_TEMPLATE — but the sender built
+-- the message with real newlines (LISTAGG '\n' separator + the prefix) and
+-- alert titles can carry double quotes. Raw newlines/quotes inside a JSON
+-- string literal are invalid JSON: Slack tolerated some of it, Microsoft
+-- Teams (Workflows) rejected the card outright — the hourly
+-- route_send_failed errors and the "text card" failure.
+--
+-- v3 escapes the message for JSON embedding using CHR() codes (the V022 and
+-- CALLs+ lessons: never trust backslashes to survive multiple string
+-- layers). Channels render the escaped \n as a line break — Slack, Teams
+-- Adaptive Cards, and PagerDuty summaries all behave.
+--
+-- Pair with snowflake/webhook_delivery.sql v2 for the Teams Workflows
+-- integration recipe (Adaptive Card body template — the retired O365
+-- connector's {"text": ...} shape does NOT work on Workflows URLs).
+-- Everything else in the sender is byte-identical to V022's v2.
+-- Idempotent. Apply IN ORDER after V025.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20026, 'BLOCKED: SCHEMA_VERSION < 25 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 25) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    sent_total INT DEFAULT 0;
+    routes_hit INT DEFAULT 0;
+    expired INT DEFAULT 0;
+    message VARCHAR;
+    emsg VARCHAR;
+    r_route_id VARCHAR;
+    r_family VARCHAR;
+    r_minsev VARCHAR;
+    r_integration VARCHAR;
+    c1 CURSOR FOR
+        SELECT r.ROUTE_ID, r.FAMILY, r.MIN_SEVERITY, r.INTEGRATION_NAME
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+        WHERE r.ENABLED
+        ORDER BY r.ROUTE_ID;
+BEGIN
+    FOR rec IN c1 DO
+        r_route_id := rec.ROUTE_ID;
+        r_family := rec.FAMILY;
+        r_minsev := rec.MIN_SEVERITY;
+        r_integration := rec.INTEGRATION_NAME;
+        -- Eligible = open, young enough, matches this route, and THIS ROUTE
+        -- has not delivered it yet (other routes' successes are irrelevant).
+        SELECT LISTAGG('[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140), '\n')
+               WITHIN GROUP (ORDER BY e.RAISED_AT DESC)
+          INTO :message
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+        JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+        WHERE e.STATUS = 'OPEN'
+          AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+          AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+              >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+          AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                          WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+
+        -- v3: the body templates embed this string inside a JSON string
+        -- literal, so it must arrive JSON-escaped. CHR() codes only —
+        -- backslash first, then quote, newline, CR, tab.
+        IF (:message IS NOT NULL) THEN
+            message := REPLACE(:message, CHR(92), CHR(92) || CHR(92));
+            message := REPLACE(:message, CHR(34), CHR(92) || CHR(34));
+            message := REPLACE(:message, CHR(10), CHR(92) || 'n');
+            message := REPLACE(:message, CHR(13), '');
+            message := REPLACE(:message, CHR(9),  CHR(92) || 't');
+        END IF;
+
+        IF (:message IS NOT NULL AND :message != '') THEN
+            BEGIN
+                CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+                    SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
+                        'OVERWATCH alerts:' || CHR(92) || 'n' || LEFT(:message, 3000)),
+                    SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));
+                routes_hit := routes_hit + 1;
+
+                -- Ledger rows for THIS route only (success path).
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES (EVENT_ID, ROUTE_ID)
+                SELECT e.EVENT_ID, :r_route_id
+                FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+                WHERE e.STATUS = 'OPEN'
+                  AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+                  AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                      >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                                  WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+                sent_total := sent_total + SQLROWCOUNT;
+
+                -- Back-compat: NOTIFIED_AT still means "delivered somewhere
+                -- at least once" (the drill, the delivery chip, and MTTA
+                -- surfaces read it).
+                UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                   SET NOTIFIED_AT = CURRENT_TIMESTAMP()
+                 WHERE e.NOTIFIED_AT IS NULL
+                   AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                               WHERE d.EVENT_ID = e.EVENT_ID);
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                        (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'NotifyWebhook', 'route_send_failed', :emsg,
+                           'route ' || :r_route_id || ' integration ' || :r_integration ||
+                           ' - will retry next run; other routes unaffected',
+                           CURRENT_ROLE();
+            END;
+        END IF;
+    END FOR;
+
+    -- Loud, not silent: open events aging past the 24h window with NO
+    -- delivery anywhere get one error-log row each run they linger.
+    SELECT COUNT(*) INTO :expired
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.STATUS = 'OPEN' AND e.NOTIFIED_AT IS NULL
+      AND e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP());
+    IF (expired > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'NotifyWebhook', 'undelivered_expired',
+               :expired || ' open event(s) aged past the 24h delivery window with no successful send',
+               'check ALERT_ROUTES integrations; events remain OPEN in-app',
+               CURRENT_ROLE();
+    END IF;
+
+    RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
+           ' route(s); ' || :expired || ' expired-undelivered flagged';
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 26 AS VERSION, 'sender v3: JSON-safe webhook payloads (Teams Workflows compatible)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V027__mart_family.sql
+-- ===========================================================================
+-- V027__mart_family.sql — the mart family (docs/design/V027_MART_FAMILY.md).
+--
+-- Nine scheduled marts replace the recurring live ACCOUNT_USAGE scans the
+-- telemetry named (idle/sizing ~90s, query families ~30s, role share,
+-- security posture, task graphs, cost allocation, timeline, AI usage), plus
+-- the telemetry schema rider (CACHE_HIT/SQL_HASH/BATCH_SIZE/TRUNCATED on
+-- APP_QUERY_TELEMETRY; EVENT_KIND/IS_RERUN on APP_USAGE).
+--
+-- Loader: ONE proc, SP_LOAD_MARTS_V27(scope, days_back). scope='HOURLY'
+-- loads marts 1-6 + the 48h incident timeline (chained AFTER
+-- TASK_LOAD_HOURLY); scope='DAILY' loads security posture + AI usage
+-- (chained AFTER TASK_LOAD_DAILY). Every mart load is MERGE-idempotent on
+-- its grain and wrapped in its own EXCEPTION block (V017 isolation): one
+-- mart's source drift logs one APP_ERROR_LOG row and never starves the
+-- rest. Backfill: CALL the proc with a large days_back (see
+-- snowflake/backfill_365.sql; QUERY_HISTORY-derived marts cap at ~365d,
+-- keep 90d for the two high-cardinality ones unless you mean it).
+--
+-- App adoption is deliberately NOT in this migration: panels go fact-first
+-- (with the live builders as labeled fallback) in the next app release,
+-- AFTER these marts hold data — adopting before data exists only exercises
+-- fallbacks. Idempotent. Apply IN ORDER after V026. Re-run roles.sql.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20027, 'BLOCKED: SCHEMA_VERSION < 26 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 26) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Telemetry rider (Codex r3 #17 / #19, approved r5)
+-- ---------------------------------------------------------------------------
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY ADD COLUMN IF NOT EXISTS CACHE_HIT BOOLEAN;
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY ADD COLUMN IF NOT EXISTS SQL_HASH VARCHAR(64);
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY ADD COLUMN IF NOT EXISTS BATCH_SIZE NUMBER(6,0);
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY ADD COLUMN IF NOT EXISTS TRUNCATED BOOLEAN;
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_USAGE ADD COLUMN IF NOT EXISTS EVENT_KIND VARCHAR(40) DEFAULT 'page_visit';
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.APP_USAGE ADD COLUMN IF NOT EXISTS IS_RERUN BOOLEAN DEFAULT FALSE;
+-- Note: the OPS_SLOW_RENDER sentinel keeps reading first-paint rows only;
+-- the app logs rerun/interaction events with RENDER_MS NULL until the scan
+-- gains an IS_RERUN filter (planned with V028).
+
+-- ---------------------------------------------------------------------------
+-- Mart tables (all rebuildable from ACCOUNT_USAGE — real drops in teardown)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY (
+    DAY DATE NOT NULL,
+    WAREHOUSE_NAME VARCHAR(200) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALFA',
+    CREDITS_TOTAL NUMBER(18,4),
+    CREDITS_COMPUTE NUMBER(18,4),
+    QUERIES NUMBER(12,0),
+    FAILS NUMBER(12,0),
+    QUEUED_MIN NUMBER(18,2),
+    SPILL_GB NUMBER(18,3),
+    P95_S NUMBER(18,1),
+    EXEC_HOURS NUMBER(18,3),
+    BILLED_HOURS NUMBER(12,0),
+    ACTIVE_HOURS NUMBER(12,0),
+    IDLE_PCT NUMBER(6,2),
+    CREDITS_PER_QUERY NUMBER(18,6),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY (
+    DAY DATE NOT NULL,
+    QUERY_HASH VARCHAR(64) NOT NULL,
+    SAMPLE_TEXT VARCHAR(200),
+    RUNS NUMBER(12,0),
+    FAILS NUMBER(12,0),
+    USERS NUMBER(12,0),
+    WAREHOUSES NUMBER(12,0),
+    DATABASE_NAME VARCHAR(200),
+    SCHEMA_NAME VARCHAR(200),
+    TOTAL_EXEC_SEC NUMBER(18,1),
+    MEDIAN_S NUMBER(18,2),
+    P95_S NUMBER(18,2),
+    COMPILE_MS_AVG NUMBER(18,1),
+    GB_SCANNED_AVG NUMBER(18,3),
+    CACHE_PCT_AVG NUMBER(6,2),
+    TAGGED_RUNS NUMBER(12,0),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY (
+    HOUR_TS TIMESTAMP_NTZ NOT NULL,
+    ROLE_NAME VARCHAR(200) NOT NULL,
+    WAREHOUSE_NAME VARCHAR(200) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALFA',
+    QUERIES NUMBER(12,0),
+    FAILS NUMBER(12,0),
+    EXEC_SEC NUMBER(18,1),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY (
+    HOUR_TS TIMESTAMP_NTZ NOT NULL,
+    DATABASE_NAME VARCHAR(200) NOT NULL,
+    SCHEMA_NAME VARCHAR(200) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALFA',
+    QUERIES NUMBER(12,0),
+    FAILS NUMBER(12,0),
+    QUEUED_SEC NUMBER(18,1),
+    SPILL_GB NUMBER(18,3),
+    P95_S NUMBER(18,1),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY (
+    DAY DATE NOT NULL,
+    DIMENSION VARCHAR(20) NOT NULL,
+    KEY_NAME VARCHAR(400) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALFA',
+    ALLOC_CREDITS NUMBER(18,6),
+    EXEC_SEC NUMBER(18,1),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY (
+    DAY DATE NOT NULL,
+    PIPELINE VARCHAR(300) NOT NULL,
+    DATABASE_NAME VARCHAR(200),
+    SCHEMA_NAME VARCHAR(200),
+    GRAPH_RUNS NUMBER(12,0),
+    RUNS_WITH_FAILURES NUMBER(12,0),
+    TASK_RUNS NUMBER(12,0),
+    AVG_WALL_SEC NUMBER(18,1),
+    P95_WALL_SEC NUMBER(18,1),
+    WH_CREDITS NUMBER(18,4),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY (
+    DAY DATE NOT NULL,
+    METRIC VARCHAR(60) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALL',
+    VALUE NUMBER(18,2),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE (
+    EVENT_TS TIMESTAMP_NTZ NOT NULL,
+    KIND VARCHAR(30) NOT NULL,
+    COMPANY VARCHAR(40) NOT NULL DEFAULT 'ALFA',
+    SEVERITY VARCHAR(20),
+    TITLE VARCHAR(300),
+    REF_ID VARCHAR(120),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY (
+    DAY DATE NOT NULL,
+    USER_NAME VARCHAR(200) NOT NULL,
+    SOURCE VARCHAR(40) NOT NULL,
+    MODEL_NAME VARCHAR(120) NOT NULL DEFAULT 'n/a',
+    REQUESTS NUMBER(12,0),
+    TOKENS NUMBER(18,0),
+    CREDITS NUMBER(18,6),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- ---------------------------------------------------------------------------
+-- The loader. scope: HOURLY (marts 1-6 + timeline) | DAILY (posture + AI).
+-- days_back parameterizes the reload window; the backfill script calls the
+-- same proc with large values, so there is exactly one loading codepath.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(WAREHOUSE_NAME, '')) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                       ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_30D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 30, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                      WHERE q.START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Freshness: replace the view with every arm (V003's seven + the new nine).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+UNION ALL
+SELECT 'MART_WAREHOUSE_EFFICIENCY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+UNION ALL
+SELECT 'MART_QUERY_FAMILY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+UNION ALL
+SELECT 'FACT_QUERY_ROLE_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+UNION ALL
+SELECT 'FACT_QUERY_SCHEMA_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+UNION ALL
+SELECT 'MART_COST_ALLOCATION_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+UNION ALL
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+UNION ALL
+SELECT 'MART_SECURITY_POSTURE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY
+UNION ALL
+SELECT 'MART_INCIDENT_TIMELINE', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+UNION ALL
+SELECT 'FACT_AI_USAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY;
+
+-- ---------------------------------------------------------------------------
+-- Chain the loader legs. Adding a child requires the root suspended; both
+-- roots (and existing children) are resumed again below.
+-- ---------------------------------------------------------------------------
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_DAILY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 3);
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+
+-- First fill now (2-3 days) so panels are not empty until the next task run.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 3);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 27 AS VERSION,
+       'mart family: 9 scheduled marts + SP_LOAD_MARTS_V27 + telemetry rider (CACHE_HIT/SQL_HASH/EVENT_KIND)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V028__cred_expiry_10d.sql
+-- ===========================================================================
+-- V028__cred_expiry_10d.sql — credential-expiry policy: 30-day -> 10-day horizon.
+--
+-- Owner decision 2026-07-09: alert at 10 days out, not 30 — the 30-day
+-- horizon kept re-surfacing rotations the team already schedules; 10 days
+-- is the "act now" line. Config-as-code like V025's break-glass change.
+--
+-- Two moving parts, one policy:
+--   [1] SEC_CRED_EXPIRY reads ALERT_CONFIG.THRESHOLD_NUM at scan time, so
+--       the rule change is a single UPDATE (no scan replacement).
+--   [2] MART_SECURITY_POSTURE_DAILY's daily bucket moves with the rule:
+--       SP_LOAD_MARTS_V27 below is derived VERBATIM from V027's proc with
+--       exactly two edits (metric name EXPIRING_CRED_30D -> _10D, horizon
+--       30 -> 10). tests/test_live_round4.py asserts that equality, so the
+--       two copies cannot drift silently. Historical _30D rows stay as
+--       history; new rows land under the _10D metric.
+--
+-- App-side panels move to the 10-day horizon in the same release (v4.11.0).
+-- Idempotent. Apply IN ORDER after V027. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20028, 'BLOCKED: SCHEMA_VERSION < 27 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 27) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- [1] The rule: 10-day horizon. The hourly scan reads THRESHOLD_NUM at
+--     runtime (since V009), so no proc surgery — already-open events keep
+--     their weekly re-alert cadence until rotated or resolved.
+-- ---------------------------------------------------------------------------
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+   SET THRESHOLD_NUM = 10
+ WHERE RULE_ID = 'SEC_CRED_EXPIRY';
+
+-- ---------------------------------------------------------------------------
+-- [2] Posture bucket follows the rule. Derived verbatim from V027 —
+--     see the header note; do NOT hand-edit this proc here without
+--     updating V027's copy and the equality lock.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(WAREHOUSE_NAME, '')) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                       ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_10D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                      WHERE q.START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 28 AS VERSION,
+       'credential expiry policy: 10-day horizon (rule threshold + posture mart bucket)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V029__loader_fix.sql
+-- ===========================================================================
+-- V029__loader_fix.sql — the two loader arms that never loaded.
+--
+-- Live finding 2026-07-10: FACT_QUERY_ROLE_HOURLY and FACT_QUERY_SCHEMA_HOURLY
+-- logged mart_load_failed EVERY HOUR since V027 applied — 'WAREHOUSE_NAME /
+-- DATABASE_NAME in select clause is neither an aggregate nor in the group by
+-- clause'. Root cause: the COMPANY expressions called COMPANY_FOR_*() on the
+-- RAW column while GROUP BY covered a DIFFERENT expression
+-- (COALESCE(col, 'NONE')). The per-mart EXCEPTION isolation worked exactly as
+-- designed (seven other marts kept loading; the app fell back to live for
+-- these two) — but the facts stayed empty. Fix: feed the UDF an aggregate,
+-- MAX(COALESCE(col, '')) — deterministic per group, UDF runs once per group.
+--
+-- The sqlglot CI gate could not catch this: it validates syntax, not GROUP BY
+-- semantics, and proc bodies are $$-skipped. The equality-lock chain extends:
+-- this proc is derived VERBATIM from V028's with exactly the two edits above
+-- (tests/test_live_round5.py asserts it).
+--
+-- After applying: the migration runs a 2-day first fill. For history, run the
+-- commented 90-day backfill once (MERGE-idempotent; re-covers all hourly
+-- marts, so it is safe but takes a few minutes):
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
+--
+-- Idempotent. Apply IN ORDER after V028. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20029, 'BLOCKED: SCHEMA_VERSION < 28 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 28) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(MAX(COALESCE(WAREHOUSE_NAME, ''))) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(MAX(COALESCE(DATABASE_NAME, ''))) AS COMPANY,
+                       COUNT(*) AS QUERIES,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                       ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_10D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                      WHERE q.START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+-- First fill so the two healed marts hold data before the next task tick.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 29 AS VERSION,
+       'loader fix: role-hour + schema-hour GROUP BY (COMPANY_FOR_* over MAX)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V030__loader_fix2.sql
+-- ===========================================================================
+-- V030__loader_fix2.sql — the correct shape for the role/schema arms.
+--
+-- Live finding 2026-07-10 (after V029): 'Invalid aggregate function in where
+-- clause [MAX(...CORRELATION(...))]'. COMPANY_FOR_* is a SQL UDF whose body
+-- CORRELATES its argument into a subquery — wrapping the argument in MAX()
+-- pushed an aggregate into that correlated WHERE when Snowflake inlined the
+-- UDF. V029's fix was wrong for this UDF implementation; lesson recorded.
+--
+-- The bulletproof shape: aggregate FIRST in a derived table, apply the UDF
+-- to a plain column OUTSIDE the grouped query — no aggregate anywhere near
+-- the UDF, nothing raw left in the select list. Same reason the other seven
+-- arms never failed.
+--
+-- Rider while the proc is open (live round 6 tuning): the posture arm gains
+-- MFA_GAP_USERS and BREAKGLASS_GRANTS_30D — the governance-drift score's
+-- last two live inputs — so Security's first paint reads the daily posture
+-- snapshot instead of the 4-subquery USERS/CREDENTIALS/GRANTS scan that
+-- topped the fleet slow-fetch board (13 hits, p95 12.3s).
+--
+-- Derived VERBATIM from V029's proc with exactly three block edits; the
+-- lock chain V027 -> V028 -> V029 -> V030 asserts it.
+--
+-- After applying: 2-day first fill runs here. For history on the two healed
+-- facts run once (idempotent, a few minutes):
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
+-- and give the posture snapshot its first daily row now:
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 3);
+--
+-- Idempotent. Apply IN ORDER after V029. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20030, 'BLOCKED: SCHEMA_VERSION < 29 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 29) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.ROLE_NAME, g.WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.EXEC_SEC
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                           COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.DATABASE_NAME, g.SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(g.DATABASE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.QUEUED_SEC, g.SPILL_GB, g.P95_S
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                           COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                           ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                           ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_10D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                      WHERE q.START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+                UNION ALL
+                SELECT CURRENT_DATE(), 'MFA_GAP_USERS', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+                WHERE U.DELETED_ON IS NULL AND U.DISABLED = FALSE
+                  AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+                  AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                              WHERE L.USER_NAME = U.NAME
+                                AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                                AND L.PASSWORD_LOGINS > 0)
+                UNION ALL
+                SELECT CURRENT_DATE(), 'BREAKGLASS_GRANTS_30D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE DELETED_ON IS NULL
+                  AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                  AND CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+-- First fill: heal the two facts and seed the extended posture snapshot.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 3);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 30 AS VERSION,
+       'loader fix 2: UDF outside aggregation (derived-table shape) + posture gains MFA/breakglass' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V031__scan_tuning_and_tagcov.sql
+-- ===========================================================================
+-- V031__scan_tuning_and_tagcov.sql — the tuning trio's migration half.
+--
+-- [1] SP_CHANGE_IMPACT_SCAN v2 (first replacement since V010). The scan was
+--     the biggest single statement family on the shared warehouse (median
+--     278s/call): its after-window joins used a blanket -18d bound and paid
+--     the double-REPLACE POSITION match on every CALL's full text. v2 bounds
+--     the joins to the OLDEST STILL-TRACKING change (:trk_lo — near-zero
+--     scan when nothing is tracking) and adds a cheap ILIKE pre-filter so
+--     the expensive normalization only runs on plausible rows. Verdict
+--     semantics unchanged; derived VERBATIM from V010 with the enumerated
+--     edits (tests/test_live_round7.py).
+--
+-- [2] MART_TAG_COVERAGE_DAILY — the user-grain tagged-exec mart the family
+--     mart could not carry (no user grain), closing the last honest
+--     non-adoption from wave 2. Loader arm follows the V030 shape law: the
+--     UDF touches only a plain column of an already-aggregated derived
+--     table. Freshness view re-emitted with the 17th arm.
+--
+-- Idempotent. Apply IN ORDER after V030. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20031, 'BLOCKED: SCHEMA_VERSION < 30 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 30) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY (
+    DAY DATE NOT NULL,
+    USER_NAME VARCHAR(200) NOT NULL,
+    COMPANY VARCHAR(40),
+    QUERIES NUMBER(12,0),
+    EXEC_SEC NUMBER(18,1),
+    UNTAGGED_EXEC_SEC NUMBER(18,1),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CHANGE_IMPACT_SCAN()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    pct FLOAT;                 -- regression threshold, % increase (ALERT_CONFIG)
+    min_calls FLOAT DEFAULT 5; -- both windows need this many runs for a verdict
+    trk_lo TIMESTAMP_NTZ;      -- v2: oldest still-tracking change (prunes the scans)
+    emsg VARCHAR;
+BEGIN
+    -- v2 (2026-07-10 tuning): the after-window joins used a blanket -18d
+    -- bound even when only fresh changes were tracking. Bound them to the
+    -- oldest ACTIVE row instead — nothing tracking means near-zero scan.
+    SELECT COALESCE(MIN(CHANGE_SEEN_AT), CURRENT_TIMESTAMP()) INTO :trk_lo
+    FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+    WHERE CURRENT_DATE() <= TRACKING_UNTIL;
+    SELECT COALESCE(MAX(THRESHOLD_NUM), 50) INTO :pct
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+    WHERE RULE_ID = 'PERF_CHANGE_REGRESSION';
+
+    -- 1a) Register changed/replaced procedures. CREATE OR REPLACE resets
+    --     CREATED = LAST_ALTERED, so replaced and brand-new procs both land
+    --     here; never-called objects finalize as NO_BASELINE, never alerts.
+    --     Overloads share one row (call matching is by name).
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+    USING (
+        SELECT 'PROCEDURE' AS OBJECT_TYPE,
+               PROCEDURE_CATALOG AS DATABASE_NAME,
+               PROCEDURE_SCHEMA AS SCHEMA_NAME,
+               PROCEDURE_CATALOG || '.' || PROCEDURE_SCHEMA || '.' || PROCEDURE_NAME AS OBJECT_NAME,
+               IFF(PROCEDURE_CATALOG LIKE 'TRXS%', 'Trexis', 'ALFA') AS COMPANY,
+               MAX(LAST_ALTERED) AS CHANGE_SEEN_AT
+        FROM SNOWFLAKE.ACCOUNT_USAGE.PROCEDURES
+        WHERE DELETED IS NULL
+          AND PROCEDURE_CATALOG IS NOT NULL
+          AND LAST_ALTERED >= DATEADD('day', -3, CURRENT_TIMESTAMP())
+        GROUP BY 1, 2, 3, 4, 5
+    ) s
+    ON t.OBJECT_TYPE = s.OBJECT_TYPE AND t.OBJECT_NAME = s.OBJECT_NAME
+       AND t.CHANGE_SEEN_AT = s.CHANGE_SEEN_AT
+    WHEN NOT MATCHED THEN INSERT
+        (OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, COMPANY, CHANGE_SEEN_AT, TRACKING_UNTIL)
+        VALUES (s.OBJECT_TYPE, s.DATABASE_NAME, s.SCHEMA_NAME, s.OBJECT_NAME, s.COMPANY,
+                s.CHANGE_SEEN_AT, DATEADD('day', 14, s.CHANGE_SEEN_AT)::DATE);
+
+    -- 1b) Register task definition changes. TASK_VERSIONS keeps every graph
+    --     version; only genuine definition/schedule/warehouse diffs register,
+    --     so suspend/resume churn is ignored. Guarded: an account without
+    --     TASK_VERSIONS still tracks procedures.
+    BEGIN
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+        USING (
+            SELECT 'TASK' AS OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME,
+                   IFF(DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA') AS COMPANY,
+                   CHANGE_SEEN_AT
+            FROM (
+                SELECT DATABASE_NAME, SCHEMA_NAME,
+                       DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS OBJECT_NAME,
+                       GRAPH_VERSION_CREATED_ON AS CHANGE_SEEN_AT,
+                       DEFINITION, SCHEDULE, WAREHOUSE_NAME,
+                       LAG(DEFINITION) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                             ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_DEFINITION,
+                       LAG(SCHEDULE) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                           ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_SCHEDULE,
+                       LAG(WAREHOUSE_NAME) OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                                                 ORDER BY GRAPH_VERSION_CREATED_ON) AS PREV_WAREHOUSE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
+            )
+            WHERE CHANGE_SEEN_AT >= DATEADD('day', -3, CURRENT_TIMESTAMP())
+              AND PREV_DEFINITION IS NOT NULL
+              AND (NOT EQUAL_NULL(DEFINITION, PREV_DEFINITION)
+                   OR NOT EQUAL_NULL(SCHEDULE, PREV_SCHEDULE)
+                   OR NOT EQUAL_NULL(WAREHOUSE_NAME, PREV_WAREHOUSE))
+        ) s
+        ON t.OBJECT_TYPE = s.OBJECT_TYPE AND t.OBJECT_NAME = s.OBJECT_NAME
+           AND t.CHANGE_SEEN_AT = s.CHANGE_SEEN_AT
+        WHEN NOT MATCHED THEN INSERT
+            (OBJECT_TYPE, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, COMPANY, CHANGE_SEEN_AT, TRACKING_UNTIL)
+            VALUES (s.OBJECT_TYPE, s.DATABASE_NAME, s.SCHEMA_NAME, s.OBJECT_NAME, s.COMPANY,
+                    s.CHANGE_SEEN_AT, DATEADD('day', 14, s.CHANGE_SEEN_AT)::DATE);
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ChangeImpactScan', 'task_versions_unavailable', :emsg,
+                   'TASK registration skipped; procedures still tracked', CURRENT_ROLE();
+    END;
+
+    -- 2) Best-effort DDL evidence: who ran the CREATE/ALTER near the change.
+    --    Multi-match picks one arbitrarily — evidence, not lineage.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET CHANGED_BY = d.USER_NAME,
+           CHANGE_DDL = LEFT(d.QUERY_TEXT, 1000)
+      FROM (
+          SELECT USER_NAME, QUERY_TEXT, START_TIME
+          FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+          WHERE START_TIME >= DATEADD('day', -4, CURRENT_TIMESTAMP())
+            AND EXECUTION_STATUS = 'SUCCESS'
+            AND (QUERY_TYPE ILIKE 'CREATE%' OR QUERY_TYPE ILIKE 'ALTER%')
+      ) d
+     WHERE t.CHANGE_DDL IS NULL
+       AND t.CHANGE_SEEN_AT >= DATEADD('day', -4, CURRENT_TIMESTAMP())
+       AND d.START_TIME BETWEEN DATEADD('hour', -3, t.CHANGE_SEEN_AT)
+                            AND DATEADD('hour', 3, t.CHANGE_SEEN_AT)
+       AND POSITION(SPLIT_PART(t.OBJECT_NAME, '.', 3) IN UPPER(d.QUERY_TEXT)) > 0;
+
+    -- 3) Freeze pre-change baselines (14 days before the change, once).
+    --    Procedure calls are matched by 'NAME(' in normalized CALL text; a
+    --    same-named proc in another schema would co-match — acceptable noise,
+    --    flagged here rather than hidden.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),
+           BASELINE_CALLS = s.CALLS, BASELINE_FAILS = s.FAILS,
+           BASELINE_MEDIAN_MS = s.MED_MS, BASELINE_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(q.EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                 MEDIAN(q.TOTAL_ELAPSED_TIME) AS MED_MS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND q.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND q.START_TIME < r.CHANGE_SEEN_AT
+           AND q.QUERY_TYPE = 'CALL'
+           AND q.QUERY_TEXT ILIKE '%' || SPLIT_PART(r.OBJECT_NAME, '.', 3) || '%'
+           AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                        REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+          WHERE r.OBJECT_TYPE = 'PROCEDURE' AND r.BASELINE_FROM IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET BASELINE_FROM = DATEADD('day', -14, t.CHANGE_SEEN_AT),
+           BASELINE_CALLS = s.CALLS, BASELINE_FAILS = s.FAILS,
+           BASELINE_MEDIAN_MS = s.MED_MS, BASELINE_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(h.STATE = 'FAILED') AS FAILS,
+                 MEDIAN(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME)) AS MED_MS,
+                 APPROX_PERCENTILE(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME), 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+            ON h.SCHEDULED_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+           AND h.QUERY_START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+           AND h.QUERY_START_TIME < r.CHANGE_SEEN_AT
+           AND h.STATE IN ('SUCCEEDED', 'FAILED')
+           AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+          WHERE r.OBJECT_TYPE = 'TASK' AND r.BASELINE_FROM IS NULL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- Idle-before objects: freeze an explicit zero baseline (-> NO_BASELINE).
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET BASELINE_FROM = DATEADD('day', -14, CHANGE_SEEN_AT),
+           BASELINE_CALLS = 0, BASELINE_FAILS = 0
+     WHERE BASELINE_FROM IS NULL;
+
+    -- 4) Refresh post-change stats while the tracking window is open.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET AFTER_CALLS = s.CALLS, AFTER_FAILS = s.FAILS,
+           AFTER_MEDIAN_MS = s.MED_MS, AFTER_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(q.EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
+                 MEDIAN(q.TOTAL_ELAPSED_TIME) AS MED_MS,
+                 APPROX_PERCENTILE(q.TOTAL_ELAPSED_TIME, 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= GREATEST(DATEADD('day', -18, CURRENT_TIMESTAMP()), :trk_lo)
+           AND q.START_TIME > r.CHANGE_SEEN_AT
+           AND q.QUERY_TYPE = 'CALL'
+           AND q.QUERY_TEXT ILIKE '%' || SPLIT_PART(r.OBJECT_NAME, '.', 3) || '%'
+           AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                        REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+          WHERE r.OBJECT_TYPE = 'PROCEDURE' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+       SET AFTER_CALLS = s.CALLS, AFTER_FAILS = s.FAILS,
+           AFTER_MEDIAN_MS = s.MED_MS, AFTER_P95_MS = s.P95_MS
+      FROM (
+          SELECT r.CHANGE_ID, COUNT(*) AS CALLS,
+                 COUNT_IF(h.STATE = 'FAILED') AS FAILS,
+                 MEDIAN(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME)) AS MED_MS,
+                 APPROX_PERCENTILE(DATEDIFF('millisecond', h.QUERY_START_TIME, h.COMPLETED_TIME), 0.95) AS P95_MS
+          FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+            ON h.SCHEDULED_TIME >= GREATEST(DATEADD('day', -18, CURRENT_TIMESTAMP()), :trk_lo)
+           AND h.QUERY_START_TIME > r.CHANGE_SEEN_AT
+           AND h.STATE IN ('SUCCEEDED', 'FAILED')
+           AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+          WHERE r.OBJECT_TYPE = 'TASK' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    -- 5) Measured credits/call via QUERY_ATTRIBUTION_HISTORY (~6h lag; the
+    --    baseline freeze waits 8h after the change so the pre-window is
+    --    complete). Guarded: without the view, runtime-only verdicts.
+    BEGIN
+        UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+           SET BASELINE_CREDITS_PER_CALL = s.TOTAL_CR / NULLIF(t.BASELINE_CALLS, 0)
+          FROM (
+              SELECT x.CHANGE_ID, SUM(a.CR) AS TOTAL_CR
+              FROM (
+                  SELECT r.CHANGE_ID, q.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                    ON q.START_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+                   AND q.START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+                   AND q.START_TIME < r.CHANGE_SEEN_AT
+                   AND q.QUERY_TYPE = 'CALL'
+                   AND q.QUERY_TEXT ILIKE '%' || SPLIT_PART(r.OBJECT_NAME, '.', 3) || '%'
+                   AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                                REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+                  WHERE r.OBJECT_TYPE = 'PROCEDURE'
+                    AND r.BASELINE_CREDITS_PER_CALL IS NULL AND r.BASELINE_CALLS > 0
+                    AND r.CHANGE_SEEN_AT < DATEADD('hour', -8, CURRENT_TIMESTAMP())
+                  UNION ALL
+                  SELECT r.CHANGE_ID, h.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    ON h.SCHEDULED_TIME >= DATEADD('day', -20, CURRENT_TIMESTAMP())
+                   AND h.QUERY_START_TIME >= DATEADD('day', -14, r.CHANGE_SEEN_AT)
+                   AND h.QUERY_START_TIME < r.CHANGE_SEEN_AT
+                   AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                   AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+                  WHERE r.OBJECT_TYPE = 'TASK'
+                    AND r.BASELINE_CREDITS_PER_CALL IS NULL AND r.BASELINE_CALLS > 0
+                    AND r.CHANGE_SEEN_AT < DATEADD('hour', -8, CURRENT_TIMESTAMP())
+              ) x
+              JOIN (
+                  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+                         SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CR
+                  FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                  WHERE START_TIME >= DATEADD('day', -21, CURRENT_TIMESTAMP())
+                  GROUP BY 1
+              ) a ON a.RID = x.QUERY_ID
+              GROUP BY x.CHANGE_ID
+          ) s
+         WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+        UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY t
+           SET AFTER_CREDITS_PER_CALL = s.TOTAL_CR / NULLIF(t.AFTER_CALLS, 0)
+          FROM (
+              SELECT x.CHANGE_ID, SUM(a.CR) AS TOTAL_CR
+              FROM (
+                  SELECT r.CHANGE_ID, q.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                    ON q.START_TIME >= GREATEST(DATEADD('day', -18, CURRENT_TIMESTAMP()), :trk_lo)
+                   AND q.START_TIME > r.CHANGE_SEEN_AT
+                   AND q.QUERY_TYPE = 'CALL'
+                   AND q.QUERY_TEXT ILIKE '%' || SPLIT_PART(r.OBJECT_NAME, '.', 3) || '%'
+                   AND POSITION(SPLIT_PART(r.OBJECT_NAME, '.', 3) || '(' IN
+                                REPLACE(REPLACE(UPPER(q.QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+                  WHERE r.OBJECT_TYPE = 'PROCEDURE' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+                  UNION ALL
+                  SELECT r.CHANGE_ID, h.QUERY_ID
+                  FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+                  JOIN SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    ON h.SCHEDULED_TIME >= GREATEST(DATEADD('day', -18, CURRENT_TIMESTAMP()), :trk_lo)
+                   AND h.QUERY_START_TIME > r.CHANGE_SEEN_AT
+                   AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                   AND h.DATABASE_NAME || '.' || h.SCHEMA_NAME || '.' || h.NAME = r.OBJECT_NAME
+                  WHERE r.OBJECT_TYPE = 'TASK' AND CURRENT_DATE() <= r.TRACKING_UNTIL
+              ) x
+              JOIN (
+                  SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
+                         SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CR
+                  FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                  WHERE START_TIME >= GREATEST(DATEADD('day', -18, CURRENT_TIMESTAMP()), :trk_lo)
+                  GROUP BY 1
+              ) a ON a.RID = x.QUERY_ID
+              GROUP BY x.CHANGE_ID
+          ) s
+         WHERE t.CHANGE_ID = s.CHANGE_ID;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ChangeImpactScan', 'attribution_unavailable', :emsg,
+                   'credits/call omitted - verdicts use runtime + failure rate only', CURRENT_ROLE();
+    END;
+
+    -- 6) Verdicts (rows still inside their tracking window). Regression =
+    --    credits/call up threshold% with a material absolute delta, OR p95 up
+    --    threshold% and at least 30s, OR failure rate up 20 points.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET LAST_EVALUATED_AT = CURRENT_TIMESTAMP(),
+           VERDICT = CASE
+               WHEN BASELINE_CALLS < :min_calls THEN 'NO_BASELINE'
+               WHEN COALESCE(AFTER_CALLS, 0) < :min_calls THEN 'PENDING'
+               WHEN (BASELINE_CREDITS_PER_CALL > 0 AND AFTER_CREDITS_PER_CALL IS NOT NULL
+                     AND AFTER_CREDITS_PER_CALL > BASELINE_CREDITS_PER_CALL * (1 + :pct / 100)
+                     AND (AFTER_CREDITS_PER_CALL - BASELINE_CREDITS_PER_CALL) * AFTER_CALLS >= 0.25)
+                 OR (AFTER_P95_MS > BASELINE_P95_MS * (1 + :pct / 100) AND AFTER_P95_MS >= 30000)
+                 OR (AFTER_FAILS / NULLIF(AFTER_CALLS, 0)
+                     >= BASELINE_FAILS / NULLIF(BASELINE_CALLS, 0) + 0.2)
+                   THEN 'REGRESSED'
+               WHEN (BASELINE_CREDITS_PER_CALL > 0 AND AFTER_CREDITS_PER_CALL IS NOT NULL
+                     AND AFTER_CREDITS_PER_CALL < BASELINE_CREDITS_PER_CALL * 0.7)
+                 OR (AFTER_P95_MS < BASELINE_P95_MS * 0.7)
+                   THEN 'IMPROVED'
+               ELSE 'NEUTRAL'
+           END,
+           VERDICT_DETAIL =
+               'runs ' || COALESCE(BASELINE_CALLS::VARCHAR, '0') || '->' || COALESCE(AFTER_CALLS::VARCHAR, '0')
+               || ' | fails ' || COALESCE(BASELINE_FAILS::VARCHAR, '0') || '->' || COALESCE(AFTER_FAILS::VARCHAR, '0')
+               || ' | p95 ' || COALESCE(ROUND(BASELINE_P95_MS / 1000, 1)::VARCHAR, '?') || 's->'
+               || COALESCE(ROUND(AFTER_P95_MS / 1000, 1)::VARCHAR, '?') || 's'
+               || ' | credits/call ' || COALESCE(ROUND(BASELINE_CREDITS_PER_CALL, 4)::VARCHAR, 'n/a')
+               || '->' || COALESCE(ROUND(AFTER_CREDITS_PER_CALL, 4)::VARCHAR, 'n/a')
+     WHERE CURRENT_DATE() <= TRACKING_UNTIL;
+
+    -- Tracking ended while still thin: close it out honestly.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET VERDICT = 'INSUFFICIENT_AFTER'
+     WHERE CURRENT_DATE() > TRACKING_UNTIL AND VERDICT = 'PENDING';
+
+    -- 7) One alert per confirmed regression (dedupe: object + change day).
+    --    2x credits/call or a 50%+ failure rate escalates to CRITICAL.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+        (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)
+    SELECT c.RULE_ID, r.COMPANY,
+           IFF(COALESCE(r.AFTER_CREDITS_PER_CALL / NULLIF(r.BASELINE_CREDITS_PER_CALL, 0), 0) >= 2
+                   OR r.AFTER_FAILS / NULLIF(r.AFTER_CALLS, 0) >= 0.5,
+               'CRITICAL', c.SEVERITY),
+           r.OBJECT_TYPE || ' ' || r.OBJECT_NAME || ' regressed after ' ||
+               TO_VARCHAR(r.CHANGE_SEEN_AT::DATE) || ' change',
+           'Schema ' || r.DATABASE_NAME || '.' || r.SCHEMA_NAME || ' | '
+               || COALESCE(r.VERDICT_DETAIL, '')
+               || IFF(r.CHANGED_BY IS NOT NULL, ' | changed by ' || r.CHANGED_BY, ''),
+           ROUND(COALESCE(100 * (r.AFTER_CREDITS_PER_CALL / NULLIF(r.BASELINE_CREDITS_PER_CALL, 0) - 1),
+                          100 * (r.AFTER_P95_MS / NULLIF(r.BASELINE_P95_MS, 0) - 1)), 1),
+           c.RULE_ID || '|' || r.OBJECT_NAME || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+    FROM DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r
+    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c
+      ON c.RULE_ID = 'PERF_CHANGE_REGRESSION' AND c.ENABLED
+    WHERE r.VERDICT = 'REGRESSED' AND NOT r.ALERTED
+      AND NOT EXISTS (
+          SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+          WHERE e.DEDUPE_KEY = c.RULE_ID || '|' || r.OBJECT_NAME || '|' || TO_VARCHAR(r.CHANGE_SEEN_AT::DATE)
+      );
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY
+       SET ALERTED = TRUE
+     WHERE VERDICT = 'REGRESSED' AND NOT ALERTED;
+
+    RETURN 'change impact scan complete';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.ROLE_NAME, g.WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.EXEC_SEC
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                           COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.DATABASE_NAME, g.SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(g.DATABASE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.QUEUED_SEC, g.SPILL_GB, g.P95_S
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                           COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                           ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                           ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4b] tag coverage by user, day grain (v4.14 tuning trio) --------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY t
+            USING (
+                SELECT g.DAY, g.USER_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(g.USER_NAME) AS COMPANY,
+                       g.QUERIES, g.EXEC_SEC, g.UNTAGGED_EXEC_SEC
+                FROM (
+                    SELECT DATE(START_TIME) AS DAY,
+                           COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
+                           COUNT(*) AS QUERIES,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC,
+                           ROUND(SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL,
+                                         COALESCE(EXECUTION_TIME, 0), 0)) / 1000, 1) AS UNTAGGED_EXEC_SEC
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ) g
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES,
+                EXEC_SEC = s.EXEC_SEC, UNTAGGED_EXEC_SEC = s.UNTAGGED_EXEC_SEC,
+                LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, COMPANY, QUERIES, EXEC_SEC, UNTAGGED_EXEC_SEC)
+            VALUES (s.DAY, s.USER_NAME, s.COMPANY, s.QUERIES, s.EXEC_SEC, s.UNTAGGED_EXEC_SEC);
+            loaded := loaded || 'tagcov ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TAG_COVERAGE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_10D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                      WHERE q.START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+                UNION ALL
+                SELECT CURRENT_DATE(), 'MFA_GAP_USERS', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+                WHERE U.DELETED_ON IS NULL AND U.DISABLED = FALSE
+                  AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+                  AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                              WHERE L.USER_NAME = U.NAME
+                                AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                                AND L.PASSWORD_LOGINS > 0)
+                UNION ALL
+                SELECT CURRENT_DATE(), 'BREAKGLASS_GRANTS_30D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE DELETED_ON IS NULL
+                  AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                  AND CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+UNION ALL
+SELECT 'MART_WAREHOUSE_EFFICIENCY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+UNION ALL
+SELECT 'MART_QUERY_FAMILY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+UNION ALL
+SELECT 'FACT_QUERY_ROLE_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+UNION ALL
+SELECT 'FACT_QUERY_SCHEMA_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+UNION ALL
+SELECT 'MART_COST_ALLOCATION_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+UNION ALL
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+UNION ALL
+SELECT 'MART_SECURITY_POSTURE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY
+UNION ALL
+SELECT 'MART_INCIDENT_TIMELINE', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+UNION ALL
+SELECT 'FACT_AI_USAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+UNION ALL
+SELECT 'MART_TAG_COVERAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY;
+
+-- First fill so the tag panel is not empty until the next task tick.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 31 AS VERSION,
+       'change-impact scan v2 (tracking-bounded + ILIKE prefilter) + tag-coverage mart' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V032__incident_object.sql
+-- ===========================================================================
+-- V032__incident_object.sql — the incident object (docs/design/V029_INCIDENT_OBJECT.md).
+--
+-- Operators work INCIDENTS; the app stored fragments. Two small PERMANENT
+-- operator-curated tables roll alerts, task failures, warehouse changes,
+-- DDL, deploys and remediations into one lifecycle object. Owner decisions
+-- 2026-07-10: auto-declare CRITICALs ON (one incident per dedupe family per
+-- 24h, SETTINGS toggle), reopen window 14 days, declare/close DBA-only.
+--
+-- Lineage (Codex r6 #6): REMEDIATION_LOG gains EVENT_ID/INCIDENT_ID and
+-- SAVINGS_LEDGER gains REMEDIATION_ID — additive, never retroactive.
+--
+-- Births: manual declare (Control Room), auto-declare for CRITICALs
+-- (SP_INCIDENT_AUTODECLARE, chained after TASK_LOAD_HOURLY), and the
+-- INCIDENT_PROPOSALS view — suggestions only, a human confirms; nothing
+-- is grouped silently.
+--
+-- The design doc's IS_RERUN scan rider closes as ALREADY-SAFE: rerun rows
+-- persist RENDER_MS NULL (V027) and the OPS_SLOW_RENDER arm has filtered
+-- RENDER_MS IS NOT NULL since V017 — reruns cannot pollute the sentinel.
+--
+-- Idempotent. Apply IN ORDER after V031. Re-run roles.sql (operator DML
+-- grants on the two new tables).
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20032, 'BLOCKED: SCHEMA_VERSION < 31 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 31) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.INCIDENTS (
+    INCIDENT_ID     VARCHAR(80)   NOT NULL DEFAULT UUID_STRING() PRIMARY KEY,
+    TITLE           VARCHAR(300)  NOT NULL,
+    SEVERITY        VARCHAR(10)   NOT NULL,
+    STATUS          VARCHAR(12)   NOT NULL DEFAULT 'OPEN',
+    COMPANY         VARCHAR(40)   NOT NULL DEFAULT 'ALL',
+    DETECTED_AT     TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+    STARTED_AT      TIMESTAMP_NTZ,
+    ACK_AT          TIMESTAMP_NTZ,
+    MITIGATED_AT    TIMESTAMP_NTZ,
+    RESOLVED_AT     TIMESTAMP_NTZ,
+    ROOT_CAUSE_KIND VARCHAR(30),
+    ROOT_CAUSE_NOTE VARCHAR(2000),
+    OWNER           VARCHAR(200),
+    REOPENED_FROM   VARCHAR(80),
+    DECLARED_BY     VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER(),
+    UPDATED_AT      TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS (
+    INCIDENT_ID  VARCHAR(80)   NOT NULL,
+    MEMBER_KIND  VARCHAR(20)   NOT NULL,
+    REF_ID       VARCHAR(300)  NOT NULL,
+    EVIDENCE_TS  TIMESTAMP_NTZ,
+    AUTO_LINKED  BOOLEAN       NOT NULL DEFAULT FALSE,
+    LINKED_BY    VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER(),
+    LINKED_AT    TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- Lineage: joins, not notes text. Additive; historical rows stay NULL.
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG ADD COLUMN IF NOT EXISTS EVENT_ID VARCHAR(80);
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG ADD COLUMN IF NOT EXISTS INCIDENT_ID VARCHAR(80);
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER  ADD COLUMN IF NOT EXISTS REMEDIATION_ID VARCHAR(80);
+
+-- Owner-decided defaults (Admin-editable data, not code).
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (SELECT 'INCIDENT_AUTO_DECLARE_CRITICAL' AS KEY, 'TRUE' AS VALUE) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (SELECT 'INCIDENT_REOPEN_DAYS' AS KEY, '14' AS VALUE) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+-- Proposals: suggestions ONLY — open alert families (48h) not yet members,
+-- with nearby warehouse changes counted. A human confirms in the app.
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS AS
+WITH open_alerts AS (
+    SELECT e.EVENT_ID, e.RULE_ID, e.COMPANY, e.SEVERITY, e.TITLE, e.RAISED_AT,
+           SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) AS FAMILY
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.STATUS IN ('OPEN', 'ACK')
+      AND e.RAISED_AT >= DATEADD('day', -2, CURRENT_TIMESTAMP())
+      AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
+                      WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID)
+)
+SELECT FAMILY || '|' || COMPANY AS PROPOSAL_KEY,
+       MAX_BY(TITLE, RAISED_AT) AS SUGGESTED_TITLE,
+       DECODE(MAX(CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 3 WHEN 'HIGH' THEN 2 ELSE 1 END),
+              3, 'CRITICAL', 2, 'HIGH', 'MEDIUM') AS SEVERITY,
+       COMPANY,
+       MIN(RAISED_AT) AS FIRST_TS,
+       MAX(RAISED_AT) AS LAST_TS,
+       COUNT(*) AS ALERTS,
+       (SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY w
+         WHERE w.CHANGE_SEEN_AT BETWEEN DATEADD('minute', -30, MIN(RAISED_AT))
+                                    AND DATEADD('minute',  30, MAX(RAISED_AT))) AS NEARBY_WH_CHANGES
+FROM open_alerts
+GROUP BY FAMILY, COMPANY;
+
+-- Auto-declare CRITICALs: one incident per dedupe family per 24h; members
+-- attach AUTO_LINKED; a family already represented in an open incident
+-- never doubles. SETTINGS toggle read at runtime.
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_INCIDENT_AUTODECLARE()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    enabled VARCHAR;
+    made INT DEFAULT 0;
+BEGIN
+    SELECT COALESCE(MAX(VALUE), 'TRUE') INTO :enabled
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'INCIDENT_AUTO_DECLARE_CRITICAL';
+    IF (UPPER(:enabled) <> 'TRUE') THEN
+        RETURN 'auto-declare off';
+    END IF;
+
+    CREATE OR REPLACE TEMPORARY TABLE _OW_AUTODECL AS
+    WITH crit AS (
+        SELECT e.EVENT_ID, e.COMPANY, e.SEVERITY, e.TITLE, e.RAISED_AT,
+               SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) AS FAMILY
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+        WHERE UPPER(e.SEVERITY) = 'CRITICAL'
+          AND e.STATUS IN ('OPEN', 'ACK')
+          AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
+                          WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID)
+    )
+    SELECT UUID_STRING() AS INCIDENT_ID, FAMILY, COMPANY,
+           MAX_BY(TITLE, RAISED_AT) AS TITLE,
+           MIN(RAISED_AT) AS FIRST_TS
+    FROM crit c
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS m
+        JOIN DBA_MAINT_DB.OVERWATCH.INCIDENTS i ON i.INCIDENT_ID = m.INCIDENT_ID
+        JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS a ON a.EVENT_ID = m.REF_ID
+        WHERE m.MEMBER_KIND = 'ALERT'
+          AND i.STATUS IN ('OPEN', 'MITIGATED')
+          AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = c.FAMILY
+    )
+    GROUP BY FAMILY, COMPANY;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.INCIDENTS
+        (INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, STARTED_AT,
+         ROOT_CAUSE_KIND, DECLARED_BY)
+    SELECT INCIDENT_ID, LEFT('Auto: ' || TITLE, 300), 'CRITICAL', 'OPEN', COMPANY,
+           CURRENT_TIMESTAMP(), FIRST_TS, 'UNKNOWN', 'SP_INCIDENT_AUTODECLARE'
+    FROM _OW_AUTODECL;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.INCIDENT_MEMBERS
+        (INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED, LINKED_BY)
+    SELECT d.INCIDENT_ID, 'ALERT', e.EVENT_ID, e.RAISED_AT, TRUE, 'SP_INCIDENT_AUTODECLARE'
+    FROM _OW_AUTODECL d
+    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+      ON e.COMPANY = d.COMPANY
+     AND UPPER(e.SEVERITY) = 'CRITICAL'
+     AND e.STATUS IN ('OPEN', 'ACK')
+     AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+     AND SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) = d.FAMILY;
+
+    SELECT COUNT(*) INTO :made FROM _OW_AUTODECL;
+    RETURN 'auto-declared ' || :made || ' incident(s)';
+END;
+$$;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_INCIDENT_AUTODECLARE
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_INCIDENT_AUTODECLARE();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_INCIDENT_AUTODECLARE RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 32 AS VERSION,
+       'incident object: INCIDENTS/INCIDENT_MEMBERS + lineage + proposals + auto-declare' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V033__change_attribution.sql
+-- ===========================================================================
+-- V033__change_attribution.sql — who made each warehouse change.
+--
+-- Pre-Terraform half of the managed-vs-manual story (design:
+-- docs/design/V029_INCIDENT_OBJECT.md, IaC assumptions). The registry knows
+-- WHAT changed (snapshot diff, V024); this adds WHO: a best-effort join to
+-- the QUERY_HISTORY ALTER that landed just before the snapshot saw the
+-- change. Multi-match picks the latest — evidence, not lineage (the V010
+-- rule). MANAGED vs MANUAL derives at READ time from the DEPLOY_ACTORS
+-- setting (comma list of service users — Flyway/Terraform once they land;
+-- empty today, so everything honestly reads MANUAL or UNKNOWN).
+--
+-- OPS_UNMANAGED_CHANGE deliberately does NOT ship here: an alert rule with
+-- no populated DEPLOY_ACTORS would be pure noise, and decorative config is
+-- against house rules (review #8). It arrives with its scan arm the day
+-- DEPLOY_ACTORS is first populated.
+--
+-- Idempotent. Apply IN ORDER after V032. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20033, 'BLOCKED: SCHEMA_VERSION < 32 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 32) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+    ADD COLUMN IF NOT EXISTS CHANGED_BY VARCHAR(200);
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SETTINGS t
+USING (SELECT 'DEPLOY_ACTORS' AS KEY, '' AS VALUE) s
+ON t.KEY = s.KEY
+WHEN NOT MATCHED THEN INSERT (KEY, VALUE) VALUES (s.KEY, s.VALUE);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_CHANGE_ATTRIBUTION()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    -- Attribute unattributed registry rows from the last 7 days: the ALTER
+    -- that ran within the 65 minutes before the hourly snapshot saw the
+    -- change (5-minute forward grace for clock skew). Best effort.
+    UPDATE DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY t
+       SET CHANGED_BY = s.USER_NAME
+      FROM (
+          SELECT r.CHANGE_ID, MAX_BY(q.USER_NAME, q.START_TIME) AS USER_NAME
+          FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+          JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+            ON q.START_TIME >= DATEADD('day', -8, CURRENT_TIMESTAMP())
+           AND q.START_TIME BETWEEN DATEADD('minute', -65, r.CHANGE_SEEN_AT)
+                                AND DATEADD('minute', 5, r.CHANGE_SEEN_AT)
+           AND q.EXECUTION_STATUS = 'SUCCESS'
+           AND q.QUERY_TYPE ILIKE 'ALTER%'
+           AND q.QUERY_TEXT ILIKE '%' || r.WAREHOUSE_NAME || '%'
+          WHERE r.CHANGED_BY IS NULL
+            AND r.CHANGE_SEEN_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+          GROUP BY r.CHANGE_ID
+      ) s
+     WHERE t.CHANGE_ID = s.CHANGE_ID;
+
+    RETURN 'attribution pass complete';
+END;
+$$;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CHANGE_ATTRIBUTION
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_ATTRIBUTION();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_CHANGE_ATTRIBUTION RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_INCIDENT_AUTODECLARE RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+
+-- First pass now so existing registry rows get their who.
+CALL DBA_MAINT_DB.OVERWATCH.SP_CHANGE_ATTRIBUTION();
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 33 AS VERSION,
+       'change attribution: CHANGED_BY on the registry + DEPLOY_ACTORS (managed vs manual at read time)' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V034__route_company_filter.sql
+-- ===========================================================================
+-- V034__route_company_filter.sql — per-route company scoping (sender v4).
+--
+-- Owner decision 2026-07-10: Teams delivery is ALFA-only for now. Routes
+-- gain COMPANY_FILTER ('ALL' default): a route carries its company's events
+-- plus account-level (COMPANY='ALL') ones — the open_alert_events
+-- convention, applied to delivery. Existing routes flip to 'ALFA' below;
+-- set a route back to 'ALL' (or add a Trexis route) when Trexis wants
+-- delivery. In-app visibility is untouched — this scopes SENDING only.
+--
+-- The expiry watchdog learns the same policy: an event no enabled route
+-- will ever carry is out of delivery scope, not "undelivered" — otherwise
+-- every Trexis event would spam undelivered_expired hourly forever.
+--
+-- Sender derived VERBATIM from V026's v3 with five enumerated edits
+-- (tests/test_live_round8.py holds the revert-equality lock).
+--
+-- Idempotent. Apply IN ORDER after V033. No new grants needed.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20034, 'BLOCKED: SCHEMA_VERSION < 33 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 33) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+    ADD COLUMN IF NOT EXISTS COMPANY_FILTER VARCHAR(40) DEFAULT 'ALL';
+
+-- Owner decision: every existing route (the Teams set) goes ALFA-only.
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+   SET COMPANY_FILTER = 'ALFA'
+ WHERE COALESCE(COMPANY_FILTER, 'ALL') = 'ALL';
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    sent_total INT DEFAULT 0;
+    routes_hit INT DEFAULT 0;
+    expired INT DEFAULT 0;
+    message VARCHAR;
+    emsg VARCHAR;
+    r_route_id VARCHAR;
+    r_family VARCHAR;
+    r_minsev VARCHAR;
+    r_integration VARCHAR;
+    r_compfilter VARCHAR;   -- v4: per-route company scope (owner: Teams = ALFA-only for now)
+    c1 CURSOR FOR
+        SELECT r.ROUTE_ID, r.FAMILY, r.MIN_SEVERITY, r.INTEGRATION_NAME,
+               COALESCE(r.COMPANY_FILTER, 'ALL') AS COMPANY_FILTER
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
+        WHERE r.ENABLED
+        ORDER BY r.ROUTE_ID;
+BEGIN
+    FOR rec IN c1 DO
+        r_route_id := rec.ROUTE_ID;
+        r_family := rec.FAMILY;
+        r_minsev := rec.MIN_SEVERITY;
+        r_integration := rec.INTEGRATION_NAME;
+        r_compfilter := rec.COMPANY_FILTER;
+        -- Eligible = open, young enough, matches this route, and THIS ROUTE
+        -- has not delivered it yet (other routes' successes are irrelevant).
+        SELECT LISTAGG('[' || e.SEVERITY || '] ' || LEFT(e.TITLE, 140), '\n')
+               WITHIN GROUP (ORDER BY e.RAISED_AT DESC)
+          INTO :message
+        FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+        JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+        WHERE e.STATUS = 'OPEN'
+          AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+          AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+          AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')
+          AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+              >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+          AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                          WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+
+        -- v3: the body templates embed this string inside a JSON string
+        -- literal, so it must arrive JSON-escaped. CHR() codes only —
+        -- backslash first, then quote, newline, CR, tab.
+        IF (:message IS NOT NULL) THEN
+            message := REPLACE(:message, CHR(92), CHR(92) || CHR(92));
+            message := REPLACE(:message, CHR(34), CHR(92) || CHR(34));
+            message := REPLACE(:message, CHR(10), CHR(92) || 'n');
+            message := REPLACE(:message, CHR(13), '');
+            message := REPLACE(:message, CHR(9),  CHR(92) || 't');
+        END IF;
+
+        IF (:message IS NOT NULL AND :message != '') THEN
+            BEGIN
+                CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+                    SNOWFLAKE.NOTIFICATION.TEXT_PLAIN(
+                        'OVERWATCH alerts:' || CHR(92) || 'n' || LEFT(:message, 3000)),
+                    SNOWFLAKE.NOTIFICATION.INTEGRATION(:r_integration));
+                routes_hit := routes_hit + 1;
+
+                -- Ledger rows for THIS route only (success path).
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES (EVENT_ID, ROUTE_ID)
+                SELECT e.EVENT_ID, :r_route_id
+                FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
+                WHERE e.STATUS = 'OPEN'
+                  AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
+                  AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')
+                  AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                      >= CASE :r_minsev WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+                  AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                                  WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = :r_route_id);
+                sent_total := sent_total + SQLROWCOUNT;
+
+                -- Back-compat: NOTIFIED_AT still means "delivered somewhere
+                -- at least once" (the drill, the delivery chip, and MTTA
+                -- surfaces read it).
+                UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+                   SET NOTIFIED_AT = CURRENT_TIMESTAMP()
+                 WHERE e.NOTIFIED_AT IS NULL
+                   AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                               WHERE d.EVENT_ID = e.EVENT_ID);
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+                        (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'NotifyWebhook', 'route_send_failed', :emsg,
+                           'route ' || :r_route_id || ' integration ' || :r_integration ||
+                           ' - will retry next run; other routes unaffected',
+                           CURRENT_ROLE();
+            END;
+        END IF;
+    END FOR;
+
+    -- Loud, not silent: open events aging past the 24h window with NO
+    -- delivery anywhere get one error-log row each run they linger.
+    SELECT COUNT(*) INTO :expired
+    FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
+    WHERE e.STATUS = 'OPEN' AND e.NOTIFIED_AT IS NULL
+      AND e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())
+      -- v4: an event NO route will ever carry (company-filtered out) is out
+      -- of delivery scope by policy, not undelivered — no hourly noise.
+      AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r2
+                  WHERE r2.ENABLED
+                    AND (COALESCE(r2.COMPANY_FILTER, 'ALL') = 'ALL'
+                         OR e.COMPANY = r2.COMPANY_FILTER
+                         OR UPPER(e.COMPANY) = 'ALL'));
+    IF (expired > 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'NotifyWebhook', 'undelivered_expired',
+               :expired || ' open event(s) aged past the 24h delivery window with no successful send',
+               'check ALERT_ROUTES integrations; events remain OPEN in-app',
+               CURRENT_ROLE();
+    END IF;
+
+    RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
+           ' route(s); ' || :expired || ' expired-undelivered flagged';
+END;
+$$;
+
+-- Owner ask 2026-07-10: retire SEC_BREAK_GLASS_USE entirely — V025 muted
+-- it (ENABLED=FALSE); admins know what they are doing, so the rule row goes
+-- and any lingering open events close as EXPECTED. The Security activity
+-- panel (evidence, no alert) stays. History in ALERT_EVENTS is preserved.
+UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+   SET STATUS = 'RESOLVED', RESOLUTION_KIND = 'EXPECTED',
+       RESOLVED_AT = CURRENT_TIMESTAMP()
+ WHERE RULE_ID = 'SEC_BREAK_GLASS_USE' AND STATUS IN ('OPEN', 'ACK');
+
+DELETE FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
+ WHERE RULE_ID = 'SEC_BREAK_GLASS_USE';
+
+MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
+USING (SELECT 34 AS VERSION,
+       'route company filter (sender v4, ALFA-only) + SEC_BREAK_GLASS_USE retired' AS DESCRIPTION) s
+ON t.VERSION = s.VERSION
+WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
+
+-- ===========================================================================
+-- >>> V035__lock_wait_mart.sql
+-- ===========================================================================
+-- V035: MART_LOCK_WAIT_DAILY — move the LOCK_WAIT_HISTORY scans off page views.
+-- Live finding 2026-07-10 (Joe's Heaviest-queries panel): the lock-contention
+-- reads scan 46-56 GB and run 74-259s EACH — LOCK_WAIT_HISTORY is enormous in
+-- this account. A page view must never pay that. The daily task pays it once,
+-- on a 3-day increment (small partitions); the panel reads the mart.
+-- Company derives from the object's database (COMPANY_FOR_DATABASE), applied
+-- OUTSIDE the aggregation per the V030 shape law.
+-- Apply AFTER V034. Idempotent (MERGE); safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20035, 'V035 requires V034 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 34) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY (
+    DAY DATE NOT NULL,
+    DATABASE_NAME VARCHAR(200) NOT NULL,
+    SCHEMA_NAME VARCHAR(200) NOT NULL,
+    OBJECT_NAME VARCHAR(400) NOT NULL,
+    LOCK_TYPE VARCHAR(50) NOT NULL,
+    COMPANY VARCHAR(50),
+    WAIT_EVENTS NUMBER(12,0),
+    ACQUIRED_WAIT_SEC NUMBER(18,0),
+    NEVER_ACQUIRED NUMBER(12,0),
+    LAST_SEEN TIMESTAMP_NTZ,
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_LOCK_WAIT_MART(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+-- Failures surface in TASK_HISTORY and the task retries next day — no
+-- swallow, no partial state (MERGE is idempotent on the day grain).
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY t
+    USING (
+        SELECT g.DAY, g.DATABASE_NAME, g.SCHEMA_NAME, g.OBJECT_NAME, g.LOCK_TYPE,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(g.DATABASE_NAME) AS COMPANY,
+               g.WAIT_EVENTS, g.ACQUIRED_WAIT_SEC, g.NEVER_ACQUIRED, g.LAST_SEEN
+        FROM (
+            SELECT CAST(REQUESTED_AT AS DATE) AS DAY,
+                   COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                   COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                   COALESCE(OBJECT_NAME, 'NONE') AS OBJECT_NAME,
+                   COALESCE(LOCK_TYPE, 'NONE') AS LOCK_TYPE,
+                   COUNT(*) AS WAIT_EVENTS,
+                   SUM(IFF(ACQUIRED_AT IS NOT NULL,
+                           DATEDIFF('second', REQUESTED_AT, ACQUIRED_AT), 0)) AS ACQUIRED_WAIT_SEC,
+                   COUNT_IF(ACQUIRED_AT IS NULL) AS NEVER_ACQUIRED,
+                   MAX(REQUESTED_AT) AS LAST_SEEN
+            FROM SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY
+            WHERE REQUESTED_AT >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
+            GROUP BY 1, 2, 3, 4, 5
+        ) g
+    ) s
+    ON t.DAY = s.DAY AND t.DATABASE_NAME = s.DATABASE_NAME
+       AND t.SCHEMA_NAME = s.SCHEMA_NAME AND t.OBJECT_NAME = s.OBJECT_NAME
+       AND t.LOCK_TYPE = s.LOCK_TYPE
+    WHEN MATCHED THEN UPDATE SET
+        t.COMPANY = s.COMPANY, t.WAIT_EVENTS = s.WAIT_EVENTS,
+        t.ACQUIRED_WAIT_SEC = s.ACQUIRED_WAIT_SEC, t.NEVER_ACQUIRED = s.NEVER_ACQUIRED,
+        t.LAST_SEEN = s.LAST_SEEN, t.LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, DATABASE_NAME, SCHEMA_NAME, OBJECT_NAME, LOCK_TYPE, COMPANY,
+         WAIT_EVENTS, ACQUIRED_WAIT_SEC, NEVER_ACQUIRED, LAST_SEEN)
+    VALUES (s.DAY, s.DATABASE_NAME, s.SCHEMA_NAME, s.OBJECT_NAME, s.LOCK_TYPE, s.COMPANY,
+            s.WAIT_EVENTS, s.ACQUIRED_WAIT_SEC, s.NEVER_ACQUIRED, s.LAST_SEEN);
+    RETURN 'OK';
+END;
+$$;
+
+-- One-time backfill (45d, the panel's widest window), then 3d daily increments.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_LOCK_WAIT_MART(45);
+
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+UNION ALL
+SELECT 'MART_WAREHOUSE_EFFICIENCY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+UNION ALL
+SELECT 'MART_QUERY_FAMILY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+UNION ALL
+SELECT 'FACT_QUERY_ROLE_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+UNION ALL
+SELECT 'FACT_QUERY_SCHEMA_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+UNION ALL
+SELECT 'MART_COST_ALLOCATION_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+UNION ALL
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+UNION ALL
+SELECT 'MART_SECURITY_POSTURE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY
+UNION ALL
+SELECT 'MART_INCIDENT_TIMELINE', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+UNION ALL
+SELECT 'FACT_AI_USAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+UNION ALL
+SELECT 'MART_TAG_COVERAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY
+UNION ALL
+SELECT 'MART_LOCK_WAIT_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOCK_WAIT_DAILY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_LOCK_WAIT_MART(3);
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOCK_WAIT_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 35 AS VERSION, 'MART_LOCK_WAIT_DAILY + SP_LOAD_LOCK_WAIT_MART + TASK_LOCK_WAIT_DAILY (page views never scan LOCK_WAIT_HISTORY again)' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 35);
+
+-- ===========================================================================
+-- >>> V036__pattern_cost_mart.sql
+-- ===========================================================================
+-- V036: MART_PATTERN_COST_DAILY - measured $ per repeated statement pattern.
+-- Owner ask (2026-07-11, after seeing the Trexis POC): "a visual of bad code
+-- and how it could cost us silently." Theirs estimates; ours joins
+-- QUERY_ATTRIBUTION_HISTORY (measured compute credits) to the parameterized
+-- hash, so a cheap query run thousands of times shows its REAL bill.
+-- Company via COMPANY_FOR_WAREHOUSE outside the aggregation (V030 shape law).
+-- Apply AFTER V035. Idempotent (MERGE); safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20036, 'V036 requires V035 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 35) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY (
+    DAY DATE NOT NULL,
+    QUERY_HASH VARCHAR(64) NOT NULL,
+    COMPANY VARCHAR(50) NOT NULL,
+    RUNS NUMBER(12,0),
+    CREDITS_ATTRIBUTED NUMBER(18,6),
+    USERS NUMBER(12,0),
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY t
+    USING (
+        SELECT m.DAY, m.QUERY_HASH, m.COMPANY,
+               SUM(m.RUNS) AS RUNS,
+               SUM(m.CREDITS_ATTRIBUTED) AS CREDITS_ATTRIBUTED,
+               SUM(m.USERS) AS USERS
+        FROM (
+            SELECT g.DAY, g.QUERY_HASH,
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                   g.RUNS, g.CREDITS_ATTRIBUTED, g.USERS
+            FROM (
+                SELECT CAST(q.START_TIME AS DATE) AS DAY,
+                       q.QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       COALESCE(q.WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       COUNT(*) AS RUNS,
+                       SUM(a.CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS_ATTRIBUTED,
+                       COUNT(DISTINCT q.USER_NAME) AS USERS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+                JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                  ON q.QUERY_ID = a.QUERY_ID
+                 AND q.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
+                WHERE a.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
+                  AND q.QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2, 3
+            ) g
+        ) m
+        GROUP BY 1, 2, 3
+    ) s
+    ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH AND t.COMPANY = s.COMPANY
+    WHEN MATCHED THEN UPDATE SET
+        t.RUNS = s.RUNS, t.CREDITS_ATTRIBUTED = s.CREDITS_ATTRIBUTED,
+        t.USERS = s.USERS, t.LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (DAY, QUERY_HASH, COMPANY, RUNS, CREDITS_ATTRIBUTED, USERS)
+    VALUES (s.DAY, s.QUERY_HASH, s.COMPANY, s.RUNS, s.CREDITS_ATTRIBUTED, s.USERS);
+    RETURN 'OK';
+END;
+$$;
+
+-- One-time backfill (30d; attribution lags ~6h), then 3d daily increments.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(30);
+
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+UNION ALL
+SELECT 'MART_WAREHOUSE_EFFICIENCY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+UNION ALL
+SELECT 'MART_QUERY_FAMILY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+UNION ALL
+SELECT 'FACT_QUERY_ROLE_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+UNION ALL
+SELECT 'FACT_QUERY_SCHEMA_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+UNION ALL
+SELECT 'MART_COST_ALLOCATION_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+UNION ALL
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+UNION ALL
+SELECT 'MART_SECURITY_POSTURE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY
+UNION ALL
+SELECT 'MART_INCIDENT_TIMELINE', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+UNION ALL
+SELECT 'FACT_AI_USAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+UNION ALL
+SELECT 'MART_TAG_COVERAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY
+UNION ALL
+SELECT 'MART_LOCK_WAIT_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY
+UNION ALL
+SELECT 'MART_PATTERN_COST_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PATTERN_COST_DAILY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(3);
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PATTERN_COST_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOCK_WAIT_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 36 AS VERSION, 'MART_PATTERN_COST_DAILY + SP_LOAD_PATTERN_COST + TASK_PATTERN_COST_DAILY (measured $ per repeated statement pattern)' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 36);
+
+-- ===========================================================================
+-- >>> V037__pattern_env_grain.sql
+-- ===========================================================================
+-- V037: DATABASE_NAME joins MART_PATTERN_COST_DAILY grain (Compare env lens
+-- groundwork, owner decision 2026-07-11: "V037 YES - build FIRST while the
+-- mart is days old") + the USERS metric becomes honest (Codex r11 #9): V036
+-- stored per-warehouse daily distinct users summed, and readers took the max
+-- day - neither is window-distinct. The mart now stores a mergeable HLL
+-- state (USERS_HLL); readers combine states and estimate, so USERS is a true
+-- approximate distinct over any day range at any grain rollup.
+-- Company via COMPANY_FOR_WAREHOUSE outside the aggregation (V030 shape law).
+-- The mart is days old: CREATE OR REPLACE + a fresh 30d backfill is cheaper
+-- than any in-place migration. Apply AFTER V036. Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20037, 'V037 requires V036 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 36) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY SUSPEND;
+
+CREATE OR REPLACE TABLE DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY (
+    DAY DATE NOT NULL,
+    QUERY_HASH VARCHAR(64) NOT NULL,
+    COMPANY VARCHAR(50) NOT NULL,
+    DATABASE_NAME VARCHAR(255) NOT NULL,
+    RUNS NUMBER(12,0),
+    CREDITS_ATTRIBUTED NUMBER(18,6),
+    USERS_HLL BINARY,
+    LOAD_TS TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY t
+    USING (
+        SELECT m.DAY, m.QUERY_HASH, m.COMPANY, m.DATABASE_NAME,
+               SUM(m.RUNS) AS RUNS,
+               SUM(m.CREDITS_ATTRIBUTED) AS CREDITS_ATTRIBUTED,
+               HLL_COMBINE(m.USERS_HLL) AS USERS_HLL
+        FROM (
+            SELECT g.DAY, g.QUERY_HASH, g.DATABASE_NAME,
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                   g.RUNS, g.CREDITS_ATTRIBUTED, g.USERS_HLL
+            FROM (
+                SELECT CAST(q.START_TIME AS DATE) AS DAY,
+                       q.QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       COALESCE(q.WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       COALESCE(q.DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COUNT(*) AS RUNS,
+                       SUM(a.CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS_ATTRIBUTED,
+                       HLL_ACCUMULATE(q.USER_NAME) AS USERS_HLL
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+                JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+                  ON q.QUERY_ID = a.QUERY_ID
+                 AND q.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
+                WHERE a.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
+                  AND q.QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2, 3, 4
+            ) g
+        ) m
+        GROUP BY 1, 2, 3, 4
+    ) s
+    ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH AND t.COMPANY = s.COMPANY
+       AND t.DATABASE_NAME = s.DATABASE_NAME
+    WHEN MATCHED THEN UPDATE SET
+        t.RUNS = s.RUNS, t.CREDITS_ATTRIBUTED = s.CREDITS_ATTRIBUTED,
+        t.USERS_HLL = s.USERS_HLL, t.LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (DAY, QUERY_HASH, COMPANY, DATABASE_NAME, RUNS, CREDITS_ATTRIBUTED, USERS_HLL)
+    VALUES (s.DAY, s.QUERY_HASH, s.COMPANY, s.DATABASE_NAME, s.RUNS, s.CREDITS_ATTRIBUTED, s.USERS_HLL);
+    RETURN 'OK';
+END;
+$$;
+
+-- Rebuild: the table was recreated empty, so the 30d backfill IS the data.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(30);
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PATTERN_COST_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOCK_WAIT_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 37 AS VERSION, 'MART_PATTERN_COST_DAILY v2: DATABASE_NAME grain (Compare env lens) + mergeable HLL user state (honest window-distinct USERS)' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 37);
+
+-- ===========================================================================
+-- >>> V038__ledger_autobook.sql
+-- ===========================================================================
+-- V038: the savings ledger books itself (owner ask 2026-07-11: "how can we
+-- automate the savings ledger - i don't think anyone will use this. i'm not
+-- even using it"). The app's remediation flows book on execute, but changes
+-- made directly in Snowsight never touched the ledger. Detection already
+-- exists: the daily warehouse-change scan (V024) snapshot-diffs settings,
+-- freezes a 14-day baseline, and measures 14 days after. This migration
+-- rides it: cost-lever changes (AUTO_SUSPEND down, SIZE down, MAX_CLUSTERS
+-- down, SCALING_POLICY -> ECONOMY) auto-book an ESTIMATED item ($0 - no
+-- invented numbers) the day they are seen; when the registry verdict lands,
+-- the item settles itself VERIFIED (measured credits/day delta x rate x 30,
+-- $5/mo noise floor) or REJECTED (no measurable saving). Forward-only:
+-- settled items never rewrite. Dedupe via SAVINGS_LEDGER.SOURCE_CHANGE_ID.
+-- Apply AFTER V037. Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20038, 'V038 requires V037 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 37) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN SUSPEND;
+
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER
+    ADD COLUMN IF NOT EXISTS SOURCE_CHANGE_ID VARCHAR(80);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    rate NUMBER;
+BEGIN
+    SELECT COALESCE(TRY_TO_NUMBER(MAX(IFF(KEY = 'CREDIT_PRICE_USD', VALUE, NULL))), 3.68)
+      INTO :rate
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER
+        (DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, SOURCE_CHANGE_ID)
+    SELECT 'Detected ' || r.SETTING || ' change on ' || r.WAREHOUSE_NAME || ': '
+               || COALESCE(r.OLD_VALUE, '?') || ' -> ' || COALESCE(r.NEW_VALUE, '?'),
+           'ESTIMATED',
+           0,
+           'SELECT * FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY WHERE CHANGE_ID = ''' || r.CHANGE_ID || '''',
+           'Auto-booked from the daily warehouse-change scan; the 14-day measured verdict settles it.',
+           r.CHANGE_ID
+    FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+    WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l
+                      WHERE l.SOURCE_CHANGE_ID = r.CHANGE_ID)
+      AND (
+            (r.SETTING = 'AUTO_SUSPEND'
+             AND COALESCE(TRY_TO_NUMBER(r.NEW_VALUE), 999999999) < COALESCE(TRY_TO_NUMBER(r.OLD_VALUE), 0))
+         OR (r.SETTING = 'MAX_CLUSTERS'
+             AND COALESCE(TRY_TO_NUMBER(r.NEW_VALUE), 999999999) < COALESCE(TRY_TO_NUMBER(r.OLD_VALUE), 0))
+         OR (r.SETTING = 'SCALING_POLICY'
+             AND UPPER(COALESCE(r.NEW_VALUE, '')) = 'ECONOMY'
+             AND UPPER(COALESCE(r.OLD_VALUE, '')) = 'STANDARD')
+         OR (r.SETTING = 'SIZE'
+             AND CASE UPPER(REPLACE(COALESCE(r.NEW_VALUE, ''), '-', ''))
+                     WHEN 'XSMALL' THEN 1 WHEN 'SMALL' THEN 2 WHEN 'MEDIUM' THEN 3
+                     WHEN 'LARGE' THEN 4 WHEN 'XLARGE' THEN 5
+                     WHEN '2XLARGE' THEN 6 WHEN 'XXLARGE' THEN 6
+                     WHEN '3XLARGE' THEN 7 WHEN '4XLARGE' THEN 8 ELSE 99 END
+               < CASE UPPER(REPLACE(COALESCE(r.OLD_VALUE, ''), '-', ''))
+                     WHEN 'XSMALL' THEN 1 WHEN 'SMALL' THEN 2 WHEN 'MEDIUM' THEN 3
+                     WHEN 'LARGE' THEN 4 WHEN 'XLARGE' THEN 5
+                     WHEN '2XLARGE' THEN 6 WHEN 'XXLARGE' THEN 6
+                     WHEN '3XLARGE' THEN 7 WHEN '4XLARGE' THEN 8 ELSE 0 END)
+      );
+
+    UPDATE DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l
+       SET STATE = IFF(s.SAVED_MONTHLY_USD >= 5, 'VERIFIED', 'REJECTED'),
+           VERIFIED_USD = IFF(s.SAVED_MONTHLY_USD >= 5, ROUND(s.SAVED_MONTHLY_USD, 2), NULL),
+           VERIFIED_AT = CURRENT_TIMESTAMP(),
+           VERIFIED_BY = 'AUTO:TASK_LEDGER_AUTOBOOK',
+           NOTES = LEFT(COALESCE(l.NOTES, '') || ' | measured '
+                        || TO_VARCHAR(ROUND(COALESCE(s.BASE, 0), 2)) || ' -> '
+                        || TO_VARCHAR(ROUND(COALESCE(s.AFT, 0), 2))
+                        || ' credits/day over ' || TO_VARCHAR(COALESCE(s.AFTER_DAYS, 0))
+                        || 'd (' || s.VERDICT || '); floor $5/mo.', 2000)
+      FROM (SELECT r.CHANGE_ID, r.VERDICT, r.AFTER_DAYS,
+                   r.BASELINE_CREDITS_PER_DAY AS BASE,
+                   r.AFTER_CREDITS_PER_DAY AS AFT,
+                   (COALESCE(r.BASELINE_CREDITS_PER_DAY, 0) - COALESCE(r.AFTER_CREDITS_PER_DAY, 0))
+                       * :rate * 30 AS SAVED_MONTHLY_USD
+              FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
+             WHERE r.VERDICT <> 'PENDING') s
+     WHERE l.SOURCE_CHANGE_ID = s.CHANGE_ID
+       AND l.STATE = 'ESTIMATED';
+
+    RETURN 'OK';
+END;
+$$;
+
+-- First pass now: books + settles from the registry's existing 90 days,
+-- so the ledger stops being empty the moment V038 applies.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LEDGER_AUTOBOOK
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LEDGER_AUTOBOOK();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LEDGER_AUTOBOOK RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN RESUME;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 38 AS VERSION, 'SP_LEDGER_AUTOBOOK + TASK_LEDGER_AUTOBOOK: savings ledger auto-books detected cost-lever changes and settles them on the 14d measured verdict' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 38);
+
+-- ===========================================================================
+-- >>> V039__pseudo_warehouse_filter.sql
+-- ===========================================================================
+-- V039: the CLOUD_SERVICES_ONLY pseudo-warehouse stops being a warehouse.
+-- COST_DB reconciliation R1 (docs/design/COSTDB_RECONCILIATION.md): accounts
+-- emit a WAREHOUSE_METERING_HISTORY row with WAREHOUSE_ID = 0 for cloud
+-- services consumed outside any warehouse. Our fact loader ingested it, so
+-- it appeared as a phantom ALFA warehouse: 100% idle in the advisor (nothing
+-- to suspend), a row in movers/chargeback-unmapped/Compare, and a slice of
+-- the boss chart. The docs-sanctioned filter is WAREHOUSE_ID > 0 (COST_DB
+-- carries the same filter with the comment "skip pseudo-VWs").
+-- SP_LOAD_HOURLY_FACTS below is derived VERBATIM from V002 with exactly one
+-- added predicate (equality-locked in tests). The V27-family mart loader is
+-- NOT re-derived here (it is equality-locked to its V028 pair); eff-mart
+-- READERS filter by name instead, and the source-side filter joins the next
+-- planned V27 re-derivation. Apply AFTER V038. Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20039, 'V039 requires V038 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 38) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        (HOUR_TS, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, COMPANY, QUERY_COUNT,
+         FAILED_COUNT, ELAPSED_SEC_SUM, P95_ELAPSED_SEC, QUEUED_SEC_SUM, SPILL_REMOTE_GB)
+    SELECT
+        DATE_TRUNC('hour', START_TIME),
+        WAREHOUSE_NAME,
+        DATABASE_NAME,
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME),
+        COUNT(*),
+        SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)),
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000,
+        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95),
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000,
+        SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3)
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+    GROUP BY 1, 2, 3, 4, 5;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY t
+    USING (
+        SELECT
+            DATE(START_TIME) AS DAY,
+            WAREHOUSE_NAME,
+            DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) AS COMPANY,
+            SUM(COALESCE(CREDITS_USED_COMPUTE, CREDITS_USED)) AS CREDITS_COMPUTE,
+            SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_TOTAL
+        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+        WHERE START_TIME >= DATEADD('day', -3, CURRENT_DATE())
+          AND WAREHOUSE_ID > 0
+        GROUP BY 1, 2, 3
+    ) s
+    ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+    WHEN MATCHED THEN UPDATE SET
+        COMPANY = s.COMPANY, CREDITS_COMPUTE = s.CREDITS_COMPUTE,
+        CREDITS_TOTAL = s.CREDITS_TOTAL, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_COMPUTE, CREDITS_TOTAL)
+        VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_COMPUTE, s.CREDITS_TOTAL);
+
+    RETURN 'hourly facts loaded';
+END;
+$$;
+
+DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+ WHERE UPPER(WAREHOUSE_NAME) = 'CLOUD_SERVICES_ONLY';
+
+DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+ WHERE UPPER(WAREHOUSE_NAME) = 'CLOUD_SERVICES_ONLY';
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 39 AS VERSION, 'pseudo-warehouse filter: CLOUD_SERVICES_ONLY (WAREHOUSE_ID = 0) excluded from the warehouse fact + phantom rows deleted (COST_DB recon R1)' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 39);
+
+-- ===========================================================================
+-- >>> V040__freshness_state.sql
+-- ===========================================================================
+-- V040: freshness becomes a lookup, not a computation (Codex r13 #2 + #3).
+-- The health strip and freshness boards read MART_SOURCE_FRESHNESS - a view
+-- of 19 MAX(LOAD_TS) + COUNT(*) table aggregates - every 30 seconds per
+-- viewer. This migration snapshots that view into a one-row-per-source
+-- STATE table every 10 minutes server-side; the app reads the tiny table
+-- and computes staleness from LAST_LOAD_TS at render. The view stays as
+-- the writer's source and the app's pre-V040 fallback.
+-- Apply AFTER V039. Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20040, 'V040 requires V039 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 39) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE (
+    SOURCE_NAME  VARCHAR(100) NOT NULL PRIMARY KEY,
+    LAST_LOAD_TS TIMESTAMP_NTZ,
+    ROW_COUNT    NUMBER(18,0),
+    SNAPSHOT_TS  TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_SNAPSHOT_FRESHNESS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET
+        t.LAST_LOAD_TS = s.LAST_LOAD_TS, t.ROW_COUNT = s.ROW_COUNT,
+        t.SNAPSHOT_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT);
+    RETURN 'OK';
+END;
+$$;
+
+CALL DBA_MAINT_DB.OVERWATCH.SP_SNAPSHOT_FRESHNESS();
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    SCHEDULE = 'USING CRON */10 * * * * America/Chicago'
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_SNAPSHOT_FRESHNESS();
+
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS RESUME;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 40 AS VERSION, 'SOURCE_FRESHNESS_STATE + SP_SNAPSHOT_FRESHNESS + 10-min task: freshness is a lookup, not 19 aggregates per health-strip refresh' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 40);
+
+-- ===========================================================================
+-- >>> V041__loader_efficiency.sql
+-- ===========================================================================
+-- V041__loader_efficiency.sql — the loader-efficiency pass.
+-- Authority: docs/design/V041_LOADER_PASS.md (design freeze 2026-07-12);
+-- evidence: docs/design/PERF_BACKLOG.md Tier A. ONE migration, eleven riders.
+--
+--   R1  OW_QH_EXTRACT: ONE QUERY_HISTORY scan per hourly cycle (watermark -
+--       45 min, 3-day retention), projected to the union of consumer columns.
+--       Rewired consumers (the design's list, exactly): FACT_QUERY_HOURLY,
+--       _OW_ALLOC_BASE, tag coverage, query-family, schema-hourly,
+--       role-hourly, incident-timeline DDL arm, R7 diagnostics. The
+--       warehouse-efficiency q-CTE and posture ADMIN_STMTS_24H are NOT on
+--       the list and deliberately stay live.
+--   R2  FACT_COST_ALLOC_XDIM_DAILY persisted from _OW_ALLOC_BASE before it
+--       collapses (no schema grain — cardinality; schema stays live).
+--   R3  is app-side (AI users tab reads FACT_AI_USAGE_DAILY mart-first).
+--   R4  Exec board v2: windows 7/14/30/60/90 (= config), single-pass KPI
+--       aggregation, atomic stage->SWAP visibility; PRESSURE_QUEUE /
+--       PRESSURE_SPILL / DB_MIX retired (whole-tree grep 2026-07-12: zero
+--       readers).
+--   R5  OW_LOAD_WATERMARKS + TASK_NIGHTLY_RECONCILE (delete-and-rebuild the
+--       trailing 3 days: restated ACCOUNT_USAGE rows and disappeared groups
+--       cannot survive stale MERGE rows).
+--   R6  Loader-owned freshness: every SP merges its sources into
+--       SOURCE_FRESHNESS_STATE (+GENERATION, +STATUS) in its own commit;
+--       TASK_SNAPSHOT_FRESHNESS retired (144 wakes/day); SP_SNAPSHOT_FRESHNESS
+--       kept for manual refresh.
+--   R7  MART_OPS_DIAG_HOURLY from the extract: top-20/hour by elapsed +
+--       failure families per hour (Operations first paint goes mart-first).
+--   R8  FACT_PLATFORM_SCORE_DAILY: the retro score's four input aggregates,
+--       loaded daily; weights stay in Python.
+--   R9  Posture UNUSED_ROLES_90D from FACT_QUERY_ROLE_HOURLY, coverage-gated
+--       (HAVING emits no row — never a lying zero — until the fact spans 90d).
+--   R10 WAREHOUSE_ID > 0 joins the V27-family loader's metering source reads
+--       (the V039 promise); eff-mart READER name-filters stay until the next
+--       re-derivation.
+--   R11 Resource-monitor totals land in the daily posture row via SHOW ->
+--       RESULT_SCAN (V024's daily scan is the owner's-rights precedent).
+--
+-- Derivation law: SP_LOAD_MARTS_V27 below is generated VERBATIM from V031's
+-- proc + the enumerated edits above (R1 x6 FROM swaps, R2 arm, R9, R10 x2,
+-- R11, R6 x2); SP_LOAD_HOURLY_FACTS from V039's minus the FACT_QUERY_HOURLY
+-- arm (moved into SP_LOAD_QH_EXTRACT with only its FROM swapped) plus the R6
+-- write; SP_LOAD_DAILY_FACTS from V002's + R5 window bounds + R5/R6 tail.
+-- tests/test_v041_loader_pass.py rebuilds each derivation and asserts
+-- equality — hand-editing any copy without its origin fails there, loudly.
+--
+-- Ordering note (why FACT_QUERY_HOURLY moved): the design chains
+-- TASK_LOAD_HOURLY -> TASK_QH_EXTRACT -> TASK_LOAD_MARTS_V27_HOURLY. The
+-- root's proc runs BEFORE the extract fills, so a fact arm left in
+-- SP_LOAD_HOURLY_FACTS reading the extract would trail by one cycle. The arm
+-- runs inside SP_LOAD_QH_EXTRACT immediately after the fill instead.
+--
+-- Apply AFTER V040 -> re-run roles.sql (new objects) -> validate.sql expects
+-- V001..V041 -> redeploy the app. Backfill note: the hourly marts now read
+-- the extract, so wide backfills fill it first (backfill_365.sql updated):
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90);
+--     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
+-- Idempotent; safe to re-run.
+
+USE DATABASE DBA_MAINT_DB;
+USE SCHEMA OVERWATCH;
+
+EXECUTE IMMEDIATE $$
+DECLARE
+    v INT;
+    not_ready EXCEPTION (-20041, 'BLOCKED: SCHEMA_VERSION < 40 - run migrations in order (see DEPLOYMENT.md)');
+BEGIN
+    SELECT COALESCE(MAX(VERSION), 0) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 40) THEN
+        RAISE not_ready;
+    END IF;
+    RETURN 'ok';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- New tables (all rebuildable — real drops in teardown.sql)
+-- ---------------------------------------------------------------------------
+
+-- R5: one row per loader; loaders read since WM_TS minus overlap.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS (
+    SOURCE     VARCHAR(60)   NOT NULL PRIMARY KEY,
+    WM_TS      TIMESTAMP_NTZ NOT NULL,
+    UPDATED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R1: the staged QUERY_HISTORY extract — union of consumer columns, 3-day
+-- retention (or the explicit backfill window). Transient: scratch by design.
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT (
+    QUERY_ID                        VARCHAR(64),
+    START_TIME                      TIMESTAMP_LTZ,
+    WAREHOUSE_NAME                  VARCHAR(200),
+    WAREHOUSE_SIZE                  VARCHAR(40),
+    DATABASE_NAME                   VARCHAR(200),
+    SCHEMA_NAME                     VARCHAR(200),
+    USER_NAME                       VARCHAR(200),
+    ROLE_NAME                       VARCHAR(200),
+    QUERY_TYPE                      VARCHAR(60),
+    EXECUTION_STATUS                VARCHAR(30),
+    ERROR_CODE                      VARCHAR(30),
+    ERROR_MESSAGE                   VARCHAR(200),
+    TOTAL_ELAPSED_TIME              NUMBER(18,0),
+    EXECUTION_TIME                  NUMBER(18,0),
+    COMPILATION_TIME                NUMBER(18,0),
+    QUEUED_OVERLOAD_TIME            NUMBER(18,0),
+    QUEUED_PROVISIONING_TIME        NUMBER(18,0),
+    BYTES_SPILLED_TO_REMOTE_STORAGE NUMBER(24,0),
+    BYTES_SCANNED                   NUMBER(24,0),
+    PERCENTAGE_SCANNED_FROM_CACHE   FLOAT,
+    QUERY_TAG                       VARCHAR(2000),
+    QUERY_PARAMETERIZED_HASH        VARCHAR(64),
+    QUERY_TEXT                      VARCHAR(200),
+    LOAD_TS                         TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R2: allocation at DAY x WAREHOUSE x DATABASE x USER (no schema grain).
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY (
+    DAY            DATE          NOT NULL,
+    WAREHOUSE_NAME VARCHAR(200)  NOT NULL,
+    DATABASE_NAME  VARCHAR(200)  NOT NULL,
+    USER_NAME      VARCHAR(200)  NOT NULL,
+    EXEC_SEC       NUMBER(18,1),
+    ALLOC_CREDITS  NUMBER(18,6),
+    LOAD_TS        TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R7: Operations first-paint diagnostics (two row kinds, one hourly loader).
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY (
+    HOUR_TS          TIMESTAMP_NTZ NOT NULL,
+    KIND             VARCHAR(20)   NOT NULL,  -- TOP_ELAPSED | FAIL_FAMILY
+    COMPANY          VARCHAR(40)   NOT NULL DEFAULT 'ALFA',
+    QUERY_ID         VARCHAR(64),
+    START_TIME       TIMESTAMP_LTZ,
+    USER_NAME        VARCHAR(200),
+    WAREHOUSE_NAME   VARCHAR(200),
+    WAREHOUSE_SIZE   VARCHAR(40),
+    DATABASE_NAME    VARCHAR(200),
+    QUERY_TYPE       VARCHAR(60),
+    EXECUTION_STATUS VARCHAR(30),
+    ELAPSED_SEC      NUMBER(18,3),
+    QUEUED_SEC       NUMBER(18,3),
+    SPILL_REMOTE_GB  NUMBER(18,4),
+    QUERY_PREVIEW    VARCHAR(200),
+    ERROR_CODE       VARCHAR(30),
+    ERROR_MESSAGE    VARCHAR(200),
+    FAILURES         NUMBER(12,0),
+    USERS_AFFECTED   NUMBER(12,0),
+    USERS_HLL        BINARY,
+    LAST_SEEN        TIMESTAMP_LTZ,
+    LOAD_TS          TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R8: the retro platform score's four input aggregates, one row per day.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.FACT_PLATFORM_SCORE_DAILY (
+    DAY            DATE          NOT NULL,
+    CREDITS_BILLED NUMBER(18,6),
+    QUERY_COUNT    NUMBER(14,0),
+    FAILED_COUNT   NUMBER(14,0),
+    QUEUED_SEC     NUMBER(18,1),
+    SPILL_GB       NUMBER(18,3),
+    TASK_RUNS      NUMBER(14,0),
+    TASK_FAILED    NUMBER(14,0),
+    CRIT_RAISED    NUMBER(12,0),
+    HIGH_RAISED    NUMBER(12,0),
+    LOAD_TS        TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R4: the board's build stage (SWAP target — same shape as MART_EXEC_BOARD).
+CREATE TRANSIENT TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE (
+    COMPANY      VARCHAR(40)   NOT NULL,
+    WINDOW_DAYS  NUMBER(4,0)   NOT NULL,
+    PANEL        VARCHAR(60)   NOT NULL,
+    METRIC       VARCHAR(80)   NOT NULL,
+    DIMENSION    VARCHAR(300),
+    PERIOD_START DATE,
+    VALUE        NUMBER(24,6),
+    VALUE_USD    NUMBER(24,2),
+    UNIT         VARCHAR(40),
+    SORT_ORDER   NUMBER(6,0),
+    REFRESHED_AT TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
+);
+
+-- R6: freshness state gains a generation (future cache-invalidation token)
+-- and a status column.
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE ADD COLUMN IF NOT EXISTS GENERATION NUMBER(18,0) DEFAULT 0;
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE ADD COLUMN IF NOT EXISTS STATUS VARCHAR(400);
+
+-- ---------------------------------------------------------------------------
+-- R1: the extract loader (+ the FACT_QUERY_HOURLY arm, moved here from
+-- SP_LOAD_HOURLY_FACTS — see the ordering note in the header). DAYS_BACK NULL
+-- means watermark mode (the task path); a number is the explicit backfill
+-- window (backfill_365.sql).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    lo TIMESTAMP_NTZ;  -- reload lower bound
+    d INT;
+    emsg VARCHAR;
+BEGIN
+    -- DAYS_BACK > 0 = explicit backfill window; 0 or NULL = watermark mode.
+    -- The tasks pass 0 (never a bare NULL — no signature-resolution
+    -- questions on any runtime).
+    IF (COALESCE(DAYS_BACK, 0) > 0) THEN
+        d := GREATEST(1, LEAST(DAYS_BACK, 400))::INT;
+        lo := DATEADD('day', -:d, CURRENT_DATE())::TIMESTAMP_NTZ;
+    ELSE
+        -- watermark - 45 min (ACCOUNT_USAGE lag overlap), first run 48h,
+        -- catch-up clamped at the 3-day retention (wider gaps: backfill).
+        SELECT GREATEST(
+                   COALESCE(DATEADD('minute', -45, MAX(WM_TS)),
+                            DATEADD('hour', -48, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ),
+                   DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ)
+          INTO :lo
+        FROM DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS
+        WHERE SOURCE = 'QH_EXTRACT';
+    END IF;
+
+    -- The one QUERY_HISTORY scan of the hourly cycle. Retention trim rides
+    -- the same DELETE; an explicit backfill keeps its wider window until the
+    -- next watermark-mode run trims back to 3 days. Both arms carry V017
+    -- isolation (v4.36.1): a failed extract fill must not fail the task —
+    -- the facts keep their last load and the freshness labels say so.
+    BEGIN
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+     WHERE START_TIME >= :lo
+        OR START_TIME < LEAST(:lo, DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ);
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+        (QUERY_ID, START_TIME, WAREHOUSE_NAME, WAREHOUSE_SIZE, DATABASE_NAME, SCHEMA_NAME,
+         USER_NAME, ROLE_NAME, QUERY_TYPE, EXECUTION_STATUS, ERROR_CODE, ERROR_MESSAGE,
+         TOTAL_ELAPSED_TIME, EXECUTION_TIME, COMPILATION_TIME, QUEUED_OVERLOAD_TIME,
+         QUEUED_PROVISIONING_TIME, BYTES_SPILLED_TO_REMOTE_STORAGE, BYTES_SCANNED,
+         PERCENTAGE_SCANNED_FROM_CACHE, QUERY_TAG, QUERY_PARAMETERIZED_HASH, QUERY_TEXT)
+    SELECT QUERY_ID, START_TIME, WAREHOUSE_NAME, WAREHOUSE_SIZE, DATABASE_NAME, SCHEMA_NAME,
+           USER_NAME, ROLE_NAME, QUERY_TYPE, EXECUTION_STATUS, ERROR_CODE::VARCHAR,
+           LEFT(ERROR_MESSAGE, 200), TOTAL_ELAPSED_TIME, EXECUTION_TIME, COMPILATION_TIME,
+           QUEUED_OVERLOAD_TIME, QUEUED_PROVISIONING_TIME, BYTES_SPILLED_TO_REMOTE_STORAGE,
+           BYTES_SCANNED, PERCENTAGE_SCANNED_FROM_CACHE, QUERY_TAG, QUERY_PARAMETERIZED_HASH,
+           LEFT(QUERY_TEXT, 200)
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= :lo;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'extract_load_failed', :emsg, 'OW_QH_EXTRACT - consumers read the previous fill', CURRENT_ROLE();
+    END;
+
+    BEGIN
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+     WHERE HOUR_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        (HOUR_TS, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, COMPANY, QUERY_COUNT,
+         FAILED_COUNT, ELAPSED_SEC_SUM, P95_ELAPSED_SEC, QUEUED_SEC_SUM, SPILL_REMOTE_GB)
+    SELECT
+        DATE_TRUNC('hour', START_TIME),
+        WAREHOUSE_NAME,
+        DATABASE_NAME,
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME),
+        COUNT(*),
+        SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)),
+        SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000,
+        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95),
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000,
+        SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3)
+    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+    WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+    GROUP BY 1, 2, 3, 4, 5;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'fact_load_failed', :emsg, 'FACT_QUERY_HOURLY - extract unaffected', CURRENT_ROLE();
+    END;
+
+    -- R5: advance the watermark; R6: loader-owned freshness.
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS t
+    USING (SELECT 'QH_EXTRACT' AS SOURCE, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS WM_TS) s
+    ON t.SOURCE = s.SOURCE
+    WHEN MATCHED THEN UPDATE SET WM_TS = s.WM_TS
+    WHEN NOT MATCHED THEN INSERT (SOURCE, WM_TS) VALUES (s.SOURCE, s.WM_TS);
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'OW_QH_EXTRACT' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+        UNION ALL
+        SELECT 'FACT_QUERY_HOURLY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'qh extract + hourly query fact loaded';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Re-derived loaders (see the derivation-law note in the header).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY t
+    USING (
+        SELECT
+            DATE(START_TIME) AS DAY,
+            WAREHOUSE_NAME,
+            DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) AS COMPANY,
+            SUM(COALESCE(CREDITS_USED_COMPUTE, CREDITS_USED)) AS CREDITS_COMPUTE,
+            SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_TOTAL
+        FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+        WHERE START_TIME >= DATEADD('day', -3, CURRENT_DATE())
+          AND WAREHOUSE_ID > 0
+        GROUP BY 1, 2, 3
+    ) s
+    ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+    WHEN MATCHED THEN UPDATE SET
+        COMPANY = s.COMPANY, CREDITS_COMPUTE = s.CREDITS_COMPUTE,
+        CREDITS_TOTAL = s.CREDITS_TOTAL, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_COMPUTE, CREDITS_TOTAL)
+        VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_COMPUTE, s.CREDITS_TOTAL);
+
+    -- V041 R6: loader-owned freshness (FACT_QUERY_HOURLY moved to the extract).
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'FACT_WAREHOUSE_DAILY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'hourly facts loaded';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    wm TIMESTAMP_NTZ;           -- V041 R5: last successful daily load
+    lo_metering TIMESTAMP_NTZ;  -- watermark - 1d overlap (default -5d, clamp -30d)
+    lo_short TIMESTAMP_NTZ;     -- watermark - 1d overlap (default -3d, clamp -30d)
+BEGIN
+    SELECT MAX(WM_TS) INTO :wm
+    FROM DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS WHERE SOURCE = 'DAILY_FACTS';
+    lo_metering := GREATEST(COALESCE(DATEADD('day', -1, :wm),
+                                     DATEADD('day', -5, CURRENT_DATE())::TIMESTAMP_NTZ),
+                            DATEADD('day', -30, CURRENT_DATE())::TIMESTAMP_NTZ);
+    lo_short := GREATEST(COALESCE(DATEADD('day', -1, :wm),
+                                  DATEADD('day', -3, CURRENT_DATE())::TIMESTAMP_NTZ),
+                         DATEADD('day', -30, CURRENT_DATE())::TIMESTAMP_NTZ);
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY t
+    USING (
+        SELECT
+            USAGE_DATE AS DAY,
+            UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+            SUM(COALESCE(CREDITS_USED_COMPUTE, 0)) AS CREDITS_COMPUTE,
+            SUM(COALESCE(CREDITS_USED_CLOUD_SERVICES, 0)) AS CREDITS_CLOUD_SVCS,
+            SUM(COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0)) AS CREDITS_ADJUSTMENT,
+            SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_USED,
+            SUM(COALESCE(CREDITS_BILLED,
+                GREATEST(0, COALESCE(CREDITS_USED, 0) + COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0)))) AS CREDITS_BILLED
+        FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+        WHERE USAGE_DATE >= :lo_metering::DATE
+        GROUP BY 1, 2
+    ) s
+    ON t.DAY = s.DAY AND t.SERVICE_TYPE = s.SERVICE_TYPE
+    WHEN MATCHED THEN UPDATE SET
+        CREDITS_COMPUTE = s.CREDITS_COMPUTE, CREDITS_CLOUD_SVCS = s.CREDITS_CLOUD_SVCS,
+        CREDITS_ADJUSTMENT = s.CREDITS_ADJUSTMENT, CREDITS_USED = s.CREDITS_USED,
+        CREDITS_BILLED = s.CREDITS_BILLED, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, SERVICE_TYPE, CREDITS_COMPUTE, CREDITS_CLOUD_SVCS, CREDITS_ADJUSTMENT, CREDITS_USED, CREDITS_BILLED)
+        VALUES (s.DAY, s.SERVICE_TYPE, s.CREDITS_COMPUTE, s.CREDITS_CLOUD_SVCS, s.CREDITS_ADJUSTMENT, s.CREDITS_USED, s.CREDITS_BILLED);
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY WHERE DAY >= :lo_short::DATE;
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+        (DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR)
+    SELECT
+        DATE(QUERY_START_TIME),
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+        COUNT(*),
+        SUM(IFF(STATE = 'FAILED', 1, 0)),
+        AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)),
+        MAX_BY(STATE, QUERY_START_TIME),
+        MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 500), QUERY_START_TIME)
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE QUERY_START_TIME >= :lo_short::DATE
+    GROUP BY 1, 2, 3, 4, 5;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY WHERE DAY >= :lo_short::DATE;
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+        (DAY, USER_NAME, COMPANY, LOGINS, FAILED_LOGINS, PASSWORD_LOGINS)
+    SELECT
+        DATE(EVENT_TIMESTAMP),
+        USER_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME),
+        COUNT(*),
+        SUM(IFF(IS_SUCCESS = 'NO', 1, 0)),
+        SUM(IFF(FIRST_AUTHENTICATION_FACTOR = 'PASSWORD' AND IS_SUCCESS = 'YES', 1, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
+    WHERE EVENT_TIMESTAMP >= :lo_short::DATE
+    GROUP BY 1, 2, 3;
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY WHERE DAY >= :lo_short::DATE;
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+        (DAY, DATABASE_NAME, COMPANY, DB_BYTES, FAILSAFE_BYTES)
+    SELECT
+        USAGE_DATE,
+        DATABASE_NAME,
+        DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+        AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)),
+        AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+    WHERE USAGE_DATE >= :lo_short::DATE
+    GROUP BY 1, 2, 3;
+
+    -- V041 R5+R6: advance the watermark; loader-owned freshness.
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS t
+    USING (SELECT 'DAILY_FACTS' AS SOURCE, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ AS WM_TS) s
+    ON t.SOURCE = s.SOURCE
+    WHEN MATCHED THEN UPDATE SET WM_TS = s.WM_TS
+    WHEN NOT MATCHED THEN INSERT (SOURCE, WM_TS) VALUES (s.SOURCE, s.WM_TS);
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'FACT_METERING_DAILY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+        UNION ALL
+        SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+        UNION ALL
+        SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+        UNION ALL
+        SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*)
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'daily facts loaded';
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    emsg VARCHAR;
+    loaded VARCHAR DEFAULT '';
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    IF (UPPER(:SCOPE) = 'HOURLY') THEN
+
+        -- [1] warehouse efficiency ------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY t
+            USING (
+                WITH m AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           SUM(CREDITS_USED) AS CREDITS_TOTAL,
+                           SUM(CREDITS_USED_COMPUTE) AS CREDITS_COMPUTE,
+                           COUNT_IF(CREDITS_USED > 0) AS BILLED_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_ID > 0
+                    GROUP BY 1, 2
+                ),
+                q AS (
+                    SELECT DATE(START_TIME) AS DAY, WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 60000 AS QUEUED_MIN,
+                           SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_GB,
+                           APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000 AS P95_S,
+                           SUM(COALESCE(EXECUTION_TIME, 0)) / 3600000 AS EXEC_HOURS,
+                           COUNT(DISTINCT DATE_TRUNC('hour', START_TIME)) AS ACTIVE_HOURS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND WAREHOUSE_NAME IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                SELECT COALESCE(m.DAY, q.DAY) AS DAY,
+                       COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(m.WAREHOUSE_NAME, q.WAREHOUSE_NAME)) AS COMPANY,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0), 4) AS CREDITS_TOTAL,
+                       ROUND(COALESCE(m.CREDITS_COMPUTE, 0), 4) AS CREDITS_COMPUTE,
+                       COALESCE(q.QUERIES, 0) AS QUERIES,
+                       COALESCE(q.FAILS, 0) AS FAILS,
+                       ROUND(COALESCE(q.QUEUED_MIN, 0), 2) AS QUEUED_MIN,
+                       ROUND(COALESCE(q.SPILL_GB, 0), 3) AS SPILL_GB,
+                       ROUND(COALESCE(q.P95_S, 0), 1) AS P95_S,
+                       ROUND(COALESCE(q.EXEC_HOURS, 0), 3) AS EXEC_HOURS,
+                       COALESCE(m.BILLED_HOURS, 0) AS BILLED_HOURS,
+                       COALESCE(q.ACTIVE_HOURS, 0) AS ACTIVE_HOURS,
+                       ROUND(100 * GREATEST(COALESCE(m.BILLED_HOURS, 0) - COALESCE(q.ACTIVE_HOURS, 0), 0)
+                             / NULLIF(m.BILLED_HOURS, 0), 2) AS IDLE_PCT,
+                       ROUND(COALESCE(m.CREDITS_TOTAL, 0) / NULLIF(q.QUERIES, 0), 6) AS CREDITS_PER_QUERY
+                FROM m FULL OUTER JOIN q ON q.DAY = m.DAY AND q.WAREHOUSE_NAME = m.WAREHOUSE_NAME
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET
+                COMPANY = s.COMPANY, CREDITS_TOTAL = s.CREDITS_TOTAL,
+                CREDITS_COMPUTE = s.CREDITS_COMPUTE, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_MIN = s.QUEUED_MIN, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S,
+                EXEC_HOURS = s.EXEC_HOURS, BILLED_HOURS = s.BILLED_HOURS,
+                ACTIVE_HOURS = s.ACTIVE_HOURS, IDLE_PCT = s.IDLE_PCT,
+                CREDITS_PER_QUERY = s.CREDITS_PER_QUERY, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, COMPANY, CREDITS_TOTAL, CREDITS_COMPUTE, QUERIES, FAILS,
+                 QUEUED_MIN, SPILL_GB, P95_S, EXEC_HOURS, BILLED_HOURS, ACTIVE_HOURS, IDLE_PCT, CREDITS_PER_QUERY)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.COMPANY, s.CREDITS_TOTAL, s.CREDITS_COMPUTE, s.QUERIES, s.FAILS,
+                    s.QUEUED_MIN, s.SPILL_GB, s.P95_S, s.EXEC_HOURS, s.BILLED_HOURS, s.ACTIVE_HOURS, s.IDLE_PCT, s.CREDITS_PER_QUERY);
+            loaded := loaded || 'wh_eff ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [2] query families (top 2000/day by exec time) --------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY t
+            USING (
+                SELECT DATE(START_TIME) AS DAY,
+                       QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+                       ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS SAMPLE_TEXT,
+                       COUNT(*) AS RUNS,
+                       COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                       COUNT(DISTINCT USER_NAME) AS USERS,
+                       COUNT(DISTINCT WAREHOUSE_NAME) AS WAREHOUSES,
+                       ANY_VALUE(DATABASE_NAME) AS DATABASE_NAME,
+                       ANY_VALUE(SCHEMA_NAME) AS SCHEMA_NAME,
+                       ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS TOTAL_EXEC_SEC,
+                       ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
+                       ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
+                       ROUND(AVG(COALESCE(COMPILATION_TIME, 0)), 1) AS COMPILE_MS_AVG,
+                       ROUND(AVG(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 3), 3) AS GB_SCANNED_AVG,
+                       ROUND(AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)), 2) AS CACHE_PCT_AVG,
+                       COUNT_IF(COALESCE(QUERY_TAG, '') != '') AS TAGGED_RUNS
+                FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+                GROUP BY 1, 2
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY DAY ORDER BY TOTAL_EXEC_SEC DESC) <= 2000
+            ) s
+            ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH
+            WHEN MATCHED THEN UPDATE SET
+                SAMPLE_TEXT = s.SAMPLE_TEXT, RUNS = s.RUNS, FAILS = s.FAILS, USERS = s.USERS,
+                WAREHOUSES = s.WAREHOUSES, DATABASE_NAME = s.DATABASE_NAME, SCHEMA_NAME = s.SCHEMA_NAME,
+                TOTAL_EXEC_SEC = s.TOTAL_EXEC_SEC, MEDIAN_S = s.MEDIAN_S, P95_S = s.P95_S,
+                COMPILE_MS_AVG = s.COMPILE_MS_AVG, GB_SCANNED_AVG = s.GB_SCANNED_AVG,
+                CACHE_PCT_AVG = s.CACHE_PCT_AVG, TAGGED_RUNS = s.TAGGED_RUNS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES, DATABASE_NAME, SCHEMA_NAME,
+                 TOTAL_EXEC_SEC, MEDIAN_S, P95_S, COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS)
+            VALUES (s.DAY, s.QUERY_HASH, s.SAMPLE_TEXT, s.RUNS, s.FAILS, s.USERS, s.WAREHOUSES, s.DATABASE_NAME,
+                    s.SCHEMA_NAME, s.TOTAL_EXEC_SEC, s.MEDIAN_S, s.P95_S, s.COMPILE_MS_AVG, s.GB_SCANNED_AVG,
+                    s.CACHE_PCT_AVG, s.TAGGED_RUNS);
+            loaded := loaded || 'qfam ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [3] role-hour fact -------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.ROLE_NAME, g.WAREHOUSE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.EXEC_SEC
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                           COALESCE(WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.ROLE_NAME = s.ROLE_NAME AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC)
+            VALUES (s.HOUR_TS, s.ROLE_NAME, s.WAREHOUSE_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.EXEC_SEC);
+            loaded := loaded || 'role_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4] schema-hour fact -----------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY t
+            USING (
+                SELECT g.HOUR_TS, g.DATABASE_NAME, g.SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(g.DATABASE_NAME) AS COMPANY,
+                       g.QUERIES, g.FAILS, g.QUEUED_SEC, g.SPILL_GB, g.P95_S
+                FROM (
+                    SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+                           COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                           COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                           COUNT(*) AS QUERIES,
+                           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS,
+                           ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000, 1) AS QUEUED_SEC,
+                           ROUND(SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3), 3) AS SPILL_GB,
+                           ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2, 3
+                ) g
+            ) s
+            ON t.HOUR_TS = s.HOUR_TS AND t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES, FAILS = s.FAILS,
+                QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB, P95_S = s.P95_S, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (HOUR_TS, DATABASE_NAME, SCHEMA_NAME, COMPANY, QUERIES, FAILS, QUEUED_SEC, SPILL_GB, P95_S)
+            VALUES (s.HOUR_TS, s.DATABASE_NAME, s.SCHEMA_NAME, s.COMPANY, s.QUERIES, s.FAILS, s.QUEUED_SEC, s.SPILL_GB, s.P95_S);
+            loaded := loaded || 'schema_hr ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [4b] tag coverage by user, day grain (v4.14 tuning trio) --------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY t
+            USING (
+                SELECT g.DAY, g.USER_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(g.USER_NAME) AS COMPANY,
+                       g.QUERIES, g.EXEC_SEC, g.UNTAGGED_EXEC_SEC
+                FROM (
+                    SELECT DATE(START_TIME) AS DAY,
+                           COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
+                           COUNT(*) AS QUERIES,
+                           ROUND(SUM(COALESCE(EXECUTION_TIME, 0)) / 1000, 1) AS EXEC_SEC,
+                           ROUND(SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL,
+                                         COALESCE(EXECUTION_TIME, 0), 0)) / 1000, 1) AS UNTAGGED_EXEC_SEC
+                    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                    WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                    GROUP BY 1, 2
+                ) g
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, QUERIES = s.QUERIES,
+                EXEC_SEC = s.EXEC_SEC, UNTAGGED_EXEC_SEC = s.UNTAGGED_EXEC_SEC,
+                LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, COMPANY, QUERIES, EXEC_SEC, UNTAGGED_EXEC_SEC)
+            VALUES (s.DAY, s.USER_NAME, s.COMPANY, s.QUERIES, s.EXEC_SEC, s.UNTAGGED_EXEC_SEC);
+            loaded := loaded || 'tagcov ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TAG_COVERAGE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5] cost allocation (exec-time share of each warehouse-hour) -------
+        BEGIN
+            CREATE OR REPLACE TEMPORARY TABLE _OW_ALLOC_BASE AS
+            WITH wh AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       SUM(CREDITS_USED) AS HOUR_CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_ID > 0
+                GROUP BY 1, 2
+            ),
+            q AS (
+                SELECT DATE_TRUNC('hour', START_TIME) AS HOUR_TS, WAREHOUSE_NAME,
+                       USER_NAME, COALESCE(ROLE_NAME, 'UNKNOWN') AS ROLE_NAME,
+                       COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
+                       COALESCE(SCHEMA_NAME, 'NONE') AS SCHEMA_NAME,
+                       SUM(COALESCE(EXECUTION_TIME, 0)) AS EXEC_MS
+                FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                  AND WAREHOUSE_NAME IS NOT NULL AND COALESCE(EXECUTION_TIME, 0) > 0
+                GROUP BY 1, 2, 3, 4, 5, 6
+            ),
+            tot AS (
+                SELECT HOUR_TS, WAREHOUSE_NAME, SUM(EXEC_MS) AS TOTAL_MS FROM q GROUP BY 1, 2
+            )
+            SELECT DATE(q.HOUR_TS) AS DAY, q.WAREHOUSE_NAME, q.USER_NAME, q.ROLE_NAME,
+                   q.DATABASE_NAME, q.SCHEMA_NAME, q.EXEC_MS,
+                   wh.HOUR_CREDITS * q.EXEC_MS / NULLIF(tot.TOTAL_MS, 0) AS ALLOC_CREDITS
+            FROM q
+            JOIN tot ON tot.HOUR_TS = q.HOUR_TS AND tot.WAREHOUSE_NAME = q.WAREHOUSE_NAME
+            JOIN wh ON wh.HOUR_TS = q.HOUR_TS AND wh.WAREHOUSE_NAME = q.WAREHOUSE_NAME;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY t
+            USING (
+                SELECT DAY, 'USER' AS DIMENSION, USER_NAME AS KEY_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) AS COMPANY,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'DATABASE', DATABASE_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+                UNION ALL
+                SELECT DAY, 'SCHEMA', DATABASE_NAME || '.' || SCHEMA_NAME,
+                       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME),
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3, DATABASE_NAME
+                UNION ALL
+                SELECT DAY, 'ROLE', ROLE_NAME,
+                       CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END,
+                       ROUND(SUM(ALLOC_CREDITS), 6), ROUND(SUM(EXEC_MS) / 1000, 1)
+                FROM _OW_ALLOC_BASE GROUP BY 1, 3
+            ) s
+            ON t.DAY = s.DAY AND t.DIMENSION = s.DIMENSION AND t.KEY_NAME = s.KEY_NAME
+            WHEN MATCHED THEN UPDATE SET COMPANY = s.COMPANY, ALLOC_CREDITS = s.ALLOC_CREDITS,
+                EXEC_SEC = s.EXEC_SEC, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, DIMENSION, KEY_NAME, COMPANY, ALLOC_CREDITS, EXEC_SEC)
+            VALUES (s.DAY, s.DIMENSION, s.KEY_NAME, s.COMPANY, s.ALLOC_CREDITS, s.EXEC_SEC);
+            loaded := loaded || 'alloc ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [5b] cross-dim allocation fact (V041 R2): persist _OW_ALLOC_BASE at
+        -- DAY x WAREHOUSE x DATABASE x USER before it collapses to single-dim.
+        -- NO schema grain (cardinality; schema stays live-filtered). Same
+        -- expressions as [5], so the day-sums reconcile by construction.
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY t
+            USING (
+                SELECT DAY, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME,
+                       ROUND(SUM(EXEC_MS) / 1000, 1) AS EXEC_SEC,
+                       ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
+                FROM _OW_ALLOC_BASE
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.WAREHOUSE_NAME = s.WAREHOUSE_NAME
+               AND t.DATABASE_NAME = s.DATABASE_NAME AND t.USER_NAME = s.USER_NAME
+            WHEN MATCHED THEN UPDATE SET EXEC_SEC = s.EXEC_SEC,
+                ALLOC_CREDITS = s.ALLOC_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, WAREHOUSE_NAME, DATABASE_NAME, USER_NAME, EXEC_SEC, ALLOC_CREDITS)
+            VALUES (s.DAY, s.WAREHOUSE_NAME, s.DATABASE_NAME, s.USER_NAME, s.EXEC_SEC, s.ALLOC_CREDITS);
+            loaded := loaded || 'alloc_xdim ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_COST_ALLOC_XDIM_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [6] task graphs -----------------------------------------------------
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY t
+            USING (
+                WITH runs AS (
+                    SELECT COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
+                           MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
+                           MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
+                           MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
+                           DATE(MIN(h.QUERY_START_TIME)) AS DAY,
+                           COUNT(*) AS TASK_RUNS,
+                           COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
+                           DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
+                           SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
+                    LEFT JOIN (
+                        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+                        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+                        WHERE START_TIME >= DATEADD('day', -:d - 1, CURRENT_DATE())
+                          AND QUERY_ID IN (
+                              SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+                              WHERE QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                                AND STATE IN ('SUCCEEDED', 'FAILED')
+                          )
+                        GROUP BY QUERY_ID
+                    ) a ON a.QUERY_ID = h.QUERY_ID
+                    WHERE h.QUERY_START_TIME >= DATEADD('day', -:d, CURRENT_DATE())
+                      AND h.STATE IN ('SUCCEEDED', 'FAILED')
+                    GROUP BY RUN_KEY
+                )
+                SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME,
+                       COUNT(*) AS GRAPH_RUNS,
+                       COUNT_IF(FAILED_TASKS > 0) AS RUNS_WITH_FAILURES,
+                       SUM(TASK_RUNS) AS TASK_RUNS,
+                       ROUND(AVG(WALL_SEC), 1) AS AVG_WALL_SEC,
+                       ROUND(APPROX_PERCENTILE(WALL_SEC, 0.95), 1) AS P95_WALL_SEC,
+                       ROUND(SUM(CREDITS), 4) AS WH_CREDITS
+                FROM runs GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.PIPELINE = s.PIPELINE
+               AND COALESCE(t.DATABASE_NAME, '') = COALESCE(s.DATABASE_NAME, '')
+               AND COALESCE(t.SCHEMA_NAME, '') = COALESCE(s.SCHEMA_NAME, '')
+            WHEN MATCHED THEN UPDATE SET GRAPH_RUNS = s.GRAPH_RUNS,
+                RUNS_WITH_FAILURES = s.RUNS_WITH_FAILURES, TASK_RUNS = s.TASK_RUNS,
+                AVG_WALL_SEC = s.AVG_WALL_SEC, P95_WALL_SEC = s.P95_WALL_SEC,
+                WH_CREDITS = s.WH_CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT
+                (DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+                 TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS)
+            VALUES (s.DAY, s.PIPELINE, s.DATABASE_NAME, s.SCHEMA_NAME, s.GRAPH_RUNS,
+                    s.RUNS_WITH_FAILURES, s.TASK_RUNS, s.AVG_WALL_SEC, s.P95_WALL_SEC, s.WH_CREDITS);
+            loaded := loaded || 'graphs ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [8] incident timeline (rolling 48h window rebuild) -----------------
+        BEGIN
+            DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+            WHERE EVENT_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+                (EVENT_TS, KIND, COMPANY, SEVERITY, TITLE, REF_ID)
+            SELECT RAISED_AT, 'ALERT', COMPANY, SEVERITY, LEFT(TITLE, 300), EVENT_ID
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+            UNION ALL
+            SELECT QUERY_START_TIME, 'TASK_FAIL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'HIGH', LEFT(DATABASE_NAME || '.' || NAME || ' failed', 300), NAME
+            FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+            WHERE QUERY_START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP()) AND STATE = 'FAILED'
+            UNION ALL
+            SELECT START_TIME, 'DDL',
+                   DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')),
+                   'INFO', LEFT(QUERY_TYPE || ' by ' || USER_NAME || ' (' || COALESCE(ROLE_NAME, '?') || ')', 300), QUERY_ID
+            FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+            WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
+              AND EXECUTION_STATUS = 'SUCCESS'
+              AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                                 'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
+            UNION ALL
+            SELECT CHANGE_SEEN_AT, 'WH_CHANGE', COMPANY, 'INFO',
+                   LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' || COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 300),
+                   CHANGE_ID
+            FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY
+            WHERE CHANGE_SEEN_AT >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
+            loaded := loaded || 'timeline ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+        END;
+
+
+        -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+        USING (
+            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
+            WHERE SOURCE_NAME IN ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'MART_QUERY_FAMILY_DAILY',
+                                  'FACT_QUERY_ROLE_HOURLY', 'FACT_QUERY_SCHEMA_HOURLY',
+                                  'MART_TAG_COVERAGE_DAILY', 'MART_COST_ALLOCATION_DAILY',
+                                  'FACT_COST_ALLOC_XDIM_DAILY', 'MART_TASK_GRAPH_DAILY',
+                                  'MART_INCIDENT_TIMELINE')
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME
+        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+            STATUS = :loaded
+        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+
+    END IF;
+
+    IF (UPPER(:SCOPE) = 'DAILY') THEN
+
+        -- [7] security posture ------------------------------------------------
+        BEGIN
+            -- V041 R11 (guarded, v4.36.1): SHOW -> RESULT_SCAN once daily
+            -- (V024 precedent), so Security stops paying a SHOW + parse per
+            -- render. The nested handler means a SHOW failure can never take
+            -- the CORE posture metrics down with it — the monitor arms below
+            -- emit no rows that day instead (HAVING; never a lying zero).
+            BEGIN
+                SHOW WAREHOUSES LIMIT 500;
+                CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
+                SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
+                       COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
+                       TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
+                FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR (
+                        WAREHOUSE_NAME VARCHAR, RESOURCE_MONITOR VARCHAR, AUTO_SUSPEND NUMBER);
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'MartLoader', 'monitor_counts_skipped', :emsg, 'SHOW WAREHOUSES unavailable - core posture unaffected', CURRENT_ROLE();
+            END;
+
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
+            USING (
+                SELECT CURRENT_DATE() AS DAY, 'EXPIRING_CRED_10D' AS METRIC, 'ALL' AS COMPANY,
+                       COUNT(*)::NUMBER(18,2) AS VALUE
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL
+                  AND EXPIRATION_DATE BETWEEN CURRENT_TIMESTAMP() AND DATEADD('day', 10, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'EXPIRED_CRED', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS
+                WHERE EXPIRATION_DATE IS NOT NULL AND EXPIRATION_DATE < CURRENT_TIMESTAMP()
+                UNION ALL
+                SELECT CURRENT_DATE(), 'ADMIN_STMTS_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+                WHERE START_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  AND ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                UNION ALL
+                SELECT CURRENT_DATE(), 'GRANT_CHANGES_24H', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE CREATED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                   OR DELETED_ON >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                UNION ALL
+                -- V041 R9: unused-role posture from the role-hour fact, not a
+                -- 90d QUERY_HISTORY anti-join. Coverage-gated: HAVING emits NO
+                -- row (never a lying zero) until the fact spans the window.
+                SELECT CURRENT_DATE(), 'UNUSED_ROLES_90D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r
+                WHERE r.DELETED_ON IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY q
+                      WHERE q.HOUR_TS >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+                        AND q.ROLE_NAME = r.NAME
+                  )
+                HAVING (SELECT MIN(HOUR_TS) FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY)
+                       <= DATEADD('day', -89, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'MFA_GAP_USERS', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
+                WHERE U.DELETED_ON IS NULL AND U.DISABLED = FALSE
+                  AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
+                  AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY L
+                              WHERE L.USER_NAME = U.NAME
+                                AND L.DAY >= DATEADD('day', -30, CURRENT_DATE())
+                                AND L.PASSWORD_LOGINS > 0)
+                UNION ALL
+                SELECT CURRENT_DATE(), 'BREAKGLASS_GRANTS_30D', 'ALL', COUNT(*)
+                FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+                WHERE DELETED_ON IS NULL
+                  AND ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')
+                  AND CREATED_ON >= DATEADD('day', -30, CURRENT_TIMESTAMP())
+                UNION ALL
+                SELECT CURRENT_DATE(), 'WH_NO_MONITOR', 'ALL',
+                       COUNT_IF(LOWER(TRIM(RESOURCE_MONITOR)) IN ('null', '', 'none'))
+                FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
+                UNION ALL
+                SELECT CURRENT_DATE(), 'WH_NO_AUTOSUSPEND', 'ALL',
+                       COUNT_IF(COALESCE(AUTO_SUSPEND, 0) <= 0)
+                FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
+            ) s
+            ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
+            WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, METRIC, COMPANY, VALUE)
+            VALUES (s.DAY, s.METRIC, s.COMPANY, s.VALUE);
+            loaded := loaded || 'posture ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT c.USAGE_TIME::DATE AS DAY,
+                       COALESCE(u.NAME, 'UNKNOWN') AS USER_NAME,
+                       c.SOURCE AS SOURCE,
+                       'n/a' AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(c.TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(c.TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM (
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                    UNION ALL
+                    SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'CLI'
+                    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+                    WHERE USAGE_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                ) c
+                LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u ON u.USER_ID = c.USER_ID
+                GROUP BY 1, 2, 3
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_code ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+        BEGIN
+            MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY t
+            USING (
+                SELECT START_TIME::DATE AS DAY,
+                       'ACCOUNT' AS USER_NAME,
+                       'Functions' AS SOURCE,
+                       COALESCE(MODEL_NAME, 'n/a') AS MODEL_NAME,
+                       COUNT(*) AS REQUESTS,
+                       SUM(COALESCE(TOKENS, 0)) AS TOKENS,
+                       ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)), 6) AS CREDITS
+                FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
+                WHERE START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+                GROUP BY 1, 2, 3, 4
+            ) s
+            ON t.DAY = s.DAY AND t.USER_NAME = s.USER_NAME AND t.SOURCE = s.SOURCE AND t.MODEL_NAME = s.MODEL_NAME
+            WHEN MATCHED THEN UPDATE SET REQUESTS = s.REQUESTS, TOKENS = s.TOKENS,
+                CREDITS = s.CREDITS, LOAD_TS = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN INSERT (DAY, USER_NAME, SOURCE, MODEL_NAME, REQUESTS, TOKENS, CREDITS)
+            VALUES (s.DAY, s.USER_NAME, s.SOURCE, s.MODEL_NAME, s.REQUESTS, s.TOKENS, s.CREDITS);
+            loaded := loaded || 'ai_functions ';
+        EXCEPTION
+            WHEN OTHER THEN
+                emsg := SQLERRM;
+                INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+        END;
+
+
+        -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+        USING (
+            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
+            WHERE SOURCE_NAME IN ('MART_SECURITY_POSTURE_DAILY', 'FACT_AI_USAGE_DAILY')
+        ) s
+        ON t.SOURCE_NAME = s.SOURCE_NAME
+        WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+            SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+            STATUS = :loaded
+        WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+
+    END IF;
+
+    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- R7: Operations diagnostics from the extract — top-20/hour by elapsed +
+-- failure families per hour. Company via COMPANY_FOR_WAREHOUSE on plain
+-- columns outside any aggregation (V030 shape law).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    d INT;
+BEGIN
+    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 3))::INT;  -- extract holds 3d
+
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
+     WHERE HOUR_TS >= DATEADD('day', -:d, CURRENT_TIMESTAMP());
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
+        (HOUR_TS, KIND, COMPANY, QUERY_ID, START_TIME, USER_NAME, WAREHOUSE_NAME,
+         WAREHOUSE_SIZE, DATABASE_NAME, QUERY_TYPE, EXECUTION_STATUS, ELAPSED_SEC,
+         QUEUED_SEC, SPILL_REMOTE_GB, QUERY_PREVIEW)
+    SELECT DATE_TRUNC('hour', e.START_TIME)::TIMESTAMP_NTZ,
+           'TOP_ELAPSED',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(COALESCE(e.WAREHOUSE_NAME, '')),
+           e.QUERY_ID, e.START_TIME, e.USER_NAME, e.WAREHOUSE_NAME, e.WAREHOUSE_SIZE,
+           e.DATABASE_NAME, e.QUERY_TYPE, e.EXECUTION_STATUS,
+           e.TOTAL_ELAPSED_TIME / 1000.0,
+           (COALESCE(e.QUEUED_OVERLOAD_TIME, 0) + COALESCE(e.QUEUED_PROVISIONING_TIME, 0)) / 1000.0,
+           COALESCE(e.BYTES_SPILLED_TO_REMOTE_STORAGE, 0) / POWER(1024, 3),
+           LEFT(e.QUERY_TEXT, 180)
+    FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT e
+    WHERE e.START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+    -- top-50 per hour: any member of a global top-50 is inside its own
+    -- hour's top-50 (if 50 heavier queries shared its hour, THEY would be
+    -- the global top-50) — so the unfiltered panel is exact, not a sample.
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', e.START_TIME)
+                               ORDER BY e.TOTAL_ELAPSED_TIME DESC NULLS LAST) <= 50;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
+        (HOUR_TS, KIND, COMPANY, ERROR_CODE, ERROR_MESSAGE, FAILURES, USERS_AFFECTED, USERS_HLL, LAST_SEEN)
+    SELECT m.HOUR_TS, 'FAIL_FAMILY', m.COMPANY, m.ERROR_CODE, m.ERROR_MESSAGE,
+           SUM(m.CNT), COUNT(DISTINCT m.USER_NAME), HLL_ACCUMULATE(m.USER_NAME), MAX(m.LAST_SEEN)
+    FROM (
+        SELECT g.HOUR_TS, g.ERROR_CODE, g.ERROR_MESSAGE, g.USER_NAME,
+               DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
+               g.CNT, g.LAST_SEEN
+        FROM (
+            SELECT DATE_TRUNC('hour', e.START_TIME)::TIMESTAMP_NTZ AS HOUR_TS,
+                   COALESCE(e.ERROR_CODE, 'UNKNOWN') AS ERROR_CODE,
+                   LEFT(COALESCE(e.ERROR_MESSAGE, 'Unknown error'), 140) AS ERROR_MESSAGE,
+                   COALESCE(e.USER_NAME, 'UNKNOWN') AS USER_NAME,
+                   COALESCE(e.WAREHOUSE_NAME, '') AS WAREHOUSE_NAME,
+                   COUNT(*) AS CNT,
+                   MAX(e.START_TIME) AS LAST_SEEN
+            FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT e
+            WHERE e.START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+              AND e.EXECUTION_STATUS = 'FAIL'
+            GROUP BY 1, 2, 3, 4, 5
+        ) g
+    ) m
+    GROUP BY m.HOUR_TS, m.COMPANY, m.ERROR_CODE, m.ERROR_MESSAGE;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'MART_OPS_DIAG_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'ops diagnostics loaded (' || :d || 'd)';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- R8: platform-score inputs, one row per day (internal facts only — cheap).
+-- Weights stay in Python (configurable without a reload).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    d INT;
+BEGIN
+    d := GREATEST(7, LEAST(COALESCE(DAYS_BACK, 30), 120))::INT;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.FACT_PLATFORM_SCORE_DAILY t
+    USING (
+        WITH spend AS (
+            SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+            WHERE DAY >= DATEADD('day', -:d, CURRENT_DATE())
+            GROUP BY DAY
+        ),
+        q AS (
+            SELECT DATE(HOUR_TS) AS DAY,
+                   SUM(QUERY_COUNT) AS QUERY_COUNT,
+                   SUM(FAILED_COUNT) AS FAILED_COUNT,
+                   SUM(QUEUED_SEC_SUM) AS QUEUED_SEC,
+                   SUM(SPILL_REMOTE_GB) AS SPILL_GB
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+            WHERE HOUR_TS >= DATEADD('day', -:d, CURRENT_DATE())
+            GROUP BY 1
+        ),
+        tk AS (
+            SELECT DAY, SUM(RUNS) AS TASK_RUNS, SUM(FAILED) AS TASK_FAILED
+            FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+            WHERE DAY >= DATEADD('day', -:d, CURRENT_DATE())
+            GROUP BY DAY
+        ),
+        a AS (
+            SELECT DATE(RAISED_AT) AS DAY,
+                   COUNT_IF(UPPER(SEVERITY) = 'CRITICAL') AS CRIT_RAISED,
+                   COUNT_IF(UPPER(SEVERITY) = 'HIGH') AS HIGH_RAISED
+            FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
+            WHERE RAISED_AT >= DATEADD('day', -:d, CURRENT_DATE())
+            GROUP BY 1
+        )
+        SELECT spend.DAY,
+               spend.CREDITS_BILLED,
+               COALESCE(q.QUERY_COUNT, 0)  AS QUERY_COUNT,
+               COALESCE(q.FAILED_COUNT, 0) AS FAILED_COUNT,
+               COALESCE(q.QUEUED_SEC, 0)   AS QUEUED_SEC,
+               COALESCE(q.SPILL_GB, 0)     AS SPILL_GB,
+               COALESCE(tk.TASK_RUNS, 0)   AS TASK_RUNS,
+               COALESCE(tk.TASK_FAILED, 0) AS TASK_FAILED,
+               COALESCE(a.CRIT_RAISED, 0)  AS CRIT_RAISED,
+               COALESCE(a.HIGH_RAISED, 0)  AS HIGH_RAISED
+        FROM spend
+        LEFT JOIN q ON q.DAY = spend.DAY
+        LEFT JOIN tk ON tk.DAY = spend.DAY
+        LEFT JOIN a ON a.DAY = spend.DAY
+    ) s
+    ON t.DAY = s.DAY
+    WHEN MATCHED THEN UPDATE SET
+        CREDITS_BILLED = s.CREDITS_BILLED, QUERY_COUNT = s.QUERY_COUNT,
+        FAILED_COUNT = s.FAILED_COUNT, QUEUED_SEC = s.QUEUED_SEC, SPILL_GB = s.SPILL_GB,
+        TASK_RUNS = s.TASK_RUNS, TASK_FAILED = s.TASK_FAILED, CRIT_RAISED = s.CRIT_RAISED,
+        HIGH_RAISED = s.HIGH_RAISED, LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT
+        (DAY, CREDITS_BILLED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB,
+         TASK_RUNS, TASK_FAILED, CRIT_RAISED, HIGH_RAISED)
+    VALUES (s.DAY, s.CREDITS_BILLED, s.QUERY_COUNT, s.FAILED_COUNT, s.QUEUED_SEC,
+            s.SPILL_GB, s.TASK_RUNS, s.TASK_FAILED, s.CRIT_RAISED, s.HIGH_RAISED);
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'FACT_PLATFORM_SCORE_DAILY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_PLATFORM_SCORE_DAILY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'platform score inputs loaded (' || :d || 'd)';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- R4: exec board v2 — all five config windows, single-pass KPI aggregation,
+-- atomic stage -> SWAP visibility. The three panels with zero readers
+-- (PRESSURE_QUEUE, PRESSURE_SPILL, DB_MIX) are no longer produced.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    credit_price FLOAT;
+BEGIN
+    SELECT COALESCE(TRY_TO_DOUBLE(MAX(VALUE)), 3.68) INTO :credit_price
+    FROM DBA_MAINT_DB.OVERWATCH.SETTINGS WHERE KEY = 'CREDIT_PRICE_USD';
+
+    -- Build into the stage; readers keep the old board until the SWAP (the
+    -- V003 DELETE+INSERT gap stranded Overview on the live fallback hourly).
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE
+        (COMPANY, WINDOW_DAYS, PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER)
+    WITH scopes AS (
+        SELECT 'ALFA' AS COMPANY UNION ALL SELECT 'Trexis' UNION ALL SELECT 'ALL'
+    ),
+    windows AS (
+        SELECT 7 AS WINDOW_DAYS UNION ALL SELECT 14 UNION ALL SELECT 30
+        UNION ALL SELECT 60 UNION ALL SELECT 90
+    ),
+    -- Aggregate each fact ONCE at (COMPANY, DAY[, dim]) grain; the
+    -- scope-window expansion joins these small frames, never the raw facts.
+    wh_daily AS (
+        SELECT COMPANY, DAY, WAREHOUSE_NAME, SUM(CREDITS_TOTAL) AS CREDITS
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+        WHERE DAY >= DATEADD('day', -90, CURRENT_DATE())
+        GROUP BY 1, 2, 3
+    ),
+    qh_daily AS (
+        SELECT COMPANY, DATE(HOUR_TS) AS DAY,
+               SUM(QUERY_COUNT) AS QUERIES, SUM(FAILED_COUNT) AS FAILED,
+               SUM(QUEUED_SEC_SUM) AS QUEUED_SEC, SUM(SPILL_REMOTE_GB) AS SPILL_GB
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+        WHERE HOUR_TS >= DATEADD('day', -90, CURRENT_DATE())
+        GROUP BY 1, 2
+    ),
+    tk_daily AS (
+        SELECT COMPANY, DAY, SUM(RUNS) AS RUNS, SUM(FAILED) AS FAILED
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+        WHERE DAY >= DATEADD('day', -90, CURRENT_DATE())
+        GROUP BY 1, 2
+    ),
+    wh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.DAY, f.WAREHOUSE_NAME, f.CREDITS
+        FROM wh_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    ),
+    qh AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS,
+               f.QUERIES, f.FAILED, f.QUEUED_SEC, f.SPILL_GB
+        FROM qh_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    ),
+    tk AS (
+        SELECT s.COMPANY AS SCOPE_COMPANY, w.WINDOW_DAYS, f.RUNS, f.FAILED
+        FROM tk_daily f
+        JOIN scopes s ON (s.COMPANY = 'ALL' OR f.COMPANY = s.COMPANY)
+        JOIN windows w ON f.DAY >= DATEADD('day', -w.WINDOW_DAYS, CURRENT_DATE())
+    ),
+    -- One aggregation pass per source; the KPI arms below just unpivot these.
+    wh_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(CREDITS) AS CREDITS
+        FROM wh GROUP BY 1, 2
+    ),
+    qh_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(QUERIES) AS QUERIES, SUM(FAILED) AS FAILED,
+               SUM(QUEUED_SEC) AS QUEUED_SEC, SUM(SPILL_GB) AS SPILL_GB
+        FROM qh GROUP BY 1, 2
+    ),
+    tk_kpi AS (
+        SELECT SCOPE_COMPANY, WINDOW_DAYS, SUM(RUNS) AS RUNS, SUM(FAILED) AS FAILED
+        FROM tk GROUP BY 1, 2
+    )
+    -- KPI panel (unpivoted from the single-pass aggregates) ------------------
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'CREDITS', NULL, NULL,
+           CREDITS, ROUND(CREDITS * :credit_price, 2), 'credits', 10
+    FROM wh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUERIES', NULL, NULL,
+           QUERIES, NULL, 'count', 20
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'FAILED_QUERIES', NULL, NULL,
+           FAILED, NULL, 'count', 30
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'QUEUED_MINUTES', NULL, NULL,
+           ROUND(QUEUED_SEC / 60, 1), NULL, 'minutes', 40
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'SPILL_GB', NULL, NULL,
+           ROUND(SPILL_GB, 2), NULL, 'gb', 50
+    FROM qh_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_RUNS', NULL, NULL,
+           RUNS, NULL, 'count', 60
+    FROM tk_kpi
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'KPI', 'TASK_FAILURES', NULL, NULL,
+           FAILED, NULL, 'count', 70
+    FROM tk_kpi
+    -- Daily spend panel -------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'DAILY_SPEND', 'CREDITS', NULL, DAY,
+           SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits/day', 10
+    FROM wh GROUP BY 1, 2, DAY
+    -- Cost drivers ------------------------------------------------------------
+    UNION ALL
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', WAREHOUSE_NAME, NULL,
+           SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits', 10
+    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME;
+
+    ALTER TABLE DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+        SWAP WITH DBA_MAINT_DB.OVERWATCH.OW_EXEC_BOARD_STAGE;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'MART_EXEC_BOARD' AS SOURCE_NAME, MAX(REFRESHED_AT) AS LAST_LOAD_TS,
+               COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
+        SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
+        STATUS = 'loader'
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
+    VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, 'loader');
+
+    RETURN 'exec board refreshed (atomic swap)';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- R5: the nightly reconcile — delete-and-rebuild the trailing 3 days so
+-- restated ACCOUNT_USAGE rows and disappeared groups cannot survive stale
+-- MERGE rows. FACT_QUERY_HOURLY self-heals (48h DELETE+INSERT each cycle)
+-- and is deliberately not touched here.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NIGHTLY_RECONCILE()
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+BEGIN
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+     WHERE HOUR_TS >= DATEADD('day', -3, CURRENT_TIMESTAMP());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+     WHERE HOUR_TS >= DATEADD('day', -3, CURRENT_TIMESTAMP());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+     WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
+
+    -- Pull the watermarks back so the loaders re-cover the window.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS
+       SET WM_TS = DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ,
+           UPDATED_AT = CURRENT_TIMESTAMP()
+     WHERE SOURCE IN ('QH_EXTRACT', 'DAILY_FACTS');
+
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 3);
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(3);
+
+    RETURN 'nightly reconcile complete (trailing 3 days rebuilt)';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Freshness view: re-emitted with the four new arms (still the manual
+-- SP_SNAPSHOT_FRESHNESS source and the pre-V040 fallback).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS AS
+SELECT 'FACT_QUERY_HOURLY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT,
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0 AS HOURS_SINCE_LOAD
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+UNION ALL
+SELECT 'FACT_WAREHOUSE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+UNION ALL
+SELECT 'FACT_METERING_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
+UNION ALL
+SELECT 'FACT_TASK_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+UNION ALL
+SELECT 'FACT_LOGIN_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_LOGIN_DAILY
+UNION ALL
+SELECT 'FACT_STORAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+UNION ALL
+SELECT 'MART_EXEC_BOARD', MAX(REFRESHED_AT), COUNT(*),
+       DATEDIFF('minute', MAX(REFRESHED_AT), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+UNION ALL
+SELECT 'MART_WAREHOUSE_EFFICIENCY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
+UNION ALL
+SELECT 'MART_QUERY_FAMILY_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
+UNION ALL
+SELECT 'FACT_QUERY_ROLE_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_ROLE_HOURLY
+UNION ALL
+SELECT 'FACT_QUERY_SCHEMA_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_SCHEMA_HOURLY
+UNION ALL
+SELECT 'MART_COST_ALLOCATION_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
+UNION ALL
+SELECT 'MART_TASK_GRAPH_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TASK_GRAPH_DAILY
+UNION ALL
+SELECT 'MART_SECURITY_POSTURE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY
+UNION ALL
+SELECT 'MART_INCIDENT_TIMELINE', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_INCIDENT_TIMELINE
+UNION ALL
+SELECT 'FACT_AI_USAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_AI_USAGE_DAILY
+UNION ALL
+SELECT 'MART_TAG_COVERAGE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_TAG_COVERAGE_DAILY
+UNION ALL
+SELECT 'MART_LOCK_WAIT_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY
+UNION ALL
+SELECT 'MART_PATTERN_COST_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY
+UNION ALL
+SELECT 'OW_QH_EXTRACT', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
+UNION ALL
+SELECT 'FACT_COST_ALLOC_XDIM_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY
+UNION ALL
+SELECT 'MART_OPS_DIAG_HOURLY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
+UNION ALL
+SELECT 'FACT_PLATFORM_SCORE_DAILY', MAX(LOAD_TS), COUNT(*),
+       DATEDIFF('minute', MAX(LOAD_TS), CURRENT_TIMESTAMP()) / 60.0
+FROM DBA_MAINT_DB.OVERWATCH.FACT_PLATFORM_SCORE_DAILY;
+
+-- ---------------------------------------------------------------------------
+-- Task graph (r15 #6 phasing). Roots suspended for child surgery; EVERY task
+-- this migration touches gets an explicit RESUME below, and the file ends
+-- with SYSTEM$TASK_DEPENDENTS_ENABLE on BOTH roots — the 07-12 alert-outage
+-- class (children left suspended) must be impossible to reintroduce here.
+-- ---------------------------------------------------------------------------
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY SUSPEND;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY SUSPEND;
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
+
+-- Re-pointed: the V27 hourly marts consume the extract, so they run after it.
+CREATE OR REPLACE TASK DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_OPS_DIAG_HOURLY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(2);
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_NIGHTLY_RECONCILE
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_NIGHTLY_RECONCILE();
+
+CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PLATFORM_SCORE_DAILY
+    WAREHOUSE = WH_ALFA_OVERWATCH
+    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
+AS
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(30);
+
+-- R6: the 10-minute snapshot task retires (144 wakes/day); the loaders own
+-- their freshness rows now. SP_SNAPSHOT_FRESHNESS stays for manual refresh.
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS SUSPEND;
+DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS;
+
+-- ---------------------------------------------------------------------------
+-- Resume the graph BEFORE the first fills (v4.36.1): if any fill statement
+-- fails in a worksheet run, the halt must never strand the task tree
+-- suspended — the 07-12 alert-outage class. The same block repeats at the
+-- very end, so a future edit between the two cannot reintroduce it either.
+-- ---------------------------------------------------------------------------
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_OPS_DIAG_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_NIGHTLY_RECONCILE RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PLATFORM_SCORE_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY');
+
+-- ---------------------------------------------------------------------------
+-- First fills (3d extract covers every consumer window: 48h fact, 2d marts)
+-- ---------------------------------------------------------------------------
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(3);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 2);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 3);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(2);
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(30);
+CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
+
+-- ---------------------------------------------------------------------------
+-- Belt-and-braces repeat: the same resumes + whole-tree enables, at the end.
+-- ---------------------------------------------------------------------------
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_OPS_DIAG_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_NIGHTLY_RECONCILE RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PLATFORM_SCORE_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY');
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 41 AS VERSION, 'loader efficiency: staged QH extract + watermarks + nightly reconcile, xdim alloc fact, exec board v2 (5 windows, atomic swap), loader-owned freshness (+GENERATION), ops-diag + platform-score marts, posture from role fact + monitor counts, pseudo-wh filter in V27 sources' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 41);

@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.36.2 — the one-shot rebuild bundle (2026-07-12)
+
+Owner: "i want the full rebuild." snowflake/rebuild/ is docs/FULL_REBUILD.md
+as six paste-and-run Snowsight files: 00 date-stamped clone backups of all
+21 operator tables (verified counts, zero DROPs), 01 teardown (byte-copy),
+02 all 41 migrations concatenated in order (Run All halts AT a failure;
+every file idempotent), 03 roles, 04 backfill, 05 validate. GENERATED and
+equality-locked against the sources (tests/test_rebuild_bundle.py) — edit
+the sources, regenerate the bundle, never hand-edit it. Operator data
+survives by default; the factory-reset variant deliberately stays manual.
+
 ## 4.36.1 — V041 corrections: the owner's regressions, fixed at the root (2026-07-12)
 
 Owner reports after v4.36.0: the cortex user table lost emails/timestamps,
