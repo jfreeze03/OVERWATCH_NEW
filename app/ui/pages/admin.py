@@ -764,6 +764,11 @@ def _canary_tab() -> None:
         "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
         "beyond ±5%, re-run the backfill for that window (snowflake/backfill_365.sql, scoped)."
     )
+    # r21 #7: merely opening this tab paid a 28d metering + 7d history scan.
+    if not st.toggle("Run reconciliation", key="adm_recon_on",
+                     help="Compares 28d metering and 7d query totals, mart vs live. "
+                          "Cached for an hour once run."):
+        return
     recon = run(mart_sql.mart_vs_live_recon(), page=_PAGE, key="mart_recon", tier="historical",
                 source="FACT_* vs METERING_DAILY_HISTORY / QUERY_HISTORY")
     if guard(recon, "Reconciliation needs the facts (V002) installed.",

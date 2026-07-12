@@ -122,6 +122,8 @@ def requested_page(valid_pages: tuple[str, ...]) -> str | None:
 
 def remember_page(page: str) -> None:
     try:
-        st.query_params[_PAGE_PARAM] = str(page).lower().replace(" ", "-")
+        value = str(page).lower().replace(" ", "-")
+        if st.query_params.get(_PAGE_PARAM) != value:  # r21 #19: no no-op writes
+            st.query_params[_PAGE_PARAM] = value
     except Exception:
         pass

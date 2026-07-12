@@ -107,7 +107,9 @@ def lazy_sections(labels: list[str], key: str) -> str:
     choice = st.radio("Section", labels, key=key, horizontal=True,
                       label_visibility="collapsed")
     try:
-        st.query_params["section"] = _section_slug(choice)
+        _slug = _section_slug(choice)
+        if st.query_params.get("section") != _slug:  # r21 #19: no no-op writes
+            st.query_params["section"] = _slug
     except Exception:  # noqa: BLE001
         pass
     st.markdown("<hr style='margin: 0.2rem 0 0.9rem 0; opacity: 0.25;'>",
@@ -435,7 +437,11 @@ def load_settings(page: str) -> dict:
     """Settings from SETTINGS with code defaults as offline fallback."""
     merged = dict(DEFAULT_SETTINGS)
     try:
-        df = _settings_frame_cached("global")
+        # r21 #15: the refresh salt joins the cache key — without it, a
+        # manual refresh after editing SETTINGS still served the old frame
+        # for up to 5 minutes (run()'s inner cache clears; this one didn't).
+        df = _settings_frame_cached(
+            f"global:{st.session_state.get('_ow_refresh_salt', '')}")
         if df is not None and not df.empty and {"KEY", "VALUE"}.issubset(df.columns):
             for _, row in df.iterrows():
                 key = str(row["KEY"]).upper()

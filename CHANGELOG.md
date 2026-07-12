@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.35.1 — Codex r21: four ships, two corrected claims (2026-07-12)
+
+- **Fragment docstrings are binding now (#4).** _whatif_panel and
+  _statement_export claimed "Fragment:" with no @st.fragment — every slider
+  move and month pick re-rendered the whole grouped Cost page. Decorators
+  added; an AST lock fails any future "Fragment:" docstring without one.
+- **Reconciliation on demand (#7).** Opening Admin > Canary paid a 28d
+  metering + 7d history comparison; it now waits for a Run toggle.
+- **Settings honor manual refresh (#15, real bug).** The outer settings
+  frame cache ignored the refresh salt, so edited settings could read stale
+  for 5 minutes after an explicit refresh. Salt joins the key.
+- **No-op query-param writes suppressed (#19)** for page and section.
+
+Corrected: #5 — SHOW WAREHOUSES inside the what-if panel is metadata-tier
+(4h cache), and with the fragment restored it reruns panel-locally; hoisting
+buys nothing. #16 — a single WHERE with OR counts each row once; there is
+no double-counting in app self-cost (the OR is at worst a pruning nit).
+Routed: #1/#2/#3/#6/#9/#17/#18 -> fix-batch; #8/#11/#12 -> query-core v2;
+#10/#13/#14/#20 -> polish round.
+
 ## 4.35.0 — Codex r20: five verified ships, one decline that mattered (2026-07-12)
 
 - **Remediation reuses the advisor's read (#1).** The Optimization

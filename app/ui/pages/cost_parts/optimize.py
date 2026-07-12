@@ -54,8 +54,13 @@ _SERVICE_CATEGORY = {
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
 # cost.py; ruff --fix prunes what this section does not use.
 
+@st.fragment
 def _whatif_panel(sized, days: int, rate: float) -> None:
-    """Fragment: slider moves rerun this panel only, not the whole page."""
+    """Fragment: slider moves rerun this panel only, not the whole page.
+
+    r21 #4: the docstring claimed fragment for months while the decorator
+    was missing — every slider move re-rendered the whole grouped Cost page.
+    The AST lock in test_codex_r21 makes 'Fragment:' docstrings binding."""
     with st.expander("Interactive what-if: size step + auto-suspend together"):
         st.caption(
             "Replays this window's observed credits under a size step and a new "

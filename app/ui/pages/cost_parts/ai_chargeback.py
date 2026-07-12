@@ -215,6 +215,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         else:
             st.caption(f"View not available in this account/role: {fn_res.error}")
 
+@st.fragment
 def _statement_export(company: str, rate: float) -> None:
     """Fragment: month picks and the zip build rerun this block only."""
     st.markdown("**Monthly statement export**")
