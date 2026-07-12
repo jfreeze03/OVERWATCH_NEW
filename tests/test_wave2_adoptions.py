@@ -158,7 +158,7 @@ def test_security_gains_posture_trend():
     assert "def _posture_trend_panel" in _SEC
     assert "mart27_sql.security_posture(90)" in _SEC
     assert "EXPIRING_CRED_10D" in _SEC                             # default metric follows V028
-    assert "_posture_trend_panel()" in _SEC.split("def render", 1)[1]
+    assert "_posture_trend_panel(_post90)" in _SEC.split("def render", 1)[1]  # shares the header's 90d read (r14 #18)
 
 
 def test_new_readers_are_canaried():

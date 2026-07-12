@@ -521,12 +521,13 @@ FROM {core_object("SAVINGS_LEDGER")}
 
 def app_cost_quarter() -> str:
     """The ROI denominator: everything the app + its tasks burned this
-    quarter on the dedicated warehouse."""
-    return """
-SELECT ROUND(COALESCE(SUM(CREDITS_USED), 0), 2) AS APP_CREDITS_QTD
-FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    quarter on the dedicated warehouse. From the fact since r14 #5 — the
+    Brief was the last always-on surface paying a live metering scan."""
+    return f"""
+SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_QTD
+FROM {mart_object("FACT_WAREHOUSE_DAILY")}
 WHERE WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'
-  AND START_TIME >= DATE_TRUNC('quarter', CURRENT_DATE())
+  AND DAY >= DATE_TRUNC('quarter', CURRENT_DATE())
 """
 
 
@@ -1123,13 +1124,15 @@ ORDER BY HOURS_SINCE_LOAD DESC
 def fact_contract_consumed(start_iso: str) -> str:
     """Contract-period billed credits from the daily fact (r13 #7) — the live
     METERING_DAILY_HISTORY rescan becomes the coverage-guarded fallback.
-    FIRST_DAY lets the caller verify the fact actually reaches the contract
-    start before trusting the sum."""
+
+    FACT_FIRST_DAY is the fact's OWN earliest day, computed WITHOUT the
+    contract filter (Codex r14 #8: MIN(DAY) inside WHERE DAY >= start made a
+    quiet contract-start day read as "no coverage" forever). The caller
+    trusts the sum only when FACT_FIRST_DAY <= contract start."""
     from datetime import date
     start = date.fromisoformat(str(start_iso)).isoformat()
     return f"""
-SELECT SUM(CREDITS_BILLED) AS CREDITS_BILLED_TO_DATE,
-       MIN(DAY) AS FIRST_DAY
+SELECT SUM(IFF(DAY >= '{start}', CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
+       MIN(DAY) AS FACT_FIRST_DAY
 FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= '{start}'
 """

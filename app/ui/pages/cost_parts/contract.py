@@ -168,8 +168,8 @@ def _contract_tab(settings: dict) -> None:
         page=_PAGE, key="contract_consumed",
         mart_source="FACT_METERING_DAILY (contract window)",
         live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (coverage fallback)",
-        mart_accept=lambda df: (not df.empty and df.iloc[0].get("FIRST_DAY") is not None
-                                and str(pd.to_datetime(df.iloc[0]["FIRST_DAY"]).date()) <= start_s))
+        mart_accept=lambda df: (not df.empty and df.iloc[0].get("FACT_FIRST_DAY") is not None
+                                and str(pd.to_datetime(df.iloc[0]["FACT_FIRST_DAY"]).date()) <= start_s))
     if not guard(res, "No metering rows since the contract start."):
         return
     consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))

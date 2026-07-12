@@ -13,7 +13,9 @@ V008 = Path(__file__).resolve().parents[1] / "snowflake" / "migrations" / "V008_
 
 def test_department_window_is_exact_metering_with_unmapped_bucket():
     sql = chargeback_sql.department_window_credits(7, "ALFA")
-    assert "WAREHOUSE_METERING_HISTORY" in sql
+    # FACT_WAREHOUSE_DAILY since r14 #5 — same exact-metering basis
+    # (CREDITS_TOTAL = CREDITS_USED), 365d backfilled, no live scan.
+    assert "FACT_WAREHOUSE_DAILY" in sql
     assert "COALESCE(D.DEPARTMENT, 'Unmapped')" in sql
     assert "DEPARTMENT_MAP" in sql
     assert re.search(r"DATEADD\('day',\s*-7", sql)

@@ -171,27 +171,27 @@ def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
 # One cached function per tier: st.cache_data TTL is fixed at decoration time.
 # ``scope`` is part of the key on purpose — see module docstring.
 
-@st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False, max_entries=256)
 def _fetch_live(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "live", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False, max_entries=512)
 def _fetch_recent(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "recent", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False, max_entries=512)
 def _fetch_historical(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "historical", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False, max_entries=128)
 def _fetch_metadata(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "metadata", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False, max_entries=512)
 def _fetch_hourly(sql: str, scope: str, _page: str = "") -> pd.DataFrame:
     return _execute(sql, "hourly", _page)
 
@@ -308,27 +308,27 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     return tuple(frames[i] for i in range(len(jobs)))
 
 
-@st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False, max_entries=64)
 def _fetch_recent_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "recent", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["historical"], show_spinner=False, max_entries=64)
 def _fetch_historical_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "historical", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["live"], show_spinner=False, max_entries=64)
 def _fetch_live_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "live", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["metadata"], show_spinner=False, max_entries=64)
 def _fetch_metadata_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "metadata", _page)
 
 
-@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False)
+@st.cache_data(ttl=CACHE_TTLS["hourly"], show_spinner=False, max_entries=64)
 def _fetch_hourly_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
     return _execute_batch(sqls, "hourly", _page)
 

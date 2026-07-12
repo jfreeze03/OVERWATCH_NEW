@@ -169,7 +169,7 @@ def _trust_center_tab() -> None:
         result_caption(tcf)
 
 
-def _governance_score_panel() -> None:
+def _governance_score_panel():
     """Governance debt as a number with named deductions (CoCo item 14a)."""
     # Posture-snapshot-first (live round 6: gov_counts topped the fleet
     # slow-fetch board — 13 hits, p95 12.3s). The daily 06:30 posture mart
@@ -177,8 +177,10 @@ def _governance_score_panel() -> None:
     # stays as the fallback and the pre-V030 path. Hygiene counts a day old
     # are fine — the source label says which path served.
     inputs: dict = {}
-    post = run(mart27_sql.security_posture(3), page=_PAGE, key="gov_posture", tier="recent",
-               source="MART_SECURITY_POSTURE_DAILY (daily 06:30 snapshot)")
+    # One 90-day read serves BOTH this score (latest day) and the trend
+    # panel below (r14 #18) — the 3d + 90d double-read collapsed.
+    post = run(mart27_sql.security_posture(90), page=_PAGE, key="gov_posture", tier="recent",
+               source="MART_SECURITY_POSTURE_DAILY (daily 06:30 snapshot, 90d shared)")
     if post.usable():
         pdf_ = post.df.copy()
         snap = pdf_[pdf_["DAY"] == pdf_["DAY"].max()].set_index("METRIC")["VALUE"]
@@ -212,7 +214,7 @@ def _governance_score_panel() -> None:
             asus = pd.to_numeric(wdf["auto_suspend"], errors="coerce").fillna(0)
             inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())
     if not inputs:
-        return
+        return post
     settings = load_settings(_PAGE)
     drift = governance_drift(inputs, weights=resolve_gov_weights(settings))
     kpi_row([
@@ -227,6 +229,7 @@ def _governance_score_panel() -> None:
             for d in drift.drivers:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
     st.divider()
+    return post
 
 
 def _export_pack(company: str, days: int) -> None:
@@ -298,12 +301,11 @@ def _change_kind(qt: object) -> str:
     return "Other"
 
 
-def _posture_trend_panel() -> None:
-    """Posture as direction, not just today (Codex r6 #15) — one cheap mart
-    read; renders nothing until the daily loader has 2+ days of history."""
-    trend = run(mart27_sql.security_posture(90), page=_PAGE, key="posture_trend",
-                tier="recent", source="MART_SECURITY_POSTURE_DAILY (loaded daily 06:30)")
-    if not trend.usable():
+def _posture_trend_panel(trend) -> None:
+    """Posture as direction, not just today (Codex r6 #15) — shares the
+    header's single 90-day posture read (r14 #18); renders nothing until
+    the daily loader has 2+ days of history."""
+    if trend is None or not trend.usable():
         return
     pdf = trend.df.copy()
     if pdf["DAY"].nunique() < 2:
@@ -434,8 +436,8 @@ def render() -> None:
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
-    _governance_score_panel()
-    _posture_trend_panel()
+    _post90 = _governance_score_panel()
+    _posture_trend_panel(_post90)
     section = lazy_sections(["Access", "Changes", "Clients", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])

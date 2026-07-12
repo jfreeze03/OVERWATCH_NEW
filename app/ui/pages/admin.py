@@ -151,7 +151,7 @@ def _migrations_tab() -> None:
         page=_PAGE, key="adm_freshness",
         mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
         live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
-        mart_tier="live", live_tier="live")
+        mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
         styled_table(fresh.df)

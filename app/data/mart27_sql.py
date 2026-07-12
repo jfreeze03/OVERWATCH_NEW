@@ -659,3 +659,22 @@ HAVING GREATEST(SUM(IFF({in_a}, p.CREDITS_ATTRIBUTED, 0)),
                 SUM(IFF({in_b}, p.CREDITS_ATTRIBUTED, 0))) > 0.01
 ORDER BY ABS(A_CREDITS - B_CREDITS) DESC
 LIMIT {lim}"""
+
+
+def fact_monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
+    """Boss-chart fallback from FACT_WAREHOUSE_DAILY (r14 #5): the fact is
+    backfilled 365 days, so the 13-month live WAREHOUSE_METERING_HISTORY
+    scan is no longer the only long-view source. The accruing efficiency
+    mart stays primary; this replaces the LIVE fallback."""
+    m = max(2, min(int(months), 13))
+    comp = ""
+    if company and company != "ALL":
+        comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
+    return f"""SELECT
+    TO_CHAR(DATE_TRUNC('month', DAY), 'YYYY-MM') AS MONTH,
+    WAREHOUSE_NAME,
+    SUM(CREDITS_TOTAL) AS CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+WHERE DAY >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
+{comp}GROUP BY 1, 2
+ORDER BY 1, 2"""

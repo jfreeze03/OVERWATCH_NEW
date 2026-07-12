@@ -208,6 +208,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.cs_by_query_type", lambda: cost_sql.cs_by_query_type(1, "ALFA")),
     ("insights.clustering_by_table", lambda: insights_sql.clustering_by_table(7, "ALFA")),
     ("mart.fact_daily_spend_year", mart_sql.fact_daily_spend_year),
+    ("mart27.fact_monthly_spend_by_warehouse", lambda: mart27_sql.fact_monthly_spend_by_warehouse(12, "ALFA")),
 )
 
 # r11 #7: names whose ABSENCE is an account-feature state, not drift — only

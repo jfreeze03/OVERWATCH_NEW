@@ -191,7 +191,7 @@ def _freshness_board() -> None:
         page=_PAGE, key="freshness",
         mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
         live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
-        mart_tier="live", live_tier="live")
+        mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     st.subheader("Telemetry freshness")
     if not res.ok:
         st.info("Freshness board is not installed yet; the live fallbacks below still work.")

@@ -32,13 +32,13 @@ def department_window_credits(days: int, company: str = "ALL") -> str:
 SELECT
     {_DEPT} AS DEPARTMENT,
     M.WAREHOUSE_NAME,
-    {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
-    SUM(COALESCE(M.CREDITS_USED, 0)) AS CREDITS_TOTAL
-FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+    M.COMPANY,
+    SUM(COALESCE(M.CREDITS_TOTAL, 0)) AS CREDITS_TOTAL
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY M
 {_MAP_JOIN}
 WHERE {where}
 GROUP BY 1, 2, 3
-HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
+HAVING SUM(COALESCE(M.CREDITS_TOTAL, 0)) > 0
 ORDER BY DEPARTMENT, CREDITS_TOTAL DESC
 """
 
@@ -80,8 +80,8 @@ def department_month_credits(month: str, company: str = "ALL") -> str:
         raise ValueError(f"month must be YYYY-MM, got {text!r}")
     month_start = f"DATE '{text}-01'"
     where = and_where(
-        f"M.START_TIME >= {month_start}",
-        f"M.START_TIME < DATEADD('month', 1, {month_start})",
+        f"M.DAY >= {month_start}",
+        f"M.DAY < DATEADD('month', 1, {month_start})",
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
     return f"""
@@ -89,14 +89,14 @@ SELECT
     {_DEPT} AS DEPARTMENT,
     COALESCE(D.OWNER, 'Unassigned') AS DEPT_OWNER,
     M.WAREHOUSE_NAME,
-    {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
-    SUM(COALESCE(M.CREDITS_USED, 0)) AS CREDITS_TOTAL,
-    SUM(COALESCE(M.CREDITS_USED_COMPUTE, M.CREDITS_USED)) AS CREDITS_COMPUTE
-FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+    M.COMPANY,
+    SUM(COALESCE(M.CREDITS_TOTAL, 0)) AS CREDITS_TOTAL,
+    SUM(COALESCE(M.CREDITS_COMPUTE, M.CREDITS_TOTAL)) AS CREDITS_COMPUTE
+FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY M
 {_MAP_JOIN}
 WHERE {where}
 GROUP BY 1, 2, 3, 4
-HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
+HAVING SUM(COALESCE(M.CREDITS_TOTAL, 0)) > 0
 ORDER BY DEPARTMENT, CREDITS_TOTAL DESC
 """
 

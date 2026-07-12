@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.32.0 — Codex r14: the fact backfill pays off + a same-day bug caught (2026-07-11)
+
+- **Contract coverage predicate fixed (r14 #8 — a bug shipped hours ago).**
+  fact_contract_consumed computed MIN(DAY) after WHERE DAY >= start, so a
+  quiet contract-start day would read as "no coverage" and fall back to the
+  live rescan forever. Coverage (FACT_FIRST_DAY) is now computed over the
+  whole fact; the contract-window sum moves into an IFF.
+- **Four metering surfaces move to the fact (r14 #5).** The 365-day
+  FACT_WAREHOUSE_DAILY backfill already existed — department chargeback
+  (window + monthly statements), the Brief's app-cost quarter, and the boss
+  chart's long-view fallback now read it instead of live
+  WAREHOUSE_METERING_HISTORY. Same exact-metering basis (CREDITS_TOTAL =
+  CREDITS_USED), pseudo-warehouse-filtered by construction, no live scans.
+- **Freshness boards poll at snapshot cadence (r14 #13).** The V040 state
+  table moves every 10 minutes; the boards' 30-second live tier bought
+  nothing. Now "recent" (5 min).
+- **Cache cardinality bounded (r14 #17).** max_entries on every tier
+  fetcher (run + batch): refresh salts and filter permutations mint keys
+  forever; process memory now has a ceiling.
+- **Security header reads posture once (r14 #18, first half).** The
+  governance score (latest day) and the 90-day trend share one read —
+  the 3d + 90d double-read is gone. Persisting warehouse-monitor counts
+  into the posture snapshot rides the V27-family re-derivation.
+- r14 disposition elsewhere: #1+#3+#4+#6 = the loader-efficiency pass
+  (one QUERY_HISTORY staging extract, watermark loads, loader-owned
+  freshness rows, ops-diagnostics mart) — next session's design+build,
+  bundled with the V27 re-derivation and its riders; #7 (AI Users from
+  FACT_AI_USAGE_DAILY — the fact HAS user grain) joins it with proper
+  contract tests, hourly tier already cut its refire 12x; #2 (dedicated
+  UI warehouse) is an owner decision — recommended, needs a quota call;
+  #9/#10/#12/#20 = the coverage/cost registry design; #11 waits for a
+  second viewer; #14/#15/#16 = query-core v2 note; #19 = fragments
+  polish round.
+
+Deploy: no new migration — redeploy the app (V040 still pending if not applied).
+
 ## 4.31.0 — Codex r13: the cache stops re-paying hourly data every 5 minutes (2026-07-11)
 
 Driven by the owner's fleet screenshots (1.5-3.4% cache hits on the top
