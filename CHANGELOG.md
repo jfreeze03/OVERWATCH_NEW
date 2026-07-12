@@ -1,5 +1,47 @@
 # Changelog
 
+## 4.36.1 — V041 corrections: the owner's regressions, fixed at the root (2026-07-12)
+
+Owner reports after v4.36.0: the cortex user table lost emails/timestamps,
+validate.sql errored on TASK_DEPENDENTS, task-graph failures and alerts
+went quiet. Root causes + the review live in
+docs/reviews/V041_INCIDENT_REVIEW_20260712.md; the live-account recovery
+is snowflake/loader_chain_check.sql (step 0), then redeploy, then
+docs/FULL_REBUILD.md for the clean slate.
+
+- **Cortex user attribution reverted byte-for-byte to v4.34.2.** The R3
+  mart swap served NULL emails and day-grain usage stamps — the exact
+  who/when IS that table. Live-first again (probe semantics intact); the
+  degraded reader + canary deleted. A correct R3 (EMAIL + FIRST_TS/LAST_TS
+  on the fact first) is queued, not shipped.
+- **The task tree can no longer strand suspended (the real alerts/task-
+  graph killer).** v4.36.0 put every RESUME after seven first-fill CALLs —
+  a halted worksheet run left both roots' children suspended (the 07-12
+  outage class the design ordered dead). The full resume +
+  SYSTEM$TASK_DEPENDENTS_ENABLE block now runs BEFORE the fills and again
+  at file end; locked (two enables per root, order asserted).
+- **Extract loader isolated + no bare NULLs.** A flaky QUERY_HISTORY scan
+  now logs and degrades (consumers read the previous fill) instead of
+  failing the task and SKIPping the hourly chain; watermark mode is
+  DAYS_BACK <= 0 and the tasks pass 0.
+- **Posture SHOW guarded:** a SHOW failure skips only the two monitor
+  metrics (HAVING — never a lying zero), never core posture.
+- **Ops diagnostics made exact:** top-50/hour (the unfiltered top-50 panel
+  is exact by construction, not a sample); USERS_AFFECTED is an honest HLL
+  window approx-distinct (V037 precedent), labeled.
+- **validate.sql: task monitoring removed** (owner decision — unused, and
+  TASK_DEPENDENTS needs a db context bare runs don't have). Task-state
+  diagnosis moved to the new snowflake/loader_chain_check.sql.
+- New: docs/FULL_REBUILD.md — the safe full drop-and-reinstall (the schema
+  is SHARED with the previous app; nothing drops DBA_MAINT_DB).
+- Review: v4.34.2 -> v4.36.1 delta audited file-by-file (the three shared
+  infra changes are sound — no revert of v4.35.x needed); every remaining
+  V041 swap holds its live contract exactly, with coverage-gated fallbacks.
+
+Deploy: redeploy the app; run loader_chain_check.sql step 0 on the live
+account now; rebuild per docs/FULL_REBUILD.md when ready (V041 re-applies
+with the corrected file).
+
 ## 4.36.0 — V041: the loader-efficiency pass (2026-07-12)
 
 One migration, eleven riders — built to the design freeze

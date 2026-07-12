@@ -1,4 +1,4 @@
-"""Locks for the V041 loader-efficiency pass (v4.36.0).
+"""Locks for the V041 loader-efficiency pass (v4.36.0, corrected v4.36.1).
 
 Authority: docs/design/V041_LOADER_PASS.md (design freeze 2026-07-12).
 The derivation locks REBUILD each re-derived proc from its origin file plus
@@ -143,14 +143,26 @@ _POSTURE_OPEN = """        -- [7] security posture -----------------------------
 """
 _POSTURE_OPEN_NEW = """        -- [7] security posture ------------------------------------------------
         BEGIN
-            -- V041 R11: SHOW -> RESULT_SCAN once daily (V024 precedent), so
-            -- Security stops paying a SHOW + parse per render.
-            SHOW WAREHOUSES LIMIT 500;
-            CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
-            SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
-                   COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
-                   TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
-            FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            -- V041 R11 (guarded, v4.36.1): SHOW -> RESULT_SCAN once daily
+            -- (V024 precedent), so Security stops paying a SHOW + parse per
+            -- render. The nested handler means a SHOW failure can never take
+            -- the CORE posture metrics down with it — the monitor arms below
+            -- emit no rows that day instead (HAVING; never a lying zero).
+            BEGIN
+                SHOW WAREHOUSES LIMIT 500;
+                CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
+                SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
+                       COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
+                       TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
+                FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR (
+                        WAREHOUSE_NAME VARCHAR, RESOURCE_MONITOR VARCHAR, AUTO_SUSPEND NUMBER);
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'MartLoader', 'monitor_counts_skipped', :emsg, 'SHOW WAREHOUSES unavailable - core posture unaffected', CURRENT_ROLE();
+            END;
 
             MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
 """
@@ -162,10 +174,12 @@ _MONITOR_ARMS = _BREAKGLASS_END + """                UNION ALL
                 SELECT CURRENT_DATE(), 'WH_NO_MONITOR', 'ALL',
                        COUNT_IF(LOWER(TRIM(RESOURCE_MONITOR)) IN ('null', '', 'none'))
                 FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
                 UNION ALL
                 SELECT CURRENT_DATE(), 'WH_NO_AUTOSUSPEND', 'ALL',
                        COUNT_IF(COALESCE(AUTO_SUSPEND, 0) <= 0)
                 FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
 """
 
 _HOURLY_CLOSE = """    END IF;
@@ -318,6 +332,15 @@ def test_v041_extract_carries_the_v002_fact_arm_verbatim_from_swapped():
     assert "DATEADD('hour', -48, CURRENT_TIMESTAMP())" in ext
     assert ext.count("DATEADD('day', -3, CURRENT_TIMESTAMP())") >= 2
     assert "WHERE SOURCE = 'QH_EXTRACT'" in ext
+    # v4.36.1 hardening: both arms isolated (a flaky scan must not fail the
+    # task and freeze the downstream chain); 0/NULL = watermark mode and the
+    # tasks pass 0 — a bare NULL argument appears nowhere in the file.
+    assert "COALESCE(DAYS_BACK, 0) > 0" in ext
+    assert ext.count("EXCEPTION") >= 2
+    assert "'OW_QH_EXTRACT - consumers read the previous fill'" in ext
+    assert "'FACT_QUERY_HOURLY - extract unaffected'" in ext
+    assert "SP_LOAD_QH_EXTRACT(NULL)" not in _V41
+    assert _V41.count("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);") == 2
 
 
 def test_v041_daily_loader_is_v002_plus_watermark_bounds_and_tail():
@@ -457,9 +480,16 @@ def test_every_v041_task_has_a_matching_resume_or_dependents_enable():
     # phasing: extract is the hourly root's child; the marts task consumes it
     assert "TASK_QH_EXTRACT\n    WAREHOUSE = WH_ALFA_OVERWATCH\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY" in _V41
     assert "TASK_LOAD_MARTS_V27_HOURLY\n    WAREHOUSE = WH_ALFA_OVERWATCH\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT" in _V41
-    # resumes come AFTER the first fills (a resumed child must not race them)
+    # v4.36.1: the graph resumes BEFORE the first fills (a halted worksheet
+    # run must never strand the tree suspended — the 07-12 outage class),
+    # and the same block repeats at the very end. Two enables per root.
+    assert _V41.index("ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;") < \
+        _V41.index("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(3);")
     assert _V41.index("CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();") < \
-        _V41.index("ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;")
+        _V41.rindex("ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;")
+    for root in ("TASK_LOAD_HOURLY", "TASK_LOAD_DAILY"):
+        assert _V41.count(
+            f"SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.{root}');") == 2
 
 
 def test_teardown_and_backfill_cover_the_new_objects():
@@ -556,19 +586,20 @@ def test_alloc_xdim_reader_contract_and_share_law():
     assert "''" in mart27_sql.alloc_xdim_attribution(7, "USER", "ALFA", "x'y")
 
 
-def test_ai_rollup_reader_contract_probe_kept_and_time_column_absent():
-    sql = mart27_sql.ai_code_user_rollup(7, "ALFA")
-    for col in ("USER_NAME", "EMAIL", "SOURCE", "ACTIVE_DAYS", "TOTAL_REQUESTS",
-                "TOTAL_CREDITS", "TOTAL_TOKENS", "FIRST_USAGE", "LAST_USAGE",
-                "CREDITS_PER_REQUEST", "AVG_DAILY_CREDITS"):
-        assert col in sql, col
-    assert "USAGE_TIME" not in sql                          # old time column absent
-    assert "SOURCE IN ('Snowsight', 'CLI')" in sql          # Functions rows excluded
+def test_ai_users_tab_is_live_first_again_with_exact_columns():
+    """Owner decision 2026-07-12: the R3 mart swap shipped NULL emails and
+    day-grain usage stamps — the exact EMAIL + FIRST/LAST timestamps are the
+    point of that table. The tab is byte-identical to v4.34.2 again (live
+    reads with probe semantics); a correct R3 needs EMAIL + FIRST_TS/LAST_TS
+    columns ON THE FACT first and is queued, not shipped."""
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
     body = cb.split("def _ai_users_tab", 1)[1].split("\ndef ", 1)[0]
-    assert body.index("mart27_sql.ai_code_user_rollup") < body.index("cortex_sql.cortex_code_user_rollup")
-    assert "probe=True" in body                             # 002139 semantics survive
-    assert 'error_kind == "unknown_function"' in body
+    assert "cortex_sql.cortex_code_user_rollup" in body
+    assert 'source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True' in body
+    assert "ai_code_user_rollup" not in body                # the degraded swap is gone
+    assert 'error_kind == "unknown_function"' in body       # 002139 note survives
+    m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
+    assert "def ai_code_user_rollup" not in m27             # reader removed with it
 
 
 def test_ops_diag_readers_and_first_paint_gate():
@@ -581,7 +612,13 @@ def test_ops_diag_readers_and_first_paint_gate():
     fails = mart27_sql.ops_diag_failures(7, "ALFA")
     for col in ("ERROR_CODE", "ERROR_MESSAGE", "FAILURES", "USERS_AFFECTED", "LAST_SEEN"):
         assert col in fails, col
-    assert "MAX(d.USERS_AFFECTED)" in fails                 # peak hourly, labeled
+    # v4.36.1: honest window approx-distinct via mergeable HLL states (V037
+    # precedent) — never the peak-hour stand-in that undercounted
+    assert "HLL_ESTIMATE(HLL_COMBINE(d.USERS_HLL))" in fails
+    assert "MAX(d.USERS_AFFECTED)" not in fails
+    assert "HLL_ACCUMULATE(m.USER_NAME)" in _proc(_V41, "SP_LOAD_OPS_DIAG")
+    # top-50/hour makes the unfiltered top-50 panel exact, not a sample
+    assert ") <= 50;" in _proc(_V41, "SP_LOAD_OPS_DIAG")
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
     body = ops.split("def _queries_tab", 1)[1].split("\ndef ", 1)[0]
     assert "_use_diag = not (wh_filter or user_filter or database or schema_contains)" in body
@@ -616,10 +653,11 @@ def test_spend_attribution_swap_and_security_monitor_swap():
 
 def test_canaries_and_expected_gaps():
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for name in ("mart27_sql.alloc_xdim_attribution", "mart27_sql.ai_code_user_rollup",
+    for name in ("mart27_sql.alloc_xdim_attribution",
                  "mart27_sql.ops_diag_top_queries", "mart27_sql.ops_diag_failures",
                  "mart27_sql.platform_score_inputs"):
         assert name in canary, name
+    assert "ai_code_user_rollup" not in canary              # reverted with the tab
     from app.data.canary import EXPECTED_GAPS
     assert not any("v041" in g or "xdim" in g or "ops_diag" in g or "platform_score" in g
                    for g in EXPECTED_GAPS)                  # EXPECTED_GAPS untouched
@@ -645,7 +683,7 @@ def test_nightly_reconcile_rebuilds_the_merge_loaded_windows():
     # FACT_QUERY_HOURLY self-heals (48h DELETE+INSERT) — deliberately absent
     assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY" not in rec
     assert "SET WM_TS = DATEADD('day', -3, CURRENT_TIMESTAMP())" in rec
-    calls = ["SP_LOAD_QH_EXTRACT(NULL)", "SP_LOAD_HOURLY_FACTS()",
+    calls = ["SP_LOAD_QH_EXTRACT(0)", "SP_LOAD_HOURLY_FACTS()",
              "SP_LOAD_DAILY_FACTS()", "SP_LOAD_MARTS_V27('HOURLY', 3)", "SP_LOAD_OPS_DIAG(3)"]
     pos = [rec.index(c) for c in calls]
     assert pos == sorted(pos)

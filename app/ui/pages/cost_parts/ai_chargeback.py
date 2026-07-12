@@ -94,19 +94,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     computed in tested logic, and budget severities only exist when an AI
     budget is actually configured."""
     ai_budget = safe_float(settings.get("AI_MONTHLY_BUDGET_USD"))
-    # V041 R3: the daily AI fact answers the rollup (cortex_users p50 17.6s
-    # x12 runs was the worst user-facing key on this page); day-grain
-    # first/last usage, no EMAIL — labeled. The live view keeps its probe
-    # semantics as the fallback, so the 002139 subscription trace below
-    # still fires on accounts without Cortex Code.
-    rollup_res = run(mart27_sql.ai_code_user_rollup(days, company), page=_PAGE,
-                     key=f"cortex_users_fact_{company}_{days}", tier="recent",
-                     source="FACT_AI_USAGE_DAILY (mart — day-grain usage stamps)")
-    if not rollup_res.usable():
-        rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
-                         key=f"cortex_users_{company}_{days}", tier="historical",
-                         source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (live fallback)",
-                         probe=True)
+    rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
+                     key=f"cortex_users_{company}_{days}", tier="historical",
+                     source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
     if not rollup_res.ok and rollup_res.error_kind == "unknown_function":
         # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
         # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a

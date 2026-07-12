@@ -61,15 +61,10 @@ WITH checks AS (
                         WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'FACT_QUERY_HOURLY'
                           AND COLUMN_NAME = 'COMPANY'),
                'OK', 'FAIL: old-app FACT_QUERY_HOURLY present — rename it and rerun V002')
-    UNION ALL
-    SELECT 'Task warehouse is WH_ALFA_OVERWATCH',
-           IFF(EXISTS (SELECT 1 FROM DBA_MAINT_DB.INFORMATION_SCHEMA.COLUMNS
-                        WHERE TABLE_SCHEMA = 'OVERWATCH' AND TABLE_NAME = 'SCHEMA_VERSION'),
-               'OK', 'CHECK: confirm SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH shows WH_ALFA_OVERWATCH')
 )
 SELECT * FROM checks
-UNION ALL
-SELECT 'Task: ' || NAME,
-       IFF(STATE = 'started', 'OK', 'CHECK: task not started (' || STATE || ')')
-FROM TABLE(INFORMATION_SCHEMA.TASK_DEPENDENTS(TASK_NAME => 'DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY', RECURSIVE => TRUE))
 ORDER BY 1;
+-- Task monitoring removed from this script (owner decision 2026-07-12: not
+-- used, and INFORMATION_SCHEMA.TASK_DEPENDENTS needs a database context that
+-- a bare worksheet run does not have). Task-state diagnosis lives in
+-- snowflake/loader_chain_check.sql when you actually need it.

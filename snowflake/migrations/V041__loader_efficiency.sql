@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY (
     ERROR_MESSAGE    VARCHAR(200),
     FAILURES         NUMBER(12,0),
     USERS_AFFECTED   NUMBER(12,0),
+    USERS_HLL        BINARY,
     LAST_SEEN        TIMESTAMP_LTZ,
     LOAD_TS          TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP()
 );
@@ -198,8 +199,12 @@ $$
 DECLARE
     lo TIMESTAMP_NTZ;  -- reload lower bound
     d INT;
+    emsg VARCHAR;
 BEGIN
-    IF (DAYS_BACK IS NOT NULL) THEN
+    -- DAYS_BACK > 0 = explicit backfill window; 0 or NULL = watermark mode.
+    -- The tasks pass 0 (never a bare NULL — no signature-resolution
+    -- questions on any runtime).
+    IF (COALESCE(DAYS_BACK, 0) > 0) THEN
         d := GREATEST(1, LEAST(DAYS_BACK, 400))::INT;
         lo := DATEADD('day', -:d, CURRENT_DATE())::TIMESTAMP_NTZ;
     ELSE
@@ -216,7 +221,10 @@ BEGIN
 
     -- The one QUERY_HISTORY scan of the hourly cycle. Retention trim rides
     -- the same DELETE; an explicit backfill keeps its wider window until the
-    -- next watermark-mode run trims back to 3 days.
+    -- next watermark-mode run trims back to 3 days. Both arms carry V017
+    -- isolation (v4.36.1): a failed extract fill must not fail the task —
+    -- the facts keep their last load and the freshness labels say so.
+    BEGIN
     DELETE FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
      WHERE START_TIME >= :lo
         OR START_TIME < LEAST(:lo, DATEADD('day', -3, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ);
@@ -235,7 +243,14 @@ BEGIN
            LEFT(QUERY_TEXT, 200)
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= :lo;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'extract_load_failed', :emsg, 'OW_QH_EXTRACT - consumers read the previous fill', CURRENT_ROLE();
+    END;
 
+    BEGIN
     DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
      WHERE HOUR_TS >= DATEADD('hour', -48, CURRENT_TIMESTAMP());
 
@@ -257,6 +272,12 @@ BEGIN
     FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT
     WHERE START_TIME >= DATEADD('hour', -48, CURRENT_TIMESTAMP())
     GROUP BY 1, 2, 3, 4, 5;
+    EXCEPTION
+        WHEN OTHER THEN
+            emsg := SQLERRM;
+            INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+            SELECT 'ExtractLoader', 'fact_load_failed', :emsg, 'FACT_QUERY_HOURLY - extract unaffected', CURRENT_ROLE();
+    END;
 
     -- R5: advance the watermark; R6: loader-owned freshness.
     MERGE INTO DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS t
@@ -903,14 +924,26 @@ BEGIN
 
         -- [7] security posture ------------------------------------------------
         BEGIN
-            -- V041 R11: SHOW -> RESULT_SCAN once daily (V024 precedent), so
-            -- Security stops paying a SHOW + parse per render.
-            SHOW WAREHOUSES LIMIT 500;
-            CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
-            SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
-                   COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
-                   TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
-            FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            -- V041 R11 (guarded, v4.36.1): SHOW -> RESULT_SCAN once daily
+            -- (V024 precedent), so Security stops paying a SHOW + parse per
+            -- render. The nested handler means a SHOW failure can never take
+            -- the CORE posture metrics down with it — the monitor arms below
+            -- emit no rows that day instead (HAVING; never a lying zero).
+            BEGIN
+                SHOW WAREHOUSES LIMIT 500;
+                CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR AS
+                SELECT "name"::VARCHAR AS WAREHOUSE_NAME,
+                       COALESCE("resource_monitor"::VARCHAR, 'null') AS RESOURCE_MONITOR,
+                       TRY_TO_NUMBER("auto_suspend"::VARCHAR) AS AUTO_SUSPEND
+                FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+            EXCEPTION
+                WHEN OTHER THEN
+                    emsg := SQLERRM;
+                    CREATE OR REPLACE TEMPORARY TABLE _OW_WH_MONITOR (
+                        WAREHOUSE_NAME VARCHAR, RESOURCE_MONITOR VARCHAR, AUTO_SUSPEND NUMBER);
+                    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+                    SELECT 'MartLoader', 'monitor_counts_skipped', :emsg, 'SHOW WAREHOUSES unavailable - core posture unaffected', CURRENT_ROLE();
+            END;
 
             MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_SECURITY_POSTURE_DAILY t
             USING (
@@ -966,10 +999,12 @@ BEGIN
                 SELECT CURRENT_DATE(), 'WH_NO_MONITOR', 'ALL',
                        COUNT_IF(LOWER(TRIM(RESOURCE_MONITOR)) IN ('null', '', 'none'))
                 FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
                 UNION ALL
                 SELECT CURRENT_DATE(), 'WH_NO_AUTOSUSPEND', 'ALL',
                        COUNT_IF(COALESCE(AUTO_SUSPEND, 0) <= 0)
                 FROM _OW_WH_MONITOR
+                HAVING COUNT(*) > 0
             ) s
             ON t.DAY = s.DAY AND t.METRIC = s.METRIC AND t.COMPANY = s.COMPANY
             WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, LOAD_TS = CURRENT_TIMESTAMP()
@@ -1101,13 +1136,16 @@ BEGIN
            LEFT(e.QUERY_TEXT, 180)
     FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT e
     WHERE e.START_TIME >= DATEADD('day', -:d, CURRENT_TIMESTAMP())
+    -- top-50 per hour: any member of a global top-50 is inside its own
+    -- hour's top-50 (if 50 heavier queries shared its hour, THEY would be
+    -- the global top-50) — so the unfiltered panel is exact, not a sample.
     QUALIFY ROW_NUMBER() OVER (PARTITION BY DATE_TRUNC('hour', e.START_TIME)
-                               ORDER BY e.TOTAL_ELAPSED_TIME DESC NULLS LAST) <= 20;
+                               ORDER BY e.TOTAL_ELAPSED_TIME DESC NULLS LAST) <= 50;
 
     INSERT INTO DBA_MAINT_DB.OVERWATCH.MART_OPS_DIAG_HOURLY
-        (HOUR_TS, KIND, COMPANY, ERROR_CODE, ERROR_MESSAGE, FAILURES, USERS_AFFECTED, LAST_SEEN)
+        (HOUR_TS, KIND, COMPANY, ERROR_CODE, ERROR_MESSAGE, FAILURES, USERS_AFFECTED, USERS_HLL, LAST_SEEN)
     SELECT m.HOUR_TS, 'FAIL_FAMILY', m.COMPANY, m.ERROR_CODE, m.ERROR_MESSAGE,
-           SUM(m.CNT), COUNT(DISTINCT m.USER_NAME), MAX(m.LAST_SEEN)
+           SUM(m.CNT), COUNT(DISTINCT m.USER_NAME), HLL_ACCUMULATE(m.USER_NAME), MAX(m.LAST_SEEN)
     FROM (
         SELECT g.HOUR_TS, g.ERROR_CODE, g.ERROR_MESSAGE, g.USER_NAME,
                DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
@@ -1420,7 +1458,7 @@ BEGIN
            UPDATED_AT = CURRENT_TIMESTAMP()
      WHERE SOURCE IN ('QH_EXTRACT', 'DAILY_FACTS');
 
-    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(NULL);
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 3);
@@ -1541,7 +1579,7 @@ CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT
     WAREHOUSE = WH_ALFA_OVERWATCH
     AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
 AS
-    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(NULL);
+    CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
 
 -- Re-pointed: the V27 hourly marts consume the extract, so they run after it.
 CREATE OR REPLACE TASK DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY
@@ -1574,6 +1612,22 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS SUSPEND;
 DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS;
 
 -- ---------------------------------------------------------------------------
+-- Resume the graph BEFORE the first fills (v4.36.1): if any fill statement
+-- fails in a worksheet run, the halt must never strand the task tree
+-- suspended — the 07-12 alert-outage class. The same block repeats at the
+-- very end, so a future edit between the two cannot reintroduce it either.
+-- ---------------------------------------------------------------------------
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_OPS_DIAG_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_NIGHTLY_RECONCILE RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_PLATFORM_SCORE_DAILY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY');
+
+-- ---------------------------------------------------------------------------
 -- First fills (3d extract covers every consumer window: 48h fact, 2d marts)
 -- ---------------------------------------------------------------------------
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(3);
@@ -1585,8 +1639,7 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(30);
 CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
 
 -- ---------------------------------------------------------------------------
--- Resume everything this migration touched, then belt-and-braces both roots'
--- whole dependent trees.
+-- Belt-and-braces repeat: the same resumes + whole-tree enables, at the end.
 -- ---------------------------------------------------------------------------
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT RESUME;
 ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY RESUME;

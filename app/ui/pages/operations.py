@@ -109,7 +109,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 mart27_sql.ops_diag_failures(days, company),
                 ops_sql.failures_by_error(days, company, database, schema_contains),
                 page=_PAGE, key=f"q_fails_{company}_{days}",
-                mart_source="MART_OPS_DIAG_HOURLY (mart — users = peak hourly)",
+                mart_source="MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)",
                 live_source="QUERY_HISTORY (live fallback)",
                 mart_tier="recent", live_tier="recent"),
         }

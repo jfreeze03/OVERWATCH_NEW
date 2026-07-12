@@ -758,47 +758,14 @@ LIMIT 100
 """
 
 
-def ai_code_user_rollup(days: int, company: str = "ALL") -> str:
-    """cortex_sql.cortex_code_user_rollup contract from FACT_AI_USAGE_DAILY
-    (V041 R3; cortex_users p50 17.6s x12 was the worst user-facing key on
-    Chargeback & AI). Day-grain degrades, labeled by the caller: FIRST/LAST
-    _USAGE are days, EMAIL is not in the fact (NULL). Cortex Code sources
-    only — the Functions rows bill the account, not a user. Qualified (a.)
-    per the alias-shadow rule. The live view stays as fallback WITH its
-    probe semantics (the 002139 subscription class)."""
-    days = bounded_days(days, 400)
-    where = and_where(
-        f"a.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-        "a.SOURCE IN ('Snowsight', 'CLI')",
-        companies.user_clause(company, "a.USER_NAME"),
-    )
-    return f"""
-SELECT
-    a.USER_NAME,
-    NULL AS EMAIL,
-    a.SOURCE,
-    COUNT(DISTINCT a.DAY) AS ACTIVE_DAYS,
-    SUM(COALESCE(a.REQUESTS, 0)) AS TOTAL_REQUESTS,
-    SUM(COALESCE(a.CREDITS, 0)) AS TOTAL_CREDITS,
-    SUM(COALESCE(a.TOKENS, 0)) AS TOTAL_TOKENS,
-    MIN(a.DAY) AS FIRST_USAGE,
-    MAX(a.DAY) AS LAST_USAGE,
-    SUM(COALESCE(a.CREDITS, 0)) / NULLIF(SUM(COALESCE(a.REQUESTS, 0)), 0) AS CREDITS_PER_REQUEST,
-    SUM(COALESCE(a.CREDITS, 0)) / NULLIF(COUNT(DISTINCT a.DAY), 0) AS AVG_DAILY_CREDITS
-FROM {mart_object("FACT_AI_USAGE_DAILY")} a
-WHERE {where}
-GROUP BY a.USER_NAME, a.SOURCE
-ORDER BY TOTAL_CREDITS DESC
-LIMIT 500
-"""
-
-
 def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50) -> str:
     """ops_sql.top_queries_by_elapsed contract from MART_OPS_DIAG_HOURLY
-    (V041 R7) — the UNFILTERED Operations first paint only: an entity or
-    schema filter needs the true filtered top-N, which only the live scan
-    has (the mart keeps each hour's global top-20). Coverage-gated while
-    the mart accrues toward the asked window."""
+    (V041 R7, corrected v4.36.1) — the UNFILTERED Operations first paint
+    only: an entity or schema filter needs the true filtered top-N, which
+    only the live scan has. The mart keeps each hour's top-50: a member of
+    the global top-50 is by construction inside its own hour's top-50, so
+    the unfiltered panel is EXACT, not a sample. Coverage-gated while the
+    mart accrues toward the asked window."""
     days = bounded_days(days, 90)
     limit = max(1, min(int(limit), 500))
     where = and_where(
@@ -823,10 +790,11 @@ LIMIT {limit}
 
 
 def ops_diag_failures(days: int, company: str = "ALL") -> str:
-    """ops_sql.failures_by_error contract from MART_OPS_DIAG_HOURLY (V041 R7).
-    USERS_AFFECTED is the PEAK HOURLY distinct-user count, not the window
-    distinct — the caller labels the source. Unfiltered first paint only;
-    coverage-gated like the top-queries reader."""
+    """ops_sql.failures_by_error contract from MART_OPS_DIAG_HOURLY (V041 R7,
+    corrected v4.36.1). USERS_AFFECTED combines the mart's hourly HLL states
+    (V037 precedent) — an honest window approx-distinct, not a peak-hour
+    stand-in. Unfiltered first paint only; coverage-gated like the
+    top-queries reader."""
     days = bounded_days(days, 90)
     where = and_where(
         "d.KIND = 'FAIL_FAMILY'",
@@ -841,7 +809,7 @@ SELECT
     d.ERROR_CODE,
     d.ERROR_MESSAGE,
     SUM(d.FAILURES) AS FAILURES,
-    MAX(d.USERS_AFFECTED) AS USERS_AFFECTED,
+    HLL_ESTIMATE(HLL_COMBINE(d.USERS_HLL)) AS USERS_AFFECTED,
     MAX(d.LAST_SEEN) AS LAST_SEEN
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
