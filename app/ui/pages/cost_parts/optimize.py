@@ -550,12 +550,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         "ESTIMATED savings-ledger item that the monthly verifier later proves or rejects. "
         "Anyone can copy the SQL for review."
     )
-    # Same SQL as the advisor above — same tier means ONE cache entry and
-    # ONE warehouse scan per hour instead of two under different TTLs that
-    # could disagree about what "idle" is mid-session (Codex finding #6).
-    idle_res = run(insights_sql.idle_warehouse_analysis(days, company), page=_PAGE,
-                   key=f"remed_idle_{company}_{days}", tier="historical",
-                   source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (hourly join)")
+    # Same builder PAIR as the advisor above (r20 #1): identical SQL identity
+    # means this is served from the advisor's cache — the remediation block
+    # no longer pays its own live metering x history join when the mart is up.
+    idle_res = run_mart_first(
+        mart27_sql.eff_idle_analysis(days, company),
+        insights_sql.idle_warehouse_analysis(days, company),
+        page=_PAGE, key=f"remed_idle_{company}_{days}",
+        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+        live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if guard(idle_res, "No warehouse activity in the window to remediate."):
         idf = idle_res.df.copy()
         wh_pick = st.selectbox("Warehouse", sorted(idf["WAREHOUSE_NAME"].astype(str)),

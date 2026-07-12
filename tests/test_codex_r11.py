@@ -121,23 +121,25 @@ def test_quarantine_only_confirmed_failers_not_pending(monkeypatch, _quiet):
     out = q.run_batch([{"key": "k0", "sql": "s0"}, {"key": "k1", "sql": "s1"},
                        {"key": "k2", "sql": "s2"}], page="T", tier="recent")
     assert set(out) == {"k0", "k1", "k2"} and out["k0"].ok
-    assert state["_ow_batch_quarantine"]["keys"] == {"k1"}  # k2 (pending) untainted
+    # r20 #2: quarantine identity = page + key + sql hash (cross-page safe)
+    assert state["_ow_batch_quarantine"]["keys"] == {q._quarantine_key("T", "k1", "s1")}
 
 
 def test_clean_solo_run_rehabilitates_a_quarantined_key(monkeypatch, _quiet):
-    state = _reset_quarantine(keys=["k9"])
+    state = _reset_quarantine(keys=[q._quarantine_key("T", "k9", "s9")])
     monkeypatch.setattr(q, "run", _fake_run_factory(ok=True))
     out = q.run_batch([{"key": "k9", "sql": "s9"}], page="T", tier="recent")
     assert out["k9"].ok
-    assert "k9" not in state["_ow_batch_quarantine"]["keys"]  # r11 #5 rehab
+    assert state["_ow_batch_quarantine"]["keys"] == set()  # r11 #5 rehab
 
 
 def test_failed_solo_run_stays_quarantined(monkeypatch, _quiet):
-    state = _reset_quarantine(keys=["k9"])
+    _qk = q._quarantine_key("T", "k9", "s9")
+    state = _reset_quarantine(keys=[_qk])
     monkeypatch.setattr(q, "run", _fake_run_factory(ok=False))
     out = q.run_batch([{"key": "k9", "sql": "s9"}], page="T", tier="recent")
     assert not out["k9"].ok
-    assert "k9" in state["_ow_batch_quarantine"]["keys"]
+    assert _qk in state["_ow_batch_quarantine"]["keys"]
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ WITH query_hours AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
       AND WAREHOUSE_NAME IS NOT NULL
+      AND {companies.warehouse_clause(company) or "1 = 1"}
 )
 SELECT
     M.WAREHOUSE_NAME,
@@ -250,6 +251,7 @@ WITH query_stats AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
       AND WAREHOUSE_NAME IS NOT NULL
+      AND {companies.warehouse_clause(company) or "1 = 1"}
     GROUP BY WAREHOUSE_NAME
 ),
 query_hours AS (
@@ -257,6 +259,7 @@ query_hours AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
       AND WAREHOUSE_NAME IS NOT NULL
+      AND {companies.warehouse_clause(company) or "1 = 1"}
 )
 SELECT
     M.WAREHOUSE_NAME,
@@ -432,6 +435,7 @@ q AS (
     SELECT WAREHOUSE_NAME, HOUR(HOUR_TS) AS HR, SUM(QUERY_COUNT) AS QC
     FROM {core_object("FACT_QUERY_HOURLY")}
     WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND {companies.warehouse_clause(company) or "1 = 1"}
     GROUP BY 1, 2
 )
 SELECT m.WAREHOUSE_NAME, m.HR AS HOUR_OF_DAY,

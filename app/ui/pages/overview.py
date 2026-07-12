@@ -291,8 +291,9 @@ def render() -> None:
         # Forecast range lives in the Projected month-end KPI — the floating
         # rectangle was the "what does this mean" magnet (owner, twice).
         charts.spend_trend(daily, daily_budget_usd=daily_budget)
-        activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="spark_activity",
-                       tier="recent", source="FACT_QUERY_HOURLY (daily)")
+        activity = run(mart_sql.fact_daily_activity(14, company), page=_PAGE,
+                       key="spark_activity", tier="recent",
+                       source="FACT_QUERY_HOURLY (daily)")
         adf = activity.df if activity.ok and not activity.empty else None
         spend14 = daily.tail(14) if len(daily) else None
         day_col = daily.columns[0] if len(daily.columns) else "DAY"

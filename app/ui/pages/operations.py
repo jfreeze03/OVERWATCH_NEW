@@ -67,8 +67,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         row = summary.df.iloc[0]
         qcount = safe_float(row.get("QUERY_COUNT"))
         failed = safe_float(row.get("FAILED_COUNT"))
-        activity = run(mart_sql.fact_daily_activity(14), page=_PAGE, key="ops_spark_activity",
-                       tier="recent", source="FACT_QUERY_HOURLY (daily)")
+        activity = run(mart_sql.fact_daily_activity(14, company, database), page=_PAGE,
+                       key="ops_spark_activity", tier="recent",
+                       source="FACT_QUERY_HOURLY (daily)")
         q_spark = (activity.df["QUERIES"].tolist()
                    if activity.usable() and "QUERIES" in activity.df.columns else None)
         f_spark = (activity.df["FAILS"].tolist()

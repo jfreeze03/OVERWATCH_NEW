@@ -19,11 +19,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 def test_idle_scan_runs_once_per_hour_not_twice():
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    calls = [chunk.split(")", 1)[0] for chunk in src.split("idle_warehouse_analysis(")[1:]]
-    blocks = src.split("idle_warehouse_analysis")
-    # both call sites must use the SAME tier so the cache dedupes them
-    tiers = [b.split('tier="', 1)[1].split('"', 1)[0] for b in blocks[1:] if 'tier="' in b]
-    assert len(calls) == 2 and tiers == ["historical", "historical"], (calls, tiers)
+    # v4.35.0 (r20 #1): BOTH sites use run_mart_first with the IDENTICAL
+    # builder pair — mart and live reads each share one cache identity, so
+    # the advisor's fetch serves the remediation block too.
+    assert src.count("mart27_sql.eff_idle_analysis(days, company)") == 2
+    assert src.count("insights_sql.idle_warehouse_analysis(days, company)") == 2
+    assert src.count("idle_warehouse_analysis(") == 2
 
 
 # ---------------------------------------------------------------------------

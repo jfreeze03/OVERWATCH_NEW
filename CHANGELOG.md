@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.35.0 — Codex r20: five verified ships, one decline that mattered (2026-07-12)
+
+- **Remediation reuses the advisor's read (#1).** The Optimization
+  remediation block re-ran the live metering x history join the idle
+  advisor had already answered mart-first; it now uses the identical
+  builder pair, so the advisor's cache serves it.
+- **Quarantine is cross-page safe (#2).** Batch-quarantine entries were
+  short member keys ('act'), so one page's failure forced same-named
+  members on other pages onto the serial path. Identity is now
+  page + key + sql-hash.
+- **Helper CTEs carry the company predicate (#4).** Idle, sizing, and
+  hourly-activity supporting scans (QUERY_HISTORY / FACT_QUERY_HOURLY)
+  ran account-wide and were only narrowed by the join; the predicate now
+  applies before aggregation ('1 = 1' keeps ALL-scope SQL valid).
+- **Sparks match their neighbors (#7).** Overview's activity sparkline is
+  company-scoped; Operations' is company+database — same treatment
+  Control Room got in v4.34.0.
+- **One credentials scan (#17)** via COUNT_IF in the governance fallback.
+- **#20 DECLINED — the registry stays full.** Codex claimed eight canary
+  readers are unreachable; a whole-tree scan (including app/main.py, which
+  subtree greps miss) shows every one has a live caller. Nothing removed.
+
+Routed: #3 retry backoff -> query-core v2; #5/#6 pipeline+topology scoping,
+#11-#16, #19 -> the standing fix-batch; #8/#9/#10 -> polish round.
+
 ## 4.34.3 — CI hotfix: floor-compat job vs bare sqlglot imports (2026-07-12)
 
 The v4.34.1/v4.34.2 test files imported sqlglot at module level; CI's

@@ -54,7 +54,8 @@ def test_batch_quarantine_and_submission_harvest():
     rb = q.split("def run_batch", 1)[1]
     assert "_ow_batch_quarantine" in rb
     assert '_q.get("salt") != _salt' in rb                             # refresh clears it
-    assert '_q["keys"] |= {str(bspecs[i]["key"]) for i in bp.errors}' in rb
+    # r20 #2: quarantine identity is page + key + sql-hash (cross-page safe)
+    assert '_q["keys"] |= {_quarantine_key(page, str(bspecs[i]["key"]), str(bspecs[i]["sql"]))' in rb
     assert "if not bspecs:" in rb                                      # all-quarantined shortcut
     eb = q.split("def _execute_batch", 1)[1].split("\ndef ", 1)[0]
     assert "jobs.append(" in eb and "pending0 = set(range(len(jobs) + 1, len(sqls)))" in eb  # r11 #4: unsubmitted = pending, not failed

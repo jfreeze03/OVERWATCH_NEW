@@ -132,6 +132,15 @@ def _classify_error(exc: object) -> str:
     return "other"
 
 
+def _quarantine_key(page: str, key: str, sql: str) -> str:
+    """Namespace quarantine entries (r20 #2). Short member keys like 'act'
+    repeat across pages, so a Control Room failure must not force an
+    unrelated member with the same key onto the serial path elsewhere —
+    page + key + a hash of the actual SQL is the identity that failed."""
+    import hashlib
+    return f"{page}:{key}:{hashlib.sha1(str(sql).encode()).hexdigest()[:8]}"
+
+
 def _with_row_cap(sql: str, cap: int) -> str:
     """Make max_rows authoritative (Codex r18 #1).
 
@@ -371,13 +380,14 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     out_direct: dict = {}
     bspecs = []
     for spec in specs:
-        if str(spec["key"]) in _q["keys"]:
+        _qk = _quarantine_key(page, str(spec["key"]), str(spec["sql"]))
+        if _qk in _q["keys"]:
             _solo = run(
                 str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                 source=str(spec.get("source", "")),
                 max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
             if _solo.ok:
-                _q["keys"].discard(str(spec["key"]))
+                _q["keys"].discard(_qk)
                 st.session_state["_ow_batch_quarantine"] = _q
             out_direct[str(spec["key"])] = _solo
         else:
@@ -397,7 +407,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         elapsed = (time.perf_counter() - started) * 1000
         # r11 #4: only CONFIRMED failers are quarantined — bp.pending members
         # (never submitted) fall through to the run() fallback below untainted.
-        _q["keys"] |= {str(bspecs[i]["key"]) for i in bp.errors}
+        _q["keys"] |= {_quarantine_key(page, str(bspecs[i]["key"]), str(bspecs[i]["sql"]))
+                       for i in bp.errors}
         st.session_state["_ow_batch_quarantine"] = _q
         failed_keys = ",".join(str(bspecs[i].get("key")) for i in bp.errors)[:160]
         _telemetry(page, tier, f"batch_fallback:{tier}:n{len(bspecs)}",
