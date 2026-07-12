@@ -705,3 +705,164 @@ FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
 WHERE DAY >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
 {comp}GROUP BY 1, 2
 ORDER BY 1, 2"""
+# ---------------------------------------------------------------------------
+# V041 loader pass — readers for the new facts/marts. Contracts mirror the
+# live builders they relieve; grain degrades are labeled by the caller's
+# source string. Coverage gates follow the unused_roles_via_fact pattern:
+# an accruing mart that cannot span the asked window returns ZERO rows, so
+# run_mart_first falls back to live instead of silently under-reporting.
+# ---------------------------------------------------------------------------
+
+def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
+                           database: str = "") -> str:
+    """cost_sql.allocated_attribution contract from FACT_COST_ALLOC_XDIM_DAILY
+    (V041 R2) — the database/user-filtered attribution that used to pay two
+    live QUERY_HISTORY scans per filter value; user-within-database is now
+    mart-served on Spend. Global-share law preserved (v4.33.1): company scope
+    (warehouse grain, matching the live builder) sets the denominator; the
+    database filter and dimension visibility rules only pick which rows
+    DISPLAY. No schema grain here by design — schema-filtered views stay on
+    the live builder. Qualified (x.) per the alias-shadow rule."""
+    days = bounded_days(days, 400)
+    dim = str(dimension or "USER").upper()
+    if dim not in ("USER", "DATABASE"):
+        raise ValueError(f"dimension must be USER/DATABASE, got {dimension!r}")
+    dim_col = "x.USER_NAME" if dim == "USER" else "x.DATABASE_NAME"
+    scope_where = and_where(
+        f"x.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
+    )
+    vis = (companies.user_clause(company, "KEY_NAME") if dim == "USER"
+           else companies.database_visibility_clause(company, "KEY_NAME"))
+    display = and_where(companies.database_equals_clause(database, "DATABASE_NAME"), vis)
+    return f"""
+WITH cov AS (
+    SELECT MIN(DAY) AS FIRST_DAY FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")}
+),
+scoped AS (
+    SELECT {dim_col} AS KEY_NAME, x.DATABASE_NAME, x.EXEC_SEC, x.ALLOC_CREDITS
+    FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")} x
+    WHERE {scope_where}
+)
+SELECT
+    COALESCE(KEY_NAME, 'NONE') AS DIMENSION,
+    ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
+    SUM(ALLOC_CREDITS) / NULLIF((SELECT SUM(ALLOC_CREDITS) FROM scoped), 0) AS ELAPSED_SHARE,
+    ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
+FROM scoped
+WHERE {display}
+  AND (SELECT FIRST_DAY FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
+GROUP BY KEY_NAME
+ORDER BY ALLOC_CREDITS DESC
+LIMIT 100
+"""
+
+
+def ai_code_user_rollup(days: int, company: str = "ALL") -> str:
+    """cortex_sql.cortex_code_user_rollup contract from FACT_AI_USAGE_DAILY
+    (V041 R3; cortex_users p50 17.6s x12 was the worst user-facing key on
+    Chargeback & AI). Day-grain degrades, labeled by the caller: FIRST/LAST
+    _USAGE are days, EMAIL is not in the fact (NULL). Cortex Code sources
+    only — the Functions rows bill the account, not a user. Qualified (a.)
+    per the alias-shadow rule. The live view stays as fallback WITH its
+    probe semantics (the 002139 subscription class)."""
+    days = bounded_days(days, 400)
+    where = and_where(
+        f"a.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "a.SOURCE IN ('Snowsight', 'CLI')",
+        companies.user_clause(company, "a.USER_NAME"),
+    )
+    return f"""
+SELECT
+    a.USER_NAME,
+    NULL AS EMAIL,
+    a.SOURCE,
+    COUNT(DISTINCT a.DAY) AS ACTIVE_DAYS,
+    SUM(COALESCE(a.REQUESTS, 0)) AS TOTAL_REQUESTS,
+    SUM(COALESCE(a.CREDITS, 0)) AS TOTAL_CREDITS,
+    SUM(COALESCE(a.TOKENS, 0)) AS TOTAL_TOKENS,
+    MIN(a.DAY) AS FIRST_USAGE,
+    MAX(a.DAY) AS LAST_USAGE,
+    SUM(COALESCE(a.CREDITS, 0)) / NULLIF(SUM(COALESCE(a.REQUESTS, 0)), 0) AS CREDITS_PER_REQUEST,
+    SUM(COALESCE(a.CREDITS, 0)) / NULLIF(COUNT(DISTINCT a.DAY), 0) AS AVG_DAILY_CREDITS
+FROM {mart_object("FACT_AI_USAGE_DAILY")} a
+WHERE {where}
+GROUP BY a.USER_NAME, a.SOURCE
+ORDER BY TOTAL_CREDITS DESC
+LIMIT 500
+"""
+
+
+def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50) -> str:
+    """ops_sql.top_queries_by_elapsed contract from MART_OPS_DIAG_HOURLY
+    (V041 R7) — the UNFILTERED Operations first paint only: an entity or
+    schema filter needs the true filtered top-N, which only the live scan
+    has (the mart keeps each hour's global top-20). Coverage-gated while
+    the mart accrues toward the asked window."""
+    days = bounded_days(days, 90)
+    limit = max(1, min(int(limit), 500))
+    where = and_where(
+        "d.KIND = 'TOP_ELAPSED'",
+        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _company_arm(company, "d.COMPANY"),
+    )
+    return f"""
+WITH cov AS (
+    SELECT MIN(HOUR_TS) AS FIRST_TS FROM {mart_object("MART_OPS_DIAG_HOURLY")}
+)
+SELECT
+    d.QUERY_ID, d.START_TIME, d.USER_NAME, d.WAREHOUSE_NAME, d.WAREHOUSE_SIZE,
+    d.DATABASE_NAME, d.QUERY_TYPE, d.EXECUTION_STATUS, d.ELAPSED_SEC, d.QUEUED_SEC,
+    d.SPILL_REMOTE_GB, d.QUERY_PREVIEW
+FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
+WHERE {where}
+  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_TIMESTAMP())
+ORDER BY d.ELAPSED_SEC DESC
+LIMIT {limit}
+"""
+
+
+def ops_diag_failures(days: int, company: str = "ALL") -> str:
+    """ops_sql.failures_by_error contract from MART_OPS_DIAG_HOURLY (V041 R7).
+    USERS_AFFECTED is the PEAK HOURLY distinct-user count, not the window
+    distinct — the caller labels the source. Unfiltered first paint only;
+    coverage-gated like the top-queries reader."""
+    days = bounded_days(days, 90)
+    where = and_where(
+        "d.KIND = 'FAIL_FAMILY'",
+        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _company_arm(company, "d.COMPANY"),
+    )
+    return f"""
+WITH cov AS (
+    SELECT MIN(HOUR_TS) AS FIRST_TS FROM {mart_object("MART_OPS_DIAG_HOURLY")}
+)
+SELECT
+    d.ERROR_CODE,
+    d.ERROR_MESSAGE,
+    SUM(d.FAILURES) AS FAILURES,
+    MAX(d.USERS_AFFECTED) AS USERS_AFFECTED,
+    MAX(d.LAST_SEEN) AS LAST_SEEN
+FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
+WHERE {where}
+  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_TIMESTAMP())
+GROUP BY d.ERROR_CODE, d.ERROR_MESSAGE
+ORDER BY FAILURES DESC
+LIMIT 50
+"""
+
+
+def platform_score_inputs(days: int = 30) -> str:
+    """mart_sql.score_inputs_daily contract from FACT_PLATFORM_SCORE_DAILY
+    (V041 R8): the four per-day input aggregates load once daily; weights
+    stay in Python. The V041 first fill MERGEs the full 30-day window, so
+    no coverage gate is needed — empty means undeployed, and run_mart_first
+    falls back to the live aggregation."""
+    days = max(7, min(int(days or 30), 120))
+    return f"""
+SELECT DAY, CREDITS_BILLED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB,
+       TASK_RUNS, TASK_FAILED, CRIT_RAISED, HIGH_RAISED
+FROM {mart_object("FACT_PLATFORM_SCORE_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+ORDER BY DAY
+"""

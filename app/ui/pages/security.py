@@ -191,8 +191,15 @@ def _governance_score_panel():
                 "expiring_credentials": snap.get("EXPIRING_CRED_10D", 0),
                 "breakglass_grants_30d": snap.get("BREAKGLASS_GRANTS_30D"),
             }
-    whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
-              tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+            if {"WH_NO_MONITOR", "WH_NO_AUTOSUSPEND"} <= set(snap.index.astype(str)):
+                # V041 R11: the posture row carries the monitor totals, so
+                # this render pays no SHOW WAREHOUSES + parse at all.
+                inputs["warehouses_no_monitor"] = int(float(snap.get("WH_NO_MONITOR") or 0))
+                inputs["warehouses_no_autosuspend"] = int(float(snap.get("WH_NO_AUTOSUSPEND") or 0))
+    whs = None
+    if "warehouses_no_monitor" not in inputs:
+        whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
+                  tier="metadata", source="SHOW WAREHOUSES (pre-V041 fallback)", max_rows=0)
     if not inputs:
         counts = run(security_sql.governance_counts(), page=_PAGE, key="gov_counts",
                      tier="historical", source="USERS + CREDENTIALS + GRANTS_TO_USERS (live fallback)")
@@ -204,7 +211,7 @@ def _governance_score_panel():
                 "expiring_credentials": row.get("EXPIRING_CREDENTIALS"),
                 "breakglass_grants_30d": row.get("BREAKGLASS_GRANTS_30D"),
             }
-    if whs.ok and not whs.empty:
+    if whs is not None and whs.ok and not whs.empty:
         wdf = whs.df.copy()
         wdf.columns = [str(c).lower() for c in wdf.columns]
         if "resource_monitor" in wdf.columns:

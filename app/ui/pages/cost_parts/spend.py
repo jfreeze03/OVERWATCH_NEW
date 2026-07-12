@@ -172,10 +172,20 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
             with col:
                 _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains)
-                if database or schema_contains:
-                    # the allocation mart has no schema sub-filter — live only
+                if schema_contains:
+                    # no allocation mart carries a schema grain — live only
                     res = run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
                               tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
+                elif database:
+                    # V041 R2: database-filtered attribution reads the cross-dim
+                    # fact (user-within-database now mart-served) instead of two
+                    # live QUERY_HISTORY scans per filter value; coverage gate
+                    # inside the reader falls back to live while the fact is young.
+                    res = run_mart_first(
+                        mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database),
+                        _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                        mart_source="FACT_COST_ALLOC_XDIM_DAILY (mart — warehouse-hour credit share)",
+                        live_source="QUERY_HISTORY (elapsed share, live fallback)")
                 else:
                     res = run_mart_first(
                         mart27_sql.alloc_attribution(days, dim.replace("_NAME", ""), company),

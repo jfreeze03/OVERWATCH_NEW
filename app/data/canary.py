@@ -210,6 +210,13 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_daily_spend_year", mart_sql.fact_daily_spend_year),
     ("mart.fact_cortex_daily_spend", lambda: mart_sql.fact_cortex_daily_spend(7)),
     ("mart27.fact_monthly_spend_by_warehouse", lambda: mart27_sql.fact_monthly_spend_by_warehouse(12, "ALFA")),
+    # V041 loader pass
+    ("mart27.alloc_xdim_attribution", lambda: mart27_sql.alloc_xdim_attribution(1, "USER", "ALFA", "")),
+    ("mart27.alloc_xdim_attribution.db", lambda: mart27_sql.alloc_xdim_attribution(1, "DATABASE", "ALFA", "DBA_MAINT_DB")),
+    ("mart27.ai_code_user_rollup", lambda: mart27_sql.ai_code_user_rollup(1, "ALFA")),
+    ("mart27.ops_diag_top_queries", lambda: mart27_sql.ops_diag_top_queries(1, "ALFA", 1)),
+    ("mart27.ops_diag_failures", lambda: mart27_sql.ops_diag_failures(1, "ALFA")),
+    ("mart27.platform_score_inputs", lambda: mart27_sql.platform_score_inputs(7)),
 )
 
 # r11 #7: names whose ABSENCE is an account-feature state, not drift — only

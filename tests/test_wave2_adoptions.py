@@ -127,7 +127,9 @@ def test_spend_adopts_family_and_allocation_marts():
     assert "cost_sql.compile_heavy_families" in _SPEND
     assert "mart27_sql.alloc_attribution" in _SPEND
     assert "cost_sql.allocated_attribution" in _SPEND
-    assert "if database or schema_contains:" in _SPEND             # mart lacks schema grain
+    assert "if schema_contains:" in _SPEND                         # no mart carries schema grain
+    assert "elif database:" in _SPEND                               # V041 R2: db filter -> xdim fact
+    assert "mart27_sql.alloc_xdim_attribution" in _SPEND
     # v4.33.1: ONE dollarization formula on every path — global share x the
     # window total the caption states. The mart credits x rate branch used a
     # different window and included idle (SYSTEM alone exceeded the caption).

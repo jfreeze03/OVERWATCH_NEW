@@ -103,9 +103,16 @@ UNION ALL SELECT 'FACT_STORAGE_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OVER
 -- QUERY_HISTORY-derived marts see at most ~365d. The two high-cardinality
 -- marts (query families, cost allocation) default to 90d here on purpose:
 -- widen deliberately if you accept the scan cost.
+-- V041: the hourly marts read OW_QH_EXTRACT, so a wide backfill fills the
+-- extract FIRST with the same window; the next hourly task run trims the
+-- extract back to its 3-day retention on its own.
 -- ---------------------------------------------------------------------------
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
--- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs):
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(120);
+-- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs)
+-- (fill the extract to the same width first):
+-- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(365);
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 365);
 

@@ -59,15 +59,15 @@ def test_validate_matches_the_repo_tip():
 # pattern). Lowering is always welcome.
 _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/brief.py": 0,
-    "app/ui/pages/overview.py": 2,  # v4.26: +1 = the monthly-spend 13-month live fallback (mart accrues, label honest)        # _live_fallback_daily (mart-first)
+    "app/ui/pages/overview.py": 1,  # v4.36/V041: only _live_fallback_daily remains (score inputs went mart-first)
     "app/ui/pages/control_room.py": 3,    # pulse/movers/task live fallbacks
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
     "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
-    "app/ui/pages/cost_parts/ai_chargeback.py": 5,
-    "app/ui/pages/operations.py": 24,
+    "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # -1 v4.36/V041 R3: users tab reads FACT_AI_USAGE_DAILY mart-first
+    "app/ui/pages/operations.py": 23,  # -1 v4.36/V041 R7: unfiltered first paint reads MART_OPS_DIAG_HOURLY
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
     "app/ui/pages/security.py": 18,

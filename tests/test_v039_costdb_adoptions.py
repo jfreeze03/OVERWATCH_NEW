@@ -30,7 +30,12 @@ def test_v039_guard_and_pieces():
 
 def test_v039_loader_is_v002_plus_exactly_one_predicate():
     """The house derivation law: a re-derived proc differs from its origin by
-    the intended edit and NOTHING else."""
+    the intended edit and NOTHING else.
+
+    Historical chain link (V039 file vs V002 file). The CURRENT loader is
+    V041's — deliberately superseded by the enumerated-edits locks in
+    tests/test_v041_loader_pass.py (the FACT_QUERY_HOURLY arm moved into
+    SP_LOAD_QH_EXTRACT with only its FROM swapped)."""
     def _body(text: str) -> str:
         seg = text.split("SP_LOAD_HOURLY_FACTS()", 1)[1]
         return seg.split("$$;", 1)[0]

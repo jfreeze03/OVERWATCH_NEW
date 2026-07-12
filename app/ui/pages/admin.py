@@ -60,6 +60,9 @@ _EXPECTED_MIGRATIONS = {
     38: "ledger autobook (detected cost-lever changes settle themselves)",
     39: "pseudo-warehouse filter (CLOUD_SERVICES_ONLY out of the warehouse fact)",
     40: "freshness state table + 10-min snapshot (lookup, not 19 aggregates)",
+    41: "loader efficiency: staged QH extract, xdim alloc fact, exec board v2, "
+        "watermarks + nightly reconcile, loader-owned freshness, ops-diag + "
+        "platform-score marts, posture riders",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

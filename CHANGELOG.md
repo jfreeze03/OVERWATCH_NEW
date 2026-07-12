@@ -1,5 +1,81 @@
 # Changelog
 
+## 4.36.0 — V041: the loader-efficiency pass (2026-07-12)
+
+One migration, eleven riders — built to the design freeze
+(docs/design/V041_LOADER_PASS.md), in a fresh session, doc as contract.
+
+- **R1 — one QUERY_HISTORY scan per hourly cycle.** `OW_QH_EXTRACT`
+  (transient, watermark - 45 min, 3-day retention) feeds the design's
+  consumer list exactly: FACT_QUERY_HOURLY, _OW_ALLOC_BASE, tag coverage,
+  query-family, schema-hourly, role-hourly, the incident-timeline DDL arm,
+  and the new R7 diagnostics. The warehouse-efficiency q-CTE and posture
+  ADMIN_STMTS_24H are not on the list and deliberately stay live. Build
+  note: the FACT_QUERY_HOURLY arm MOVED into SP_LOAD_QH_EXTRACT (verbatim,
+  FROM swapped) — the root's proc runs before the extract fills, so an arm
+  left behind would trail a cycle.
+- **R2 — FACT_COST_ALLOC_XDIM_DAILY** (DAY x WH x DB x USER, no schema
+  grain) persists from _OW_ALLOC_BASE before it collapses; Spend's
+  database-filtered attribution goes mart-first (was two live scans per
+  filter value) and user-within-database is mart-served.
+- **R3 — AI users from the fact.** cortex_code_user_rollup's contract now
+  reads FACT_AI_USAGE_DAILY (cortex_users p50 17.6s x12 was the worst
+  user-facing key); the live view stays as fallback WITH probe semantics —
+  the 002139 subscription note still fires where Cortex Code is absent.
+- **R4 — exec board v2.** Builds all five config windows (7/14/30/60/90 —
+  14/60/90 always fell to the 13-month live scan before), aggregates each
+  source once and unpivots, and swaps in atomically via OW_EXEC_BOARD_STAGE
+  (the DELETE+INSERT gap stranded Overview on the live fallback hourly).
+  PRESSURE_QUEUE / PRESSURE_SPILL / DB_MIX retired: zero readers.
+- **R5 — watermarks + nightly reconcile.** OW_LOAD_WATERMARKS; the extract
+  reads watermark - 45 min, the daily loader watermark - 1 day (outage
+  self-heal, 30d clamp); TASK_NIGHTLY_RECONCILE delete-and-rebuilds the
+  trailing 3 days so restated ACCOUNT_USAGE rows and disappeared groups
+  cannot survive stale MERGE rows.
+- **R6 — loader-owned freshness.** Every SP merges its sources into
+  SOURCE_FRESHNESS_STATE (+GENERATION invalidation token, +STATUS) in its
+  own commit; TASK_SNAPSHOT_FRESHNESS retired (144 wakes/day);
+  SP_SNAPSHOT_FRESHNESS kept for manual refresh.
+- **R7 — MART_OPS_DIAG_HOURLY.** Top-20/hour by elapsed + failure families
+  from the extract; Operations' UNFILTERED first paint goes mart-first
+  (30-37s batch retired); any entity/schema filter keeps the true live
+  top-N. Coverage-gated while the mart accrues.
+- **R8 — FACT_PLATFORM_SCORE_DAILY.** The retro score's four input
+  aggregates load daily; weights stay in Python; Overview's sparkline
+  reads the fact with the live aggregation as fallback.
+- **R9 — unused-role posture from FACT_QUERY_ROLE_HOURLY**, coverage-gated
+  via HAVING (no row — never a lying zero — until the fact spans 90d);
+  the 90d QUERY_HISTORY anti-join leaves the daily posture loader.
+- **R10 — WAREHOUSE_ID > 0** joins the V27-family loader's two metering
+  source reads (the V039 promise); eff-mart reader name-filters stay until
+  the next re-derivation.
+- **R11 — monitor counts in the posture row** (WH_NO_MONITOR /
+  WH_NO_AUTOSUSPEND) via SHOW -> RESULT_SCAN in the daily posture arm
+  (V024's scan is the owner's-rights precedent); Security's governance
+  panel stops paying a SHOW + parse on render when the posture row
+  carries them.
+
+Derivation law: SP_LOAD_MARTS_V27 re-derived VERBATIM from V031's proc +
+the enumerated edits; SP_LOAD_HOURLY_FACTS from V039's minus the moved arm;
+SP_LOAD_DAILY_FACTS from V002's + watermark bounds. All three (and the
+moved arm) are equality-locked in tests/test_v041_loader_pass.py, which
+also carries the design's test plan: the numeric-recon pandas harness
+(xdim day-sums == single-dim day-sums == never exceed metering), the
+extract-consumer projection contract, the board-windows==config cross-lock,
+and the task-graph lock (every V041 task has a RESUME; both roots end with
+SYSTEM$TASK_DEPENDENTS_ENABLE — the 07-12 outage class stays dead).
+Superseded with semantics: test_v039's "loader = V002 + one predicate"
+(now the historical chain link), prep_iac's probe-count needle, wave2's
+spend filter-split lock. Budgets went DOWN: overview 2->1, ai_chargeback
+5->4, operations 24->23. Canaries added for all five new readers;
+EXPECTED_GAPS untouched.
+
+Deploy (Joe): push -> Snowsight: V041 after V040 -> re-run roles.sql (new
+objects) -> validate.sql expects V001..V041 -> redeploy the app on the
+warehouse runtime. Optional but recommended: re-run backfill_365.sql
+(extract fills first now) so the xdim fact starts with 90d of history.
+Fleet board after 24h tells us what the pass actually bought.
+
 ## 4.35.1 — Codex r21: four ships, two corrected claims (2026-07-12)
 
 - **Fragment docstrings are binding now (#4).** _whatif_panel and

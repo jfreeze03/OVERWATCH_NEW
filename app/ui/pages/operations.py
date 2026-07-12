@@ -89,15 +89,40 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         ])
         result_caption(summary)
 
-    # Parallel path (same contract as Security): both queries submit async in
-    # one shot; any failure falls back to the serial per-query calls.
-    _qb = run_batch([
-        {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
-                                                             user_filter, database, schema_contains),
-         "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
-        {"key": "fails", "sql": ops_sql.failures_by_error(days, company, database, schema_contains),
-         "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-    ], page=_PAGE, tier="recent")
+    # V041 R7: the UNFILTERED first paint reads MART_OPS_DIAG_HOURLY
+    # (top-20/hour by elapsed + failure families; Operations led the fleet
+    # pain board and this batch ran 30-37s live). An entity or schema filter
+    # needs the true filtered top-N, which only the live scan has — that
+    # path keeps the parallel batch below, unchanged.
+    _use_diag = not (wh_filter or user_filter or database or schema_contains)
+    if _use_diag:
+        _qb = {
+            "top": run_mart_first(
+                mart27_sql.ops_diag_top_queries(days, company, 50),
+                ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
+                                               user_filter, database, schema_contains),
+                page=_PAGE, key=f"q_top_{company}_{days}",
+                mart_source="MART_OPS_DIAG_HOURLY (mart — union of hourly top-20s)",
+                live_source="QUERY_HISTORY (live fallback)",
+                mart_tier="recent", live_tier="recent", max_rows=50),
+            "fails": run_mart_first(
+                mart27_sql.ops_diag_failures(days, company),
+                ops_sql.failures_by_error(days, company, database, schema_contains),
+                page=_PAGE, key=f"q_fails_{company}_{days}",
+                mart_source="MART_OPS_DIAG_HOURLY (mart — users = peak hourly)",
+                live_source="QUERY_HISTORY (live fallback)",
+                mart_tier="recent", live_tier="recent"),
+        }
+    else:
+        # Parallel path (same contract as Security): both queries submit async
+        # in one shot; any failure falls back to the serial per-query calls.
+        _qb = run_batch([
+            {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
+                                                                 user_filter, database, schema_contains),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
+            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, database, schema_contains),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
+        ], page=_PAGE, tier="recent")
 
     st.markdown("**Heaviest queries**")
     top = _qb.get("top") or run(

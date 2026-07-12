@@ -183,8 +183,14 @@ def render() -> None:
     task_fail_pct = (task_failures / task_runs * 100) if task_runs else 0.0
 
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
-    score_inputs = run(mart_sql.score_inputs_daily(30), page=_PAGE, key="score_inputs",
-                       tier="recent", source="facts + ALERT_EVENTS (retro score inputs)")
+    # V041 R8: the daily fact stores the four retro-score input aggregates;
+    # weights stay in Python. The 4-source live aggregation is the fallback.
+    score_inputs = run_mart_first(
+        mart27_sql.platform_score_inputs(30), mart_sql.score_inputs_daily(30),
+        page=_PAGE, key="score_inputs",
+        mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
+        live_source="facts + ALERT_EVENTS (retro score inputs, live fallback)",
+        mart_tier="recent", live_tier="recent")
     score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
                                           budget, rate)
                     if score_inputs.usable() else pd.DataFrame())

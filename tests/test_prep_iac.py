@@ -96,7 +96,8 @@ def test_admin_panel_degrades_honestly_without_flyway():
 
 def test_cortex_code_reads_are_probes_with_a_truthful_note():
     ai = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert ai.count('_USAGE_HISTORY", probe=True)') == 2           # both reads
+    assert ai.count("probe=True") == 2                             # both LIVE reads
+    assert '_USAGE_HISTORY (live fallback)"' in ai                 # V041 R3: users read is mart-first
     assert "SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION" in ai         # the why, in the code
     assert "nothing is misconfigured" in ai                        # honest, not alarming
     adm2 = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
