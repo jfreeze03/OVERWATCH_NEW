@@ -13,7 +13,10 @@ _BRIEF = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8
 
 def test_brief_reads_go_out_as_two_batches():
     assert _BRIEF.count("run_batch(") == 2                    # live + recent groups
-    assert _BRIEF.count(") or run(") == 9                     # every read keeps its serial fallback
+    assert _BRIEF.count(") or run(") == 8                     # every BATCHED read keeps its serial fallback
+    # (health_strip left the batch at r15 #14 — it shares the app shell's
+    # run() cache entry under key="health_strip" instead of paying twice)
+    assert '"key": "strip"' not in _BRIEF
     # v4.23: `or {}` dropped — run_batch guarantees a dict since v4.20
     assert 'tier="live")' in _BRIEF and 'tier="recent")' in _BRIEF
     assert ') or {}' not in _BRIEF

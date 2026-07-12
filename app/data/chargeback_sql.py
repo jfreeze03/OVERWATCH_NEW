@@ -25,7 +25,7 @@ def department_window_credits(days: int, company: str = "ALL") -> str:
     """Exact credits per department and warehouse for the window."""
     days = bounded_days(days)
     where = and_where(
-        f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        f"M.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
     return f"""

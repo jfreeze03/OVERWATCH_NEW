@@ -31,9 +31,11 @@ def render() -> None:
     # Two tier-grouped parallel batches (live round 10: ten serial reads made
     # the exec page the slow one — p95 8.9s). Any batch failure falls back to
     # the original serial per-query path below, unchanged.
+    # health_strip deliberately NOT in this batch (r15 #14): the app shell
+    # already runs it under key="health_strip" every render — the batch's
+    # tuple cache was paying the same SQL a second time. The serial call
+    # below shares the shell's cache entry.
     _b_live = run_batch([
-        {"key": "strip", "sql": mart_sql.health_strip(),
-         "source": "ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY"},
         {"key": "inc", "sql": mart_sql.open_incidents(5, company),
          "source": f"INCIDENTS (open, {company} + account-level)"},
         {"key": "events", "sql": mart_sql.open_alert_events(50, company),
@@ -51,7 +53,7 @@ def render() -> None:
          "source": "DAILY_DIGEST (Cortex, grounded)"},
     ], page=_PAGE, tier="recent")
 
-    strip = _b_live.get("strip") or run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+    strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
                 source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     strip_up = strip.ok and not strip.empty
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}

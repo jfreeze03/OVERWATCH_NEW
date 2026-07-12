@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.32.1 — r15 #1: my regression, their catch, everyone's class-killer (2026-07-11)
+
+- **Chargeback window read fixed.** The r14 fact swap changed the FROM but
+  left the live view's M.START_TIME in the WHERE — FACT_WAREHOUSE_DAILY has
+  no such column, so every Chargeback render failed (and failures are never
+  cached, so it re-failed each rerun). Now M.DAY, like its month sibling.
+- **The class is dead, not just the instance.** New sweep test walks the
+  entire canary registry: any builder reading ONLY our facts/marts must
+  never reference the live views' time columns. The r14 lock checked the
+  table name and missed the column — r15 #20's criticism was fair.
+- **Brief stops paying for the health strip twice (r15 #14, the concrete
+  half).** The app shell runs it every render under key="health_strip";
+  Brief's batch tuple-cache paid the same SQL again. Brief now shares the
+  shell's cache entry. (Per-member batch caching remains the query-core v2
+  design.)
+- r15 disposition: #2/#3/#4/#6/#7/#9/#10 all fold into the loader-efficiency
+  pass (now EIGHT riders on the V27 re-derivation — next session, fresh
+  context, one migration); #5 dedicated UI warehouse = owner decision,
+  standing recommendation; #8 rides it too (Cortex spend from
+  FACT_METERING_DAILY is a two-line reader swap once the pass lands);
+  #11/#12/#13 = the coverage/cadence registry design; #15/#16/#17 =
+  query-core v2 (byte-budgets noted); #18 clustering = measure-first note
+  (SYSTEM$CLUSTERING_INFORMATION before any CLUSTER BY — likely unnecessary
+  at current table sizes); #19 fragments round; #20 partially delivered
+  tonight via the schema sweep.
+
+Deploy: redeploy the app; no migration.
+
 ## 4.32.0 — Codex r14: the fact backfill pays off + a same-day bug caught (2026-07-11)
 
 - **Contract coverage predicate fixed (r14 #8 — a bug shipped hours ago).**
