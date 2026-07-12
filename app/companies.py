@@ -179,6 +179,33 @@ def role_clause(company: str, column: str = "ROLE_NAME") -> str:
     return assert_no_control_tokens(clause)
 
 
+def database_visibility_clause(company: str, column: str = "DATABASE_NAME") -> str:
+    """Which DATABASE-grain rows belong in a company's lens (live finding
+    2026-07-11: USER$SSLONSKY — a Trexis user's personal database — showed
+    under ALFA because attribution scoped company at WAREHOUSE grain only).
+
+    Semantics: exclude the OTHER company's databases rather than pattern-
+    matching our own (DBA_MAINT_DB and other shared/unclassified databases
+    stay visible). Personal ``USER$<name>`` databases attribute to their
+    OWNER's company via COMPANY_FOR_USER. NULL / 'NONE' (no database
+    context) stays visible everywhere — that activity is real."""
+    company = str(company or DEFAULT_COMPANY)
+    if company not in ("ALFA", "Trexis"):
+        return ""
+    literals = ", ".join(sql_literal(d) for d in TREXIS_DATABASES)
+    trexish = (f"(UPPER({column}) IN ({literals}) "
+               f"OR UPPER({column}) LIKE 'TRXS!_%' ESCAPE '!')")
+    personal_owner = f"{COMPANY_FOR_USER_FN}(SUBSTR({column}, 6))"
+    if company == "Trexis":
+        clause = (f"({column} IS NULL OR UPPER({column}) = 'NONE' OR {trexish} "
+                  f"OR (UPPER({column}) LIKE 'USER$%' AND {personal_owner} = 'Trexis'))")
+    else:
+        clause = (f"({column} IS NULL OR UPPER({column}) = 'NONE' "
+                  f"OR (NOT {trexish} AND (UPPER({column}) NOT LIKE 'USER$%' "
+                  f"OR {personal_owner} = 'ALFA')))")
+    return assert_no_control_tokens(clause)
+
+
 def database_options(company: str) -> tuple[str, ...]:
     """Known databases for the sidebar picker, scoped to the company."""
     company = str(company or DEFAULT_COMPANY)

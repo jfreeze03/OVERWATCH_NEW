@@ -308,17 +308,31 @@ def alloc_attribution(days: int, dimension: str, company: str = "ALL") -> str:
     dim = str(dimension or "USER").upper()
     if dim not in ("USER", "DATABASE", "SCHEMA", "ROLE"):
         raise ValueError(f"dimension must be USER/DATABASE/SCHEMA/ROLE, got {dimension!r}")
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      f"DIMENSION = {sql_literal(dim)}",
-                      _company_arm(company))
+    scope_where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+                            f"DIMENSION = {sql_literal(dim)}",
+                            _company_arm(company))
+    # Same global-share law as the live builder (live math fix 2026-07-11):
+    # visibility rules pick which rows display; the share denominator is the
+    # company's WHOLE scoped activity. USER$ personal databases attribute to
+    # their owner's company; users attribute by role membership.
+    vis = ""
+    if dim == "DATABASE":
+        vis = companies.database_visibility_clause(company, "KEY_NAME")
+    elif dim == "USER":
+        vis = companies.user_clause(company, "KEY_NAME")
     return f"""
+WITH scoped AS (
+    SELECT KEY_NAME, EXEC_SEC, ALLOC_CREDITS
+    FROM {mart_object("MART_COST_ALLOCATION_DAILY")}
+    WHERE {scope_where}
+)
 SELECT
-    COALESCE(KEY_NAME, 'UNKNOWN') AS DIMENSION,
+    COALESCE(KEY_NAME, 'NONE') AS DIMENSION,
     ROUND(SUM(EXEC_SEC), 1) AS ELAPSED_SEC,
-    RATIO_TO_REPORT(SUM(ALLOC_CREDITS)) OVER () AS ELAPSED_SHARE,
+    SUM(ALLOC_CREDITS) / NULLIF((SELECT SUM(ALLOC_CREDITS) FROM scoped), 0) AS ELAPSED_SHARE,
     ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
-FROM {mart_object("MART_COST_ALLOCATION_DAILY")}
-WHERE {where}
+FROM scoped
+WHERE {and_where(vis)}
 GROUP BY KEY_NAME
 ORDER BY ALLOC_CREDITS DESC
 LIMIT 100

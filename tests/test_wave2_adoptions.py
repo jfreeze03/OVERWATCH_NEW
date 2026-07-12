@@ -125,7 +125,11 @@ def test_spend_adopts_family_and_allocation_marts():
     assert "mart27_sql.alloc_attribution" in _SPEND
     assert "cost_sql.allocated_attribution" in _SPEND
     assert "if database or schema_contains:" in _SPEND             # mart lacks schema grain
-    assert 'alloc["ALLOC_CREDITS"].map(safe_float) * rate' in _SPEND  # mart path dollarizes credits
+    # v4.33.1: ONE dollarization formula on every path — global share x the
+    # window total the caption states. The mart credits x rate branch used a
+    # different window and included idle (SYSTEM alone exceeded the caption).
+    assert 'alloc["ELAPSED_SHARE"].map(safe_float) * window_usd' in _SPEND
+    assert 'alloc["ALLOC_CREDITS"].map(safe_float) * rate' not in _SPEND
 
 
 def test_chargeback_role_share_goes_mart_first():

@@ -109,8 +109,12 @@ def test_mfa_gap_requires_login_evidence():
 
 def test_attribution_is_share_based_not_dollars():
     sql = cost_sql.allocated_attribution(7, "DATABASE_NAME", "ALL")
-    assert "RATIO_TO_REPORT" in sql
-    assert "$" not in sql  # dollarization happens in logic/formulas
+    # Global-share law since v4.33.1: the denominator is the whole scoped
+    # window (a subquery total), never RATIO_TO_REPORT over filtered rows —
+    # that renormalized any database filter to 100% of the window.
+    assert "RATIO_TO_REPORT" not in sql
+    assert "(SELECT SUM(ELAPSED_MS) FROM scoped)" in sql
+    assert "USER$" not in sql          # ALL scope: no visibility arm
 
 
 def test_free_text_filters_are_sanitized_into_builders():

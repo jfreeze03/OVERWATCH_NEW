@@ -92,29 +92,44 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
 
     Produces shares, not dollars: the caller multiplies by scoped warehouse
     spend and MUST label the result 'allocated'.
-    """
+
+    Shares are GLOBAL over the company's scoped warehouse activity in the
+    window (live math fix 2026-07-11: RATIO_TO_REPORT over the FILTERED set
+    renormalized any database filter to 100%, so every selected database
+    'cost' the whole window). Database/schema filters and the dimension
+    visibility rules only choose which rows DISPLAY — the denominator
+    never moves, so a filtered view shows its true slice."""
     days = bounded_days(days)
     dim = "USER_NAME" if str(dimension).upper() == "USER_NAME" else "DATABASE_NAME"
-    scope = companies.user_clause(company) if dim == "USER_NAME" else companies.database_clause(company)
+    vis = (companies.user_clause(company) if dim == "USER_NAME"
+           else companies.database_visibility_clause(company))
     from app.core.sqlsafe import contains_filter
 
-    where = and_where(
+    scope_where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "EXECUTION_STATUS = 'SUCCESS'",
         "WAREHOUSE_NAME IS NOT NULL",
         companies.warehouse_clause(company),
+    )
+    display_where = and_where(
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
-        scope,
+        vis,
     )
     return f"""
+WITH scoped AS (
+    SELECT {dim} AS DIM_VAL, DATABASE_NAME, SCHEMA_NAME, USER_NAME,
+           COALESCE(TOTAL_ELAPSED_TIME, 0) AS ELAPSED_MS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {scope_where}
+)
 SELECT
-    COALESCE({dim}, 'UNKNOWN') AS DIMENSION,
+    COALESCE(DIM_VAL, 'NONE') AS DIMENSION,
     COUNT(*) AS QUERY_COUNT,
-    SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS ELAPSED_SEC,
-    RATIO_TO_REPORT(SUM(COALESCE(TOTAL_ELAPSED_TIME, 0))) OVER () AS ELAPSED_SHARE
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {where}
+    SUM(ELAPSED_MS) / 1000.0 AS ELAPSED_SEC,
+    SUM(ELAPSED_MS) / NULLIF((SELECT SUM(ELAPSED_MS) FROM scoped), 0) AS ELAPSED_SHARE
+FROM scoped
+WHERE {display_where}
 GROUP BY 1
 ORDER BY ELAPSED_SEC DESC
 LIMIT 100

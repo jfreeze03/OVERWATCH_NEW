@@ -157,12 +157,16 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         window_usd = float(view["USD_CURRENT"].sum())
         result_caption(wh, note="Both windows offset 24h for ACCOUNT_USAGE completeness. "
                                 "Totals include per-warehouse cloud-services credits, "
-                                "unadjusted — the account rebate lives on the Spend panel.")
+                                "unadjusted — the account rebate lives on the Spend panel. "
+                                "Company-wide: the database/schema filters don't narrow this table.")
 
         st.markdown("**By user and database (allocated — estimate)**")
         st.caption(
             "Snowflake bills at warehouse grain. These split the scoped warehouse spend "
-            f"({format_usd(window_usd)}) by query elapsed-time share; treat as directionally correct."
+            f"({format_usd(window_usd)}) by query elapsed-time share; treat as directionally "
+            "correct. Shares stay global, so a database/schema filter shows that slice of "
+            "the total — never 100% of it. NONE = queries with no database context; "
+            "USER$ personal databases attribute to their owner's company."
         )
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
@@ -179,20 +183,19 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                         mart_source="MART_COST_ALLOCATION_DAILY (mart — warehouse-hour credit share)",
                         live_source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share, live fallback)")
                 if guard(res, f"No query history to allocate by {label}."):
-                    vdf = res.df.copy()
-                    usd_col = next((c for c in vdf.columns if str(c).upper().endswith('_USD') or str(c).upper() == 'ALLOCATED_USD'), None)
-                    label_col = vdf.columns[0]
-                    if usd_col is not None and len(vdf) > 1:
-                        charts.waterfall_usd(vdf, label_col, usd_col)
-                        st.caption('Waterfall: how the window total builds up, largest contributors first (allocated).')
                     alloc = res.df.copy()
-                    if "ALLOC_CREDITS" in alloc.columns:
-                        # mart path: dollarize allocated credits directly —
-                        # better than share x window (idle handling included)
-                        alloc["ALLOCATED_USD"] = alloc["ALLOC_CREDITS"].map(safe_float) * rate
-                    else:
-                        alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
+                    # ONE formula on every path (live math fix 2026-07-11):
+                    # share x the window total the caption states. Direct
+                    # dollarization of mart credits used a different window
+                    # and included idle — SYSTEM alone exceeded the caption.
+                    alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
+                    if len(alloc) > 1:
+                        charts.waterfall_usd(alloc.head(10), "DIMENSION", "ALLOCATED_USD")
+                        st.caption("Waterfall: top 10 contributors (allocated).")
                     charts.bar_usd(alloc, "DIMENSION", "ALLOCATED_USD", title=f"Allocated $ by {label}")
+                    shown = float(alloc["ELAPSED_SHARE"].map(safe_float).sum())
+                    st.caption(f"Rows shown cover {shown:.0%} of scoped spend "
+                               f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}).")
 
     st.markdown("**Daily anomaly check (per warehouse)**")
     daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
