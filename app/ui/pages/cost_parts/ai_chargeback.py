@@ -193,6 +193,12 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
 
     with st.expander("AI Functions usage (optional view)"):
+        # Expander bodies run even when collapsed (Codex r17 #18) — the scan
+        # itself waits for the toggle, like the deep-scan forensics toggles.
+        if not st.toggle("Load AI Functions usage", key="ai_fn_scan",
+                         help="Scans CORTEX_AI_FUNCTIONS_USAGE_HISTORY once, then cached."):
+            st.caption("Off until you ask — this view needs its own history scan.")
+            return
         fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
                      key=f"cortex_fn_{days}", tier="historical",
                      source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")

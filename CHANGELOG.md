@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.33.2 — Codex r17: one new item in a fourth convergent round (2026-07-11)
+
+18 of r17's 20 items restate the adjudicated queue (V041 loader riders,
+registry design, query-core v2, standing owner decision on a dedicated UI
+warehouse, measure-first clustering, executable perf contracts). Shipped the
+one new bug: the optional AI Functions view ran its historical scan on every
+AI-tab paint because expander bodies execute even when collapsed — the scan
+now waits for an explicit toggle (deep-scan forensics pattern). r17 #17's
+mechanism is wrong (st.text_input fires on Enter/blur, not per keystroke),
+but the underlying cost of schema-filtered attribution is real and dies with
+V041 rider nine; Apply-form/fragments ride the queued fragments round.
+
 ## 4.33.0 — Codex r16: the two new items, and calling the convergence (2026-07-11)
 
 r16 is the third consecutive round recommending substantially the same
