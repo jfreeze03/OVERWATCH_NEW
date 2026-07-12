@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.33.0 — Codex r16: the two new items, and calling the convergence (2026-07-11)
+
+r16 is the third consecutive round recommending substantially the same
+list. Shipped the two items that were both new AND safe as reader swaps:
+
+- **Cortex service spend from the fact (r16 #7).** Chargeback & AI's
+  Cortex panel read live METERING_DAILY_HISTORY although FACT_METERING_DAILY
+  carries DAY, SERVICE_TYPE, and billed credits. Fact-first with the live
+  scan as fallback; same SERVICE_TYPE predicate, same billed basis. Per the
+  r15 lesson, the lock asserts the fact version contains no USAGE_DATE.
+- **Overview reads metering once (r16 #17).** The 45d MTD read and the 150d
+  backtest read collapse into one 150d frame loaded up front —
+  _mtd_spend_usd's preloaded parameter existed for exactly this; the 45d
+  read survives only as its internal fallback.
+
+Convergence disposition (#1-#6, #8-#16, #18-#20): every remaining item is
+already queued — the loader-efficiency pass (V041: staging extract,
+watermarks, task-graph phasing, loader-owned freshness, ops mart, AI Users
+fact, role-posture fact, Cortex reader landed here instead), the
+coverage/cadence registry (now noting r16 #10's real find: backfill_365
+only prepends before MIN(DAY) and cannot repair interior holes), the
+query-core v2 design (per-member batch caching, real server metrics,
+buffered telemetry, byte budgets), the dedicated UI warehouse (owner
+decision), measure-first clustering, the fragments round, and executable
+contracts. Recommendation: pause review rounds until the loader pass
+lands — the last three rounds' marginal yield was two reader swaps and
+two same-day bug catches on freshly written code.
+
+Deploy: redeploy the app; no migration.
+
 ## 4.32.1 — r15 #1: my regression, their catch, everyone's class-killer (2026-07-11)
 
 - **Chargeback window read fixed.** The r14 fact swap changed the FROM but

@@ -1136,3 +1136,21 @@ SELECT SUM(IFF(DAY >= '{start}', CREDITS_BILLED, 0)) AS CREDITS_BILLED_TO_DATE,
        MIN(DAY) AS FACT_FIRST_DAY
 FROM {mart_object("FACT_METERING_DAILY")}
 """
+
+
+def fact_cortex_daily_spend(days: int) -> str:
+    """AI/Cortex service credits by day from the daily fact (Codex r16 #7) —
+    same SERVICE_TYPE predicate and billed basis as the live builder it
+    replaces; the fact carries DAY, SERVICE_TYPE, and CREDITS_BILLED."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    DAY,
+    UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+    SUM(CREDITS_BILLED) AS CREDITS_BILLED
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE '%AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')
+GROUP BY 1, 2
+ORDER BY DAY
+"""

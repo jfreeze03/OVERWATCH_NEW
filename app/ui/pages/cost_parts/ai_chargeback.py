@@ -48,8 +48,11 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
     left, right = st.columns(2)
     with left:
         st.markdown("**Cortex / AI spend**")
-        res = run(cost_sql.cortex_daily_spend(days), page=_PAGE, key=f"cortex_{days}",
-                  tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (AI services)")
+        res = run_mart_first(
+            mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
+            page=_PAGE, key=f"cortex_{days}",
+            mart_source="FACT_METERING_DAILY (AI services, billed)",
+            live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (AI services, live fallback)")
         if guard(res, "No AI/Cortex service credits in this window."):
             df = res.df.copy()
             df["USD"] = df["CREDITS_BILLED"].map(safe_float) * ai_rate

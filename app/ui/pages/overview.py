@@ -133,7 +133,12 @@ def render() -> None:
         daily, trend_source = _live_fallback_daily(company, days, rate)
 
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
-    mtd_spend, mtd_source = _mtd_spend_usd(rate)
+    # One 150d metering read serves MTD here AND the forecast backtest below
+    # (Codex r16 #17) — the separate 45d read survives only as the fallback
+    # inside _mtd_spend_usd when this one fails.
+    _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
+                   tier="recent", source="FACT_METERING_DAILY (150d)")
+    mtd_spend, mtd_source = _mtd_spend_usd(rate, preloaded=_bt_hist)
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(company)
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
@@ -299,8 +304,6 @@ def render() -> None:
             ("Failures, 14d", adf, "DAY", "FAILS"),
         ])
         result_caption(trend_source, note="mart-first" if using_mart else "live fallback — deploy marts for cheaper loads")
-        _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
-                       tier="recent", source="FACT_METERING_DAILY (150d)")
         _bt = pd.DataFrame()
         if _bt_hist.usable() and len(_bt_hist.df) >= 50:
             _bt_daily = _bt_hist.df.copy()

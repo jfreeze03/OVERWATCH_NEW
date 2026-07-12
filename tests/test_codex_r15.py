@@ -56,3 +56,19 @@ def test_brief_shares_the_shells_health_strip_cache():
     assert 'key="health_strip"' in br                     # shell-shared entry
     mn = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     assert 'key="health_strip"' in mn                     # same key both sides
+
+
+def test_r16_reader_swaps_are_fact_first_and_column_true():
+    """r16 #7/#17 — and the r15 lesson applied: assert the fact version
+    carries the fact's OWN columns, and the page reads the wide frame once."""
+    from app.data import mart_sql
+    sql = mart_sql.fact_cortex_daily_spend(7)
+    assert "FACT_METERING_DAILY" in sql and "USAGE_DATE" not in sql   # fact time column only
+    assert "ILIKE '%CORTEX%'" in sql                                  # same predicate as live
+    from pathlib import Path
+    _ROOT = Path(__file__).resolve().parents[1]
+    cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
+    assert "fact_cortex_daily_spend" in cb and "live fallback" in cb.split("fact_cortex_daily_spend", 1)[1][:300]
+    ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
+    assert ov.count('key="fact_daily_150"') == 1                      # one wide read
+    assert "preloaded=_bt_hist" in ov                                 # MTD derives from it
