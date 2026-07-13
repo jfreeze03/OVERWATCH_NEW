@@ -30,8 +30,16 @@ WITH checks AS (
     SELECT 'KEBARR1 classifies as ALFA',
            IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('KEBARR1') = 'ALFA', 'OK', 'FAIL')
     UNION ALL
-    SELECT 'TRXS_ prefix classifies as Trexis',
-           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('TRXS_LOADER') = 'Trexis', 'OK', 'FAIL')
+    -- V019 made USER classification role-membership-based (a user is Trexis
+    -- if they hold a %TRXS% role); the old check probed a fictional user
+    -- against V001's retired prefix rule and failed on every fresh install
+    -- (live finding, 2026-07-12 rebuild). The deterministic prefix rule
+    -- still governs DATABASES — test that, and the unknown-user fallback.
+    SELECT 'TRXS_ database prefix classifies as Trexis',
+           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE('TRXS_EDW_PRD') = 'Trexis', 'OK', 'FAIL')
+    UNION ALL
+    SELECT 'Unknown user falls back to ALFA (no TRXS role)',
+           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('OW_VALIDATE_PROBE_NOBODY') = 'ALFA', 'OK', 'FAIL')
     UNION ALL
     -- This account does not expose ACCOUNT_USAGE.WAREHOUSES; use
     -- WAREHOUSE_EVENTS_HISTORY (any lifecycle event proves the warehouse

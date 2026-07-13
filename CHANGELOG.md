@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.37.1 — validate: the stale V001-era user-prefix check (2026-07-12)
+
+Live finding on the rebuilt account: 'TRXS_ prefix classifies as Trexis'
+FAILed. The check probed a fictional user against V001's prefix rule, which
+V019 deliberately replaced with role-membership classification — latently
+wrong since then, surfaced by the fresh install. Replaced with two
+deterministic checks that test the CURRENT contracts: the database prefix
+rule (COMPANY_FOR_DATABASE('TRXS_EDW_PRD') = 'Trexis') and the unknown-user
+ALFA fallback. Rebuild-bundle copy regenerated. Also confirmed from the
+rebuild's error log: the four mart_load_failed rows are V027/V029 first-fill
+replay artifacts (fixed by V030 in-sequence) — expected on every fresh
+apply, not a live failure.
+
 ## 4.37.0 — Codex r22: eight ships, ten routes, two declines (2026-07-12)
 
 Every claim verified in code first; the adjudication with evidence is
