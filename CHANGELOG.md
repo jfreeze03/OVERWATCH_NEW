@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.43.0 — r27: V043 + the adjudication's ship list (2026-07-13)
+
+Authority: docs/reviews/CODEX_R27_ADJUDICATION_20260713.md.
+
+- **V043 (forward-generated, byte-locked):** task retirement finished
+  loader-side — SP_LOAD_DAILY_FACTS stops scanning TASK_HISTORY; the [6]
+  task-graphs arm, the timeline TASK_FAIL union, board/score task inputs
+  (zero-filled, shapes kept), purge/reconcile/freshness references all go;
+  FACT_TASK_DAILY + MART_TASK_GRAPH_DAILY drop. **PIPE_TASK_FAILURES
+  (HIGH) is disabled** — it had been alerting on task failures all along.
+  The r25 metrics get teeth: SEC_NEW_ADMIN_NETWORK + COST_EGRESS_SPIKE
+  rules and scan arms (18 arms, same dedupe shape).
+- **Viewer identity (#4, Snowflake-doc verified):** in owner's-rights SiS,
+  CURRENT_USER() is the app owner — prefs, usage rows, audit actors, and
+  verification stamps now ride identity_sql() (st.user, CURRENT_USER()
+  fallback); the query cache isolates per viewer.
+- **Executor allow-list (#10-light):** one statement per call, aimed at
+  OVERWATCH tables/procs or a warehouse lever — anything else refuses
+  before it reaches Snowflake.
+- **Domain cache invalidation (#14):** writes bump only their domain's
+  salt (alerts/settings/prefs/budgets/...); unknown targets still bump the
+  global salt. An alert ack no longer refetches the whole page.
+- **Bulk alert lifecycle (#12-partial):** one UPDATE + one audit INSERT
+  for N events (was 2N in a loop); honest failure message when the audit
+  half fails. Full atomicity lands with r28's proc layer.
+- **Admin:** access self-check (probes every privileged source, prints the
+  exact missing grant), grouped error families over raw rows, orphaned
+  settings-key warnings.
+- **Roles/docs:** audit append-only REVOKEs restored (#6, r26 regression);
+  SHOW GRANTS ON STREAMLIT proof block (#7); SNOW_PRI_* overrides removed
+  (#8 — suffix heuristics already covered them); DEPLOYMENT/RUNBOOK
+  rewritten for the two-role owner's-rights model (#9+#3) and locked.
+
 ## 4.42.0 — r26: two roles, no task monitoring (2026-07-13)
 
 Owner: "the only roles that will have access is SNOW_ACCOUNTADMINS and

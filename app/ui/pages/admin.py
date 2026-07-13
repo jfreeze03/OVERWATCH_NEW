@@ -17,6 +17,7 @@ from app.config import (
     resolve_role_profile,
 )
 from app.core.errors import error_buffer, safe_page
+from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
@@ -66,6 +67,9 @@ _EXPECTED_MIGRATIONS = {
         "platform-score marts, posture riders",
     42: "codex r22: FACT_QUERY_DAILY, atomic extract + gated watermark, "
         "ops-diag backfill, purge coverage, AI fact usage stamps",
+    43: "task retirement loader-side (fills/board/score/purge/reconcile/"
+        "freshness + tables dropped, PIPE_TASK_FAILURES disabled) + r25 "
+        "alert teeth (new-admin-network, egress spike)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -98,6 +102,16 @@ def _settings_tab(is_operator: bool) -> None:
     if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
         styled_table(res.df)
         result_caption(res)
+        # r27 H2: keys the app no longer reads (retired features leave rows
+        # behind — SCORE_PTS_TASK_FAIL_PER_PCT after V043, for instance).
+        try:
+            _known = {k for k in DEFAULT_SETTINGS if not k.startswith("_")}
+            _orphans = sorted(set(res.df["KEY"].astype(str)) - _known)
+            if _orphans:
+                st.warning("Settings rows the app no longer reads (safe to delete): "
+                           + ", ".join(_orphans))
+        except (KeyError, TypeError):
+            pass
 
     st.markdown("**Change a setting**")
     editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")]
@@ -106,7 +120,7 @@ def _settings_tab(is_operator: bool) -> None:
                               help="Numeric settings take numbers; dates are YYYY-MM-DD; blank clears.")
     update_sql = (
         f"UPDATE {core_object('SETTINGS')} SET VALUE = {sql_literal(new_value)}, "
-        "UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER() "
+        f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
         f"WHERE KEY = {sql_literal(key)};"
     )
     st.code(update_sql, language="sql")
@@ -217,7 +231,49 @@ def _self_cost_tab() -> None:
         result_caption(res)
 
 
+def _access_self_check() -> None:
+    """r27 H3: probe every privileged source the app reads and hand back the
+    exact missing grant — the next access error becomes a checklist row,
+    not a debugging session."""
+    st.markdown("**Access self-check**")
+    st.caption("Probes each privileged source with a 1-row read. Run after a rebuild, "
+               "a role change, or when any panel reports an access error.")
+    if not st.button("Run access self-check", key="adm_access_check"):
+        return
+    probes = [
+        ("ACCOUNT_USAGE core", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY LIMIT 1",
+         "GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE SNOW_ACCOUNTADMINS; (roles.sql)"),
+        ("LOGIN_HISTORY", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY LIMIT 1",
+         "Covered by IMPORTED PRIVILEGES — if core is OK and this is not, contact Snowflake."),
+        ("CREDENTIALS", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.CREDENTIALS LIMIT 1",
+         "Newer accounts expose this view by default; older ones need Snowflake to enable it."),
+        ("DATA_TRANSFER_HISTORY", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY LIMIT 1",
+         "Covered by IMPORTED PRIVILEGES (Security -> Egress reads this)."),
+        ("Trust Center findings", "SELECT 1 FROM SNOWFLAKE.TRUST_CENTER.FINDINGS LIMIT 1",
+         "GRANT APPLICATION ROLE SNOWFLAKE.TRUST_CENTER_VIEWER TO ROLE SNOW_ACCOUNTADMINS;"),
+        ("App schema", "SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SETTINGS LIMIT 1",
+         "Run snowflake/roles.sql as SNOW_ACCOUNTADMINS."),
+        ("Warehouse metadata", "SHOW WAREHOUSES", "USAGE/MONITOR on warehouses (roles.sql)."),
+    ]
+    rows = []
+    for name, sql, fix in probes:
+        r = run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata", source=name,
+                max_rows=0 if sql.startswith("SHOW") else 1)
+        rows.append({"SOURCE": name, "STATUS": "OK" if r.ok else "BLOCKED",
+                     "FIX": "" if r.ok else fix,
+                     "ERROR": "" if r.ok else str(r.error)[:140]})
+    _df = pd.DataFrame(rows)
+    blocked = int((_df["STATUS"] == "BLOCKED").sum())
+    if blocked == 0:
+        st.success(f"All {len(_df)} sources reachable.")
+    else:
+        st.error(f"{blocked} source(s) blocked — fixes below.")
+    styled_table(_df)
+    st.divider()
+
+
 def _observability_tab() -> None:
+    _access_self_check()
     st.markdown("**Recent app errors (this session)**")
     buffer = error_buffer()
     if not buffer:
@@ -230,7 +286,19 @@ def _observability_tab() -> None:
     if sink.ok and sink.empty:
         st.success("Error sink is empty.")
     elif guard(sink, "", setup_hint="Sink table comes from V001."):
-        styled_table(sink.df)
+        # r27 H4: repeated identical errors read as ONE family, not N rows.
+        _e = sink.df.copy()
+        try:
+            _e["FAMILY"] = (_e["ERROR_TYPE"].astype(str) + " · "
+                            + _e["ERROR_MESSAGE"].astype(str).str.slice(0, 60))
+            grouped = (_e.groupby(["PAGE", "FAMILY"], as_index=False)
+                       .agg(COUNT=("FAMILY", "size"), FIRST_SEEN=("LOGGED_AT", "min"),
+                            LAST_SEEN=("LOGGED_AT", "max")))
+            styled_table(grouped.sort_values("LAST_SEEN", ascending=False), height=240)
+            with st.expander(f"Raw rows ({len(_e)})"):
+                styled_table(_e)
+        except (KeyError, TypeError):
+            styled_table(sink.df)
 
     st.markdown("**Query telemetry (this session)**")
     telemetry = query_telemetry()

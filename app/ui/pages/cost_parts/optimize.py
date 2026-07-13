@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
+from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
@@ -718,7 +719,7 @@ def _savings_tab() -> None:
                 update_sql = (
                     f"UPDATE {core_object('SAVINGS_LEDGER')}\n"
                     f"SET STATE = 'VERIFIED', VERIFIED_USD = {sql_number(verified_usd)}, "
-                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = CURRENT_USER()\n"
+                    f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}\n"
                     f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])};"
                 )
                 st.code(update_sql, language="sql")

@@ -66,24 +66,37 @@ rename them first (e.g. `ALTER TABLE ... RENAME TO ALERT_CONFIG_V3;`), then
 run the migrations. `snowflake/validate.sql` checks the shapes and flags any
 survivor.
 
-Task graphs run on the dedicated **`WH_ALFA_OVERWATCH`** warehouse (XSMALL,
-60s auto-suspend, `OVERWATCH_RM` resource monitor).
+The loader chain runs on the dedicated **`WH_ALFA_OVERWATCH`** warehouse
+(XSMALL, 60s auto-suspend, `OVERWATCH_RM` resource monitor).
 
-## 2. Roles
+## 2. Roles and execution model (owner's rights)
 
-- `OVERWATCH_MONITOR` — read-only telemetry (IMPORTED PRIVILEGES on SNOWFLAKE
-  db + SELECT on OVERWATCH objects). Grant to viewer roles.
-- `OVERWATCH_OPERATOR` — MONITOR plus INSERT/UPDATE on settings, alert
-  lifecycle, action queue, savings ledger. `roles.sql` grants it to
-  **SNOW_SYSADMINS** and **SNOW_ACCOUNTADMINS** (the account's DBA roles);
-  both already resolve to the DBA navigation profile in-app, so members get
-  the Admin page and gated in-app execution with no extra setup.
+**Access is two roles, total** (owner decision 2026-07-13):
+**SNOW_ACCOUNTADMINS** and **SNOW_SYSADMINS**. `roles.sql` grants both
+directly (IMPORTED PRIVILEGES on the SNOWFLAKE db, read/write on the
+OVERWATCH schema, warehouse usage) and actively retires the old
+OVERWATCH_MONITOR / OVERWATCH_OPERATOR layer.
+
+**OVERWATCH is an owner's-rights service.** Streamlit-in-Snowflake executes
+every query with the app owner's privileges, not the viewer's role — the
+viewer's role decides only which navigation profile they see. Two
+consequences the code accounts for:
+
+- Viewer identity comes from `st.user` (`app/core/identity.py`), because
+  `CURRENT_USER()` returns the app owner inside the app. Preferences,
+  usage telemetry, and audit actor stamps all ride `identity_sql()`.
+- The in-app execution gate (typed confirmation + admin profile) is a UX
+  guard, not a security boundary; the executor additionally enforces a
+  statement allow-list (OVERWATCH tables/procs and warehouse levers only).
+
 - Own the Streamlit app and the OVERWATCH objects with **SNOW_SYSADMINS** so
   day-to-day operation never requires the break-glass role.
-- `ALERT_AUDIT` and `REMEDIATION_LOG` are append-only for operators
-  (INSERT granted, UPDATE/DELETE explicitly revoked). Members of the owning
-  role can still modify them — if an auditor requires stronger guarantees,
-  export the tables on a schedule or replicate them to a locked schema.
+- `ALERT_AUDIT` and `REMEDIATION_LOG` are append-only (UPDATE/DELETE
+  explicitly revoked, even from the two admin roles). Admins can re-grant —
+  the revokes block accidents, not adversaries; export on a schedule if an
+  auditor needs stronger guarantees.
+- `roles.sql` ends with a `SHOW GRANTS ON STREAMLIT` proof block: every
+  grantee should be one of the two roles, and the output says so.
 
 ## 3. Streamlit-in-Snowflake (primary target)
 
@@ -116,8 +129,9 @@ shows what is deployed; re-running PUT with OVERWRITE replaces files and the
 app picks them up on next open.
 
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
-WH_ALFA_OVERWATCH`); `environment.yml` pins the Snowflake-channel packages. Each
-viewer runs under their own role — that is the access-control model.
+WH_ALFA_OVERWATCH`); `environment.yml` pins the Snowflake-channel packages.
+Queries execute with the app owner's rights; USAGE on the Streamlit object
+(two roles only) is the access-control model.
 
 ## 4. Local development (dev only)
 
@@ -128,7 +142,7 @@ viewer runs under their own role — that is the access-control model.
 account = "<account>"
 user = "<user>"
 authenticator = "externalbrowser"   # or password
-role = "OVERWATCH_MONITOR"
+role = "SNOW_SYSADMINS"
 warehouse = "WH_ALFA_OVERWATCH"
 database = "DBA_MAINT_DB"
 schema = "OVERWATCH"

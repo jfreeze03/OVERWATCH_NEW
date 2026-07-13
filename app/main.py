@@ -20,6 +20,7 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     resolve_role_profile,
 )
+from app.core.identity import identity_sql  # noqa: E402
 from app.core.query import (  # noqa: E402
     bump_refresh_salt,
     execute_statement,
@@ -277,9 +278,9 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
         ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
     if not st.session_state.get("_ow_usage_oldshape"):
         ok = execute_statement_async(
-            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN) "
+            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) "
             f"SELECT {sql_literal(str(page)[:80])}, {ms}, {sql_literal(kind)}, "
-            f"{'TRUE' if is_rerun else 'FALSE'}", page="Sidebar")
+            f"{'TRUE' if is_rerun else 'FALSE'}, {identity_sql()}", page="Sidebar")
         if ok:
             return
         st.session_state["_ow_usage_oldshape"] = True

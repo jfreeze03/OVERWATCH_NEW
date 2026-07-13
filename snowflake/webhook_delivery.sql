@@ -69,14 +69,4 @@ CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
 -- CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_FINOPS
 --     TYPE = WEBHOOK ENABLED = TRUE
 --     WEBHOOK_URL = 'https://hooks.slack.com/services/T000/B000/YYYY'
---     WEBHOOK_SECRET = <a secret holding that URL>
---     WEBHOOK_BODY_TEMPLATE = '{"text": "SNOWFLAKE_WEBHOOK_MESSAGE"}'
---     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
--- INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
--- SELECT 'COST', 'HIGH', 'OVERWATCH_WEBHOOK_FINOPS';
---
--- Routes are additive: an event can match several and each send is isolated
--- — one bad channel never blocks the others. Disable a route by flipping
--- ENABLED, no deploy needed.
-
-ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
+--     WEBHO

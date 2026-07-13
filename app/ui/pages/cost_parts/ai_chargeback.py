@@ -10,6 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import core_object
+from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
@@ -351,7 +352,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                     f"MERGE INTO {core_object('DEPT_BUDGETS')} t "
                     f"USING (SELECT {sql_literal(str(pick_dept))} AS D) s ON t.DEPARTMENT = s.D "
                     f"WHEN MATCHED THEN UPDATE SET MONTHLY_BUDGET_USD = {sql_number(float(bud_usd))}, "
-                    "UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER() "
+                    f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
                     f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD) "
                     f"VALUES (s.D, {sql_number(float(bud_usd))});"
                 )
@@ -384,7 +385,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             f"{sql_literal(department)} AS DEPARTMENT, {sql_literal(owner)} AS OWNER) s\n"
             "ON t.MAP_TYPE = s.MAP_TYPE AND t.NAME = s.NAME\n"
             "WHEN MATCHED THEN UPDATE SET DEPARTMENT = s.DEPARTMENT, OWNER = s.OWNER, "
-            "UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = CURRENT_USER()\n"
+            f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()}\n"
             "WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER) "
             "VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER);"
         )

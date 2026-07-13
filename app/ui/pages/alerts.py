@@ -14,6 +14,7 @@ import streamlit as st
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.ai import cortex_complete
 from app.core.errors import safe_page
+from app.core.identity import identity_sql, viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
@@ -59,7 +60,7 @@ def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str
     kind = kind if kind in RESOLUTION_KINDS else ""
     if action == "ACK":
         update = (
-            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = CURRENT_USER(), "
+            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = {identity_sql()}, "
             f"ACK_AT = CURRENT_TIMESTAMP() WHERE EVENT_ID = {sql_literal(event_id)} AND STATUS = 'OPEN';"
         )
     else:
@@ -71,11 +72,48 @@ def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str
             "AND STATUS IN ('OPEN', 'ACK');"
         )
     audit_note = f"[{kind}] {note}" if kind else note
+    if viewer_name():
+        # r27 #4: audit attribution survives owner's-rights (the table has no
+        # actor column; the note carries the viewer).
+        audit_note = f"{audit_note} — by {viewer_name()}"
     audit = (
         f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE) "
         f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)});"
     )
     return update + "\n" + audit
+
+
+def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str = "") -> tuple[str, str]:
+    """r27 #12 (set-based half): ONE UPDATE + ONE audit INSERT for the whole
+    selection instead of 2N statements in a loop. True single-transaction
+    atomicity needs a stored proc — r28's action layer."""
+    action = "RESOLVE" if action == "RESOLVE" else "ACK"
+    kind = str(kind or "").upper()
+    kind = kind if kind in RESOLUTION_KINDS else ""
+    ids = ", ".join(sql_literal(str(e)) for e in event_ids)
+    if action == "ACK":
+        update = (
+            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = {identity_sql()}, "
+            f"ACK_AT = CURRENT_TIMESTAMP() WHERE EVENT_ID IN ({ids}) AND STATUS = 'OPEN';"
+        )
+        state_filter = "STATUS = 'ACK'"
+    else:
+        set_kind = f", RESOLUTION_KIND = {sql_literal(kind)}" if kind else ""
+        update = (
+            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'RESOLVED', "
+            f"RESOLVED_AT = CURRENT_TIMESTAMP(){set_kind} "
+            f"WHERE EVENT_ID IN ({ids}) AND STATUS IN ('OPEN', 'ACK');"
+        )
+        state_filter = "STATUS = 'RESOLVED'"
+    audit_note = f"[{kind}] {note}" if kind else note
+    if viewer_name():
+        audit_note = f"{audit_note} — by {viewer_name()}"
+    audit = (
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE) "
+        f"SELECT EVENT_ID, {sql_literal(action)}, {sql_literal(audit_note)} "
+        f"FROM {core_object('ALERT_EVENTS')} WHERE EVENT_ID IN ({ids}) AND {state_filter};"
+    )
+    return update, audit
 
 
 def _delivery_status() -> None:
@@ -396,17 +434,15 @@ def _open_events_section(events, is_operator: bool) -> None:
                 key="alert_bulk_confirm")
             if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec", type="primary",
                          disabled=(not chosen or confirm_b != f"BULK {b_action}")):
-                done = 0
-                for label in chosen:
-                    script = _lifecycle_sql(options[label], b_action, b_note, b_kind)
-                    ok_one = True
-                    for stmt in [s for s in script.split(";") if s.strip()]:
-                        ok, _msg = execute_statement(stmt + ";", page=_PAGE)
-                        ok_one = ok_one and ok
-                    done += int(ok_one)
-                notify(done == len(chosen),
-                       f"{b_action} applied to {done}/{len(chosen)} event(s); audit rows written.")
-                if done:
+                # r27 #12: 2 statements for N events (was 2N in a loop)
+                upd, aud = _bulk_lifecycle_sql([options[c] for c in chosen], b_action, b_note, b_kind)
+                ok_u, msg_u = execute_statement(upd, page=_PAGE)
+                ok_a, msg_a = execute_statement(aud, page=_PAGE) if ok_u else (False, "skipped (update failed)")
+                notify(ok_u and ok_a,
+                       f"Bulk {b_action}: {len(chosen)} event(s) in one statement; "
+                       + ("audit rows written." if ok_a else f"AUDIT FAILED: {msg_a} — events updated; "
+                          "re-run or record manually."))
+                if ok_u and ok_a:
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
                                  page=_PAGE)

@@ -100,7 +100,7 @@ def test_bulk_resolve_requires_a_kind():
     body = _ALERTS.split("Bulk acknowledge / resolve", 1)[1]
     assert 'if b_action == "RESOLVE":' in body
     assert "alert_bulk_kind" in body and "RESOLUTION_KINDS" in body
-    assert "_lifecycle_sql(options[label], b_action, b_note, b_kind)" in body
+    assert "_bulk_lifecycle_sql([options[c] for c in chosen], b_action, b_note, b_kind)" in body
 
 
 def test_reverse_hint_names_the_evidence_not_a_guess():

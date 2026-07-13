@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.42.0"
+APP_VERSION = "4.43.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -94,12 +94,9 @@ ACCOUNT_USAGE_LAG_NOTE = "Account telemetry can lag up to ~45 min (metering-dail
 # actual security boundary under Streamlit-in-Snowflake).
 # ---------------------------------------------------------------------------
 ROLE_PROFILE_OVERRIDES = {
-    "SNOW_PRI_GFR_PRD_ALFA_PDMWMGMT": "EXECUTIVE",
-    "SNOW_PRI_GFR_PRD_ALFA_DSA": "MANAGER",
-    "SNOW_PRI_GFR_PRD_ALFA_DTI": "ANALYST",
-    "SNOW_PRI_GFR_NONPRD_ALFA_PDMWMGMT": "EXECUTIVE",
-    "SNOW_PRI_GFR_NONPRD_ALFA_DSA": "MANAGER",
-    "SNOW_PRI_GFR_NONPRD_ALFA_DTI": "ANALYST",
+    # r27 #8: the SNOW_PRI_* viewer-role overrides were traces of roles
+    # with no app access (owner 2026-07-13). Only the two real roles map;
+    # the profile machinery stays for operator-UI gating.
     "SNOW_ACCOUNTADMINS": "DBA",
     "SNOW_SYSADMINS": "DBA",
 }

@@ -754,8 +754,9 @@ def log_ui_event(kind: str, page: str = "") -> None:
 
     if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_usage_oldshape"):
         return
+    from app.core.identity import identity_sql
     execute_statement_async(
-        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN) "
-        f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE",
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) "
+        f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE, {identity_sql()}",
         page="Usage")
 

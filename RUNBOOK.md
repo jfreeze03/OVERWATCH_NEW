@@ -32,10 +32,11 @@ labels and generates (never silently executes) the SQL to fix what it finds.
   every table has a CSV download. `?page=` and `?section=` are shareable.
 - **💾 Views** (in the filter strip) saves page+section+filters per user,
   sets a default landing view, and a display timezone.
-- Roles: viewers hold **OVERWATCH_MONITOR** (read-only), operators hold
-  **OVERWATCH_OPERATOR** (may execute generated statements — always behind a
-  typed confirmation, always audited). SNOW_SYSADMINS / SNOW_ACCOUNTADMINS
-  map to the DBA navigation profile automatically.
+- Roles: access is **SNOW_ACCOUNTADMINS** and **SNOW_SYSADMINS**, nothing
+  else (owner decision 2026-07-13; the old monitor/operator layer is
+  retired). Both map to the DBA navigation profile; in-app execution is
+  always behind a typed confirmation and always audited. The app itself
+  runs with owner's rights — see DEPLOYMENT.md §2.
 
 ## 2. Architecture
 
@@ -82,7 +83,7 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | Migration | Creates |
 |---|---|
 | V001 core | DB context, `SETTINGS`, `COMPANY_SCOPE` (+`COMPANY_FOR_USER()`), `APP_ERROR_LOG`, `SCHEMA_VERSION` |
-| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY`, `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_OVERWATCH` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
+| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY` (dropped by V043), `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_OVERWATCH` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
 | V003 marts | `MART_EXEC_BOARD` (+refresh proc/task), control-room snapshot, `MART_SOURCE_FRESHNESS` |
 | V004 alerts | `ALERT_CONFIG`, `ALERT_EVENTS`, `ALERT_AUDIT`, `SP_ALERT_SCAN`, `TASK_ALERT_SCAN` |
 | V005 actions | `ACTION_QUEUE`, `SAVINGS_LEDGER` |
@@ -235,8 +236,6 @@ Admin → Settings, never in code.
   is *peak hourly cohort* p95 — the help text says so; a schema filter
   switches to live raw p95). Heaviest queries table (click → drill-through:
   full profile of one query).
-- **Tasks** — task runs/failures by day (FACT_TASK_DAILY), failure detail
-  with DATABASE column, RCA timeline for a selected failure.
 - **Warehouses** — daily credits per warehouse, events, concurrency peaks
   (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add cluster).
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
@@ -468,7 +467,7 @@ ACTION_QUEUE, SAVINGS_LEDGER, DEPARTMENT_MAP, ALERT_ROUTES,
 REMEDIATION_LOG (append-only), USER_PREFS, OBJECT_CHANGE_REGISTRY,
 PIPELINE_SLA_CONFIG, DAILY_DIGEST.
 **Facts (transient, rebuildable, purged by retention):** FACT_METERING_DAILY,
-FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_TASK_DAILY, FACT_LOGIN_DAILY,
+FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_LOGIN_DAILY,
 FACT_STORAGE_DAILY. **Marts/views:** MART_EXEC_BOARD, MART_SOURCE_FRESHNESS,
 control-room snapshot, MART_SPEND_ROLLUP_DT (Dynamic Table pilot).
 **Procs:** SP_LOAD_HOURLY_FACTS, SP_LOAD_DAILY_FACTS, SP_REFRESH_EXEC_BOARD,
@@ -578,8 +577,8 @@ different literals). **Break-glass** — ACCOUNTADMIN / SNOW_ACCOUNTADMINS;
 for emergencies and grants, not routine work. **Dedupe key** — string that
 makes an alert fire once per object per period. **Mart-first** — read our
 small fact tables before the big ACCOUNT_USAGE views. **Operator** —
-OVERWATCH_OPERATOR role member; may execute generated statements behind
-typed confirms. **Quiet window** — contiguous hours where a warehouse
+member of SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (DBA profile); may execute
+generated statements behind typed confirms. **Quiet window** — contiguous hours where a warehouse
 burns credits with ~no queries. **Verified saving** — ledger item proven
 by actual before/after spend, not projection.
 

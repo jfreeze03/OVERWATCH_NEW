@@ -223,7 +223,65 @@ _FETCHERS = {
 }
 
 
-def _cache_scope() -> str:
+# r27 #14: writes to app tables invalidate only their domain; anything we
+# can't classify (ALTER WAREHOUSE, CALLs into loader procs) still bumps the
+# global salt — conservative, never stale.
+_DOMAIN_TOKENS = {
+    "alerts": ("ALERT_EVENTS", "ALERT_AUDIT", "ALERT_CONFIG", "ALERT_ROUTES"),
+    "settings": ("OVERWATCH.SETTINGS",),
+    "prefs": ("USER_PREFS",),
+    "budgets": ("DEPT_BUDGETS",),
+    "ledger": ("SAVINGS_LEDGER",),
+    "queue": ("ACTION_QUEUE",),
+    "remediation": ("REMEDIATION_LOG",),
+    "incidents": ("OVERWATCH.INCIDENTS", "INCIDENT_MEMBERS"),
+    "mappings": ("DEPT_MAPPING",),
+}
+
+
+def _domains_in(sql: str) -> list[str]:
+    up = str(sql or "").upper()
+    return [d for d, toks in _DOMAIN_TOKENS.items() if any(tok in up for tok in toks)]
+
+
+def _bump_refresh(sql: str) -> None:
+    """Post-write invalidation: domain-scoped when the target is known."""
+    stamp = datetime.now().isoformat()
+    doms = _domains_in(sql)
+    if doms:
+        salts = st.session_state.setdefault("_ow_domain_salts", {})
+        for d in doms:
+            salts[d] = stamp
+    else:
+        st.session_state["_ow_refresh_salt"] = stamp
+
+
+# r27 #10 (light): operator writes are app-constructed and confirmation-gated,
+# but the executor itself now refuses anything outside the action surface —
+# one statement, aimed at OVERWATCH objects or a warehouse lever.
+_WRITE_PREFIXES = (
+    "ALTER WAREHOUSE ",
+    "INSERT INTO DBA_MAINT_DB.OVERWATCH.",
+    "UPDATE DBA_MAINT_DB.OVERWATCH.",
+    "DELETE FROM DBA_MAINT_DB.OVERWATCH.",
+    "MERGE INTO DBA_MAINT_DB.OVERWATCH.",
+    "CALL DBA_MAINT_DB.OVERWATCH.",
+)
+
+
+def _statement_allowed(sql: str) -> tuple[bool, str]:
+    body = str(sql or "").strip().rstrip(";").strip()
+    # string literals may legitimately hold ';' (operator notes)
+    if ";" in re.sub(r"'[^']*'", "''", body):
+        return False, "multi-statement strings are not executed — one statement per call."
+    if not body.upper().startswith(_WRITE_PREFIXES):
+        return False, ("statement is outside the operator allow-list "
+                       "(OVERWATCH tables, OVERWATCH procs, warehouse levers): "
+                       + body[:80])
+    return True, ""
+
+
+def _cache_scope(sql: str = "") -> str:
     """Cache identity beyond the SQL text itself.
 
     The SQL string is a cache-key argument to every tier fetcher, and every
@@ -238,9 +296,14 @@ def _cache_scope() -> str:
     three times per TTL. Telemetry still records the key per call site.
     """
     role = str(st.session_state.get("_ow_current_role", "") or "")
-    user = str(st.session_state.get("_ow_current_user", "") or "")
+    # r27 #4: in owner's-rights SiS the session user is the app owner —
+    # the viewer (st.user) is the cache-isolation identity.
+    from app.core.identity import viewer_name
+    user = viewer_name() or str(st.session_state.get("_ow_current_user", "") or "")
     salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
-    return f"role={role}|user={user}|salt={salt}"
+    dsalts = st.session_state.get("_ow_domain_salts", {}) or {}
+    extra = "|".join(f"{d}={dsalts[d]}" for d in _domains_in(sql) if d in dsalts)
+    return f"role={role}|user={user}|salt={salt}|{extra}"
 
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool,
@@ -401,7 +464,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         capped.append(_with_row_cap(sql, cap))
         caps.append(cap)
     try:
-        scope = _cache_scope()
+        scope = _cache_scope("\n".join(capped))
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except _BatchPartial as bp:
         elapsed = (time.perf_counter() - started) * 1000
@@ -491,7 +554,7 @@ def run(
     try:
         cap = int(max_rows) if max_rows else 0
         _FETCH_MISS.set(False)
-        df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(), page)
+        df = _FETCHERS[tier](_with_row_cap(sql, cap), _cache_scope(sql), page)
         cache_hit = not _FETCH_MISS.get()
         truncated = bool(cap) and len(df) > cap
         if truncated:
@@ -528,6 +591,10 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
     Post-submission failures are not observed — acceptable for telemetry
     only. Operator actions must keep using execute_statement().
     """
+    ok, why = _statement_allowed(sql)
+    if not ok:
+        record_error(page, RuntimeError(why), context=f"execute_statement_async blocked: {sql[:200]}")
+        return False
     try:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
@@ -547,15 +614,17 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
 
     Callers gate this behind role + typed confirmation. Returns (ok, message).
     """
+    ok, why = _statement_allowed(sql)
+    if not ok:
+        return False, why
     try:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
         session.sql(sql).collect()
-        # r24 #8: a successful action bumps the refresh salt, so every cached
-        # read refetches on the next rerun — post-action freshness no longer
-        # depends on individual panels sitting on the live tier.
-        from datetime import datetime as _dt
-        st.session_state["_ow_refresh_salt"] = _dt.now().isoformat()
+        # r24 #8 + r27 #14: a successful action invalidates cached reads —
+        # domain-scoped when the write target is a known app table, global
+        # otherwise — so post-action freshness never depends on live tiers.
+        _bump_refresh(sql)
         return True, "Statement executed."
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement: {sql[:200]}")
