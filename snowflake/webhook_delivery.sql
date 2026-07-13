@@ -1,3 +1,5 @@
+-- Webhook delivery setup with Power Automate URL for Teams notifications
+-- Co-authored with CoCo
 -- webhook_delivery.sql — ONE-TIME integration setup (the only step that
 -- cannot ship in git: it holds your webhook secret).
 --
@@ -27,19 +29,19 @@ CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
 -- "Send each adaptive card" action rejects it (the "text card" error).
 -- Setup: Teams channel -> Workflows -> "Post to a channel when a webhook
 -- request is received", copy the HTTP URL, then:
---
--- CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
---     TYPE = GENERIC_STRING
---     SECRET_STRING = 'https://prod-XX.westus.logic.azure.com:443/workflows/...';
--- CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
---     TYPE = WEBHOOK ENABLED = TRUE
---     WEBHOOK_URL = 'https://prod-XX.westus.logic.azure.com:443/workflows/...'
---     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
---     WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
---     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
--- INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
--- SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS';
---
+--https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/26/workflows/8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs
+ CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+    TYPE = GENERIC_STRING
+     SECRET_STRING = '8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs';
+ CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
+     TYPE = WEBHOOK ENABLED = TRUE
+     WEBHOOK_URL = 'https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/SNOWFLAKE_WEBHOOK_SECRET'
+     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+     WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
+     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+ INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
+ SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS';
+
 -- V026's sender JSON-escapes the message (quotes, newlines, tabs), so
 -- multi-alert digests render as line breaks in the card instead of
 -- breaking the flow. Workflows replies 202 Accepted on success.
