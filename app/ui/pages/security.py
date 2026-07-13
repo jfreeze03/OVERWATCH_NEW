@@ -86,7 +86,7 @@ def _access_tab(company: str, days: int) -> None:
         st.markdown("**Break-glass role holders**")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
-        if guard(res, "No ACCOUNTADMIN/SECURITYADMIN/ORGADMIN grants visible to this role."):
+        if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
             styled_table(res.df)
             st.caption("This list should be short and every name should be expected.")
 

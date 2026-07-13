@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.41.0"
+APP_VERSION = "4.42.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -47,7 +47,6 @@ DEFAULT_SETTINGS = {
     "SCORE_PTS_PER_CRITICAL": "6",
     "SCORE_PTS_PER_HIGH": "2",
     "SCORE_PTS_QUERY_FAIL_PER_PCT": "1.5",
-    "SCORE_PTS_TASK_FAIL_PER_PCT": "2",
     "SCORE_PTS_QUEUE_PER_MIN": "0.3",
     "SCORE_PTS_SPILL_PER_GB": "0.5",
     "SCORE_PTS_PER_STALE_SOURCE": "4",
@@ -103,10 +102,6 @@ ROLE_PROFILE_OVERRIDES = {
     "SNOW_PRI_GFR_NONPRD_ALFA_DTI": "ANALYST",
     "SNOW_ACCOUNTADMINS": "DBA",
     "SNOW_SYSADMINS": "DBA",
-    "ACCOUNTADMIN": "DBA",
-    "SYSADMIN": "DBA",
-    "OVERWATCH_OPERATOR": "DBA",
-    "OVERWATCH_MONITOR": "ANALYST",
 }
 
 PAGES_BY_PROFILE = {

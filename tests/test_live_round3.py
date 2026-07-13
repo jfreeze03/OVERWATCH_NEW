@@ -104,8 +104,9 @@ def test_unit_costs_ai_falls_back_to_code_usage():
 
 def test_new_cost_builders_are_canaried():
     src = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for name in ("measured_query_costs", "procedure_costs_usd", "graph_daily_costs",
-                 "serverless_task_daily", "warehouse_change_registry", "cortex_source_costs"):
+    # r26: graph builders retired with task monitoring
+    for name in ("measured_query_costs", "procedure_costs_usd",
+                 "warehouse_change_registry", "cortex_source_costs"):
         assert name in src, name
 
 

@@ -118,7 +118,7 @@ def _settings_tab(is_operator: bool) -> None:
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
     else:
-        st.caption("Executing requires the OVERWATCH_OPERATOR role; anyone can copy the SQL for review.")
+        st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; anyone can copy the SQL for review.")
 
 
 def _migrations_tab() -> None:
@@ -472,7 +472,7 @@ def _emergency_tab(is_operator: bool) -> None:
                 execute_statement(log_sql, page=_PAGE)
                 notify(ok, msg)
         else:
-            st.caption("Copy the SQL; executing from the app requires OVERWATCH_OPERATOR.")
+            st.caption("Copy the SQL; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
 
 def _emergency_extras(is_operator: bool) -> None:

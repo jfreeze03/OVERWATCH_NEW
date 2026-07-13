@@ -38,4 +38,6 @@ def test_v013_and_grants():
     v13 = (root / "snowflake" / "migrations" / "V013__user_prefs.sql").read_text(encoding="utf-8")
     assert "USER_PREFS" in v13 and "SELECT 13 AS VERSION" in v13
     roles = (root / "snowflake" / "roles.sql").read_text(encoding="utf-8")
-    assert "USER_PREFS TO ROLE OVERWATCH_MONITOR" in roles
+    # r26 (owner 2026-07-13): per-table grants collapsed into the blanket
+    # ALL/FUTURE TABLES grants to the two admin roles.
+    assert "ON ALL TABLES IN SCHEMA DBA_MAINT_DB.OVERWATCH TO ROLE SNOW_SYSADMINS" in roles

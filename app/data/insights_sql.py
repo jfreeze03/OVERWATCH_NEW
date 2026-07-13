@@ -1,7 +1,7 @@
 """Insight builders ported from the original OVERWATCH (features 1-7).
 
 Idle warehouse analysis, repeat-query fingerprints, storage growth, release
-window compares, task failure detail, pipeline SLA readers, dormant users.
+window compares, pipeline SLA readers, dormant users.
 Pure SQL strings: bounded windows, company scoping, no dollar rates.
 """
 
@@ -170,68 +170,6 @@ WHERE {where}
 GROUP BY 1
 """
 
-
-def release_task_compare(release_date: str, window_days: int, company: str = "ALL") -> str:
-    """Per-task runs/failures/runtime before vs after a release date."""
-    release = _iso_date(release_date, "release_date")
-    window = max(1, min(int(window_days), 14))
-    where = and_where(
-        f"QUERY_START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
-        f"QUERY_START_TIME < DATEADD('day', {window}, DATE '{release}')",
-        companies.database_clause(company, "DATABASE_NAME"),
-    )
-    return f"""
-SELECT
-    DATABASE_NAME,
-    NAME AS TASK_NAME,
-    IFF(QUERY_START_TIME < DATE '{release}', 'BEFORE', 'AFTER') AS PERIOD,
-    COUNT(*) AS RUNS,
-    SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
-    AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE {where}
-GROUP BY 1, 2, 3
-ORDER BY DATABASE_NAME, TASK_NAME, PERIOD
-LIMIT 1000
-"""
-
-
-# ---------------------------------------------------------------------------
-# 5. Task failure detail (root-cause timeline)
-# ---------------------------------------------------------------------------
-
-def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
-    from app.core.sqlsafe import contains_filter
-
-    days = bounded_days(days, maximum=14)
-    # r23 #3: TASK_HISTORY prunes on SCHEDULED_TIME (the V031 builders bound
-    # BOTH columns for exactly this reason); without it the RCA read scanned
-    # the whole view — 33s on the fleet board. +1 day covers runs scheduled
-    # before the window that started inside it.
-    where = and_where(
-        f"SCHEDULED_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())",
-        f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        "STATE = 'FAILED'",
-        companies.database_clause(company, "DATABASE_NAME"),
-        companies.database_equals_clause(database),
-        contains_filter("SCHEMA_NAME", schema_contains),
-    )
-    return f"""
-SELECT
-    DATABASE_NAME,
-    SCHEMA_NAME,
-    NAME AS TASK_NAME,
-    ROOT_TASK_ID,
-    GRAPH_RUN_GROUP_ID,
-    QUERY_START_TIME,
-    DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC,
-    COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
-    LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE {where}
-ORDER BY QUERY_START_TIME DESC
-LIMIT 500
-"""
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
-"""Locks for v4.7.0: task-graph cost trends + warehouse change scorecard.
+"""Locks for v4.7.0: warehouse change scorecard (graph-cost half removed
+r26 2026-07-13 with task monitoring — owner: "we don't use it").
 
 1. Migration V024 bookkeeping: ordering guard, version row, objects created,
    teardown coverage, validate expectation.
@@ -15,9 +16,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from app.data import change_impact_sql, graph_sql
+from app.data import change_impact_sql
 from app.logic import wh_change
-from app.logic.graphs import enrich_graph_daily, pipeline_summary
 
 _ROOT = Path(__file__).resolve().parents[1]
 _MIG = (_ROOT / "snowflake" / "migrations" / "V024__warehouse_change_scorecard.sql").read_text(encoding="utf-8")
@@ -74,36 +74,6 @@ def test_validate_expects_at_least_v024():
 # 2. Graph cost builders — scoping and measurement
 # ---------------------------------------------------------------------------
 
-def test_graph_costs_measures_credits_per_run():
-    sql = graph_sql.graph_daily_costs(30)
-    assert "GRAPH_RUN_GROUP_ID" in sql
-    assert "QUERY_ATTRIBUTION_HISTORY" in sql            # measured, not estimated
-    assert "MIN_BY" in sql                               # pipeline = root (first to start)
-    assert "LIMIT 5000" in sql
-
-
-def test_graph_costs_honors_database_filter():
-    sql = graph_sql.graph_daily_costs(30, "ALFA", "ALFA_EDW_PRD", "EDW")
-    assert "ALFA_EDW_PRD" in sql                         # the user's ask: db-filterable
-    assert "SCHEMA_NAME" in sql and "EDW" in sql
-    unfiltered = graph_sql.graph_daily_costs(30, "ALFA")
-    assert "ALFA_EDW_PRD" not in unfiltered
-
-
-def test_graph_costs_company_scope_and_day_clamp():
-    trexis = graph_sql.graph_daily_costs(30, "Trexis")
-    assert "TRXS" in trexis
-    clamped = graph_sql.graph_daily_costs(999999)
-    assert "-90," in clamped                             # bounded live window
-
-
-def test_serverless_builder_scopes_and_filters():
-    sql = graph_sql.serverless_task_daily(30, "ALFA", "ALFA_EDW_PRD")
-    assert "SERVERLESS_TASK_HISTORY" in sql
-    assert "ALFA_EDW_PRD" in sql
-    assert "SERVERLESS_CREDITS" in sql
-
-
 def test_wh_registry_builder_scopes_company_and_warehouse():
     sql = change_impact_sql.warehouse_change_registry(90, "Trexis", "TRANSFORM")
     assert "WAREHOUSE_CHANGE_REGISTRY" in sql
@@ -138,45 +108,6 @@ def _daily(days_credits_runs_fails, pipeline="ROOT_A"):
             "AVG_WALL_SEC": 100.0, "P95_WALL_SEC": 200.0, "WH_CREDITS": credits,
         })
     return pd.DataFrame(rows)
-
-
-def test_enrich_dollars_and_allocated_per_run():
-    out = enrich_graph_daily(_daily([(2.0, 4, 1)]), rate_usd=3.68)
-    row = out.iloc[0]
-    assert row["USD"] == 7.36                            # 2 credits at 3.68
-    assert row["USD_PER_RUN"] == 1.84                    # allocated: day $ / day runs
-    assert row["SUCCESS_PCT"] == 75.0
-
-
-def test_enrich_empty_frame_is_safe():
-    out = enrich_graph_daily(pd.DataFrame(), 3.68)
-    assert out.empty and "USD" in out.columns
-
-
-def test_summary_trend_pricier_and_cheaper():
-    # $/run 1.0 for four days then 2.0 for four days -> PRICIER (and reverse).
-    pricier = pipeline_summary(enrich_graph_daily(
-        _daily([(1, 1, 0)] * 4 + [(2, 1, 0)] * 4), rate_usd=1.0))
-    assert pricier.iloc[0]["TREND"] == "PRICIER"
-    cheaper = pipeline_summary(enrich_graph_daily(
-        _daily([(2, 1, 0)] * 4 + [(1, 1, 0)] * 4), rate_usd=1.0))
-    assert cheaper.iloc[0]["TREND"] == "CHEAPER"
-
-
-def test_summary_trend_flat_and_thin():
-    flat = pipeline_summary(enrich_graph_daily(_daily([(1, 1, 0)] * 6), rate_usd=1.0))
-    assert flat.iloc[0]["TREND"] == "FLAT"
-    thin = pipeline_summary(enrich_graph_daily(_daily([(1, 1, 0)] * 3), rate_usd=1.0))
-    assert thin.iloc[0]["TREND"] == "n/a"                # < 4 active days
-
-
-def test_summary_totals_reconcile():
-    out = pipeline_summary(enrich_graph_daily(_daily([(1, 2, 0), (3, 2, 2)]), rate_usd=2.0))
-    row = out.iloc[0]
-    assert row["USD"] == 8.0                             # (1+3) credits at $2
-    assert row["GRAPH_RUNS"] == 4
-    assert row["USD_PER_RUN"] == 2.0
-    assert row["SUCCESS_PCT"] == 50.0                    # 2 of 4 runs failed
 
 
 # ---------------------------------------------------------------------------

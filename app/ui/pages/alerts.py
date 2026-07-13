@@ -106,7 +106,7 @@ def _delivery_status() -> None:
                    "section). Until then, 2am alerts wait for someone to look.")
     else:
         st.error("No webhook integration — alerts stay in-app only. One-time setup: "
-                 "snowflake/webhook_delivery.sql (ACCOUNTADMIN pastes the channel URL).")
+                 "snowflake/webhook_delivery.sql (SNOW_ACCOUNTADMINS pastes the channel URL).")
 
 
 @st.fragment
@@ -272,7 +272,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                                     page=_PAGE)
                             notify(ok, msg)
                     else:
-                        st.caption("Copy the SQL; executing needs OVERWATCH_OPERATOR.")
+                        st.caption("Copy the SQL; executing needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
                     booked = run(mart_sql.ledger_for_event(event_id[:8]), page=_PAGE,
                                  key=f"clf_led_{event_id[:8]}", tier="live",
                                  source="SAVINGS_LEDGER")
@@ -371,7 +371,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                         log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
                                      page=_PAGE)
             else:
-                st.caption("Executing requires the OVERWATCH_OPERATOR role; the SQL is copyable for review.")
+                st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
 
         if is_operator and len(edf):
             st.divider()
@@ -504,7 +504,7 @@ def render() -> None:
                         f"WHERE RULE_ID = {sql_literal(rule_id)};",
                         language="sql",
                     )
-                    st.caption("Rule changes are generate-only: review, then run as OVERWATCH_OPERATOR.")
+                    st.caption("Rule changes are generate-only: review, then run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
                     st.caption("WINDOW_HOURS is informational: each rule family's scan "
                                "window is fixed in SP_ALERT_SCAN (see the runbook's rule "
                                "catalogue) — editing the column does not change the scan.")

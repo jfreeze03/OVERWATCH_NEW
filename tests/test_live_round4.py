@@ -29,18 +29,17 @@ def test_replay_builders_take_company():
     assert mv.count("COMPANY = 'ALFA'") == 2                  # day CTE + baseline CTE
     act = mart_sql.day_activity("2026-07-08", "ALFA")
     assert act.count("COMPANY = 'ALFA'") == 2                 # day + its 14d baseline
-    assert "COMPANY = 'ALFA'" in mart_sql.day_task_failures("2026-07-08", "ALFA")
     assert "(COMPANY = 'ALFA' OR UPPER(COMPANY) = 'ALL')" in mart_sql.day_alerts("2026-07-08", "ALFA")
     # account-wide replay stays account-wide
     for fn in (mart_sql.day_spend_movers, mart_sql.day_activity,
-               mart_sql.day_task_failures, mart_sql.day_alerts):
+               mart_sql.day_alerts):
         assert "COMPANY = '" not in fn("2026-07-08")
 
 
 def test_replay_call_sites_pass_the_scope():
     body = _CR.split("def _day_replay", 1)[1].split("\ndef ", 1)[0]
     for call in ("day_spend_movers(day_iso, rp_company)", "day_activity(day_iso, rp_company)",
-                 "day_task_failures(day_iso, rp_company)", "day_alerts(day_iso, rp_company)"):
+                 "day_alerts(day_iso, rp_company)"):
         assert body.count(call) == 2, call                    # batch spec + serial fallback
     assert "Scoped to {rp_company}" in body                   # the caption says so
 

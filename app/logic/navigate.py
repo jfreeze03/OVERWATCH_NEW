@@ -36,7 +36,6 @@ _FAMILY_DEFAULTS = (
     ("COST", ("Cost & Contract", "Spend & Attribution")),
     ("PERF", ("Operations", "Queries")),
     ("PIPE", ("Operations", "Pipeline SLA")),
-    ("TASK", ("Operations", "Tasks")),
     ("SEC", ("Security", "Access")),
 )
 

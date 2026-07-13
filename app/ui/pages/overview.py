@@ -207,9 +207,6 @@ def render() -> None:
     fail_pct = (failed_queries / queries * 100) if queries else 0.0
     queued_minutes = _board_metric(board, "QUEUED_MINUTES")
     spill_gb = _board_metric(board, "SPILL_GB")
-    task_runs = _board_metric(board, "TASK_RUNS")
-    task_failures = _board_metric(board, "TASK_FAILURES")
-    task_fail_pct = (task_failures / task_runs * 100) if task_runs else 0.0
 
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
     # V041 R8: the daily fact stores the four retro-score input aggregates;
@@ -228,7 +225,6 @@ def render() -> None:
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts,
         "query_fail_pct": fail_pct,
-        "task_fail_pct": task_fail_pct,
         "queue_minutes": queued_minutes,
         "spill_gb": spill_gb,
     }, weights=scoring.resolve_weights(settings))

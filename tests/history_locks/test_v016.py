@@ -49,8 +49,9 @@ def test_backfill_script_idempotent_and_mirrors_loaders():
 
 def test_grants_for_new_tables():
     roles = (_ROOT / "snowflake" / "roles.sql").read_text(encoding="utf-8")
-    assert "APP_USAGE TO ROLE OVERWATCH_MONITOR" in roles
-    assert "DEPT_BUDGETS TO ROLE OVERWATCH_OPERATOR" in roles
+    # r26 (owner 2026-07-13): blanket grants to SNOW_* replaced per-table lines.
+    assert "FUTURE TABLES IN SCHEMA DBA_MAINT_DB.OVERWATCH TO ROLE SNOW_ACCOUNTADMINS" in roles
+    assert "FUTURE TABLES IN SCHEMA DBA_MAINT_DB.OVERWATCH TO ROLE SNOW_SYSADMINS" in roles
 
 
 def test_round3_builders():
@@ -81,8 +82,6 @@ def test_round3_ux_builders_and_wiring():
     from app.data import mart_sql as _m
     from app.data import ops_sql as _o
 
-    dag = _o.task_graph_nodes()
-    assert "TASK_VERSIONS" in dag and "PREDECESSORS" in dag and "FAILURES_24H" in dag
     vd = _o.volume_deltas()
     assert "TABLE_DML_HISTORY" in vd and "'WATCH'" in vd and "AVG_ROWS >= 1000" in vd
     assert "APP_USAGE" in _m.app_usage_summary(30)

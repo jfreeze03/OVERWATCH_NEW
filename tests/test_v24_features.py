@@ -90,7 +90,7 @@ def _inputs(days=10, **overrides):
         "CREDITS_BILLED": [10.0] * days, "CRIT_RAISED": [0] * days,
         "HIGH_RAISED": [0] * days, "QUERY_COUNT": [1000] * days,
         "FAILED_COUNT": [0] * days, "QUEUED_SEC": [0.0] * days,
-        "SPILL_GB": [0.0] * days, "TASK_RUNS": [100] * days, "TASK_FAILED": [0] * days,
+        "SPILL_GB": [0.0] * days,
     }
     base.update(overrides)
     return pd.DataFrame(base)
@@ -154,5 +154,5 @@ def test_recheck_account_rules_ignore_warehouse():
 def test_score_inputs_and_metric_kinds_sql():
     assert "RESOLUTION_KIND IN ('ACTIONED', 'NOISE')" in mart_sql.rule_metric_kinds(90)
     sql = mart_sql.score_inputs_daily(30)
-    for col in ("CRIT_RAISED", "QUEUED_SEC", "TASK_FAILED", "CREDITS_BILLED"):
+    for col in ("CRIT_RAISED", "QUEUED_SEC", "CREDITS_BILLED"):
         assert col in sql

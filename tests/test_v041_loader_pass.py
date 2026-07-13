@@ -630,7 +630,7 @@ def test_ops_diag_readers_and_first_paint_gate():
 def test_platform_score_reader_and_overview_swap():
     sql = mart27_sql.platform_score_inputs(30)
     for col in ("DAY", "CREDITS_BILLED", "QUERY_COUNT", "FAILED_COUNT", "QUEUED_SEC",
-                "SPILL_GB", "TASK_RUNS", "TASK_FAILED", "CRIT_RAISED", "HIGH_RAISED"):
+                "SPILL_GB", "CRIT_RAISED", "HIGH_RAISED"):
         assert col in sql, col
     assert "RAISED_AT" not in sql and "HOUR_TS" not in sql  # old source columns absent
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")

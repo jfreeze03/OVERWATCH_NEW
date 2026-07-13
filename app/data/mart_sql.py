@@ -144,21 +144,6 @@ ORDER BY DAY
 """
 
 
-def fact_task_daily(days: int, company: str = "ALL", database: str = "") -> str:
-    days = bounded_days(days)
-    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
-    if str(company).upper() != "ALL":
-        where.append(f"COMPANY = {sql_literal(company)}")
-    if str(database or "").strip():
-        where.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
-    return f"""
-SELECT DAY, DATABASE_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
-FROM {mart_object("FACT_TASK_DAILY")}
-WHERE {and_where(*where)}
-ORDER BY FAILED DESC, DAY DESC
-"""
-
-
 def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     """Window-vs-prior warehouse credits from FACT_WAREHOUSE_DAILY.
 
@@ -405,7 +390,7 @@ WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
 
 
 def incident_timeline(days: int, company: str = "ALL") -> str:
-    """One time axis for everything that happened: alerts, task failures,
+    """One time axis for everything that happened: alerts,
     DDL. The 'what else happened around then?' view Datadog does well."""
     days = bounded_days(days, 14)
     comp = str(company or "ALL")
@@ -418,13 +403,6 @@ SELECT 'ALERT' AS EVENT_TYPE, RAISED_AT::TIMESTAMP_NTZ AS AT, SEVERITY,
        LEFT(TITLE, 120) AS LABEL
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()) {alert_filter}
-UNION ALL
-SELECT 'TASK FAILURE', COMPLETED_TIME::TIMESTAMP_NTZ, 'HIGH',
-       LEFT(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME || ': ' ||
-            COALESCE(ERROR_MESSAGE, 'failed'), 120)
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE COMPLETED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-  AND STATE = 'FAILED' {entity_filter}
 UNION ALL
 SELECT 'DDL CHANGE', START_TIME::TIMESTAMP_NTZ, 'INFO',
        LEFT(USER_NAME || ': ' || QUERY_TEXT, 120)
@@ -743,12 +721,6 @@ q AS (
     WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
     GROUP BY 1
 ),
-t AS (
-    SELECT DAY, SUM(RUNS) AS TASK_RUNS, SUM(FAILED) AS TASK_FAILED
-    FROM {core_object("FACT_TASK_DAILY")}
-    WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-    GROUP BY DAY
-),
 a AS (
     SELECT DATE(RAISED_AT) AS DAY,
            COUNT_IF(UPPER(SEVERITY) = 'CRITICAL') AS CRIT_RAISED,
@@ -763,13 +735,10 @@ SELECT spend.DAY,
        COALESCE(q.FAILED_COUNT, 0) AS FAILED_COUNT,
        COALESCE(q.QUEUED_SEC, 0)   AS QUEUED_SEC,
        COALESCE(q.SPILL_GB, 0)     AS SPILL_GB,
-       COALESCE(t.TASK_RUNS, 0)    AS TASK_RUNS,
-       COALESCE(t.TASK_FAILED, 0)  AS TASK_FAILED,
        COALESCE(a.CRIT_RAISED, 0)  AS CRIT_RAISED,
        COALESCE(a.HIGH_RAISED, 0)  AS HIGH_RAISED
 FROM spend
 LEFT JOIN q ON q.DAY = spend.DAY
-LEFT JOIN t ON t.DAY = spend.DAY
 LEFT JOIN a ON a.DAY = spend.DAY
 ORDER BY spend.DAY
 """
@@ -830,21 +799,6 @@ base AS (
     WHERE DATE(HOUR_TS) BETWEEN DATEADD('day', -14, {lit}) AND DATEADD('day', -1, {lit}){comp}
 )
 SELECT day_of.*, base.BASELINE_QUERIES, base.BASELINE_FAILED FROM day_of, base
-"""
-
-
-def day_task_failures(day: object, company: str = "ALL") -> str:
-    from app.data.common import day_literal
-
-    lit = day_literal(day)
-    comp = ("" if str(company or "ALL").upper() == "ALL"
-            else f" AND COMPANY = {sql_literal(company)}")
-    return f"""
-SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, LAST_ERROR
-FROM {core_object("FACT_TASK_DAILY")}
-WHERE DAY = {lit} AND FAILED > 0{comp}
-ORDER BY FAILED DESC
-LIMIT 50
 """
 
 

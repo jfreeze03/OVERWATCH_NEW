@@ -193,7 +193,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                     ok_all, count = ok_all and ok, count + int(ok)
                 (st.success if ok_all else st.error)(f"{count}/{len(statements)} action(s) queued.")
             elif not is_operator:
-                st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
+                st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
     with st.expander("AI Functions usage (optional view)"):
         # Expander bodies run even when collapsed (Codex r17 #18) — the scan
@@ -393,4 +393,4 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
             notify(ok, msg)
         elif not is_operator:
-            st.caption("Copy and run as OVERWATCH_OPERATOR - in-app execution needs the operator role.")
+            st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")

@@ -38,6 +38,8 @@ def test_v014_purge_settings_driven_with_floors():
 
 def test_roles_audit_append_only_and_remediation_grant():
     roles = (_ROOT / "snowflake" / "roles.sql").read_text(encoding="utf-8")
-    assert "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT" in roles
-    assert "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG" in roles
-    assert "GRANT INSERT         ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG" in roles
+    # r26 (owner 2026-07-13): the operator layer is retired — the app's two
+    # admin roles hold blanket writes, so the append-only REVOKEs went with it.
+    # V014's migration semantics (audit tables + purge riders) stay locked above.
+    assert "SNOW_SYSADMINS" in roles
+    assert "TO ROLE OVERWATCH_OPERATOR" not in roles      # no grants to the retired role

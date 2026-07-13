@@ -1,7 +1,7 @@
 """Day-replay narrative: turn the day's cross-domain frames into headlines.
 
-Pure module — the Control Room page fetches six day-scoped frames (spend
-movers, activity vs baseline, DDL, grants, task failures, alerts) and this
+Pure module — the Control Room page fetches five day-scoped frames (spend
+movers, activity vs baseline, DDL, grants, alerts) and this
 distills them into the ordered story Snowsight's siloed views can't tell.
 """
 
@@ -17,7 +17,6 @@ def replay_headlines(
     activity: pd.DataFrame | None,
     ddl_count: int,
     grants_count: int,
-    task_failures: int,
     critical_alerts: int,
     rate_usd: float,
 ) -> list[dict]:
@@ -53,9 +52,6 @@ def replay_headlines(
     if critical_alerts:
         heads.append({"severity": "bad",
                       "text": f"{critical_alerts} CRITICAL alert(s) raised."})
-    if task_failures:
-        heads.append({"severity": "warn",
-                      "text": f"{task_failures} task failure(s)."})
     if ddl_count:
         heads.append({"severity": "info",
                       "text": f"{ddl_count} DDL change(s) landed — correlate below."})

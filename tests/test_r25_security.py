@@ -16,7 +16,7 @@ def test_new_network_logins_contract():
     from app.data import security_sql
     sql = security_sql.new_network_logins(7)
     assert "DATEADD('day', -90," in sql                      # fixed 90d baseline
-    assert "'ACCOUNTADMIN', 'SECURITYADMIN', 'ORGADMIN'" in sql  # same list as admin_role_holders
+    assert "'SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'" in sql  # same list as admin_role_holders (owner 2026-07-13)
     assert "FIRST_SEEN >= DATEADD('day', -7," in sql         # only window-new pairs surface
     assert "FIRST_AUTHENTICATION_FACTOR" in sql              # password vs SSO visible per row
     assert "COALESCE(L.CLIENT_IP, '(none)')" in sql          # null IPs group honestly

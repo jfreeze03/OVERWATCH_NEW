@@ -52,21 +52,6 @@ def _assemble(context: str, evidence: str, question: str) -> str:
     return prompt[:MAX_PROMPT_CHARS]
 
 
-def task_failure_prompt(timeline: pd.DataFrame, company: str, window_days: int = 7) -> str:
-    evidence = _serialize_rows(
-        timeline,
-        ["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
-         "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"],
-    )
-    return _assemble(
-        f"Snowflake task failures for company scope {company}, last {window_days} days. "
-        "ROLE_IN_GRAPH=Root cause means first failure in its task-graph run; Cascade rows are downstream.",
-        evidence,
-        "Diagnose the most likely root causes and recommend fixes, prioritizing Root cause rows and "
-        "repeat offenders. Group by database where it clarifies ownership.",
-    )
-
-
 def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int) -> str:
     evidence = _serialize_rows(
         advisor,
@@ -82,19 +67,14 @@ def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int)
     )
 
 
-def release_compare_prompt(verdicts: list[dict], task_deltas: pd.DataFrame,
+def release_compare_prompt(verdicts: list[dict],
                            release_date: str, window_days: int) -> str:
     verdict_lines = "\n".join(
         f"- {v.get('Metric')}: before={v.get('Before')} after={v.get('After')} "
         f"delta={v.get('Delta %')}% verdict={v.get('Verdict')}"
         for v in (verdicts or [])
     ) or "(no rows)"
-    task_lines = _serialize_rows(
-        task_deltas,
-        ["DATABASE_NAME", "TASK_NAME", "FAILED_BEFORE", "FAILED_AFTER",
-         "NEW_FAILURES", "AVG_SEC_BEFORE", "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"],
-    )
-    evidence = f"QUERY HEALTH:\n{verdict_lines}\n\nPER-TASK DELTAS:\n{task_lines}"
+    evidence = f"QUERY HEALTH:\n{verdict_lines}"
     return _assemble(
         f"Release comparison around {release_date}: {window_days} days before vs after.",
         evidence,

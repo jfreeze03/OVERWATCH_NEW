@@ -17,7 +17,7 @@ from app.config import core_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days
 
-_TYPES = ("PROCEDURE", "TASK")
+_TYPES = ("PROCEDURE",)   # r26: TASK branch removed with task monitoring (owner call)
 _NAME_RE = re.compile(r"^[A-Za-z0-9_$.]{1,600}$")
 
 
@@ -62,9 +62,8 @@ def object_run_history(object_type: str, object_name: str, days: int = 28) -> st
     name = str(object_name or "").strip()
     if not _NAME_RE.match(name):
         raise ValueError(f"Invalid object name: {object_name!r}")
-    if otype == "PROCEDURE":
-        short = name.split(".")[-1].upper()
-        return f"""
+    short = name.split(".")[-1].upper()
+    return f"""
 SELECT
     DATE_TRUNC('day', START_TIME) AS DAY,
     COUNT(*) AS RUNS,
@@ -77,20 +76,6 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND QUERY_TEXT ILIKE {sql_literal('%' + short + '%')}
   AND POSITION({sql_literal(short + "(")} IN
                REPLACE(REPLACE(UPPER(QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
-GROUP BY 1
-ORDER BY 1
-"""
-    return f"""
-SELECT
-    DATE_TRUNC('day', QUERY_START_TIME) AS DAY,
-    COUNT(*) AS RUNS,
-    COUNT_IF(STATE = 'FAILED') AS FAILS,
-    ROUND(MEDIAN(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME)) / 1000, 1) AS MEDIAN_S,
-    ROUND(APPROX_PERCENTILE(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME), 0.95) / 1000, 1) AS P95_S
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-  AND STATE IN ('SUCCEEDED', 'FAILED')
-  AND DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME = {sql_literal(name.upper())}
 GROUP BY 1
 ORDER BY 1
 """

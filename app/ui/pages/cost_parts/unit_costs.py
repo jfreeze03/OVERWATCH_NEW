@@ -36,7 +36,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     st.caption(
         "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~6h lag, idle time "
         "excluded) at your contract rate. For 'who owns the bill' including idle, "
-        "use Optimization's allocated view; for pipelines, Operations → Task graphs ($)."
+        "use Optimization's allocated view for pipeline-level attribution."
     )
 
     # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and

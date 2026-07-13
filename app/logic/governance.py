@@ -76,7 +76,7 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
     if breakglass > 0:
         drivers.append(ScoreDriver(
             "Break-glass grants", _cap(breakglass * w["GOV_PTS_BREAKGLASS_GRANT"], 18),
-            f"{breakglass:.0f} ACCOUNTADMIN-tier grants in the last 30 days."))
+            f"{breakglass:.0f} admin-tier grants in the last 30 days."))
 
     no_monitor = safe_float(inputs.get("warehouses_no_monitor"))
     if no_monitor > 0:

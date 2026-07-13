@@ -32,12 +32,6 @@ def test_action_queue_filters_open_in_sql_and_mirrors_logic():
     sqlglot.parse(sql, dialect="snowflake")
 
 
-def test_failure_timeline_skips_scan_when_summary_says_zero():
-    assert "known_failures: float | None = None" in _OPS
-    assert "if known_failures is not None and known_failures <= 0:" in _OPS
-    assert "if days >= 7 else None" in _OPS               # 7d detail needs >=7d summary
-
-
 def test_storage_builders_return_latest_day_only():
     for sql in (cost_sql.storage_by_database(90, "ALFA"),
                 cost_sql.storage_by_database_live(90, "ALFA")):

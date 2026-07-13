@@ -68,8 +68,8 @@ def test_v032_task_chain_and_bookkeeping():
     assert "DROP VIEW IF EXISTS DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS;" in teardown
     assert "DROP TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_INCIDENT_AUTODECLARE;" in teardown
     roles = (_ROOT / "snowflake" / "roles.sql").read_text(encoding="utf-8")
-    assert "INCIDENTS       TO ROLE OVERWATCH_OPERATOR" in roles
-    assert "INCIDENT_MEMBERS TO ROLE OVERWATCH_OPERATOR" in roles
+    # r26: blanket SNOW_* grants cover INCIDENTS/INCIDENT_MEMBERS writes.
+    assert "INSERT, UPDATE, DELETE ON ALL TABLES" in roles
 
 
 def test_is_rerun_rider_closed_as_already_safe():

@@ -141,32 +141,6 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
-def task_release_deltas(df: pd.DataFrame) -> pd.DataFrame:
-    """Pivot per-task BEFORE/AFTER rows; surface tasks that got worse."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    pivot = df.pivot_table(
-        index=["DATABASE_NAME", "TASK_NAME"], columns="PERIOD",
-        values=["RUNS", "FAILED", "AVG_SEC"], aggfunc="sum",
-    )
-    pivot.columns = [f"{m}_{p}" for m, p in pivot.columns]
-    pivot = pivot.reset_index().fillna(0)
-    for col in ("FAILED_BEFORE", "FAILED_AFTER", "AVG_SEC_BEFORE", "AVG_SEC_AFTER"):
-        if col not in pivot.columns:
-            pivot[col] = 0.0
-    pivot["NEW_FAILURES"] = (pivot["FAILED_AFTER"] - pivot["FAILED_BEFORE"]).clip(lower=0)
-    pivot["RUNTIME_DELTA_PCT"] = pivot.apply(
-        lambda r: round((safe_float(r["AVG_SEC_AFTER"]) - safe_float(r["AVG_SEC_BEFORE"]))
-                        / abs(safe_float(r["AVG_SEC_BEFORE"])) * 100, 1)
-        if safe_float(r["AVG_SEC_BEFORE"]) else 0.0,
-        axis=1,
-    )
-    pivot["GOT_WORSE"] = (pivot["NEW_FAILURES"] > 0) | (pivot["RUNTIME_DELTA_PCT"] > 25)
-    return pivot.sort_values(["GOT_WORSE", "NEW_FAILURES", "RUNTIME_DELTA_PCT"],
-                             ascending=[False, False, False]).reset_index(drop=True)
-
-
-# ---- 5. Task failure root-cause ---------------------------------------------
 
 _ERROR_FAMILIES = (
     ("Permission / auth", r"not authorized|insufficient privilege|does not exist or not authorized|access denied"),
@@ -186,24 +160,6 @@ def classify_task_error(message: object) -> str:
         if re.search(pattern, text):
             return family
     return "Other"
-
-
-def build_failure_timeline(df: pd.DataFrame) -> pd.DataFrame:
-    """Mark the first failure per graph run (root cause) vs cascade, and
-    attach an error family for grouping."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    out["ERROR_FAMILY"] = out.get("ERROR_MESSAGE", "").map(classify_task_error)
-    out["QUERY_START_TIME"] = pd.to_datetime(out["QUERY_START_TIME"], errors="coerce")
-    group_col = "GRAPH_RUN_GROUP_ID" if "GRAPH_RUN_GROUP_ID" in out.columns else None
-    if group_col and out[group_col].notna().any():
-        firsts = out.sort_values("QUERY_START_TIME").groupby(group_col, dropna=False).head(1).index
-        out["ROLE_IN_GRAPH"] = "Cascade"
-        out.loc[firsts, "ROLE_IN_GRAPH"] = "Root cause"
-    else:
-        out["ROLE_IN_GRAPH"] = "Root cause"
-    return out.sort_values("QUERY_START_TIME", ascending=False).reset_index(drop=True)
 
 
 # ---- 7. Dormant users ----------------------------------------------------------

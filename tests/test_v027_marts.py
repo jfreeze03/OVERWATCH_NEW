@@ -109,7 +109,7 @@ def test_readers_are_thin_and_bounded():
 def test_all_nine_readers_are_canaried():
     src = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     for name in ("warehouse_efficiency", "query_families", "role_hourly", "schema_hourly",
-                 "cost_allocation", "task_graphs", "security_posture", "incident_timeline",
+                 "cost_allocation", "security_posture", "incident_timeline",
                  "ai_usage"):
         assert f"mart27_sql.{name}" in src, name
 

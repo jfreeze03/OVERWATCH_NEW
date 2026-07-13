@@ -24,7 +24,6 @@ LIVE_BUILDERS = [
     lambda: ops_sql.query_window_summary(7, "ALFA"),
     lambda: ops_sql.top_queries_by_elapsed(7, "ALFA"),
     lambda: ops_sql.failures_by_error(7, "Trexis"),
-    lambda: ops_sql.task_runs(7, "ALFA"),
     lambda: ops_sql.warehouse_pressure(7, "ALFA"),
     lambda: ops_sql.lock_contention(7),
     lambda: security_sql.failed_logins(7, "ALFA"),
@@ -139,9 +138,6 @@ def test_database_and_schema_filters_flow_into_builders():
     assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_SIT')" in sql
     assert "SCHEMA_NAME ILIKE '%CLAIMS%' ESCAPE '~'" in sql
 
-    sql = ops_sql.task_runs(7, "ALFA", database="ALFA_EDW_PROD", schema_contains="DW")
-    assert "UPPER(DATABASE_NAME) IN ('ALFA_EDW_PROD')" in sql and "SCHEMA_NAME ILIKE '%DW%' ESCAPE '~'" in sql
-
     sql = cost_sql.allocated_attribution(7, "USER_NAME", "ALFA", database="ADMIN", schema_contains="X")
     assert "UPPER(DATABASE_NAME) IN ('ADMIN')" in sql
 
@@ -150,9 +146,6 @@ def test_database_and_schema_filters_flow_into_builders():
 
     sql = insights_sql.repeat_query_fingerprints(7, "ALL", database="TRXS_EDW_PRD", schema_contains="GW")
     assert "UPPER(DATABASE_NAME) IN ('TRXS_EDW_PRD')" in sql
-
-    sql = mart_sql.fact_task_daily(7, "ALFA", database="ALFA_EDW_SIT")
-    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_SIT'" in sql
 
 
 def test_schema_filter_sanitizes_hostile_input():

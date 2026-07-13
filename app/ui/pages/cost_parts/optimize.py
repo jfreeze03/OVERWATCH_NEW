@@ -159,7 +159,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         f"{sql_literal('Re-run idle analysis for ' + str(r['WAREHOUSE_NAME']) + ' after the change; verify idle $ drop.')});"
                     )
                 st.code("\n".join(statements), language="sql")
-                st.caption("Review and run as OVERWATCH_OPERATOR. Warehouse changes are never executed from the app.")
+                st.caption("Review and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS. Warehouse changes are never executed from the app.")
         ai_evaluation_panel(
             key=f"idle_{company}_{days}",
             prompt=idle_warehouse_prompt(advisor, company, days),
@@ -557,7 +557,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.markdown("**Guarded remediation (generate → review → execute)**")
     panel_help(
         "Turns findings into exact `ALTER` statements. Execution needs the "
-        "OVERWATCH_OPERATOR role, writes a REMEDIATION_LOG audit row, and books an "
+        "admin profile, writes a REMEDIATION_LOG audit row, and books an "
         "ESTIMATED savings-ledger item that the monthly verifier later proves or rejects. "
         "Anyone can copy the SQL for review."
     )
@@ -633,7 +633,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         execute_statement(ledger_sql, page=_PAGE)
                     notify(ok, msg)
             else:
-                st.caption("Copy the SQL freely; executing from the app requires OVERWATCH_OPERATOR.")
+                st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
     remlog = run(mart_sql.remediation_log(50), page=_PAGE, key="remed_log", tier="live",
                  source="REMEDIATION_LOG")
@@ -700,7 +700,7 @@ def _savings_tab() -> None:
             ok, msg = execute_statement(insert_sql, page=_PAGE)
             notify(ok, msg)
         elif not is_operator:
-            st.caption("Copy and run as OVERWATCH_OPERATOR — in-app execution needs the operator role.")
+            st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app execution needs an admin profile.")
 
     if not res.empty:
         with st.expander("Verify an estimated item (proof required)"):

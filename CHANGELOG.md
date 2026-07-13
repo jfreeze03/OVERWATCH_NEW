@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.42.0 — r26: two roles, no task monitoring (2026-07-13)
+
+Owner: "the only roles that will have access is SNOW_ACCOUNTADMINS and
+SNOW_SYSADMINS. remove any traces of other roles. also remove task monitor
+references. the app is producing a number of access error messages."
+
+- **roles.sql rewritten.** The OVERWATCH_MONITOR/OPERATOR layer is retired
+  (actively dropped, idempotent); every grant now goes directly to
+  SNOW_ACCOUNTADMINS and SNOW_SYSADMINS — locked so no other grantee can
+  reappear. Teardown keeps its everything-commented safety law; rebuild
+  bundle copies regenerated. Re-run roles.sql once to apply.
+- **Task monitoring removed end-to-end.** Operations loses the Tasks and
+  Task graphs ($) sections; the failure-RCA timeline, release task-deltas,
+  Control Room task vitals/triage/replay rows, the Overview task-failure
+  score signal, the incident-timeline TASK arm, and the change-impact TASK
+  drill are gone with their builders (graph_sql module deleted). Every
+  live TASK_HISTORY / TASK_VERSIONS / SERVERLESS_TASK_HISTORY read — the
+  access-error sources — is out of the app; the loader's own DAG health
+  still surfaces via APP_ERROR_LOG and freshness (loader_chain_check.sql
+  unchanged for worksheet diagnosis).
+- **Break-glass panels watch the real roles** (SNOW_* pair, not the unused
+  built-ins); admin/alert captions and the dept map follow. Platform score
+  is task-free in both live and retro paths (weights unchanged otherwise).
+- Live-scan budgets DOWN: operations 22 -> 18, control_room 3 -> 2.
+  18 task-monitoring tests removed with the feature; needles updated with
+  r26 notes; NaT fix in triage RAISED_AT normalization surfaced by the
+  slimmer frame.
+
 ## 4.41.0 — r25: the two security metrics the owner picked (2026-07-13)
 
 From the seven proposed, the owner chose #6 and #7. Both are click-gated —

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.data import change_impact_sql, insights_sql, mart_sql
+from app.data import change_impact_sql, mart_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,18 +41,10 @@ def test_change_drill_prefilters_before_normalizing():
     assert sql.count("QUERY_TEXT ILIKE '%SP_ALERT_SCAN%'") == 1
     assert sql.count("POSITION('SP_ALERT_SCAN('") == 1     # exact match still decides
     assert sql.index("ILIKE") < sql.index("POSITION")
-    # the TASK branch has an exact FQN equality — no text pass to prefilter
-    tsql = change_impact_sql.object_run_history("TASK", "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY", 28)
-    assert "ILIKE" not in tsql
-
-
-def test_task_failure_details_prunes_on_scheduled_time():
-    sql = insights_sql.task_failure_details(7, "ALFA")
-    # TASK_HISTORY prunes on SCHEDULED_TIME (V031 precedent) — the RCA read
-    # sat at 33s scanning the whole view without it
-    assert "SCHEDULED_TIME >= DATEADD('day', -8, CURRENT_DATE())" in sql
-    assert "QUERY_START_TIME >= DATEADD('day', -7, CURRENT_DATE())" in sql
-    assert "STATE = 'FAILED'" in sql                       # semantics unchanged
+    # r26: the TASK branch was removed with task monitoring (owner call)
+    import pytest
+    with pytest.raises(ValueError):
+        change_impact_sql.object_run_history("TASK", "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY", 28)
 
 
 def test_security_changes_tab_batches_its_two_live_reads():

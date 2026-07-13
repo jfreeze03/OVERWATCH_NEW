@@ -33,7 +33,7 @@ def test_day_literal_rejects_hostile():
 
 def test_day_builders_embed_validated_literal():
     for builder in (mart_sql.day_spend_movers, mart_sql.day_activity,
-                    mart_sql.day_task_failures, mart_sql.day_alerts,
+                    mart_sql.day_alerts,
                     security_sql.day_ddl, security_sql.day_grants):
         sql = builder("2026-07-01")
         assert "'2026-07-01'::DATE" in sql
@@ -53,18 +53,18 @@ def _movers(delta):
 
 def test_replay_orders_worst_first():
     heads = replay_headlines(_movers(30.0), None, ddl_count=2, grants_count=1,
-                             task_failures=3, critical_alerts=1, rate_usd=2.0)
+                             critical_alerts=1, rate_usd=2.0)
     assert heads[0]["severity"] == "bad"
     sev = [h["severity"] for h in heads]
     assert sev == sorted(sev, key=lambda x: {"bad": 0, "warn": 1, "info": 2, "ok": 3}[x])
 
 
 def test_replay_quiet_day_is_empty():
-    assert replay_headlines(None, None, 0, 0, 0, 0, 2.0) == []
+    assert replay_headlines(None, None, 0, 0, 0, 2.0) == []
 
 
 def test_replay_down_mover_is_ok_severity():
-    heads = replay_headlines(_movers(-30.0), None, 0, 0, 0, 0, 2.0)
+    heads = replay_headlines(_movers(-30.0), None, 0, 0, 0, 2.0)
     assert heads and heads[-1]["severity"] == "ok"
 
 

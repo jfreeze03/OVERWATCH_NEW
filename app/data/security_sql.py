@@ -156,7 +156,8 @@ LIMIT 200
 
 
 def admin_role_holders() -> str:
-    """Current holders of break-glass roles; should be a short, known list."""
+    """Current holders of the admin roles (owner 2026-07-13: the only roles
+    with access are SNOW_ACCOUNTADMINS / SNOW_SYSADMINS); short, known list."""
     return """
 SELECT
     ROLE AS ADMIN_ROLE,
@@ -165,7 +166,7 @@ SELECT
     CREATED_ON AS GRANTED_ON
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
 WHERE DELETED_ON IS NULL
-  AND ROLE IN ('ACCOUNTADMIN', 'SECURITYADMIN', 'ORGADMIN')
+  AND ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')
 ORDER BY ROLE, USER_NAME
 """
 
@@ -477,7 +478,7 @@ WITH admins AS (
     SELECT DISTINCT GRANTEE_NAME AS USER_NAME
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
     WHERE DELETED_ON IS NULL
-      AND ROLE IN ('ACCOUNTADMIN', 'SECURITYADMIN', 'ORGADMIN')
+      AND ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')
 ),
 hist AS (
     SELECT L.USER_NAME,
