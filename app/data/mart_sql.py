@@ -693,6 +693,34 @@ LIMIT 5000
 """
 
 
+def fact_warehouse_pressure(days: int, company: str = "ALL") -> str:
+    """ops_sql.warehouse_pressure contract from FACT_QUERY_HOURLY (r23 #1:
+    the live scan was a top fleet pain key at 17.8s p50). Queued seconds,
+    spill and counts are exact sums of the hourly fact; P95_ELAPSED_SEC is
+    the PEAK hourly-group p95 — the caller labels it. Live stays as the
+    labeled fallback for pre-fact windows."""
+    days = max(1, min(int(days or 7), 90))
+    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
+             "WAREHOUSE_NAME IS NOT NULL"]
+    if str(company).upper() != "ALL":
+        where.append(f"COMPANY = {sql_literal(company)}")
+    return f"""
+SELECT
+    WAREHOUSE_NAME,
+    SUM(QUERY_COUNT) AS QUERY_COUNT,
+    ROUND(SUM(COALESCE(QUEUED_SEC_SUM, 0)), 1) AS QUEUED_SEC,
+    ROUND(SUM(COALESCE(SPILL_REMOTE_GB, 0)), 2) AS SPILL_REMOTE_GB,
+    MAX(COALESCE(P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC
+FROM {core_object("FACT_QUERY_HOURLY")}
+WHERE {" AND ".join(where)}
+GROUP BY 1
+HAVING SUM(COALESCE(QUEUED_SEC_SUM, 0)) > 0
+    OR SUM(COALESCE(SPILL_REMOTE_GB, 0)) > 0
+ORDER BY QUEUED_SEC DESC
+LIMIT 50
+"""
+
+
 def score_inputs_daily(days: int = 30) -> str:
     """Per-day signals for the RETRO platform-score trend, from facts +
     alert history. The live score adds stale-source/open-action penalties

@@ -549,11 +549,16 @@ def _contention_tab(company: str, days: int) -> None:
     left, right = st.columns(2)
     with left:
         st.markdown("**Warehouse queue & spill pressure**")
-        # r19 #18: a one-member batch paid submission machinery for zero
-        # parallelism — the plain cached path is strictly better here.
-        res = run(ops_sql.warehouse_pressure(days, company), page=_PAGE,
-                  key=f"c_pressure_{company}_{days}", tier="recent",
-                  source="ACCOUNT_USAGE.QUERY_HISTORY")
+        # r23 #1: the hourly fact answers this without a QUERY_HISTORY scan
+        # (the live read sat at 17.8s on the fleet board). r19 #18 still
+        # holds — no one-member batch; mart-first with the labeled fallback.
+        res = run_mart_first(
+            mart_sql.fact_warehouse_pressure(days, company),
+            ops_sql.warehouse_pressure(days, company),
+            page=_PAGE, key=f"c_pressure_{company}_{days}",
+            mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
+            live_source="QUERY_HISTORY (live fallback)",
+            mart_tier="recent", live_tier="recent")
         if guard(res, "No queueing or spill pressure in this window."):
             charts.bar_count(res.df.sort_values("QUEUED_SEC", ascending=False),
                              "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds")

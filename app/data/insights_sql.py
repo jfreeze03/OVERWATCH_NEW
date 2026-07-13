@@ -204,7 +204,12 @@ def task_failure_details(days: int, company: str = "ALL", database: str = "", sc
     from app.core.sqlsafe import contains_filter
 
     days = bounded_days(days, maximum=14)
+    # r23 #3: TASK_HISTORY prunes on SCHEDULED_TIME (the V031 builders bound
+    # BOTH columns for exactly this reason); without it the RCA read scanned
+    # the whole view — 33s on the fleet board. +1 day covers runs scheduled
+    # before the window that started inside it.
     where = and_where(
+        f"SCHEDULED_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())",
         f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "STATE = 'FAILED'",
         companies.database_clause(company, "DATABASE_NAME"),

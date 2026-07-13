@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.38.0 — r23: the post-rebuild fleet board's picks (2026-07-12)
+
+App-only round, by design — the rebuild settles while the telemetry does
+the picking (pain = p95 x slow fetches; the board's leaders, not opinions).
+All four targets verified in code before shipping:
+
+- **Queue/spill pressure goes fact-first (c_pressure, 17.8s p50).** The
+  hourly fact carries exact queued/spill/count sums; a new
+  fact_warehouse_pressure reader serves the Contention panel with the live
+  scan as labeled fallback (p95 = peak hourly, labeled). Canaried;
+  operations' live-scan budget drops 23 -> 22.
+- **Task-failure RCA prunes on SCHEDULED_TIME (t_rca, 32.9s).** TASK_HISTORY
+  prunes on SCHEDULED_TIME — the V031 builders bound both columns for
+  exactly this reason; the RCA read now does too (+1d margin, semantics
+  unchanged).
+- **Change-impact drill pre-filters before normalizing (chg_hist, 6.1s).**
+  The V031 scan-v2 trick applied to object_run_history's PROCEDURE branch:
+  a cheap ILIKE rides in front of the POSITION text pass, so only plausible
+  CALL rows pay the REPLACE/UPPER normalization.
+- **Security's changes tab batches its two live reads** (DDL/DCL + failed-
+  login reasons) — the Access-tab parallel-submit pattern, serial fallbacks
+  unchanged.
+
+Still open from the board after this round: cs_types 21.4s (routed r22 #16,
+extract v2), the loader-v2 re-derivation set (#4/5/6/8/19), and the V1
+EXECUTION_STATUS probe (one query in Snowsight decides which side gets the
+one-line fix).
+
+Deploy: app-only — push the build; no migration, no grants.
+
 ## 4.37.1 — validate: the stale V001-era user-prefix check (2026-07-12)
 
 Live finding on the rebuilt account: 'TRXS_ prefix classifies as Trexis'

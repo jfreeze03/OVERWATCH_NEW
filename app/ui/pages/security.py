@@ -370,8 +370,18 @@ def _clients_tab(company: str, days: int) -> None:
 
 
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+    # r23 #4 (the Access-tab pattern): the tab's two independent live reads
+    # submit server-side async in one shot; any failure falls back to the
+    # serial per-query calls below, unchanged.
+    _cb = run_batch([
+        {"key": "ddl", "sql": security_sql.recent_ddl_changes(days, company, database, schema_contains),
+         "source": "QUERY_HISTORY (DDL/DCL types)"},
+        {"key": "login_reasons", "sql": security_sql.failed_login_reasons(days, company),
+         "source": "LOGIN_HISTORY (failure reasons)"},
+    ], page=_PAGE, tier="recent")
+
     st.markdown("**Who changed what (DDL/DCL)**")
-    res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
+    res = _cb.get("ddl") or run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
               key=f"ddl_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (DDL/DCL types)")
     if res.ok and res.empty:
@@ -399,7 +409,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         result_caption(res)
 
     st.markdown("**Failed-login reasons (network policy vs credentials)**")
-    reasons = run(security_sql.failed_login_reasons(days, company), page=_PAGE,
+    reasons = _cb.get("login_reasons") or run(security_sql.failed_login_reasons(days, company), page=_PAGE,
                   key=f"login_reasons_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
     if reasons.ok and reasons.empty:

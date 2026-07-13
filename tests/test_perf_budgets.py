@@ -67,7 +67,7 @@ _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
     "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
     "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # v4.36.1: users tab reverted to live-first (owner: exact emails + timestamps); 4 is the true count, old 5 was slack
-    "app/ui/pages/operations.py": 23,  # -1 v4.36/V041 R7: unfiltered first paint reads MART_OPS_DIAG_HOURLY
+    "app/ui/pages/operations.py": 22,  # -1 v4.38/r23: queue/spill pressure reads FACT_QUERY_HOURLY mart-first
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
     "app/ui/pages/security.py": 18,

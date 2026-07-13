@@ -49,7 +49,12 @@ LIMIT 200
 
 
 def object_run_history(object_type: str, object_name: str, days: int = 28) -> str:
-    """Daily run/latency/failure series for one tracked object (live)."""
+    """Daily run/latency/failure series for one tracked object (live).
+
+    r23 #2 (the V031 scan-v2 trick): a cheap ILIKE pre-filter rides in front
+    of the expensive POSITION text normalization, so only plausible CALL
+    rows pay the REPLACE/UPPER pass — the drill sat at 6s on the fleet
+    board with the normalization running on every CALL in 28 days."""
     days = bounded_days(days, 60)
     otype = str(object_type or "").strip().upper()
     if otype not in _TYPES:
@@ -69,6 +74,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND QUERY_TYPE = 'CALL'
+  AND QUERY_TEXT ILIKE {sql_literal('%' + short + '%')}
   AND POSITION({sql_literal(short + "(")} IN
                REPLACE(REPLACE(UPPER(QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
 GROUP BY 1
