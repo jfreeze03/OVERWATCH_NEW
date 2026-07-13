@@ -46,6 +46,8 @@ def _access_tab(company: str, days: int) -> None:
          "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
         {"key": "grants", "sql": security_sql.recent_role_grants(days),
          "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
+        {"key": "newnet", "sql": security_sql.new_network_logins(days),
+         "source": "ACCOUNT_USAGE.LOGIN_HISTORY (admin users, 90d baseline)"},
     ], page=_PAGE, tier="historical")
 
     mfa = batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
@@ -87,6 +89,23 @@ def _access_tab(company: str, days: int) -> None:
         if guard(res, "No ACCOUNTADMIN/SECURITYADMIN/ORGADMIN grants visible to this role."):
             styled_table(res.df)
             st.caption("This list should be short and every name should be expected.")
+
+    st.markdown("**New networks for privileged users (90-day baseline)**")
+    nn = batch.get("newnet") or run(security_sql.new_network_logins(days), page=_PAGE,
+              key=f"newnet_{days}", tier="recent",
+              source="LOGIN_HISTORY x admin grants (90d baseline)")
+    if nn.ok and nn.empty:
+        st.success("No break-glass account logged in from a network unseen in the last 90 days.")
+    elif guard(nn, ""):
+        kpi_row([{
+            "label": "New networks", "value": f"{len(nn.df)}", "delta_color": "inverse",
+            "help": "An admin-role user's (user, IP) pair first appeared inside this window. "
+                    "An IP quiet for 90+ days re-flags on purpose — better a stale re-flag "
+                    "than a silent novel network.",
+        }])
+        styled_table(nn.df)
+        st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
+        result_caption(nn)
 
     st.markdown("**Expiring credentials (10-day horizon)**")
     creds = batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
@@ -142,6 +161,54 @@ def _access_tab(company: str, days: int) -> None:
     elif guard(res, ""):
         styled_table(res.df)
         result_caption(res)
+
+
+def _egress_tab(company: str, days: int) -> None:
+    """r25 #7 (owner pick): data leaving the account. Two lenses — the
+    outbound transfer bill (DATA_TRANSFER_HISTORY) and who unloads to stages
+    (QUERY_TYPE='UNLOAD') — because exfiltration and a surprise egress bill
+    both start as 'bytes moved that nobody was watching'."""
+    st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
+    st.markdown("**Outbound transfer (account-wide)**")
+    xfer = run(security_sql.egress_daily(days), page=_PAGE, key=f"egress_{days}",
+               tier="recent", source="ACCOUNT_USAGE.DATA_TRANSFER_HISTORY")
+    if xfer.ok and xfer.empty:
+        st.success("No cross-cloud or cross-region transfer in this window.")
+    elif guard(xfer, "", setup_hint="Needs the ACCOUNT_USAGE.DATA_TRANSFER_HISTORY view."):
+        xdf = xfer.df.copy()
+        _by_tgt = xdf.groupby("TARGET_REGION")["GB"].sum().sort_values(ascending=False)
+        kpi_row([
+            {"label": f"Egress GB · {days}d", "value": f"{float(xdf['GB'].sum()):,.1f}"},
+            {"label": "Top destination", "value": str(_by_tgt.index[0]) if len(_by_tgt) else "—",
+             "help": "Region receiving the most bytes. An unexpected destination is the finding."},
+            {"label": "Destinations", "value": f"{int((_by_tgt > 0).sum())}"},
+        ])
+        charts.daily_stacked_count(xdf, "DAY", "TARGET_REGION", "GB", title="GB by destination region")
+        styled_table(xdf.sort_values("GB", ascending=False).head(50), height=240)
+        result_caption(xfer)
+
+    st.markdown("**Unload activity (COPY INTO stage)**")
+    panel_help(
+        "QUERY_HISTORY filtered to QUERY_TYPE='UNLOAD' — every successful COPY INTO "
+        "<location>, grouped per user/day. GB_OUT sums the query's byte counters (for "
+        "an unload exactly one carries the payload). SAMPLE_TARGET previews the newest "
+        "statement so the destination is visible without a drill."
+    )
+    unl = run(security_sql.unload_activity(days, company), page=_PAGE,
+              key=f"unload_{company}_{days}", tier="recent",
+              source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD only)")
+    if unl.ok and unl.empty:
+        st.success("No unloads to stages in this window for this scope.")
+    elif guard(unl, ""):
+        udf = unl.df.copy()
+        kpi_row([
+            {"label": "Unload runs", "value": f"{int(udf['UNLOADS'].sum())}"},
+            {"label": "GB written out", "value": f"{float(udf['GB_OUT'].sum()):,.1f}"},
+            {"label": "Users unloading", "value": f"{udf['USER_NAME'].nunique()}"},
+        ])
+        styled_table(udf, height=320)
+        st.caption("Every name here should have a business reason to move data out. New names are the finding.")
+        result_caption(unl)
 
 
 def _trust_center_tab() -> None:
@@ -455,7 +522,7 @@ def render() -> None:
     )
     _post90 = _governance_score_panel()
     _posture_trend_panel(_post90)
-    section = lazy_sections(["Access", "Changes", "Clients", "Trust Center"], key="sec_section")
+    section = lazy_sections(["Access", "Changes", "Clients", "Egress", "Trust Center"], key="sec_section")
     if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
@@ -464,5 +531,7 @@ def render() -> None:
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Clients":
         _clients_tab(f["company"], f["days"])
+    elif section == "Egress":
+        _egress_tab(f["company"], f["days"])
     else:
         _trust_center_tab()

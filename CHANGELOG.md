@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.41.0 — r25: the two security metrics the owner picked (2026-07-13)
+
+From the seven proposed, the owner chose #6 and #7. Both are click-gated —
+Security's first paint pays nothing new.
+
+- **New networks for privileged users (Access tab).** A break-glass user's
+  (user, IP) pair appearing for the first time against a 90-day
+  LOGIN_HISTORY baseline, with auth factor and success counts per row.
+  Rides the tab's existing batch round-trip. Quiet-90d IPs re-flag on
+  purpose — a stale re-flag beats a silent novel network.
+- **Egress watch (new section).** Outbound bytes by day/destination from
+  DATA_TRANSFER_HISTORY (stacked daily + top-destination KPI) and per-user
+  UNLOAD activity with GB_OUT and a SAMPLE_TARGET preview of the statement
+  — exfiltration and a surprise transfer bill start as the same unwatched
+  bytes.
+- Canaries for all three builders; section-list lock superseded (4 -> 5
+  sections, documented); security.py live-scan budget 18 -> 22 with the
+  justification in the dict.
+
 ## 4.40.0 — r24: profile links everywhere + the first honesty/tier ships (2026-07-13)
 
 - **Snowsight query-profile links are a pattern now** (owner: "the

@@ -107,7 +107,9 @@ def test_client_drivers_builder_shape():
 
 
 def test_clients_panel_wired_and_canaried():
-    assert 'lazy_sections(["Access", "Changes", "Clients", "Trust Center"]' in _SECURITY
+    # r25 superseded the 4-section list: owner picked #7 (egress watch), which
+    # earned its own lazy section between Clients and Trust Center.
+    assert 'lazy_sections(["Access", "Changes", "Clients", "Egress", "Trust Center"]' in _SECURITY
     assert "ACCOUNT_USAGE.SESSIONS" in _SECURITY
     assert "sec_drivers_csv" in _SECURITY                     # inventory is exportable
     assert "(not reported)" in _SECURITY                      # honest PROGRAM caveat

@@ -70,7 +70,7 @@ _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/operations.py": 22,  # -1 v4.38/r23: queue/spill pressure reads FACT_QUERY_HOURLY mart-first
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
-    "app/ui/pages/security.py": 18,
+    "app/ui/pages/security.py": 22,  # +4 v4.41/r25 (owner picked #6+#7): new-network batch rider on Access + Egress lazy section (DATA_TRANSFER_HISTORY, UNLOAD scan) — zero first-paint cost, all click-gated
 }
 
 

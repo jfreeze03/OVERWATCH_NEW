@@ -461,3 +461,97 @@ WHERE {where}
 ORDER BY GRANTED_AT
 LIMIT 200
 """
+
+
+def new_network_logins(days: int = 7) -> str:
+    """r25 #6 (owner pick): privileged logins from never-before-seen networks.
+
+    Baseline = 90 days of LOGIN_HISTORY for break-glass users (same role list
+    as admin_role_holders); a row surfaces only when a (user, IP) pair FIRST
+    appears inside the triage window. An IP quiet for 90+ days re-flags on
+    purpose — better a stale re-flag than a silent novel network.
+    """
+    days = bounded_days(days)
+    return f"""
+WITH admins AS (
+    SELECT DISTINCT GRANTEE_NAME AS USER_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE DELETED_ON IS NULL
+      AND ROLE IN ('ACCOUNTADMIN', 'SECURITYADMIN', 'ORGADMIN')
+),
+hist AS (
+    SELECT L.USER_NAME,
+           COALESCE(L.CLIENT_IP, '(none)') AS CLIENT_IP,
+           L.EVENT_TIMESTAMP, L.IS_SUCCESS, L.FIRST_AUTHENTICATION_FACTOR
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY L
+    JOIN admins A ON A.USER_NAME = L.USER_NAME
+    WHERE L.EVENT_TIMESTAMP >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+),
+first_seen AS (
+    SELECT USER_NAME, CLIENT_IP, MIN(EVENT_TIMESTAMP) AS FIRST_SEEN
+    FROM hist
+    GROUP BY USER_NAME, CLIENT_IP
+)
+SELECT F.USER_NAME,
+       F.CLIENT_IP,
+       F.FIRST_SEEN,
+       COUNT(*) AS LOGINS,
+       SUM(IFF(H.IS_SUCCESS = 'YES', 1, 0)) AS SUCCESSES,
+       MAX(H.EVENT_TIMESTAMP) AS LAST_LOGIN,
+       MAX(H.FIRST_AUTHENTICATION_FACTOR) AS AUTH_FACTOR
+FROM first_seen F
+JOIN hist H ON H.USER_NAME = F.USER_NAME AND H.CLIENT_IP = F.CLIENT_IP
+WHERE F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY F.USER_NAME, F.CLIENT_IP, F.FIRST_SEEN
+ORDER BY F.FIRST_SEEN DESC
+LIMIT 200
+"""
+
+
+def egress_daily(days: int = 30) -> str:
+    """r25 #7a (owner pick): outbound bytes by day and destination — the
+    exfil canary and the surprise-transfer-bill canary are the same chart."""
+    days = bounded_days(days)
+    return f"""
+SELECT DATE(START_TIME) AS DAY,
+       COALESCE(TARGET_CLOUD, 'INTERNAL') AS TARGET_CLOUD,
+       COALESCE(TARGET_REGION, '(same region)') AS TARGET_REGION,
+       TRANSFER_TYPE,
+       ROUND(SUM(BYTES_TRANSFERRED) / POWER(1024, 3), 3) AS GB
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3, 4
+HAVING SUM(BYTES_TRANSFERRED) > 0
+ORDER BY DAY, GB DESC
+"""
+
+
+def unload_activity(days: int = 30, company: str = "ALL") -> str:
+    """r25 #7b (owner pick): who runs COPY INTO <location> (QUERY_TYPE
+    'UNLOAD'), per user/day. GB_OUT sums both QUERY_HISTORY byte counters —
+    for an unload exactly one of them carries the payload, so the sum is the
+    real figure, not an overstatement. SAMPLE_TARGET = newest statement's
+    first 120 chars, so the destination is visible without a drill."""
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "QUERY_TYPE = 'UNLOAD'",
+        "EXECUTION_STATUS = 'SUCCESS'",
+        companies.user_clause(company, "USER_NAME"),
+    )
+    return f"""
+SELECT DATE(START_TIME) AS DAY,
+       USER_NAME,
+       ROLE_NAME,
+       COUNT(*) AS UNLOADS,
+       ROUND((SUM(COALESCE(BYTES_WRITTEN, 0))
+            + SUM(COALESCE(BYTES_WRITTEN_TO_RESULT, 0))) / POWER(1024, 3), 3) AS GB_OUT,
+       MAX(START_TIME) AS LAST_UNLOAD,
+       MAX_BY(LEFT(QUERY_TEXT, 120), START_TIME) AS SAMPLE_TARGET
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1, 2, 3
+ORDER BY DAY DESC, GB_OUT DESC
+LIMIT 300
+"""
+
