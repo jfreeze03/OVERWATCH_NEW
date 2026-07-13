@@ -1,0 +1,52 @@
+# Codex r27 adjudication + house review — 2026-07-13 (post-v4.42.0)
+
+Every claim verified against `622bfca`. Verdicts: **SHIP** (verified, goes in
+the next round), **ROUTE** (real, but owner decision or later round),
+**DECLINE** (with reason). Owner's standing directives applied: only
+SNOW_ACCOUNTADMINS/SNOW_SYSADMINS have access; task monitoring is retired;
+deterministic company classification is an owner-endorsed law.
+
+## Verdicts
+
+| # | Claim | Verdict | Evidence / reasoning |
+|---|-------|---------|----------------------|
+| 1 | Finish task-monitoring retirement loader-side | **SHIP (V043)** — TRUE, highest value | v4.42.0 removed the APP surfaces only. The effective loader still scans TASK_HISTORY hourly and fills FACT_TASK_DAILY (V042 L944/1072 read it in re-derived procs; L1379 tracks its freshness; backfill_365 L46 fills it). Worse: **PIPE_TASK_FAILURES is a live HIGH alert rule** (V004 L30, scan arm L160-166) still raising task-failure alerts — likely a chunk of the alert noise. V043: disable the rule + re-derive the scan without the arm, drop the FACT_TASK_DAILY fill + freshness row + timeline-mart task arm, drop FACT_TASK_DAILY / MART_TASK_GRAPH_DAILY, trim backfill; regen rebuild bundle. |
+| 2 | Active-feature manifest | **DECLINE as process, ADOPT as test** | A standing manifest is bureaucracy for a one-owner repo; the lock suite is the manifest. Adopting the spirit in V043's tests: the *effective* (latest re-derived) procs must contain zero retired-object references — that's the gap v4.42.0's app-only sweep left. |
+| 3 | Formalize owner-rights architecture | **SHIP (fold into #9 docs)** | True and docs-only. OVERWATCH is an owner-rights service; DEPLOYMENT.md L131 still shows `role = "OVERWATCH_MONITOR"` TOML. |
+| 4 | Use st.user, not CURRENT_USER() | **SHIP** — TRUE, confirmed against Snowflake docs | Snowflake: in owner's-rights SiS, `CURRENT_USER()` = the app owner, not the viewer; `st.user.user_name` = the viewer (both runtimes). Today USER_PREFS (prefs_sql L33/43/55), APP_USAGE, ALERT_AUDIT/REMEDIATION_LOG actors, and savings verification all collapse to one username. Fix app-side: thread `st.user.user_name` (sql_literal-escaped) with a CURRENT_USER() fallback when st.user is unavailable. |
+| 5 | Dedicated least-privilege app owner | **ROUTE (owner decision)** | Legitimate hardening, but it reintroduces a role the day after "remove any traces of other roles." The app executes owner-rights under the deploying role today. If wanted: one OVERWATCH_OWNER role holding only IMPORTED PRIVILEGES + schema R/W, granted to nobody. Owner call. |
+| 6 | Restore immutable audit history | **SHIP** — TRUE, r26 regression | The blanket `INSERT, UPDATE, DELETE ON ALL TABLES` grants cover ALERT_AUDIT/REMEDIATION_LOG. Restore the two append-only REVOKEs in roles.sql. Honest caveat: both grantees are admin roles that can re-grant — this blocks accidents, not adversaries (same caveat the old model documented). |
+| 7 | Prove the two-role restriction on the Streamlit object | **SHIP (light)** | True that roles.sql can't see existing grants. Add a `SHOW GRANTS ON STREAMLIT <app>` + RESULT_SCAN check to validate.sql (app name parameterized in a comment) failing on unexpected grantees. |
+| 8 | Remove dead multi-profile layer | **SHIP (partial)** | The ROLE_PROFILE_OVERRIDES still map six SNOW_PRI_* viewer roles (config L94-125) that no longer have access — those are exactly "traces of other roles." Remove them; real roles resolve to DBA. Keep the profile *machinery* (it gates operator UI and costs nothing) — flattening it entirely changes button visibility semantics for zero gain. |
+| 9 | Regenerate operational docs | **SHIP** | Verified drift: DEPLOYMENT.md L69 (task graphs), L74-76 + L131 (retired roles), RUNBOOK.md L35-36/L581. Rewrite both for the two-role owner-rights model + a lock asserting retired role names appear nowhere in docs. CI-generated docs: declined, same reason as #2. |
+| 10 | Replace generic execute_statement | **SHIP (light) / ROUTE (full)** | Verified shape (query.py L545+): generic `session.sql(sql)`. But every caller passes app-constructed SQL (sql_literal-escaped), behind typed confirmation — not user-typed SQL. Cheap real hardening now: statement-prefix allow-list (ALTER WAREHOUSE / INSERT-UPDATE-DELETE on DBA_MAINT_DB.OVERWATCH.% / CALL DBA_MAINT_DB.OVERWATCH.%) + reject multi-statement strings. Full stored-proc action layer: r28, alongside #11. |
+| 11 | Durable action command (intent-first, idempotency keys) | **ROUTE (r28)** | Real. Requires an action-intent table or REMEDIATION_LOG status extension (migration) + the proc layer from #10-full. Do together. |
+| 12 | Atomic, set-based alert lifecycle | **SHIP (partial)** | Verified: alerts.py L357+ splits generated SQL on `;` and loops per statement; bulk ack loops per event. Ship set-based bulk (one UPDATE … IN (…) + one INSERT … SELECT audit) = 2 statements instead of 2N. True atomicity needs a proc — bundle into r28's action layer. |
+| 13 | Version operator configuration (CAS, history, rollback) | **ROUTE (r28, trimmed)** | Last-writer-wins is real but the writer population is ~2 DBAs. Full CAS/rollback is over-engineering; a SETTINGS_HISTORY append trigger-table in the r28 migration is the right-sized version. |
+| 14 | Domain-scoped cache invalidation | **SHIP** | Verified: the r24 refresh salt is global — an alert ack refetches every cached frame on the page rerun. Generational salts per domain (alerts/settings/prefs/warehouses/marts) keyed off what execute_statement touched. |
+| 15 | Deployed-runtime perf contract in CI | **DECLINE (gate), KEEP (practice)** | CI can't query Snowflake here. The deployed-runtime contract already exists as APP_QUERY_TELEMETRY + the pain board, and rounds r23/r24 were literally telemetry-picked. The string-count budgets are linting and labeled as such. Adopting one slice: surface effective warehouse timeout on Admin (SHOW PARAMETERS), since tier session timeouts don't apply in SiS. |
+| 16 | Full reconciliation registry | **ROUTE (r28/V044)** | Real and valuable (recon currently: account metering + query totals, mart_sql L587+). Per-company/warehouse/database sum-to-total + late-arrival checks belong in SP_NIGHTLY_RECONCILE v2. |
+| 17 | Semantic metric contract | **ROUTE (r28 docs)** | Partially exists as panel_help texts. A docs/METRICS.md with grain/source/lag/exactness per metric is worth doing once, then locked. Score-weight "calibration against outcomes" is aspirational — no outcome labels exist. |
+| 18 | Stop defaulting unknown entities to ALFA | **ROUTE (owner decision)** | Verified behavior (companies.py L75-99 + the V001 UDFs). But deterministic-ALFA is an owner-endorsed law (validate.sql checks it deliberately, v4.37.1). Changing to UNKNOWN rewrites go-forward chargeback and splits from all historical mart rows. Tradeoff memo, owner decides; if yes, it's a V044 UDF + app + validate change with a dated cutover note. |
+| 19 | Evidence-grade savings verification | **ROUTE (r28)** | Verified: can_verify = nonempty proof string + numeric amount (actions.py L44-58). Right fix: "Run proof" button executes the read-only proof, stores result + QUERY_ID + snapshot into SAVINGS_LEDGER columns (migration for columns). |
+| 20 | Action Queue as operating center | **ROUTE (r28-r29, product)** | Verified mostly-read (one INSERT path from AI chargeback). Claim/assign/due/status + entity-360 links is the right product direction and the biggest single feature on the list. Needs design; schedule as its own round. |
+
+## House additions — what else is weak (verified)
+
+| # | Finding | Disposition |
+|---|---------|-------------|
+| H1 | **The r25 security metrics have no teeth.** Egress and new-network are panels only; nobody watches them between visits. Add two rules to the hourly scan in V043 (SEC_NEW_ADMIN_NETWORK, COST_EGRESS_SPIKE vs trailing baseline) so they alert. | SHIP (V043) |
+| H2 | **Retired-signal settings rows linger.** SCORE_PTS_TASK_FAIL_PER_PCT (and any future retirees) sit in SETTINGS with no owner-visible signal. Admin settings tab: flag keys the app no longer reads. | SHIP (small) |
+| H3 | **No access self-check.** "The app is producing access error messages" had to be diagnosed by hand. Admin panel that probes each privileged source (TRUST_CENTER.FINDINGS, DATA_TRANSFER_HISTORY, CREDENTIALS, ORGANIZATION_USAGE if used) and prints the exact missing grant + fix SQL. Turns the next access error into a checklist row. | SHIP |
+| H4 | **APP_ERROR_LOG panel shows raw rows.** Repeated identical errors read as N incidents. Group by (PAGE, CONTEXT-prefix, error family): first/last/count. Purge already covers growth (V042 L1249). | SHIP (small) |
+| H5 | **Alert noise root cause candidate**: PIPE_TASK_FAILURES (HIGH) has been alerting on loader-task failures all along — it fired during the V041 incident too. Disabling it in V043 (see #1) may be the single biggest alert-quality win. | folded into #1 |
+| H6 | **new_network_logins re-derives the admin list per render.** It rides the batch, so cost is one round-trip — fine — but the 90d LOGIN_HISTORY×GRANTS join is the page's heaviest read. If telemetry shows it hot, precompute in the daily posture arm (V044). | WATCH (telemetry) |
+| H7 | **Bulk alert ack UX**: the per-event confirm loop makes triaging 20 alerts a 20-click job even before #12's statement count. Multi-select + one typed confirm for the batch. | SHIP (with #12) |
+| H8 | **validate.sql doesn't validate grants.** It checks objects and floors but nothing about who can reach the app (ties to #7). One RESULT_SCAN block closes it. | folded into #7 |
+
+## Proposed sequencing
+
+- **r27 (next): V043 + app.** #1+H5 (loader retirement + rule disable), H1 (alert teeth for r25 metrics), #4 (st.user identity), #6 (audit REVOKEs), #8-partial (SNOW_PRI_* trace removal), #9+#3 (docs rewrite + lock), #10-light (allow-list), #12-partial+H7 (set-based bulk ack), #14 (cache generations), #7+H8 (grant validation), H2-H4. One migration, one app pass, one docs pass.
+- **r28: the action layer.** #10-full + #11 + #12-full (proc-based atomic actions with intent + idempotency), #13-trimmed, #19, #16 (recon v2), #17.
+- **r29: #20** (Action Queue as operating center) — product round.
+- **Owner decisions needed:** #5 (dedicated owner role — yes/no), #18 (UNKNOWN company — tradeoff: honest unmapped surfacing vs deterministic law + historical continuity).
