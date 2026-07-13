@@ -10,9 +10,10 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, resolve_role_profile
+from app.core.query import run
 from app.core.session import current_role
 from app.core.state import filters
-from app.data import cost_sql, mart27_sql
+from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.formulas import safe_float
 from app.ui.components import (
     guard,
@@ -20,6 +21,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     page_header,
+    result_caption,
     run_mart_first,
     section_header,
     styled_table,
@@ -98,6 +100,24 @@ def render() -> None:
                 "TAGGED_PCT": st.column_config.NumberColumn("Tagged %", format="%.1f%%")})
             st.caption("Fix at the source: set QUERY_TAG in the tool/session that runs the "
                        "workload; the scoreboard moves within a day.")
+        st.divider()
+        section_header("Unmapped entities", "warn", "chargeback")
+        st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
+                   "silently billing ALFA. Empty is the goal state.")
+        unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
+                  key=f"unmapped_{f['days']}", tier="recent",
+                  source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
+        if unm.ok and unm.empty:
+            st.success("Every entity in the window carries company evidence — nothing is billed blind.")
+        elif guard(unm, ""):
+            kpi_row([{"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
+                      "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
+                              "original company until a backfill re-run."}])
+            styled_table(unm.df, height=240)
+            st.caption("Classify explicitly, then the next loader pass re-stamps: "
+                       "`INSERT INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (SCOPE_TYPE, PATTERN, COMPANY) "
+                       "VALUES ('WAREHOUSE'|'DATABASE'|'USER_OVERRIDE', '<NAME>', 'ALFA'|'Trexis');`")
+            result_caption(unm)
     elif section == "Contract & Forecast":
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)

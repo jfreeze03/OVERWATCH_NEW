@@ -3,9 +3,12 @@
 ALFA and Trexis share a single Snowflake account, so scoping is deliberately
 hardcoded (owner decision, 2026-07). Rules:
 
-- Trexis owns exactly the four ``WH_TRXS_*`` warehouses, the ``TRXS_*``
-  database families, and ``TRXS_*`` users. ALFA is the default for everything
-  else (including account-level rows with no object context).
+- Trexis owns the ``WH_TRXS_*`` warehouses, the ``TRXS_*`` database
+  families, and users holding ``%TRXS%`` roles. Since V044 (#18, owner
+  2026-07-13) ALFA needs evidence too — ``WH_ALFA_*`` names, ``ALFA%``/
+  ``ADMIN`` databases, ``%ALFA%`` or DBA roles. Anything with no evidence
+  classifies **UNKNOWN** and surfaces on Cost -> Chargeback for an explicit
+  COMPANY_SCOPE mapping before it's charged to anyone.
 - ``KEBARR1`` holds both companies' roles and is classified as **ALFA** by
   explicit policy override.
 
@@ -19,7 +22,7 @@ from __future__ import annotations
 
 from .core.sqlsafe import assert_no_control_tokens, in_list, like_any, not_in_list, sql_literal
 
-COMPANIES = ("ALFA", "Trexis", "ALL")
+COMPANIES = ("ALFA", "Trexis", "UNKNOWN", "ALL")
 DEFAULT_COMPANY = "ALFA"
 
 TREXIS_WAREHOUSES = (
@@ -74,12 +77,18 @@ _PROD_DB_SUFFIX = ("_PRD",)
 
 def classify_warehouse(name: object) -> str:
     wh = str(name or "").strip().upper()
-    return "Trexis" if wh in TREXIS_WAREHOUSES else "ALFA"
+    if wh in TREXIS_WAREHOUSES:
+        return "Trexis"
+    return "ALFA" if wh.startswith("WH_ALFA_") else "UNKNOWN"
 
 
 def classify_database(name: object) -> str:
     db = str(name or "").strip().upper()
-    return "Trexis" if db in TREXIS_DATABASES or db.startswith("TRXS_") else "ALFA"
+    if db in TREXIS_DATABASES or db.startswith("TRXS_"):
+        return "Trexis"
+    if db.startswith("ALFA") or db in ("ADMIN", "DBA_MAINT_DB"):
+        return "ALFA"      # DBA_MAINT_DB: app infra, seeded ALFA in V044
+    return "UNKNOWN"
 
 
 def classify_user(name: object) -> str:
@@ -89,7 +98,9 @@ def classify_user(name: object) -> str:
     user = str(name or "").strip().upper()
     if user in USER_COMPANY_OVERRIDES:
         return USER_COMPANY_OVERRIDES[user]
-    return "Trexis" if user.startswith(TREXIS_USER_PREFIX) else "ALFA"
+    if user.startswith(TREXIS_USER_PREFIX):
+        return "Trexis"
+    return "UNKNOWN"      # role evidence lives server-side (COMPANY_FOR_USER)
 
 
 def classify_environment(database: object) -> str:
@@ -108,7 +119,10 @@ def warehouse_clause(company: str, column: str = "WAREHOUSE_NAME") -> str:
     if company == "Trexis":
         clause = in_list(column, TREXIS_WAREHOUSES)
     elif company == "ALFA":
-        clause = not_in_list(column, TREXIS_WAREHOUSES)
+        clause = f"(UPPER(COALESCE({column}, '')) LIKE 'WH!_ALFA!_%' ESCAPE '!')"
+    elif company == "UNKNOWN":
+        exclude = not_in_list(column, TREXIS_WAREHOUSES)
+        clause = f"({exclude} AND UPPER(COALESCE({column}, '')) NOT LIKE 'WH!_ALFA!_%' ESCAPE '!')"
     else:
         clause = ""
     return assert_no_control_tokens(clause)
@@ -122,6 +136,10 @@ def database_clause(company: str, column: str = "DATABASE_NAME") -> str:
         include = like_any(column, ALFA_DATABASE_PATTERNS)
         exclude = not_in_list(column, TREXIS_DATABASES)
         clause = f"({include} AND {exclude})" if include and exclude else include or exclude
+    elif company == "UNKNOWN":
+        clause = (f"(UPPER(COALESCE({column}, '')) NOT LIKE 'TRXS!_%' ESCAPE '!' "
+                  f"AND UPPER(COALESCE({column}, '')) NOT LIKE 'ALFA%' "
+                  f"AND UPPER(COALESCE({column}, '')) NOT IN ('ADMIN', 'DBA_MAINT_DB'))")
     else:
         clause = ""
     return assert_no_control_tokens(clause)
@@ -139,7 +157,7 @@ COMPANY_FOR_USER_FN = "DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER"
 def user_clause(company: str, column: str = "USER_NAME") -> str:
     """Company scope for user-grained sources, by role membership."""
     company = str(company or DEFAULT_COMPANY)
-    if company in ("Trexis", "ALFA"):
+    if company in ("Trexis", "ALFA", "UNKNOWN"):
         clause = f"{COMPANY_FOR_USER_FN}({column}) = {sql_literal(company)}"
     else:
         clause = ""
@@ -173,7 +191,12 @@ def role_clause(company: str, column: str = "ROLE_NAME") -> str:
     if company == "Trexis":
         clause = f"UPPER({column}) LIKE '%TRXS%'"
     elif company == "ALFA":
-        clause = f"(COALESCE(UPPER({column}), '') NOT LIKE '%TRXS%')"
+        clause = (f"(UPPER(COALESCE({column}, '')) LIKE '%ALFA%' "
+                  f"OR UPPER(COALESCE({column}, '')) IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'))")
+    elif company == "UNKNOWN":
+        clause = (f"(COALESCE(UPPER({column}), '') NOT LIKE '%TRXS%' "
+                  f"AND COALESCE(UPPER({column}), '') NOT LIKE '%ALFA%' "
+                  f"AND COALESCE(UPPER({column}), '') NOT IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'))")
     else:
         clause = ""
     return assert_no_control_tokens(clause)

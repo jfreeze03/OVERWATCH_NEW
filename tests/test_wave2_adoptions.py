@@ -72,7 +72,8 @@ def test_family_readers_match_live_contracts():
 def test_role_share_keeps_both_leak_guards():
     sql = mart27_sql.role_share(7, "ALFA")
     assert "COMPANY = 'ALFA'" in sql                              # fact company column
-    assert "NOT LIKE '%TRXS%'" in sql                             # TRXS role heuristic (r3 lesson)
+    # V044 (#18): ALFA role arm is positive evidence, not not-Trexis
+    assert "LIKE '%ALFA%'" in sql and "SNOW_ACCOUNTADMINS" in sql
     # v4.34.1 attribution law: the share is computed over the whole
     # warehouse partition in a CTE; role visibility filters display rows
     # after (law locks live in test_r18_batch1).

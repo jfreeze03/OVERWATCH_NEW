@@ -50,7 +50,9 @@ def test_company_scope_present_when_requested():
     alfa = cost_sql.warehouse_daily_credits(7, "ALFA")
     trexis = cost_sql.warehouse_daily_credits(7, "Trexis")
     both = cost_sql.warehouse_daily_credits(7, "ALL")
-    assert "NOT IN" in alfa and "WH_TRXS_LOAD" in alfa
+    assert "WH!_ALFA!_%" in alfa                       # V044: evidence-based arm
+    unknown = cost_sql.warehouse_daily_credits(7, "UNKNOWN")
+    assert "NOT IN" in unknown and "WH_TRXS_LOAD" in unknown
     assert re.search(r"\bIN \('WH_TRXS_LOAD'", trexis)
     assert "WH_TRXS_LOAD' " not in both.split("CASE")[0]  # ALL: no filter before CASE label
 

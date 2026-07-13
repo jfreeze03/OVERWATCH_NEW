@@ -46,23 +46,28 @@ def test_validate_expects_at_least_v025():
 def test_role_clause_scopes_by_name_heuristic():
     assert "LIKE '%TRXS%'" in role_clause("Trexis")
     alfa = role_clause("ALFA")
-    assert "NOT LIKE '%TRXS%'" in alfa
+    # V044 (#18): positive evidence; UNKNOWN takes the no-token residual
+    assert "LIKE '%ALFA%'" in alfa
+    unk = role_clause("UNKNOWN")
+    assert "NOT LIKE '%TRXS%'" in unk and "NOT LIKE '%ALFA%'" in unk
     assert "COALESCE" in alfa                          # NULL role must stay visible for ALFA
     assert role_clause("ALL") == ""
 
 
 def test_role_share_excludes_foreign_roles():
     sql = chargeback_sql.role_share_within_warehouse(7, "ALFA")
-    assert "NOT LIKE '%TRXS%'" in sql                  # the TF_O_TRXS_* leak, fixed
+    # V044 (#18): the TF_O_TRXS_* leak stays fixed — those roles carry no
+    # ALFA token, so the positive-evidence arm excludes them just the same
+    assert "LIKE '%ALFA%'" in sql and "TRXS" not in sql.split("WHERE", 1)[0]
     assert "LIKE '%TRXS%'" in chargeback_sql.role_share_within_warehouse(7, "Trexis")
     assert "TRXS%'" not in chargeback_sql.role_share_within_warehouse(7, "ALL").split("WAREHOUSE_NAME IS NOT NULL")[1].split("GROUP BY")[0].replace("NOT IN ('WH_TRXS_LOAD", "")
 
 
 def test_day_replay_builders_take_company():
     ddl = security_sql.day_ddl("2026-07-07", "ALFA")
-    assert "NOT LIKE '%TRXS%'" in ddl
+    assert "LIKE '%ALFA%'" in ddl                      # V044: evidence-based arm
     grants = security_sql.day_grants("2026-07-07", "ALFA")
-    assert "NOT LIKE '%TRXS%'" in grants
+    assert "LIKE '%ALFA%'" in grants                   # V044: evidence-based arm
     assert "ROLE" in grants
     # default stays account-wide (replay with company ALL)
     assert "TRXS" not in security_sql.day_ddl("2026-07-07")

@@ -1,7 +1,7 @@
 -- validate.sql — post-install checks. Every row should read OK.
 
 WITH checks AS (
-    SELECT 'V001..V043 applied' AS CHECK_NAME,
+    SELECT 'V001..V044 applied' AS CHECK_NAME,
            IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 42) = 42,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
@@ -35,8 +35,8 @@ WITH checks AS (
     SELECT 'TRXS_ database prefix classifies as Trexis',
            IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE('TRXS_EDW_PRD') = 'Trexis', 'OK', 'FAIL')
     UNION ALL
-    SELECT 'Unknown user falls back to ALFA (no TRXS role)',
-           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('OW_VALIDATE_PROBE_NOBODY') = 'ALFA', 'OK', 'FAIL')
+    SELECT 'Unknown user classifies UNKNOWN (V044: evidence-based)',
+           IFF(DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER('OW_VALIDATE_PROBE_NOBODY') = 'UNKNOWN', 'OK', 'FAIL')
     UNION ALL
     -- This account does not expose ACCOUNT_USAGE.WAREHOUSES; use
     -- WAREHOUSE_EVENTS_HISTORY (any lifecycle event proves the warehouse

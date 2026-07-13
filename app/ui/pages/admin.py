@@ -70,6 +70,8 @@ _EXPECTED_MIGRATIONS = {
     43: "task retirement loader-side (fills/board/score/purge/reconcile/"
         "freshness + tables dropped, PIPE_TASK_FAILURES disabled) + r25 "
         "alert teeth (new-admin-network, egress spike)",
+    44: "UNKNOWN classification (#18): evidence-based company both sides, "
+        "COMPANY_SCOPE database mapping lever, board UNKNOWN scope",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

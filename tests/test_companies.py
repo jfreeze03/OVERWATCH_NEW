@@ -15,14 +15,19 @@ def test_kebarr1_is_alfa_despite_dual_roles():
 
 def test_trexis_prefix_users():
     assert co.classify_user("TRXS_LOADER") == "Trexis"
-    assert co.classify_user("JSMITH") == "ALFA"
-    assert co.classify_user(None) == "ALFA"
+    # V044 (#18): no role evidence python-side -> UNKNOWN (the SQL UDF adds
+    # role evidence; python mirror is prefix-only and says so honestly)
+    assert co.classify_user("JSMITH") == "UNKNOWN"
+    assert co.classify_user(None) == "UNKNOWN"   # no context = no evidence (V044)
 
 
 def test_warehouse_classification():
     assert co.classify_warehouse("WH_TRXS_LOAD") == "Trexis"
     assert co.classify_warehouse("WH_TRXS_LINEAGE") == "Trexis"
-    assert co.classify_warehouse("COMPUTE_WH") == "ALFA"
+    assert co.classify_warehouse("WH_ALFA_QUERY") == "ALFA"
+    # V044 (#18): a warehouse with neither company's evidence is UNKNOWN —
+    # it surfaces on Cost -> Chargeback until a COMPANY_SCOPE row maps it
+    assert co.classify_warehouse("COMPUTE_WH") == "UNKNOWN"
 
 
 def test_database_classification_and_environment():
@@ -37,7 +42,11 @@ def test_warehouse_clause_partitions_the_account():
     trexis = co.warehouse_clause("Trexis")
     alfa = co.warehouse_clause("ALFA")
     assert "IN" in trexis and "WH_TRXS_LOAD" in trexis
-    assert "NOT IN" in alfa and "WH_TRXS_LOAD" in alfa
+    # V044 (#18): the account no longer partitions two-ways — ALFA needs
+    # WH_ALFA_* evidence; UNKNOWN takes the residual
+    assert "WH!_ALFA!_%" in alfa
+    unknown = co.warehouse_clause("UNKNOWN")
+    assert "NOT IN" in unknown and "WH_TRXS_LOAD" in unknown and "NOT LIKE" in unknown
     assert co.warehouse_clause("ALL") == ""
 
 

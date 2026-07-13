@@ -1,7 +1,7 @@
 """The rebuild bundle can never drift from its sources (v4.36.2).
 
 snowflake/rebuild/ is GENERATED: byte-identical copies (teardown, roles,
-backfill, validate), the ordered concatenation of all 43 migrations, and a
+backfill, validate), the ordered concatenation of all 44 migrations, and a
 clone-backup script covering every operator table teardown's safety model
 names. Editing a source without regenerating the bundle fails here.
 """
@@ -34,8 +34,8 @@ def test_bundle_copies_are_byte_identical_to_their_sources():
 
 def test_bundle_migrations_are_the_ordered_byte_concatenation():
     migs = sorted((_SF / "migrations").glob("V0*.sql"))
-    assert len(migs) == 43
-    text = (_RB / "02_migrations_V001_V043.sql").read_text(encoding="utf-8")
+    assert len(migs) == 44
+    text = (_RB / "02_migrations_V001_V044.sql").read_text(encoding="utf-8")
     # every file present, in order, byte-identical between its banners
     positions = []
     for m in migs:

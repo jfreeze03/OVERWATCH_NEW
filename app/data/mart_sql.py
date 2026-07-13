@@ -1150,3 +1150,32 @@ WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 GROUP BY 1, 2
 ORDER BY DAY
 """
+
+def unmapped_entities(days: int = 7) -> str:
+    """V044 (#18): everything the loaders stamped UNKNOWN — the explicit-
+    classification worklist behind honest chargeback. Mart-only (zero
+    ACCOUNT_USAGE): rows appear as facts re-stamp (trailing 3d nightly,
+    go-forward hourly). Fix = a COMPANY_SCOPE mapping row; the panel
+    prints the exact INSERT."""
+    days = bounded_days(days, 30)
+    return f"""
+SELECT 'WAREHOUSE' AS GRAIN, WAREHOUSE_NAME AS ENTITY,
+       'credits' AS MEASURE, ROUND(SUM(CREDITS_TOTAL), 2) AS VALUE,
+       MAX(DAY) AS LAST_SEEN
+FROM {core_object("FACT_WAREHOUSE_DAILY")}
+WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 2
+UNION ALL
+SELECT 'DATABASE', DATABASE_NAME, 'queries', SUM(QUERIES), MAX(DATE(HOUR_TS))
+FROM {core_object("FACT_QUERY_SCHEMA_HOURLY")}
+WHERE COMPANY = 'UNKNOWN' AND HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 2
+UNION ALL
+SELECT 'USER', USER_NAME, 'logins', SUM(LOGINS), MAX(DAY)
+FROM {core_object("FACT_LOGIN_DAILY")}
+WHERE COMPANY = 'UNKNOWN' AND DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY 2
+ORDER BY GRAIN, VALUE DESC
+LIMIT 300
+"""
+

@@ -35,7 +35,7 @@ def test_supporting_cte_scans_carry_the_warehouse_predicate():
                 insights_sql.warehouse_hourly_activity(14, "ALFA")):
         head = sql.split("\nSELECT\n", 1)[0] if "\nSELECT\n" in sql else sql
         # every helper CTE body mentions the company predicate (TRXS list)
-        assert "TRXS" in head
+        assert "TRXS" in head or "WH!_ALFA!_%" in head   # V044 arm shape
     # ALL keeps the SQL valid via the neutral predicate
     assert "1 = 1" in insights_sql.idle_warehouse_analysis(30, "ALL")
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.44.0 — r28a: UNKNOWN classification, adjudication #18 (2026-07-13)
+
+Owner: "ignore 5 do 18." Unknown entities stop silently billing ALFA.
+
+- **V044 (forward-generated, byte-locked):** classification is evidence-
+  based on BOTH sides now — Trexis by mapping/prefix/role (unchanged),
+  ALFA by WH_ALFA_* names, ALFA%/ADMIN databases, %ALFA% or DBA roles —
+  and the residual is **UNKNOWN**. COMPANY_SCOPE mapping rows are the
+  explicit lever (DATABASE grain added; DBA_MAINT_DB seeded ALFA — the
+  app's own footprint stays attributed). The exec board gains an UNKNOWN
+  scope so the new pill is mart-served. SYSTEM lands UNKNOWN on purpose:
+  it runs both companies' work.
+- **UNKNOWN is a first-class filter** (company pill) and **Cost ->
+  Chargeback gains an "Unmapped entities" worklist** — every UNKNOWN
+  warehouse/database/user from the facts with the exact COMPANY_SCOPE
+  INSERT printed under it. Empty is the goal state.
+- **History is honest, not rewritten:** mart rows keep the company stamped
+  at load; the nightly reconcile re-stamps the trailing 3 days; older
+  rows re-stamp only on a backfill re-run (noted in the migration).
+- validate.sql: the "unknown user falls back to ALFA" law is superseded —
+  the probe now expects UNKNOWN; KEBARR1's override law unchanged.
+  Python mirrors, clause arms (warehouse/database/user/role), and eleven
+  scoping locks updated with V044 notes.
+
 ## 4.43.0 — r27: V043 + the adjudication's ship list (2026-07-13)
 
 Authority: docs/reviews/CODEX_R27_ADJUDICATION_20260713.md.

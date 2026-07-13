@@ -19,7 +19,7 @@ def test_department_window_is_exact_metering_with_unmapped_bucket():
     assert "COALESCE(D.DEPARTMENT, 'Unmapped')" in sql
     assert "DEPARTMENT_MAP" in sql
     assert re.search(r"DATEADD\('day',\s*-7", sql)
-    assert "NOT IN" in sql  # ALFA company scope
+    assert "WH!_ALFA!_%" in sql  # ALFA company scope (V044: evidence-based)
 
 
 def test_role_share_normalizes_per_warehouse():
