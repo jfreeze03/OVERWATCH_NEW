@@ -34,6 +34,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     selectable_table,
+    snowsight_profile_column,
     styled_table,
 )
 
@@ -121,7 +122,7 @@ def _settings_tab(is_operator: bool) -> None:
 
 
 def _migrations_tab() -> None:
-    res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="live",
+    res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="metadata",  # r24 #8: changes only at migrations
               source="SCHEMA_VERSION")
     if not res.ok:
         st.error(f"Cannot read SCHEMA_VERSION: {res.error}")
@@ -137,7 +138,7 @@ def _migrations_tab() -> None:
     else:
         st.success(f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
 
-    fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="live",
+    fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="recent",  # r24 #8: external ledger probe
              source="flyway_schema_history (Flyway ledger)", probe=True)
     if fh.usable():
         st.markdown("**Flyway deploy history** — the transport's own ledger")
@@ -504,7 +505,9 @@ def _emergency_extras(is_operator: bool) -> None:
         if rq.ok and rq.empty:
             st.success("Nothing running or queued right now.")
         elif guard(rq, ""):
-            sel_rq = selectable_table(rq.df, key="emg_rq_sel", height=240)
+            _rqdf, _rq_cfg = snowsight_profile_column(rq.df, _PAGE)
+            sel_rq = selectable_table(_rqdf, key="emg_rq_sel", height=240,
+                                      column_config=_rq_cfg or None)
             if sel_rq is not None and is_operator:
                 qrow = rq.df.iloc[int(sel_rq)]
                 qid = str(qrow["QUERY_ID"])
@@ -666,7 +669,7 @@ def _perf_rider_panels(fq_df=None) -> None:
             st.markdown("**Next tuning targets** — pain = p95 x slow fetches; "
                         "the telemetry picks, not opinions.")
             _sel = selectable_table(
-                _tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "CACHE_HIT_PCT", "PAIN"]],
+                _tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "PAIN"]],  # r24: CACHE_HIT_PCT off — 0.0 by construction until weighted telemetry (review #3/#4)
                 key="adm_tt_sel", height=160)
             # Codex r8 #1: click a target, see the slow keys behind the pain
             if _sel is not None:

@@ -32,6 +32,7 @@ from app.ui.components import (
     run_mart_first,
     section_header,
     selectable_table,
+    snowsight_profile_column,
     styled_table,
 )
 
@@ -130,15 +131,22 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
         source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
+        # r24: every QUERY_ID row links straight to its Snowsight profile
+        # (owner ask — the drill's single link earned its keep).
+        _tp, _tp_cfg = snowsight_profile_column(top.df, _PAGE)
+        _tp_cols = ["START_TIME", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
+                    "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]
+        if "PROFILE" in _tp.columns:
+            _tp_cols.append("PROFILE")
         sel_q = selectable_table(
-            top.df[["START_TIME", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
-                     "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]],
+            _tp[_tp_cols],
             key="ops_top_sel",
             column_config={
                 "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
                 "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed s", format="%.1f"),
                 "QUEUED_SEC": st.column_config.NumberColumn("Queued s", format="%.1f"),
                 "SPILL_REMOTE_GB": st.column_config.NumberColumn("Spill GB", format="%.2f"),
+                **_tp_cfg,
             },
         )
         st.caption("Elapsed-time ranking. Per-query dollars are estimates; exact billing is per warehouse.")

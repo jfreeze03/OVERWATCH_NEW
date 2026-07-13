@@ -583,7 +583,7 @@ def render() -> None:
             "route keeps the original single-webhook behavior until you add rows. One "
             "failing integration never blocks the others."
         )
-        routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="live",
+        routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="recent",  # r24 #8: config table; post-save freshness rides the action salt
                      source="ALERT_ROUTES")
         if guard(routes, "No routes configured yet.",
                  setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness."):

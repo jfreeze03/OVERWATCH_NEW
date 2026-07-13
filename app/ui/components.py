@@ -290,6 +290,35 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 
 
 
+def snowsight_profile_column(df, page: str, id_col: str = "QUERY_ID"):
+    """Frame + column-config additions that turn QUERY_IDs into Snowsight
+    query-profile deep links (owner ask 2026-07-13: "the hyperlinks to the
+    query profile are helpful"). The org/account context resolves once per
+    session; when it is unavailable the frame returns unchanged and no link
+    column renders — an honest degrade, never a dead link."""
+    from app.core.query import run
+    if df is None or df.empty or id_col not in df.columns:
+        return df, {}
+    ctx = st.session_state.get("_ow_snowsight_ctx")
+    if ctx is None:
+        res = run("SELECT CURRENT_ORGANIZATION_NAME() AS ORG, CURRENT_ACCOUNT_NAME() AS ACCT",
+                  page=page, key="snowsight_ctx", tier="metadata", source="session context")
+        org = str(res.df.iloc[0].get("ORG", "") or "") if res.usable() else ""
+        acct = str(res.df.iloc[0].get("ACCT", "") or "") if res.usable() else ""
+        ctx = (org.lower(), acct.lower())
+        st.session_state["_ow_snowsight_ctx"] = ctx
+    org, acct = ctx
+    if not org or not acct:
+        return df, {}
+    out = df.copy()
+    base = f"https://app.snowflake.com/{org}/{acct}/#/compute/history/queries/"
+    out["PROFILE"] = out[id_col].map(
+        lambda q: f"{base}{q}/profile" if str(q or "").strip() else None)
+    return out, {"PROFILE": st.column_config.LinkColumn(
+        "Profile", display_text="Open ↗", width="small",
+        help="Query profile in Snowsight — plan, partitions, spilling.")}
+
+
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",

@@ -32,6 +32,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     selectable_table,
+    snowsight_profile_column,
     styled_table,
     toggle_cost_hint,
 )
@@ -275,10 +276,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 {"label": "Costliest single query",
                  "value": format_usd(float(edf_q["ALLOCATED_USD"].max())) if len(edf_q) else "$0"},
             ])
+            _eq, _eq_cfg = snowsight_profile_column(edf_q, _PAGE)
+            _eq_cols = ["ALLOCATED_USD", "USER_NAME", "WAREHOUSE_NAME", "QUERY_TYPE",
+                        "EXECUTION_STATUS", "ELAPSED_SEC", "START_TIME", "QUERY_SNIPPET", "QUERY_ID"]
+            if "PROFILE" in _eq.columns:
+                _eq_cols.append("PROFILE")
             styled_table(
-                edf_q[["ALLOCATED_USD", "USER_NAME", "WAREHOUSE_NAME", "QUERY_TYPE",
-                       "EXECUTION_STATUS", "ELAPSED_SEC", "START_TIME", "QUERY_SNIPPET", "QUERY_ID"]],
-                column_config={"ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.2f")},
+                _eq[_eq_cols],
+                column_config={"ALLOCATED_USD": st.column_config.NumberColumn("Allocated $", format="$%.2f"),
+                               **_eq_cfg},
             )
             result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
             st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")

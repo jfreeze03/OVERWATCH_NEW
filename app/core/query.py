@@ -551,6 +551,11 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
         session.sql(sql).collect()
+        # r24 #8: a successful action bumps the refresh salt, so every cached
+        # read refetches on the next rerun — post-action freshness no longer
+        # depends on individual panels sitting on the live tier.
+        from datetime import datetime as _dt
+        st.session_state["_ow_refresh_salt"] = _dt.now().isoformat()
         return True, "Statement executed."
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement: {sql[:200]}")

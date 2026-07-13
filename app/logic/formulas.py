@@ -197,3 +197,34 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
 <div class="foot">Numbers come from ACCOUNT_USAGE-derived facts with the cloud-services
 adjustment applied; telemetry lags up to ~45 min (metering daily up to 24h).</div>
 </body></html>"""
+
+def mtd_pace_vs_prior_month(daily, today):
+    """MTD spend paced against the SAME first-N-days of the prior month —
+    the budget-free pace signal (owner 2026-07-13: the Monthly-budget KPI
+    read 'Not configured' forever; a pace needs no configuration).
+
+    ``daily``: frame with DAY (date-like) and USD columns covering both
+    months. Returns (mtd_usd, prior_usd, pct_delta); pct_delta is None when
+    the prior month has no rows in the span — never a fabricated 0%.
+    """
+    from datetime import timedelta
+
+    import pandas as pd
+
+    if daily is None or len(daily) == 0 or "USD" not in getattr(daily, "columns", ()):
+        return 0.0, 0.0, None
+    frame = daily.copy()
+    frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
+    frame = frame.dropna(subset=["DAY"])
+    month_start = today.replace(day=1)
+    prior_end = month_start - timedelta(days=1)
+    prior_start = prior_end.replace(day=1)
+    n_days = min(today.day, prior_end.day)   # capped at the prior month's length
+    prior_cut = prior_start + timedelta(days=n_days)
+    mtd = float(frame[frame["DAY"] >= month_start]["USD"].map(safe_float).sum())
+    prior_rows = frame[(frame["DAY"] >= prior_start) & (frame["DAY"] < prior_cut)]
+    prior = float(prior_rows["USD"].map(safe_float).sum())
+    if prior_rows.empty or prior <= 0:
+        return mtd, prior, None
+    return mtd, prior, (mtd - prior) / prior * 100.0
+

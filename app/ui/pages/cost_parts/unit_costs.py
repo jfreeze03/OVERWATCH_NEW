@@ -19,7 +19,13 @@ from app.core.query import run, run_batch
 from app.data import cortex_sql, insights_sql, mart27_sql
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.ui import charts
-from app.ui.components import guard, kpi_row, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    result_caption,
+    snowsight_profile_column,
+    styled_table,
+)
 
 _PAGE = "Cost & Contract"
 
@@ -200,8 +206,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                            "attribution lags ~6h, so very recent runs may not price yet."):
                 cdf = cres.df.copy()
                 cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                cdf, _c_cfg = snowsight_profile_column(cdf, _PAGE)
                 styled_table(cdf, height=170, column_config={
                     "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                    **_c_cfg,
                 })
                 st.caption(f"{len(cdf)} CALL(s) — one row per proc run.")
                 if len(cdf) == 1:

@@ -26,7 +26,6 @@ from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_p
 from app.logic.formulas import account_today, exec_summary_html, format_usd, month_days, safe_float
 from app.ui import charts
 from app.ui.components import (
-    budget_kpi,
     download_text_button,
     kpi_row,
     load_settings,
@@ -96,6 +95,36 @@ def _open_alert_counts(company: str = "ALL") -> tuple[QueryResult, int, int]:
         return res, 0, 0
     sev = res.df["SEVERITY"].astype(str).str.upper()
     return res, int((sev == "CRITICAL").sum()), int((sev == "HIGH").sum())
+
+
+def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
+                  budget: float) -> dict:
+    """MTD paced against the prior month's same first-N-days (owner
+    2026-07-13: the Monthly-budget KPI read 'Not configured' forever —
+    replaced with a pace that needs no configuration). Reuses the 150d
+    daily-spend frame already loaded for the forecast backtest — zero extra
+    queries. A configured budget still shows, inside help, not as a KPI."""
+    from app.logic.formulas import mtd_pace_vs_prior_month
+
+    if not hist.usable():
+        return {"label": "MTD spend", "value": format_usd(mtd_spend),
+                "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
+    frame = hist.df.copy()
+    frame["USD"] = frame["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+    mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
+    budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
+                   f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
+    if pct is None:
+        return {"label": "MTD spend", "value": format_usd(mtd),
+                "help": "Pace vs last month appears once the prior month has "
+                        "daily facts (backfill_365.sql loads the year)." + budget_note}
+    return {"label": "MTD vs last month (same days)",
+            "value": format_usd(mtd),
+            "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
+            "delta_color": "inverse",
+            "help": "Billed credits, account-wide, first "
+                    f"{account_today().day} days of each month at today's rate."
+                    + budget_note}
 
 
 @safe_page(_PAGE)
@@ -218,7 +247,7 @@ def render() -> None:
                     "are on Cost -> Spend; Snowsight adds storage and transfer, so it "
                     "reads higher.",
         },
-        budget_kpi(settings, mtd_spend) if mtd_source else {
+        _mtd_pace_kpi(mtd_spend, _bt_hist, rate, budget) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
             "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",

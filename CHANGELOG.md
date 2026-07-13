@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.40.0 — r24: profile links everywhere + the first honesty/tier ships (2026-07-13)
+
+- **Snowsight query-profile links are a pattern now** (owner: "the
+  hyperlinks to the query profile are helpful"). A shared helper turns any
+  QUERY_ID column into a Profile link (org/account resolved once per
+  session; no context = no column, never a dead link). Wired: Operations
+  heaviest queries, Optimization costliest queries, Unit-costs CALL
+  pricing, Admin running-queries. One click from any row to the plan,
+  partitions, and spilling.
+- **Review #4 — the dead cache gauge is off the pain board.** CACHE_HIT_PCT
+  read 0.0 by construction (persisted rows are slow-biased); the tuning
+  targets table drops it, the by-page table keeps it with the
+  floor-not-census caption, and the real gauge returns with weighted
+  telemetry (review #3).
+- **Overview: the Monthly-budget KPI is replaced** (owner: "I don't like
+  having useless features" — it read 'Not configured' forever). Its slot
+  now paces MTD against the prior month's SAME first-N-days from the 150d
+  frame the page already loads (zero new queries); a configured budget
+  survives as help-text context. No prior-month data = no fabricated 0%.
+- **Review #8, first slice — post-action freshness is systemic.**
+  execute_statement bumps the refresh salt on success, so every cached
+  read refetches after any operator action; with that guarantee in place,
+  the risk-free live-tier downgrades land (SCHEMA_VERSION -> metadata,
+  Flyway probe -> recent, alert routes -> recent). The deliberate live
+  surfaces (settings table, dept budgets, alert queue, recheck-now)
+  stay live. The queue itself is next slice, behind an ack-flow test.
+
+Deploy: app-only — push the build.
+
+## 4.39.0 — triage filters, visible; the 20-item forward review (2026-07-13)
+
+(Entry restored in v4.40.0 — the stamp script died mid-run and the commit
+went out titled v4.39.0 without it; the work itself shipped in f5852d4.)
+
+- Triage filter strip visual pass: active-scope chips (contains-filters
+  amber), a filtered-strip glow, one-click Reset, and an honest
+  "Account-wide · default window" state. Token-layer CSS; user text
+  escaped; locked in test_design_system.
+- docs/reviews/APP_REVIEW_20260713.md: twenty grounded recommendations in
+  four tiers with r24-r26 sequencing.
+
 ## 4.38.0 — r23: the post-rebuild fleet board's picks (2026-07-12)
 
 App-only round, by design — the rebuild settles while the telemetry does
