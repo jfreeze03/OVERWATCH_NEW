@@ -415,8 +415,52 @@ def _persistent_status_bar(vals: dict | None = None) -> None:
     status_bar(stats)
 
 
+def _reset_scope() -> None:
+    """One-click return to the account-wide default scope (v4.39)."""
+    from app.core.state import FILTER_DEFAULTS
+    for key, default in FILTER_DEFAULTS.items():
+        st.session_state[key] = default
+
+
+def _scope_chips() -> tuple[str, bool]:
+    """Chip row summarizing the ACTIVE scope. Non-default filters render as
+    accent chips (text filters amber — they narrow hardest); all-default
+    renders one muted account-wide chip. Values are user text: escaped."""
+    import html as _html
+
+    from app.core.state import FILTER_DEFAULTS
+    chips: list[str] = []
+
+    def _chip(label: str, value: str, kind: str = "accent") -> None:
+        chips.append(f'<span class="ow-chip ow-chip-{kind}">'
+                     f'<span class="ow-chip-dot"></span>{label} '
+                     f"<b>{_html.escape(str(value))}</b></span>")
+
+    if st.session_state.get("flt_company") != FILTER_DEFAULTS["flt_company"]:
+        _chip("Company", st.session_state.get("flt_company", ""))
+    if st.session_state.get("flt_environment") != FILTER_DEFAULTS["flt_environment"]:
+        _chip("Env", st.session_state.get("flt_environment", ""))
+    if st.session_state.get("flt_days") != FILTER_DEFAULTS["flt_days"]:
+        _chip("Window", f"{st.session_state.get('flt_days')}d")
+    if str(st.session_state.get("flt_database") or "").strip():
+        _chip("Database", st.session_state.get("flt_database", ""))
+    for key, label in (("flt_warehouse_contains", "Warehouse~"),
+                       ("flt_user_contains", "User~"),
+                       ("flt_schema_contains", "Schema~")):
+        if str(st.session_state.get(key) or "").strip():
+            _chip(label, st.session_state.get(key, ""), kind="warn")
+    active = bool(chips)
+    if not active:
+        chips.append('<span class="ow-chip">Account-wide · '
+                     f'default {FILTER_DEFAULTS["flt_days"]}d window</span>')
+    marker = '<div class="ow-scope-active"></div>' if active else ""
+    return f'{marker}<div class="ow-scope-chips">{"".join(chips)}</div>', active
+
+
 def _topbar_scope(health_vals: dict | None = None) -> None:
-    """Triage filter strip above every page, like the original OVERWATCH."""
+    """Triage filter strip above every page, like the original OVERWATCH.
+    v4.39 visual pass: active-scope chips + one-click reset, and the strip
+    border glows while any non-default filter is live."""
     box = st.container(border=True)
     with box:
         head_l, head_m, head_r = st.columns([3.6, 1.4, 1])
@@ -429,6 +473,15 @@ def _topbar_scope(health_vals: dict | None = None) -> None:
                 st.caption(f"Telemetry ≤ {stale_h}h old")
         with head_r:
             _views_popover()
+        chips_html, _scope_is_active = _scope_chips()
+        chip_col, reset_col = st.columns([5.2, 0.8])
+        with chip_col:
+            st.markdown(chips_html, unsafe_allow_html=True)
+        with reset_col:
+            if _scope_is_active:
+                st.button("Reset", key="flt_reset", on_click=_reset_scope,
+                          help="Back to the account-wide default scope.",
+                          use_container_width=True)
         _topbar_scope_controls()
 
 

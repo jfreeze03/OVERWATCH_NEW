@@ -104,3 +104,22 @@ def test_role_based_user_scope_everywhere():
 def test_stale_elements_hidden_for_crisp_section_switch():
     from app import theme
     assert '[data-stale="true"]' in theme._CSS   # no bleed between lazy sections
+
+def test_triage_scope_chips_and_reset():
+    """v4.39: the active scope reads as chips, the strip glows when any
+    non-default filter is live, and one click resets — scoped numbers must
+    never pass as account-wide."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
+    for cls in (".ow-scope-chips{", ".ow-chip{", ".ow-chip-accent{",
+                ".ow-chip-warn{", ".ow-chip-dot{"):
+        assert cls in theme, cls
+    assert ':has(.ow-scope-active)' in theme               # the filtered glow
+    main = (root / "app" / "main.py").read_text(encoding="utf-8")
+    assert "_scope_chips" in main and "_reset_scope" in main
+    assert '_html.escape(str(value))' in main              # user text escaped
+    assert 'kind="warn"' in main                           # contains-filters read hotter
+    assert 'st.button("Reset", key="flt_reset", on_click=_reset_scope' in main
+    assert "Account-wide" in main                          # honest default chip
+
