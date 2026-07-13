@@ -76,7 +76,6 @@ REFUSERS = [
     ("prefs.key", lambda p: prefs_sql.upsert_pref_sql(p, "{}")),
     ("rem.warehouse", lambda p: remediation.auto_suspend_fix(p)),
     ("rem.user", lambda p: remediation.disable_user(p)),
-    ("rem.monitor", lambda p: remediation.resource_monitor_quota(p, 30)),
     ("rem.cortex", lambda p: remediation.cortex_allowlist(p)),
 ]
 

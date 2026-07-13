@@ -15,6 +15,8 @@ from app.logic import insights
     lambda: insights_sql.repeat_query_fingerprints(7, "ALFA"),
     lambda: insights_sql.storage_growth_by_database(30, "ALFA"),
     lambda: insights_sql.release_query_compare("2026-07-01", 7, "ALFA"),
+    lambda: insights_sql.release_task_compare("2026-07-01", 7, "ALFA"),
+    lambda: insights_sql.task_failure_details(7, "ALFA"),
     lambda: insights_sql.dormant_users(90, "ALFA"),
 ])
 def test_every_insight_scan_is_bounded(builder):
@@ -39,7 +41,7 @@ def test_release_compare_validates_date():
     with pytest.raises(ValueError):
         insights_sql.release_query_compare("07/01/2026", 7)
     with pytest.raises(ValueError):
-        insights_sql.release_query_compare("2026-07-01'; DROP TABLE x;--", 7)
+        insights_sql.release_task_compare("2026-07-01'; DROP TABLE x;--", 7)
 
 
 def test_release_windows_clamped_to_14_days():
@@ -133,6 +135,21 @@ def test_release_verdicts():
     assert insights.compare_release_periods(pd.DataFrame()) == []
 
 
+def test_task_release_deltas_flags_regressions():
+    df = pd.DataFrame([
+        {"DATABASE_NAME": "DB", "TASK_NAME": "T1", "PERIOD": "BEFORE", "RUNS": 10, "FAILED": 0, "AVG_SEC": 100},
+        {"DATABASE_NAME": "DB", "TASK_NAME": "T1", "PERIOD": "AFTER", "RUNS": 10, "FAILED": 3, "AVG_SEC": 100},
+        {"DATABASE_NAME": "DB", "TASK_NAME": "T2", "PERIOD": "BEFORE", "RUNS": 10, "FAILED": 0, "AVG_SEC": 100},
+        {"DATABASE_NAME": "DB", "TASK_NAME": "T2", "PERIOD": "AFTER", "RUNS": 10, "FAILED": 0, "AVG_SEC": 101},
+    ])
+    out = insights.task_release_deltas(df)
+    t1 = out[out["TASK_NAME"] == "T1"].iloc[0]
+    t2 = out[out["TASK_NAME"] == "T2"].iloc[0]
+    assert bool(t1["GOT_WORSE"]) and t1["NEW_FAILURES"] == 3
+    assert not bool(t2["GOT_WORSE"])
+    assert out.iloc[0]["TASK_NAME"] == "T1"  # regressions first
+
+
 # ---- 5. failure timeline ------------------------------------------------------------
 
 def test_error_classification():
@@ -144,6 +161,21 @@ def test_error_classification():
     assert insights.classify_task_error("Syntax error line 1") == "Syntax / SQL"
     assert insights.classify_task_error("") == "No error text"
     assert insights.classify_task_error("weird") == "Other"
+
+
+def test_failure_timeline_marks_root_vs_cascade():
+    df = pd.DataFrame([
+        {"TASK_NAME": "CHILD", "GRAPH_RUN_GROUP_ID": "g1",
+         "QUERY_START_TIME": "2026-07-07 02:10:00", "ERROR_MESSAGE": "upstream failed"},
+        {"TASK_NAME": "ROOT", "GRAPH_RUN_GROUP_ID": "g1",
+         "QUERY_START_TIME": "2026-07-07 02:00:00", "ERROR_MESSAGE": "timeout"},
+    ])
+    out = insights.build_failure_timeline(df)
+    root = out[out["TASK_NAME"] == "ROOT"].iloc[0]
+    child = out[out["TASK_NAME"] == "CHILD"].iloc[0]
+    assert root["ROLE_IN_GRAPH"] == "Root cause"
+    assert child["ROLE_IN_GRAPH"] == "Cascade"
+    assert root["ERROR_FAMILY"] == "Timeout / cancelled"
 
 
 # ---- 7. dormant users -----------------------------------------------------------------

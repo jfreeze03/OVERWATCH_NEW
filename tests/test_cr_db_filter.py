@@ -2,7 +2,7 @@
 filter in Control room using database").
 
 Grain law: panels whose source carries DATABASE_NAME follow the filter
-(pulse, activity spark, lock spikes); panels without the grain say
+(pulse, activity spark, tasks, lock spikes); panels without the grain say
 so instead of silently ignoring it (timeline, spend movers, triage note)."""
 
 from __future__ import annotations
@@ -36,6 +36,6 @@ def test_control_room_wires_the_filter_and_labels_the_rest():
     # honest labels where the grain doesn't exist
     assert "the database filter doesn't apply here" in _CR      # timeline
     assert "the database filter doesn't narrow this" in _CR     # movers
-    assert "doesn't narrow this queue" in _CR      # triage grain note (r26 wording)
+    assert "don't have database grain" in _CR                   # triage note
     # the page states its scope when the filter is on
     assert '''f" · {f['database']}" if f["database"] else ""''' in _CR

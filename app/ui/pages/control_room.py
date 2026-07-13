@@ -1,6 +1,6 @@
 """Control Room — DBA morning triage on one screen.
 
-Ranked queue (alerts + spend anomalies), telemetry freshness,
+Ranked queue (alerts + task failures + spend anomalies), telemetry freshness,
 24h operations pulse, and spend movers. No button maze: the queue is visible
 on entry.
 """
@@ -102,6 +102,8 @@ def _day_replay() -> None:
          "source": "FACT_WAREHOUSE_DAILY vs 14d baseline"},
         {"key": "act", "sql": mart_sql.day_activity(day_iso, rp_company),
          "source": "FACT_QUERY_HOURLY (day vs baseline)"},
+        {"key": "tf", "sql": mart_sql.day_task_failures(day_iso, rp_company),
+         "source": "FACT_TASK_DAILY (failures that day)"},
         {"key": "al", "sql": mart_sql.day_alerts(day_iso, rp_company),
          "source": "ALERT_EVENTS (that day)"},
     ], page=_PAGE, tier="recent")
@@ -113,7 +115,7 @@ def _day_replay() -> None:
     ], page=_PAGE, tier="historical")
     if _b_recent is not None and _b_hist is not None:
         movers, activity = _b_recent["mv"], _b_recent["act"]
-        alerts_d = _b_recent["al"]
+        tasks, alerts_d = _b_recent["tf"], _b_recent["al"]
         ddl, grants = _b_hist["ddl"], _b_hist["gr"]
     else:
         movers = run(mart_sql.day_spend_movers(day_iso, rp_company), page=_PAGE,
@@ -128,6 +130,9 @@ def _day_replay() -> None:
         grants = run(security_sql.day_grants(day_iso, rp_company), page=_PAGE,
                      key=f"rp_gr_{rp_company}_{day_iso}",
                      tier="historical", source="GRANTS_TO_USERS (that day)")
+        tasks = run(mart_sql.day_task_failures(day_iso, rp_company), page=_PAGE,
+                    key=f"rp_tf_{rp_company}_{day_iso}",
+                    tier="recent", source="FACT_TASK_DAILY (failures that day)")
         alerts_d = run(mart_sql.day_alerts(day_iso, rp_company), page=_PAGE,
                        key=f"rp_al_{rp_company}_{day_iso}",
                        tier="recent", source="ALERT_EVENTS (that day)")
@@ -138,9 +143,10 @@ def _day_replay() -> None:
         activity.df if activity.usable() else None,
         len(ddl.df) if ddl.usable() else 0,
         len(grants.df) if grants.usable() else 0,
+        int(tasks.df["FAILED"].sum()) if tasks.usable() else 0,
         crit_n, rate,
     )
-    if not any(r.usable() for r in (movers, activity, ddl, grants, alerts_d)):
+    if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
         st.info(f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
         return
     if heads:
@@ -154,6 +160,11 @@ def _day_replay() -> None:
         st.markdown("**Spend movers vs 14d baseline**")
         if guard(movers, "No warehouse spend recorded that day."):
             styled_table(movers.df, height=240)
+        st.markdown("**Task failures**")
+        if tasks.ok and tasks.empty:
+            st.success("No task failures that day.")
+        elif guard(tasks, ""):
+            styled_table(tasks.df, height=200)
     with c2:
         st.markdown("**DDL that landed**")
         if ddl.ok and ddl.empty:
@@ -353,6 +364,13 @@ def render() -> None:
                  key=f"cr_alerts_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
                  else f"ALERT_EVENTS ({company} + account-level)")
+    tasks = run(mart_sql.fact_task_daily(2, company, f["database"]), page=_PAGE, key=f"cr_tasks_{company}",
+                tier="recent", source="FACT_TASK_DAILY")
+    if not tasks.usable():
+        tasks = run(ops_sql.task_runs(2, company, f["database"], f["schema_contains"]),
+                    page=_PAGE, key=f"cr_tasks_live_{company}",
+                    tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
+
     wh_daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
                    key=f"cr_wh_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
     anomalies: list[dict] = []
@@ -365,23 +383,27 @@ def render() -> None:
 
     queue = triage_queue(
         alerts.df if alerts.usable() else None,
+        tasks.df if tasks.usable() else None,
         anomalies,
     )
     if queue.empty:
-        if alerts.ok:
-            st.success("Nothing to triage: no open alerts or spend anomalies in scope.")
+        sources_ok = alerts.ok and tasks.ok
+        if sources_ok:
+            st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
         else:
-            st.info("Triage inputs incomplete: alert tables not installed.")
+            st.info("Triage inputs incomplete: "
+                    + ("alert tables not installed; " if not alerts.ok else "")
+                    + ("task facts not installed." if not tasks.ok else ""))
     else:
         styled_table(queue)
-        st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, spend anomalies."
-                   + (" Neither source has database grain, so the database filter "
-                      "doesn't narrow this queue." if f["database"] else ""))
+        st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies."
+                   + (" Task failures follow the database filter; alerts and "
+                      "spend anomalies don't have database grain." if f["database"] else ""))
 
     # ---- Spend movers ----------------------------------------------------------
     st.subheader("Incident correlation timeline")
     panel_help(
-        "Alerts and DDL changes on one time axis (7 days). Click a row "
+        "Alerts, task failures, and DDL changes on one time axis (7 days). Click a row "
         "below the chart to see everything else that happened within ±30 minutes — the "
         "'what changed right before this broke?' view."
     )
@@ -403,10 +425,10 @@ def render() -> None:
     if tl is None:
         tl = run(mart_sql.incident_timeline(tl_days, _tl_company),
                  page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
-                 source="ALERT_EVENTS + QUERY_HISTORY (DDL"
+                 source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL"
                         + (", live fallback)" if tl_win.startswith("48h") else ")"))
     if tl.ok and tl.empty:
-        st.success("Quiet week: no alerts or DDL in the window.")
+        st.success("Quiet week: no alerts, task failures, or DDL in the window.")
     elif guard(tl, ""):
         tdf = tl.df.copy()
         tdf, tz_note = localize_timestamps(tdf, ["AT"])
@@ -472,6 +494,6 @@ def render() -> None:
     # r19 #2: six reads for a bottom-of-page feature ran on every rerun —
     # the flight recorder now loads only when asked (results stay cached).
     if st.toggle("Load day replay", key="cr_replay_on",
-                 help="Five reads across spend, activity, DDL, grants, and "
+                 help="Six reads across spend, activity, DDL, grants, tasks, and "
                       "alerts for one chosen day. Loads when on; caches after."):
         _day_replay()

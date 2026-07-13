@@ -20,12 +20,10 @@ def test_anomaly_evidence_validates_date_and_scopes():
 
 def test_incident_timeline_unions_three_sources():
     sql = mart_sql.incident_timeline(7, "Trexis")
-    assert "'ALERT'" in sql and "'DDL CHANGE'" in sql
-    # r26 (owner 2026-07-13): the TASK FAILURE arm left with task monitoring.
-    assert "'TASK FAILURE'" not in sql
+    assert "'ALERT'" in sql and "'TASK FAILURE'" in sql and "'DDL CHANGE'" in sql
     assert "::TIMESTAMP_NTZ" in sql                      # one dtype on the axis
     assert "COMPANY IN ('Trexis', 'ALL')" in sql
-    assert "LIMIT 400" in sql
+    assert "STATE = 'FAILED'" in sql and "LIMIT 400" in sql
 
 
 def test_fact_daily_activity_builder():

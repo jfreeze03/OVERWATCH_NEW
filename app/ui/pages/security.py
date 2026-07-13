@@ -258,13 +258,12 @@ def _governance_score_panel():
                 "expiring_credentials": snap.get("EXPIRING_CRED_10D", 0),
                 "breakglass_grants_30d": snap.get("BREAKGLASS_GRANTS_30D"),
             }
-            if {"WH_NO_MONITOR", "WH_NO_AUTOSUSPEND"} <= set(snap.index.astype(str)):
-                # V041 R11: the posture row carries the monitor totals, so
-                # this render pays no SHOW WAREHOUSES + parse at all.
-                inputs["warehouses_no_monitor"] = int(float(snap.get("WH_NO_MONITOR") or 0))
+            if "WH_NO_AUTOSUSPEND" in set(snap.index.astype(str)):
+                # V041 R11 posture row; the WH_NO_MONITOR twin is ignored
+                # since v4.45 (owner runs no resource monitors).
                 inputs["warehouses_no_autosuspend"] = int(float(snap.get("WH_NO_AUTOSUSPEND") or 0))
     whs = None
-    if "warehouses_no_monitor" not in inputs:
+    if "warehouses_no_autosuspend" not in inputs:
         whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="gov_show_wh",
                   tier="metadata", source="SHOW WAREHOUSES (pre-V041 fallback)", max_rows=0)
     if not inputs:
@@ -281,9 +280,6 @@ def _governance_score_panel():
     if whs is not None and whs.ok and not whs.empty:
         wdf = whs.df.copy()
         wdf.columns = [str(c).lower() for c in wdf.columns]
-        if "resource_monitor" in wdf.columns:
-            rm = wdf["resource_monitor"].astype(str).str.strip().str.lower()
-            inputs["warehouses_no_monitor"] = int(((rm == "null") | (rm == "") | (rm == "none")).sum())
         if "auto_suspend" in wdf.columns:
             asus = pd.to_numeric(wdf["auto_suspend"], errors="coerce").fillna(0)
             inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())

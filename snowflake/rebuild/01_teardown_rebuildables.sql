@@ -234,9 +234,9 @@ DROP SECRET IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL;    -- recipe (
 -- The warehouse also serves the Streamlit app; the resource monitor caps it;
 -- roles may be granted into your role hierarchy.
 -- DROP STREAMLIT IF EXISTS DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
--- ALTER WAREHOUSE IF EXISTS WH_ALFA_OVERWATCH SET RESOURCE_MONITOR = NULL;
+-- ALTER WAREHOUSE IF EXISTS WH_ALFA_OVERWATCH SET RESOURCE_MONITOR = NULL;  -- already NULL: V045
 -- DROP WAREHOUSE IF EXISTS WH_ALFA_OVERWATCH;
--- DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;
+-- DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;  -- already dropped by V045 (owner correction)
 -- Retired 2026-07-13 (owner: only SNOW_* roles have access) — roles.sql
 -- drops these actively; teardown keeps every destructive line commented.
 -- DROP ROLE IF EXISTS OVERWATCH_OPERATOR;

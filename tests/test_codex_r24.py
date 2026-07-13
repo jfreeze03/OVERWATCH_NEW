@@ -52,7 +52,7 @@ def test_actions_bump_the_refresh_salt_and_tiers_downgrade_safely():
     assert 'key="alert_routes", tier="recent"' in al
     # the deliberately-live operator-edit surfaces STAY live (the audit rule)
     assert 'key="settings_table", tier="live"' in adm
-    assert 'key="emg_budgets", tier="live"' in adm
+    # v4.45: the budget<->monitor sync panel retired with resource monitors
 
 def test_overview_budget_kpi_replaced_by_the_pace_kpi():
     """Owner 2026-07-13: 'replace Monthly budget with something else — I

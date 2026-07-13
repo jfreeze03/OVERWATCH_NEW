@@ -56,27 +56,39 @@ def test_ledger_totals_never_mix_states():
 
 def test_triage_queue_merges_and_ranks():
     alerts = pd.DataFrame([{"SEVERITY": "CRITICAL", "TITLE": "spend spike", "DETAIL": "x", "RAISED_AT": "2026-07-07"}])
+    tasks = pd.DataFrame([
+        {"TASK_NAME": "LOAD_A", "DATABASE_NAME": "ALFA_EDW_PROD", "SCHEMA_NAME": "DW",
+         "FAILED": 4, "LAST_ERROR": "boom", "DAY": "2026-07-06"},
+        {"TASK_NAME": "LOAD_B", "DATABASE_NAME": "ALFA_EDW_DEV", "SCHEMA_NAME": "DW",
+         "FAILED": 0, "LAST_ERROR": "", "DAY": "2026-07-06"},
+    ])
     anomalies = [{"label": "WH_X", "value": 900.0, "z": 6.2}]
-    queue = triage_queue(alerts, anomalies)
+    queue = triage_queue(alerts, tasks, anomalies)
     assert queue.iloc[0]["KIND"] == "Alert"
     kinds = set(queue["KIND"])
-    assert kinds == {"Alert", "Spend anomaly"}
-    assert len(queue) == 2
+    assert kinds == {"Alert", "Task failure", "Spend anomaly"}
+    assert len(queue) == 3  # zero-failure task excluded
+    # Owner requirement: failed tasks must show their database.
+    task_row = queue[queue["KIND"] == "Task failure"].iloc[0]
+    assert task_row["DATABASE"] == "ALFA_EDW_PROD"
+    assert task_row["TITLE"].startswith("ALFA_EDW_PROD.DW.LOAD_A")
     assert "DATABASE" in queue.columns
 
 
 def test_triage_queue_raised_at_is_arrow_safe_text():
     """Regression: mixed timestamp/date/None RAISED_AT crashed st.dataframe
     ('Conversion failed for column RAISED_AT with type object')."""
-    from datetime import datetime
+    from datetime import date, datetime
 
     alerts = pd.DataFrame([{"SEVERITY": "HIGH", "TITLE": "a", "DETAIL": "",
                             "RAISED_AT": datetime(2026, 7, 7, 2, 0)}])
+    tasks = pd.DataFrame([{"TASK_NAME": "T", "DATABASE_NAME": "DB", "SCHEMA_NAME": "S",
+                           "FAILED": 1, "LAST_ERROR": "", "DAY": date(2026, 7, 6)}])
     anomalies = [{"label": "WH", "value": 1.0, "z": 6.0}]
-    queue = triage_queue(alerts, anomalies)
+    queue = triage_queue(alerts, tasks, anomalies)
     assert all(isinstance(v, str) for v in queue["RAISED_AT"])
     assert "" in set(queue["RAISED_AT"])  # anomaly row normalized to empty text
 
 
 def test_triage_queue_empty_inputs():
-    assert triage_queue(None, None).empty
+    assert triage_queue(None, None, None).empty

@@ -1,7 +1,7 @@
 -- validate.sql — post-install checks. Every row should read OK.
 
 WITH checks AS (
-    SELECT 'V001..V044 applied' AS CHECK_NAME,
+    SELECT 'V001..V045 applied' AS CHECK_NAME,
            IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 42) = 42,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
@@ -45,7 +45,7 @@ WITH checks AS (
     SELECT 'WH_ALFA_OVERWATCH exists (event evidence)',
            IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
                         WHERE WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'),
-               'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_OVERWATCH + OVERWATCH_RM via SHOW WAREHOUSES')
+               'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_OVERWATCH via SHOW WAREHOUSES')
     UNION ALL
     SELECT 'Alert rules seeded',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')

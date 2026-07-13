@@ -630,7 +630,7 @@ def test_ops_diag_readers_and_first_paint_gate():
 def test_platform_score_reader_and_overview_swap():
     sql = mart27_sql.platform_score_inputs(30)
     for col in ("DAY", "CREDITS_BILLED", "QUERY_COUNT", "FAILED_COUNT", "QUEUED_SEC",
-                "SPILL_GB", "CRIT_RAISED", "HIGH_RAISED"):
+                "SPILL_GB", "TASK_RUNS", "TASK_FAILED", "CRIT_RAISED", "HIGH_RAISED"):
         assert col in sql, col
     assert "RAISED_AT" not in sql and "HOUR_TS" not in sql  # old source columns absent
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
@@ -646,8 +646,10 @@ def test_spend_attribution_swap_and_security_monitor_swap():
     assert body.index("if schema_contains:") < body.index("elif database:")
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     gov = sec.split("def _governance_score_panel", 1)[1].split("\ndef ", 1)[0]
-    assert '"warehouses_no_monitor" not in inputs' in gov   # SHOW only as fallback
-    assert 'snap.get("WH_NO_MONITOR")' in gov
+    # v4.45: monitor tracking retired (owner correction) — the posture-first
+    # read + SHOW fallback pattern survives on the autosuspend metric.
+    assert '"warehouses_no_autosuspend" not in inputs' in gov
+    assert 'snap.get("WH_NO_AUTOSUSPEND")' in gov
     assert "whs is not None and whs.ok" in gov
 
 

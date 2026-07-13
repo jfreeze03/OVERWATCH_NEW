@@ -3,7 +3,7 @@
 ## 1. Snowflake objects (one-time, then per release)
 
 Run as **SNOW_ACCOUNTADMINS** (or **SNOW_SYSADMINS** if it can create the
-warehouse/resource monitor and grants) — these are the account's DBA roles:
+warehouse and grants) — these are the account's DBA roles:
 
 ```
 snowflake/migrations/V001__core.sql
@@ -51,8 +51,8 @@ app and flags drift.
 
 Cost controls installed by V002:
 - `WH_ALFA_OVERWATCH` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to the app + tasks.
-- `OVERWATCH_RM` — resource monitor, default 30 credits/month, suspends the
-  warehouse at 100%. Adjust the quota in V002 before running if needed.
+  No resource monitor since v4.45 (owner correction: OVERWATCH_RM's 30-credit
+  cap was suspending the warehouse mid-use — V045 dropped it).
 
 ### Shared schema warning (read before migrating)
 
@@ -67,7 +67,7 @@ run the migrations. `snowflake/validate.sql` checks the shapes and flags any
 survivor.
 
 The loader chain runs on the dedicated **`WH_ALFA_OVERWATCH`** warehouse
-(XSMALL, 60s auto-suspend, `OVERWATCH_RM` resource monitor).
+(XSMALL, 60s auto-suspend; no resource monitor since v4.45).
 
 ## 2. Roles and execution model (owner's rights)
 
@@ -169,7 +169,7 @@ surgical by design — the schema is shared with the old app, so it never drops
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
   `CLONE` backups first. `UNDROP TABLE ...` also works within Time Travel.
-- **Section C (commented):** warehouse, resource monitor, Streamlit app
+- **Section C (commented):** warehouse, Streamlit app
   object, roles — shared infrastructure, dropped only deliberately.
 
 The verify query at the bottom lists any surviving OVERWATCH objects. A unit

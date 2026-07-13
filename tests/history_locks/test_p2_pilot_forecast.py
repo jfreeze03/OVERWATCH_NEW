@@ -82,7 +82,7 @@ def test_emergency_builders_validated():
     assert r.cluster_range_fix("WH_A", 5, 2).count("5") >= 2  # hi floored to lo
     with _pt.raises(ValueError):
         r.scaling_policy_fix("WH_A", "TURBO")
-    assert "CREDIT_QUOTA = 30" in r.resource_monitor_quota("OVERWATCH_RM", 30)
+    # v4.45: resource_monitor_quota retired with resource monitors (owner correction)
     assert "PIPE_EXECUTION_PAUSED = TRUE" in r.pause_pipe("DB1", "RAW", "MY_PIPE")
     assert r.suspend_task_fqn("db1", "raw", "t1") == "ALTER TASK DB1.RAW.T1 SUSPEND;"
     assert "SET DISABLED = TRUE" in r.disable_user("BADUSER")

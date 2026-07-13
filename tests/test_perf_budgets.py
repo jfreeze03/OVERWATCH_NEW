@@ -60,14 +60,14 @@ def test_validate_matches_the_repo_tip():
 _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/brief.py": 0,
     "app/ui/pages/overview.py": 1,  # v4.36/V041: only _live_fallback_daily remains (score inputs went mart-first)
-    "app/ui/pages/control_room.py": 2,    # -1 v4.42/r26: task live fallback removed with task monitoring
+    "app/ui/pages/control_room.py": 3,    # restored v4.45 (owner correction) — pulse/movers/task live fallbacks
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
     "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
     "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # v4.36.1: users tab reverted to live-first (owner: exact emails + timestamps); 4 is the true count, old 5 was slack
-    "app/ui/pages/operations.py": 18,  # -4 v4.42/r26: task + task-graph monitoring removed (owner call)
+    "app/ui/pages/operations.py": 22,  # restored v4.45 (owner correction: task monitoring stays; the r26 cut had misread "resource monitor")
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
     "app/ui/pages/security.py": 22,  # +4 v4.41/r25 (owner picked #6+#7): new-network batch rider on Access + Egress lazy section (DATA_TRANSFER_HISTORY, UNLOAD scan) — zero first-paint cost, all click-gated

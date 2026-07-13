@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.44.0"
+APP_VERSION = "4.45.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -47,6 +47,7 @@ DEFAULT_SETTINGS = {
     "SCORE_PTS_PER_CRITICAL": "6",
     "SCORE_PTS_PER_HIGH": "2",
     "SCORE_PTS_QUERY_FAIL_PER_PCT": "1.5",
+    "SCORE_PTS_TASK_FAIL_PER_PCT": "2",
     "SCORE_PTS_QUEUE_PER_MIN": "0.3",
     "SCORE_PTS_SPILL_PER_GB": "0.5",
     "SCORE_PTS_PER_STALE_SOURCE": "4",
@@ -64,7 +65,6 @@ DEFAULT_SETTINGS = {
     "GOV_PTS_EXPIRED_CRED": "8",
     "GOV_PTS_EXPIRING_CRED": "2",
     "GOV_PTS_BREAKGLASS_GRANT": "6",
-    "GOV_PTS_NO_MONITOR": "4",
     "GOV_PTS_NO_AUTOSUSPEND": "3",
     "CONTRACT_CREDITS": 0.0,         # 0 = not configured
     "CONTRACT_START_DATE": "",

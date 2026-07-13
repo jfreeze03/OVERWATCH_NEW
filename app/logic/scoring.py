@@ -40,6 +40,7 @@ DEFAULT_WEIGHTS = {
     "SCORE_PTS_PER_CRITICAL": 6.0,
     "SCORE_PTS_PER_HIGH": 2.0,
     "SCORE_PTS_QUERY_FAIL_PER_PCT": 1.5,
+    "SCORE_PTS_TASK_FAIL_PER_PCT": 2.0,
     "SCORE_PTS_QUEUE_PER_MIN": 0.3,
     "SCORE_PTS_SPILL_PER_GB": 0.5,
     "SCORE_PTS_PER_STALE_SOURCE": 4.0,
@@ -64,7 +65,7 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
     """Score 0-100 from a signals dict. Missing signals simply add no penalty.
 
     Expected keys (all optional):
-      budget_pct, critical_alerts, high_alerts, query_fail_pct,
+      budget_pct, critical_alerts, high_alerts, query_fail_pct, task_fail_pct,
       queue_minutes, spill_gb, stale_sources, open_high_actions
     Weights come from resolve_weights(settings) so executives can ask "why is
     a critical worth N points?" and get "because we set it" — not magic.
@@ -90,6 +91,12 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
     if query_fail > 2:
         drivers.append(
             ScoreDriver("Query failures", _cap((query_fail - 2) * w["SCORE_PTS_QUERY_FAIL_PER_PCT"], 12), f"{query_fail:.1f}% of queries failed.")
+        )
+
+    task_fail = safe_float(signals.get("task_fail_pct"))
+    if task_fail > 1:
+        drivers.append(
+            ScoreDriver("Task failures", _cap((task_fail - 1) * w["SCORE_PTS_TASK_FAIL_PER_PCT"], 14), f"{task_fail:.1f}% of task runs failed.")
         )
 
     queue_minutes = safe_float(signals.get("queue_minutes"))
@@ -126,7 +133,7 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     """Retro platform score per day from fact-derived signals.
 
     ``inputs`` (one row per DAY): CREDITS_BILLED, CRIT_RAISED, HIGH_RAISED,
-    QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB.
+    QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB, TASK_RUNS, TASK_FAILED.
     Budget pct uses the month-to-date cumulative spend against the monthly
     budget, like the live score. Labeled RETRO: the live score also counts
     stale sources and open actions, which facts don't carry per-day — the
@@ -138,7 +145,7 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce")
     frame = frame.dropna(subset=["DAY"]).sort_values("DAY")
     for col in ("CREDITS_BILLED", "CRIT_RAISED", "HIGH_RAISED", "QUERY_COUNT",
-                "FAILED_COUNT", "QUEUED_SEC", "SPILL_GB"):
+                "FAILED_COUNT", "QUEUED_SEC", "SPILL_GB", "TASK_RUNS", "TASK_FAILED"):
         frame[col] = frame.get(col, 0).map(safe_float) if col in frame.columns else 0.0
     frame["_MONTH"] = frame["DAY"].dt.to_period("M")
     frame["_MTD_USD"] = frame.groupby("_MONTH")["CREDITS_BILLED"].cumsum() * safe_float(rate_usd, 3.68)
@@ -146,11 +153,13 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     rows = []
     for _, r in frame.iterrows():
         queries = r["QUERY_COUNT"]
+        tasks = r["TASK_RUNS"]
         result = platform_score(signals={
             "budget_pct": (r["_MTD_USD"] / budget * 100) if budget > 0 else 0,
             "critical_alerts": r["CRIT_RAISED"],
             "high_alerts": r["HIGH_RAISED"],
             "query_fail_pct": (r["FAILED_COUNT"] / queries * 100) if queries else 0,
+            "task_fail_pct": (r["TASK_FAILED"] / tasks * 100) if tasks else 0,
             "queue_minutes": r["QUEUED_SEC"] / 60.0,
             "spill_gb": r["SPILL_GB"],
         }, weights=weights)

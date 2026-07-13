@@ -21,7 +21,7 @@ from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import chargeback_sql, cost_sql, mart_sql, ops_sql, security_sql
+from app.data import cost_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation
 from app.logic.formulas import safe_float
 from app.ui.components import (
@@ -72,6 +72,8 @@ _EXPECTED_MIGRATIONS = {
         "alert teeth (new-admin-network, egress spike)",
     44: "UNKNOWN classification (#18): evidence-based company both sides, "
         "COMPANY_SCOPE database mapping lever, board UNKNOWN scope",
+    45: "owner correction: task monitoring restored (tables/procs/rule/"
+        "refill; teeth + UNKNOWN scope kept); OVERWATCH_RM dropped",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -215,7 +217,7 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 def _self_cost_tab() -> None:
     st.caption(
         "The monitoring app must never become the cost problem: WH_ALFA_OVERWATCH is XSMALL with a "
-        "30-credit monthly resource monitor, and every app query carries an OVERWATCH query tag."
+        "and every app query carries an OVERWATCH query tag (no resource monitor since v4.45 — OVERWATCH_RM was suspending the warehouse mid-use)."
     )
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
@@ -412,8 +414,6 @@ _EMERGENCY_CATALOG = """
 | Statement timeout (WH) | `SET STATEMENT_TIMEOUT_IN_SECONDS = n` | Queries running for hours; caps every new statement on that warehouse. |
 | Cluster range | `SET MIN/MAX_CLUSTER_COUNT` | Multi-cluster fan-out burning credits, or raise it during a queue emergency. |
 | Scaling policy | `SET SCALING_POLICY = ECONOMY` | Slows cluster spawn during bursty-but-tolerant loads. |
-| Resource monitor quota | `ALTER RESOURCE MONITOR ... SET CREDIT_QUOTA = n` | The hard monthly brake; SUSPEND_IMMEDIATE trigger kills at the cap. |
-| Attach monitor | `SET RESOURCE_MONITOR = <rm>` | Unmonitored warehouse found during an incident. |
 | Warehouse size | `SET WAREHOUSE_SIZE = <size>` | Down = cost triage; up = performance firefight (use the remediation panel's resize). |
 | Auto-suspend | `SET AUTO_SUSPEND = 60` | Idle-burn discovered mid-incident (remediation panel). |
 | Pause pipe | `ALTER PIPE ... SET PIPE_EXECUTION_PAUSED = TRUE` | Ingestion flood / bad file loop. |
@@ -454,8 +454,7 @@ def _emergency_tab(is_operator: bool) -> None:
 
     action = st.selectbox("Lever", [
         "Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
-        "Cluster range", "Scaling policy", "Resource monitor quota",
-        "Attach resource monitor", "Pause pipe", "Resume pipe", "Suspend task",
+        "Cluster range", "Scaling policy", "Pause pipe", "Resume pipe", "Suspend task",
         "Resume task", "Disable user", "Re-enable user",
         "Cortex allowlist (ACCOUNT)", "Account statement timeout (ACCOUNT)",
     ], key="emg_action")
@@ -463,7 +462,7 @@ def _emergency_tab(is_operator: bool) -> None:
     stmt = ""
     try:
         if action in ("Suspend warehouse", "Resume warehouse", "Warehouse statement timeout",
-                      "Cluster range", "Scaling policy", "Attach resource monitor"):
+                      "Cluster range", "Scaling policy"):
             wh = (st.selectbox("Warehouse", wh_names, key="emg_wh") if wh_names
                   else st.text_input("Warehouse", key="emg_wh_txt"))
             if action == "Suspend warehouse" and wh:
@@ -482,15 +481,6 @@ def _emergency_tab(is_operator: bool) -> None:
             elif action == "Scaling policy" and wh:
                 pol = st.radio("Policy", ["ECONOMY", "STANDARD"], horizontal=True, key="emg_pol")
                 stmt = remediation.scaling_policy_fix(wh, pol)
-            elif action == "Attach resource monitor" and wh:
-                mon = st.text_input("Resource monitor name", "OVERWATCH_RM", key="emg_mon")
-                if mon:
-                    stmt = remediation.attach_resource_monitor(wh, mon)
-        elif action == "Resource monitor quota":
-            mon = st.text_input("Resource monitor name", "OVERWATCH_RM", key="emg_mon2")
-            quota = st.number_input("Credit quota / month", 1, 100000, 30, key="emg_quota")
-            if mon:
-                stmt = remediation.resource_monitor_quota(mon, int(quota))
         elif action in ("Pause pipe", "Resume pipe"):
             fqn = st.text_input("Pipe (DB.SCHEMA.PIPE)", key="emg_pipe")
             parts = [p for p in fqn.split(".") if p.strip()]
@@ -595,61 +585,6 @@ def _emergency_extras(is_operator: bool) -> None:
                         f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
                         page=_PAGE)
                     notify(ok, msg)
-
-    st.divider()
-    st.markdown("**Budget ↔ resource-monitor sync**")
-    panel_help(
-        "Budgets are intent (SETTINGS / DEPT_BUDGETS); resource monitors are enforcement. "
-        "This suggests a quota per monitor from the budgets of the departments whose "
-        "warehouses it guards (quota = budget ÷ credit rate), and applies it in one click."
-    )
-    mons = run("SHOW RESOURCE MONITORS LIMIT 100", page=_PAGE, key="emg_show_rm",
-               tier="metadata", source="SHOW RESOURCE MONITORS", max_rows=0)
-    whs2 = run(security_sql.show_warehouses_sql(), page=_PAGE, key="emg_show_wh2",
-               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-    bud2 = run(mart_sql.dept_budgets(), page=_PAGE, key="emg_budgets", tier="live",
-               source="DEPT_BUDGETS")
-    dmap2 = run(chargeback_sql.department_map(), page=_PAGE, key="emg_dmap", tier="recent",
-                source="DEPARTMENT_MAP")
-    settings2 = load_settings(_PAGE)
-    rate2 = safe_float(settings2.get("CREDIT_PRICE_USD"), 3.68)
-    if mons.ok and not mons.empty and whs2.ok and not whs2.empty and bud2.ok and not bud2.empty             and dmap2.usable():
-        wdf2 = whs2.df.copy()
-        wdf2.columns = [str(c).lower() for c in wdf2.columns]
-        mdf2 = dmap2.df.copy()
-        j = wdf2.merge(mdf2[mdf2["MAP_TYPE"].astype(str) == "WAREHOUSE"],
-                       left_on=wdf2["name"].astype(str).str.upper(),
-                       right_on=mdf2["NAME"].astype(str).str.upper(), how="inner")
-        j = j.merge(bud2.df, on="DEPARTMENT", how="inner")
-        if not j.empty and "resource_monitor" in j.columns:
-            j = j[~j["resource_monitor"].astype(str).str.lower().isin(("null", "", "none"))]
-            sug = (j.groupby("resource_monitor")["MONTHLY_BUDGET_USD"].sum()
-                    .reset_index())
-            sug["SUGGESTED_QUOTA_CREDITS"] = (sug["MONTHLY_BUDGET_USD"] / rate2).round(0)
-            styled_table(sug.rename(columns={"resource_monitor": "MONITOR"}))
-            if is_operator and not sug.empty:
-                pick_m = st.selectbox("Monitor", sorted(sug["resource_monitor"].astype(str)),
-                                      key="emg_sync_mon")
-                row_m = sug[sug["resource_monitor"].astype(str) == pick_m].iloc[0]
-                quota = int(row_m["SUGGESTED_QUOTA_CREDITS"])
-                stmt_m = remediation.resource_monitor_quota(pick_m, quota)
-                st.code(stmt_m, language="sql")
-                confirm_m = st.text_input("Type SYNC to confirm", key="emg_sync_confirm")
-                if st.button("Apply quota + audit", key="emg_sync_exec",
-                             disabled=(confirm_m != "SYNC")):
-                    ok, msg = execute_statement(stmt_m, page=_PAGE)
-                    execute_statement(
-                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
-                        f"SELECT 'MONITOR_SYNC', {sql_literal(pick_m)}, {sql_literal(stmt_m)}, "
-                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
-                        page=_PAGE)
-                    notify(ok, msg)
-        else:
-            st.info("No monitored warehouses map to budgeted departments yet.")
-    else:
-        st.caption("Needs: resource monitors, department budgets (Cost > Chargeback), and the "
-                   "warehouse map. Suggestions appear once all three exist.")
 
 
 @st.fragment

@@ -12,12 +12,12 @@ from app.core.query import execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
-from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_sql
-from app.logic import wh_change
-from app.logic.ai_prompts import release_compare_prompt
+from app.data import change_impact_sql, graph_sql, insights_sql, mart27_sql, mart_sql, ops_sql
+from app.logic import graphs, wh_change
+from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
-from app.logic.formulas import credits_to_usd, safe_float
-from app.logic.insights import compare_release_periods
+from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
@@ -232,6 +232,48 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         styled_table(fails.df)
 
 
+def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
+                              known_failures: float | None = None) -> None:
+    """Root-cause vs cascade view of recent task failures (ported)."""
+    st.markdown("**Failure root-cause timeline (7d)**")
+    if known_failures is not None and known_failures <= 0:
+        st.success("No task failures in the last 7 days for this scope.")
+        return
+    res = run(insights_sql.task_failure_details(7, company, database, schema_contains), page=_PAGE,
+              key=f"t_rca_{company}", tier="recent",
+              source="ACCOUNT_USAGE.TASK_HISTORY (failures)")
+    if not res.ok:
+        st.error(f"Failure detail unavailable: {res.error}")
+        return
+    if res.empty:
+        st.success("No task failures in the last 7 days for this scope.")
+        return
+    timeline = build_failure_timeline(res.df)
+    roots = timeline[timeline["ROLE_IN_GRAPH"] == "Root cause"]
+    kpi_row([
+        {"label": "Failures (7d)", "value": f"{len(timeline)}"},
+        {"label": "Root causes", "value": f"{len(roots)}",
+         "help": "First failure per task-graph run; fix these, the cascade follows."},
+        {"label": "Top error family",
+         "value": str(timeline["ERROR_FAMILY"].mode().iloc[0]) if not timeline.empty else "n/a"},
+    ])
+    fam = timeline.groupby("ERROR_FAMILY", as_index=False).size().rename(columns={"size": "FAILURES"})
+    charts.bar_count(fam.sort_values("FAILURES", ascending=False), "ERROR_FAMILY", "FAILURES",
+                     title="Failures by family")
+    styled_table(
+        timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
+                   "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
+    )
+    result_caption(res)
+    ai_evaluation_panel(
+        key=f"task_failures_{company}",
+        prompt=task_failure_prompt(timeline, company),
+        settings=load_settings(_PAGE),
+        page=_PAGE,
+        subject="diagnose these task failures",
+    )
+
+
 def _release_compare_tab(company: str) -> None:
     """Before/after a release date: query health + per-task regressions (ported)."""
     st.caption(
@@ -267,13 +309,30 @@ def _release_compare_tab(company: str) -> None:
             st.info("Need data on both sides of the release date to compare.")
         result_caption(q_res)
 
-    ai_evaluation_panel(
-        key=f"release_{company}_{release_iso}_{window}",
-        prompt=release_compare_prompt(verdicts, release_iso, window),
-        settings=load_settings(_PAGE),
-        page=_PAGE,
-        subject="judge this release",
-    )
+    st.markdown("**Task regressions**")
+    t_res = run(insights_sql.release_task_compare(release_iso, window, company), page=_PAGE,
+                key=f"rel_t_{company}_{release_iso}_{window}", tier="historical",
+                source="ACCOUNT_USAGE.TASK_HISTORY")
+    if guard(t_res, "No task runs in the compare windows."):
+        deltas = task_release_deltas(t_res.df)
+        worse = deltas[deltas["GOT_WORSE"]]
+        if worse.empty:
+            st.success("No task gained failures or slowed >25% after the release.")
+        else:
+            st.warning(f"{len(worse)} task(s) regressed after the release:")
+        styled_table(
+            deltas[["DATABASE_NAME", "TASK_NAME", "RUNS_BEFORE", "RUNS_AFTER",
+                     "FAILED_BEFORE", "FAILED_AFTER", "NEW_FAILURES",
+                     "AVG_SEC_BEFORE", "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]],
+        )
+        result_caption(t_res)
+        ai_evaluation_panel(
+            key=f"release_{company}_{release_iso}_{window}",
+            prompt=release_compare_prompt(verdicts, deltas, release_iso, window),
+            settings=load_settings(_PAGE),
+            page=_PAGE,
+            subject="judge this release",
+        )
 
 
 def _pipeline_sla_tab(is_operator: bool) -> None:
@@ -394,6 +453,67 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
                 styled_table(sdf)
 
 
+def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+    res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
+              tier="recent", source="FACT_TASK_DAILY")
+    if not res.usable():
+        res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
+                  tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
+    if guard(res, "No task runs recorded for this scope/window."):
+        df = res.df.copy()
+        failed_col = "FAILED" if "FAILED" in df.columns else None
+        if failed_col:
+            total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
+            total_failed = safe_float(df[failed_col].sum())
+            _known_failed = total_failed
+            kpi_row([
+                {"label": f"Task runs ({days}d)", "value": f"{total_runs:,.0f}"},
+                {"label": "Failed runs", "value": f"{total_failed:,.0f}",
+                 "delta": f"{(total_failed / total_runs * 100) if total_runs else 0:.1f}%",
+                 "delta_color": "inverse" if total_failed else "off"},
+            ])
+            df = df.sort_values(failed_col, ascending=False)
+        styled_table(df)
+        result_caption(res)
+    st.divider()
+    # r19 #6: the summary window (>=7d, same scope) already counted failures
+    # — when it says zero, skip the 7d TASK_HISTORY detail scan entirely.
+    _failure_timeline_section(company, database, schema_contains,
+                              known_failures=locals().get("_known_failed") if days >= 7 else None)
+
+    st.markdown("**Task graph (DAG)**")
+    if st.toggle("Render account task topology", key="ops_dag_toggle",
+                 help="Latest task versions + predecessors; red = failed in 24h, gray = suspended."):
+        gres = run(ops_sql.task_graph_nodes(), page=_PAGE, key="task_dag", tier="recent",
+                   source="TASK_VERSIONS + TASK_HISTORY")
+        if guard(gres, "No tasks recorded in TASK_VERSIONS."):
+            import json as _json
+
+            lines = ["digraph tasks {", 'rankdir=LR; node [shape=box, style="rounded,filled", fontsize=10];']
+            for _, r in gres.df.iterrows():
+                fqn = str(r["TASK_FQN"])
+                short = fqn.split(".")[-1]
+                fails = int(r.get("FAILURES_24H") or 0)
+                state = str(r.get("STATE") or "").lower()
+                color = "#fecaca" if fails else ("#e2e8f0" if "suspend" in state else "#bbf7d0")
+                lines.append(f'"{fqn}" [label="{short}", fillcolor="{color}"];')
+                preds_raw = r.get("PREDECESSORS")
+                preds = []
+                try:
+                    parsed = _json.loads(preds_raw) if isinstance(preds_raw, str) else preds_raw
+                    if isinstance(parsed, list):
+                        preds = [str(p) for p in parsed]
+                except (TypeError, ValueError):
+                    if preds_raw:
+                        preds = [p.strip().strip('"') for p in str(preds_raw).strip("[]").split(",") if p.strip()]
+                lines.extend(f'"{p.upper()}" -> "{fqn}";' for p in preds)
+            lines.append("}")
+            st.graphviz_chart("\n".join(lines))
+            st.caption("Green = healthy, red = failed in the last 24h, gray = suspended. "
+                       "Edges point downstream.")
+            result_caption(gres)
+
+
 def _warehouses_tab(company: str, rate: float) -> None:
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="recent", source="FACT_WAREHOUSE_DAILY")
@@ -466,6 +586,68 @@ def _contention_tab(company: str, days: int) -> None:
             styled_table(res.df)
             result_caption(res)
 
+
+
+def _graphs_tab(company: str, days: int, rate: float, database: str = "",
+                schema_contains: str = "") -> None:
+    st.caption(
+        "Cost per pipeline = measured warehouse credits for every task run in the "
+        "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~6h lag) at the configured rate. "
+        "$/run is a day's cost over that day's runs — allocated, not per-run metered. "
+        "Serverless tasks bill separately and are listed below at task-day grain."
+    )
+    res = run_mart_first(
+        mart27_sql.task_graphs(days, company, database, schema_contains),
+        graph_sql.graph_daily_costs(days, company, database, schema_contains),
+        page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
+        mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
+        live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
+    if not guard(res, "No task-graph runs in this scope/window."):
+        return
+    daily = graphs.enrich_graph_daily(res.df, rate)
+    summary = graphs.pipeline_summary(daily)
+    top = summary.iloc[0] if not summary.empty else None
+    worst = summary.sort_values("SUCCESS_PCT").iloc[0] if not summary.empty else None
+    kpi_row([
+        {"label": "Pipeline spend (window)",
+         "value": format_usd(float(summary["USD"].sum()) if not summary.empty else 0.0),
+         "delta": f"{len(summary)} pipeline(s)", "delta_color": "off"},
+        {"label": "Most expensive",
+         "value": str(top["PIPELINE"]) if top is not None else "n/a",
+         "delta": format_usd(float(top["USD"])) if top is not None else None,
+         "delta_color": "off"},
+        {"label": "Worst success",
+         "value": f"{float(worst['SUCCESS_PCT']):.1f}%" if worst is not None else "n/a",
+         "delta": str(worst["PIPELINE"]) if worst is not None else None,
+         "delta_color": "inverse" if worst is not None and float(worst["SUCCESS_PCT"]) < 100 else "off"},
+    ])
+    top5 = summary.head(5)["PIPELINE"].tolist() if not summary.empty else []
+    chart_df = daily[daily["PIPELINE"].isin(top5)][["DAY", "PIPELINE", "USD"]]
+    if not chart_df.empty:
+        charts.daily_stacked_usd(chart_df, "DAY", "PIPELINE", "USD")
+    styled_table(summary, height=300, column_config={
+        "USD": st.column_config.NumberColumn("$ (window)", format="$%.2f"),
+        "USD_PER_RUN": st.column_config.NumberColumn("$/run (alloc)", format="$%.4f"),
+        "SUCCESS_PCT": st.column_config.NumberColumn("Success %", format="%.1f%%"),
+    })
+    with st.expander("Daily detail (per pipeline per day)"):
+        styled_table(daily.sort_values(["DAY", "USD"], ascending=[False, False]), height=280)
+    result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
+                             "Pipeline label = the graph's root task.")
+
+    sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
+              page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
+              tier="historical", source="SERVERLESS_TASK_HISTORY")
+    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
+    if not sls.ok:
+        st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
+    elif sls.empty:
+        st.caption("No serverless task credits in this scope/window.")
+    else:
+        sdf = sls.df.copy()
+        sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
+        styled_table(sdf, height=220, column_config={
+            "USD": st.column_config.NumberColumn("$", format="$%.2f")})
 
 
 def _wh_change_block(company: str, is_operator: bool) -> None:
@@ -574,21 +756,18 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
         result_caption(res)
 
         st.markdown("**Run history around one change**")
-        # r26: run-history drill is PROCEDURE-only (task monitoring removed);
-        # TASK rows stay visible in the registry table above.
-        picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)
-                        if str(t).upper() == "PROCEDURE"})
+        picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)})
         clicked_obj = None
         if sel_ci is not None:
             crow = df.iloc[int(sel_ci)]
-            if str(crow["OBJECT_TYPE"]).upper() == "PROCEDURE":
-                clicked_obj = f"{crow['OBJECT_TYPE']} {crow['OBJECT_NAME']}"
+            clicked_obj = f"{crow['OBJECT_TYPE']} {crow['OBJECT_NAME']}"
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         if pick:
             otype, _, name = pick.partition(" ")
             hist = run(change_impact_sql.object_run_history(otype, name, 28),
                        page=_PAGE, key=f"chg_hist_{pick}", tier="recent",
-                       source="ACCOUNT_USAGE.QUERY_HISTORY")
+                       source="ACCOUNT_USAGE.QUERY_HISTORY" if otype == "PROCEDURE"
+                              else "ACCOUNT_USAGE.TASK_HISTORY")
             if guard(hist, "No runs recorded for this object in the last 28 days."):
                 rule_at = None
                 match = df[(df["OBJECT_TYPE"] == otype) & (df["OBJECT_NAME"] == name)]
@@ -617,17 +796,20 @@ def render() -> None:
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    page_header("Operations", "Queries, warehouses, contention, releases, and pipeline SLAs.", icon_name="operations",
+    page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.", icon_name="operations",
                 scope_note=f"{f['company']} · last {f['days']} days")
     # Contention folded under Warehouses (CoCo): warehouse health and the
-    # contention it causes read together. Task monitoring removed 2026-07-13
-    # (owner: "we don't use it" — the panels only produced access errors).
+    # contention it causes read together. Seven pills -> six.
     section = lazy_sections(
-        ["Queries", "Warehouses", "Change impact",
+        ["Queries", "Tasks", "Task graphs ($)", "Warehouses", "Change impact",
          "Pipeline SLA", "Release compare"], key="ops_section")
     if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
                      f["database"], f["schema_contains"])
+    elif section == "Tasks":
+        _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+    elif section == "Task graphs ($)":
+        _graphs_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
     elif section == "Warehouses":
         _warehouses_tab(f["company"], rate)
         st.divider()

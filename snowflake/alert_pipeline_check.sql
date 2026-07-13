@@ -84,12 +84,13 @@ SELECT * FROM ALERT_CONFIG ORDER BY 1;
 SHOW NOTIFICATION INTEGRATIONS;
 
 -- ---------------------------------------------------------------------------
--- STEP 7: the warehouse every task runs on. If a resource monitor tripped,
+-- STEP 7: the warehouse every task runs on. (Resource monitors removed in
+-- v4.45; if this account ever re-adds one and it trips,
 -- tasks queue or fail even though the app (same warehouse, your session)
 -- may still respond from cache.
 -- ---------------------------------------------------------------------------
 SHOW WAREHOUSES LIKE 'WH_ALFA_OVERWATCH';
-SHOW RESOURCE MONITORS;
+SHOW RESOURCE MONITORS;  -- expect none since V045
 
 -- ============================================================================
 -- FIXES

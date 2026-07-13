@@ -33,6 +33,13 @@ def test_run_history_procedure_matches_call_text():
     assert "ACCOUNT_USAGE.QUERY_HISTORY" in sql
 
 
+def test_run_history_task_uses_task_history_equality():
+    sql = change_impact_sql.object_run_history("task", "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY")
+    assert "ACCOUNT_USAGE.TASK_HISTORY" in sql
+    assert "'DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY'" in sql
+    assert "STATE IN ('SUCCEEDED', 'FAILED')" in sql
+
+
 def test_run_history_rejects_bad_input():
     with pytest.raises(ValueError):
         change_impact_sql.object_run_history("VIEW", "A.B.C")

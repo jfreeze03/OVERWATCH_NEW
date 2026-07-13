@@ -102,6 +102,9 @@ def test_ai_and_graph_and_timeline_contracts():
     for col in ("FUNCTION_NAME", "MODEL_NAME", "REQUESTS", "TOKENS",
                 "CREDITS", "CREDITS_PER_1M_TOKENS"):
         assert col in ai, col
+    tg = mart27_sql.task_graphs(30, "ALFA", "ALFA_EDW_PRD", "rpt")
+    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_PRD'" in tg
+    assert "SCHEMA_NAME" in tg                                     # contains filter wired
     tl = mart27_sql.incident_timeline(48, "ALFA")
     assert "EVENT_TS AS AT" in tl and "KIND AS EVENT_TYPE" in tl and "TITLE AS LABEL" in tl
     assert "(COMPANY = 'ALFA' OR UPPER(COMPANY) = 'ALL')" in tl    # account-level rows kept
@@ -141,7 +144,8 @@ def test_chargeback_role_share_goes_mart_first():
 
 
 def test_operations_adopts_graph_and_schema_marts():
-    # r26: graph-cost adoption removed with task monitoring (owner call)
+    assert "mart27_sql.task_graphs" in _OPS
+    assert "graph_sql.graph_daily_costs" in _OPS
     assert "mart27_sql.schema_window_summary" in _OPS
     assert "elif not wh_filter and not user_filter:" in _OPS       # schema fact has no wh/user dims
 

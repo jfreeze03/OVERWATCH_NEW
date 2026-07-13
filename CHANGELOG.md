@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.45.0 — r29: the owner's correction (2026-07-13)
+
+"i messed up. i meant getting rid of resource monitor, not task
+monitoring. we need to add that back. that's my fault."
+
+- **Task monitoring restored end-to-end.** App: everything r26 removed is
+  back from git history (Operations Tasks + Task graphs sections, failure
+  RCA timeline, Control Room task vitals/triage/replay, Overview task
+  metrics + score signal, incident-timeline task arm, change-impact TASK
+  drill, graph_sql/graphs modules, all builders, prompts, canaries) —
+  with every post-r26 feature kept (SNOW_* captions, viewer identity,
+  allow-list, domain salts, V044 clause arms). Loader: **V045**
+  (forward-generated, byte-locked) recreates both tables, re-derives all
+  seven procs back to their task-inclusive V041/V042 bodies, re-enables
+  PIPE_TASK_FAILURES, and refills 120 days from TASK_HISTORY — while
+  keeping V043's r25 alert teeth (19 scan arms now) and V044's UNKNOWN
+  board scope. Budgets restored 18->22 / 2->3 with the correction noted.
+- **Resource monitors removed instead (the actual ask).** V045 detaches
+  and drops OVERWATCH_RM — the 30-credit monthly cap that had been
+  suspending WH_ALFA_OVERWATCH mid-use (the real source of the error
+  storm). App: the governance "No resource monitor" deduction, the
+  posture WH_NO_MONITOR read, the emergency monitor levers, and the
+  budget<->monitor sync panel are gone; auto-suspend tracking stays.
+  Docs and worksheets updated; teardown lines annotated.
+- 15 test files wholesale-restored from git, 3 surgically (V044 edits
+  kept); the r26 lock keeps its roles half with the correction recorded.
+
 ## 4.44.0 — r28a: UNKNOWN classification, adjudication #18 (2026-07-13)
 
 Owner: "ignore 5 do 18." Unknown entities stop silently billing ALFA.

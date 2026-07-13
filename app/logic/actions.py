@@ -78,11 +78,12 @@ def ledger_totals(df: pd.DataFrame) -> dict:
 
 def triage_queue(
     alerts: pd.DataFrame | None,
+    task_failures: pd.DataFrame | None,
     anomalies: list[dict] | None,
 ) -> pd.DataFrame:
-    """Merge alert events and spend anomalies into one ranked morning-triage
-    queue for the Control Room. (Task monitoring removed 2026-07-13 — owner:
-    "we don't use it".)"""
+    """Merge alert events, task failures, and spend anomalies into one ranked
+    morning-triage queue for the Control Room. (Restored 2026-07-13 — the
+    owner meant resource monitors, not task monitoring.)"""
     rows: list[dict] = []
     if alerts is not None and not alerts.empty:
         for _, r in alerts.iterrows():
@@ -94,6 +95,23 @@ def triage_queue(
                 "DETAIL": str(r.get("DETAIL", ""))[:220],
                 "SOURCE": "ALERT_EVENTS",
                 "RAISED_AT": r.get("RAISED_AT"),
+            })
+    if task_failures is not None and not task_failures.empty:
+        for _, r in task_failures.iterrows():
+            failed = int(float(r.get("FAILED", 0) or 0))
+            if failed <= 0:
+                continue
+            database = str(r.get("DATABASE_NAME", "") or "")
+            schema = str(r.get("SCHEMA_NAME", "") or "")
+            qualified = ".".join(p for p in (database, schema) if p)
+            rows.append({
+                "SEVERITY": "HIGH" if failed >= 3 else "MEDIUM",
+                "KIND": "Task failure",
+                "DATABASE": database,
+                "TITLE": f"{qualified + '.' if qualified else ''}{r.get('TASK_NAME', 'task')} failed {failed}x",
+                "DETAIL": str(r.get("LAST_ERROR", "") or "")[:220],
+                "SOURCE": "FACT_TASK_DAILY",
+                "RAISED_AT": r.get("DAY"),
             })
     rows.extend({
         "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",

@@ -145,19 +145,6 @@ def scaling_policy_fix(warehouse: str, policy: str) -> str:
     return f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} SET SCALING_POLICY = '{p}';"
 
 
-def resource_monitor_quota(monitor: str, credits: int) -> str:
-    """Tighten (or raise) the hard brake. SUSPEND_IMMEDIATE triggers kill
-    running queries when the quota hits."""
-    credits = max(1, min(int(credits), 100000))
-    return (f"ALTER RESOURCE MONITOR {_ident(monitor, 'resource monitor')} "
-            f"SET CREDIT_QUOTA = {credits};")
-
-
-def attach_resource_monitor(warehouse: str, monitor: str) -> str:
-    return (f"ALTER WAREHOUSE {_ident(warehouse, 'warehouse')} "
-            f"SET RESOURCE_MONITOR = {_ident(monitor, 'resource monitor')};")
-
-
 def pause_pipe(database: str, schema: str, pipe: str, paused: bool = True) -> str:
     """Stop an ingestion flood (or resume it)."""
     fqn = ".".join(_ident(p, "name part") for p in (database, schema, pipe))

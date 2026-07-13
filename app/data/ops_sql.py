@@ -85,6 +85,34 @@ LIMIT 50
 """
 
 
+def task_runs(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
+    """Task run outcomes grouped by task, newest failures surfaced."""
+    days = bounded_days(days)
+    where = and_where(
+        f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    NAME AS TASK_NAME,
+    COUNT(*) AS RUNS,
+    SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
+    AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC,
+    MAX(QUERY_START_TIME) AS LAST_RUN,
+    MAX_BY(STATE, QUERY_START_TIME) AS LAST_STATE,
+    MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 200), QUERY_START_TIME) AS LAST_ERROR
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE {where}
+GROUP BY 1, 2, 3
+ORDER BY FAILED DESC, LAST_RUN DESC
+LIMIT 200
+"""
+
+
 def warehouse_pressure(days: int, company: str = "ALL") -> str:
     """Queue and spill pressure per warehouse for the window."""
     days = bounded_days(days)
@@ -275,6 +303,35 @@ FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE(
 WHERE EXECUTION_STATUS IN ('RUNNING', 'QUEUED', 'RESUMING_WAREHOUSE', 'BLOCKED')
 ORDER BY START_TIME
 LIMIT 100
+"""
+
+
+def task_graph_nodes() -> str:
+    """Latest version of every task with predecessors + 24h failure count —
+    feeds the DAG view (pipeline topology at a glance)."""
+    return """
+WITH latest AS (
+    SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
+           DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
+           PREDECESSORS, STATE, WAREHOUSE_NAME, SCHEDULE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                               ORDER BY GRAPH_VERSION_CREATED_ON DESC) = 1
+),
+fails AS (
+    SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
+           COUNT(*) AS FAILURES_24H
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE COMPLETED_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND STATE = 'FAILED'
+    GROUP BY 1
+)
+SELECT l.TASK_FQN, l.PREDECESSORS, l.STATE, l.WAREHOUSE_NAME, l.SCHEDULE,
+       COALESCE(f.FAILURES_24H, 0) AS FAILURES_24H
+FROM latest l
+LEFT JOIN fails f ON f.TASK_FQN = l.TASK_FQN
+ORDER BY l.TASK_FQN
+LIMIT 300
 """
 
 

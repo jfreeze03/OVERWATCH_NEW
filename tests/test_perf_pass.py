@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.data import insights_sql, mart_sql
+from app.data import graph_sql, insights_sql, mart_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,6 +78,12 @@ def test_jump_box_loads_live_targets_on_demand():
 # ---------------------------------------------------------------------------
 # #9 — attribution prunes + canary anchors
 # ---------------------------------------------------------------------------
+
+def test_graph_attribution_is_pruned_before_grouping():
+    sql = graph_sql.graph_daily_costs(30)
+    att = sql.split("QUERY_ATTRIBUTION_HISTORY", 1)[1].split("GROUP BY QUERY_ID", 1)[0]
+    assert "QUERY_ID IN (" in att and "TASK_HISTORY" in att
+
 
 def test_procedure_attribution_is_pruned_before_grouping():
     sql = insights_sql.procedure_costs_usd(30)

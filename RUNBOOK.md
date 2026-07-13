@@ -74,7 +74,7 @@ labels its source and lag.
 role. `ALTER SESSION` is not available to the app (capability detected at
 connect; query tags/timeouts degrade to warehouse-level backstops). The app
 and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_OVERWATCH**
-under the **OVERWATCH_RM** resource monitor (30 credits/month default).
+(no resource monitor since v4.45 — OVERWATCH_RM was suspending it mid-use).
 
 ## 3. Install / upgrade
 
@@ -83,7 +83,7 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | Migration | Creates |
 |---|---|
 | V001 core | DB context, `SETTINGS`, `COMPANY_SCOPE` (+`COMPANY_FOR_USER()`), `APP_ERROR_LOG`, `SCHEMA_VERSION` |
-| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY` (dropped by V043), `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_OVERWATCH` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
+| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY` (dropped by V043, restored by V045), `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_OVERWATCH` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
 | V003 marts | `MART_EXEC_BOARD` (+refresh proc/task), control-room snapshot, `MART_SOURCE_FRESHNESS` |
 | V004 alerts | `ALERT_CONFIG`, `ALERT_EVENTS`, `ALERT_AUDIT`, `SP_ALERT_SCAN`, `TASK_ALERT_SCAN` |
 | V005 actions | `ACTION_QUEUE`, `SAVINGS_LEDGER` |
@@ -236,6 +236,8 @@ Admin → Settings, never in code.
   is *peak hourly cohort* p95 — the help text says so; a schema filter
   switches to live raw p95). Heaviest queries table (click → drill-through:
   full profile of one query).
+- **Tasks** — task runs/failures by day (FACT_TASK_DAILY), failure detail
+  with DATABASE column, RCA timeline for a selected failure.
 - **Warehouses** — daily credits per warehouse, events, concurrency peaks
   (WAREHOUSE_LOAD_HISTORY; sustained PEAK_QUEUED ≳1 = add cluster).
 - **Contention** — lock waits (LOCK_WAIT_HISTORY).
@@ -365,9 +367,8 @@ Generate exact validated SQL, type EMERGENCY, execute, audited to
 REMEDIATION_LOG. Warehouse-level (your role needs OPERATE/MODIFY):
 **SUSPEND/RESUME** (spend kill-switch; running queries finish first — pair
 with a statement timeout if something is stuck), **STATEMENT_TIMEOUT_IN_
-SECONDS**, **MIN/MAX_CLUSTER_COUNT**, **SCALING_POLICY ECONOMY**,
-**RESOURCE_MONITOR attach**. Object-level: **resource monitor CREDIT_QUOTA**
-(the hard brake; SUSPEND_IMMEDIATE kills at cap), **ALTER PIPE ...
+SECONDS**, **MIN/MAX_CLUSTER_COUNT**, **SCALING_POLICY ECONOMY**.
+Object-level: **ALTER PIPE ...
 PIPE_EXECUTION_PAUSED** (ingestion flood), **ALTER TASK <root> SUSPEND**
 (runaway graph), **ALTER USER ... DISABLED=TRUE** (compromised
 credentials). ACCOUNT-level (run as SNOW_ACCOUNTADMINS; the panel
@@ -375,8 +376,8 @@ generates the SQL): **CORTEX_MODELS_ALLOWLIST = 'None'** (AI/Cortex-Code
 spend kill-switch; 'All' restores; or pin cheap models),
 **STATEMENT_TIMEOUT_IN_SECONDS** account default, **NETWORK_POLICY**
 (lockdown — not generated; coordinate first so you don't lock yourself
-out). Note: resource monitors do NOT govern serverless/AI spend — the
-allowlist is the AI brake.
+out). (Resource-monitor levers removed in v4.45 — the owner runs none;
+the Cortex allowlist and statement timeouts are the spend brakes.)
 
 ## 11. Settings reference (Admin → Settings)
 
@@ -467,7 +468,7 @@ ACTION_QUEUE, SAVINGS_LEDGER, DEPARTMENT_MAP, ALERT_ROUTES,
 REMEDIATION_LOG (append-only), USER_PREFS, OBJECT_CHANGE_REGISTRY,
 PIPELINE_SLA_CONFIG, DAILY_DIGEST.
 **Facts (transient, rebuildable, purged by retention):** FACT_METERING_DAILY,
-FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_LOGIN_DAILY,
+FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_TASK_DAILY, FACT_LOGIN_DAILY,
 FACT_STORAGE_DAILY. **Marts/views:** MART_EXEC_BOARD, MART_SOURCE_FRESHNESS,
 control-room snapshot, MART_SPEND_ROLLUP_DT (Dynamic Table pilot).
 **Procs:** SP_LOAD_HOURLY_FACTS, SP_LOAD_DAILY_FACTS, SP_REFRESH_EXEC_BOARD,

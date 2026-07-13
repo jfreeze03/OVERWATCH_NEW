@@ -96,6 +96,25 @@ LIMIT 5000
 """
 
 
+def task_graphs(days: int, company: str = "ALL", database: str = "",
+                schema_contains: str = "") -> str:
+    """Same filter surface as graph_sql.graph_daily_costs (wave 2 parity)."""
+    days = bounded_days(days, 400)
+    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             companies.database_clause(company, "DATABASE_NAME"),
+             contains_filter("SCHEMA_NAME", schema_contains)]
+    if str(database or "").strip():
+        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+    return f"""
+SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES,
+       TASK_RUNS, AVG_WALL_SEC, P95_WALL_SEC, WH_CREDITS
+FROM {mart_object("MART_TASK_GRAPH_DAILY")}
+WHERE {and_where(*parts)}
+ORDER BY DAY, WH_CREDITS DESC
+LIMIT 5000
+"""
+
+
 def security_posture(days: int = 90) -> str:
     days = bounded_days(days, 400)
     return f"""
@@ -810,7 +829,7 @@ def platform_score_inputs(days: int = 30) -> str:
     days = max(7, min(int(days or 30), 120))
     return f"""
 SELECT DAY, CREDITS_BILLED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB,
-       CRIT_RAISED, HIGH_RAISED
+       TASK_RUNS, TASK_FAILED, CRIT_RAISED, HIGH_RAISED
 FROM {mart_object("FACT_PLATFORM_SCORE_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 ORDER BY DAY

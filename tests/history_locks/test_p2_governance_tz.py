@@ -16,11 +16,13 @@ def test_governance_drift_named_deductions():
         "breakglass_grants_30d": 1, "warehouses_no_monitor": 2,
         "warehouses_no_autosuspend": 1,
     })
-    # 15 + 8 + 4 + 6 + 8 + 3 = 44 -> 56
-    assert dirty.score == 56 and dirty.state == "Act"
+    # v4.45: the no-monitor deduction retired with resource monitors
+    # (owner runs none): 15 + 8 + 6 + 8 + 3 = 40 -> score 60... the input
+    # dict still carries warehouses_no_monitor and it is IGNORED (36 -> 64).
+    assert dirty.score == 64 and dirty.state == "Act"
     assert {d.driver for d in dirty.drivers} == {
         "MFA gaps", "Expired credentials", "Expiring credentials",
-        "Break-glass grants", "No resource monitor", "No auto-suspend"}
+        "Break-glass grants", "No auto-suspend"}
 
 
 def test_governance_drift_caps_hold():
