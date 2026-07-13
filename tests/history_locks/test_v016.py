@@ -40,7 +40,7 @@ def test_canary_sentinel():
 
 def test_backfill_script_idempotent_and_mirrors_loaders():
     bf = (_ROOT / "snowflake" / "backfill_365.sql").read_text(encoding="utf-8")
-    assert bf.count("COALESCE((SELECT MIN(DAY)") == 5   # older-than-existing only
+    assert bf.count("COALESCE((SELECT MIN(DAY)") == 6   # older-than-existing only (+FACT_QUERY_DAILY, V042 r22 #1)
     assert "FACT_QUERY_HOURLY" not in bf.split("--", 5)[-1].split("INSERT", 1)[0] or True
     assert "GREATEST(0, COALESCE(CREDITS_USED, 0) + COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0))" in bf
     assert "COMPANY_FOR_WAREHOUSE" in bf and "COMPANY_FOR_DATABASE" in bf

@@ -168,8 +168,18 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         st.session_state["_ops_drill_target"] = target
     target_id = st.session_state.get("_ops_drill_target", "")
     if target_id:
+        # r22 #17: rows from the table carry START_TIME — bound the detail
+        # scan to that day +/-1 instead of the whole 365-day retention.
+        _hint = ""
         try:
-            detail_sql = insights_sql.query_detail(target_id)
+            if top.usable() and "START_TIME" in top.df.columns:
+                _match = top.df[top.df["QUERY_ID"].astype(str) == str(target_id)]
+                if len(_match):
+                    _hint = str(_match.iloc[0]["START_TIME"])[:10]
+        except (KeyError, IndexError, ValueError, TypeError):
+            _hint = ""
+        try:
+            detail_sql = insights_sql.query_detail(target_id, _hint)
         except ValueError as exc:
             st.error(str(exc))
             detail_sql = ""

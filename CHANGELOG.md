@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.37.0 — Codex r22: eight ships, ten routes, two declines (2026-07-12)
+
+Every claim verified in code first; the adjudication with evidence is
+docs/reviews/CODEX_R22_ADJUDICATION_20260712.md. Shipped (V042 +
+app):
+
+- **#7 — the extract is atomic and the watermark gates on COMMIT.** The
+  v4.36.1 isolation could delete the overlap, fail the insert, and still
+  advance the watermark — a hole every consumer MERGEd in until the
+  nightly repair. Each arm is one transaction now; a failed cycle
+  re-covers its own window.
+- **#1 — FACT_QUERY_DAILY** (day grain, year-backfillable): the exec
+  board's 14/60/90 windows and the platform score read it, so a fresh
+  rebuild starts with real query totals instead of undercounting while
+  the hourly fact accrues from day one.
+- **#2 — ops diagnostics backfill** (wide explicit loads; recurring stays
+  2d) — the 7-day Operations first paint is mart-served on day one.
+- **#10 — retention: sixteen V027/V041 tables join SP_PURGE_FACTS** (the
+  whole mart family predated the purge, not just the new tables).
+- **#15 loader half — the AI fact gains EMAIL + exact FIRST/LAST usage
+  stamps.** The users tab STAYS live-first per the owner decision; the
+  mart re-swap is queued behind a side-by-side proof.
+- **#14 — AI users section is toggled** (the exact Cortex scan no longer
+  runs ambiently with the chargeback group), **#17 — drill lookups bound
+  to the clicked row's day ±1** (pasted IDs keep the broad scan), **#20
+  label half — the fleet board names its exception-weighted sample.**
+
+Routed: #4/#5/#6/#8 (one reviewed loader-v2 re-derivation, together),
+#3/#11/#12/#16 (extract v2 / loader v2), #13 (fix-batch), #19 (loader v2
+headline: percentile states), #20 stats half (fix-batch), #15 app half
+(behind fact proof). Declined with evidence: #9 (COUNT/MAX are
+metadata-served — freshness writes are constant-cost already), #18 (the
+"second scan" is the share-law denominator; folding it post-filter is the
+renormalization bug the law exists to prevent). Open: V1 — the
+'FAIL' vs 'FAILED' EXECUTION_STATUS split between V002 facts and V027
+marts needs one live probe; the loser gets a one-line fix.
+
+Deploy: V042 after V041 (the rebuild bundle is regenerated to 42 files) ->
+roles.sql -> backfill_365.sql (now fills FACT_QUERY_DAILY for the year +
+the diagnostics mart for 90d) -> validate expects V001..V042.
+
 ## 4.36.2 — the one-shot rebuild bundle (2026-07-12)
 
 Owner: "i want the full rebuild." snowflake/rebuild/ is docs/FULL_REBUILD.md

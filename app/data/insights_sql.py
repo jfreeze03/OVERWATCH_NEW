@@ -291,14 +291,26 @@ LIMIT 100
 _QUERY_ID_RE_HINT = "Snowflake query IDs are UUID-like hex strings"
 
 
-def query_detail(query_id: str) -> str:
-    """Full detail for one query; the ID is validated before embedding."""
+def query_detail(query_id: str, start_hint: str = "") -> str:
+    """Full detail for one query; the ID is validated before embedding.
+
+    r22 #17: ``start_hint`` (an ISO date from the clicked row's START_TIME)
+    bounds the scan to a +/-1-day window instead of the full 365-day
+    retention. The manually-pasted-ID path passes no hint and keeps the
+    broad scan — that reach is its purpose."""
     import re as _re
 
     qid = str(query_id or "").strip()
     if not _re.match(r"^[0-9a-fA-F-]{16,64}$", qid):
         raise ValueError(f"Invalid query id ({_QUERY_ID_RE_HINT}): {qid!r}")
     from app.core.sqlsafe import sql_literal as _lit
+
+    window = ""
+    if str(start_hint or "").strip():
+        from datetime import date as _date
+        anchor = _date.fromisoformat(str(start_hint).strip()[:10]).isoformat()
+        window = (f"\n  AND START_TIME >= DATEADD('day', -1, '{anchor}'::DATE)"
+                  f"\n  AND START_TIME < DATEADD('day', 2, '{anchor}'::DATE)")
 
     return f"""
 SELECT
@@ -318,7 +330,7 @@ SELECT
     PARTITIONS_SCANNED, PARTITIONS_TOTAL,
     QUERY_TEXT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE QUERY_ID = {_lit(qid)}
+WHERE QUERY_ID = {_lit(qid)}{window}
 LIMIT 1
 """
 

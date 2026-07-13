@@ -109,7 +109,15 @@ def render() -> None:
         _cortex_storage_tab(f["company"], f["days"], ai_rate, settings)
         st.divider()
         section_header("AI users", "info", "operations")
-        _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
+        # r22 #14: the exact Cortex Code user scan is the heaviest read in
+        # this group — it runs only when asked, like the other deep scans.
+        from app.ui.components import toggle_cost_hint
+        st.caption(toggle_cost_hint("cortex_users"))
+        if st.toggle("Load AI user attribution (exact live token metering)",
+                     key="ai_users_scan",
+                     help="Runs the per-user Cortex Code scans; the rest of "
+                          "this section stays cheap without it."):
+            _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
     elif section == "Unit costs":
         section_header("Unit costs — one query, one call, one AI request", "info", "cost")
         _unit_costs_tab(f, rate, ai_rate)

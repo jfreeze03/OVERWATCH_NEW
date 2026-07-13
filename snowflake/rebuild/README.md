@@ -9,7 +9,7 @@ before moving on:
 |---|------|------|--------|
 | 00 | 00_backup_operator_data.sql | date-stamped clones of all 21 operator tables | SOURCE_ROWS == CLONE_ROWS every row |
 | 01 | 01_teardown_rebuildables.sql | drops every rebuildable OVERWATCH object (operator data survives) | VERIFY select lists ONLY operator tables |
-| 02 | 02_migrations_V001_V041.sql | all 41 migrations, in order | runs to the end; halts AT the failure if any |
+| 02 | 02_migrations_V001_V042.sql | all 42 migrations, in order | runs to the end; halts AT the failure if any |
 | 03 | 03_roles.sql | grants incl. the V041 objects | 'roles applied' |
 | 04 | 04_backfill_365.sql | year of dailies, 90d marts (extract first) | backfill coverage select |
 | 05 | 05_validate.sql | post-install checks | every row OK |

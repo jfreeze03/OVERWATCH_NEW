@@ -63,6 +63,8 @@ _EXPECTED_MIGRATIONS = {
     41: "loader efficiency: staged QH extract, xdim alloc fact, exec board v2, "
         "watermarks + nightly reconcile, loader-owned freshness, ops-diag + "
         "platform-score marts, posture riders",
+    42: "codex r22: FACT_QUERY_DAILY, atomic extract + gated watermark, "
+        "ops-diag backfill, purge coverage, AI fact usage stamps",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -635,9 +637,11 @@ def _performance_tab() -> None:
     else:
         styled_table(fq.df, height=280)
         st.caption(
-            "Only fetches ≥2s or failed are persisted (sampled, fire-and-forget, 60/session cap) "
-            "— this is the regression surface across every user, not a complete census. "
-            "The session table above shows only YOUR session."
+            "Only fetches ≥2s or failed are persisted, plus a ~2% healthy sample "
+            "(fire-and-forget, 60/session cap) — an EXCEPTION-WEIGHTED sample, so "
+            "p50/p95 here read HIGHER than true fleet latency (r22 #20; weighted "
+            "stats are queued). This is the regression surface across every user, "
+            "not a complete census. The session table above shows only YOUR session."
         )
     _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
 
