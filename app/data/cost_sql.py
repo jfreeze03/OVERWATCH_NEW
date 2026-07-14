@@ -322,7 +322,7 @@ def org_usage_in_currency(days: int) -> str:
 SELECT
     USAGE_DATE AS DAY,
     ACCOUNT_NAME,
-    UPPER(COALESCE(USAGE_TYPE, 'UNKNOWN')) AS USAGE_TYPE,
+    UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
     MAX(CURRENCY) AS CURRENCY,
     SUM(COALESCE(USAGE_IN_CURRENCY, 0)) AS USAGE_IN_CURRENCY
 FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
@@ -454,25 +454,31 @@ LIMIT 25
 """
 
 def org_account_month_usd(months: int = 2) -> str:
-    """This account's org-billed dollars by month and bucket, for the
-    reconciliation panel: COMPUTE_USD (compute + cloud services + their
-    adjustments — the bucket the app's credits x rate models) vs TOTAL_USD
-    (everything: storage, transfer, serverless, priority support).
+    """This account's org-billed dollars by month on the STRUCTURED billing
+    dimensions (item 6, 2026-07-14 — verified against this account's RATING_TYPE
+    values, retiring the old USAGE_TYPE string match). COMPUTE_USD =
+    RATING_TYPE 'COMPUTE' (warehouse + serverless + cloud services, with the
+    cloud-services rebate netted via the IS_ADJUSTMENT rows) — the bucket the
+    app's credits x rate models. AI_USD (AI_COMPUTE/AI_INFERENCE), STORAGE_USD,
+    TRANSFER_USD, an explicit ADJUSTMENT_USD, and TOTAL_USD (everything) round
+    it out.
 
-    Uses the org rate card, so this is billing truth; differences from the
-    app's model are rate-card reality, not a bug in either number. Data is UTC,
-    can lag up to ~72h, and mutates until month close; classification of the
-    compute bucket still uses USAGE_TYPE pending the structured-dimension
-    rebuild (item 6 — needs the account's RATING_TYPE/SERVICE_TYPE values).
+    Org rate-card = billing truth; residual vs the app model is rate-card
+    reality, not a bug in either number. Data is UTC, can lag up to ~72h, and
+    mutates until month close; BILLING_TYPE is uniformly 'CONSUMPTION' on this
+    account (no overage/free-usage split today).
     """
     months = max(1, min(int(months or 2), 12))
     return f"""
 SELECT
     DATE_TRUNC('month', USAGE_DATE)::DATE AS MONTH,
-    SUM(IFF(LOWER(USAGE_TYPE) LIKE '%compute%' OR LOWER(USAGE_TYPE) LIKE '%cloud service%',
-            USAGE_IN_CURRENCY, 0))        AS COMPUTE_USD,
-    SUM(USAGE_IN_CURRENCY)                AS TOTAL_USD,
-    MAX(CURRENCY)                         AS CURRENCY
+    SUM(IFF(RATING_TYPE = 'COMPUTE', USAGE_IN_CURRENCY, 0))                        AS COMPUTE_USD,
+    SUM(IFF(RATING_TYPE IN ('AI_COMPUTE', 'AI_INFERENCE'), USAGE_IN_CURRENCY, 0))  AS AI_USD,
+    SUM(IFF(RATING_TYPE IN ('STORAGE', 'BLOCK_STORAGE'), USAGE_IN_CURRENCY, 0))    AS STORAGE_USD,
+    SUM(IFF(RATING_TYPE = 'DATA_TRANSFER', USAGE_IN_CURRENCY, 0))                  AS TRANSFER_USD,
+    SUM(IFF(IS_ADJUSTMENT, USAGE_IN_CURRENCY, 0))                                  AS ADJUSTMENT_USD,
+    SUM(USAGE_IN_CURRENCY)                                                         AS TOTAL_USD,
+    MAX(CURRENCY)                                                                  AS CURRENCY
 FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
 WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
   AND USAGE_DATE >= DATE_TRUNC('month', DATEADD('month', -{months - 1}, CURRENT_DATE()))

@@ -48,3 +48,17 @@ def test_sidebar_db_picker_has_inventory_and_fallback():
     m = (__import__("pathlib").Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     assert "security_sql.show_databases_sql()" in m       # live inventory
     assert "databases_for(_company, _env)" in m           # offline fallback preserved
+
+
+def test_org_buckets_use_structured_dimensions():
+    import pytest as _pt
+    sg = _pt.importorskip("sqlglot")
+    sql = cost_sql.org_account_month_usd(3)
+    assert "RATING_TYPE = 'COMPUTE'" in sql          # structured, not USAGE_TYPE string match
+    assert "LOWER(USAGE_TYPE) LIKE" not in sql
+    for col in ("COMPUTE_USD", "AI_USD", "STORAGE_USD", "TRANSFER_USD", "ADJUSTMENT_USD", "TOTAL_USD"):
+        assert col in sql
+    assert "IS_ADJUSTMENT" in sql
+    sg.parse(sql, dialect="snowflake")
+    # display pivot moved off USAGE_TYPE too
+    assert "SERVICE_TYPE" in cost_sql.org_usage_in_currency(30)

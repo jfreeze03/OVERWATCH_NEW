@@ -358,7 +358,7 @@ def _org_spend_tab() -> None:
     _charts.daily_stacked_usd(
         df.rename(columns={"USAGE_IN_CURRENCY": "USD"}), "DAY", "ACCOUNT_NAME", "USD")
     st.caption(f"Amounts are {currency} from the org rate card, not credits x app rate.")
-    pivot = (df.groupby(["ACCOUNT_NAME", "USAGE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
+    pivot = (df.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
              .sort_values(["ACCOUNT_NAME", "USAGE_IN_CURRENCY"], ascending=[True, False]))
     st.dataframe(pivot, hide_index=True, use_container_width=True,
                  column_config={"USAGE_IN_CURRENCY": st.column_config.NumberColumn(
@@ -398,6 +398,10 @@ def _org_spend_tab() -> None:
                 "ORG_COMPUTE_USD": round(org_usd, 2),
                 "APP_MODEL_USD": round(model_usd, 2),
                 "DELTA_PCT": round(drift, 2) if drift is not None else None,
+                "ORG_AI_USD": round(safe_float(orow.get("AI_USD")), 2),
+                "ORG_STORAGE_USD": round(safe_float(orow.get("STORAGE_USD")), 2),
+                "ORG_TRANSFER_USD": round(safe_float(orow.get("TRANSFER_USD")), 2),
+                "ORG_ADJUSTMENT_USD": round(safe_float(orow.get("ADJUSTMENT_USD")), 2),
                 "ORG_TOTAL_USD": round(safe_float(orow.get("TOTAL_USD")), 2),
             })
         styled_table(pd.DataFrame(rows_rc), column_config={
