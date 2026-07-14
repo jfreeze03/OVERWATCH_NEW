@@ -23,51 +23,57 @@ the band cannot just be set to "generous and move on."
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from app.logic.formulas import (
     DEFAULT_AI_CREDIT_PRICE_USD,
     DEFAULT_CREDIT_PRICE_USD,
     billed_credits,
     credits_to_usd,
+    safe_float,
 )
 
 # ---------------------------------------------------------------------------
-# The tolerance policy — see the request in the session notes.
+# The tolerance policy
 # ---------------------------------------------------------------------------
+
+# The account's effective contract rate IS DEFAULT_CREDIT_PRICE_USD (3.68), so the
+# app model and the invoice price the same credit the same way and there is no
+# systematic rate-card gap to absorb. That is what lets this band be tight.
+#
+# Were the effective rate materially below 3.68, no single band would work: the
+# constant overstatement from pricing at 3.68 would be the same order as the
+# dropped-rebate error below, and the two would be indistinguishable. The fix then
+# is not a looser band but reconciling at the IMPLIED rate
+# (USAGE_IN_CURRENCY / credits), which cancels the rate difference and leaves only
+# the rebate error visible. Revisit this if the contract is renegotiated.
+RECONCILE_PCT = 0.01        # 1% of billed — see the walls below
+RECONCILE_FLOOR_USD = 1.00  # absolute slack so a near-zero window cannot flap
 
 
 def reconciles(computed_usd: float, billed_usd: float) -> bool:
     """Does the app's computed spend reconcile with what Snowflake billed?
 
-    This is the definition of "close enough" for CI, and it is a judgment call
-    about YOUR billing reality, not a mechanical one. The band has to sit
-    between two hard walls:
+    Hybrid band: absolute slack on small windows, proportional slack on large
+    ones. A percentage-only rule divides by a near-zero billed total and turns
+    two cents of honest rounding into a screaming variance; an absolute-only rule
+    is meaningless once the window is six figures.
 
-      FLOOR — it must be tight enough to still catch a dropped cloud-services
-              adjustment. That rebate runs up to 10% of daily compute, so a
-              tolerance of >=10% would make test_a_dropped_cs_adjustment_breaks
-              _reconciliation() pass while the app overstates every dollar.
+    The band sits between two hard walls:
 
-      CEILING — it must be loose enough to absorb (a) cent-rounding across the
-              window, which is pennies, and (b) genuine rate-card drift: the app
-              prices at a flat DEFAULT_CREDIT_PRICE_USD while the invoice applies
-              real contract rates per RATING_TYPE. That gap is not a bug and must
-              not redden CI.
+      FLOOR — tight enough to still catch a dropped cloud-services rebate, which
+              is the regression formulas.billed_credits exists to prevent (the
+              old app hardcoded it to zero). That rebate runs up to 10% of daily
+              compute, so anything at or above a 10% band would let the bug back
+              in silently. At 1% we catch any systematic rebate loss above 1%.
 
-    Shapes worth weighing:
-      - relative only (abs(c-b) <= pct * b) — scales, but on a near-zero window a
-        tiny absolute gap reads as a huge percentage and flaps.
-      - absolute only (abs(c-b) <= usd)     — stable when small, meaningless at
-        six figures.
-      - hybrid: abs(c-b) <= max(floor_usd, pct * b) — absolute slack for small
-        windows, proportional slack for large ones. Usually the right shape.
+      CEILING — loose enough to absorb cent-rounding across the window, which is
+              fractions of a cent per day and cannot approach 1% of a real month.
 
-    TODO(jfreeze03): implement. Pick the shape and the numbers; the numbers are
-    the part only you can supply, because they encode how far your effective
-    contract rate really sits from DEFAULT_CREDIT_PRICE_USD.
+    1% is therefore comfortably clear of both walls rather than split between
+    them, which is the whole reason a matching effective rate is worth having.
     """
-    raise NotImplementedError("define the reconciliation tolerance policy")
+    gap = abs(safe_float(computed_usd) - safe_float(billed_usd))
+    return gap <= max(RECONCILE_FLOOR_USD, RECONCILE_PCT * abs(safe_float(billed_usd)))
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +156,11 @@ def test_the_synthetic_frame_is_self_consistent():
     assert df["BILLED_USD"].iloc[0] == round(92.0 * _RATE, 2)
 
 
-@pytest.mark.xfail(raises=NotImplementedError, reason="tolerance policy is yours to define")
 def test_a_clean_month_reconciles():
     df = _usage_frame()
     assert reconciles(_computed_usd(df), float(df["BILLED_USD"].sum()))
 
 
-@pytest.mark.xfail(raises=NotImplementedError, reason="tolerance policy is yours to define")
 def test_a_dropped_cs_adjustment_breaks_reconciliation():
     """The regression that matters. If the tolerance swallows this, it is too loose.
 
@@ -168,7 +172,6 @@ def test_a_dropped_cs_adjustment_breaks_reconciliation():
     assert not reconciles(forgot_the_rebate, float(df["BILLED_USD"].sum()))
 
 
-@pytest.mark.xfail(raises=NotImplementedError, reason="tolerance policy is yours to define")
 def test_cent_rounding_across_a_window_still_reconciles():
     """Rounding is not a break. Per-day rounding to cents drifts by up to half a
     cent a day; over a month that is small change and must not redden CI."""
@@ -178,7 +181,6 @@ def test_cent_rounding_across_a_window_still_reconciles():
     assert reconciles(per_day, _computed_usd(df))
 
 
-@pytest.mark.xfail(raises=NotImplementedError, reason="tolerance policy is yours to define")
 def test_a_near_zero_window_does_not_flap():
     """A quiet day is where a percentage-only tolerance falls apart: a few cents
     of drift against a couple of dollars of spend is a huge percentage and nothing
