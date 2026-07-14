@@ -20424,6 +20424,7 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --                           split EQUALLY across the base objects each query
 --                           touched (ACCESS_HISTORY) so totals stay additive
 --   QUERY_COMPUTE_RESIDUAL  measured credits for queries with no base object
+--                           (COMPANY='UNKNOWN' — unattributable, but additive)
 --   CLUSTERING / MV_REFRESH / SERVERLESS_TASK / SNOWPIPE / SEARCH_OPT
 --                           direct per-object serverless credits
 -- Verified accessible on this account 2026-07-14 (ACCESS_HISTORY present, so
@@ -20551,7 +20552,7 @@ BEGIN
         WHERE ah.QUERY_START_TIME >= :lo
           AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
     )
-    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', NULL, SUM(qa.CREDITS)
+    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)
     FROM qa
     LEFT JOIN obj_q ON obj_q.QUERY_ID = qa.QUERY_ID
     WHERE obj_q.QUERY_ID IS NULL

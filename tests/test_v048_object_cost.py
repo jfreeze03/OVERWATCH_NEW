@@ -53,3 +53,11 @@ def test_v048_object_fqn_is_null_safe():
     assert "COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN')" in _V48
     assert "COALESCE(TABLE_NAME, 'UNKNOWN')" in _V48 and "COALESCE(TASK_NAME, 'UNKNOWN')" in _V48
     assert "COALESCE(PIPE_NAME, 'UNKNOWN_PIPE')" in _V48
+
+
+def test_v048_residual_company_is_unknown_not_null():
+    # Residual (no base object) must carry the app's UNKNOWN company sentinel,
+    # not NULL — NULL drops out of every COMPANY = '<x>' filter and breaks
+    # additivity of per-company sums to the account total.
+    assert "'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)" in _V48
+    assert "'QUERY_COMPUTE_RESIDUAL', NULL" not in _V48
