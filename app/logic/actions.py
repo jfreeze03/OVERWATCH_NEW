@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from app.logic.formulas import account_now
+
 SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 OPEN_STATUSES = ("OPEN", "IN_PROGRESS")
 
@@ -34,7 +36,10 @@ def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     view["_SEV"] = view.get("SEVERITY", "").astype(str).str.upper().map(SEVERITY_RANK).fillna(9)
     due = pd.to_datetime(view.get("DUE_DATE"), errors="coerce")
     created = pd.to_datetime(view.get("CREATED_AT"), errors="coerce")
-    now = pd.Timestamp.now()
+    # Account time: DUE_DATE and CREATED_AT are mart columns and the marts store
+    # account time. A server-clock now() runs 5-6 hours ahead under SiS and would
+    # flag rows overdue before they are.
+    now = pd.Timestamp(account_now())
     view["_OVERDUE"] = (due.notna() & (due < now)).astype(int)
     view["_AGE_H"] = ((now - created).dt.total_seconds() / 3600).fillna(0).clip(lower=0)
     view = view.sort_values(["_SEV", "_OVERDUE", "_AGE_H"], ascending=[True, False, False])

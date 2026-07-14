@@ -27,21 +27,32 @@ DEFAULT_STORAGE_USD_PER_TB_MONTH = 23.00
 ACCOUNT_TIMEZONE = "America/Chicago"
 
 
+def account_now() -> datetime:
+    """Now in the ACCOUNT's timezone, not the server's. Naive, on purpose.
+
+    The marts store naive account time, so anything compared against a mart
+    timestamp — overdue checks, row ages — has to be read here or it compares
+    account time against a UTC clock and runs 5-6 hours fast. Naive because the
+    values it is measured against carry no tzinfo. Falls back to the local clock
+    only where tzdata is unavailable.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(tz=ZoneInfo(ACCOUNT_TIMEZONE)).replace(tzinfo=None)
+    except (ImportError, KeyError):  # ZoneInfoNotFoundError is a KeyError
+        return datetime.now()
+
+
 def account_today() -> date:
     """Today in the ACCOUNT's timezone, not the server's.
 
     Under SiS/containers the process clock is UTC while account time is
     America/Chicago: from 18:00 to midnight Chicago the two disagree about
     what 'today' is, which shifted MTD boundaries and month-end forecasts
-    for a quarter of every day. Falls back to the local date only where
-    tzdata is unavailable.
+    for a quarter of every day.
     """
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(tz=ZoneInfo(ACCOUNT_TIMEZONE)).date()
-    except (ImportError, KeyError):  # ZoneInfoNotFoundError is a KeyError
-        return date.today()
+    return account_now().date()
 
 
 def safe_float(value: object, default: float = 0.0) -> float:

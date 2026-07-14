@@ -11,6 +11,8 @@ from datetime import date, timedelta
 
 import pandas as pd
 
+from app.logic.formulas import account_today
+
 
 def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> dict:
     """Summarize ORGANIZATION_USAGE.REMAINING_BALANCE_DAILY rows.
@@ -51,20 +53,28 @@ def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> d
 
 
 def plan_scenarios(daily_burn_usd: float, term_months: int, buffer_pct: float,
-                   remaining_usd: float, growth_pcts: tuple = (-10, 0, 10, 25)) -> list[dict]:
+                   remaining_usd: float, growth_pcts: tuple = (-10, 0, 10, 25),
+                   today: date | None = None) -> list[dict]:
     """One row per growth scenario: term consumption, exhaustion of the
-    CURRENT contract, and a recommended next commit with buffer."""
+    CURRENT contract, and a recommended next commit with buffer.
+
+    ``today`` anchors the exhaustion date and defaults to account time, not the
+    server's: under SiS the process clock is UTC, so a bare ``date.today()``
+    reads a day ahead from 18:00 Chicago onward and dates the contract running
+    dry one day late.
+    """
     daily = max(0.0, float(daily_burn_usd))
     months = max(1, min(int(term_months), 60))
     buffer = max(0.0, min(float(buffer_pct), 100.0)) / 100
     remaining = max(0.0, float(remaining_usd))
+    anchor = today or account_today()
     rows = []
     for g in growth_pcts:
         rate = daily * (1 + g / 100)
         term_usd = rate * 30.44 * months
         if rate > 0 and remaining > 0:
             days_left = remaining / rate
-            exhaustion = date.today() + timedelta(days=int(days_left))
+            exhaustion = anchor + timedelta(days=int(days_left))
             exhaustion_s = exhaustion.isoformat()
         else:
             exhaustion_s = "n/a"

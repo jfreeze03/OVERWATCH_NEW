@@ -5,6 +5,19 @@ properly quoted SQL string literal. We strip all literals ('...' with ''
 doubling) and assert the residue contains no marker, no quote, no comment
 token, and no statement separator. Builders that reject input (ValueError)
 pass by definition. This file is the artifact you hand a pen tester.
+
+Scope, honestly: TARGETS below is a CURATED corpus, not the full builder set —
+it deliberately exercises the multi-filter builders (warehouse/user/db/schema)
+one argument at a time, which is where a payload is most likely to slip past.
+It cannot simply be extended to all 105 company-taking builders, because
+_residue() strips literals but not COMMENTS: five builders carry a `--` comment
+(one of them an apostrophe, in "the CALL's id") and would trip the no-comment
+and no-quote assertions while being perfectly safe.
+
+Exhaustive per-builder coverage therefore lives in tests/test_p4_filter_matrix.py,
+which derives its target list by introspection and scans literals and comments in
+one pass. Keep both: that file proves nothing escapes anywhere, this one keeps the
+hand-aimed adversarial corpus and the refuser/LIKE-metacharacter contracts.
 """
 
 import re
@@ -38,7 +51,9 @@ PAYLOADS = (
     "ZZINJZZ\nnewline'",
 )
 
-# (name, callable taking the payload) — every filter-accepting builder.
+# (name, callable taking the payload) — the curated corpus (see module docstring).
+# Exhaustive coverage of every company-taking builder is derived, not listed, in
+# tests/test_p4_filter_matrix.py. Add builders here only for a hand-aimed case.
 TARGETS = [
     ("ops.summary.wh", lambda p: ops_sql.query_window_summary(7, "ALFA", p, "", "", "")),
     ("ops.summary.user", lambda p: ops_sql.query_window_summary(7, "ALFA", "", p, "", "")),

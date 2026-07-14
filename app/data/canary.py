@@ -7,7 +7,7 @@ ACCOUNT_USAGE column drift or object loss before a user hits it. Pure module.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import timedelta
 
 from app.data import (
     change_impact_sql,
@@ -24,20 +24,21 @@ from app.data import (
     recheck_sql,
     security_sql,
 )
+from app.logic.formulas import account_today
 
 
 def _recent_release_iso() -> str:
     """Canary anchor for the release-compare builders. A fixed old date made
     the canary scan half a year of TASK/QUERY_HISTORY (153s in production
     telemetry); anchoring 3 days back keeps the scan inside warm partitions."""
-    return (date.today() - timedelta(days=3)).isoformat()
+    return (account_today() - timedelta(days=3)).isoformat()
 
 
 def _recent_pair() -> tuple[str, str, str, str]:
     """Recent contiguous week-vs-week windows for the compare canaries —
     same recency rule as the release anchor (fixed dates are forbidden
     here, and recent windows exercise warm fact partitions)."""
-    a1 = date.today() - timedelta(days=1)
+    a1 = account_today() - timedelta(days=1)
     a0, b0 = a1 - timedelta(days=7), a1 - timedelta(days=14)
     return a0.isoformat(), a1.isoformat(), b0.isoformat(), a0.isoformat()
 
@@ -106,7 +107,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.unused_roles", lambda: security_sql.unused_roles(1)),
     ("security.role_privilege_matrix", lambda: security_sql.role_privilege_matrix()),
     ("insights.anomaly_evidence", lambda: insights_sql.anomaly_evidence(
-        __import__("datetime").date.today().isoformat())),
+        account_today().isoformat())),
     ("insights.idle_warehouse_analysis", lambda: insights_sql.idle_warehouse_analysis(1, "ALFA")),
     ("insights.repeat_query_fingerprints", lambda: insights_sql.repeat_query_fingerprints(1, "ALFA", 2)),
     ("insights.storage_growth_by_database", lambda: insights_sql.storage_growth_by_database(2, "ALFA")),
@@ -132,7 +133,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.source_freshness", mart_sql.source_freshness),
     ("mart.source_freshness_state", mart_sql.source_freshness_state),
     ("mart.fact_contract_consumed", lambda: mart_sql.fact_contract_consumed(
-        (date.today() - timedelta(days=30)).isoformat())),
+        (account_today() - timedelta(days=30)).isoformat())),
     ("mart.fact_daily_spend", lambda: mart_sql.fact_daily_spend(2)),
     ("mart.fact_warehouse_daily", lambda: mart_sql.fact_warehouse_daily(2, "ALFA")),
     ("mart.fact_task_daily", lambda: mart_sql.fact_task_daily(2, "ALFA")),

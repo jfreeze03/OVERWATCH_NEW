@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 import streamlit as st
 
@@ -16,7 +16,7 @@ from app.data import change_impact_sql, graph_sql, insights_sql, mart27_sql, mar
 from app.logic import graphs, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import flag_anomalies
-from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.logic.formulas import account_today, credits_to_usd, format_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -282,7 +282,7 @@ def _release_compare_tab(company: str) -> None:
     )
     col_date, col_window = st.columns([1.2, 1.0])
     with col_date:
-        release_day = st.date_input("Release date", value=date.today() - timedelta(days=1),
+        release_day = st.date_input("Release date", value=account_today() - timedelta(days=1),
                                     key="ops_release_date")
     with col_window:
         window = st.select_slider("Compare window (days each side)", options=[1, 2, 3, 5, 7, 14],

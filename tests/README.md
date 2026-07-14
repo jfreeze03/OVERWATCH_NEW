@@ -16,6 +16,19 @@ Living gates (run + evolve with every change):
   test_v25_features — regression locks for the 4.1—4.5 passes
 - test_stress — opt-in (OW_STRESS=1 / `make stress`) render+logic volume
 
+Phase 4 — locks that DERIVE their targets instead of listing them, so a builder
+or module added tomorrow is covered without anyone remembering to add it:
+- test_p4_filter_matrix — introspects app/data/*_sql.py and drives every
+  company-taking builder (105, vs the 28 test_injection_fuzz names by hand)
+  across all of COMPANIES: parses as Snowflake, filter is live, scopes stay
+  distinct, hostile input stays inside a literal, day windows stay clamped
+- test_p4_dst — account_today()/account_now() across the DST transitions, plus
+  an AST guard that no module in app/logic or app/data reads the server clock
+  for a business date (they must go through account time — the marts store it)
+- test_p4_org_reconciliation — billed (ORGANIZATION_USAGE.USAGE_IN_CURRENCY)
+  vs computed (credits x rate); pins the cloud-services rebate that
+  formulas.billed_credits exists to make unforgettable
+
 history_locks/ — frozen locks from earlier feature waves (V012—V018 era,
 P1/P2 polish rounds). They still run in CI; they just don't need to crowd
 the top level. Fix them only if a deliberate contract change breaks one.
