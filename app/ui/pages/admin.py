@@ -854,6 +854,24 @@ def _canary_tab() -> None:
         )
 
 
+def _metric_registry_tab() -> None:
+    """Phase 1 (architectural): the single semantic contract for every cost
+    number — method, grain, source, timezone, latency, formula version."""
+    from app.logic import metric_registry as mr
+    st.markdown("**Cost metric registry — what every number means**")
+    st.caption(
+        "Read a figure by its METHOD: BILLED ties to the invoice, METERED is "
+        "exact usage (idle in, CS unadjusted), MEASURED is attributed compute "
+        "(idle out), ALLOCATED is a share-based estimate, ESTIMATED is "
+        "bytes/credits x a configured rate. Adding a cost metric without "
+        "registering it here fails the drift-guard test."
+    )
+    _order = {m: i for i, m in enumerate(mr.METHODS)}
+    _rows = sorted(mr.as_rows(), key=lambda r: _order.get(r["Method"], 99))
+    styled_table(pd.DataFrame(_rows), height=460)
+    st.caption(f"{len(_rows)} registered metrics · methods: {', '.join(mr.METHODS)}.")
+
+
 @safe_page(_PAGE)
 def render() -> None:
     page_header("Admin", "Settings, migrations, self-cost, canary, and app observability.", icon_name="admin")
@@ -861,7 +879,7 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
     section = lazy_sections(
-        ["Settings", "Emergency", "Migrations & freshness", "App self-cost", "Org spend",
+        ["Settings", "Emergency", "Migrations & freshness", "Metrics", "App self-cost", "Org spend",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     if section == "Settings":
         _settings_tab(is_operator)
@@ -869,6 +887,8 @@ def render() -> None:
         _emergency_fragment(is_operator)
     elif section == "Migrations & freshness":
         _migrations_tab()
+    elif section == "Metrics":
+        _metric_registry_tab()
     elif section == "App self-cost":
         _self_cost_tab()
     elif section == "Org spend":
