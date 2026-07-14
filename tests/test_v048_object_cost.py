@@ -43,3 +43,13 @@ def test_object_cost_metrics_registered():
     from app.logic import metric_registry as mr
     keys = {m.key for m in mr.METRICS}
     assert "object_query_cost" in keys and "object_maintenance_cost" in keys
+
+
+def test_v048_object_fqn_is_null_safe():
+    # OBJECT_FQN is NOT NULL and Snowflake '||' yields NULL if ANY operand is
+    # NULL. Every direct-arm FQN must COALESCE its name parts, else one NULL
+    # component aborts the whole load (regression: SP_LOAD_OBJECT_COST NULL FQN).
+    assert "DATABASE_NAME || '.' || SCHEMA_NAME" not in _V48
+    assert "COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN')" in _V48
+    assert "COALESCE(TABLE_NAME, 'UNKNOWN')" in _V48 and "COALESCE(TASK_NAME, 'UNKNOWN')" in _V48
+    assert "COALESCE(PIPE_NAME, 'UNKNOWN_PIPE')" in _V48
