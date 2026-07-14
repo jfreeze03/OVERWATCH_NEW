@@ -74,6 +74,8 @@ _EXPECTED_MIGRATIONS = {
         "COMPANY_SCOPE database mapping lever, board UNKNOWN scope",
     45: "owner correction: task monitoring restored (tables/procs/rule/"
         "refill; teeth + UNKNOWN scope kept); OVERWATCH_RM dropped",
+    46: "storage truth: account tiers (stage/hybrid/archive) + per-DB "
+        "monthly-average billing basis (COST_DB recon R3 / audit F1)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -166,7 +166,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             f"({format_usd(window_usd)}) by query elapsed-time share; treat as directionally "
             "correct. Shares stay global, so a database/schema filter shows that slice of "
             "the total — never 100% of it. NONE = queries with no database context; "
-            "USER$ personal databases attribute to their owner's company."
+            "USER$ personal databases attribute to their owner's company. "
+            "The mart path weights each share by that warehouse-hour's credits "
+            "(size-aware); the live fallback (shown while facts load, or whenever a "
+            "schema filter is set) uses elapsed-time share, which is warehouse-size-blind "
+            "— a coarser estimate when one entity concentrates on unusually large or small "
+            "warehouses."
         )
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):

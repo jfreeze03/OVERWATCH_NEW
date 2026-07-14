@@ -66,7 +66,7 @@ _LIVE_SCAN_BUDGETS = {
     # (tag coverage needs user grain; pruning needs partition stats).
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
     "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
-    "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # v4.36.1: users tab reverted to live-first (owner: exact emails + timestamps); 4 is the true count, old 5 was slack
+    "app/ui/pages/cost_parts/ai_chargeback.py": 5,  # +1 v4.46 (audit F1b/R3): account storage-tier live fallback (STORAGE_USAGE) under the fact-first read, probe-gated, non-first-paint
     "app/ui/pages/operations.py": 22,  # restored v4.45 (owner correction: task monitoring stays; the r26 cut had misread "resource monitor")
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)

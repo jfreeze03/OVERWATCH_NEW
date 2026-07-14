@@ -50,6 +50,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.cortex_daily_spend", lambda: cost_sql.cortex_daily_spend(2)),
     ("cost.storage_by_database", lambda: cost_sql.storage_by_database(2, "ALFA")),
     ("cost.storage_by_database_live", lambda: cost_sql.storage_by_database_live(2, "ALFA")),
+    ("cost.storage_account_truth", lambda: cost_sql.storage_account_truth(2)),
+    ("cost.storage_account_truth_live", lambda: cost_sql.storage_account_truth_live(2)),
     ("ops.query_window_summary", lambda: ops_sql.query_window_summary(1, "ALFA")),
     ("ops.top_queries_by_elapsed", lambda: ops_sql.top_queries_by_elapsed(1, "ALFA", 1)),
     ("ops.failures_by_error", lambda: ops_sql.failures_by_error(1, "ALFA")),

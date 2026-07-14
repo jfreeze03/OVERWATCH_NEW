@@ -1,4 +1,4 @@
-"""Cost SQL builders.
+"""Cost SQL builders (F1-F4 cost-audit fixes, 2026-07-14).
 
 Formula contract (see ARCHITECTURE.md):
 - Account billed spend: METERING_DAILY_HISTORY with the cloud-services
@@ -50,7 +50,7 @@ SELECT
     DATE(START_TIME) AS DAY,
     WAREHOUSE_NAME,
     {companies.company_case_sql()} AS COMPANY,
-    SUM(COALESCE(CREDITS_USED_COMPUTE, CREDITS_USED)) AS CREDITS_COMPUTE,
+    SUM(COALESCE(CREDITS_USED_COMPUTE, 0)) AS CREDITS_COMPUTE,
     SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_TOTAL
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
 WHERE {where}
@@ -92,6 +92,14 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
 
     Produces shares, not dollars: the caller multiplies by scoped warehouse
     spend and MUST label the result 'allocated'.
+
+    Size note (F2, 2026-07-14): this LIVE builder shares by elapsed time, which
+    is warehouse-size-blind (an XS second and a 4XL second count the same). It
+    is the fallback path; the normal path is mart27_sql.alloc_attribution, whose
+    ALLOC_CREDITS share is weighted per warehouse-hour by real credits (size-
+    aware). The elapsed-share form here is deliberate — the global-share law
+    (below) was a bug-fix and is lock-tested — so the UI caption flags the live
+    path as the coarser estimate rather than silently credit-weighting it.
 
     Shares are GLOBAL over the company's scoped warehouse activity in the
     window (live math fix 2026-07-11: RATIO_TO_REPORT over the FILTERED set
@@ -153,10 +161,12 @@ ORDER BY DAY
 
 
 def storage_by_database(days: int, company: str = "ALL", database: str = "") -> str:
-    """Database storage per day from FACT_STORAGE_DAILY (loaded daily) —
-    the live DATABASE_STORAGE_USAGE_HISTORY scan now runs once in the
-    loader, not per page view. Page falls back to the _live variant while
-    the fact is empty."""
+    """Per-database storage on the BILLING basis: the average of daily bytes
+    over the window (F1, 2026-07-14). Snowflake bills storage on the monthly
+    average of daily on-disk bytes, so the r19 latest-day snapshot over/under-
+    stated any database that grew or shrank mid-window. FACT_STORAGE_DAILY
+    holds one row per day per database, each already that day's average bytes;
+    the page falls back to the _live variant while the fact is empty."""
     days = bounded_days(days)
     where = and_where(
         f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
@@ -164,19 +174,23 @@ def storage_by_database(days: int, company: str = "ALL", database: str = "") -> 
         companies.database_equals_clause(database),
     )
     return f"""
-SELECT DAY, DATABASE_NAME,
-       SUM(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
-       SUM(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
+SELECT DATABASE_NAME,
+       AVG(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
+       AVG(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+       COUNT(DISTINCT DAY)              AS DAYS_AVERAGED,
+       MAX(DAY)                         AS LATEST_DAY
 FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
 WHERE {where}
-GROUP BY 1, 2
-QUALIFY DAY = MAX(DAY) OVER ()
-ORDER BY DATABASE_NAME
+GROUP BY DATABASE_NAME
+HAVING AVG(COALESCE(DB_BYTES, 0)) > 0
+ORDER BY DB_BYTES DESC
 """
 
 
 def storage_by_database_live(days: int, company: str = "ALL", database: str = "") -> str:
-    """Live fallback for storage_by_database (fact empty / not deployed)."""
+    """Live fallback for storage_by_database (fact empty / not deployed):
+    average of daily AVERAGE_*_BYTES over the window per database — the same
+    monthly-average billing basis as the fact path (F1, 2026-07-14)."""
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
@@ -185,15 +199,59 @@ def storage_by_database_live(days: int, company: str = "ALL", database: str = ""
     )
     return f"""
 SELECT
-    USAGE_DATE AS DAY,
     DATABASE_NAME,
     AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
-    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES
+    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+    COUNT(DISTINCT USAGE_DATE)               AS DAYS_AVERAGED,
+    MAX(USAGE_DATE)                          AS LATEST_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
 WHERE {where}
-GROUP BY 1, 2
-QUALIFY DAY = MAX(DAY) OVER ()
-ORDER BY DATABASE_NAME
+GROUP BY DATABASE_NAME
+HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
+ORDER BY DB_BYTES DESC
+"""
+
+
+def storage_account_truth(days: int) -> str:
+    """Account-wide storage by tier on the billing basis (F1b/R3, V046):
+    average of daily bytes for table, stage, fail-safe, hybrid, and archive
+    cool/cold. Account grain only — STORAGE_USAGE (and this fact) carry no
+    per-database split for stage/hybrid/archive. Reads FACT_STORAGE_ACCOUNT_
+    DAILY; page falls back to the _live variant while the fact is empty."""
+    days = bounded_days(days, maximum=400)
+    return f"""
+SELECT
+    AVG(COALESCE(TABLE_BYTES, 0))        AS TABLE_BYTES,
+    AVG(COALESCE(STAGE_BYTES, 0))        AS STAGE_BYTES,
+    AVG(COALESCE(FAILSAFE_BYTES, 0))     AS FAILSAFE_BYTES,
+    AVG(COALESCE(HYBRID_BYTES, 0))       AS HYBRID_BYTES,
+    AVG(COALESCE(ARCHIVE_COOL_BYTES, 0)) AS ARCHIVE_COOL_BYTES,
+    AVG(COALESCE(ARCHIVE_COLD_BYTES, 0)) AS ARCHIVE_COLD_BYTES,
+    COUNT(DISTINCT DAY)                  AS DAYS_AVERAGED,
+    MAX(DAY)                             AS LATEST_DAY
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_ACCOUNT_DAILY
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+"""
+
+
+def storage_account_truth_live(days: int) -> str:
+    """Live fallback for storage_account_truth from ACCOUNT_USAGE.STORAGE_USAGE
+    (F1b/R3, V046). Same monthly-average billing basis; account-wide. Note the
+    view is Snowflake's own estimate that will not match the invoice exactly —
+    org USAGE_IN_CURRENCY is billing truth."""
+    days = bounded_days(days, maximum=400)
+    return f"""
+SELECT
+    AVG(COALESCE(STORAGE_BYTES, 0))              AS TABLE_BYTES,
+    AVG(COALESCE(STAGE_BYTES, 0))               AS STAGE_BYTES,
+    AVG(COALESCE(FAILSAFE_BYTES, 0))            AS FAILSAFE_BYTES,
+    AVG(COALESCE(HYBRID_TABLE_STORAGE_BYTES, 0)) AS HYBRID_BYTES,
+    AVG(COALESCE(ARCHIVE_STORAGE_COOL_BYTES, 0)) AS ARCHIVE_COOL_BYTES,
+    AVG(COALESCE(ARCHIVE_STORAGE_COLD_BYTES, 0)) AS ARCHIVE_COLD_BYTES,
+    COUNT(DISTINCT USAGE_DATE)                  AS DAYS_AVERAGED,
+    MAX(USAGE_DATE)                             AS LATEST_DAY
+FROM SNOWFLAKE.ACCOUNT_USAGE.STORAGE_USAGE
+WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 

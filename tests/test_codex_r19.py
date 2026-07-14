@@ -38,10 +38,15 @@ def test_failure_timeline_skips_scan_when_summary_says_zero():
     assert "if days >= 7 else None" in _OPS               # 7d detail needs >=7d summary
 
 
-def test_storage_builders_return_latest_day_only():
+def test_storage_builders_use_monthly_average_billing_basis():
+    # F1 (2026-07-14): Snowflake bills storage on the monthly average of daily
+    # bytes, not a latest-day snapshot. Both builders now AVG the window per
+    # database (superseding the r19 QUALIFY-latest-day snapshot).
     for sql in (cost_sql.storage_by_database(90, "ALFA"),
                 cost_sql.storage_by_database_live(90, "ALFA")):
-        assert "QUALIFY DAY = MAX(DAY) OVER ()" in sql
+        assert "AVG(COALESCE(" in sql
+        assert "QUALIFY DAY = MAX(DAY) OVER ()" not in sql
+        assert "DAYS_AVERAGED" in sql
         sqlglot.parse(sql, dialect="snowflake")
 
 

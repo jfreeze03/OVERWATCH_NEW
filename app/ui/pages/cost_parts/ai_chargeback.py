@@ -45,6 +45,63 @@ _SERVICE_CATEGORY = {
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
 # cost.py; ruff --fix prunes what this section does not use.
 
+def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
+    """Account-wide storage by tier (F1b/R3, V046). Table/stage/fail-safe bill
+    at the standard rate; hybrid and archive cool/cold at their own SETTINGS
+    rates. Account grain — STORAGE_USAGE carries no per-database split for these
+    tiers, so the company filter does not narrow it."""
+    st.markdown("**Account storage by tier (billing basis)**")
+    res = run(cost_sql.storage_account_truth(days), page=_PAGE,
+              key=f"stor_acct_{days}", tier="recent",
+              source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
+    if not res.ok or res.empty:
+        res = run(cost_sql.storage_account_truth_live(days), page=_PAGE,
+                  key=f"stor_acct_live_{days}", tier="historical",
+                  source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
+    if not res.ok:
+        st.caption("Account storage tiers need migration V046 "
+                   "(FACT_STORAGE_ACCOUNT_DAILY) or STORAGE_USAGE access — an admin "
+                   "can apply it on Admin → Migrations & freshness.")
+        return
+    if res.empty:
+        st.caption("No account storage rows in this window yet.")
+        return
+    import pandas as pd
+
+    row = res.df.iloc[0]
+    std = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+    stage_rate = safe_float(settings.get("STORAGE_STAGE_USD_PER_TB_MONTH"), std)
+    hybrid_rate = safe_float(settings.get("STORAGE_HYBRID_USD_PER_TB_MONTH"), 348.16)
+    cool_rate = safe_float(settings.get("STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH"), 4.0)
+    cold_rate = safe_float(settings.get("STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH"), 1.0)
+    tiers = [
+        ("Table", "TABLE_BYTES", std),
+        ("Stage", "STAGE_BYTES", stage_rate),
+        ("Fail-safe", "FAILSAFE_BYTES", std),
+        ("Hybrid tables", "HYBRID_BYTES", hybrid_rate),
+        ("Archive cool", "ARCHIVE_COOL_BYTES", cool_rate),
+        ("Archive cold", "ARCHIVE_COLD_BYTES", cold_rate),
+    ]
+    rows = []
+    for label, col, rate in tiers:
+        tb = safe_float(row.get(col)) / (1024**4)
+        rows.append({"Tier": label, "TB": round(tb, 4),
+                     "$/TB/mo": round(rate, 2), "USD/mo": round(tb * rate, 2)})
+    tdf = pd.DataFrame(rows)
+    total_usd = float(tdf["USD/mo"].sum())
+    kpi_row([{"label": "Account storage (all tiers)", "value": f"{format_usd(total_usd)}/mo",
+              "help": "Avg of daily bytes over the window x per-tier SETTINGS rates. "
+                      "Estimate — STORAGE_USAGE is Snowflake's own approximation and won't "
+                      "match the invoice exactly; the org rate-card panel is billing truth. "
+                      "Stage/hybrid/archive are account-wide (no per-database split)."}])
+    shown = tdf[tdf["USD/mo"] > 0]
+    if not shown.empty:
+        charts.bar_usd(shown.sort_values("USD/mo", ascending=False), "Tier", "USD/mo",
+                       title="Storage $/month by tier (est.)")
+    styled_table(tdf, height=220)
+    result_caption(res)
+
+
 def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict) -> None:
     left, right = st.columns(2)
     with left:
@@ -63,31 +120,33 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
     with right:
         st.markdown("**Storage by database**")
-        # r19 #7: both builders return only the latest loaded day now (the
-        # panel is a snapshot; it discarded the window anyway). Label was
-        # stale too — the first read has been the FACT since R-adoption.
+        # F1 (2026-07-14): storage bills on the monthly average of daily bytes,
+        # so both builders now average the window per database instead of
+        # snapshotting the latest day (which over/understated any database that
+        # moved mid-month). The account-tier breakdown lives below.
         res = run(cost_sql.storage_by_database(days, company, st.session_state.get("flt_database", "")), page=_PAGE,
                   key=f"storage_{company}_{days}", tier="historical",
-                  source="FACT_STORAGE_DAILY (latest day)")
+                  source="FACT_STORAGE_DAILY (avg of daily bytes, billing basis)")
         if not res.ok or res.empty:
             res = run(cost_sql.storage_by_database_live(days, company,
                                                         st.session_state.get("flt_database", "")),
                       page=_PAGE, key=f"storage_live_{company}_{days}", tier="historical",
-                      source="DATABASE_STORAGE_USAGE_HISTORY (latest day, live fallback)")
+                      source="DATABASE_STORAGE_USAGE_HISTORY (avg of daily bytes, live fallback)")
         if guard(res, "No storage rows for this scope."):
             df = res.df.copy()
-            latest_day = df["DAY"].max()
-            latest = df[df["DAY"] == latest_day].copy()
-            latest["TB"] = latest["DB_BYTES"].map(safe_float) / (1024**4)
+            df["TB"] = df["DB_BYTES"].map(safe_float) / (1024**4)
             rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
-            latest["USD_MONTH"] = latest["TB"] * rate_tb
-            total_tb = float(latest["TB"].sum())
-            kpi_row([{"label": "Current storage", "value": f"{total_tb:,.2f} TB",
+            df["USD_MONTH"] = df["TB"] * rate_tb
+            total_tb = float(df["TB"].sum())
+            kpi_row([{"label": "Avg storage (window)", "value": f"{total_tb:,.2f} TB",
                       "delta": f"~{format_usd(total_tb * rate_tb)}/mo",
-                      "help": f"${rate_tb:.2f}/TB/mo from SETTINGS. Display estimate."}])
-            charts.bar_usd(latest.sort_values("USD_MONTH", ascending=False),
+                      "help": f"Average of daily bytes over the window x ${rate_tb:.2f}/TB/mo "
+                              "(SETTINGS) — Snowflake's storage billing basis. Estimate; "
+                              "billing truth is the org rate-card panel."}])
+            charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
                            "DATABASE_NAME", "USD_MONTH", title="$/month (est.)")
             result_caption(res)
+        _account_storage_tiers(company, days, settings)
 
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:
     """Cortex Code user attribution — ported from the original AI & Cortex

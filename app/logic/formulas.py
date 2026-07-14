@@ -14,6 +14,13 @@ from datetime import date, datetime
 DEFAULT_CREDIT_PRICE_USD = 3.68
 DEFAULT_AI_CREDIT_PRICE_USD = 2.20
 DEFAULT_STORAGE_USD_PER_TB_MONTH = 23.00
+# Storage TB base (F3, 2026-07-14): every storage divisor in the app is binary
+# TiB (bytes / 1024**4, GB / 1024). Snowflake prices "per TB" and its own
+# ACCOUNT_USAGE storage views (DATABASE_STORAGE_USAGE_HISTORY, STORAGE_USAGE)
+# are explicitly an estimate that "won't match your invoice exactly"
+# (docs.snowflake.com/en/sql-reference/account-usage/storage_usage). Billing
+# truth is ORGANIZATION_USAGE.USAGE_IN_CURRENCY, surfaced on the Cost rate-card
+# reconciliation panel. Keep this divisor consistent with the $/TB SETTING.
 
 # The Snowflake account runs in Central time; SETTINGS and the marts store
 # account time. components.py imports this so the app has ONE spelling of it.

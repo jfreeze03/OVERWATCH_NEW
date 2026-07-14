@@ -37,7 +37,14 @@ def mart_object(name: str) -> str:
 DEFAULT_SETTINGS = {
     "CREDIT_PRICE_USD": 3.68,
     "AI_CREDIT_PRICE_USD": 2.20,
-    "STORAGE_USD_PER_TB_MONTH": 23.00,
+    "STORAGE_USD_PER_TB_MONTH": 23.00,   # standard table/stage/failsafe; TB = binary TiB (see formulas.py F3 note)
+    # Storage tier rates (V046 storage-truth). Estimates from AWS US-East list
+    # pricing — EDIT on Admin to match your rate card. Hybrid/archive bill
+    # differently from standard storage; these light up the account-tier panel.
+    "STORAGE_STAGE_USD_PER_TB_MONTH": 23.00,
+    "STORAGE_HYBRID_USD_PER_TB_MONTH": 348.16,   # ~$0.34/GB row store
+    "STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH": 4.00,
+    "STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH": 1.00,
     "MONTHLY_BUDGET_USD": 0.0,       # 0 = not configured; UI must not invent one
     "AI_MONTHLY_BUDGET_USD": 0.0,    # 0 = not configured; gates Cortex user severities
     "CORTEX_MODEL": "llama3.1-8b",   # model for in-app AI evaluations (Admin-editable)
