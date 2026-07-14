@@ -59,4 +59,8 @@ def test_exports_cache_bytes_and_never_rerun_on_download():
     assert _CMP.count('on_click="ignore"') == 3           # two table paths + text
     for pg in ("overview.py", "security.py"):
         _p = (_ROOT / "app" / "ui" / "pages" / pg).read_text(encoding="utf-8")
-      
+        assert _p.count("download_button") == _p.count('on_click="ignore"')
+    assert "df.to_csv(index=False).encode" in _CMP        # prep stores BYTES
+    prep = _CMP.split("_prep_key = ", 1)[1]
+    assert "st.session_state[_prep_key] = df.to_csv" in prep
+    assert "st.session_state[_prep_key] = True" not in _CMP
