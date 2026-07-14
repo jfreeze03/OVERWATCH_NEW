@@ -1,6 +1,6 @@
 """Department chargeback builders.
 
-Billing truth: WAREHOUSE_METERING_HISTORY joined to DEPARTMENT_MAP — exact
+Exact usage (not billed): WAREHOUSE_METERING_HISTORY joined to DEPARTMENT_MAP — exact
 credits, idle included (a department owns its warehouse's idle time), always
 reconciling to the scoped total via the 'Unmapped' bucket. The role lens is
 elapsed-share allocation *within* each warehouse and is labeled allocated.

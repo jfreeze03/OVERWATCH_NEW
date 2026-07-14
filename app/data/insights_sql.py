@@ -723,7 +723,7 @@ def measured_query_costs(days: int, company: str = "ALL", database: str = "",
     Attribution excludes warehouse idle time: this answers "what did running
     THIS query cost" — the complement of expensive_queries_usd's allocated
     lens (which spreads the whole warehouse-hour bill, idle included).
-    ~6h view lag; rows without attributed credits are omitted.
+    ~8h view lag; rows without attributed credits are omitted.
     """
     from app.core.sqlsafe import contains_filter
 
@@ -753,7 +753,7 @@ SELECT
     q.QUERY_ID, q.USER_NAME, q.WAREHOUSE_NAME, q.DATABASE_NAME, q.SCHEMA_NAME,
     q.QUERY_TYPE, q.EXECUTION_STATUS, q.START_TIME,
     ROUND(q.ELAPSED_MS / 1000.0, 1) AS ELAPSED_SEC,
-    ROUND(SUM(a.CREDITS_ATTRIBUTED_COMPUTE), 6) AS CREDITS,
+    ROUND(SUM(a.CREDITS_ATTRIBUTED_COMPUTE + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)), 6) AS CREDITS,
     q.QUERY_SNIPPET
 FROM q
 JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
@@ -761,7 +761,7 @@ JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
  AND a.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
 GROUP BY q.QUERY_ID, q.USER_NAME, q.WAREHOUSE_NAME, q.DATABASE_NAME, q.SCHEMA_NAME,
          q.QUERY_TYPE, q.EXECUTION_STATUS, q.START_TIME, q.ELAPSED_MS, q.QUERY_SNIPPET
-HAVING SUM(a.CREDITS_ATTRIBUTED_COMPUTE) > 0
+HAVING SUM(a.CREDITS_ATTRIBUTED_COMPUTE + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
 ORDER BY CREDITS DESC
 LIMIT {limit}
 """

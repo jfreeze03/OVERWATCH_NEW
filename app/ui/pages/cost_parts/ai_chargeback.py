@@ -85,8 +85,8 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
     rows = []
     for label, col, rate in tiers:
         tb = safe_float(row.get(col)) / (1024**4)
-        rows.append({"Tier": label, "TB": round(tb, 4),
-                     "$/TB/mo": round(rate, 2), "USD/mo": round(tb * rate, 2)})
+        rows.append({"Tier": label, "TiB": round(tb, 4),
+                     "$/TiB/mo": round(rate, 2), "USD/mo": round(tb * rate, 2)})
     tdf = pd.DataFrame(rows)
     total_usd = float(tdf["USD/mo"].sum())
     kpi_row([{"label": "Account storage (all tiers)", "value": f"{format_usd(total_usd)}/mo",
@@ -134,15 +134,15 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
                       source="DATABASE_STORAGE_USAGE_HISTORY (avg of daily bytes, live fallback)")
         if guard(res, "No storage rows for this scope."):
             df = res.df.copy()
-            df["TB"] = df["DB_BYTES"].map(safe_float) / (1024**4)
+            df["TB"] = (df["DB_BYTES"].map(safe_float) + df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
             rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
             df["USD_MONTH"] = df["TB"] * rate_tb
             total_tb = float(df["TB"].sum())
-            kpi_row([{"label": "Avg storage (window)", "value": f"{total_tb:,.2f} TB",
+            kpi_row([{"label": "Avg storage (window)", "value": f"{total_tb:,.2f} TiB",
                       "delta": f"~{format_usd(total_tb * rate_tb)}/mo",
-                      "help": f"Average of daily bytes over the window x ${rate_tb:.2f}/TB/mo "
-                              "(SETTINGS) — Snowflake's storage billing basis. Estimate; "
-                              "billing truth is the org rate-card panel."}])
+                      "help": f"Average of daily (active + fail-safe) bytes over the window x "
+                              f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's storage billing basis "
+                              "(binary TiB). Estimate; the org rate-card panel is billing truth."}])
             charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
                            "DATABASE_NAME", "USD_MONTH", title="$/month (est.)")
             result_caption(res)
@@ -321,7 +321,7 @@ def _statement_export(company: str, rate: float) -> None:
             st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
 
 def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> None:
-    """Department chargeback: warehouse = billing truth, role = usage lens."""
+    """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens."""
     dept_res = run(chargeback_sql.department_window_credits(days, company), page=_PAGE,
                    key=f"cb_dept_{company}_{days}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")

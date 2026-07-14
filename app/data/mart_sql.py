@@ -168,7 +168,8 @@ def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     callers keep the live builder as fallback and label the source.
     """
     days = bounded_days(days)
-    where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())"]
+    where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())",
+             "DAY < CURRENT_DATE()"]   # equal-length windows, exclude today (Codex P0-3)
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     return f"""

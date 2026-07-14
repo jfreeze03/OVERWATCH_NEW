@@ -3,7 +3,7 @@ AI request.
 
 Measurement honesty (the panel's whole point):
 - Query and procedure dollars are MEASURED — QUERY_ATTRIBUTION_HISTORY
-  credits (child statements roll up to the CALL), ~6h lag. Attribution
+  credits (child statements roll up to the CALL), ~8h lag. Attribution
   excludes warehouse idle time, so these numbers answer "what did running
   THIS cost" — the Optimization section's expensive-queries view keeps the
   ALLOCATED lens (incl. idle share) for "who owns the bill".
@@ -34,7 +34,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     company, days = f["company"], f["days"]
     database, schema_contains = f["database"], f["schema_contains"]
     st.caption(
-        "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~6h lag, idle time "
+        "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~8h lag, idle time "
         "excluded) at your contract rate. For 'who owns the bill' including idle, "
         "use Optimization's allocated view; for pipelines, Operations → Task graphs ($)."
     )
@@ -99,7 +99,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         kpi_row(kpis)
 
     st.markdown("**Most expensive queries — measured $ each**")
-    if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~6h)."):
+    if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
         qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
         styled_table(qdf, height=280, column_config={
@@ -129,7 +129,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         result_caption(p_res, note="Database/schema = the CALL's session context; procs may "
                                    "read other databases. ATTRIBUTED_CALLS = calls the "
                                    "attribution view matched; $0 with calls = attribution "
-                                   "lag (~6h) or children ran without a warehouse. "
+                                   "lag (~8h) or children ran without a warehouse. "
                                    "Change-impact (Operations) watches these numbers around "
                                    "each ALTER.")
 
@@ -161,7 +161,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             "Type a procedure name (bare or db.schema-qualified — paste PROC_NAME "
             "from the leaderboard above). Same measured rollup as the leaderboard "
             "(children via ROOT_QUERY_ID), sliced by day; honors the page filters. "
-            "Attribution lags ~6h; idle time excluded."
+            "Attribution lags ~8h; idle time excluded."
         )
         _pname = st.text_input("Procedure name", key="uc_proc_trend_name")
         if _pname.strip():
@@ -187,7 +187,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                     "USD": st.column_config.NumberColumn("$", format="$%.4f"),
                     "CREDITS_PER_CALL": st.column_config.NumberColumn("cr/call", format="%.6f"),
                 })
-                st.caption("$0 days with calls = attribution not caught up (~6h) or "
+                st.caption("$0 days with calls = attribution not caught up (~8h) or "
                            "children ran without a warehouse — same caveats as the leaderboard.")
 
     with st.expander("Price a specific CALL or session (measured)"):
@@ -195,7 +195,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             "Paste a CALL's QUERY_ID for that one proc run, or a SESSION_ID to price "
             "every proc the session ran (e.g. your three ad-hoc CALLs). Children roll "
             "up via QUERY_ATTRIBUTION_HISTORY.ROOT_QUERY_ID — no task graph id needed. "
-            "Attribution lags ~6h; idle time excluded."
+            "Attribution lags ~8h; idle time excluded."
         )
         _ident = st.text_input("QUERY_ID or SESSION_ID", key="uc_call_ident")
         if _ident.strip():
@@ -203,7 +203,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                        key=f"call_cost_{_ident.strip()[:24]}", tier="historical",
                        source="QUERY_ATTRIBUTION_HISTORY (ROOT_QUERY_ID rollup, 7d)")
             if guard(cres, "No CALLs matched in the last 7 days — check the id; "
-                           "attribution lags ~6h, so very recent runs may not price yet."):
+                           "attribution lags ~8h, so very recent runs may not price yet."):
                 cdf = cres.df.copy()
                 cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
                 cdf, _c_cfg = snowsight_profile_column(cdf, _PAGE)

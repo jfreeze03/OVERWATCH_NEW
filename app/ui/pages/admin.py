@@ -76,6 +76,7 @@ _EXPECTED_MIGRATIONS = {
         "refill; teeth + UNKNOWN scope kept); OVERWATCH_RM dropped",
     46: "storage truth: account tiers (stage/hybrid/archive) + per-DB "
         "monthly-average billing basis (COST_DB recon R3 / audit F1)",
+    47: "pattern-cost mart includes Query Acceleration (Codex audit item 4)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

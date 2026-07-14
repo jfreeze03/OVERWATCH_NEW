@@ -22,7 +22,7 @@ def test_measured_queries_use_attribution_not_allocation():
     assert "QUERY_ATTRIBUTION_HISTORY" in sql
     assert "CREDITS_ATTRIBUTED_COMPUTE" in sql
     assert "WAREHOUSE_METERING_HISTORY" not in sql     # that's the allocated lens
-    assert "HAVING SUM(a.CREDITS_ATTRIBUTED_COMPUTE) > 0" in sql  # unpriced rows omitted
+    assert "HAVING SUM(a.CREDITS_ATTRIBUTED_COMPUTE + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0" in sql  # unpriced rows omitted; QAS included
     # join-then-group: the filtered window drives the join; the whole
     # attribution view is never pre-aggregated (the 139s family, Codex #11)
     assert sql.index("QUERY_HISTORY q") < sql.index("QUERY_ATTRIBUTION_HISTORY")

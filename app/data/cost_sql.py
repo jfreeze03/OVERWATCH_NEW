@@ -39,7 +39,7 @@ ORDER BY DAY
 
 
 def warehouse_daily_credits(days: int, company: str = "ALL") -> str:
-    """Per-warehouse daily compute credits (exact metering), company-scoped."""
+    """Per-warehouse daily compute credits (exact usage, not billed), company-scoped."""
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",

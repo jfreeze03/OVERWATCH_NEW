@@ -604,7 +604,7 @@ def _side_windows(a_start: str, a_end: str, b_start: str, b_end: str,
 def compare_warehouse_credits(a_start: str, a_end: str, b_start: str, b_end: str,
                               company: str = "ALL") -> str:
     """Per-warehouse credits for both sides — movers AND the strip's
-    company-scopable spend total (FACT_WAREHOUSE_DAILY, exact metering)."""
+    company-scopable spend total (FACT_WAREHOUSE_DAILY, exact usage)."""
     in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end)
     comp = ""
     if company and company != "ALL":

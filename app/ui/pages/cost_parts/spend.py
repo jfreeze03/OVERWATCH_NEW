@@ -139,7 +139,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"wh_vs_prior_{company}_{days}", tier="historical",
                  source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
-    st.markdown("**By warehouse (exact metering)**")
+    st.markdown("**By warehouse (exact usage)**")
     if guard(wh, "No warehouse credits in this window."):
         view = wh.df.copy()
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
@@ -155,9 +155,10 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             },
         )
         window_usd = float(view["USD_CURRENT"].sum())
-        result_caption(wh, note="Both windows offset 24h for ACCOUNT_USAGE completeness. "
-                                "Totals include per-warehouse cloud-services credits, "
-                                "unadjusted — the account rebate lives on the Spend panel. "
+        result_caption(wh, note="Equal-length windows excluding the current partial day for "
+                                "completeness. Exact USAGE, not billed: totals include each "
+                                "warehouse's idle time and its unadjusted cloud-services credits "
+                                "— the account-level rebate lives on the Spend panel. "
                                 "Company-wide: the database/schema filters don't narrow this table.")
 
         st.markdown("**By user and database (allocated — estimate)**")
@@ -181,22 +182,17 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     # no allocation mart carries a schema grain — live only
                     res = run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
                               tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
-                elif database:
-                    # V041 R2: database-filtered attribution reads the cross-dim
-                    # fact (user-within-database now mart-served) instead of two
-                    # live QUERY_HISTORY scans per filter value; coverage gate
-                    # inside the reader falls back to live while the fact is young.
+                else:
+                    # P0-1/P0-2 (Codex 2026-07-14): BOTH unfiltered and database-
+                    # filtered attribution read FACT_COST_ALLOC_XDIM_DAILY so company
+                    # scope is warehouse-based on every path. The owner-scoped
+                    # MART_COST_ALLOCATION_DAILY made the same user/DB total shift
+                    # when a database filter was toggled. `database` is "" unfiltered.
                     res = run_mart_first(
                         mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database),
                         _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
                         mart_source="FACT_COST_ALLOC_XDIM_DAILY (mart — warehouse-hour credit share)",
                         live_source="QUERY_HISTORY (elapsed share, live fallback)")
-                else:
-                    res = run_mart_first(
-                        mart27_sql.alloc_attribution(days, dim.replace("_NAME", ""), company),
-                        _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
-                        mart_source="MART_COST_ALLOCATION_DAILY (mart — warehouse-hour credit share)",
-                        live_source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share, live fallback)")
                 if guard(res, f"No query history to allocate by {label}."):
                     alloc = res.df.copy()
                     # ONE formula on every path (live math fix 2026-07-11):

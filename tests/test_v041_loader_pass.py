@@ -641,9 +641,9 @@ def test_platform_score_reader_and_overview_swap():
 def test_spend_attribution_swap_and_security_monitor_swap():
     sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     body = sp.split("def _attribution_tab", 1)[1].split("\ndef ", 1)[0]
-    assert "elif database:" in body
     assert "mart27_sql.alloc_xdim_attribution" in body
-    assert body.index("if schema_contains:") < body.index("elif database:")
+    assert "mart27_sql.alloc_attribution(" not in body   # P0-1 (2026-07-14): owner-scoped mart retired; both paths -> xdim
+    assert body.index("if schema_contains:") < body.index("mart27_sql.alloc_xdim_attribution")
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     gov = sec.split("def _governance_score_panel", 1)[1].split("\ndef ", 1)[0]
     # v4.45: monitor tracking retired (owner correction) — the posture-first

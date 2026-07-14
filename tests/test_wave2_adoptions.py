@@ -126,10 +126,10 @@ def test_optimize_adopts_eff_and_family_marts():
 def test_spend_adopts_family_and_allocation_marts():
     assert "mart27_sql.family_compile_heavy" in _SPEND
     assert "cost_sql.compile_heavy_families" in _SPEND
-    assert "mart27_sql.alloc_attribution" in _SPEND
+    assert "mart27_sql.alloc_attribution(" not in _SPEND   # P0-1: owner-scoped mart retired from spend
     assert "cost_sql.allocated_attribution" in _SPEND
     assert "if schema_contains:" in _SPEND                         # no mart carries schema grain
-    assert "elif database:" in _SPEND                               # V041 R2: db filter -> xdim fact
+    assert "company, database)" in _SPEND                           # P0-1: unfiltered + db-filtered both -> xdim (warehouse-scoped)
     assert "mart27_sql.alloc_xdim_attribution" in _SPEND
     # v4.33.1: ONE dollarization formula on every path — global share x the
     # window total the caption states. The mart credits x rate branch used a
