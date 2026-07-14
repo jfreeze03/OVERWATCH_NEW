@@ -54,6 +54,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.storage_account_truth_live", lambda: cost_sql.storage_account_truth_live(2)),
     ("cost.storage_by_database_calendar", lambda: cost_sql.storage_by_database_calendar("ALFA")),
     ("cost.storage_by_database_calendar_live", lambda: cost_sql.storage_by_database_calendar_live("ALFA")),
+    ("cost.object_cost_by_arm", lambda: cost_sql.object_cost_by_arm(2, "ALFA")),
+    ("cost.object_cost_top", lambda: cost_sql.object_cost_top(2, "ALFA")),
     ("ops.query_window_summary", lambda: ops_sql.query_window_summary(1, "ALFA")),
     ("ops.top_queries_by_elapsed", lambda: ops_sql.top_queries_by_elapsed(1, "ALFA", 1)),
     ("ops.failures_by_error", lambda: ops_sql.failures_by_error(1, "ALFA")),

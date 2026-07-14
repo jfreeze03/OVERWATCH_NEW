@@ -92,6 +92,18 @@ METRICS: tuple[Metric, ...] = (
            "warehouse / window", "ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (CS / total)",
            ACCOUNT_TZ, "~45 min", "v4.30",
            "Per-warehouse heuristic; the real rebate is the account-level 10%-of-daily-compute rule."),
+    Metric("object_query_cost", "Per-object query compute", MEASURED,
+           "object / day",
+           "FACT_OBJECT_COST_DAILY (QUERY_ATTRIBUTION_HISTORY split across ACCESS_HISTORY base objects)",
+           UTC, "~8h / daily load", "V048",
+           "Measured compute+QAS split EQUALLY across the base objects each query touched "
+           "(additive). QUERY_COMPUTE_RESIDUAL = credits for queries touching no base object. "
+           "Full-query 'influenced cost' is a separate non-additive lens."),
+    Metric("object_maintenance_cost", "Per-object maintenance cost", MEASURED,
+           "object / day / arm",
+           "FACT_OBJECT_COST_DAILY (clustering / MV refresh / serverless task / Snowpipe / search-opt)",
+           UTC, "daily load", "V048",
+           "Direct per-object serverless credits — the classic silent burners."),
     Metric("month_end_forecast", "Month-end forecast", ESTIMATED,
            "account / month", "linear / seasonal / opt-in ML over FACT_METERING_DAILY",
            ACCOUNT_TZ, "as of last loaded day", "v4.x",

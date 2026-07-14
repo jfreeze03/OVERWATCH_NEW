@@ -310,6 +310,48 @@ WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 
+def object_cost_by_arm(days: int = 30, company: str = "ALL") -> str:
+    """Object-cost breakdown by cost arm from FACT_OBJECT_COST_DAILY (V048,
+    additive). QUERY_COMPUTE is measured compute+QAS split equally across the
+    base objects each query touched; the rest are direct per-object serverless
+    credits (clustering / MV refresh / serverless task / Snowpipe / search-opt)."""
+    days = bounded_days(days, 400)
+    comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)
+    return f"""
+SELECT COST_ARM,
+       COUNT(DISTINCT OBJECT_FQN) AS OBJECTS,
+       ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+WHERE {where}
+GROUP BY COST_ARM
+ORDER BY CREDITS DESC
+"""
+
+
+def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
+    """Top objects by total measured + maintenance credits (V048), with the
+    query-compute vs maintenance split per object."""
+    days = bounded_days(days, 400)
+    lim = max(5, min(int(limit or 25), 200))
+    comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)
+    return f"""
+SELECT OBJECT_FQN,
+       ANY_VALUE(OBJECT_DOMAIN) AS OBJECT_DOMAIN,
+       ANY_VALUE(COMPANY) AS COMPANY,
+       ROUND(SUM(IFF(COST_ARM = 'QUERY_COMPUTE', CREDITS, 0)), 4) AS QUERY_CREDITS,
+       ROUND(SUM(IFF(COST_ARM NOT IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_RESIDUAL'), CREDITS, 0)), 4) AS MAINTENANCE_CREDITS,
+       ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS
+FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+WHERE {where}
+GROUP BY OBJECT_FQN
+HAVING SUM(COALESCE(CREDITS, 0)) > 0
+ORDER BY CREDITS DESC
+LIMIT {lim}
+"""
+
+
 def org_usage_in_currency(days: int) -> str:
     """Org-wide daily spend in currency per account (Accounts Spend Summary).
 

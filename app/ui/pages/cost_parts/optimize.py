@@ -15,7 +15,7 @@ from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
-from app.data import insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
@@ -372,6 +372,40 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
         st.divider()
     # ---- 3. Storage growth movers ------------------------------------------------
+    st.markdown("**Object cost ledger (measured + maintenance)**")
+    st.caption(
+        "Additive per-object credits (V048): measured query compute+QAS split "
+        "equally across the base objects each query touched, plus direct "
+        "clustering / MV refresh / serverless task / Snowpipe / search-opt. "
+        "QUERY_COMPUTE_RESIDUAL = credits for queries that touched no base object."
+    )
+    _oc = run(cost_sql.object_cost_by_arm(days, company), page=_PAGE,
+              key=f"objcost_arm_{company}_{days}", tier="recent",
+              source="FACT_OBJECT_COST_DAILY (object-cost ledger)", probe=True)
+    if _oc.ok and not _oc.empty:
+        _adf = _oc.df.copy()
+        _adf["USD"] = _adf["CREDITS"].map(safe_float) * rate
+        kpi_row([{"label": "Object-attributed spend", "value": format_usd(float(_adf["USD"].sum())),
+                  "help": "Sum across arms x the configured rate. Additive by construction."}])
+        charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD", title="$ by cost arm")
+        _top = run(cost_sql.object_cost_top(days, company, 25), page=_PAGE,
+                   key=f"objcost_top_{company}_{days}", tier="recent",
+                   source="FACT_OBJECT_COST_DAILY (top objects)", probe=True)
+        if _top.ok and not _top.empty:
+            _tdf = _top.df.copy()
+            _tdf["USD"] = _tdf["CREDITS"].map(safe_float) * rate
+            _tdf["QUERY_USD"] = _tdf["QUERY_CREDITS"].map(safe_float) * rate
+            _tdf["MAINT_USD"] = _tdf["MAINTENANCE_CREDITS"].map(safe_float) * rate
+            styled_table(_tdf[["OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "QUERY_USD", "MAINT_USD", "USD"]],
+                         height=300)
+        st.caption("Measured query compute is split equally across a query's base objects "
+                   "(additive); full-query 'influenced cost' is a separate non-additive lens.")
+    elif _oc.ok:
+        st.success("No object-cost rows yet (loads after V048 + the first daily run).")
+    else:
+        st.info("Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
+                "can apply it on Admin → Migrations & freshness.")
+    st.divider()
     st.markdown("**Storage growth movers**")
     days_storage = max(days, 30)
     sg_res = run(insights_sql.storage_growth_by_database(days_storage, company), page=_PAGE,
