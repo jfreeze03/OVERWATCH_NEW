@@ -104,6 +104,12 @@ METRICS: tuple[Metric, ...] = (
            "FACT_OBJECT_COST_DAILY (clustering / MV refresh / serverless task / Snowpipe / search-opt)",
            UTC, "daily load", "V048",
            "Direct per-object serverless credits — the classic silent burners."),
+    Metric("etl_unit_cost", "ETL unit cost (per pipeline)", MEASURED,
+           "pipeline / run",
+           "QUERY_HISTORY (JSON QUERY_TAG) + QUERY_ATTRIBUTION_HISTORY credits",
+           UTC, "~8h", "Phase 3",
+           "$/run, $/M rows, $/TiB, failed-run waste for pipelines that set the structured "
+           "QUERY_TAG (docs/design/ETL_COST_TAGS.md). Coverage % is credit-weighted."),
     Metric("month_end_forecast", "Month-end forecast", ESTIMATED,
            "account / month", "linear / seasonal / opt-in ML over FACT_METERING_DAILY",
            ACCOUNT_TZ, "as of last loaded day", "v4.x",
