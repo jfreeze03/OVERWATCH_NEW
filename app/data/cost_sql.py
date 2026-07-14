@@ -212,6 +212,61 @@ ORDER BY DB_BYTES DESC
 """
 
 
+def storage_by_database_calendar(company: str = "ALL", database: str = "", prior: bool = False) -> str:
+    """Per-database storage on the CALENDAR-month billing basis (item 7,
+    2026-07-14): average of daily bytes over the current month-to-date
+    (excluding today's partial day) or the prior completed calendar month.
+    Snowflake bills storage on the monthly average of daily on-disk bytes."""
+    if prior:
+        lo = "DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE()))"
+        hi = "DATE_TRUNC('month', CURRENT_DATE())"
+    else:
+        lo = "DATE_TRUNC('month', CURRENT_DATE())"
+        hi = "CURRENT_DATE()"
+    where = and_where(f"DAY >= {lo}", f"DAY < {hi}",
+                      companies.database_clause(company),
+                      companies.database_equals_clause(database))
+    return f"""
+SELECT DATABASE_NAME,
+       AVG(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
+       AVG(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+       COUNT(DISTINCT DAY)              AS DAYS_AVERAGED,
+       MAX(DAY)                         AS LATEST_DAY
+FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
+WHERE {where}
+GROUP BY DATABASE_NAME
+HAVING AVG(COALESCE(DB_BYTES, 0)) > 0
+ORDER BY DB_BYTES DESC
+"""
+
+
+def storage_by_database_calendar_live(company: str = "ALL", database: str = "", prior: bool = False) -> str:
+    """Live fallback for storage_by_database_calendar (fact empty): same
+    calendar-month billing basis from DATABASE_STORAGE_USAGE_HISTORY."""
+    if prior:
+        lo = "DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE()))"
+        hi = "DATE_TRUNC('month', CURRENT_DATE())"
+    else:
+        lo = "DATE_TRUNC('month', CURRENT_DATE())"
+        hi = "CURRENT_DATE()"
+    where = and_where(f"USAGE_DATE >= {lo}", f"USAGE_DATE < {hi}",
+                      companies.database_clause(company),
+                      companies.database_equals_clause(database))
+    return f"""
+SELECT
+    DATABASE_NAME,
+    AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
+    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+    COUNT(DISTINCT USAGE_DATE)               AS DAYS_AVERAGED,
+    MAX(USAGE_DATE)                          AS LATEST_DAY
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
+WHERE {where}
+GROUP BY DATABASE_NAME
+HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
+ORDER BY DB_BYTES DESC
+"""
+
+
 def storage_account_truth(days: int) -> str:
     """Account-wide storage by tier on the billing basis (F1b/R3, V046):
     average of daily bytes for table, stage, fail-safe, hybrid, and archive
@@ -259,7 +314,8 @@ def org_usage_in_currency(days: int) -> str:
     """Org-wide daily spend in currency per account (Accounts Spend Summary).
 
     Requires ORGANIZATION_USAGE access on this account; the page shows a
-    friendly setup note when the role cannot see the view.
+    friendly setup note when the role cannot see the view. Org-usage data is
+    UTC, can lag up to ~72h, and mutates until month close (item 6 caveat).
     """
     days = bounded_days(days)
     return f"""
@@ -404,7 +460,10 @@ def org_account_month_usd(months: int = 2) -> str:
     (everything: storage, transfer, serverless, priority support).
 
     Uses the org rate card, so this is billing truth; differences from the
-    app's model are rate-card reality, not a bug in either number.
+    app's model are rate-card reality, not a bug in either number. Data is UTC,
+    can lag up to ~72h, and mutates until month close; classification of the
+    compute bucket still uses USAGE_TYPE pending the structured-dimension
+    rebuild (item 6 — needs the account's RATING_TYPE/SERVICE_TYPE values).
     """
     months = max(1, min(int(months or 2), 12))
     return f"""

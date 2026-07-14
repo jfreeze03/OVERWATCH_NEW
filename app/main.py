@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from app.companies import COMPANIES, ENVIRONMENTS, databases_for  # noqa: E402
+from app.companies import COMPANIES, ENVIRONMENTS, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
@@ -440,7 +440,10 @@ def _scope_chips() -> tuple[str, bool]:
     if st.session_state.get("flt_company") != FILTER_DEFAULTS["flt_company"]:
         _chip("Company", st.session_state.get("flt_company", ""))
     if st.session_state.get("flt_environment") != FILTER_DEFAULTS["flt_environment"]:
-        _chip("Env", st.session_state.get("flt_environment", ""))
+        # Item 8a (2026-07-14): Environment only narrows the database PICKER,
+        # it does not scope the data — label it so the chip is not read as an
+        # applied data filter.
+        _chip("Env (DB picker)", st.session_state.get("flt_environment", ""), kind="warn")
     if st.session_state.get("flt_days") != FILTER_DEFAULTS["flt_days"]:
         _chip("Window", f"{st.session_state.get('flt_days')}d")
     if str(st.session_state.get("flt_database") or "").strip():
@@ -498,17 +501,31 @@ def _topbar_scope_controls() -> None:
     with c_days:
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
     with c_db:
-        # Options honor BOTH scopes: ALFA + PROD offers exactly the two PROD
-        # databases, not the whole family (live finding, 2026-07-08).
-        db_options = ["", *databases_for(
-            st.session_state.get("flt_company", COMPANIES[0]),
-            st.session_state.get("flt_environment", ENVIRONMENTS[0]))]
+        # Item 8c (2026-07-14): options come from LIVE inventory (SHOW
+        # DATABASES, cached) classified by the same Company/Environment rules,
+        # so a new database appears without a code change. The hardcoded
+        # companies.py lists are the offline fallback (live finding 2026-07-08:
+        # ALFA + PROD must offer exactly the PROD databases, not the family).
+        _company = st.session_state.get("flt_company", COMPANIES[0])
+        _env = st.session_state.get("flt_environment", ENVIRONMENTS[0])
+        _opts = ()
+        _inv = run(security_sql.show_databases_sql(), page="Sidebar", key="db_inventory",
+                   tier="metadata", source="SHOW DATABASES", max_rows=0)
+        if _inv.ok and not _inv.empty:
+            _idf = _inv.df.copy()
+            _idf.columns = [str(c).lower() for c in _idf.columns]
+            if "name" in _idf.columns:
+                _opts = classify_databases(_idf["name"].astype(str).tolist(), _company, _env)
+        if not _opts:
+            _opts = databases_for(_company, _env)   # offline fallback
+        db_options = ["", *_opts]
         if st.session_state.get("flt_database") not in db_options:
             st.session_state["flt_database"] = ""
         st.selectbox("Database", db_options, key="flt_database",
                      format_func=lambda v: v or "All databases",
                      help="Applies to query, task, DDL, attribution, storage, and lock panels. "
-                          "Options track the Company and Environment filters.")
+                          "Live inventory (SHOW DATABASES) tracked to Company + Environment; "
+                          "falls back to the known-database list if inventory is unavailable.")
     # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
     # visits; the contains-filters open automatically whenever one is active
     # so a live filter can never hide.

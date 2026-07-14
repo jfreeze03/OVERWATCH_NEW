@@ -300,6 +300,14 @@ def show_warehouses_sql() -> str:
     return "SHOW WAREHOUSES LIMIT 500"
 
 
+def show_databases_sql() -> str:
+    """SHOW-based database inventory (ACCOUNT_USAGE.DATABASES absent on this
+    account, mirroring SHOW WAREHOUSES). Feeds the sidebar picker so new
+    databases appear without a code change (item 8c, 2026-07-14); the hardcoded
+    lists in companies.py stay the offline fallback."""
+    return "SHOW DATABASES LIMIT 500"
+
+
 def role_privilege_matrix() -> str:
     """Auditor sheet: privileges per role aggregated by object type."""
     return """

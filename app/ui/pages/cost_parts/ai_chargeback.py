@@ -120,31 +120,44 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
             result_caption(res)
     with right:
         st.markdown("**Storage by database**")
-        # F1 (2026-07-14): storage bills on the monthly average of daily bytes,
-        # so both builders now average the window per database instead of
-        # snapshotting the latest day (which over/understated any database that
-        # moved mid-month). The account-tier breakdown lives below.
-        res = run(cost_sql.storage_by_database(days, company, st.session_state.get("flt_database", "")), page=_PAGE,
-                  key=f"storage_{company}_{days}", tier="historical",
-                  source="FACT_STORAGE_DAILY (avg of daily bytes, billing basis)")
+        # Item 7 (2026-07-14): storage bills on the CALENDAR-month average of
+        # daily bytes, so the card shows month-to-date (excl. today's partial
+        # day) with the prior completed month for trend — not a trailing-N
+        # window. Fact-first with a live DATABASE_STORAGE_USAGE_HISTORY fallback.
+        _db = st.session_state.get("flt_database", "")
+        res = run(cost_sql.storage_by_database_calendar(company, _db, prior=False), page=_PAGE,
+                  key=f"storage_mtd_{company}", tier="historical",
+                  source="FACT_STORAGE_DAILY (MTD daily-average, billing basis)")
         if not res.ok or res.empty:
-            res = run(cost_sql.storage_by_database_live(days, company,
-                                                        st.session_state.get("flt_database", "")),
-                      page=_PAGE, key=f"storage_live_{company}_{days}", tier="historical",
-                      source="DATABASE_STORAGE_USAGE_HISTORY (avg of daily bytes, live fallback)")
-        if guard(res, "No storage rows for this scope."):
+            res = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=False), page=_PAGE,
+                      key=f"storage_mtd_live_{company}", tier="historical",
+                      source="DATABASE_STORAGE_USAGE_HISTORY (MTD daily-average, live)")
+        if guard(res, "No storage rows for this scope this month."):
             df = res.df.copy()
-            df["TB"] = (df["DB_BYTES"].map(safe_float) + df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
             rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
-            df["USD_MONTH"] = df["TB"] * rate_tb
-            total_tb = float(df["TB"].sum())
-            kpi_row([{"label": "Avg storage (window)", "value": f"{total_tb:,.2f} TiB",
-                      "delta": f"~{format_usd(total_tb * rate_tb)}/mo",
-                      "help": f"Average of daily (active + fail-safe) bytes over the window x "
-                              f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's storage billing basis "
-                              "(binary TiB). Estimate; the org rate-card panel is billing truth."}])
+            df["TiB"] = (df["DB_BYTES"].map(safe_float) + df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
+            df["USD_MONTH"] = df["TiB"] * rate_tb
+            mtd_tib = float(df["TiB"].sum())
+            pri = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
+                      key=f"storage_prior_{company}", tier="historical",
+                      source="FACT_STORAGE_DAILY (prior full month daily-average)", probe=True)
+            prior_tib = 0.0
+            if pri.ok and not pri.empty:
+                prior_tib = float(((pri.df["DB_BYTES"].map(safe_float)
+                                    + pri.df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)).sum())
+            mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib > 0 else None
+            kpi_row([
+                {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
+                 "delta": f"~{format_usd(mtd_tib * rate_tb)}/mo",
+                 "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
+                         f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
+                         "basis (binary TiB). Estimate; the org rate-card panel is billing truth."},
+                {"label": "Prior full month", "value": f"{prior_tib:,.2f} TiB",
+                 "delta": (f"{mom:+.1f}% MoM" if mom is not None else "no prior data"),
+                 "delta_color": "off"},
+            ])
             charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
-                           "DATABASE_NAME", "USD_MONTH", title="$/month (est.)")
+                           "DATABASE_NAME", "USD_MONTH", title="$/month by database (MTD est.)")
             result_caption(res)
         _account_storage_tiers(company, days, settings)
 

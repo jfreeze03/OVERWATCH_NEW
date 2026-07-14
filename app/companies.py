@@ -91,6 +91,26 @@ def classify_database(name: object) -> str:
     return "UNKNOWN"
 
 
+def classify_databases(names, company: str = "ALL", environment: str = "ALL") -> tuple:
+    """Filter a LIVE database inventory (SHOW DATABASES names) to a company and
+    environment using the same rules as classify_database / classify_environment
+    (item 8c, 2026-07-14). Lets the picker track real inventory instead of the
+    hardcoded lists; databases_for() stays the offline fallback."""
+    comp = str(company or DEFAULT_COMPANY)
+    env = str(environment or "ALL").upper()
+    out = []
+    for n in names:
+        name = str(n or "").strip()
+        if not name:
+            continue
+        if comp not in ("ALL", "") and classify_database(name) != comp:
+            continue
+        if env in ("PROD", "NONPROD") and classify_environment(name) != env:
+            continue
+        out.append(name.upper())
+    return tuple(sorted(dict.fromkeys(out)))
+
+
 def classify_user(name: object) -> str:
     # Offline heuristic (name prefix + override). Live scoping is role-based
     # via COMPANY_FOR_USER — see user_clause. Kept for the seed-sync test and
@@ -266,13 +286,12 @@ def database_case_sql(database_col: str = "DATABASE_NAME") -> str:
     """CASE labeling rows by company at DATABASE grain. company_case_sql
     tests membership in the WAREHOUSE list — applied to a database column it
     labeled every row ALFA (the storage-movers bug, review #7)."""
-    literals = ", ".join(sql_literal(d) for d in TREXIS_DATABASES)
-    return (f"CASE WHEN UPPER({database_col}) IN ({literals}) "
-            f"OR UPPER({database_col}) LIKE 'TRXS!_%' ESCAPE '!' "
-            "THEN 'Trexis' ELSE 'ALFA' END")
+    return f"DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE({database_col})"
 
 
 def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:
-    """CASE expression labeling rows by company for the ALL view."""
-    literals = ", ".join(sql_literal(w) for w in TREXIS_WAREHOUSES)
-    return f"CASE WHEN UPPER({warehouse_col}) IN ({literals}) THEN 'Trexis' ELSE 'ALFA' END"
+    """Company label for the ALL view via the evidence-based UDF (item 8b,
+    2026-07-14) so the live path matches the marts: COMPANY_SCOPE lookup, then
+    WH_ALFA_* -> ALFA, else UNKNOWN. Superseded the old 'Trexis else ALFA'
+    CASE that mislabeled every residual/unmapped warehouse as ALFA."""
+    return f"DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE({warehouse_col})"

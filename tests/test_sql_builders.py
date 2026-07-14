@@ -55,7 +55,8 @@ def test_company_scope_present_when_requested():
     unknown = cost_sql.warehouse_daily_credits(7, "UNKNOWN")
     assert "NOT IN" in unknown and "WH_TRXS_LOAD" in unknown
     assert re.search(r"\bIN \('WH_TRXS_LOAD'", trexis)
-    assert "WH_TRXS_LOAD' " not in both.split("CASE")[0]  # ALL: no filter before CASE label
+    assert "WH_TRXS_LOAD" not in both                     # ALL view: no company WHERE filter
+    assert "COMPANY_FOR_WAREHOUSE" in both                # company labeled via the evidence UDF (item 8b)
 
 
 def test_user_scope_carries_kebarr1_override():
