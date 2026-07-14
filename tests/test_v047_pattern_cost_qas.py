@@ -26,3 +26,13 @@ def test_validate_gate_at_v047():
     val=(_ROOT/"snowflake"/"validate.sql").read_text(encoding="utf-8")
     m=re.search(r"V001\.\.V(\d+) applied", val)
     assert m and int(m.group(1)) >= 47
+
+
+def test_v047_preserves_v037_grain_not_v036():
+    # V047 must be re-derived from the CURRENT schema (V037: DATABASE_NAME grain,
+    # USERS_HLL sketch), not the pre-V037 V036 body (USERS NUMBER, no DATABASE_NAME).
+    # Regressing the grain makes the MERGE reference a dropped USERS column.
+    assert "m.DATABASE_NAME" in _V47 and "t.DATABASE_NAME = s.DATABASE_NAME" in _V47
+    assert "HLL_ACCUMULATE(q.USER_NAME)" in _V47 and "HLL_COMBINE(m.USERS_HLL)" in _V47
+    assert "t.USERS_HLL = s.USERS_HLL" in _V47
+    assert "AS USERS\n" not in _V47 and "t.USERS =" not in _V47   # the V036 column is gone

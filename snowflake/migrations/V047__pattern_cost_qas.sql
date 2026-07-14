@@ -1,9 +1,9 @@
 -- V047: Query Acceleration in the pattern-cost mart (Codex 2026-07-14, audit item 4).
 -- SP_LOAD_PATTERN_COST summed only CREDITS_ATTRIBUTED_COMPUTE; accelerated
--- queries also bill CREDITS_USED_QUERY_ACCELERATION. Re-derived from V036 with
--- that single addition so MART_PATTERN_COST_DAILY.CREDITS_ATTRIBUTED reflects
--- total measured compute. No schema/table/task change. Apply AFTER V046.
--- Idempotent; safe to re-run.
+-- queries also bill CREDITS_USED_QUERY_ACCELERATION. Re-derived from V037 (the
+-- current DATABASE_NAME-grain / USERS_HLL schema) with that single addition so
+-- MART_PATTERN_COST_DAILY.CREDITS_ATTRIBUTED reflects total measured compute.
+-- No schema/table/task change. Apply AFTER V046. Idempotent; safe to re-run.
 
 EXECUTE IMMEDIATE
 $$
@@ -27,38 +27,40 @@ $$
 BEGIN
     MERGE INTO DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY t
     USING (
-        SELECT m.DAY, m.QUERY_HASH, m.COMPANY,
+        SELECT m.DAY, m.QUERY_HASH, m.COMPANY, m.DATABASE_NAME,
                SUM(m.RUNS) AS RUNS,
                SUM(m.CREDITS_ATTRIBUTED) AS CREDITS_ATTRIBUTED,
-               SUM(m.USERS) AS USERS
+               HLL_COMBINE(m.USERS_HLL) AS USERS_HLL
         FROM (
-            SELECT g.DAY, g.QUERY_HASH,
+            SELECT g.DAY, g.QUERY_HASH, g.DATABASE_NAME,
                    DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(g.WAREHOUSE_NAME) AS COMPANY,
-                   g.RUNS, g.CREDITS_ATTRIBUTED, g.USERS
+                   g.RUNS, g.CREDITS_ATTRIBUTED, g.USERS_HLL
             FROM (
                 SELECT CAST(q.START_TIME AS DATE) AS DAY,
                        q.QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
                        COALESCE(q.WAREHOUSE_NAME, 'NONE') AS WAREHOUSE_NAME,
+                       COALESCE(q.DATABASE_NAME, 'NONE') AS DATABASE_NAME,
                        COUNT(*) AS RUNS,
                        SUM(a.CREDITS_ATTRIBUTED_COMPUTE + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS_ATTRIBUTED,
-                       COUNT(DISTINCT q.USER_NAME) AS USERS
+                       HLL_ACCUMULATE(q.USER_NAME) AS USERS_HLL
                 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
                 JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
                   ON q.QUERY_ID = a.QUERY_ID
                  AND q.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
                 WHERE a.START_TIME >= DATEADD('day', -1 * :DAYS_BACK, CURRENT_DATE())
                   AND q.QUERY_PARAMETERIZED_HASH IS NOT NULL
-                GROUP BY 1, 2, 3
+                GROUP BY 1, 2, 3, 4
             ) g
         ) m
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2, 3, 4
     ) s
     ON t.DAY = s.DAY AND t.QUERY_HASH = s.QUERY_HASH AND t.COMPANY = s.COMPANY
+       AND t.DATABASE_NAME = s.DATABASE_NAME
     WHEN MATCHED THEN UPDATE SET
         t.RUNS = s.RUNS, t.CREDITS_ATTRIBUTED = s.CREDITS_ATTRIBUTED,
-        t.USERS = s.USERS, t.LOAD_TS = CURRENT_TIMESTAMP()
-    WHEN NOT MATCHED THEN INSERT (DAY, QUERY_HASH, COMPANY, RUNS, CREDITS_ATTRIBUTED, USERS)
-    VALUES (s.DAY, s.QUERY_HASH, s.COMPANY, s.RUNS, s.CREDITS_ATTRIBUTED, s.USERS);
+        t.USERS_HLL = s.USERS_HLL, t.LOAD_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (DAY, QUERY_HASH, COMPANY, DATABASE_NAME, RUNS, CREDITS_ATTRIBUTED, USERS_HLL)
+    VALUES (s.DAY, s.QUERY_HASH, s.COMPANY, s.DATABASE_NAME, s.RUNS, s.CREDITS_ATTRIBUTED, s.USERS_HLL);
     RETURN 'OK';
 END;
 $$;
@@ -67,5 +69,5 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PATTERN_COST(90);
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 47 AS VERSION,
-       'pattern-cost mart includes Query Acceleration: SP_LOAD_PATTERN_COST re-derived from V036 + CREDITS_USED_QUERY_ACCELERATION (Codex audit item 4)' AS DESCRIPTION
+       'pattern-cost mart includes Query Acceleration: SP_LOAD_PATTERN_COST re-derived from V037 + CREDITS_USED_QUERY_ACCELERATION (Codex audit item 4)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 47);
