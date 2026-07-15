@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.47.0 — V049: write-target attribution (2026-07-15)
+
+Owner: "let's do both" — deploy corrected V048 and build V049.
+
+- **V049 (forward-generated, byte-locked):** ACCESS_HISTORY.OBJECTS_MODIFIED
+  joins the object-cost equal split. V048 split measured query compute across
+  BASE_OBJECTS_ACCESSED (reads only), so write-only ETL — COPY INTO,
+  INSERT..VALUES, CTAS from constants — read no base table and its credits
+  parked in QUERY_COMPUTE_RESIDUAL instead of on the tables it builds. Now
+  loads attribute to their targets and the residual shrinks to genuinely
+  unattributable compute (no read, no write). DISTINCT over the read/write
+  union keeps a read+write of one table to a single share; additivity holds.
+  Two enumerated edits (dedup CTE + obj_q CTE — the split and the residual
+  must agree on what "attributed" means, or credits double-count or vanish);
+  `outputs/gen_v049.py` re-derives from V048's CURRENT proc,
+  `tests/test_v049_write_targets.py` byte-compares and pins the invariants
+  (UNKNOWN residual kept, QAS kept, equal split kept, proc-swap-only, both
+  flatten arms present twice).
+- Proc swap + 14-day reload; no new objects (table and task are V048's).
+  Registry: object_query_cost source/note now say read **or wrote** (V048/V049);
+  Optimize caption matches. validate.sql floor and admin's expected-migrations
+  walk to 49 in lockstep; rebuild bundle regenerated
+  (`02_migrations_V001_V049.sql`).
+- **Deploy runbook** for both pending items:
+  `docs/handoff/DEPLOY_V048_V049_20260715.md`. Option A lands the V048
+  UNKNOWN-residual correction and V049 in ONE proc swap + reload (V049's body
+  derives from corrected V048), plus a surgical UPDATE for the residual rows
+  older than the reload window; the verification block captures the residual
+  share before/after — the materiality number that originally gated V049.
+
 ## 4.46.0 — Phase 4: account-time fixes + derived locks (2026-07-14/15)
 
 (The same Code session's cost-audit round — F1–F4, Codex items 1–8, metric

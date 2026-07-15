@@ -312,9 +312,10 @@ WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 
 def object_cost_by_arm(days: int = 30, company: str = "ALL") -> str:
     """Object-cost breakdown by cost arm from FACT_OBJECT_COST_DAILY (V048,
-    additive). QUERY_COMPUTE is measured compute+QAS split equally across the
-    base objects each query touched; the rest are direct per-object serverless
-    credits (clustering / MV refresh / serverless task / Snowpipe / search-opt)."""
+    additive; V049 adds write targets). QUERY_COMPUTE is measured compute+QAS
+    split equally across the base objects each query read or wrote; the rest
+    are direct per-object serverless credits (clustering / MV refresh /
+    serverless task / Snowpipe / search-opt)."""
     days = bounded_days(days, 400)
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
     where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)

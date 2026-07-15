@@ -94,11 +94,14 @@ METRICS: tuple[Metric, ...] = (
            "Per-warehouse heuristic; the real rebate is the account-level 10%-of-daily-compute rule."),
     Metric("object_query_cost", "Per-object query compute", MEASURED,
            "object / day",
-           "FACT_OBJECT_COST_DAILY (QUERY_ATTRIBUTION_HISTORY split across ACCESS_HISTORY base objects)",
-           UTC, "~8h / daily load", "V048",
-           "Measured compute+QAS split EQUALLY across the base objects each query touched "
-           "(additive). QUERY_COMPUTE_RESIDUAL = credits for queries touching no base object. "
-           "Full-query 'influenced cost' is a separate non-additive lens."),
+           "FACT_OBJECT_COST_DAILY (QUERY_ATTRIBUTION_HISTORY split across ACCESS_HISTORY "
+           "base objects read + write targets)",
+           UTC, "~8h / daily load", "V048/V049",
+           "Measured compute+QAS split EQUALLY across the base objects each query read or "
+           "wrote (additive; V049 folded in OBJECTS_MODIFIED so write-only ETL attributes "
+           "to its targets). QUERY_COMPUTE_RESIDUAL = credits for queries that neither read "
+           "nor wrote a base object. Full-query 'influenced cost' is a separate "
+           "non-additive lens."),
     Metric("object_maintenance_cost", "Per-object maintenance cost", MEASURED,
            "object / day / arm",
            "FACT_OBJECT_COST_DAILY (clustering / MV refresh / serverless task / Snowpipe / search-opt)",

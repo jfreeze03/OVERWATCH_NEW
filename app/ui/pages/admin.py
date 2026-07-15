@@ -78,6 +78,8 @@ _EXPECTED_MIGRATIONS = {
         "monthly-average billing basis (COST_DB recon R3 / audit F1)",
     47: "pattern-cost mart includes Query Acceleration (Codex audit item 4)",
     48: "FACT_OBJECT_COST_DAILY object-cost ledger (measured split + serverless arms)",
+    49: "write-target attribution (OBJECTS_MODIFIED joins the split; residual "
+        "= no-read-no-write compute)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

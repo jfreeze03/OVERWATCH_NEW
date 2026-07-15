@@ -1,10 +1,10 @@
--- 02_migrations_V001_V048.sql — GENERATED: the 48 migration files,
+-- 02_migrations_V001_V049.sql — GENERATED: the 49 migration files,
 -- byte-concatenated in order (locked by tests/test_rebuild_bundle.py).
 -- Snowsight 'Run All' executes top to bottom and HALTS at the first
 -- error — exactly the rule from docs/FULL_REBUILD.md. If it halts,
 -- read the failing statement, fix, and resume FROM THAT FILE's banner;
 -- everything is idempotent, so re-running a completed file is safe.
--- Expect several minutes total: V027/V029/V030/V031/V041/V042/V043/V044/V045 end
+-- Expect several minutes total: V027/V029/V030/V031/V041/V042/V043/V044/V045/V048/V049 end
 -- with first-fill CALLs.
 
 -- ===========================================================================
@@ -146,7 +146,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V001 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V002__facts.sql
 -- ===========================================================================
@@ -423,7 +422,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V002 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V003__marts.sql
 -- ===========================================================================
@@ -597,7 +595,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V003 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V004__alerts.sql
 -- ===========================================================================
@@ -815,7 +812,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V004 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V005__actions.sql
 -- ===========================================================================
@@ -862,7 +858,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V005 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V006__pipeline_sla.sql
 -- ===========================================================================
@@ -919,7 +914,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V006 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V007__automation.sql
 -- ===========================================================================
@@ -1265,7 +1259,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V007 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V008__chargeback.sql
 -- ===========================================================================
@@ -1328,7 +1321,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V008 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V009__credentials.sql
 -- ===========================================================================
@@ -1542,7 +1534,6 @@ ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
 
 SELECT 'V009 applied' AS STATUS;
-
 -- ===========================================================================
 -- >>> V010__change_impact.sql
 -- ===========================================================================
@@ -1972,7 +1963,6 @@ USING (SELECT 10 AS VERSION,
        'change impact: object-change registry, regression scan, PERF_CHANGE_REGRESSION rule' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V011__proactive_alerts.sql
 -- ===========================================================================
@@ -2322,7 +2312,6 @@ USING (SELECT 11 AS VERSION,
        'proactive alerts: cloud-svc ratio, storage surge, serverless creep, copy failures, break-glass' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V012__routing_anomaly_remediation.sql
 -- ===========================================================================
@@ -2574,7 +2563,6 @@ USING (SELECT 12 AS VERSION,
        'routing + anomaly sweep + remediation log + dynamic-table failure alerts' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V013__user_prefs.sql
 -- ===========================================================================
@@ -2595,7 +2583,6 @@ MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 13 AS VERSION, 'user prefs: saved views + default landing' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V014__lifecycle_hardening.sql
 -- ===========================================================================
@@ -3197,7 +3184,6 @@ USING (SELECT 14 AS VERSION,
        'lifecycle hardening: contract breach projection, fingerprint drift, fact retention' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V015__pilot_and_backups.sql
 -- ===========================================================================
@@ -3274,7 +3260,6 @@ USING (SELECT 15 AS VERSION,
        'DT pilot (spend rollup) + weekly operator-table clone backups' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V016__closing_loops.sql
 -- ===========================================================================
@@ -4091,7 +4076,6 @@ USING (SELECT 16 AS VERSION,
        'closing loops: pre-explained anomalies, dept budgets, org creep, volume drop, canary sentinel, app usage' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V017__hardening_v7.sql
 -- ===========================================================================
@@ -5096,7 +5080,6 @@ USING (SELECT 17 AS VERSION,
        'hardening: scan v7 per-rule isolation, deploy stage, render SLA, version guard, usage retention' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V018__delivery_first_class.sql
 -- ===========================================================================
@@ -5218,7 +5201,6 @@ USING (SELECT 18 AS VERSION,
        'delivery first-class: notify task in-chain, guarded auto-resume, digest webhook send' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V019__scoping_fixes.sql
 -- ===========================================================================
@@ -5291,7 +5273,6 @@ USING (SELECT 19 AS VERSION,
        'scoping: role-based COMPANY_FOR_USER, WH_TRXS_LINEAGE, disable SEC_CRED_EXPIRY (no EXPIRES_AT)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V020__credentials_column.sql
 -- ===========================================================================
@@ -6102,7 +6083,6 @@ USING (SELECT 20 AS VERSION,
        'credentials: EXPIRATION_DATE column, re-enable SEC_CRED_EXPIRY, scan v8' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V021__precision_telemetry.sql
 -- ===========================================================================
@@ -6163,7 +6143,6 @@ MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 21 AS VERSION, 'precision kinds + fleet telemetry' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V022__delivery_per_route.sql
 -- ===========================================================================
@@ -6314,7 +6293,6 @@ MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 22 AS VERSION, 'per-route delivery ledger; additive fan-out + honest retries' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V023__prod_scoped_volume.sql
 -- ===========================================================================
@@ -7437,7 +7415,6 @@ MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 23 AS VERSION, 'sweep v4 (PROD-only volume) + scan v9 (CREDENTIALS.DELETED_ON removed)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V024__warehouse_change_scorecard.sql
 -- ===========================================================================
@@ -7788,7 +7765,6 @@ USING (SELECT 24 AS VERSION,
        'warehouse change scorecard: config snapshots, change registry, WH_CHANGE_REGRESSION rule' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V025__break_glass_policy.sql
 -- ===========================================================================
@@ -7836,7 +7812,6 @@ USING (SELECT 25 AS VERSION,
        'policy: SEC_BREAK_GLASS_USE disabled - ACCOUNTADMIN/SNOW_ACCOUNTADMINS are routine operating roles here' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V026__teams_safe_delivery.sql
 -- ===========================================================================
@@ -7998,7 +7973,6 @@ MERGE INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION t
 USING (SELECT 26 AS VERSION, 'sender v3: JSON-safe webhook payloads (Teams Workflows compatible)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V027__mart_family.sql
 -- ===========================================================================
@@ -8751,7 +8725,6 @@ USING (SELECT 27 AS VERSION,
        'mart family: 9 scheduled marts + SP_LOAD_MARTS_V27 + telemetry rider (CACHE_HIT/SQL_HASH/EVENT_KIND)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V028__cred_expiry_10d.sql
 -- ===========================================================================
@@ -9279,7 +9252,6 @@ USING (SELECT 28 AS VERSION,
        'credential expiry policy: 10-day horizon (rule threshold + posture mart bucket)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V029__loader_fix.sql
 -- ===========================================================================
@@ -9801,7 +9773,6 @@ USING (SELECT 29 AS VERSION,
        'loader fix: role-hour + schema-hour GROUP BY (COMPANY_FOR_* over MAX)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V030__loader_fix2.sql
 -- ===========================================================================
@@ -10353,7 +10324,6 @@ USING (SELECT 30 AS VERSION,
        'loader fix 2: UDF outside aggregation (derived-table shape) + posture gains MFA/breakglass' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V031__scan_tuning_and_tagcov.sql
 -- ===========================================================================
@@ -11368,7 +11338,6 @@ USING (SELECT 31 AS VERSION,
        'change-impact scan v2 (tracking-bounded + ILIKE prefilter) + tag-coverage mart' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V032__incident_object.sql
 -- ===========================================================================
@@ -11568,7 +11537,6 @@ USING (SELECT 32 AS VERSION,
        'incident object: INCIDENTS/INCIDENT_MEMBERS + lineage + proposals + auto-declare' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V033__change_attribution.sql
 -- ===========================================================================
@@ -11668,7 +11636,6 @@ USING (SELECT 33 AS VERSION,
        'change attribution: CHANGED_BY on the registry + DEPLOY_ACTORS (managed vs manual at read time)' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V034__route_company_filter.sql
 -- ===========================================================================
@@ -11860,7 +11827,6 @@ USING (SELECT 34 AS VERSION,
        'route company filter (sender v4, ALFA-only) + SEC_BREAK_GLASS_USE retired' AS DESCRIPTION) s
 ON t.VERSION = s.VERSION
 WHEN NOT MATCHED THEN INSERT (VERSION, DESCRIPTION) VALUES (s.VERSION, s.DESCRIPTION);
-
 -- ===========================================================================
 -- >>> V035__lock_wait_mart.sql
 -- ===========================================================================
@@ -12037,7 +12003,6 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 35 AS VERSION, 'MART_LOCK_WAIT_DAILY + SP_LOAD_LOCK_WAIT_MART + TASK_LOCK_WAIT_DAILY (page views never scan LOCK_WAIT_HISTORY again)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 35);
-
 -- ===========================================================================
 -- >>> V036__pattern_cost_mart.sql
 -- ===========================================================================
@@ -12213,7 +12178,6 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 36 AS VERSION, 'MART_PATTERN_COST_DAILY + SP_LOAD_PATTERN_COST + TASK_PATTERN_COST_DAILY (measured $ per repeated statement pattern)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 36);
-
 -- ===========================================================================
 -- >>> V037__pattern_env_grain.sql
 -- ===========================================================================
@@ -12312,7 +12276,6 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY RESUME;
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 37 AS VERSION, 'MART_PATTERN_COST_DAILY v2: DATABASE_NAME grain (Compare env lens) + mergeable HLL user state (honest window-distinct USERS)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 37);
-
 -- ===========================================================================
 -- >>> V038__ledger_autobook.sql
 -- ===========================================================================
@@ -12434,7 +12397,6 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN RESUME;
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 38 AS VERSION, 'SP_LEDGER_AUTOBOOK + TASK_LEDGER_AUTOBOOK: savings ledger auto-books detected cost-lever changes and settles them on the 14d measured verdict' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 38);
-
 -- ===========================================================================
 -- >>> V039__pseudo_warehouse_filter.sql
 -- ===========================================================================
@@ -12528,7 +12490,6 @@ DELETE FROM DBA_MAINT_DB.OVERWATCH.MART_WAREHOUSE_EFFICIENCY_DAILY
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 39 AS VERSION, 'pseudo-warehouse filter: CLOUD_SERVICES_ONLY (WAREHOUSE_ID = 0) excluded from the warehouse fact + phantom rows deleted (COST_DB recon R1)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 39);
-
 -- ===========================================================================
 -- >>> V040__freshness_state.sql
 -- ===========================================================================
@@ -12596,7 +12557,6 @@ ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_SNAPSHOT_FRESHNESS RESUME;
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 40 AS VERSION, 'SOURCE_FRESHNESS_STATE + SP_SNAPSHOT_FRESHNESS + 10-min task: freshness is a lookup, not 19 aggregates per health-strip refresh' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 40);
-
 -- ===========================================================================
 -- >>> V041__loader_efficiency.sql
 -- ===========================================================================
@@ -14256,7 +14216,6 @@ SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY');
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 41 AS VERSION, 'loader efficiency: staged QH extract + watermarks + nightly reconcile, xdim alloc fact, exec board v2 (5 windows, atomic swap), loader-owned freshness (+GENERATION), ops-diag + platform-score marts, posture from role fact + monitor counts, pseudo-wh filter in V27 sources' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 41);
-
 -- ===========================================================================
 -- >>> V042__codex_r22.sql
 -- ===========================================================================
@@ -15730,7 +15689,6 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(30);
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 42 AS VERSION, 'codex r22: FACT_QUERY_DAILY (board/score full-window truth post-rebuild), atomic extract + gated watermark, ops-diag backfill, purge covers V027/V041 tables, AI fact gains EMAIL + exact usage stamps (tab stays live-first)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 42);
-
 -- ===========================================================================
 -- >>> V043__task_retirement_alert_teeth.sql
 -- ===========================================================================
@@ -17770,7 +17728,6 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN();
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 43 AS VERSION, 'task retirement finished loader-side (fills/board/score/purge/reconcile/freshness + both tables dropped, PIPE_TASK_FAILURES disabled) + r25 metrics get alert teeth (SEC_NEW_ADMIN_NETWORK, COST_EGRESS_SPIKE)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 43);
-
 -- ===========================================================================
 -- >>> V044__unknown_classification.sql
 -- ===========================================================================
@@ -18009,7 +17966,6 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 44 AS VERSION, 'UNKNOWN classification (#18): evidence-based company on both sides, COMPANY_SCOPE mapping lever (DATABASE rows supported, DBA_MAINT_DB seeded ALFA), exec board UNKNOWN scope' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 44);
-
 -- ===========================================================================
 -- >>> V045__task_monitoring_restored.sql
 -- ===========================================================================
@@ -20222,7 +20178,6 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN();
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 45 AS VERSION, 'owner correction: task monitoring restored loader-side (tables + procs + rule + 120d refill; r25 teeth and V044 UNKNOWN scope kept); OVERWATCH_RM resource monitor dropped (the actual removal target)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 45);
-
 -- ===========================================================================
 -- >>> V046__storage_truth.sql
 -- ===========================================================================
@@ -20336,7 +20291,6 @@ INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 46 AS VERSION,
        'storage truth: FACT_STORAGE_ACCOUNT_DAILY + SP_LOAD_STORAGE_TRUTH + daily task (table/stage/failsafe/hybrid/archive cool+cold from STORAGE_USAGE); per-DB storage readers moved to monthly-average billing basis (F1); tier-rate SETTINGS seeded (R3/F1b)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 46);
-
 -- ===========================================================================
 -- >>> V047__pattern_cost_qas.sql
 -- ===========================================================================
@@ -20413,7 +20367,6 @@ INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 47 AS VERSION,
        'pattern-cost mart includes Query Acceleration: SP_LOAD_PATTERN_COST re-derived from V037 + CREDITS_USED_QUERY_ACCELERATION (Codex audit item 4)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 47);
-
 -- ===========================================================================
 -- >>> V048__object_cost_ledger.sql
 -- ===========================================================================
@@ -20586,3 +20539,191 @@ INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 48 AS VERSION,
        'FACT_OBJECT_COST_DAILY additive object-cost ledger: measured query compute+QAS split across accessed base objects (ACCESS_HISTORY) + residual, plus direct clustering/MV/serverless-task/snowpipe/search-opt arms; daily task (Codex architectural Phase 2)' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 48);
+-- ===========================================================================
+-- >>> V049__write_target_attribution.sql
+-- ===========================================================================
+-- V049__write_target_attribution.sql — writes join the object-cost split
+-- (r28+ queue; owner go 2026-07-15: "let's do both").
+--
+--   V048's split used ACCESS_HISTORY.BASE_OBJECTS_ACCESSED (reads only), so
+--   write-only ETL — COPY INTO, INSERT ... VALUES, CTAS from constants —
+--   read no base table and its credits landed in QUERY_COMPUTE_RESIDUAL
+--   instead of on the tables it builds. V049 folds
+--   ACCESS_HISTORY.OBJECTS_MODIFIED (write targets) into the same equal
+--   split: loads attribute to their targets; the residual shrinks to
+--   genuinely unattributable compute (no read, no write). DISTINCT over the
+--   union keeps a read+write of one table to a single share. Credits stay
+--   additive across arms and companies.
+--
+--   Proc swap + 14-day reload; no new objects (table and task are V048's).
+--   The reload window matches the V048 first fill, so the working window is
+--   re-attributed under the new split in one pass.
+--
+-- Derivation law: SP_LOAD_OBJECT_COST from V048 verbatim + two enumerated
+-- edits (dedup CTE + obj_q CTE — split and residual must agree on what
+-- "attributed" means); tests/test_v049_write_targets.py re-derives and
+-- byte-compares. Apply AFTER V048. Idempotent; safe to re-run.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20049, 'V049 requires V048 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 48) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+-- >>> derived:SP_LOAD_OBJECT_COST
+CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_OBJECT_COST(DAYS_BACK FLOAT)
+RETURNS VARCHAR
+LANGUAGE SQL
+EXECUTE AS OWNER
+AS
+$$
+DECLARE
+    lo DATE;
+BEGIN
+    lo := DATEADD('day', -GREATEST(COALESCE(:DAYS_BACK, 3), 1)::INT, CURRENT_DATE());
+    DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY WHERE DAY >= :lo;
+
+    -- Direct per-object serverless arms -----------------------------------
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    SELECT START_TIME::DATE, COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN') || '.' || COALESCE(TABLE_NAME, 'UNKNOWN'),
+           'TABLE', 'CLUSTERING',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME), SUM(COALESCE(CREDITS_USED, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY
+    WHERE START_TIME >= :lo AND CREDITS_USED > 0
+    GROUP BY 1, 2, 3, 4, 5;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    SELECT START_TIME::DATE, COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN') || '.' || COALESCE(TABLE_NAME, 'UNKNOWN'),
+           'MATERIALIZED_VIEW', 'MV_REFRESH',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME), SUM(COALESCE(CREDITS_USED, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.MATERIALIZED_VIEW_REFRESH_HISTORY
+    WHERE START_TIME >= :lo AND CREDITS_USED > 0
+    GROUP BY 1, 2, 3, 4, 5;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    SELECT START_TIME::DATE, COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN') || '.' || COALESCE(TABLE_NAME, 'UNKNOWN'),
+           'TABLE', 'SEARCH_OPT',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME), SUM(COALESCE(CREDITS_USED, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.SEARCH_OPTIMIZATION_HISTORY
+    WHERE START_TIME >= :lo AND CREDITS_USED > 0
+    GROUP BY 1, 2, 3, 4, 5;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    SELECT START_TIME::DATE, COALESCE(DATABASE_NAME, 'UNKNOWN') || '.' || COALESCE(SCHEMA_NAME, 'UNKNOWN') || '.' || COALESCE(TASK_NAME, 'UNKNOWN'),
+           'TASK', 'SERVERLESS_TASK',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(DATABASE_NAME), SUM(COALESCE(CREDITS_USED, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+    WHERE START_TIME >= :lo AND CREDITS_USED > 0
+    GROUP BY 1, 2, 3, 4, 5;
+
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    SELECT START_TIME::DATE, COALESCE(PIPE_NAME, 'UNKNOWN_PIPE'), 'PIPE', 'SNOWPIPE',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(SPLIT_PART(PIPE_NAME, '.', 1)), SUM(COALESCE(CREDITS_USED, 0))
+    FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+    WHERE START_TIME >= :lo AND CREDITS_USED > 0
+    GROUP BY 1, 2, 3, 4, 5;
+
+    -- Measured query compute, split EQUALLY across accessed base objects ---
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    WITH qa AS (
+        SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
+               SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+        WHERE START_TIME >= :lo
+        GROUP BY QUERY_ID
+        HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
+    ),
+    dedup AS (
+        -- V049: write targets join the split — OBJECTS_MODIFIED alongside
+        -- BASE_OBJECTS_ACCESSED, so write-only ETL (COPY INTO, INSERT..VALUES,
+        -- CTAS from constants) attributes to the tables it builds. DISTINCT
+        -- over the union keeps a read+write of one table to a single share.
+        SELECT DISTINCT QUERY_ID, OBJECT_FQN, OBJECT_DOMAIN
+        FROM (
+            SELECT ah.QUERY_ID,
+                   f.value:"objectName"::STRING AS OBJECT_FQN,
+                   f.value:"objectDomain"::STRING AS OBJECT_DOMAIN
+            FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah,
+                 LATERAL FLATTEN(input => ah.BASE_OBJECTS_ACCESSED) f
+            WHERE ah.QUERY_START_TIME >= :lo
+              AND f.value:"objectName" IS NOT NULL
+              AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
+            UNION ALL
+            SELECT ah.QUERY_ID,
+                   f.value:"objectName"::STRING,
+                   f.value:"objectDomain"::STRING
+            FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah,
+                 LATERAL FLATTEN(input => ah.OBJECTS_MODIFIED) f
+            WHERE ah.QUERY_START_TIME >= :lo
+              AND f.value:"objectName" IS NOT NULL
+              AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
+        )
+    ),
+    counts AS (SELECT QUERY_ID, COUNT(*) AS N FROM dedup GROUP BY QUERY_ID)
+    SELECT qa.DAY, d.OBJECT_FQN, UPPER(REPLACE(d.OBJECT_DOMAIN, ' ', '_')), 'QUERY_COMPUTE',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(SPLIT_PART(d.OBJECT_FQN, '.', 1)),
+           SUM(qa.CREDITS / c.N)
+    FROM qa
+    JOIN dedup d ON d.QUERY_ID = qa.QUERY_ID
+    JOIN counts c ON c.QUERY_ID = qa.QUERY_ID
+    GROUP BY 1, 2, 3, 4, 5;
+
+    -- Residual: measured credits for queries that touched no base object ---
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
+    WITH qa AS (
+        SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
+               SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+        WHERE START_TIME >= :lo
+        GROUP BY QUERY_ID
+        HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
+    ),
+    obj_q AS (
+        -- V049: attributed = read OR wrote a base object; the residual is
+        -- only what genuinely touched nothing.
+        SELECT ah.QUERY_ID
+        FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah,
+             LATERAL FLATTEN(input => ah.BASE_OBJECTS_ACCESSED) f
+        WHERE ah.QUERY_START_TIME >= :lo
+          AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
+        UNION
+        SELECT ah.QUERY_ID
+        FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah,
+             LATERAL FLATTEN(input => ah.OBJECTS_MODIFIED) f
+        WHERE ah.QUERY_START_TIME >= :lo
+          AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
+    )
+    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)
+    FROM qa
+    LEFT JOIN obj_q ON obj_q.QUERY_ID = qa.QUERY_ID
+    WHERE obj_q.QUERY_ID IS NULL
+    GROUP BY 1;
+
+    MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
+    USING (
+        SELECT 'FACT_OBJECT_COST_DAILY' AS SOURCE_NAME, MAX(LOAD_TS) AS LAST_LOAD_TS, COUNT(*) AS ROW_COUNT
+        FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+    ) s
+    ON t.SOURCE_NAME = s.SOURCE_NAME
+    WHEN MATCHED THEN UPDATE SET t.LAST_LOAD_TS = s.LAST_LOAD_TS, t.ROW_COUNT = s.ROW_COUNT, t.SNAPSHOT_TS = CURRENT_TIMESTAMP()
+    WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT) VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT);
+
+    RETURN 'OK';
+END;
+$$;
+
+-- Reload the working window under the new split: write targets attributed,
+-- residual re-derived. Same 14-day horizon as the V048 first fill.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OBJECT_COST(14);
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 49 AS VERSION,
+       'Write-target attribution: ACCESS_HISTORY.OBJECTS_MODIFIED joins the object-cost equal split, so write-only ETL attributes to its target tables; QUERY_COMPUTE_RESIDUAL shrinks to no-read-no-write compute (r28+ queue)' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 49);

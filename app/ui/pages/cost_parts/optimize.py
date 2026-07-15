@@ -374,10 +374,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # ---- 3. Storage growth movers ------------------------------------------------
     st.markdown("**Object cost ledger (measured + maintenance)**")
     st.caption(
-        "Additive per-object credits (V048): measured query compute+QAS split "
-        "equally across the base objects each query touched, plus direct "
+        "Additive per-object credits (V048/V049): measured query compute+QAS split "
+        "equally across the base objects each query read or wrote, plus direct "
         "clustering / MV refresh / serverless task / Snowpipe / search-opt. "
-        "QUERY_COMPUTE_RESIDUAL = credits for queries that touched no base object."
+        "QUERY_COMPUTE_RESIDUAL = credits for queries that neither read nor wrote "
+        "a base object."
     )
     _oc = run(cost_sql.object_cost_by_arm(days, company), page=_PAGE,
               key=f"objcost_arm_{company}_{days}", tier="recent",
