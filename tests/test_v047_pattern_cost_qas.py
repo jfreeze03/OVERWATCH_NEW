@@ -1,6 +1,9 @@
 """Lock for V047: Query Acceleration in the pattern-cost mart (Codex item 4)."""
+import re
 from pathlib import Path
-import re, pytest
+
+import pytest
+
 sqlglot = pytest.importorskip("sqlglot")
 _ROOT = Path(__file__).resolve().parents[1]
 _V47 = (_ROOT/"snowflake"/"migrations"/"V047__pattern_cost_qas.sql").read_text(encoding="utf-8")

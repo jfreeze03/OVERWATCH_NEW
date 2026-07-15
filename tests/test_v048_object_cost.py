@@ -1,7 +1,10 @@
 """Locks for V048 object-cost ledger (architectural Phase 2, 2026-07-14)."""
 from pathlib import Path
+
 import pytest
+
 from app.data import cost_sql
+
 sqlglot = pytest.importorskip("sqlglot")
 _ROOT = Path(__file__).resolve().parents[1]
 _V48 = (_ROOT / "snowflake" / "migrations" / "V048__object_cost_ledger.sql").read_text(encoding="utf-8")

@@ -1,8 +1,11 @@
 """Locks for the Codex 'Next' batch items 7, 8a, 8b (2026-07-14)."""
 from pathlib import Path
+
 import pytest
+
 from app import companies
 from app.data import cost_sql
+
 sqlglot = pytest.importorskip("sqlglot")
 _ROOT = Path(__file__).resolve().parents[1]
 

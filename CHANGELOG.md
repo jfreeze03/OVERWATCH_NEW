@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.46.0 — Phase 4: account-time fixes + derived locks (2026-07-14/15)
+
+(The same Code session's cost-audit round — F1–F4, Codex items 1–8, metric
+registry, V046–V048 object-cost ledger, ETL tags — is chronicled in
+`docs/design/COSTDB_VS_OVERWATCH_2026-07-14.md` and
+`docs/reviews/CODEX_REVIEW_ASSESSMENT_2026-07-14.md`.)
+
+- **Three account-time bugs, one class.** `account_today()` exists because the
+  SiS process clock is UTC while the account runs America/Chicago — yet three
+  modules still read the server clock for a business date. contract_planner
+  dated CURRENT_CONTRACT_EXHAUSTED a day late for ~6h of every day (the old
+  lock passed remaining_usd=0, short-circuiting to "n/a": covered, untested);
+  actions.rank_actions compared account-time mart stamps against a server-clock
+  now(), flagging rows overdue up to 6h early; canary.py anchored probe windows
+  on the server date (one via `__import__("datetime").date.today()`), probing a
+  day with no data yet on the boundary. New `formulas.account_now()` is the one
+  spelling of account time; `account_today()` delegates to it.
+- **Locks that DERIVE their targets** (both Phase 4 findings were drift, not
+  defect — the codebase knew the answer and nothing enforced it):
+  `test_p4_filter_matrix` introspects `app/data/*_sql.py` and drives all 105
+  company-taking builders across every COMPANIES value — no builder fails open
+  (UNKNOWN included), no scopes collapse, no payload escapes a literal, no day
+  window unclamped. `test_p4_dst` pins the DST boundary (the same 05:30 UTC is
+  yesterday under CST, today under CDT — no fixed offset passes) plus an AST
+  guard: no server-clock reads in app/logic or app/data. `test_p4_org_
+  reconciliation` pins the cloud-services rebate at the owner-confirmed
+  effective rate (3.68 = DEFAULT_CREDIT_PRICE_USD): band max($1, 1% of billed);
+  a dropped 8% rebate breaks it at 8.7x, 30d cent-rounding sits at 0.004%.
+- **Why test_injection_fuzz stalled at 28 targets** while claiming "every
+  filter-accepting builder": its residue check strips literals but not
+  comments, and five builders carry a `--` comment (one an apostrophe, in "the
+  CALL's id") — any of them would trip it while perfectly safe. The list was
+  silently capped at what the checker could digest. New scanner resolves
+  literals and comments in one pass; the fuzz file now states its curated scope
+  honestly and defers exhaustiveness to the matrix.
+- Gates: mypy.ini treats numpy as Any (numpy 2.x stubs use PEP 695 syntax that
+  mypy refuses below the 3.11 target — same footing pandas already has); ruff
+  import-order debt in four prior-round test files paid. 1243 passed, 1 skipped.
+
 ## 4.45.0 — r29: the owner's correction (2026-07-13)
 
 "i messed up. i meant getting rid of resource monitor, not task

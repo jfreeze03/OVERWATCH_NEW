@@ -1,7 +1,10 @@
 """Locks for Phase 3 — ETL tags + unit-cost KPIs (2026-07-14)."""
 from pathlib import Path
+
 import pytest
+
 from app.data import etl_sql
+
 sqlglot = pytest.importorskip("sqlglot")
 _ROOT = Path(__file__).resolve().parents[1]
 
