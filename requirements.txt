@@ -2,7 +2,7 @@
 # Streamlit-in-Snowflake uses environment.yml (Snowflake conda channel) instead.
 # Compatible-release pins: tested floor, no surprise major upgrades.
 streamlit~=1.45
-pandas~=2.2
+pandas~=3.0
 altair~=5.4
 snowflake-snowpark-python~=1.30
 snowflake-connector-python~=3.13
