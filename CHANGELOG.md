@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.50.0 — five cross-page moves + Cortex real names (2026-07-15)
+## 4.50.0 — five cross-page moves + Cortex real names (2026-07-27)
 
 Owner: "do all 5" (the v4.49 deferred queue) + first/last names on the Cortex
 user attribution.
@@ -43,7 +43,7 @@ user attribution.
   profile links), v016 history (the fragment moved), V046 (tiers wiring),
   design-system (nothing-lost list gains _storage_tab/_cortex_spend_tab).
 
-## 4.49.0 — label truth pass + section coherence (2026-07-15)
+## 4.49.0 — label truth pass + section coherence (2026-07-27)
 
 Owner: "check for other mislabels across the board... make sure each section
 has the correct sections within." Ten parallel auditors read every page and
