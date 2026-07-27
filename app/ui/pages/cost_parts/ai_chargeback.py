@@ -1,4 +1,5 @@
-"""Cost & Contract — attribution, contract pacing, Cortex/storage, savings.
+"""Cost & Contract — the Chargeback & AI section bodies (department chargeback,
+Cortex & storage, AI user attribution).
 
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
@@ -28,17 +29,6 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost & Contract"
-
-_SERVICE_CATEGORY = {
-    "WAREHOUSE_METERING": "Warehouse",
-    "WAREHOUSE_METERING_READER": "Warehouse (reader)",
-    "SNOWPIPE": "Serverless", "SNOWPIPE_STREAMING": "Serverless",
-    "SERVERLESS_TASK": "Serverless", "SERVERLESS_ALERTS": "Serverless",
-    "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
-    "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
-    "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
-    "REPLICATION": "Replication", "STORAGE": "Storage",
-}
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -92,7 +82,7 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
     kpi_row([{"label": "Account storage (all tiers)", "value": f"{format_usd(total_usd)}/mo",
               "help": "Avg of daily bytes over the window x per-tier SETTINGS rates. "
                       "Estimate — STORAGE_USAGE is Snowflake's own approximation and won't "
-                      "match the invoice exactly; the org rate-card panel is billing truth. "
+                      "match the invoice exactly; the org rate-card panel on Contract & Forecast is billing truth. "
                       "Stage/hybrid/archive are account-wide (no per-database split)."}])
     shown = tdf[tdf["USD/mo"] > 0]
     if not shown.empty:
@@ -105,7 +95,7 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
 def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict) -> None:
     left, right = st.columns(2)
     with left:
-        st.markdown("**Cortex / AI spend**")
+        st.markdown("**Cortex / AI spend (account-wide)**")
         res = run_mart_first(
             mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
             page=_PAGE, key=f"cortex_{days}",
@@ -151,7 +141,7 @@ def _cortex_storage_tab(company: str, days: int, ai_rate: float, settings: dict)
                  "delta": f"~{format_usd(mtd_tib * rate_tb)}/mo",
                  "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
                          f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
-                         "basis (binary TiB). Estimate; the org rate-card panel is billing truth."},
+                         "basis (binary TiB). Estimate; the org rate-card panel on Contract & Forecast is billing truth."},
                 {"label": "Prior full month", "value": f"{prior_tib:,.2f} TiB",
                  "delta": (f"{mom:+.1f}% MoM" if mom is not None else "no prior data"),
                  "delta_color": "off"},
@@ -254,7 +244,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 statements.append(
                     f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD)\n"
                     f"VALUES ({sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
-                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > AI Users', "
+                    f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
                     f"{sql_number(r['PROJECTED_30D_USD'])});"
                 )
             script = "\n".join(statements)
@@ -351,7 +341,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         {"label": f"Chargeback total ({days}d)", "value": format_usd(total_usd),
          "help": "Exact warehouse metering x rate — includes each warehouse's "
                  "cloud-services credits, unadjusted (the account-level rebate lives "
-                 "on Cost → Spend). Reconciles to the scoped spend by construction."},
+                 "on Cost & Contract → Spend & Attribution). Reconciles to the scoped spend by construction."},
         {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},
         {"label": "Unmapped", "value": format_usd(unmapped_usd),
          "delta": "map warehouses below" if unmapped_usd > 0 else "fully mapped",
@@ -367,7 +357,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
 
     st.markdown("**Role usage within warehouses (allocated)**")
     st.caption(
-        "Elapsed-time share per role inside each warehouse x that warehouse's exact spend. "
+        "Execution-time share per role (elapsed on the live fallback) inside each warehouse x that warehouse's exact spend. "
         "Usage lens for conversations, not the billing number. Shares are whole-warehouse: "
         "roles outside this scope keep their slice, so a warehouse's rows can sum below 1."
     )

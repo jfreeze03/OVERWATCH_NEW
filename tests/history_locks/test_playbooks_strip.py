@@ -12,7 +12,8 @@ def test_every_deep_link_rule_has_a_specific_playbook():
 
 
 def test_playbook_family_fallback():
-    assert "Cost > Spend" in playbooks.playbook_for("COST_BRAND_NEW_RULE")
+    # v4.49: playbooks name exact pill labels, not the old "Cost > Spend" shorthand
+    assert "Cost & Contract > Spend & Attribution" in playbooks.playbook_for("COST_BRAND_NEW_RULE")
     assert "Security" in playbooks.playbook_for("SEC_SOMETHING")
     assert "add one" in playbooks.playbook_for("XYZ")
 

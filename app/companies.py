@@ -7,7 +7,7 @@ hardcoded (owner decision, 2026-07). Rules:
   families, and users holding ``%TRXS%`` roles. Since V044 (#18, owner
   2026-07-13) ALFA needs evidence too — ``WH_ALFA_*`` names, ``ALFA%``/
   ``ADMIN`` databases, ``%ALFA%`` or DBA roles. Anything with no evidence
-  classifies **UNKNOWN** and surfaces on Cost -> Chargeback for an explicit
+  classifies **UNKNOWN** and surfaces on Cost & Contract -> Spend & Attribution (Unmapped entities) for an explicit
   COMPANY_SCOPE mapping before it's charged to anyone.
 - ``KEBARR1`` holds both companies' roles and is classified as **ALFA** by
   explicit policy override.

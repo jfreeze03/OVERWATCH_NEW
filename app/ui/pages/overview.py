@@ -244,7 +244,7 @@ def render() -> None:
             "help": "Warehouse metering credits x "
                     f"${rate:.2f}/credit ({settings.get('_source')}) — the "
                     "company-scopable lens. Serverless/AI and the cloud-services rebate "
-                    "are on Cost -> Spend; Snowsight adds storage and transfer, so it "
+                    "are on Cost & Contract -> Spend & Attribution; Snowsight adds storage and transfer, so it "
                     "reads higher.",
         },
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, budget) if mtd_source else {

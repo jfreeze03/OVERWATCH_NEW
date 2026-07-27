@@ -1,4 +1,5 @@
-"""Cost & Contract — attribution, contract pacing, Cortex/storage, savings.
+"""Cost & Contract — the Contract & Forecast section bodies (year projection,
+rate-card reconciliation, org billing truth, pacing, steering, renewal planner).
 
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
@@ -29,17 +30,6 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost & Contract"
-
-_SERVICE_CATEGORY = {
-    "WAREHOUSE_METERING": "Warehouse",
-    "WAREHOUSE_METERING_READER": "Warehouse (reader)",
-    "SNOWPIPE": "Serverless", "SNOWPIPE_STREAMING": "Serverless",
-    "SERVERLESS_TASK": "Serverless", "SERVERLESS_ALERTS": "Serverless",
-    "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
-    "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
-    "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
-    "REPLICATION": "Replication", "STORAGE": "Storage",
-}
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —

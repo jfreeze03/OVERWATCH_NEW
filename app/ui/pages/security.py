@@ -32,16 +32,18 @@ _PAGE = "Security"
 
 
 def _access_tab(company: str, days: int) -> None:
-    # Parallel path: the tab's five independent queries submit server-side
-    # async in one shot (~1 round trip instead of five serial). Any failure
+    # Parallel path: the tab's independent queries submit server-side
+    # async in one shot (~1 round trip instead of one per query). Any failure
     # falls back to the serial per-query calls below, unchanged.
     batch = run_batch([
         {"key": "mfa", "sql": security_sql.users_without_mfa(company),
-         "source": "ACCOUNT_USAGE.USERS + LOGIN_HISTORY"},
+         "source": "ACCOUNT_USAGE.USERS + FACT_LOGIN_DAILY (mart-first)"},
         {"key": "creds", "sql": security_sql.expiring_credentials(10, company),
          "source": "ACCOUNT_USAGE.CREDENTIALS"},
         {"key": "logins", "sql": security_sql.failed_logins(days, company),
          "source": "ACCOUNT_USAGE.LOGIN_HISTORY"},
+        {"key": "login_reasons", "sql": security_sql.failed_login_reasons(days, company),
+         "source": "LOGIN_HISTORY (failure reasons)"},
         {"key": "admins", "sql": security_sql.admin_role_holders(),
          "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
         {"key": "grants", "sql": security_sql.recent_role_grants(days),
@@ -79,16 +81,28 @@ def _access_tab(company: str, days: int) -> None:
                   key=f"faillog_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
         if res.ok and res.empty:
-            st.success("No failed logins in this window.")
+            st.success("No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
             styled_table(res.df)
     with right:
-        st.markdown("**Break-glass role holders**")
+        st.markdown("**Privileged role holders**")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
             styled_table(res.df)
             st.caption("This list should be short and every name should be expected.")
+
+    # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
+    # login telemetry, not change evidence.
+    st.markdown("**Failed-login reasons (network policy vs credentials)**")
+    reasons = batch.get("login_reasons") or run(security_sql.failed_login_reasons(days, company),
+                  page=_PAGE, key=f"login_reasons_{company}_{days}", tier="recent",
+                  source="ACCOUNT_USAGE.LOGIN_HISTORY")
+    if reasons.ok and reasons.empty:
+        st.success("No failed logins in the window.")
+    elif guard(reasons, ""):
+        styled_table(reasons.df)
+        result_caption(reasons)
 
     st.markdown("**New networks for privileged users (90-day baseline)**")
     nn = batch.get("newnet") or run(security_sql.new_network_logins(days), page=_PAGE,
@@ -152,6 +166,21 @@ def _access_tab(company: str, days: int) -> None:
             )
             st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
             result_caption(res)
+
+    # Moved from Changes (v4.49): entitlement hygiene — who still holds access
+    # nobody uses — reads with dormant users, not with DDL evidence.
+    st.markdown("**Unused roles (90d) — revoke candidates**")
+    ur = run_mart_first(
+        mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
+        page=_PAGE, key="unused_roles",
+        mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
+        live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
+    if ur.ok and ur.empty:
+        st.success("Every active role was assumed in the last 90 days.")
+    elif guard(ur, ""):
+        styled_table(ur.df)
+        st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
+        result_caption(ur)
 
     st.markdown("**Role grants in the window (account-wide)**")
     res = batch.get("grants") or run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
@@ -291,7 +320,8 @@ def _governance_score_panel():
         {"label": "Governance drift score", "value": f"{drift.score}/100",
          "delta": drift.state, "delta_color": "off",
          "help": "Countable hygiene debt: MFA gaps, credential rotation, break-glass "
-                 "grants, unmonitored warehouses. Fixed weights, capped per category."},
+                 "grants, warehouses without auto-suspend. Default weights "
+                 "(SETTINGS-overridable), capped per category."},
         {"label": "Deductions", "value": f"{len(drift.drivers)}"},
     ])
     if drift.drivers:
@@ -305,7 +335,8 @@ def _governance_score_panel():
 def _export_pack(company: str, days: int) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     st.markdown("**Auditor export pack**")
-    st.caption("Dormant users, MFA gaps, break-glass holders, and window grants as a timestamped zip of CSVs.")
+    st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
+               "audit sheets (failed logins, credentials, role matrix, unused roles, 90d grant diff).")
     if not st.button("Build access-review pack", key="sec_pack_build"):
         return
     from app.ui.components import log_ui_event
@@ -436,21 +467,15 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # r23 #4 (the Access-tab pattern): the tab's two independent live reads
     # submit server-side async in one shot; any failure falls back to the
     # serial per-query calls below, unchanged.
-    _cb = run_batch([
-        {"key": "ddl", "sql": security_sql.recent_ddl_changes(days, company, database, schema_contains),
-         "source": "QUERY_HISTORY (DDL/DCL types)"},
-        {"key": "login_reasons", "sql": security_sql.failed_login_reasons(days, company),
-         "source": "LOGIN_HISTORY (failure reasons)"},
-    ], page=_PAGE, tier="recent")
-
     st.markdown("**Who changed what (DDL/DCL)**")
-    res = _cb.get("ddl") or run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
+    res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
               key=f"ddl_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (DDL/DCL types)")
+    # No early return on an empty window (v4.49): the bare `return` here used
+    # to hide every panel below whenever a quiet week had no DDL.
     if res.ok and res.empty:
         st.success("No DDL/DCL changes recorded in this window for this scope.")
-        return
-    if guard(res, ""):
+    elif guard(res, ""):
         # Redesign 2026-07-09: the flat total/day bar answered neither of the
         # questions people ask ("what kind of change?", "who?"). Stack by
         # change kind; put the who right beside it.
@@ -467,32 +492,9 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             charts.bar_count(by_user, "USER_NAME", "STATEMENTS",
                              title="Statements by user", top_n=8)
         st.caption("Left: what kind of change landed each day (create / alter / "
-                   "drop / grants). Right: who made them. Rows below have the objects.")
+                   "drop-truncate / grants / other). Right: who made them. Rows below have the objects.")
         styled_table(res.df)
         result_caption(res)
-
-    st.markdown("**Failed-login reasons (network policy vs credentials)**")
-    reasons = _cb.get("login_reasons") or run(security_sql.failed_login_reasons(days, company), page=_PAGE,
-                  key=f"login_reasons_{company}_{days}", tier="recent",
-                  source="ACCOUNT_USAGE.LOGIN_HISTORY")
-    if reasons.ok and reasons.empty:
-        st.success("No failed logins in the window.")
-    elif guard(reasons, ""):
-        styled_table(reasons.df)
-        result_caption(reasons)
-
-    st.markdown("**Unused roles (90d) — revoke candidates**")
-    ur = run_mart_first(
-        mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
-        page=_PAGE, key="unused_roles",
-        mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
-        live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
-    if ur.ok and ur.empty:
-        st.success("Every active role was assumed in the last 90 days.")
-    elif guard(ur, ""):
-        styled_table(ur.df)
-        st.caption("Also in the quarterly export pack with the full grant matrix and 90d diff.")
-        result_caption(ur)
 
     st.markdown("**Break-glass role activity (should hug zero)**")
     bga = run(security_sql.admin_role_activity(days), page=_PAGE,

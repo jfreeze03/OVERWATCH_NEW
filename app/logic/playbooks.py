@@ -17,20 +17,20 @@ PLAYBOOKS: dict[str, str] = {
     ),
     "COST_STORAGE_SURGE": (
         "**Means:** a database grew more than the threshold in one day.\n\n"
-        "1. Cost > Optimization → *Storage growth movers* for the table-level movers.\n"
+        "1. Cost & Contract > Optimization & Savings → *Storage growth movers* for the table-level movers.\n"
         "2. Check for runaway CTAS/backup copies and missing retention on staging.\n"
         "3. If intentional (backfill, new feed), note it on the event and resolve."
     ),
     "COST_SERVERLESS_CREEP": (
         "**Means:** a serverless service doubled week-over-week.\n\n"
-        "1. Cost > Spend: switch the category view to the service in the title.\n"
+        "1. Cost & Contract > Spend & Attribution: switch the category view to the service in the title.\n"
         "2. Auto-clustering/MV/search-opt: confirm someone enabled it on purpose and the "
         "table churn justifies it.\n"
         "3. If not intentional, suspend the feature before month-end, then resolve."
     ),
     "COST_ANOMALY_SWEEP": (
         "**Means:** yesterday's credits for this series sit far outside its 28-day pattern.\n\n"
-        "1. Investigate → lands on Cost > Spend scoped to the entity; check the day's attribution.\n"
+        "1. Investigate → lands on Cost & Contract > Spend & Attribution scoped to the entity; check the day's attribution.\n"
         "2. Operations > Queries for that window: one heavy query family usually explains it.\n"
         "3. Recurring anomaly on the same series = raise the threshold or fix the workload."
     ),
@@ -69,12 +69,12 @@ PLAYBOOKS: dict[str, str] = {
 }
 
 _FAMILY_FALLBACK = {
-    "COST": "1. Cost > Spend for the window in the title.\n2. Attribution to find the owner.\n3. Note findings on the event; resolve with the fix.",
+    "COST": "1. Cost & Contract > Spend & Attribution for the window in the title.\n2. Attribution to find the owner.\n3. Note findings on the event; resolve with the fix.",
     "PERF": "1. Operations > Queries scoped to the entity.\n2. Compare p95 and queue vs the prior window.\n3. Right-size or fix the query family.",
     "PIPE": "1. Operations > Pipeline SLA.\n2. Find the failing loader/task and its error.\n3. Re-run after the fix and confirm freshness.",
     "SEC": "1. Security page for the matching panel.\n2. Verify with the named user/owner.\n3. Rotate/revoke as needed and document.",
     "TASK": "1. Operations > Tasks for the failure detail.\n2. Check the task's history and error.\n3. Fix and resume the task.",
-    "BUDGET": "1. Cost > Contract for pacing.\n2. Identify the driver in Attribution.\n3. Adjust the budget or the workload.",
+    "BUDGET": "1. Cost & Contract > Contract & Forecast for pacing.\n2. Identify the driver in Attribution.\n3. Adjust the budget or the workload.",
 }
 
 

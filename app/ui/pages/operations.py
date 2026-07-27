@@ -1,4 +1,4 @@
-"""Operations — queries, tasks, warehouses, contention."""
+"""Operations — queries, tasks, task-graph costs, warehouses, contention, change impact, releases, pipeline SLAs."""
 
 from __future__ import annotations
 
@@ -82,8 +82,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "severity": "warn" if failed else ""},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
              "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s",
-             "help": "Highest hourly p95 from the fact table — a peak, not the whole-window "
-                     "p95. Add a schema filter for the exact live number."
+             "help": "Highest hourly p95 from the fact table — a peak, not the "
+                     "whole-window p95."
                      if used_mart else None},
             {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.0f} min"},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
@@ -91,7 +91,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         result_caption(summary)
 
     # V041 R7: the UNFILTERED first paint reads MART_OPS_DIAG_HOURLY
-    # (top-20/hour by elapsed + failure families; Operations led the fleet
+    # (top-50/hour by elapsed + failure families; Operations led the fleet
     # pain board and this batch ran 30-37s live). An entity or schema filter
     # needs the true filtered top-N, which only the live scan has — that
     # path keeps the parallel batch below, unchanged.
@@ -103,7 +103,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
                                                user_filter, database, schema_contains),
                 page=_PAGE, key=f"q_top_{company}_{days}",
-                mart_source="MART_OPS_DIAG_HOURLY (mart — union of hourly top-20s)",
+                mart_source="MART_OPS_DIAG_HOURLY (mart — union of hourly top-50s)",
                 live_source="QUERY_HISTORY (live fallback)",
                 mart_tier="recent", live_tier="recent", max_rows=50),
             "fails": run_mart_first(
@@ -149,7 +149,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 **_tp_cfg,
             },
         )
-        st.caption("Elapsed-time ranking. Per-query dollars are estimates; exact billing is per warehouse.")
+        st.caption("Elapsed-time ranking.")
 
     st.markdown("**Query drill-through**")
     candidate_ids: list[str] = []
@@ -399,7 +399,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
     st.markdown("**Volume drops (yesterday vs prior-7d average)**")
     panel_help(
         "Rows added per table yesterday vs its prior-7-day average (tables moving "
-        "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past 50%; this table also "
+        "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past 50% (PROD databases only); this table also "
         "shows the 30-50% WATCH band so you see decay before it alerts."
     )
     vd = run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
@@ -518,7 +518,7 @@ def _warehouses_tab(company: str, rate: float) -> None:
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="recent", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
-                 setup_hint="Live equivalent lives on Cost & Contract > Attribution."):
+                 setup_hint="Live equivalent lives on Cost & Contract > Spend & Attribution."):
         return
     df = res.df.copy()
     df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
@@ -592,7 +592,7 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
                 schema_contains: str = "") -> None:
     st.caption(
         "Cost per pipeline = measured warehouse credits for every task run in the "
-        "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~6h lag) at the configured rate. "
+        "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~8h lag) at the configured rate. "
         "$/run is a day's cost over that day's runs — allocated, not per-run metered. "
         "Serverless tasks bill separately and are listed below at task-day grain."
     )
@@ -796,10 +796,10 @@ def render() -> None:
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    page_header("Operations", "Queries, tasks, warehouses, contention, releases, and pipeline SLAs.", icon_name="operations",
+    page_header("Operations", "Queries, tasks, task-graph costs, warehouses, contention, change impact, releases, and pipeline SLAs.", icon_name="operations",
                 scope_note=f"{f['company']} · last {f['days']} days")
     # Contention folded under Warehouses (CoCo): warehouse health and the
-    # contention it causes read together. Seven pills -> six.
+    # contention it causes read together.
     section = lazy_sections(
         ["Queries", "Tasks", "Task graphs ($)", "Warehouses", "Change impact",
          "Pipeline SLA", "Release compare"], key="ops_section")
@@ -813,7 +813,7 @@ def render() -> None:
     elif section == "Warehouses":
         _warehouses_tab(f["company"], rate)
         st.divider()
-        section_header("Contention (lock waits)", "info", "warehouse")
+        section_header("Contention (queue, spill & lock waits)", "info", "warehouse")
         _contention_tab(f["company"], f["days"])
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)

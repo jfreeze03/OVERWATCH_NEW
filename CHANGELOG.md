@@ -1,5 +1,62 @@
 # Changelog
 
+## 4.49.0 — label truth pass + section coherence (2026-07-15)
+
+Owner: "check for other mislabels across the board... make sure each section
+has the correct sections within." Ten parallel auditors read every page and
+verdicted every cross-page pointer against the real section lists (68 correct,
+14 wrong or imprecise). ~55 fixes; the themes:
+
+- **Every pointer now names a real label.** The "Cost > Spend" shorthand family
+  (playbooks, alerts, overview, ai_chargeback, operations, brief, companies,
+  errors) now says the exact pill — 'Cost & Contract > Spend & Attribution',
+  'Contract & Forecast', 'Admin > Errors & telemetry', 'Chargeback & AI > AI
+  users' (that one is stamped into ACTION_QUEUE SOURCE rows), 'Auditor export
+  pack' (nothing was ever named "quarterly"), Operations' retired "contention
+  tab" → Warehouses.
+- **Captions stop misdescribing the data.** CS-ratio caption implied the alert
+  fires at ~10% — WATCH is >10%, ELEVATED (where it fires) is >20%. Cortex/AI
+  spend and role-share panels say account-wide / exec-second like their SQL.
+  Failed-logins all-clear discloses the reader's 30d cap. Governance help said
+  "unmonitored warehouses" (monitor tracking died in v4.45 — it means no
+  auto-suspend) and "fixed weights" (they're SETTINGS-overridable).
+  "Break-glass role holders" → "Privileged role holders" (SYSADMINS is the
+  routine role by this page's own definition). QAH lag standardized to ~8h
+  (registry value); ops-diag "top-20s" → top-50s (v4.36.1); freshness
+  fallback label drops the stale "19-aggregate" count; month-end forecast
+  formula_version 'v4.x' placeholder → v4.4. Admin's garbled self-cost caption
+  ("XSMALL with a ") restored — the v4.45 monitor removal ate its clause; now
+  says the real 60s auto-suspend. Admin self-cost source label admits the
+  warehouse-name arm of its filter. Stale RUNBOOK pointer for backfill
+  (SP_LOAD_MARTS_V27 / "DAILY 3" — neither exists) → backfill_365.sql
+  (HOURLY 90, DAILY 365). Deleted the "resource monitor quota" sentence from
+  the Emergency help (no such lever since v4.45).
+- **Three rendering bugs.** toggle_cost_hint() return value was discarded bare
+  on the query-efficiency and storage-waste scans (hint never rendered — now
+  st.caption-wrapped); the canary results map dropped GAP rows to NaN
+  (PASS/FAIL/GAP now all render); Optimization's divider only appeared when
+  the repeat-query toggle was on.
+- **Section coherence, applied where low-risk (intra-page):** Security's
+  failed-login reasons → Access (it decomposes Failed logins; login telemetry,
+  not change evidence) and unused roles → Access (entitlement hygiene, next to
+  dormant users) — which also kills the real bug that Changes' empty-DDL
+  early-return hid every panel below it on a quiet week. Optimization's
+  recurring-patterns + price-a-pattern panels un-nested from inside the
+  differently-named expensive-query toggle into their own labeled toggle.
+  Dead _SERVICE_CATEGORY copies deleted from cost.py/contract/ai_chargeback/
+  optimize (only spend.py ever used it). Docstrings/subtitles on Admin,
+  Operations, Control Room, and all cost_parts modules now describe what each
+  actually renders (four modules carried the same copied whole-page docstring).
+- Locks updated with the changes they pin: playbooks family fallback (exact
+  labels), security changes-tab batch (moved reads; early-return regression
+  pinned dead), freshness label keeps its pre-V040 phrase.
+
+Deferred (cross-page moves, each its own round): storage panels out of
+Chargeback & AI, query-tag governance into it, Task graphs ($) vs Unit costs,
+Admin Emergency/fire-drill/restated-days homes, Control Room incident
+lifecycle KPIs. Brief/Overview: kept separate deliberately — see the round
+notes.
+
 ## 4.48.0 — Org spend moves to Cost & Contract (2026-07-15)
 
 Owner: "move them." Admin's Org spend tab was the page's one section about

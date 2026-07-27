@@ -1,4 +1,5 @@
-"""Cost & Contract — attribution, contract pacing, Cortex/storage, savings.
+"""Cost & Contract — the Spend & Attribution section bodies (spend by service,
+cloud-services health, company attribution).
 
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
@@ -82,7 +83,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
         st.markdown(
             f"- **This page — billed spend ({days}d): {format_usd(billed_usd)}.** Account-wide, "
             "every compute service, cloud-services rebate applied. The number that ties to the bill.\n"
-            f"- **Overview / company cards — warehouse-exact: {format_usd(wh_usd)}** of the above is "
+            f"- **Overview's company-scoped spend KPI — warehouse-exact: {format_usd(wh_usd)}** of the above is "
             "warehouse metering, the only grain Snowflake scopes per warehouse — which is why the "
             f"company filter lives there. The remaining {format_usd(other_usd)} (serverless, AI, "
             "replication, reader) has no warehouse to scope by.\n"
@@ -95,9 +96,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
 
     st.markdown("**Cloud-services health by warehouse**")
     st.caption(
-        "Above ~10% of a warehouse's credits usually means many tiny queries, "
-        "metadata-heavy patterns, or compile-heavy SQL. The COST_CLOUD_SVC_RATIO "
-        "alert fires at ELEVATED (editable on Alerts)."
+        "Above ~10% (WATCH) of a warehouse's credits usually means many tiny queries, "
+        "metadata-heavy patterns, or compile-heavy SQL. ELEVATED starts past 20%, "
+        "where the COST_CLOUD_SVC_RATIO alert fires (editable on Alerts)."
     )
     csr = run(mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
               key=f"csr_fact_{company}_{days}", tier="recent",

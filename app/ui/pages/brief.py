@@ -95,7 +95,7 @@ def render() -> None:
                 "delta": f"{days_left:,.0f} days at current burn",
                 "delta_color": "inverse" if days_left <= 90 else "off",
                 "help": "Straight-line on trailing 30d billed credits vs contracted credits. "
-                        "Scenarios: Cost > Contract > Renewal planner.",
+                        "Scenarios: Cost & Contract > Contract & Forecast > Renewal planner.",
             })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")

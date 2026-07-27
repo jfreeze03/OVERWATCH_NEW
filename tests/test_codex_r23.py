@@ -56,11 +56,21 @@ def test_task_failure_details_prunes_on_scheduled_time():
 
 
 def test_security_changes_tab_batches_its_two_live_reads():
+    # v4.49: failed-login reasons moved to the Access tab (login telemetry,
+    # not change evidence) and unused roles went with it (entitlement
+    # hygiene), so Changes is down to the single DDL read — no batch left.
+    # The moved read joins the Access batch instead.
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     body = sec.split("def _changes_tab", 1)[1].split("\ndef ", 1)[0]
-    assert 'run_batch([' in body
-    assert '{"key": "ddl"' in body and '{"key": "login_reasons"' in body
-    # serial fallbacks keep their own cache keys, per the Access-tab pattern
-    assert '_cb.get("ddl") or run(' in body
-    assert '_cb.get("login_reasons") or run(' in body
+    assert "run_batch([" not in body                       # one read, nothing to batch
+    assert "recent_ddl_changes" in body
+    assert "failed_login_reasons" not in body and "unused_roles" not in body
     assert ") or {}" not in body                           # the r8 trust lock holds
+    access = sec.split("def _access_tab", 1)[1].split("\ndef ", 1)[0]
+    assert '{"key": "login_reasons"' in access             # batched with its siblings
+    assert 'batch.get("login_reasons") or run(' in access  # serial fallback kept
+    assert "unused_roles" in access                        # entitlement hygiene lives here
+    # the Changes early-return regression stays dead: an empty DDL window must
+    # not hide the panels below it
+    _ddl_empty = body.split("No DDL/DCL changes recorded", 1)[1][:120]
+    assert "return" not in _ddl_empty

@@ -471,6 +471,7 @@ def render() -> None:
             {"label": "Open high", "value": f"{high_n}",
              "severity": "warn" if high_n else "ok"},
             {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}",
+             "help": "Counts the 300 most recent open events — the feed cap.",
              "severity": "info"},
         ])
 
@@ -487,7 +488,7 @@ def render() -> None:
             styled_table(rules.df)
             st.caption(
                 "Thresholds are data, not code: update ALERT_CONFIG and the next scan uses them. "
-                "Statistical anomaly detection runs in-app (Cost > Attribution, Operations > Warehouses) "
+                "Statistical anomaly detection runs in-app (Cost & Contract > Spend & Attribution, Operations > Warehouses) "
                 "and is deliberately separate from these deterministic rules."
             )
             st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
@@ -558,10 +559,10 @@ def render() -> None:
             df = mttr.df.copy()
             latest = df.dropna(subset=["MTTA_MIN"]).tail(4)
             kpi_row([
-                {"label": "MTTA (4-week avg)",
+                {"label": "MTTA (last 4 active weeks)",
                  "value": f"{latest['MTTA_MIN'].mean():,.0f} min" if not latest.empty else "No acks yet",
                  "help": "Raised -> acknowledged. Improve by working the queue, not the inbox."},
-                {"label": "MTTR (4-week avg)",
+                {"label": "MTTR (last 4 active weeks)",
                  "value": (f"{df.dropna(subset=['MTTR_MIN']).tail(4)['MTTR_MIN'].mean():,.0f} min"
                            if df["MTTR_MIN"].notna().any() else "No resolves yet"),
                  "help": "Raised -> resolved, including remediation time."},
@@ -622,7 +623,7 @@ def render() -> None:
         routes = run(mart_sql.alert_routes(), page=_PAGE, key="alert_routes", tier="recent",  # r24 #8: config table; post-save freshness rides the action salt
                      source="ALERT_ROUTES")
         if guard(routes, "No routes configured yet.",
-                 setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness."):
+                 setup_hint=_SETUP_HINT):
             styled_table(routes.df)
             st.code(
                 "-- add a route (operator): send all PIPELINE alerts of MEDIUM+ to #dataeng\n"

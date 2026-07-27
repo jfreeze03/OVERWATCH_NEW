@@ -1,4 +1,5 @@
-"""Cost & Contract — attribution, contract pacing, Cortex/storage, savings.
+"""Cost & Contract — the Optimization & Savings section bodies (advisors,
+scans, guarded remediation, savings ledger).
 
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
@@ -39,17 +40,6 @@ from app.ui.components import (
 )
 
 _PAGE = "Cost & Contract"
-
-_SERVICE_CATEGORY = {
-    "WAREHOUSE_METERING": "Warehouse",
-    "WAREHOUSE_METERING_READER": "Warehouse (reader)",
-    "SNOWPIPE": "Serverless", "SNOWPIPE_STREAMING": "Serverless",
-    "SERVERLESS_TASK": "Serverless", "SERVERLESS_ALERTS": "Serverless",
-    "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
-    "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
-    "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
-    "REPLICATION": "Replication", "STORAGE": "Storage",
-}
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -117,8 +107,10 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
                 st.caption(f"· {a_line}")
 
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool) -> None:
-    """Ported optimization insights: idle warehouses, repeat queries, storage movers."""
-    # ---- 1. Idle warehouse advisor -------------------------------------------
+    """Optimization insights: idle/right-sizing advisors, expensive queries and
+    patterns, the object-cost ledger, efficiency/storage/clustering scans, and
+    guarded remediation."""
+    # ---- Idle warehouse advisor ----------------------------------------------
     st.markdown("**Idle warehouse advisor**")
     st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
     idle_res = run_mart_first(
@@ -174,7 +166,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.markdown("**Warehouse right-sizing simulator**")
     st.caption(
         "Mechanical scenario model: one Snowflake size step halves or doubles the credit rate. "
-        "Runtime effects depend on the workload - the rationale says why; you decide."
+        "Runtime effects depend on the workload — the rationale says why; you decide."
     )
     # On-demand (Codex r3 #5): the profile joins metering x QUERY_HISTORY over
     # the whole window (~90s cold at 60d in production telemetry). The idle
@@ -290,9 +282,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
             st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
-        st.markdown("**Recurring cost patterns (same query, run all day)**")
-        st.caption("Grouped by parameterized fingerprint: a $9 query run 400x outranks one $300 "
-                   "outlier — this is where caching/materialization actually pays.")
+    st.markdown("**Recurring cost patterns (same query, run all day)**")
+    st.caption("Grouped by parameterized fingerprint: a $9 query run 400x outranks one $300 "
+               "outlier — this is where caching/materialization actually pays.")
+    st.caption(toggle_cost_hint("exppat_"))
+    if st.toggle("Run recurring-pattern scan (hour-share allocation by fingerprint)",
+                 key="cost_exppat_toggle",
+                 help="Its own scan, independent of the expensive-query one above — "
+                      "it was hidden inside that toggle before v4.49."):
         pats = run(insights_sql.expensive_patterns_usd(days, company, 30), page=_PAGE,
                    key=f"exppat_{company}_{days}", tier="historical",
                    source="QUERY_HISTORY x METERING (hour-share, by QUERY_PARAMETERIZED_HASH)")
@@ -329,7 +326,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.caption(f"Sample: {str(prow['QUERY_SNIPPET'])[:120]}")
 
     st.divider()
-    # ---- 2. Repeat-query candidates -------------------------------------------
+    # ---- Repeat-query candidates ----------------------------------------------
     st.markdown("**Repeat-query candidates (cache / materialization)**")
     st.caption(toggle_cost_hint("repeatq"))
     _rq_on = st.toggle("Run repeat-query scan (fingerprints the window's QUERY_HISTORY)",
@@ -370,8 +367,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
             result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
 
-        st.divider()
-    # ---- 3. Storage growth movers ------------------------------------------------
+    st.divider()
+    # ---- Object cost ledger ----------------------------------------------------
     st.markdown("**Object cost ledger (measured + maintenance)**")
     st.caption(
         "Additive per-object credits (V048/V049): measured query compute+QAS split "
@@ -431,11 +428,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
             },
         )
-        result_caption(sg_res, note=f"Window widened to {days_storage}d for a stable growth slope.")
+        result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
+                                     if days < days_storage else f"{days_storage}d window."))
 
     st.divider()
     st.markdown("**Query efficiency (pruning + result cache)**")
-    toggle_cost_hint("prune_")   # v4.26.1: the pain table counted these
+    st.caption(toggle_cost_hint("prune_"))
     if st.toggle("Run query-efficiency scan", key="cost_eff_toggle",
                  help="Scans the window's QUERY_HISTORY for full-table-scan families and the zero-scan share."):
         prune = run(ops_sql.poor_pruning_queries(
@@ -460,7 +458,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        "metadata). A falling line means redundant recomputation.")
 
     st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
-    toggle_cost_hint("reclaim_")
+    st.caption(toggle_cost_hint("reclaim_"))
     if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                  help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
         with st.spinner("Scanning table storage + 90 days of read/DML history…"):
@@ -681,7 +679,7 @@ def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
-        st.info("Savings ledger is not installed yet — an admin can verify on Admin → Migrations & freshness.")
+        st.info("Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
         return
     totals = ledger_totals(res.df)
     st.caption("Books itself since V038: the daily scan detects cost-lever changes "

@@ -29,17 +29,6 @@ from app.ui.components import (
 
 _PAGE = "Cost & Contract"
 
-_SERVICE_CATEGORY = {
-    "WAREHOUSE_METERING": "Warehouse",
-    "WAREHOUSE_METERING_READER": "Warehouse (reader)",
-    "SNOWPIPE": "Serverless", "SNOWPIPE_STREAMING": "Serverless",
-    "SERVERLESS_TASK": "Serverless", "SERVERLESS_ALERTS": "Serverless",
-    "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
-    "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
-    "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
-    "REPLICATION": "Replication", "STORAGE": "Storage",
-}
-
 
 from app.ui.pages.cost_parts.ai_chargeback import (  # noqa: E402
     _ai_users_tab,
@@ -62,7 +51,7 @@ def render() -> None:
                 scope_note=f"{f['company']} · last {f['days']} days", icon_name="cost")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
-    # Four grouped sections instead of eight pills (CoCo density fix): each
+    # Six grouped sections instead of eight pills (CoCo density fix): each
     # group renders its related sub-panels under labeled section headers.
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",

@@ -190,11 +190,11 @@ def _freshness_board() -> None:
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="freshness",
         mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
-        live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
+        live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     st.subheader("Telemetry freshness")
     if not res.ok:
-        st.info("Freshness board is not installed yet; the live fallbacks below still work.")
+        st.info("Freshness board is not installed yet; the live fallbacks on this page still work.")
         return
     if res.empty:
         st.info("Freshness view exists but has no rows — have the loader tasks run yet?")
@@ -400,10 +400,10 @@ def render() -> None:
                    + (" Task failures follow the database filter; alerts and "
                       "spend anomalies don't have database grain." if f["database"] else ""))
 
-    # ---- Spend movers ----------------------------------------------------------
+    # ---- Incident correlation timeline -----------------------------------------
     st.subheader("Incident correlation timeline")
     panel_help(
-        "Alerts, task failures, and DDL changes on one time axis (7 days). Click a row "
+        "Alerts, task failures, and DDL changes on one time axis (48h or 7d). Click a row "
         "below the chart to see everything else that happened within ±30 minutes — the "
         "'what changed right before this broke?' view."
     )
@@ -455,8 +455,8 @@ def render() -> None:
     if _spk.ok and not _spk.empty:
         st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
         styled_table(_spk.df, height=180)
-        st.caption("Objects locking >=3x their own baseline — the Operations "
-                   "contention tab has the full table and history.")
+        st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
+                   "Warehouses section has the full table and history.")
 
     st.subheader("Spend movers (window vs prior)")
     if f["database"]:

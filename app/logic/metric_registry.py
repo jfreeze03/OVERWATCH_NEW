@@ -115,7 +115,7 @@ METRICS: tuple[Metric, ...] = (
            "QUERY_TAG (docs/design/ETL_COST_TAGS.md). Coverage % is credit-weighted."),
     Metric("month_end_forecast", "Month-end forecast", ESTIMATED,
            "account / month", "linear / seasonal / opt-in ML over FACT_METERING_DAILY",
-           ACCOUNT_TZ, "as of last loaded day", "v4.x",
+           ACCOUNT_TZ, "as of last loaded day", "v4.4",
            "Projection with a 3-month backtest naming the most reliable engine."),
 )
 

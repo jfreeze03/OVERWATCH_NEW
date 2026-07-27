@@ -113,7 +113,7 @@ def safe_page(page_name: str):
                     friendly = f"{type(exc).__name__}: {friendly} — app bug, not a Snowflake failure."
                 st.caption(friendly)
                 st.info(
-                    "The failure was logged (Admin > Error log). Other pages are unaffected; "
+                    "The failure was logged (Admin > Errors & telemetry). Other pages are unaffected; "
                     "refresh after fixing the cause."
                 )
                 return None

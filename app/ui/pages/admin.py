@@ -1,4 +1,5 @@
-"""Admin — settings, migration status, self-cost, error log, telemetry.
+"""Admin — settings, emergency levers, migrations & freshness, metric registry,
+app self-cost, performance, canary, and errors & telemetry.
 
 Everything that was wrongly parked on the old app's executive page lives
 here, where the people who can act on it will look for it.
@@ -175,12 +176,12 @@ def _migrations_tab() -> None:
                    "procurement lands, docs/FLYWAY_ADOPTION.md is the adoption runbook; "
                    "this panel lights up on its own once flyway_schema_history exists.")
 
-    st.markdown("**Telemetry freshness**")
+    st.markdown("**Source freshness**")
     fresh = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="adm_freshness",
         mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
-        live_source="MART_SOURCE_FRESHNESS (19-aggregate view, pre-V040 fallback)",
+        live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
@@ -202,7 +203,7 @@ def _migrations_tab() -> None:
                 hint = ""
                 if float(s.get("ROW_COUNT", 0) or 0) == 0:
                     hint = ("never filled — run the backfill "
-                            "(RUNBOOK: SP_LOAD_MARTS_V27 HOURLY 90, then DAILY 3).")
+                            "(snowflake/backfill_365.sql: HOURLY 90, then DAILY 365).")
                 if errs.ok and not errs.empty:
                     _m = errs.df[errs.df.apply(
                         lambda r, _n=name: _n in str(r.get("CONTEXT", ""))
@@ -223,12 +224,12 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 def _self_cost_tab() -> None:
     st.caption(
         "The monitoring app must never become the cost problem: WH_ALFA_OVERWATCH is XSMALL with a "
-        "and every app query carries an OVERWATCH query tag (no resource monitor since v4.45 — OVERWATCH_RM was suspending the warehouse mid-use)."
+        "60-second auto-suspend, and every app query carries an OVERWATCH query tag (no resource monitor since v4.45 — OVERWATCH_RM was suspending the warehouse mid-use)."
     )
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
-              source="ACCOUNT_USAGE.QUERY_HISTORY (QUERY_TAG LIKE 'OVERWATCH%')")
-    if guard(res, "No tagged OVERWATCH queries in the last 14 days (fresh install, or tags disabled)."):
+              source="ACCOUNT_USAGE.QUERY_HISTORY (OVERWATCH tag or WH_ALFA_OVERWATCH)")
+    if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
         df = res.df.copy()
         total = int(pd.to_numeric(df["APP_QUERIES"], errors="coerce").fillna(0).sum())
         failed = int(pd.to_numeric(df["FAILED"], errors="coerce").fillna(0).sum())
@@ -352,9 +353,8 @@ def _emergency_tab(is_operator: bool) -> None:
     panel_help(
         "The catalogue below is the education; the generator builds exact statements "
         "with validated identifiers. Suspending a warehouse does not kill in-flight "
-        "queries — pair with a statement timeout when something is stuck. Resource "
-        "monitor quota changes take effect immediately; Cortex allowlist changes "
-        "apply account-wide within minutes."
+        "queries — pair with a statement timeout when something is stuck. Cortex "
+        "allowlist changes apply account-wide within minutes."
     )
     with st.expander("Known emergency levers (reference)", expanded=False):
         st.markdown(_EMERGENCY_CATALOG)
@@ -565,7 +565,7 @@ def _performance_tab() -> None:
             "(fire-and-forget, 60/session cap) — an EXCEPTION-WEIGHTED sample, so "
             "p50/p95 here read HIGHER than true fleet latency (r22 #20; weighted "
             "stats are queued). This is the regression surface across every user, "
-            "not a complete census. The session table above shows only YOUR session."
+            "not a complete census. Per-session telemetry lives on Errors & telemetry."
         )
     _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
 
@@ -684,7 +684,7 @@ def _canary_tab() -> None:
         from app.ui.components import styled_table as _styled
 
         view = stored.copy()
-        view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED"})
+        view["STATUS"] = view["STATUS"].map({"PASS": "SUCCESS", "FAIL": "FAILED", "GAP": "GAP"})
         view = view.rename(columns={"STATUS": "EXECUTION_STATUS"})
         _styled(view, height=420)
 
@@ -783,7 +783,7 @@ def _metric_registry_tab() -> None:
 
 @safe_page(_PAGE)
 def render() -> None:
-    page_header("Admin", "Settings, migrations, self-cost, canary, and app observability.", icon_name="admin")
+    page_header("Admin", "Settings, emergency, migrations, metrics, self-cost, performance, canary, and telemetry.", icon_name="admin")
     profile = resolve_role_profile(current_role())
     is_operator = profile in OPERATOR_PROFILES
     _context_section()

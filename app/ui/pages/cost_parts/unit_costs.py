@@ -93,7 +93,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
         kpis.append({"label": "AI spend (window)",
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
-                     "delta": f"{len(ai_res.df)} function/model pair(s)",
+                     "delta": f"{len(ai_res.df)} source/model pair(s)",
                      "delta_color": "off"})
     if kpis:
         kpi_row(kpis)
@@ -226,7 +226,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         })
 
     st.divider()
-    st.markdown("**AI — $ by function and model**")
+    st.markdown("**AI — $ by function/model (or Cortex Code source)**")
     if not ai_res.usable():
         # This account bills AI through Cortex CODE (Snowsight/CLI token
         # credits), not SQL Cortex functions — fall back to those views
@@ -301,4 +301,4 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                     "WASTE_USD": st.column_config.NumberColumn("Failed-run $", format="$%.2f"),
                 })
             result_caption(etl, note="Failed-run $ = attributed credits on non-SUCCESS runs "
-                                     "(retry/abort waste). Method = MEASURED (Admin -> Metrics).")
+                                     "(retry/abort waste). Method = MEASURED (Admin → Metrics).")

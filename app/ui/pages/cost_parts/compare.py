@@ -160,7 +160,7 @@ def _compare_tab(company: str, rate: float) -> None:
     if not pat.ok:
         st.info("Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
                 "an admin can apply the pending schema update on Admin → Migrations & freshness.")
-    elif guard(pat, "No repeated pattern crossed the $0.01 floor in either window."):
+    elif guard(pat, "No repeated pattern crossed the 0.01-credit floor in either window."):
         pv = pat.df.copy()
         pv["A_USD"] = pv["A_CREDITS"].map(safe_float) * rate
         pv["B_USD"] = pv["B_CREDITS"].map(safe_float) * rate
