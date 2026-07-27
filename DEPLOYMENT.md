@@ -40,6 +40,21 @@ snowflake/migrations/V031__scan_tuning_and_tagcov.sql
 snowflake/migrations/V032__incident_object.sql
 snowflake/migrations/V033__change_attribution.sql
 snowflake/migrations/V034__route_company_filter.sql
+snowflake/migrations/V035__lock_wait_mart.sql
+snowflake/migrations/V036__pattern_cost_mart.sql
+snowflake/migrations/V037__pattern_env_grain.sql
+snowflake/migrations/V038__ledger_autobook.sql
+snowflake/migrations/V039__pseudo_warehouse_filter.sql
+snowflake/migrations/V040__freshness_state.sql
+snowflake/migrations/V041__loader_efficiency.sql
+snowflake/migrations/V042__codex_r22.sql
+snowflake/migrations/V043__task_retirement_alert_teeth.sql
+snowflake/migrations/V044__unknown_classification.sql
+snowflake/migrations/V045__task_monitoring_restored.sql
+snowflake/migrations/V046__storage_truth.sql
+snowflake/migrations/V047__pattern_cost_qas.sql
+snowflake/migrations/V048__object_cost_ledger.sql
+snowflake/migrations/V049__write_target_attribution.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

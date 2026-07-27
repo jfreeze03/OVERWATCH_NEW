@@ -216,7 +216,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             if str(srow.get("RECOMMENDATION", "")).upper().startswith("DOWN"):
                 est_sz = round(max(0.0, safe_float(srow.get("MONTHLY_USD_NOW"))
                                     - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
-                st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until the verifier proves it).")
+                st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until you verify it "
+                           "on the Savings ledger below).")
             blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
             from app.logic import remediation as _remediation
             st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
@@ -226,9 +227,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 ok, msg = execute_statement(stmt_sz, page=_PAGE)
                 execute_statement(
                     f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
                     f"SELECT 'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}, {sql_literal(stmt_sz)}, "
-                    f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
+                    f"{sql_number(est_sz)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
                     page=_PAGE)
                 if ok:
                     from app.ui.components import log_ui_event
@@ -239,7 +240,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
                         f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
                         f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
-                        "'Booked from sizing simulator; verifier tests actuals.'", page=_PAGE)
+                        "'Booked from sizing simulator; verify with a proof run on the Savings ledger.'", page=_PAGE)
                 notify(ok, msg)
         _whatif_panel(sized, days, rate)
         result_caption(prof_res)
@@ -558,10 +559,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     ok, msg = execute_statement(stmt_w, page=_PAGE)
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
                         f"SELECT 'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}, "
                         f"{sql_literal(stmt_w)}, {sql_number(est_w)}, "
-                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}", page=_PAGE)
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}", page=_PAGE)
                     if ok and est_w > 0:
                         execute_statement(
                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
@@ -592,7 +593,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     panel_help(
         "Turns findings into exact `ALTER` statements. Execution needs the "
         "admin profile, writes a REMEDIATION_LOG audit row, and books an "
-        "ESTIMATED savings-ledger item that the monthly verifier later proves or rejects. "
+        "ESTIMATED savings-ledger item — verify it on the Savings ledger below. "
+        "Warehouse-setting changes are also caught by the change scan, which "
+        "books and settles its own measured row (V038). "
         "Anyone can copy the SQL for review."
     )
     # Same builder PAIR as the advisor above (r20 #1): identical SQL identity
@@ -650,10 +653,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     ok, msg = execute_statement(stmt, page=_PAGE)
                     log_sql = (
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE) "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, EST_MONTHLY_SAVINGS_USD, STATUS, RESULT_NOTE, EXECUTED_BY) "
                         f"SELECT {sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, "
                         f"{sql_literal(wh_pick)}, {sql_literal(stmt[:4000])}, {sql_number(est_monthly)}, "
-                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}"
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}"
                     )
                     execute_statement(log_sql, page=_PAGE)
                     if ok and est_monthly > 0:
@@ -662,7 +665,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
                             f"SELECT {sql_literal(f'{fix_kind} on {wh_pick}')}, 'ESTIMATED', "
                             f"{sql_number(est_monthly)}, {sql_literal(stmt[:4000])}, "
-                            f"{sql_literal('Booked by guarded remediation; verifier will test actuals.')}"
+                            f"{sql_literal('Booked by guarded remediation; verify with a proof run on the Savings ledger.')}"
                         )
                         execute_statement(ledger_sql, page=_PAGE)
                     notify(ok, msg)

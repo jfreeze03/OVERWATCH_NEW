@@ -1,5 +1,49 @@
 # Changelog
 
+## 4.51.0 — Tranche A: outcome and audit trust (2026-07-27)
+
+Owner: "tranche A" — the app-only first tranche from the Codex adjudication
+(docs/reviews/CODEX_REVIEW_ADJUDICATION_2026-07-27.md). No migration.
+
+- **Audit actors are the viewer.** Both ALERT_AUDIT INSERTs now stamp
+  ACTED_BY and all six REMEDIATION_LOG INSERTs stamp EXECUTED_BY with
+  identity_sql() — omitting them let the CURRENT_USER() defaults record the
+  app owner under owner's-rights SiS. The false r27-era comment ("the table
+  has no actor column") is gone. Remediation-history panels light up with
+  real names, zero read-side change.
+- **Savings captions promise only what settles.** Six screens promised "the
+  monthly verifier proves or rejects" — but V007's verifier proposes only,
+  and only for a description no executed path books; V038 settles only its
+  own rows. Captions now route to the real path (manual proof-backed verify
+  on the Savings ledger; the change scan's own measured row for
+  warehouse-setting changes). Ledger NOTES stop claiming a verifier will
+  test actuals. The selection-gap fix (typed link) stays queued for r28.
+- **ETL unit costs are run-grain and honest.** Queries aggregate to
+  (pipeline, run_id) before pipeline totals; $/M-rows counts WRITE-statement
+  rows only (a 3-stage pipeline no longer counts logical rows 3x); new
+  RUN_ID_CREDIT_PCT column — $/run divides only run-tagged spend, so partial
+  tagging degrades honestly. Both builders gain database/schema_contains and
+  the panel threads the page filters (the ETL panel used to ignore them).
+- **Telemetry reports measured time.** Batch members no longer log an
+  invented wall/batch_size runtime — they log the measured batch wall with
+  BATCH_SIZE labeling the sharing (matching what QueryResult already
+  reported). Cache-miss fetches now capture the Snowflake QUERY_ID via the
+  async job handle into session telemetry; the persisted column rides the
+  next migration.
+- **The perf lint sees through page files.** test_v451_trust renders every
+  builder each page references and pins the page's TRUE reachable
+  ACCOUNT_USAGE table set (unit_costs: 7 tables under a 0 literal budget —
+  the gap Codex called). test_perf_budgets reframed as the lint proxy it is;
+  house law 3 amended.
+- **Canary compile-only mode.** EXPLAIN wraps each of the 181 statements —
+  same drift coverage for identifier/object errors, no aggregates executed;
+  the classic executed probe stays a toggle away.
+- **Docs carry the real floor.** DEPLOYMENT.md and README run-lists extended
+  V035..V049 (they stopped at V034 for fifteen migrations); README's retired
+  OVERWATCH_MONITOR/OPERATOR annotation and pre-V044 company-scoping prose
+  corrected; a lock pins the migration floor into both docs. Admin's
+  registry caption stops overclaiming KPI discovery.
+
 ## 4.50.0 — five cross-page moves + Cortex real names (2026-07-27)
 
 Owner: "do all 5" (the v4.49 deferred queue) + first/last names on the Cortex

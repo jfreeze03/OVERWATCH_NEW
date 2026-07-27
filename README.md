@@ -31,8 +31,12 @@ ALFA and Trexis share one Snowflake account, so scoping is **hardcoded on purpos
 in exactly one module: `app/companies.py` (mirrored in the `COMPANY_SCOPE`
 seed, with a unit test that keeps the two in sync).
 
-- Trexis: the four `WH_TRXS_*` warehouses, `TRXS_*` databases, `TRXS_*` users.
-- ALFA: everything else.
+- Trexis: `COMPANY_SCOPE` mapping rows, `WH_TRXS_*`/`TRXS_*` prefixes, `%TRXS%` roles.
+- ALFA: needs evidence too (V044) — `WH_ALFA_*` warehouses, `ALFA%`/`ADMIN`
+  databases, `%ALFA%` or DBA roles.
+- Everything else classifies **UNKNOWN** and surfaces on Cost & Contract →
+  Spend & Attribution (Unmapped entities) until a `COMPANY_SCOPE` row maps it —
+  nothing silently bills ALFA.
 - Exception: user `KEBARR1` holds both ALFA and Trexis roles and is classified
   as **ALFA** by explicit override.
 
@@ -97,7 +101,22 @@ snowflake/migrations/V031__scan_tuning_and_tagcov.sql -- change-impact scan v2 (
 snowflake/migrations/V032__incident_object.sql -- INCIDENTS + members + lineage + proposals + auto-declare
 snowflake/migrations/V033__change_attribution.sql -- CHANGED_BY on the change registry + DEPLOY_ACTORS setting
 snowflake/migrations/V034__route_company_filter.sql -- per-route COMPANY_FILTER; sender v4 (Teams = ALFA-only)
-snowflake/roles.sql                      -- OVERWATCH_MONITOR / OVERWATCH_OPERATOR
+snowflake/migrations/V035__lock_wait_mart.sql -- lock-wait mart (page views never scan LOCK_WAIT_HISTORY)
+snowflake/migrations/V036__pattern_cost_mart.sql -- pattern-cost mart (measured $ per repeated statement)
+snowflake/migrations/V037__pattern_env_grain.sql -- pattern mart v2: DATABASE_NAME grain + HLL users (compare env prep)
+snowflake/migrations/V038__ledger_autobook.sql -- ledger autobook (detected cost-lever changes settle themselves)
+snowflake/migrations/V039__pseudo_warehouse_filter.sql -- pseudo-warehouse filter (CLOUD_SERVICES_ONLY out of the warehouse fact)
+snowflake/migrations/V040__freshness_state.sql -- freshness state table + 10-min snapshot (lookup, not 19 aggregates)
+snowflake/migrations/V041__loader_efficiency.sql -- loader efficiency: staged QH extract, xdim alloc fact, exec board v2, watermarks + nightly reconcile, loader-owned freshness, ops-diag + platform-score marts, posture riders
+snowflake/migrations/V042__codex_r22.sql -- codex r22: FACT_QUERY_DAILY, atomic extract + gated watermark, ops-diag backfill, purge coverage, AI fact usage stamps
+snowflake/migrations/V043__task_retirement_alert_teeth.sql -- task retirement loader-side (fills/board/score/purge/reconcile/freshness + tables dropped, PIPE_TASK_FAILURES disabled) + r25 alert teeth (new-admin-network, egress spike)
+snowflake/migrations/V044__unknown_classification.sql -- UNKNOWN classification (#18): evidence-based company both sides, COMPANY_SCOPE database mapping lever, board UNKNOWN scope
+snowflake/migrations/V045__task_monitoring_restored.sql -- owner correction: task monitoring restored (tables/procs/rule/refill; teeth + UNKNOWN scope kept); OVERWATCH_RM dropped
+snowflake/migrations/V046__storage_truth.sql -- storage truth: account tiers (stage/hybrid/archive) + per-DB monthly-average billing basis (COST_DB recon R3 / audit F1)
+snowflake/migrations/V047__pattern_cost_qas.sql -- pattern-cost mart includes Query Acceleration (Codex audit item 4)
+snowflake/migrations/V048__object_cost_ledger.sql -- FACT_OBJECT_COST_DAILY object-cost ledger (measured split + serverless arms)
+snowflake/migrations/V049__write_target_attribution.sql -- write-target attribution (OBJECTS_MODIFIED joins the split; residual = no-read-no-write compute)
+snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```
 

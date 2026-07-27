@@ -8,6 +8,7 @@ import streamlit as st
 
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.errors import safe_page
+from app.core.identity import identity_sql
 from app.core.query import execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
@@ -849,9 +850,9 @@ def _emergency_tab(is_operator: bool) -> None:
                 ok, msg = execute_statement(stmt, page=_PAGE)
                 log_sql = (
                     f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                    "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "
                     f"SELECT 'EMERGENCY', {sql_literal(action)}, {sql_literal(stmt[:4000])}, "
-                    f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}"
+                    f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}"
                 )
                 execute_statement(log_sql, page=_PAGE)
                 notify(ok, msg)
@@ -903,10 +904,10 @@ def _emergency_extras(is_operator: bool) -> None:
                         f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})", page=_PAGE)
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "
                         f"SELECT 'CANCEL_QUERY', {sql_literal(qid)}, "
                         f"{sql_literal('SYSTEM$CANCEL_QUERY ' + qid)}, "
-                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}",
+                        f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
                         page=_PAGE)
                     notify(ok, msg)
 

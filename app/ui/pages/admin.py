@@ -452,18 +452,28 @@ def _perf_rider_panels(fq_df=None) -> None:
 
 def _canary_tab() -> None:
     st.caption(
-        "Runs every registered SQL builder against the live account (1-row caps) to catch "
+        "Runs every registered SQL builder against the live account to catch "
         "ACCOUNT_USAGE column drift or missing OVERWATCH objects before a user does. "
+        "Execute mode runs each statement with a 1-row cap; compile-only wraps each "
+        "in EXPLAIN — same drift coverage for column/object errors, no data scanned. "
         "Failures are logged to APP_ERROR_LOG."
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
 
     st.markdown(f"**{len(CANARIES)} registered statements**")
+    compile_only = st.toggle(
+        "Compile-only (EXPLAIN)", key="adm_canary_explain", value=True,
+        help="v4.51 (Codex #17): EXPLAIN validates identifiers and objects without "
+             "executing the aggregates — seconds instead of minutes. Untoggle for "
+             "the classic executed probe (also proves row-level access).")
     if st.button("Run canary now", key="adm_canary_run"):
         results = []
         progress = st.progress(0.0, text="Running canary...")
         for idx, (name, builder) in enumerate(CANARIES):
-            res = run(builder(), page=_PAGE, key=f"canary_{name}", tier="live",
+            _sql = builder()
+            if compile_only:
+                _sql = "EXPLAIN USING TEXT\n" + _sql
+            res = run(_sql, page=_PAGE, key=f"canary_{name}", tier="live",
                       source=name, max_rows=1, probe=True)
             # r10 #4: classified from the RAW exception in run(). r11 #7: GAP
             # must be DECLARED per entry — an absent core object is drift and
@@ -582,8 +592,9 @@ def _metric_registry_tab() -> None:
         "Read a figure by its METHOD: BILLED ties to the invoice, METERED is "
         "exact usage (idle in, CS unadjusted), MEASURED is attributed compute "
         "(idle out), ALLOCATED is a share-based estimate, ESTIMATED is "
-        "bytes/credits x a configured rate. Adding a cost metric without "
-        "registering it here fails the drift-guard test."
+        "bytes/credits x a configured rate. Documentation-grade today: the "
+        "drift test pins the registered entries, but cannot yet discover an "
+        "unregistered KPI — register new cost metrics by hand."
     )
     _order = {m: i for i, m in enumerate(mr.METHODS)}
     _rows = sorted(mr.as_rows(), key=lambda r: _order.get(r["Method"], 99))

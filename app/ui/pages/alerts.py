@@ -73,12 +73,13 @@ def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str
         )
     audit_note = f"[{kind}] {note}" if kind else note
     if viewer_name():
-        # r27 #4: audit attribution survives owner's-rights (the table has no
-        # actor column; the note carries the viewer).
+        # v4.51 (Codex P1-B): ACTED_BY takes the viewer explicitly — omitting
+        # it let the CURRENT_USER() default stamp the app owner under
+        # owner's-rights SiS. The note keeps the suffix for prose context.
         audit_note = f"{audit_note} — by {viewer_name()}"
     audit = (
-        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE) "
-        f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)});"
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
+        f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)}, {identity_sql()});"
     )
     return update + "\n" + audit
 
@@ -109,8 +110,8 @@ def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str 
     if viewer_name():
         audit_note = f"{audit_note} — by {viewer_name()}"
     audit = (
-        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE) "
-        f"SELECT EVENT_ID, {sql_literal(action)}, {sql_literal(audit_note)} "
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
+        f"SELECT EVENT_ID, {sql_literal(action)}, {sql_literal(audit_note)}, {identity_sql()} "
         f"FROM {core_object('ALERT_EVENTS')} WHERE EVENT_ID IN ({ids}) AND {state_filter};"
     )
     return update, audit
@@ -249,7 +250,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                 with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                     st.caption("Playbook above says what; this generates the how. Execute is "
                                "operator-gated, audited to REMEDIATION_LOG, and books an "
-                               "ESTIMATED ledger item the monthly verifier proves or rejects.")
+                               "ESTIMATED ledger item — verify it on Cost & Contract > "
+                               "Optimization & Savings. The change scan settles its own "
+                               "measured row for warehouse-setting changes (V038).")
                     try:
                         prior = run(mart_sql.ledger_for_event(event_id[:8].lower()), page=_PAGE,
                                     key=f"clf_led_{event_id[:8]}", tier="live",
@@ -264,8 +267,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                                 except (TypeError, ValueError):
                                     usd_s = "n/a"
                                 st.markdown(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})")
-                            st.caption("VERIFIED/REJECTED comes from the monthly verifier's "
-                                       "before/after actuals — the loop, closed end to end.")
+                            st.caption("VERIFIED comes from a manual proof-backed verify on the "
+                                       "Savings ledger; the change scan (V038) additionally books "
+                                       "and settles its own measured row for warehouse-setting "
+                                       "changes.")
                     except ValueError:
                         pass  # non-uuid event id shapes: chip simply doesn't render
                     fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
@@ -292,10 +297,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                             ok, msg = execute_statement(stmt_cl, page=_PAGE)
                             execute_statement(
                                 f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                                "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE) "
+                                "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "
                                 f"SELECT 'ALERT_CLOSED_LOOP', {sql_literal(wh_inline)}, "
                                 f"{sql_literal(stmt_cl)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, "
-                                f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}",
+                                f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}, {identity_sql()}",
                                 page=_PAGE)
                             if ok:
                                 from app.ui.components import log_ui_event
@@ -318,8 +323,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                         st.markdown("**Savings booked from this alert**")
                         styled_table(booked.df[["DESCRIPTION", "STATE", "ESTIMATED_USD",
                                                 "VERIFIED_USD", "CREATED_AT"]], height=140)
-                        st.caption("ESTIMATED flips to VERIFIED (or REJECTED) when the monthly "
-                                   "verifier compares actual before/after spend — the loop closes here.")
+                        st.caption("ESTIMATED flips to VERIFIED when verified on the Savings "
+                                   "ledger (proof + measured amount). Warehouse-setting changes "
+                                   "also get a separate change-scan row that settles itself (V038).")
             rid_u = str(row["RULE_ID"]).upper()
             if rid_u.startswith(("COST_", "PERF_")):
                 with st.expander("Explain with AI (grounded in the day's evidence)"):

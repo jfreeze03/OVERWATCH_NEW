@@ -176,6 +176,7 @@ from contextvars import ContextVar  # noqa: E402  (kept beside its single use)
 # Context-local (Codex r9 #4): the old module dict raced across concurrent
 # Streamlit session threads, corrupting cache-hit telemetry either way.
 _FETCH_MISS: ContextVar[bool] = ContextVar("ow_fetch_miss", default=False)
+_LAST_QUERY_ID: ContextVar[str] = ContextVar("ow_last_query_id", default="")
 
 
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
@@ -183,7 +184,15 @@ def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
-    return _normalize(session.sql(sql).to_pandas())
+    # Async submit purely to get the job handle: it carries the Snowflake
+    # QUERY_ID (v4.51, Codex #16) — the sync path never exposed it.
+    try:
+        job = session.sql(sql).to_pandas(block=False)
+        _LAST_QUERY_ID.set(str(getattr(job, "query_id", "") or ""))
+        return _normalize(job.result())
+    except AttributeError:
+        _LAST_QUERY_ID.set("")
+        return _normalize(session.sql(sql).to_pandas())
 
 
 # One cached function per tier: st.cache_data TTL is fixed at decoration time.
@@ -308,7 +317,8 @@ def _cache_scope(sql: str = "") -> str:
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool,
                cache_hit: bool | None = None, sql_hash: str | None = None,
-               batch_size: int | None = None, truncated: bool | None = None) -> None:
+               batch_size: int | None = None, truncated: bool | None = None,
+               query_id: str | None = None) -> None:
     try:
         entries = st.session_state.setdefault(_TELEMETRY_KEY, [])
         entries.append({
@@ -320,6 +330,7 @@ def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok:
             "rows": int(rows),
             "ok": bool(ok),
             "cache_hit": cache_hit,
+            "query_id": query_id or "",
         })
         del entries[:-_TELEMETRY_MAX]
     except Exception:
@@ -485,7 +496,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                 truncated = bool(caps[idx]) and len(df) > caps[idx]
                 if truncated:
                     df = df.head(caps[idx])
-                _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(bspecs), 1),
+                _telemetry(page, tier, f"batch:{spec['key']}", elapsed,
                            len(df), ok=True, batch_size=len(bspecs), truncated=truncated)
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
@@ -520,7 +531,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
-        _telemetry(page, tier, f"batch:{spec['key']}", elapsed / max(len(bspecs), 1), len(df), ok=True,
+        _telemetry(page, tier, f"batch:{spec['key']}", elapsed, len(df), ok=True,
                    batch_size=len(bspecs), truncated=truncated)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
@@ -564,7 +575,8 @@ def run(
         _telemetry(page, tier, key, elapsed, len(df), ok=True,
                    cache_hit=cache_hit,
                    sql_hash=_hashlib.sha1(sql.encode()).hexdigest()[:16],
-                   truncated=truncated)
+                   truncated=truncated,
+                   query_id=("" if cache_hit else _LAST_QUERY_ID.get()))
         return QueryResult(
             df=df, ok=True, truncated=truncated, source=source, tier=tier,
             fetched_at=datetime.now(), elapsed_ms=elapsed,

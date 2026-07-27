@@ -6,8 +6,15 @@ Two gates:
    expectation dict).
 2. Hot pages (Brief/Overview/Control Room) carry a pinned budget of live
    ACCOUNT_USAGE references — every one that exists today is a labeled
-   FALLBACK under a fact-first read. Adding a new live scan to a first-paint
-   path fails here with instructions, instead of shipping a slow morning.
+   FALLBACK under a fact-first read.
+
+Honesty note (v4.51, Codex P2): this budget counts the LITERAL in page
+source — a lint proxy. It cannot see scans reached through app/data builders
+(unit_costs pins 0 here while its builders reach 7 ACCOUNT_USAGE tables).
+The builder-level companion gate lives in tests/test_v451_trust.py
+(test_reachable_account_usage_tables_per_page): it renders each page's
+referenced builders and pins the true reachable table set. Keep both — this
+one polices page-file hygiene, that one polices the actual scan surface.
 """
 
 from __future__ import annotations

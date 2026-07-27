@@ -261,13 +261,13 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "Cost governance for pipelines that set a JSON QUERY_TAG "
         "(pipeline / run_id / target_object / environment / cost_center — see "
         "docs/design/ETL_COST_TAGS.md). MEASURED attribution credits per pipeline: "
-        "$/run, $/M rows, $/TiB scanned, and failed-run waste. Untagged queries fall "
-        "out — coverage says how much."
+        "$/run, $/M rows written, $/TiB scanned, and failed-run waste. Untagged queries "
+        "fall out — coverage says how much; $/run divides only run_id-tagged spend."
     )
     if st.toggle("Run ETL unit-cost scan", key="etl_unit_toggle",
                  help="Scans the window's QUERY_HISTORY for JSON pipeline tags joined to "
                       "measured attribution credits. Off by default (keeps first paint fast)."):
-        cov = run(etl_sql.etl_tag_coverage(days, company), page=_PAGE,
+        cov = run(etl_sql.etl_tag_coverage(days, company, f["database"], f["schema_contains"]), page=_PAGE,
                   key=f"etl_cov_{company}_{days}", tier="historical",
                   source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)")
         if cov.ok and not cov.empty:
@@ -282,7 +282,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                  "delta_color": "off",
                  "help": "Measured compute with no pipeline tag, at the configured rate."},
             ])
-        etl = run(etl_sql.etl_cost_by_pipeline(days, company), page=_PAGE,
+        etl = run(etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"]), page=_PAGE,
                   key=f"etl_pipe_{company}_{days}", tier="historical",
                   source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)")
         if guard(etl, "No tagged pipeline runs with attributed credits in this window — "
@@ -294,16 +294,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             edf["USD_PER_TIB"] = edf["CREDITS_PER_TIB"].map(lambda c: credits_to_usd(c, rate))
             edf["WASTE_USD"] = edf["RETRY_WASTE_CREDITS"].map(lambda c: credits_to_usd(c, rate))
             styled_table(
-                edf[["PIPELINE", "RUNS", "USD", "USD_PER_RUN", "USD_PER_M_ROWS", "USD_PER_TIB", "WASTE_USD"]],
+                edf[["PIPELINE", "RUNS", "USD", "USD_PER_RUN", "RUN_ID_CREDIT_PCT",
+                     "USD_PER_M_ROWS", "USD_PER_TIB", "WASTE_USD"]],
                 height=300, column_config={
                     "USD": st.column_config.NumberColumn("$", format="$%.2f"),
                     "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f"),
-                    "USD_PER_M_ROWS": st.column_config.NumberColumn("$/M rows", format="$%.4f"),
+                    "RUN_ID_CREDIT_PCT": st.column_config.NumberColumn("run_id %", format="%.0f%%",
+                                                                        help="Share of this pipeline's credits carrying a run_id — $/run divides only that share."),
+                    "USD_PER_M_ROWS": st.column_config.NumberColumn("$/M rows written", format="$%.4f"),
                     "USD_PER_TIB": st.column_config.NumberColumn("$/TiB", format="$%.2f"),
                     "WASTE_USD": st.column_config.NumberColumn("Failed-run $", format="$%.2f"),
                 })
-            result_caption(etl, note="Failed-run $ = attributed credits on non-SUCCESS runs "
-                                     "(retry/abort waste). Method = MEASURED (Admin → Metrics).")
+            result_caption(etl, note="Failed-run $ = attributed credits on non-SUCCESS statements, "
+                                     "run grain (retry/abort waste). Rows = write statements only. "
+                                     "Method = MEASURED (Admin → Metrics).")
 
     st.divider()
     st.markdown("**Task-graph pipeline costs**")

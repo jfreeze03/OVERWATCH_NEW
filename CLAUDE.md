@@ -36,7 +36,10 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 3. **Live-scan budgets** (`tests/test_perf_budgets.py`) count "ACCOUNT_USAGE"
    literals per hot page file. Lowering is welcome; raising needs a
    justification comment in the dict. Keep SQL in `app/data/*_sql.py`;
-   `unit_costs.py` budget is 0.
+   `unit_costs.py` budget is 0. The literal count is a lint proxy (v4.51):
+   the builder-level gate in `tests/test_v451_trust.py` renders each page's
+   referenced builders and pins the true reachable ACCOUNT_USAGE table set —
+   growing that set is the honest version of raising a budget.
 4. **Every SQL builder gets a canary** (`app/data/canary.py`, default args,
    sqlglot-parses) and **every created object a teardown mention**
    (`tests/test_teardown_coverage.py`). Teardown keeps ALL destructive lines
