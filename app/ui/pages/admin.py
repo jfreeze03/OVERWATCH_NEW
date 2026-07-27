@@ -22,7 +22,7 @@ from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import mart_sql
+from app.data import cost_sql, mart_sql
 from app.logic.formulas import safe_float
 from app.ui.components import (
     guard,
@@ -78,6 +78,8 @@ _EXPECTED_MIGRATIONS = {
     48: "FACT_OBJECT_COST_DAILY object-cost ledger (measured split + serverless arms)",
     49: "write-target attribution (OBJECTS_MODIFIED joins the split; residual "
         "= no-read-no-write compute)",
+    50: "one-pass object-cost loader (staged QAH + ACCESS_HISTORY) + read/write "
+        "arm split (production vs consumption shares)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -459,6 +461,21 @@ def _canary_tab() -> None:
         "Failures are logged to APP_ERROR_LOG."
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
+
+    with st.expander("Object-cost ledger reconciliation (additive contract)"):
+        st.caption(
+            "v4.52 (Codex #7): query arms + residual vs QUERY_ATTRIBUTION_HISTORY, "
+            "and each maintenance arm vs its source history, over a lag-safe window "
+            "ending 2 days ago. DELTA ~0 is the contract; drift is late-arriving "
+            "attribution (self-heals on the next daily load) or a loader defect."
+        )
+        if st.button("Run object-ledger recon", key="adm_objcost_recon"):
+            _oc_res = run(cost_sql.object_cost_recon(7), page=_PAGE, key="objcost_recon",
+                          tier="live", source="FACT_OBJECT_COST_DAILY vs QAH + serverless histories")
+            if guard(_oc_res, "Object-cost ledger has no rows yet (V048+ not deployed or first load pending)."):
+                styled_table(_oc_res.df, column_config={
+                    "DELTA_PCT": st.column_config.NumberColumn("Delta %", format="%.2f%%")})
+                result_caption(_oc_res)
 
     st.markdown(f"**{len(CANARIES)} registered statements**")
     compile_only = st.toggle(

@@ -312,10 +312,11 @@ WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 
 def object_cost_by_arm(days: int = 30, company: str = "ALL") -> str:
     """Object-cost breakdown by cost arm from FACT_OBJECT_COST_DAILY (V048,
-    additive; V049 adds write targets). QUERY_COMPUTE is measured compute+QAS
-    split equally across the base objects each query read or wrote; the rest
-    are direct per-object serverless credits (clustering / MV refresh /
-    serverless task / Snowpipe / search-opt)."""
+    additive; V050 splits query compute by role). QUERY_COMPUTE_WRITE is the
+    production share (building the object), QUERY_COMPUTE_READ the consumption
+    share — measured compute+QAS split equally across touched objects (legacy
+    QUERY_COMPUTE rows predate V050); the rest are direct per-object serverless
+    credits (clustering / MV refresh / serverless task / Snowpipe / search-opt)."""
     days = bounded_days(days, 400)
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
     where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)
@@ -341,8 +342,8 @@ def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25) -> st
 SELECT OBJECT_FQN,
        ANY_VALUE(OBJECT_DOMAIN) AS OBJECT_DOMAIN,
        ANY_VALUE(COMPANY) AS COMPANY,
-       ROUND(SUM(IFF(COST_ARM = 'QUERY_COMPUTE', CREDITS, 0)), 4) AS QUERY_CREDITS,
-       ROUND(SUM(IFF(COST_ARM NOT IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_RESIDUAL'), CREDITS, 0)), 4) AS MAINTENANCE_CREDITS,
+       ROUND(SUM(IFF(COST_ARM IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_READ', 'QUERY_COMPUTE_WRITE'), CREDITS, 0)), 4) AS QUERY_CREDITS,
+       ROUND(SUM(IFF(COST_ARM NOT IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_READ', 'QUERY_COMPUTE_WRITE', 'QUERY_COMPUTE_RESIDUAL'), CREDITS, 0)), 4) AS MAINTENANCE_CREDITS,
        ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS
 FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
 WHERE {where}
@@ -576,4 +577,74 @@ WHERE {where}
 GROUP BY QUERY_TYPE
 ORDER BY CS_CREDITS DESC
 LIMIT 12
+"""
+
+
+def object_cost_recon(days: int = 7) -> str:
+    """Object-ledger reconciliation (Codex #7 app slice, v4.52): the additive
+    contract, checked. Query arms + residual must equal QAH's credits for the
+    same window; each maintenance arm must equal its source history. Window is
+    lag-safe — it ends 2 days ago (QAH ~8h lag + the 06:45 daily load), so a
+    clean account reads DELTA ~0 and drift means late-arriving attribution or
+    a loader defect. Day attribution mirrors the loader exactly: per-query
+    MIN(START_TIME)::DATE for the query row, START_TIME::DATE + CREDITS_USED>0
+    for the maintenance arms."""
+    days = bounded_days(days, 14)
+    win = (f"BETWEEN DATEADD('day', -{days + 2}, CURRENT_DATE()) "
+           "AND DATEADD('day', -2, CURRENT_DATE())")
+    return f"""
+WITH qa AS (
+    SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
+           SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days + 3}, CURRENT_DATE())
+    GROUP BY QUERY_ID
+    HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
+),
+ledger AS (
+    SELECT COST_ARM, SUM(COALESCE(CREDITS, 0)) AS CREDITS
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY
+    WHERE DAY {win}
+    GROUP BY COST_ARM
+),
+checks AS (
+    SELECT 'QUERY_ARMS_VS_QAH' AS CHECK_NAME,
+           (SELECT SUM(CREDITS) FROM ledger
+             WHERE COST_ARM IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_READ',
+                                'QUERY_COMPUTE_WRITE', 'QUERY_COMPUTE_RESIDUAL')) AS LEDGER_CREDITS,
+           (SELECT SUM(CREDITS) FROM qa WHERE DAY {win}) AS SOURCE_CREDITS
+    UNION ALL
+    SELECT 'CLUSTERING',
+           (SELECT SUM(CREDITS) FROM ledger WHERE COST_ARM = 'CLUSTERING'),
+           (SELECT SUM(COALESCE(CREDITS_USED, 0)) FROM SNOWFLAKE.ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY
+             WHERE START_TIME::DATE {win} AND CREDITS_USED > 0)
+    UNION ALL
+    SELECT 'MV_REFRESH',
+           (SELECT SUM(CREDITS) FROM ledger WHERE COST_ARM = 'MV_REFRESH'),
+           (SELECT SUM(COALESCE(CREDITS_USED, 0)) FROM SNOWFLAKE.ACCOUNT_USAGE.MATERIALIZED_VIEW_REFRESH_HISTORY
+             WHERE START_TIME::DATE {win} AND CREDITS_USED > 0)
+    UNION ALL
+    SELECT 'SEARCH_OPT',
+           (SELECT SUM(CREDITS) FROM ledger WHERE COST_ARM = 'SEARCH_OPT'),
+           (SELECT SUM(COALESCE(CREDITS_USED, 0)) FROM SNOWFLAKE.ACCOUNT_USAGE.SEARCH_OPTIMIZATION_HISTORY
+             WHERE START_TIME::DATE {win} AND CREDITS_USED > 0)
+    UNION ALL
+    SELECT 'SERVERLESS_TASK',
+           (SELECT SUM(CREDITS) FROM ledger WHERE COST_ARM = 'SERVERLESS_TASK'),
+           (SELECT SUM(COALESCE(CREDITS_USED, 0)) FROM SNOWFLAKE.ACCOUNT_USAGE.SERVERLESS_TASK_HISTORY
+             WHERE START_TIME::DATE {win} AND CREDITS_USED > 0)
+    UNION ALL
+    SELECT 'SNOWPIPE',
+           (SELECT SUM(CREDITS) FROM ledger WHERE COST_ARM = 'SNOWPIPE'),
+           (SELECT SUM(COALESCE(CREDITS_USED, 0)) FROM SNOWFLAKE.ACCOUNT_USAGE.PIPE_USAGE_HISTORY
+             WHERE START_TIME::DATE {win} AND CREDITS_USED > 0)
+)
+SELECT CHECK_NAME,
+       ROUND(COALESCE(LEDGER_CREDITS, 0), 4) AS LEDGER_CREDITS,
+       ROUND(COALESCE(SOURCE_CREDITS, 0), 4) AS SOURCE_CREDITS,
+       ROUND(COALESCE(LEDGER_CREDITS, 0) - COALESCE(SOURCE_CREDITS, 0), 4) AS DELTA_CREDITS,
+       ROUND(100 * (COALESCE(LEDGER_CREDITS, 0) - COALESCE(SOURCE_CREDITS, 0))
+             / NULLIF(SOURCE_CREDITS, 0), 2) AS DELTA_PCT
+FROM checks
+ORDER BY CHECK_NAME
 """

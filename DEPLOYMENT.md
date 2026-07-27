@@ -55,6 +55,7 @@ snowflake/migrations/V046__storage_truth.sql
 snowflake/migrations/V047__pattern_cost_qas.sql
 snowflake/migrations/V048__object_cost_ledger.sql
 snowflake/migrations/V049__write_target_attribution.sql
+snowflake/migrations/V050__one_pass_read_write_arms.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

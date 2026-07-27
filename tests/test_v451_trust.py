@@ -66,7 +66,12 @@ _REACHABLE = {
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES", "GRANTS_TO_USERS",
         "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS", "USERS"),
     "app/ui/pages/alerts.py": (),
-    "app/ui/pages/admin.py": ("METERING_DAILY_HISTORY", "QUERY_HISTORY"),
+    # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
+    # maintenance-arm source histories, click-gated on the Canary tab.
+    "app/ui/pages/admin.py": (
+        "AUTOMATIC_CLUSTERING_HISTORY", "MATERIALIZED_VIEW_REFRESH_HISTORY",
+        "METERING_DAILY_HISTORY", "PIPE_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
+        "QUERY_HISTORY", "SEARCH_OPTIMIZATION_HISTORY", "SERVERLESS_TASK_HISTORY"),
 }
 
 

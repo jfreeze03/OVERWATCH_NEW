@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.52.0 — Tranche B: V050 one-pass loader + read/write arms (2026-07-27)
+
+Owner: "tranche B", after running the V048/V049 deploy. One migration for
+Joe: docs/handoff/DEPLOY_V050_20260727.md.
+
+- **V050 (forward-generated, byte-locked):** SP_LOAD_OBJECT_COST re-derived
+  from V049 with one enumerated edit — the two attribution inserts become a
+  staged design. QUERY_ATTRIBUTION_HISTORY is aggregated ONCE and
+  ACCESS_HISTORY flattened once per array into session-scoped temp stages
+  (V049 re-scanned QAH twice and flattened AH four times per run); both
+  inserts read the stages, so the split and the residual partition the same
+  staged credits exactly.
+- **Read/write arms (Codex #5):** every split share is labeled —
+  QUERY_COMPUTE_WRITE is the production share (the cost of building the
+  object; the V049 write-target work made it attributable, V050 makes it
+  visible), QUERY_COMPUTE_READ the consumption share. Write wins on a
+  read+write collapse so each object keeps one share; credits/N additivity
+  unchanged. Readers bucket legacy QUERY_COMPUTE rows (pre-reload days) with
+  both new arms; registry and captions updated.
+- **Riding fix:** credits for queries whose only touched object has a NULL
+  name used to VANISH — V049's residual guard lacked the objectName filter
+  the split had, so such queries counted "attributed" while the split had no
+  row for them. The unified stage routes them to QUERY_COMPUTE_RESIDUAL.
+- **Object-ledger reconciliation (Codex #7 app slice):** new
+  cost_sql.object_cost_recon — query arms + residual vs QAH, each
+  maintenance arm vs its source history, over a lag-safe window ending 2
+  days back; surfaced click-gated on Admin > Canary with DELTA columns.
+  Canary-registered; Admin's reachable-scan pin updated deliberately.
+- Lockstep: validate.sql floor and _EXPECTED_MIGRATIONS to 50; rebuild
+  bundle regenerated (02_migrations_V001_V050.sql); DEPLOYMENT/README
+  run-lists gain V050 (the v4.51 doc-floor lock enforces this now);
+  tests/test_v050_one_pass.py byte-compares the derivation and pins
+  one-pass scan counts, arm partition, residual anti-join, and reader
+  bucketing.
+
 ## 4.51.0 — Tranche A: outcome and audit trust (2026-07-27)
 
 Owner: "tranche A" — the app-only first tranche from the Codex adjudication

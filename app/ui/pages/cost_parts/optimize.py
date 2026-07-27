@@ -372,11 +372,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # ---- Object cost ledger ----------------------------------------------------
     st.markdown("**Object cost ledger (measured + maintenance)**")
     st.caption(
-        "Additive per-object credits (V048/V049): measured query compute+QAS split "
-        "equally across the base objects each query read or wrote, plus direct "
-        "clustering / MV refresh / serverless task / Snowpipe / search-opt. "
-        "QUERY_COMPUTE_RESIDUAL = credits for queries that neither read nor wrote "
-        "a base object."
+        "Additive per-object credits (V048–V050): measured query compute+QAS split "
+        "equally across touched objects, labeled by role — QUERY_COMPUTE_WRITE is "
+        "the cost of building the object (production), QUERY_COMPUTE_READ the cost "
+        "of reading it (consumption) — plus direct clustering / MV refresh / "
+        "serverless task / Snowpipe / search-opt. QUERY_COMPUTE_RESIDUAL = credits "
+        "for queries that neither read nor wrote a base object."
     )
     _oc = run(cost_sql.object_cost_by_arm(days, company), page=_PAGE,
               key=f"objcost_arm_{company}_{days}", tier="recent",
