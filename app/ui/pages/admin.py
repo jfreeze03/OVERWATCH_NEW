@@ -21,7 +21,7 @@ from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
-from app.data import cost_sql, mart_sql, ops_sql, security_sql
+from app.data import mart_sql, ops_sql, security_sql
 from app.logic import remediation
 from app.logic.formulas import safe_float
 from app.ui.components import (
@@ -320,100 +320,6 @@ def _observability_tab() -> None:
     if st.button("Refresh all cached data", key="adm_refresh"):
         bump_refresh_salt()
         st.rerun()
-
-
-def _org_spend_tab() -> None:
-    """Accounts Spend Summary from ORGANIZATION_USAGE (currency, per account)."""
-    st.caption(
-        "Org-level billed spend in currency per account and usage type — the same source "
-        "as Snowsight's Accounts Spend Summary (USAGE_IN_CURRENCY_DAILY, lags up to 24-72h)."
-    )
-    st.caption(_SCAN_NOTE)
-    res = run(cost_sql.org_usage_in_currency(30), page=_PAGE, key="org_spend",
-              tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY")
-    if not res.ok:
-        st.info(
-            "ORGANIZATION_USAGE is not visible to this role/account. Grant the "
-            "ORGANIZATION_USAGE_VIEWER application role (or enable org views on this account) "
-            f"to light this up. Detail: {res.error}"
-        )
-        return
-    if res.empty:
-        st.info("No org usage rows in the last 30 days.")
-        return
-    df = res.df.copy()
-    df["USAGE_IN_CURRENCY"] = pd.to_numeric(df["USAGE_IN_CURRENCY"], errors="coerce").fillna(0)
-    currency = str(df["CURRENCY"].dropna().iloc[0]) if df["CURRENCY"].notna().any() else "USD"
-    total = float(df["USAGE_IN_CURRENCY"].sum())
-    by_account = (df.groupby("ACCOUNT_NAME", as_index=False)["USAGE_IN_CURRENCY"].sum()
-                  .sort_values("USAGE_IN_CURRENCY", ascending=False))
-    kpi_row([
-        {"label": f"Org spend (30d, {currency})", "value": f"{total:,.0f}",
-         "help": "Billed currency across every account in the organization."},
-        {"label": "Accounts", "value": f"{by_account['ACCOUNT_NAME'].nunique()}"},
-        {"label": "Largest account",
-         "value": str(by_account.iloc[0]["ACCOUNT_NAME"]) if not by_account.empty else "n/a",
-         "delta": f"{float(by_account.iloc[0]['USAGE_IN_CURRENCY']):,.0f} {currency}" if not by_account.empty else None,
-         "delta_color": "off"},
-    ])
-    from app.ui import charts as _charts
-
-    _charts.daily_stacked_usd(
-        df.rename(columns={"USAGE_IN_CURRENCY": "USD"}), "DAY", "ACCOUNT_NAME", "USD")
-    st.caption(f"Amounts are {currency} from the org rate card, not credits x app rate.")
-    pivot = (df.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
-             .sort_values(["ACCOUNT_NAME", "USAGE_IN_CURRENCY"], ascending=[True, False]))
-    st.dataframe(pivot, hide_index=True, use_container_width=True,
-                 column_config={"USAGE_IN_CURRENCY": st.column_config.NumberColumn(
-                     f"Spend ({currency})", format="%.2f")})
-    result_caption(res)
-
-    st.divider()
-    st.markdown("**Billing truth vs app model (this account)**")
-    st.caption(
-        "Org rate-card dollars for THIS account vs the app's credits x configured rate. "
-        "The compute bucket should track closely; the residual is rate-card reality "
-        "(storage, transfer, serverless, discounts), not a bug in either number."
-    )
-    org_m = run(cost_sql.org_account_month_usd(2), page=_PAGE, key="org_month_this",
-                tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account)")
-    model_m = run(mart_sql.fact_daily_spend(70), page=_PAGE, key="fact_daily_45",
-                  tier="recent", source="FACT_METERING_DAILY")
-    if not org_m.usable():
-        st.info("Needs ORGANIZATION_USAGE visibility (see the note above).")
-    elif not model_m.usable():
-        st.info("Needs the daily metering facts (V002) for the model side.")
-    else:
-        rate_now = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
-        mdf = model_m.df.copy()
-        mdf["MONTH"] = pd.to_datetime(mdf["DAY"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-        model_by_month = mdf.groupby("MONTH")["CREDITS_BILLED"].sum() * rate_now
-        odf = org_m.df.copy()
-        odf["MONTH"] = pd.to_datetime(odf["MONTH"], errors="coerce")
-        rows_rc = []
-        for _, orow in odf.iterrows():
-            month = orow["MONTH"]
-            model_usd = float(model_by_month.get(month, 0.0))
-            org_usd = safe_float(orow.get("COMPUTE_USD"))
-            drift = (100.0 * (model_usd - org_usd) / org_usd) if org_usd else None
-            rows_rc.append({
-                "MONTH": month.strftime("%Y-%m") if pd.notna(month) else "?",
-                "ORG_COMPUTE_USD": round(org_usd, 2),
-                "APP_MODEL_USD": round(model_usd, 2),
-                "DELTA_PCT": round(drift, 2) if drift is not None else None,
-                "ORG_AI_USD": round(safe_float(orow.get("AI_USD")), 2),
-                "ORG_STORAGE_USD": round(safe_float(orow.get("STORAGE_USD")), 2),
-                "ORG_TRANSFER_USD": round(safe_float(orow.get("TRANSFER_USD")), 2),
-                "ORG_ADJUSTMENT_USD": round(safe_float(orow.get("ADJUSTMENT_USD")), 2),
-                "ORG_TOTAL_USD": round(safe_float(orow.get("TOTAL_USD")), 2),
-            })
-        styled_table(pd.DataFrame(rows_rc), column_config={
-            "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%")})
-        st.caption(
-            f"Model = FACT_METERING_DAILY billed credits x ${rate_now:.2f} (SETTINGS). The current "
-            "month is partial on both sides; judge the prior month. A steady gap means the "
-            "contract rate in SETTINGS no longer matches the rate card — fix it on Settings."
-        )
 
 
 _EMERGENCY_CATALOG = """
@@ -882,7 +788,7 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
     _context_section()
     section = lazy_sections(
-        ["Settings", "Emergency", "Migrations & freshness", "Metrics", "App self-cost", "Org spend",
+        ["Settings", "Emergency", "Migrations & freshness", "Metrics", "App self-cost",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     if section == "Settings":
         _settings_tab(is_operator)
@@ -894,8 +800,6 @@ def render() -> None:
         _metric_registry_tab()
     elif section == "App self-cost":
         _self_cost_tab()
-    elif section == "Org spend":
-        _org_spend_tab()
     elif section == "Performance":
         _performance_tab()
     elif section == "Canary":

@@ -8,7 +8,7 @@ Two numbers describe the same spend and they are produced completely differently
 
 They must agree, but they will never be byte-equal: the org rate card carries
 contract discounts, per-RATING_TYPE pricing and adjustments, while the app model
-applies a configured flat rate. cost_sql.org_rate_card says so outright — the
+applies a configured flat rate. cost_sql.org_account_month_usd says so outright — the
 residual "is rate-card reality, not a bug in either number." So reconciliation is
 a TOLERANCE question, and the tolerance is what these locks are really about.
 

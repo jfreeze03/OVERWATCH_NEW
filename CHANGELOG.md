@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.48.0 — Org spend moves to Cost & Contract (2026-07-15)
+
+Owner: "move them." Admin's Org spend tab was the page's one section about
+business cost rather than the app's own operation; its placement dated to a
+2026-07-07 credential-tracking commit and was argued nowhere. Three references
+already believed the panels were on Cost (formulas.py F3, two ai_chargeback
+captions), and the BUDGET alert family deep-links to Contract & Forecast.
+
+- **Rate-card reconciliation** ("Billing truth vs app model") now renders
+  directly under the year-projection strip on Contract & Forecast — it audits
+  the CREDIT_PRICE_USD that the projection, pacing, steering, and renewal
+  planner all price with, so drift shows up before the numbers it distorts.
+  Prices from the settings dict cost.py already passes (Admin's copy re-called
+  load_settings); the "fix it" pointer now says Admin → Settings.
+- **Org accounts spend** (Snowsight's Accounts Spend Summary equivalent) sits
+  below the contract-balance billing-truth panel — same ORGANIZATION_USAGE
+  source family, same degrade path when org views aren't granted, and
+  Contract & Forecast is the one Cost section that is structurally
+  company-agnostic, matching org-grain data.
+- Admin drops the section (eight app-operation sections remain); run() keys
+  are telemetry-only so caches are untouched; no perf-budget movement (both
+  files unbudgeted, and ORGANIZATION_USAGE never counted anyway).
+- Drift paid: formulas.py F3 now names the real surface (it claimed "the Cost
+  rate-card reconciliation panel" since 2026-07-14, before the panel was
+  there); test_p4_org_reconciliation cited a nonexistent cost_sql.org_rate_card
+  (the language lives in org_account_month_usd). New
+  tests/test_org_spend_placement.py pins the placement, the settings-dict
+  pricing, the audit-before-consumers ordering, and zero new ACCOUNT_USAGE
+  literals on contract.py.
+
 ## 4.47.0 — V049: write-target attribution (2026-07-15)
 
 Owner: "let's do both" — deploy corrected V048 and build V049.
