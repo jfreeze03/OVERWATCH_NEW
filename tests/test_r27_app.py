@@ -62,7 +62,10 @@ def test_bulk_ack_is_two_statements_not_2n():
     assert "EVENT_ID IN (" in alerts
     bulk = alerts.split("Bulk acknowledge / resolve", 1)[1]
     assert "for label in chosen" not in bulk                         # the loop is gone
-    assert "_bulk_lifecycle_sql([options[c] for c in chosen]" in bulk
+    # v4.53: proc-first (SP_ALERT_LIFECYCLE, one atomic call); the set-based
+    # 2-statement pair survives as the pre-V051 legacy fallback.
+    assert "_bulk_lifecycle_sql(_bulk_ids" in bulk
+    assert "SP_ALERT_LIFECYCLE" in bulk and "execute_action(call, [upd, aud]" in bulk
 
 
 def test_admin_gains_self_check_error_grouping_settings_hygiene():

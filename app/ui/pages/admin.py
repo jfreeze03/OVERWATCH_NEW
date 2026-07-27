@@ -80,6 +80,8 @@ _EXPECTED_MIGRATIONS = {
         "= no-read-no-write compute)",
     50: "one-pass object-cost loader (staged QAH + ACCESS_HISTORY) + read/write "
         "arm split (production vs consumption shares)",
+    51: "action layer: transactional alert-lifecycle / remediation / verify-savings "
+        "/ action-update procs + idempotency intent table + typed savings link",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

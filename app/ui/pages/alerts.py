@@ -14,8 +14,8 @@ import streamlit as st
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.ai import cortex_complete
 from app.core.errors import safe_page
-from app.core.identity import identity_sql, viewer_name
-from app.core.query import execute_statement, run
+from app.core.identity import idempotency_key, identity_sql, viewer_name
+from app.core.query import execute_action, execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
@@ -398,19 +398,16 @@ def _open_events_section(events, is_operator: bool) -> None:
             if is_operator:
                 confirm = st.text_input(f"Type {action} to confirm execution", key=f"alert_confirm_{event_id[:8]}")
                 if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
-                    ok_all, messages = True, []
-                    for stmt in [s for s in sql_script.split(";") if s.strip()]:
-                        ok, msg = execute_statement(stmt + ";", page=_PAGE)
-                        if not ok and "RESOLUTION_KIND" in msg:
-                            # Pre-V021 deployment: retry the legacy statement.
-                            legacy = _lifecycle_sql(event_id, action, note)
-                            ok, msg = execute_statement(
-                                legacy.split(";")[0] + ";", page=_PAGE)
-                            msg += (" (resolution kind not stored — an admin can apply the pending schema update on Admin → Migrations & freshness)")
-                        ok_all = ok_all and ok
-                        messages.append(msg)
-                    notify(ok_all, " / ".join(messages))
-                    if ok_all:
+                    # V051: one atomic proc (update + audit in a transaction);
+                    # the pre-V051 legacy path is the split script, unchanged.
+                    call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                            f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
+                            f"{sql_literal(kind)}, {identity_sql()}, "
+                            f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
+                    legacy = [s + ";" for s in sql_script.split(";") if s.strip()]
+                    ok, msg = execute_action(call, legacy, page=_PAGE)
+                    notify(ok, msg)
+                    if ok:
                         from app.ui.components import log_ui_event
                         log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
                                      page=_PAGE)
@@ -440,15 +437,17 @@ def _open_events_section(events, is_operator: bool) -> None:
                 key="alert_bulk_confirm")
             if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec", type="primary",
                          disabled=(not chosen or confirm_b != f"BULK {b_action}")):
-                # r27 #12: 2 statements for N events (was 2N in a loop)
-                upd, aud = _bulk_lifecycle_sql([options[c] for c in chosen], b_action, b_note, b_kind)
-                ok_u, msg_u = execute_statement(upd, page=_PAGE)
-                ok_a, msg_a = execute_statement(aud, page=_PAGE) if ok_u else (False, "skipped (update failed)")
-                notify(ok_u and ok_a,
-                       f"Bulk {b_action}: {len(chosen)} event(s) in one statement; "
-                       + ("audit rows written." if ok_a else f"AUDIT FAILED: {msg_a} — events updated; "
-                          "re-run or record manually."))
-                if ok_u and ok_a:
+                # V051: one atomic proc for the whole selection; the
+                # pre-V051 legacy path is the set-based 2-statement pair.
+                _bulk_ids = [options[c] for c in chosen]
+                upd, aud = _bulk_lifecycle_sql(_bulk_ids, b_action, b_note, b_kind)
+                call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                        f"{sql_literal(','.join(str(e) for e in _bulk_ids))}, {sql_literal(b_action)}, "
+                        f"{sql_literal(b_note)}, {sql_literal(b_kind)}, {identity_sql()}, "
+                        f"{sql_literal(idempotency_key('ALERT_BULK_' + b_action, ''.join(_bulk_ids)))})")
+                ok_u, msg_u = execute_action(call, [upd, aud], page=_PAGE)
+                notify(ok_u, f"Bulk {b_action}: {len(chosen)} event(s) — {msg_u}")
+                if ok_u:
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
                                  page=_PAGE)

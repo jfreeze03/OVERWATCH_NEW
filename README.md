@@ -117,6 +117,7 @@ snowflake/migrations/V047__pattern_cost_qas.sql -- pattern-cost mart includes Qu
 snowflake/migrations/V048__object_cost_ledger.sql -- FACT_OBJECT_COST_DAILY object-cost ledger (measured split + serverless arms)
 snowflake/migrations/V049__write_target_attribution.sql -- write-target attribution (OBJECTS_MODIFIED joins the split; residual = no-read-no-write compute)
 snowflake/migrations/V050__one_pass_read_write_arms.sql -- one-pass object-cost loader + read/write arm split
+snowflake/migrations/V051__action_layer.sql -- atomic alert-lifecycle proc + idempotency (scoped slice)
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```

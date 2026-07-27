@@ -100,7 +100,9 @@ def test_bulk_resolve_requires_a_kind():
     body = _ALERTS.split("Bulk acknowledge / resolve", 1)[1]
     assert 'if b_action == "RESOLVE":' in body
     assert "alert_bulk_kind" in body and "RESOLUTION_KINDS" in body
-    assert "_bulk_lifecycle_sql([options[c] for c in chosen], b_action, b_note, b_kind)" in body
+    # v4.53: the ids are extracted to _bulk_ids for the proc CALL; the set-based
+    # 2-statement pair (built here) survives as the pre-V051 legacy fallback.
+    assert "_bulk_lifecycle_sql(_bulk_ids, b_action, b_note, b_kind)" in body
 
 
 def test_reverse_hint_names_the_evidence_not_a_guess():

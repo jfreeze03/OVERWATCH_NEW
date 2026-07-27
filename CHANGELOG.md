@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.53.0 — Tranche C: action layer (scoped after review) (2026-07-27)
+
+Owner: "tranche C" → after adversarial review, "ship the correct slice". A
+design-phase subagent auto-wrote a full 4-proc action layer; it was NOT
+committed. Three independent verifiers reviewed it and found, in procs that no
+app path called, an owner-privileged SQL injection (a stored PROOF_SQL built by
+string-concatenating a target, later run under EXECUTE AS OWNER) and an
+over-broad allow-list (ALTER USER / ACCOUNT / SESSION). The owner scoped V051
+down to the one wired, verified path.
+
+- **V051 (hand-authored — re-derives nothing, so no generator):**
+  `SP_ALERT_LIFECYCLE` turns alert ack/resolve into ONE set-based transaction
+  (audit + update), replacing the app's split UPDATE-then-audit that could
+  partially succeed; `OW_ACTION_INTENTS` dedups a re-submitted action by key.
+- **Draft bugs fixed in the shipped proc:** audit now runs BEFORE the update on
+  the same pre-state filter (the draft audited by post-update status, spuriously
+  re-auditing already-ACK/RESOLVED events); `SPLIT_TO_TABLE` values are TRIM-ed;
+  an empty/NULL idempotency key returns BLOCKED instead of hitting a PK
+  violation; the `AT` reserved-keyword column is `CREATED_AT`.
+- **Idempotency stated honestly:** sequential-retry dedup only — Snowflake
+  PRIMARY KEY is informational (no lock), and the alert transitions are
+  idempotent anyway; full concurrency control was judged over-engineering for
+  the ~2-DBA writer population.
+- **App wiring (proc-first, legacy fallback):** `execute_action()` in query.py
+  CALLs the proc and reads its OK/DUPLICATE/BLOCKED verdict, falling back to the
+  v4.52 statements if the proc isn't deployed; `idempotency_key()` in
+  identity.py keys on the testable `account_now()`. Alert single + bulk
+  lifecycle route through it. Nothing changes behavior until V051 is applied.
+- **Deferred (their own hardened round):** the remediation / verify-savings /
+  action-queue procs + the typed savings link — they need app wiring, an
+  identifier-validated (not concatenated) proof, an allow-list narrowed to
+  warehouse/pipe/task/cancel, and per-proc row-affected checks. See the design
+  doc. The v4.51 caption fixes already removed the false verifier-settles
+  promises, so nothing in the app over-claims in the meantime.
+- Lockstep: validate.sql + _EXPECTED_MIGRATIONS to 51; rebuild bundle
+  V001_V051; DEPLOYMENT/README run-lists; test_v051_action_layer.py pins the
+  slim shape AND that the deferred injection-bearing procs did not ship. Deploy
+  runbook: docs/handoff/DEPLOY_V051_20260727.md.
+
 ## 4.52.0 — Tranche B: V050 one-pass loader + read/write arms (2026-07-27)
 
 Owner: "tranche B", after running the V048/V049 deploy. One migration for

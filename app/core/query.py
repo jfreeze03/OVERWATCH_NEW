@@ -641,3 +641,49 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement: {sql[:200]}")
         return False, format_snowflake_error(exc)
+
+
+_PROC_MISSING = ("does not exist", "unknown function", "invalid identifier",
+                 "unknown user-defined function")
+
+
+def _legacy_action(fallback: list[str], *, page: str) -> tuple[bool, str]:
+    results, all_ok = [], True
+    for stmt in fallback:
+        s = stmt.strip()
+        if not s:
+            continue
+        o, m = execute_statement(s if s.endswith(";") else s + ";", page=page)
+        all_ok = all_ok and o
+        results.append(m)
+    return all_ok, "(pre-V051 legacy path) " + " / ".join(results)
+
+
+def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bool, str]:
+    """Transactional action layer (V051), proc-first with a legacy fallback.
+
+    CALL the atomic proc and read its RETURN string; if the proc is not
+    deployed yet (pre-V051), run the legacy statements exactly as v4.52 did and
+    label the path. The proc's own verdicts are honoured: 'OK...'/'VERIFIED...'
+    succeed, 'DUPLICATE...' is an already-done success (idempotency), 'BLOCKED...'
+    is a refusal. This is the single seam every operator action routes through,
+    so the V051 rollout is one migration — not a code-flag flip.
+    """
+    ok, why = _statement_allowed(call_sql)
+    if not ok:
+        return False, why
+    try:
+        session = get_session()
+        apply_query_tag(session, build_query_tag(page=page, tier="write"))
+        rows = session.sql(call_sql).collect()
+        verdict = str(rows[0][0]) if rows and rows[0] else "OK"
+        _bump_refresh(call_sql)
+        if verdict.startswith("BLOCKED"):
+            return False, verdict
+        # DUPLICATE = the idempotency key already ran = the action is done.
+        return True, verdict
+    except Exception as exc:
+        if any(m in format_snowflake_error(exc).lower() for m in _PROC_MISSING):
+            return _legacy_action(fallback, page=page)   # pre-V051 deployment
+        record_error(page, exc, context=f"execute_action: {call_sql[:200]}")
+        return False, format_snowflake_error(exc)

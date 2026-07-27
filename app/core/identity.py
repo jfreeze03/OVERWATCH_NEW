@@ -31,3 +31,19 @@ def identity_sql() -> str:
     """SQL expression for the viewing user, safe in any runtime."""
     v = viewer_name()
     return sql_literal(v) if v else "CURRENT_USER()"
+
+
+def idempotency_key(kind: str, payload: str) -> str:
+    """Deterministic idempotency key for a V051 action proc.
+
+    sha1 of (kind, payload, viewer, minute-bucket): a double-click inside the
+    same minute is a DUPLICATE the proc no-ops; the same action a minute later
+    is a new intent. account_now() (account time, testable) drives the bucket.
+    """
+    import hashlib
+
+    from app.logic.formulas import account_now
+
+    minute = account_now().strftime("%Y%m%d%H%M")
+    raw = f"{kind}|{payload}|{viewer_name()}|{minute}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:32]
