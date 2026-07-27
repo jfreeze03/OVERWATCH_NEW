@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.55.0"
+APP_VERSION = "4.56.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -59,7 +59,8 @@ DEFAULT_SETTINGS = {
     "SCORE_PTS_SPILL_PER_GB": "0.5",
     "SCORE_PTS_PER_STALE_SOURCE": "4",
     "SCORE_PTS_PER_OPEN_ACTION": "1.5",
-    # Fact retention (SP_PURGE_FACTS, monthly). Floors in the proc: 90/180/30.
+    # Fact retention (SP_PURGE_FACTS, monthly). Floors in the proc: 90/365/30
+    # (daily floor raised 180->365 in V054 so long windows always have history).
     "FACT_RETENTION_DAYS_HOURLY": "400",
     "FACT_RETENTION_DAYS_DAILY": "800",
     "ERROR_LOG_RETENTION_DAYS": "180",

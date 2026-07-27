@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.56.0 — exec-board long windows actually read long history (2026-07-27)
+
+Owner: ran a fresh Codex analysis, "review and make recommendations" → after
+adjudication, "Build V054." The headline was a CONFIRMED regression I shipped in
+V052: the Executive Board advertised 180/365-day windows but read only 90.
+
+- **The bug (Codex r29 #1).** V052 added 180 and 365 to the exec-board loader's
+  `windows` CTE, but the three source CTEs it reads from
+  (`wh_daily`/`qh_daily`/`tk_daily`) still capped at 90 days
+  (`WHERE DAY >= DATEADD('day', -90, CURRENT_DATE())`). The window join reads
+  those already-capped frames, so the 180/365 pills computed over only 90 days —
+  identical to the 90-day row. A silent lie; I re-derived only the windows CTE in
+  V052 and never checked the source horizon the windows read from.
+- **The fix (V054).** Re-derive `SP_REFRESH_EXEC_BOARD` from V052 with the three
+  source horizons `-90 → -365` (= max `DAY_WINDOW_OPTIONS`). Sources are
+  `FACT_*_DAILY` (mart, long retention), so this is history, not a live rescan;
+  the aggregate-once/join-small shape is unchanged. The migration re-`CALL`s the
+  board so the pills carry real data now.
+- **Companion (Codex r29 #20).** Raise the `SP_PURGE_FACTS` daily-fact retention
+  floor `180 → 365` so retained history always covers the widest advertised
+  window (a runtime no-op under the default 800-day setting; it only tightens the
+  guarantee). New STANDING CI invariant
+  (`tests/test_v054_window_history.py`): every effective exec-board source
+  horizon AND the retention floor must be ≥ `max(DAY_WINDOW_OPTIONS)` — the check
+  that would have caught #1 (V052's test compared window *names* only).
+- **Codex r29 #7 declined — already fixed.** The QH watermark advance the
+  reviewer flagged (V041) was re-derived in V042 (r22 #7) to gate the watermark
+  MERGE behind an `ok` flag set only on the extract arm's COMMIT; that reviewer
+  cited the superseded V041 body. The rest of r29 is triaged in
+  `docs/reviews/CODEX_REVIEW_ADJUDICATION_r29_2026-07-27.md`.
+- Process: adversarial multi-lens re-verification before ship (the discipline
+  that catches the silent kind). New reusable `outputs/gen_rebuild_bundle.py`
+  regenerates the rebuild bundle. Lockstep to 54; bundle `V001_V054`; deploy
+  runbook `DEPLOY_V054_20260727.md`.
+
 ## 4.55.0 — action layer: procs dropped, P1-A closed safely (2026-07-27)
 
 Owner: "build V053a" -> after three review rounds, "drop the proc; close P1-A

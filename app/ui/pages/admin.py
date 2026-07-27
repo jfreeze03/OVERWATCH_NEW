@@ -86,6 +86,8 @@ _EXPECTED_MIGRATIONS = {
         "live scans stay capped at 90",
     53: "typed savings link (FINDING_TYPE/TARGET_OBJECT) + monthly verifier "
         "re-derived to select app-booked rows (P1-A); no proc",
+    54: "exec-board 180/365 windows read full history (V052 capped their source "
+        "CTEs at 90); daily-fact retention floor raised 180->365",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
