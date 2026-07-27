@@ -1,5 +1,48 @@
 # Changelog
 
+## 4.50.0 — five cross-page moves + Cortex real names (2026-07-15)
+
+Owner: "do all 5" (the v4.49 deferred queue) + first/last names on the Cortex
+user attribution.
+
+- **Storage → Spend & Attribution.** Per-database calendar-month storage and
+  the account tier split leave 'Chargeback & AI' (storage is neither) for a
+  labeled Storage section beside Spend; the cortex tab slims to
+  _cortex_spend_tab. The v4.46 STORAGE_USAGE live-fallback literal moves with
+  it (ai_chargeback budget 5→4, spend 9→10, same probe-gated non-first-paint
+  scan).
+- **Query-tag governance → Chargeback & AI.** Its own caption always said why
+  it exists ("chargeback precision is capped by tag coverage") — now it sits
+  with the chargeback it gates.
+- **Task graphs ($) → Unit costs.** $/run per pipeline joins the ETL panel on
+  the same QUERY_ATTRIBUTION_HISTORY basis; zero ACCOUNT_USAGE literals moved
+  (unit_costs budget stays 0). Task MONITORING — the v4.45 owner-correction's
+  subject — stays on Operations (Tasks pill, failures, RCA); the v4.45 lock
+  updated to say exactly that.
+- **Incident lifecycle KPIs → Alerts > History.** The 90d medians (MTTA/MTTR
+  incident grain, reopen, alerts/incident, change-correlated) read beside the
+  alert-grain MTTA/MTTR; Control Room keeps the one number that changes
+  overnight (Open incidents) with a pointer.
+- **Emergency console → Operations.** The lever generator, catalogue, and
+  running-query kill switch land as an Operations Emergency pill — the
+  subjects (warehouses, queries, pipes, tasks) are that page's sections, and
+  executions audit to REMEDIATION_LOG under the Operations page name. Admin
+  is now purely app-plumbing (7 sections). RUNBOOK §10 heading updated; the
+  stale "suspended by resource monitor" runbook entry retired outright
+  (OVERWATCH_RM died in v4.45).
+- **Cortex attribution shows people (owner ask).** USERS.FIRST_NAME/LAST_NAME
+  ride the rollup join (grouped, grain unchanged); the cost-by-user chart
+  plots DISPLAY_NAME — "First Last" with a USER_NAME fallback for service
+  accounts/dropped users, never blank, never invented — and the User
+  attribution detail gains FIRST_NAME/LAST_NAME between USER_NAME and EMAIL.
+  The v4.34.2 live-first + exact emails/timestamps decision is intact
+  (amended by the owner to add names); locks pin the SQL shape and the
+  fallback behavior.
+- Locks updated with what they pin: v4.45 restore (pill list), wave2
+  adoptions (graphs mart-first followed the move), codex r24 (kill-switch
+  profile links), v016 history (the fragment moved), V046 (tiers wiring),
+  design-system (nothing-lost list gains _storage_tab/_cortex_spend_tab).
+
 ## 4.49.0 — label truth pass + section coherence (2026-07-15)
 
 Owner: "check for other mislabels across the board... make sure each section

@@ -65,8 +65,8 @@ _LIVE_SCAN_BUDGETS = {
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
-    "app/ui/pages/cost_parts/spend.py": 9,      # +1 v4.30: CS-by-QUERY_TYPE drill inside the ELEVATED branch (COST_DB recon R6)
-    "app/ui/pages/cost_parts/ai_chargeback.py": 5,  # +1 v4.46 (audit F1b/R3): account storage-tier live fallback (STORAGE_USAGE) under the fact-first read, probe-gated, non-first-paint
+    "app/ui/pages/cost_parts/spend.py": 10,     # +1 v4.30: CS-by-QUERY_TYPE drill (COST_DB recon R6); +1 v4.50: the v4.46 storage-tier live fallback moved here with the storage panels (probe-gated, non-first-paint, unchanged)
+    "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # -1 v4.50: the storage-tier live fallback moved to spend.py with the storage panels
     "app/ui/pages/operations.py": 22,  # restored v4.45 (owner correction: task monitoring stays; the r26 cut had misread "resource monitor")
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)

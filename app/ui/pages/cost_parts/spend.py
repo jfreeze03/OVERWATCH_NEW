@@ -8,6 +8,7 @@ and says so; estimated and verified savings never mix.
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from app.core.query import run
@@ -225,3 +226,105 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:
         st.caption("Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
+
+
+def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
+    """Account-wide storage by tier (F1b/R3, V046). Table/stage/fail-safe bill
+    at the standard rate; hybrid and archive cool/cold at their own SETTINGS
+    rates. Account grain — STORAGE_USAGE carries no per-database split for these
+    tiers, so the company filter does not narrow it."""
+    st.markdown("**Account storage by tier (billing basis)**")
+    res = run(cost_sql.storage_account_truth(days), page=_PAGE,
+              key=f"stor_acct_{days}", tier="recent",
+              source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
+    if not res.ok or res.empty:
+        res = run(cost_sql.storage_account_truth_live(days), page=_PAGE,
+                  key=f"stor_acct_live_{days}", tier="historical",
+                  source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
+    if not res.ok:
+        st.caption("Account storage tiers need migration V046 "
+                   "(FACT_STORAGE_ACCOUNT_DAILY) or STORAGE_USAGE access — an admin "
+                   "can apply it on Admin → Migrations & freshness.")
+        return
+    if res.empty:
+        st.caption("No account storage rows in this window yet.")
+        return
+    row = res.df.iloc[0]
+    std = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+    stage_rate = safe_float(settings.get("STORAGE_STAGE_USD_PER_TB_MONTH"), std)
+    hybrid_rate = safe_float(settings.get("STORAGE_HYBRID_USD_PER_TB_MONTH"), 348.16)
+    cool_rate = safe_float(settings.get("STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH"), 4.0)
+    cold_rate = safe_float(settings.get("STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH"), 1.0)
+    tiers = [
+        ("Table", "TABLE_BYTES", std),
+        ("Stage", "STAGE_BYTES", stage_rate),
+        ("Fail-safe", "FAILSAFE_BYTES", std),
+        ("Hybrid tables", "HYBRID_BYTES", hybrid_rate),
+        ("Archive cool", "ARCHIVE_COOL_BYTES", cool_rate),
+        ("Archive cold", "ARCHIVE_COLD_BYTES", cold_rate),
+    ]
+    rows = []
+    for label, col, rate in tiers:
+        tb = safe_float(row.get(col)) / (1024**4)
+        rows.append({"Tier": label, "TiB": round(tb, 4),
+                     "$/TiB/mo": round(rate, 2), "USD/mo": round(tb * rate, 2)})
+    tdf = pd.DataFrame(rows)
+    total_usd = float(tdf["USD/mo"].sum())
+    kpi_row([{"label": "Account storage (all tiers)", "value": f"{format_usd(total_usd)}/mo",
+              "help": "Avg of daily bytes over the window x per-tier SETTINGS rates. "
+                      "Estimate — STORAGE_USAGE is Snowflake's own approximation and won't "
+                      "match the invoice exactly; the org rate-card panel on Contract & Forecast is billing truth. "
+                      "Stage/hybrid/archive are account-wide (no per-database split)."}])
+    shown = tdf[tdf["USD/mo"] > 0]
+    if not shown.empty:
+        charts.bar_usd(shown.sort_values("USD/mo", ascending=False), "Tier", "USD/mo",
+                       title="Storage $/month by tier (est.)")
+    styled_table(tdf, height=220)
+    result_caption(res)
+
+
+def _storage_tab(company: str, days: int, settings: dict) -> None:
+    """Storage economics (moved from Chargeback & AI, v4.50): per-database
+    calendar-month billing basis plus the account tier split. Spend-lens
+    material — storage is neither chargeback nor AI."""
+    st.markdown("**Storage by database**")
+    # Item 7 (2026-07-14): storage bills on the CALENDAR-month average of
+    # daily bytes, so the card shows month-to-date (excl. today's partial
+    # day) with the prior completed month for trend — not a trailing-N
+    # window. Fact-first with a live DATABASE_STORAGE_USAGE_HISTORY fallback.
+    _db = st.session_state.get("flt_database", "")
+    res = run(cost_sql.storage_by_database_calendar(company, _db, prior=False), page=_PAGE,
+              key=f"storage_mtd_{company}", tier="historical",
+              source="FACT_STORAGE_DAILY (MTD daily-average, billing basis)")
+    if not res.ok or res.empty:
+        res = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=False), page=_PAGE,
+                  key=f"storage_mtd_live_{company}", tier="historical",
+                  source="DATABASE_STORAGE_USAGE_HISTORY (MTD daily-average, live)")
+    if guard(res, "No storage rows for this scope this month."):
+        df = res.df.copy()
+        rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+        df["TiB"] = (df["DB_BYTES"].map(safe_float) + df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
+        df["USD_MONTH"] = df["TiB"] * rate_tb
+        mtd_tib = float(df["TiB"].sum())
+        pri = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
+                  key=f"storage_prior_{company}", tier="historical",
+                  source="FACT_STORAGE_DAILY (prior full month daily-average)", probe=True)
+        prior_tib = 0.0
+        if pri.ok and not pri.empty:
+            prior_tib = float(((pri.df["DB_BYTES"].map(safe_float)
+                                + pri.df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)).sum())
+        mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib > 0 else None
+        kpi_row([
+            {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
+             "delta": f"~{format_usd(mtd_tib * rate_tb)}/mo",
+             "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
+                     f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
+                     "basis (binary TiB). Estimate; the org rate-card panel on Contract & Forecast is billing truth."},
+            {"label": "Prior full month", "value": f"{prior_tib:,.2f} TiB",
+             "delta": (f"{mom:+.1f}% MoM" if mom is not None else "no prior data"),
+             "delta_color": "off"},
+        ])
+        charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
+                       "DATABASE_NAME", "USD_MONTH", title="$/month by database (MTD est.)")
+        result_caption(res)
+    _account_storage_tiers(company, days, settings)

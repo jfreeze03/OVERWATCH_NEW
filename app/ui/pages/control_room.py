@@ -288,20 +288,15 @@ def render() -> None:
                   source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
     if inc_met.usable():
         im = inc_met.df.iloc[0]
+        # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
+        # change-correlated) moved to Alerts > History — retrospective process
+        # health, not morning triage. Only the number that changes overnight
+        # stays on this screen.
         kpi_row([
             {"label": "Open incidents", "value": f"{safe_float(im.get('OPEN_NOW')):,.0f}",
-             "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok"},
-            {"label": "MTTA / MTTR (90d)",
-             "value": f"{safe_float(im.get('MTTA_MIN')):,.0f} / {safe_float(im.get('MTTR_MIN')):,.0f} min",
-             "help": "Detected -> acknowledged / resolved, incident grain (alert-grain lives on Alerts -> History)."},
-            {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
-             "help": "Share of closed incidents reopened within 14 days (owner-set window)."},
-            {"label": "Alerts / incident", "value": f"{safe_float(im.get('COMPRESSION')):,.1f}",
-             "help": "How many alerts each incident absorbs — higher means storms "
-                     "compress into one object instead of many pages."},
-            {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
-             "help": "Incidents with a warehouse-change or deploy member — how often "
-                     "a change explains the breakage."},
+             "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok",
+             "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
+                     "Alerts -> History."},
         ])
     oi = run(mart_sql.open_incidents(50, company), page=_PAGE,
              key=f"open_incidents_{company}", tier="live",

@@ -16,13 +16,15 @@ from __future__ import annotations
 import streamlit as st
 
 from app.core.query import run, run_batch
-from app.data import cortex_sql, etl_sql, insights_sql, mart27_sql
+from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
+from app.logic import graphs
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
     result_caption,
+    run_mart_first,
     snowsight_profile_column,
     styled_table,
 )
@@ -36,7 +38,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     st.caption(
         "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~8h lag, idle time "
         "excluded) at your contract rate. For 'who owns the bill' including idle, "
-        "use Optimization's allocated view; for pipelines, Operations → Task graphs ($)."
+        "use Optimization's allocated view; for pipelines, the task-graph panel below."
     )
 
     # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and
@@ -302,3 +304,73 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 })
             result_caption(etl, note="Failed-run $ = attributed credits on non-SUCCESS runs "
                                      "(retry/abort waste). Method = MEASURED (Admin → Metrics).")
+
+    st.divider()
+    st.markdown("**Task-graph pipeline costs**")
+    # Moved from Operations > Task graphs ($) (v4.50): $/run per pipeline is
+    # unit-cost material on the same QUERY_ATTRIBUTION_HISTORY basis as the
+    # ETL panel above. Operational task health (failures, RCA, runtimes)
+    # stays on Operations > Tasks.
+    _graphs_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
+
+
+def _graphs_tab(company: str, days: int, rate: float, database: str = "",
+                schema_contains: str = "") -> None:
+    st.caption(
+        "Cost per pipeline = measured warehouse credits for every task run in the "
+        "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~8h lag) at the configured rate. "
+        "$/run is a day's cost over that day's runs — allocated, not per-run metered. "
+        "Serverless tasks bill separately and are listed below at task-day grain."
+    )
+    res = run_mart_first(
+        mart27_sql.task_graphs(days, company, database, schema_contains),
+        graph_sql.graph_daily_costs(days, company, database, schema_contains),
+        page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
+        mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
+        live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
+    if not guard(res, "No task-graph runs in this scope/window."):
+        return
+    daily = graphs.enrich_graph_daily(res.df, rate)
+    summary = graphs.pipeline_summary(daily)
+    top = summary.iloc[0] if not summary.empty else None
+    worst = summary.sort_values("SUCCESS_PCT").iloc[0] if not summary.empty else None
+    kpi_row([
+        {"label": "Pipeline spend (window)",
+         "value": format_usd(float(summary["USD"].sum()) if not summary.empty else 0.0),
+         "delta": f"{len(summary)} pipeline(s)", "delta_color": "off"},
+        {"label": "Most expensive",
+         "value": str(top["PIPELINE"]) if top is not None else "n/a",
+         "delta": format_usd(float(top["USD"])) if top is not None else None,
+         "delta_color": "off"},
+        {"label": "Worst success",
+         "value": f"{float(worst['SUCCESS_PCT']):.1f}%" if worst is not None else "n/a",
+         "delta": str(worst["PIPELINE"]) if worst is not None else None,
+         "delta_color": "inverse" if worst is not None and float(worst["SUCCESS_PCT"]) < 100 else "off"},
+    ])
+    top5 = summary.head(5)["PIPELINE"].tolist() if not summary.empty else []
+    chart_df = daily[daily["PIPELINE"].isin(top5)][["DAY", "PIPELINE", "USD"]]
+    if not chart_df.empty:
+        charts.daily_stacked_usd(chart_df, "DAY", "PIPELINE", "USD")
+    styled_table(summary, height=300, column_config={
+        "USD": st.column_config.NumberColumn("$ (window)", format="$%.2f"),
+        "USD_PER_RUN": st.column_config.NumberColumn("$/run (alloc)", format="$%.4f"),
+        "SUCCESS_PCT": st.column_config.NumberColumn("Success %", format="%.1f%%"),
+    })
+    with st.expander("Daily detail (per pipeline per day)"):
+        styled_table(daily.sort_values(["DAY", "USD"], ascending=[False, False]), height=280)
+    result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
+                             "Pipeline label = the graph's root task.")
+
+    sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
+              page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
+              tier="historical", source="SERVERLESS_TASK_HISTORY")
+    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
+    if not sls.ok:
+        st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
+    elif sls.empty:
+        st.caption("No serverless task credits in this scope/window.")
+    else:
+        sdf = sls.df.copy()
+        sdf["USD"] = sdf["SERVERLESS_CREDITS"].map(lambda c: credits_to_usd(c, rate))
+        styled_table(sdf, height=220, column_config={
+            "USD": st.column_config.NumberColumn("$", format="$%.2f")})

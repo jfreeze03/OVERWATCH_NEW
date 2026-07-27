@@ -144,8 +144,11 @@ def test_chargeback_role_share_goes_mart_first():
 
 
 def test_operations_adopts_graph_and_schema_marts():
-    assert "mart27_sql.task_graphs" in _OPS
-    assert "graph_sql.graph_daily_costs" in _OPS
+    # v4.50: the graphs tab moved to Cost & Contract > Unit costs; its
+    # mart-first adoption moved with it, unchanged.
+    _UC = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
+    assert "mart27_sql.task_graphs" in _UC
+    assert "graph_sql.graph_daily_costs" in _UC
     assert "mart27_sql.schema_window_summary" in _OPS
     assert "elif not wh_filter and not user_filter:" in _OPS       # schema fact has no wh/user dims
 

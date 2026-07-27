@@ -49,7 +49,12 @@ def test_app_task_surfaces_are_back():
     assert "FACT_TASK_DAILY" in mart_sql.fact_task_daily(2, "ALFA")
     assert "SERVERLESS_TASK_HISTORY" in graph_sql.serverless_task_daily(7)
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
-    assert '"Tasks", "Task graphs ($)"' in ops
+    # v4.50: the $ view moved to Cost & Contract > Unit costs (same QAH basis
+    # as the ETL panel); task MONITORING — the owner-correction's subject —
+    # stays on Operations (Tasks pill, failure RCA, timelines).
+    assert '"Queries", "Tasks", "Warehouses"' in ops
+    uc = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
+    assert "def _graphs_tab" in uc and "MART_TASK_GRAPH_DAILY" in uc
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
     assert '"key": "tf"' in cr                                     # day-replay task frame
     import inspect

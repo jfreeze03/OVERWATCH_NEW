@@ -27,7 +27,8 @@ def test_profile_links_ride_every_query_id_table():
         ("app/ui/pages/operations.py", 'snowsight_profile_column(top.df, _PAGE)'),
         ("app/ui/pages/cost_parts/optimize.py", 'snowsight_profile_column(edf_q, _PAGE)'),
         ("app/ui/pages/cost_parts/unit_costs.py", 'snowsight_profile_column(cdf, _PAGE)'),
-        ("app/ui/pages/admin.py", 'snowsight_profile_column(rq.df, _PAGE)'),
+        # v4.50: the running-query kill switch moved to Operations > Emergency
+        ("app/ui/pages/operations.py", 'snowsight_profile_column(rq.df, _PAGE)'),
     ):
         assert marker in (_ROOT / rel).read_text(encoding="utf-8"), rel
 

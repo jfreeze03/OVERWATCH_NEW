@@ -42,6 +42,15 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
     rate = safe_float(ai_rate_usd, 2.20)
     out["SPEND_USD"] = (out.get("TOTAL_CREDITS", 0.0) * rate).round(2)
     out["PROJECTED_30D_USD"] = (out["PROJECTED_30D_CREDITS"] * rate).round(2)
+    # Owner ask (v4.50): charts read better as people than as login names.
+    # "First Last" when USERS carries them; the login name when it doesn't
+    # (service accounts, dropped users) — never blank, never invented.
+    if "FIRST_NAME" in out.columns and "LAST_NAME" in out.columns:
+        full = (out["FIRST_NAME"].fillna("").astype(str).str.strip() + " "
+                + out["LAST_NAME"].fillna("").astype(str).str.strip()).str.strip()
+        out["DISPLAY_NAME"] = full.where(full != "", out["USER_NAME"])
+    else:
+        out["DISPLAY_NAME"] = out["USER_NAME"]
     return out
 
 

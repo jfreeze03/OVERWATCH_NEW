@@ -86,9 +86,14 @@ def test_account_readers_registered_in_canary():
 
 
 def test_storage_tab_wires_account_tiers():
+    # v4.50: the storage panels moved to Spend & Attribution (spend.py) —
+    # storage is neither chargeback nor AI. The tier panel stays wired, just
+    # on the page whose subject it is.
+    sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
+    assert "def _account_storage_tiers" in sp
+    assert "_account_storage_tiers(company, days, settings)" in sp
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert "def _account_storage_tiers" in cb
-    assert "_account_storage_tiers(company, days, settings)" in cb
+    assert "_account_storage_tiers" not in cb
 
 
 def test_tier_rate_defaults_present():

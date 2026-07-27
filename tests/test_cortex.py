@@ -27,6 +27,26 @@ def test_rollup_covers_both_code_sources_and_users_join():
     assert "LIMIT 500" in sql
 
 
+def test_rollup_carries_real_names():
+    # Owner ask (v4.50): FIRST/LAST name ride the USERS join — selected in
+    # both CTEs and grouped, so the per-user grain is unchanged.
+    sql = cortex_sql.cortex_code_user_rollup(14, "ALL")
+    assert "U.FIRST_NAME" in sql and "U.LAST_NAME" in sql
+    assert "GROUP BY USER_NAME, EMAIL, FIRST_NAME, LAST_NAME, SOURCE" in sql
+
+
+def test_display_name_prefers_person_falls_back_to_login():
+    named = enrich_user_rollup(_rollup(FIRST_NAME="Kevin", LAST_NAME="Barr"), 2.20, 30)
+    assert named.iloc[0]["DISPLAY_NAME"] == "Kevin Barr"
+    # NULL names (service accounts, dropped users) fall back to the login —
+    # never blank, never invented.
+    unnamed = enrich_user_rollup(_rollup(FIRST_NAME=None, LAST_NAME=None), 2.20, 30)
+    assert unnamed.iloc[0]["DISPLAY_NAME"] == "KEBARR1"
+    # Pre-name frames (no columns at all) behave the same.
+    legacy = enrich_user_rollup(_rollup(), 2.20, 30)
+    assert legacy.iloc[0]["DISPLAY_NAME"] == "KEBARR1"
+
+
 def test_rollup_company_scope_carries_kebarr1():
     alfa = cortex_sql.cortex_code_user_rollup(7, "ALFA")
     trexis = cortex_sql.cortex_code_user_rollup(7, "Trexis")

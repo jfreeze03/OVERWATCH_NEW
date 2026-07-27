@@ -361,7 +361,7 @@ required "inconclusive" escape, word limits.
   (CRITICAL at 2× cost or 50% failure rate). DATABASE_NAME/SCHEMA_NAME are
   first-class columns, so every change is attributable to its schema.
 
-## 10. Emergency levers (Admin → Emergency)
+## 10. Emergency levers (Operations → Emergency; on Admin before v4.50)
 
 Generate exact validated SQL, type EMERGENCY, execute, audited to
 REMEDIATION_LOG. Warehouse-level (your role needs OPERATE/MODIFY):
@@ -517,9 +517,11 @@ suspended tasks are the usual cause (a failed run suspends after retries).
 `SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY()) ORDER BY
 SCHEDULED_TIME DESC` for the error; fix; `ALTER TASK ... RESUME;`.
 
-**Warehouse suspended by the resource monitor.** OVERWATCH_RM hit quota —
-raise it (Admin → Emergency → Resource monitor quota) or investigate the
-burn first (App self-cost).
+**~~Warehouse suspended by the resource monitor.~~** Retired v4.45:
+OVERWATCH_RM is gone (it was suspending the app warehouse mid-use — the
+owner correction). A suspended WH_ALFA_OVERWATCH now means someone ran the
+suspend lever (Operations → Emergency) or an account-level change; resume it
+and check App self-cost for the burn.
 
 **Alert didn't fire.** Rule ENABLED? Threshold sane? DEDUPE_KEY may be
 suppressing (by design — see recurrence in §12); resolve the old event or

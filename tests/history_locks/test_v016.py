@@ -92,8 +92,10 @@ def test_round3_ux_builders_and_wiring():
     assert '"Brief": brief.render,' in main_src
     alerts_src = (root / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert "@st.fragment" in alerts_src and "_open_events_section(events, is_operator)" in alerts_src
-    admin_src = (root / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
-    assert "@st.fragment" in admin_src
+    # v4.50: the emergency fragment (admin's only @st.fragment) moved to
+    # Operations with the Emergency console; the fragment contract rides along.
+    ops_src = (root / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
+    assert "@st.fragment" in ops_src and "_emergency_fragment" in ops_src
 
     rb = (root / "RUNBOOK.md").read_text(encoding="utf-8")
     for marker in ("COST_DEPT_BUDGET_PACE", "TASK_CANARY_SENTINEL", "backfill_365",

@@ -69,8 +69,10 @@ def test_cost_consolidated_to_four_sections():
     cost = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
     assert '"Spend & Attribution", "Contract & Forecast", "Chargeback & AI"' in cost
     # all eight original sub-tabs still called (nothing lost in the merge)
+    # v4.50: storage moved to Spend & Attribution (_storage_tab) and the cortex
+    # tab dropped its storage half (_cortex_spend_tab) — still nothing lost.
     for fn in ("_spend_tab", "_attribution_tab", "_contract_tab", "_chargeback_tab",
-               "_cortex_storage_tab", "_ai_users_tab", "_optimization_tab", "_savings_tab"):
+               "_cortex_spend_tab", "_storage_tab", "_ai_users_tab", "_optimization_tab", "_savings_tab"):
         assert fn + "(" in cost, fn
 
 

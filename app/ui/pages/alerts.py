@@ -572,6 +572,32 @@ def render() -> None:
         else:
             st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
+        st.markdown("**Incident lifecycle (90d, incident grain)**")
+        # Moved from Control Room (v4.50): retrospective process-health
+        # medians don't change morning to morning — they read with alert
+        # history, beside the alert-grain MTTA/MTTR above.
+        inc_met = run(mart_sql.incident_metrics(90, f["company"]), page=_PAGE,
+                      key=f"inc_metrics_{f['company']}", tier="recent",
+                      source=f"INCIDENTS lifecycle (90d, {f['company']} + account-level)")
+        if inc_met.usable():
+            im = inc_met.df.iloc[0]
+            kpi_row([
+                {"label": "MTTA / MTTR (90d)",
+                 "value": f"{safe_float(im.get('MTTA_MIN')):,.0f} / {safe_float(im.get('MTTR_MIN')):,.0f} min",
+                 "help": "Detected -> acknowledged / resolved at INCIDENT grain — "
+                         "the alert-grain pair above counts individual events."},
+                {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
+                 "help": "Share of closed incidents reopened within 14 days (owner-set window)."},
+                {"label": "Alerts / incident", "value": f"{safe_float(im.get('COMPRESSION')):,.1f}",
+                 "help": "How many alerts each incident absorbs — higher means storms "
+                         "compress into one object instead of many pages."},
+                {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
+                 "help": "Incidents with a warehouse-change or deploy member — how often "
+                         "a change explains the breakage."},
+            ])
+        else:
+            st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")
+
         st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
         slo = run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
                   tier="recent", source="ALERT_DELIVERIES + ALERT_EVENTS + APP_ERROR_LOG")
