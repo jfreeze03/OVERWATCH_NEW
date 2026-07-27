@@ -237,10 +237,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if ok and est_sz > 0:
                     execute_statement(
                         f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                        "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                        "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                         f"SELECT {sql_literal('Resize ' + str(srow['WAREHOUSE_NAME']) + ' to ' + target_size)}, "
                         f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
-                        "'Booked from sizing simulator; verify with a proof run on the Savings ledger.'", page=_PAGE)
+                        "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
+                        f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
                 notify(ok, msg)
         _whatif_panel(sized, days, rate)
         result_caption(prof_res)
@@ -567,10 +568,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     if ok and est_w > 0:
                         execute_statement(
                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                             f"SELECT {sql_literal('Retention ' + str(wrow['TABLE_NAME']) + ' -> ' + str(int(keep_days)) + 'd')}, "
                             f"'ESTIMATED', {sql_number(est_w)}, {sql_literal(stmt_w)}, "
-                            "'Booked from storage-waste scan.'", page=_PAGE)
+                            "'Booked from storage-waste scan.', "
+                            f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
                     notify(ok, msg)
 
     st.markdown("**Automatic clustering spend (per table)**")
@@ -663,10 +665,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     if ok and est_monthly > 0:
                         ledger_sql = (
                             f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES, FINDING_TYPE, TARGET_OBJECT) "
                             f"SELECT {sql_literal(f'{fix_kind} on {wh_pick}')}, 'ESTIMATED', "
                             f"{sql_number(est_monthly)}, {sql_literal(stmt[:4000])}, "
-                            f"{sql_literal('Booked by guarded remediation; verify with a proof run on the Savings ledger.')}"
+                            f"{sql_literal('Booked by guarded remediation; verify with a proof run on the Savings ledger.')}, "
+                            # V053: AUTO_SUSPEND rows are what the monthly verifier re-measures (P1-A).
+                            f"{sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, {sql_literal(wh_pick)}"
                         )
                         execute_statement(ledger_sql, page=_PAGE)
                     notify(ok, msg)

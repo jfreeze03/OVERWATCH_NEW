@@ -1,7 +1,44 @@
 # Action layer — full round design (V053 / r28 continued)
 
-**Status: decisions signed off 2026-07-27 (D1–D5 below). Ready to implement,
-starting with V053a. Design-doc-first; each phase is its own Snowsight run.**
+**Status: OUTCOME — both action procs DROPPED after build + review; V053 ships
+the safe residue only (typed savings link + verifier selection). See the
+"Build outcome" note below. The design (D1–D5) is retained as the record of
+what was attempted and why the procs were not shippable.**
+
+## Build outcome (2026-07-27)
+
+The remediation proc was built to this design, hardened across two more
+adversarial-review rounds, and still failed:
+
+- Round 1 (V051 draft): owner-privileged SQL **injection** (concatenated
+  proof). Fixed.
+- Round 2: **dead happy path** (trailing `;` blocked every call), **FAILED
+  reported as success**, **audit rolled back on bookkeeping failure**, and an
+  over-broad allow-list. Fixed.
+- Round 3: the allow-list is a **substring** check, so a trailing
+  `-- SET DATA_RETENTION_TIME_IN_DAYS` comment carries an arbitrary
+  `ALTER TABLE … DROP COLUMN` past it and runs under `EXECUTE AS OWNER`.
+
+The lesson across three rounds: **validating free-text SQL server-side under
+owner rights is not robustly securable by string checks.** The verify proc had
+the parallel problem (an operator-supplied proof runs owner-privileged).
+
+**Owner decision (2026-07-27): drop both procs.** V053 ships only the part that
+was always safe and was the actual goal (Codex P1-A): the typed `SAVINGS_LEDGER`
+link + a re-derived monthly verifier that finds app-booked rows. The app stamps
+`FINDING_TYPE`/`TARGET_OBJECT` on its **existing** guarded booking inserts — no
+stored procedure, no owner-privileged free-text execution. Remediation and
+verify stay on today's already-safe path (typed confirmation + operator gating
++ clean builders).
+
+If atomic/idempotent remediation is ever wanted, the robust design is **typed
+parameters** — the proc takes `(kind, identifier-validated target, validated
+value)` and *constructs* the statement internally, so no free-text SQL crosses
+the boundary. That's a fresh round, not a patch to this one.
+
+---
+
+_Original design (retained as the record of the attempt):_
 
 Continues Tranche C. V051 shipped the wired, verified slice — `SP_ALERT_LIFECYCLE`
 + `OW_ACTION_INTENTS` + the `execute_action()` seam — and your Snowsight smoke

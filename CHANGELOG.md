@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.55.0 — action layer: procs dropped, P1-A closed safely (2026-07-27)
+
+Owner: "build V053a" -> after three review rounds, "drop the proc; close P1-A
+app-side." The action-layer remediation and verify procs were built to the
+signed-off V053 design, then abandoned — adversarial re-verification kept
+finding that free-text SQL under EXECUTE AS OWNER is not robustly securable by
+string checks. What ships is the safe residue that was the actual goal.
+
+- **Both action procs dropped.** SP_EXECUTE_REMEDIATION failed three rounds:
+  owner-privileged injection (V051 draft) -> dead happy path + FAILED-as-success
+  + audit-rolled-back-on-booking-failure + over-broad allow-list -> the tightened
+  allow-list is still a substring check a trailing comment defeats
+  (`ALTER TABLE ... DROP COLUMN -- SET DATA_RETENTION_TIME_IN_DAYS`). Not
+  reachable through the app (P_STMT only ever comes from clean builders), but an
+  owner-privileged gate that can be bypassed does not ship. SP_VERIFY_SAVINGS had
+  the parallel problem (operator-supplied proof runs owner-privileged). The
+  robust alternative — typed parameters, statement constructed inside the proc —
+  is a fresh round, not a patch. Remediation/verify stay on today's already-safe
+  path (typed confirmation + operator gating + clean builders).
+- **V053 ships the safe, valuable residue (Codex P1-A).** Typed SAVINGS_LEDGER
+  columns (FINDING_TYPE/TARGET_OBJECT + proof-evidence columns) + the monthly
+  verifier re-derived from V007 (two edits) to select
+  FINDING_TYPE='AUTO_SUSPEND' rows, not just the legacy DESCRIPTION LIKE that no
+  executed path booked. The app stamps FINDING_TYPE/TARGET_OBJECT on its
+  EXISTING (already-guarded) resize/retention/auto-suspend ledger inserts, so
+  the verifier finally finds them. No stored procedure, no owner-privileged
+  execution, no free-text SQL crossing a trust boundary.
+- Process: three adversarial-review rounds gated this — the exact mechanism that
+  caught the original injection. The design doc (ACTION_LAYER_V053.md) records
+  the attempt and why the procs weren't shippable; test_v053a pins that no
+  action proc ships and that the app closes P1-A by typing its own inserts.
+  Lockstep to 53; bundle V001_V053; deploy runbook DEPLOY_V053_20260727.md.
+  V051's shipped alert-lifecycle proc is untouched.
+
 ## 4.54.0 — long-history window filter (180/365) (2026-07-27)
 
 Owner: "expand the triage filters to 180 and 365 days" → "mart-history only" →

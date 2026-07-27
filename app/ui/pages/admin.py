@@ -84,6 +84,8 @@ _EXPECTED_MIGRATIONS = {
         "OW_ACTION_INTENTS idempotency",
     52: "exec-board loader windows gain 180/365 (mart-history window filter); "
         "live scans stay capped at 90",
+    53: "typed savings link (FINDING_TYPE/TARGET_OBJECT) + monthly verifier "
+        "re-derived to select app-booked rows (P1-A); no proc",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

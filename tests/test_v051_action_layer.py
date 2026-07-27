@@ -89,8 +89,10 @@ def test_v051_app_wiring_is_proc_first_with_fallback():
 def test_v051_teardown_covers_the_shipped_objects_only():
     td = _read("snowflake/teardown.sql").upper()
     assert "SP_ALERT_LIFECYCLE" in td and "OW_ACTION_INTENTS" in td
+    # The remediation/verify/action-queue procs were all dropped after review
+    # (see V053 / test_v053a); none should appear in teardown.
     for gone in ("SP_EXECUTE_REMEDIATION", "SP_VERIFY_SAVINGS", "SP_ACTION_UPDATE"):
-        assert gone not in td, f"teardown still drops deferred {gone}"
+        assert gone not in td, f"teardown drops a never-created proc: {gone}"
 
 
 def test_v051_has_no_generator():
