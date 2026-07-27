@@ -33,8 +33,12 @@ def cortex_code_user_rollup(days: int, company: str = "ALL") -> str:
 
     Credits are exact (token metering). Projection to 30 days and dollar
     classification happen in app/logic/cortex.py, not in SQL.
+
+    Honors the long window (v4.54): the owner-named live exception. Cortex Code
+    usage views are per-user token telemetry — low-volume, so 180/365 is cheap
+    to scan, unlike a QUERY_HISTORY-scale live read (still capped at 90).
     """
-    days = bounded_days(days)
+    days = bounded_days(days, 365)
     # Company scope is applied ONCE per grouped user in the outer WHERE (a
     # ~50-row set), not per raw usage row — COMPANY_FOR_USER stays cheap.
     outer_scope = companies.user_clause(company, "USER_NAME")
@@ -83,8 +87,11 @@ LIMIT 500
 
 
 def cortex_code_daily(days: int, company: str = "ALL") -> str:
-    """Daily Cortex Code usage by source (requests, credits, active users)."""
-    days = bounded_days(days)
+    """Daily Cortex Code usage by source (requests, credits, active users).
+
+    Honors the long window (v4.54) with cortex_code_user_rollup — same
+    low-volume telemetry, the owner-named live exception to the 90d cap."""
+    days = bounded_days(days, 365)
     where = and_where("1 = 1", companies.user_clause(company, "U.NAME"))
     return f"""
 WITH combined AS ({_COMBINED_CODE_USAGE.format(days=days)})

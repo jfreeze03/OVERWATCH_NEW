@@ -22,8 +22,9 @@ _MAP_JOIN = (
 
 
 def department_window_credits(days: int, company: str = "ALL") -> str:
-    """Exact credits per department and warehouse for the window."""
-    days = bounded_days(days)
+    """Exact credits per department and warehouse for the window.
+    Mart-backed (FACT_WAREHOUSE_DAILY), so it honors the long window (v4.54)."""
+    days = bounded_days(days, 365)
     where = and_where(
         f"M.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),

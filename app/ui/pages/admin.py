@@ -80,8 +80,10 @@ _EXPECTED_MIGRATIONS = {
         "= no-read-no-write compute)",
     50: "one-pass object-cost loader (staged QAH + ACCESS_HISTORY) + read/write "
         "arm split (production vs consumption shares)",
-    51: "action layer: transactional alert-lifecycle / remediation / verify-savings "
-        "/ action-update procs + idempotency intent table + typed savings link",
+    51: "action layer (scoped): SP_ALERT_LIFECYCLE atomic alert lifecycle + "
+        "OW_ACTION_INTENTS idempotency",
+    52: "exec-board loader windows gain 180/365 (mart-history window filter); "
+        "live scans stay capped at 90",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

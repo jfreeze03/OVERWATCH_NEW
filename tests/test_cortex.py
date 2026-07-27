@@ -62,7 +62,10 @@ def test_no_dollar_rates_baked_into_sql():
 
 
 def test_windows_clamped():
-    assert "-90," in cortex_sql.cortex_code_daily(9999, "ALL").replace(" ", "")
+    # v4.54: Cortex user-cost readers honor the long window (owner-named live
+    # exception — per-user token telemetry is low-volume, cheap to scan long).
+    assert "-365," in cortex_sql.cortex_code_daily(9999, "ALL").replace(" ", "")
+    assert "-365," in cortex_sql.cortex_code_user_rollup(9999, "ALL").replace(" ", "")
 
 
 # ---- classification logic --------------------------------------------------

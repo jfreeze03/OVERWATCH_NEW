@@ -17,6 +17,7 @@ from app.companies import COMPANIES, ENVIRONMENTS, classify_databases, databases
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
+    MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
     resolve_role_profile,
 )
@@ -500,6 +501,13 @@ def _topbar_scope_controls() -> None:
                           "Database; the per-environment lens ships with Compare.")
     with c_days:
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
+        if int(st.session_state.get("flt_days", 7)) > MAX_LIVE_WINDOW_DAYS:
+            # v4.54: 180/365 are honored by mart-history (Overview KPIs, storage,
+            # chargeback) and the one owner-named live exception (Cortex user
+            # costs). Other live-scan panels cap at 90 — disclosed, not silently.
+            st.caption(f"{st.session_state['flt_days']}d applies to Overview KPIs, "
+                       "storage & chargeback history, and Cortex user costs. "
+                       f"Live scans (Operations, Security) cap at {MAX_LIVE_WINDOW_DAYS}d.")
     with c_db:
         # Item 8c (2026-07-14): options come from LIVE inventory (SHOW
         # DATABASES, cached) classified by the same Company/Environment rules,

@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.54.0 — long-history window filter (180/365) (2026-07-27)
+
+Owner: "expand the triage filters to 180 and 365 days" → "mart-history only" →
+"the only live feature where we'd want 180/365 is Cortex Usage user costs".
+
+- **Window filter gains 180 and 365.** DAY_WINDOW_OPTIONS = (7,14,30,60,90,
+  180,365). The picker discloses the split: beyond 90 days, only mart-history
+  panels and Cortex user costs honor the window; other live scans cap at 90.
+- **V052 (forward-generated, byte-locked):** re-derives SP_REFRESH_EXEC_BOARD
+  from V045 with one edit — the windows CTE gains 180/365 — so Overview's KPI
+  board has rows for the new options. A test-lock requires the board's window
+  set to equal DAY_WINDOW_OPTIONS (a window with no board row falls through to
+  a 13-month live scan), so the config change and the migration are coupled by
+  construction. Proc swap + one board reload; no new objects.
+- **The 90-day live guardrail stays.** MAX_LIVE_WINDOW_DAYS = 90 still bounds
+  expensive QUERY_HISTORY-scale scans; new MAX_MART_WINDOW_DAYS = 365. Raised
+  to honor 365: the mart-backed storage-by-database and department-window
+  chargeback builders (facts have 400–800d retention), and — the owner-named
+  live exception — the Cortex user-cost readers (cortex_code_user_rollup /
+  cortex_code_daily; per-user token telemetry is low-volume, cheap to scan
+  long, unlike QUERY_HISTORY). Every other live builder still clamps at 90.
+- Locks: test_v052_windows pins the byte-derivation, board-windows==config,
+  the live cap unchanged, mart+Cortex honoring 365, and the filter-strip
+  disclosure. The V041 board-window lock now asserts V041 froze its era's five
+  windows; the config-match check lives with the effective proc. Lockstep:
+  validate + _EXPECTED_MIGRATIONS to 52; rebuild bundle V001_V052;
+  DEPLOYMENT/README. Deploy runbook: docs/handoff/DEPLOY_V052_20260727.md.
+
 ## 4.53.0 — Tranche C: action layer (scoped after review) (2026-07-27)
 
 Owner: "tranche C" → after adversarial review, "ship the correct slice". A

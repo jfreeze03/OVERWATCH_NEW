@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.53.0"
+APP_VERSION = "4.54.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -81,9 +81,13 @@ DEFAULT_SETTINGS = {
 # ---------------------------------------------------------------------------
 # Windows and guardrails
 # ---------------------------------------------------------------------------
-DAY_WINDOW_OPTIONS = (7, 14, 30, 60, 90)
+DAY_WINDOW_OPTIONS = (7, 14, 30, 60, 90, 180, 365)
 DEFAULT_DAY_WINDOW = 7
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
+MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) honor the long window
+# The 90d live cap bounds expensive QUERY_HISTORY-scale scans. The window
+# picker offers 180/365 for mart-history (exec board, storage, chargeback)
+# and the one low-volume live exception the owner named: Cortex user costs.
 DEFAULT_MAX_ROWS = 5_000           # visible-truncation cap for detail tables
 
 # Only knobs that CODE actually reads live here (review #8: five decorative

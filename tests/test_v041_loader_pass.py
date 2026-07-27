@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.config import DAY_WINDOW_OPTIONS
 from app.data import mart27_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -436,13 +435,12 @@ def test_extract_consumers_in_the_loader_match_the_design_list_exactly():
 # ---------------------------------------------------------------------------
 
 def test_board_windows_match_the_config_tuple():
+    # V041 froze its era's five windows; the live config-match check moved to
+    # the effective proc's lock (test_v052_windows) when V052 added 180/365.
     board = _proc(_V41, "SP_REFRESH_EXEC_BOARD")
     windows_cte = board.split("windows AS (", 1)[1].split("),", 1)[0]
     built = tuple(int(n) for n in re.findall(r"SELECT (\d+)(?: AS WINDOW_DAYS)?", windows_cte))
-    assert built == tuple(DAY_WINDOW_OPTIONS), (
-        "exec-board loader windows must equal app.config.DAY_WINDOW_OPTIONS — "
-        "the 7/30-only drift class (14/60/90 always falling to the 13-month "
-        f"live scan) dies here. built={built} config={tuple(DAY_WINDOW_OPTIONS)}")
+    assert built == (7, 14, 30, 60, 90), f"V041 window set changed: {built}"
 
 
 def test_board_v2_swaps_atomically_and_drops_the_dead_panels():

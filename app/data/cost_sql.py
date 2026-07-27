@@ -166,8 +166,9 @@ def storage_by_database(days: int, company: str = "ALL", database: str = "") -> 
     average of daily on-disk bytes, so the r19 latest-day snapshot over/under-
     stated any database that grew or shrank mid-window. FACT_STORAGE_DAILY
     holds one row per day per database, each already that day's average bytes;
-    the page falls back to the _live variant while the fact is empty."""
-    days = bounded_days(days)
+    the page falls back to the _live variant while the fact is empty.
+    Mart-backed, so it honors the long window (v4.54)."""
+    days = bounded_days(days, 365)
     where = and_where(
         f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
         companies.database_clause(company),
