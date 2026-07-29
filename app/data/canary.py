@@ -82,6 +82,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_metering_by_service", lambda: mart_sql.fact_metering_by_service(7)),
     ("mart.fact_query_window_summary", lambda: mart_sql.fact_query_window_summary(1, "ALFA")),
     ("mart.app_statement_stats", lambda: mart_sql.app_statement_stats(1)),
+    ("mart.cloud_svc_top_shapes", lambda: mart_sql.cloud_svc_top_shapes(1, "ALFA")),
+    ("mart.cloud_svc_by_user", lambda: mart_sql.cloud_svc_by_user(1, "ALFA")),
     ("cost.cloud_services_ratio", lambda: cost_sql.cloud_services_ratio_by_warehouse(1, "ALFA")),
     ("cost.compile_heavy_families", lambda: cost_sql.compile_heavy_families(1, "ALFA")),
     ("ops.poor_pruning_queries", lambda: ops_sql.poor_pruning_queries(1, "ALFA")),

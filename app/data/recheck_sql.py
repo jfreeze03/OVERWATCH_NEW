@@ -16,7 +16,7 @@ RECHECKABLE: dict[str, tuple[bool, str]] = {
     "COST_WH_DAILY_CREDITS": (True, "credits today"),
     "PERF_QUEUED_MINUTES": (True, "queued minutes today"),
     "PERF_SPILL_GB": (True, "remote spill GB today"),
-    "COST_CLOUD_SVC_RATIO": (False, "cloud-services ratio % today"),
+    "COST_CLOUD_SVC_RATIO": (True, "cloud-services ratio % today"),
     "PERF_QUERY_FAIL_PCT": (False, "query fail % today"),
 }
 
@@ -56,11 +56,15 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= CURRENT_DATE() {wh_clause}
 """
     if rid == "COST_CLOUD_SVC_RATIO":
-        return """
+        # Warehouse-scoped to match the alert exactly (WAREHOUSE_METERING_HISTORY,
+        # CS / total credits) — the old recheck read the account-wide ratio off
+        # METERING_HISTORY, so the drawer showed a different number than the
+        # per-warehouse alert it was re-checking.
+        return f"""
 SELECT COALESCE(SUM(CREDITS_USED_CLOUD_SERVICES), 0)
-       / NULLIF(SUM(CREDITS_USED_COMPUTE), 0) * 100 AS CURRENT_VALUE
-FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_HISTORY
-WHERE START_TIME >= CURRENT_DATE()
+       / NULLIF(SUM(CREDITS_USED), 0) * 100 AS CURRENT_VALUE
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE START_TIME >= CURRENT_DATE() {wh_clause}
 """
     if rid == "PERF_QUERY_FAIL_PCT":
         return """

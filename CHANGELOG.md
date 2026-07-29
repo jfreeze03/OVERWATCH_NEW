@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.57.0 — cloud-services ratio: drill to the query shapes & users (2026-07-28)
+
+Owner: a `COST_CLOUD_SVC_RATIO` alert sits >21% on two warehouses; "track the
+components causing the spike to lower costs." The Spend page already showed the
+ratio, the rebate, compile-heavy families, and CS-by-type — what was missing was
+a persisted shape/user breakdown (a metadata storm of tiny queries never
+surfaces in the compile-heavy view).
+
+- **Per-query cloud-services credits persisted (V055).** `OW_QH_EXTRACT` gains
+  `CREDITS_USED_CLOUD_SERVICES` (additive — the extract already scans
+  `QUERY_HISTORY` once, so no new scan). `SP_LOAD_QH_EXTRACT` re-derived (from
+  V042) to fill it and cascade a **guarded, isolated** `SP_LOAD_CLOUD_SVC_MART`
+  (a mart failure logs and never breaks the extract or its watermark).
+- **`MART_CLOUD_SVC_DAILY`** — CS credits at day / company / warehouse / user /
+  role / query_type / parameterized_hash grain (CS>0 only), MERGE-accumulated
+  from the extract like `FACT_QUERY_DAILY`. Retention trimmed by a re-derived
+  `SP_PURGE_FACTS` (from V054) on the daily floor.
+- **App (mart-backed, no live scan).** Spend → "Cloud-services health by
+  warehouse" gains a **warehouse picker** and two tables — top query shapes by
+  CS credits (RUNS / CS-per-1k / avg exec / cache% — the triage that names the
+  fix) and CS by user/role — for **any** warehouse, not only ELEVATED.
+- **Recheck fixed.** The `COST_CLOUD_SVC_RATIO` alert-drawer recheck was
+  account-wide (`METERING_HISTORY`); it now matches the per-warehouse alert
+  (`WAREHOUSE_METERING_HISTORY`, CS / total credits, filtered by the warehouse),
+  and returns no answer rather than a misleading account number when no
+  warehouse is in the event.
+- Correction on record: the drill-down basics already existed; this round adds
+  only the genuine gaps (shape/user grain, warehouse-selectable, warehouse-aware
+  recheck), not a rebuild. 5-lens adversarial verification before ship; new
+  `outputs/gen_rebuild_bundle.py` already in place. Lockstep to 55; bundle
+  `V001_V055`; deploy runbook `DEPLOY_V055_20260728.md`.
+
 ## 4.56.0 — exec-board long windows actually read long history (2026-07-27)
 
 Owner: ran a fresh Codex analysis, "review and make recommendations" → after

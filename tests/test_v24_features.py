@@ -147,8 +147,11 @@ def test_recheck_rejects_hostile_targets():
 
 
 def test_recheck_account_rules_ignore_warehouse():
-    sql = recheck_sql.recheck_sql("COST_CLOUD_SVC_RATIO")
-    assert sql and "METERING_HISTORY" in sql
+    # PERF_QUERY_FAIL_PCT is account-wide (no per-warehouse grain), so it returns
+    # SQL with no warehouse filter. (COST_CLOUD_SVC_RATIO became warehouse-aware
+    # in V055 to match its per-warehouse alert — see test_v055_cloud_services.)
+    sql = recheck_sql.recheck_sql("PERF_QUERY_FAIL_PCT")
+    assert sql and "QUERY_HISTORY" in sql
 
 
 def test_score_inputs_and_metric_kinds_sql():

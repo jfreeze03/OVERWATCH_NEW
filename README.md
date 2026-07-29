@@ -121,6 +121,7 @@ snowflake/migrations/V051__action_layer.sql -- atomic alert-lifecycle proc + ide
 snowflake/migrations/V052__exec_board_windows_180_365.sql -- exec-board 180/365 windows (long-history filter)
 snowflake/migrations/V053__action_layer_remediation_verify.sql -- remediation + verify procs (action layer phase a)
 snowflake/migrations/V054__exec_board_window_history.sql -- exec-board 180/365 windows read full history (source-horizon fix + retention floor)
+snowflake/migrations/V055__cloud_services_breakdown.sql -- per-query cloud-services credits persisted (extract column + MART_CLOUD_SVC_DAILY) for the CS-ratio drill-down
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```

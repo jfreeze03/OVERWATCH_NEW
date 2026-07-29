@@ -47,7 +47,7 @@ def write_copies() -> None:
 # a first-fill CALL and so pause for a minute+ during Run All. Extend when a new
 # migration adds a heavy first-fill (V054 repopulates the exec board).
 CALL_NOTE = ("V027/V029/V030/V031/V041/V042/V043/V044/V045/V048/V049/V050/V051/"
-             "V052/V053/V054")
+             "V052/V053/V054/V055")
 
 
 def write_migrations_bundle() -> tuple[str, int]:
@@ -74,7 +74,21 @@ def write_migrations_bundle() -> tuple[str, int]:
     return fname, len(migs)
 
 
+def write_readme_row(fname: str, n: int) -> None:
+    """Keep the README's step-02 row in sync with the bundle (it drifted V042 ->
+    V054 -> V055 by hand). Only the `| 02 | ... |` row is generated; the rest of
+    the README is authored."""
+    readme = RB / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    new = re.sub(
+        r"\| 02 \| 02_migrations_V001_V\d+\.sql \| all \d+ migrations,",
+        f"| 02 | {fname} | all {n} migrations,", text, count=1)
+    if new != text:
+        readme.write_text(new, encoding="utf-8")
+
+
 if __name__ == "__main__":
     write_copies()
     fname, n = write_migrations_bundle()
-    print(f"regenerated rebuild bundle: {fname} ({n} migrations) + 4 copies")
+    write_readme_row(fname, n)
+    print(f"regenerated rebuild bundle: {fname} ({n} migrations) + 4 copies + README row")

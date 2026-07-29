@@ -88,6 +88,8 @@ _EXPECTED_MIGRATIONS = {
         "re-derived to select app-booked rows (P1-A); no proc",
     54: "exec-board 180/365 windows read full history (V052 capped their source "
         "CTEs at 90); daily-fact retention floor raised 180->365",
+    55: "per-query cloud-services credits persisted (OW_QH_EXTRACT column + "
+        "MART_CLOUD_SVC_DAILY at shape/user grain) for the CS-ratio drill-down",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -133,6 +133,40 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
                 st.caption("Metadata storms show up here — SHOW/DESCRIBE floods bill "
                            "cloud services without ever touching a warehouse.")
 
+    # V055: shape/user drill-down from MART_CLOUD_SVC_DAILY — for ANY warehouse
+    # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query
+    # shapes and the users/tools burning the cloud-services credits.
+    wh_opts = [str(w) for w in csr.df["WAREHOUSE_NAME"].tolist()] if csr.usable() and not csr.df.empty else []
+    if wh_opts:
+        st.markdown("**Drill in — cloud-services credits by query shape & user**")
+        _ALL = "(all warehouses)"
+        pick = st.selectbox("Warehouse", [_ALL, *wh_opts], key=f"cs_drill_wh_{company}_{days}",
+                            help="Ranked by cloud-services %, most elevated first. Any warehouse — "
+                                 "not only ELEVATED. '(all warehouses)' includes the no-warehouse "
+                                 "metadata bucket (WAREHOUSE_NAME resolves to NONE).")
+        wh_arg = "" if pick == _ALL else pick
+        shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg), page=_PAGE,
+                     key=f"cs_shapes_{company}_{days}_{pick}", tier="recent",
+                     source="MART_CLOUD_SVC_DAILY (per-query CS credits, loaded hourly)")
+        if guard(shapes, "No cloud-services credits recorded for this warehouse yet "
+                         "(the mart loads hourly; needs V055 deployed)."):
+            st.caption("Gross cloud-services credits per shape (before the account-level 10% rebate "
+                       "shown above). High RUNS + tiny AVG_EXEC_S + high AVG_CACHE_PCT = a polling / "
+                       "metadata storm; a heavy CS_PER_1K_RUNS on a SELECT = a compile-heavy plan. "
+                       "That triage is the fix.")
+            styled_table(shapes.df, height=300, column_config={
+                "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
+                "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%d%%")})
+            result_caption(shapes)
+            users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg), page=_PAGE,
+                        key=f"cs_users_{company}_{days}_{pick}", tier="recent",
+                        source="MART_CLOUD_SVC_DAILY (CS credits by user/role)")
+            if guard(users, "No per-user cloud-services credits for this warehouse yet."):
+                st.markdown("**Who's driving it** (user / role / tool)")
+                styled_table(users.df, height=220, column_config={
+                    "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f")})
+                result_caption(users)
+
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
     wh = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
              key=f"wh_vs_prior_fact_{company}_{days}", tier="recent",
