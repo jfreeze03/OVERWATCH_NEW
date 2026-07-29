@@ -102,8 +102,9 @@ _EXPECTED_MIGRATIONS = {
         "QUERY_ATTRIBUTION_HISTORY up by COALESCE(ROOT_QUERY_ID,QUERY_ID) so "
         "MART_TASK_GRAPH_DAILY.WH_CREDITS captures proc-body compute (audit #10)",
     60: "triage #5/#11 + alert guard: MART_QUERY_FAMILY_DAILY gains "
-        "TOTAL_ELAPSED_SEC (COMPILE_PCT bounded 0-100), schema-hourly queued "
-        "includes provisioning, CS-ratio alert excludes CLOUD_SERVICES_ONLY",
+        "TOTAL_ELAPSED_SEC (COMPILE_PCT bounded 0-100 on post-V060 rows), "
+        "schema-hourly queued includes provisioning, CS-ratio alert excludes "
+        "CLOUD_SERVICES_ONLY",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

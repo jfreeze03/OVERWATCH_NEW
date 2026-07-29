@@ -349,7 +349,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     database=st.session_state.get("flt_database", ""),
                     schema_contains=st.session_state.get("flt_schema_contains", "")),
                 page=_PAGE, key=f"repeatq_{company}_{days}",
-                mart_source="MART_QUERY_FAMILY_DAILY (mart — exec-time grain, day-level LAST_RUN)",
+                mart_source="MART_QUERY_FAMILY_DAILY (mart — wall-clock elapsed, day-level LAST_RUN)",
                 live_source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live fallback)")
         if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
                  setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):

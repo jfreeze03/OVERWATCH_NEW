@@ -241,7 +241,7 @@ def render() -> None:
     # open_high_actions comes from the ACTION_QUEUE read hoisted above the score
     # (the Top-actions panel below reuses it).
     _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
-              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     stale_sources = 0
     if _hs.ok and not _hs.empty:
         _srow = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]

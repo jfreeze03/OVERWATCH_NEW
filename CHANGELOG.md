@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.70.1 — verify-round fix-forward: repeat-fingerprints onto the elapsed basis (app-only) (2026-07-29)
+
+The 4.70.0 adversarial verification returned CORRECT on the schema-queued fix, the
+alert guard, and the score wiring (regression hunt clean), with one INCOMPLETE:
+**`family_repeat_fingerprints` — the *other* reader of `MART_QUERY_FAMILY_DAILY` —
+still derived `TOTAL_ELAPSED_HOURS`/`AVG_ELAPSED_SEC` from exec time** while its
+live twin uses true elapsed, so the materialization-candidate gate (≥0.5h) and the
+"Compute in repeats" KPI silently changed basis depending on which source served.
+V060's new column makes it a one-line fix: both metrics now use
+`COALESCE(TOTAL_ELAPSED_SEC, TOTAL_EXEC_SEC)` (same degrade as compile-heavy),
+docstring + the "exec-time grain" caller label corrected, lock test added.
+Cosmetic: the health-strip source label named the wrong freshness object in two
+places; admin's V060 note now says "post-V060 rows" for the COMPILE_PCT bound.
+Noted for the next migration batch (V061 queue): the efficiency arm's `QUEUED_MIN`
+is still overload-only — same class as #11, warehouse grain.
+
 ## 4.70.0 — V060 (triage #5/#11 + alert guard) + triage #3 score wiring (2026-07-29)
 
 Closes the metrics triage in full: the two migration-level LOWs, the verify-round

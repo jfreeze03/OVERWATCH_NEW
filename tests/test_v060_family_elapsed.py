@@ -122,6 +122,20 @@ def test_v060_app_reader_uses_elapsed_with_degrade():
     assert "/ NULLIF(SUM(f.TOTAL_EXEC_SEC), 0)" not in sql                     # exec-only denominator gone
 
 
+def test_v0601_repeat_fingerprints_use_elapsed_with_degrade():
+    """v4.70.1 (verify round): BOTH readers of MART_QUERY_FAMILY_DAILY share the
+    wall-clock basis — family_repeat_fingerprints' TOTAL_ELAPSED_HOURS /
+    AVG_ELAPSED_SEC previously stayed on exec time while the live twin used true
+    elapsed, silently changing the materialization-candidate gate (>=0.5h) and
+    the 'Compute in repeats' KPI depending on which source served."""
+    from app.data import mart27_sql
+    sql = mart27_sql.family_repeat_fingerprints(30, "ALFA")
+    assert sql.count("COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)") == 2   # HOURS + AVG
+    assert "SUM(f.TOTAL_EXEC_SEC) / 3600.0" not in sql                         # exec basis gone
+    op = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
+    assert "exec-time grain" not in op                                          # caller label updated
+
+
 def test_v060_no_new_teardown_needed():
     td = (_ROOT / "snowflake" / "teardown.sql").read_text(encoding="utf-8")
     assert "MART_QUERY_FAMILY_DAILY" in td and "SP_ALERT_SCAN" in td           # both pre-exist

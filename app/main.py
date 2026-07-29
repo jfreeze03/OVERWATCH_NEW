@@ -360,7 +360,7 @@ def _health_values() -> dict[str, tuple[str, str]]:
     the persistent status bar, and the top bar (they used to parse it thrice
     with three different source labels)."""
     res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
-              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     if not res.ok or res.empty:
         return {}
     return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}

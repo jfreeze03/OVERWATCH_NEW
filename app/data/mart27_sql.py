@@ -249,8 +249,11 @@ LIMIT 25
 def family_repeat_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
                                database: str = "", schema_contains: str = "") -> str:
     """insights_sql.repeat_query_fingerprints contract from the family mart.
-    ELAPSED here is exec-time (the mart's grain) — callers label the source.
-    LAST_RUN degrades to the day grain. Qualified (f.) — see
+    ELAPSED is wall-clock via TOTAL_ELAPSED_SEC (V060), matching the live twin;
+    COALESCE degrades pre-V060 rows to the exec basis (v4.70.1 — the verify
+    round caught this reader still on exec-time while the same-named metrics'
+    live twin used true elapsed, silently changing the materialization-candidate
+    gate by source). LAST_RUN degrades to the day grain. Qualified (f.) — see
     family_compile_heavy for the alias-shadow lesson."""
     days = bounded_days(days, 400)
     min_runs = max(2, min(int(min_runs or 10), 1000))
@@ -266,8 +269,8 @@ SELECT
     SUM(f.RUNS) AS RUNS,
     MAX(f.USERS) AS USERS,
     MAX(f.WAREHOUSES) AS WAREHOUSES,
-    ROUND(SUM(f.TOTAL_EXEC_SEC) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
-    ROUND(SUM(f.TOTAL_EXEC_SEC) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_ELAPSED_SEC,
+    ROUND(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)) / 3600.0, 2) AS TOTAL_ELAPSED_HOURS,
+    ROUND(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_ELAPSED_SEC,
     ROUND(SUM(COALESCE(f.GB_SCANNED_AVG, 0) * f.RUNS) / 1024, 4) AS TOTAL_TB_SCANNED,
     ROUND(SUM(COALESCE(f.CACHE_PCT_AVG, 0) * f.RUNS) / NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT,
     ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW,
