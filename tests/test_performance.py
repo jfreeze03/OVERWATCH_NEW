@@ -27,6 +27,27 @@ def test_cache_scope_excludes_filters():
     assert "role" in src and "salt" in src  # what SQL cannot express stays
 
 
+def test_cache_scope_keys_account_wide_reads_by_role_only(monkeypatch):
+    """perf #9: account-wide reads (marts, ACCOUNT_USAGE) return the same rows for
+    every viewer under owner's-rights SiS, so they key by ROLE only — otherwise N
+    viewers each cold-miss the live fallback on a mart outage and re-run the same
+    account-wide scan. The viewer is folded in ONLY for user-specific reads
+    (USER_PREFS / CURRENT_USER()), whose isolation the SQL text may not carry."""
+    import streamlit as st
+
+    import app.core.identity as ident
+    monkeypatch.setattr(ident, "viewer_name", lambda: "VIEWER_A")
+    st.session_state["_ow_current_role"] = "SNOW_SYSADMINS"
+
+    acct = query._cache_scope("SELECT * FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY")
+    assert "role=SNOW_SYSADMINS" in acct and "user=" not in acct          # deduped across viewers
+    prefs = query._cache_scope(
+        "SELECT PREF_KEY FROM DBA_MAINT_DB.OVERWATCH.USER_PREFS WHERE USER_NAME = 'VIEWER_A'")
+    assert "user=VIEWER_A" in prefs                                        # still isolated per viewer
+    cur = query._cache_scope("SELECT 1 WHERE X = CURRENT_USER()")
+    assert "user=VIEWER_A" in cur                                          # fallback path isolated too
+
+
 def test_fact_query_summary_matches_live_aliases():
     """Mart and live summary must stay drop-in interchangeable for the KPI row."""
     from app.data import ops_sql

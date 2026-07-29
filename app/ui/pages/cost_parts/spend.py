@@ -137,8 +137,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
     # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query
     # shapes and the users/tools burning the cloud-services credits.
     wh_opts = [str(w) for w in csr.df["WAREHOUSE_NAME"].tolist()] if csr.usable() and not csr.df.empty else []
-    if wh_opts:
-        st.markdown("**Drill in — cloud-services credits by query shape & user**")
+    # perf: the drill-in fires two MART_CLOUD_SVC_DAILY reads; gate it behind a
+    # toggle (off by default) so the Spend & Attribution first paint doesn't pay
+    # for a breakdown most viewers don't open. The ratio table above stays live.
+    if wh_opts and st.toggle("Drill in — cloud-services credits by query shape & user",
+                             key=f"cs_drill_toggle_{company}_{days}",
+                             help="Loads the per-shape and per-user cloud-services breakdown "
+                                  "(2 mart reads) on demand."):
         _ALL = "(all warehouses)"
         pick = st.selectbox("Warehouse", [_ALL, *wh_opts], key=f"cs_drill_wh_{company}_{days}",
                             help="Ranked by cloud-services %, most elevated first. Any warehouse — "

@@ -305,14 +305,24 @@ def _cache_scope(sql: str = "") -> str:
     three times per TTL. Telemetry still records the key per call site.
     """
     role = str(st.session_state.get("_ow_current_role", "") or "")
-    # r27 #4: in owner's-rights SiS the session user is the app owner —
-    # the viewer (st.user) is the cache-isolation identity.
-    from app.core.identity import viewer_name
-    user = viewer_name() or str(st.session_state.get("_ow_current_user", "") or "")
     salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
     dsalts = st.session_state.get("_ow_domain_salts", {}) or {}
     extra = "|".join(f"{d}={dsalts[d]}" for d in _domains_in(sql) if d in dsalts)
-    return f"role={role}|user={user}|salt={salt}|{extra}"
+    # perf #9: account-wide reads (marts, ACCOUNT_USAGE) return the SAME rows for
+    # every viewer under owner's-rights SiS — role governs row visibility, not the
+    # person — so they key by ROLE only. Keying them by viewer made N concurrent
+    # viewers each cold-miss the live fallback on a mart outage and re-run the same
+    # account-wide (~50GB) scan on the one XS warehouse. The viewer is added ONLY
+    # for user-specific reads: USER_PREFS is the sole one (identity_sql lives only
+    # there), and its CURRENT_USER() fallback is not isolated by a literal in the
+    # SQL — the SiS path already bakes the viewer name into the SQL text.
+    user_part = ""
+    up = str(sql or "").upper()
+    if "USER_PREFS" in up or "CURRENT_USER()" in up:
+        from app.core.identity import viewer_name
+        user = viewer_name() or str(st.session_state.get("_ow_current_user", "") or "")
+        user_part = f"user={user}|"
+    return f"role={role}|{user_part}salt={salt}|{extra}"
 
 
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool,

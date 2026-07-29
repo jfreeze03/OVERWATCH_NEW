@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.61.0 — performance round, Tranche 1 (app-only) (2026-07-29)
+
+First tranche of the performance round (scope: docs/reviews/PERF_ROUND_SCOPE_2026-07-29.md).
+
+- **#9 (high) — cache scope keyed every read by the viewer, causing a live-scan
+  stampede.** `_cache_scope` baked the viewer's name into every cache key, but
+  account-wide reads (marts, ACCOUNT_USAGE) return the same rows for every viewer
+  under owner's-rights SiS (role governs visibility, not the person). So on a mart
+  outage, N concurrent viewers each cold-missed the live fallback and re-ran the
+  same account-wide (~50 GB) scan on the one XS warehouse. Now keys account-wide
+  reads by ROLE only, folding in the viewer ONLY for user-specific reads
+  (`USER_PREFS` / `CURRENT_USER()`). A focused leak-safety trace confirmed the
+  sole per-viewer read (`USER_PREFS`) is isolated by the viewer literal in its own
+  SQL text, so role-only scoping serves the fleet from one cache entry without any
+  cross-viewer leak.
+- **Cloud-services drill-in gated behind a toggle.** The V055 shape/user
+  breakdown fired two `MART_CLOUD_SVC_DAILY` reads on every Spend & Attribution
+  first paint; it's now an opt-in toggle (the per-warehouse ratio table stays
+  live), removing both reads from the default path.
+- Re-scoped honestly after verifying against current code: #11 Unit-costs
+  leaderboards are already `run_batch`-parallelized (and are the section's primary
+  content, so not gated); #16 Overview's board is deliberately kept off the KPI
+  batch for cache-coherence (documented); #15's Cost first-paint batching is a
+  real win but a moderate `_spend_tab` restructure — carried to a focused
+  follow-up rather than rushed here (and note: `st.expander` still executes its
+  body every rerun, so "defer" needs a toggle, not just collapsing).
+
 ## 4.60.0 — audit #10 + #15 confirmed and fixed (app-only) (2026-07-29)
 
 The two PLAUSIBLE audit items, adjudicated (prosecutor + defender per finding —
