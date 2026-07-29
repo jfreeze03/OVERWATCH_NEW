@@ -168,6 +168,17 @@ def render() -> None:
     _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
                    tier="recent", source="FACT_METERING_DAILY (150d)")
     mtd_spend, mtd_source = _mtd_spend_usd(rate, preloaded=_bt_hist)
+    # Triage #1: the exec-board `daily` frame is windowed to the filter `days`
+    # (default 7) and is company-scoped, so it truncates month-to-date for most of
+    # the month and mismatches the account-wide "Projected month-end" KPI (which
+    # sits beside the account-wide MTD KPI). Project from the account-wide 150d
+    # frame already loaded above; fall back to the board frame only if it failed.
+    if _bt_hist.usable():
+        _proj = _bt_hist.df.copy()
+        _proj["USD"] = _proj["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+        proj_daily = _proj[["DAY", "USD"]]
+    else:
+        proj_daily = daily
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(company)
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
@@ -182,8 +193,8 @@ def render() -> None:
             mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
             if not mdf.empty:
                 mtd_now = float(pd.to_numeric(
-                    daily[pd.to_datetime(daily.iloc[:, 0]).dt.date >= today.replace(day=1)]
-                    .iloc[:, -1], errors="coerce").fillna(0).sum()) if not daily.empty else 0.0
+                    proj_daily[pd.to_datetime(proj_daily.iloc[:, 0]).dt.date >= today.replace(day=1)]
+                    .iloc[:, -1], errors="coerce").fillna(0).sum()) if not proj_daily.empty else 0.0
                 add = float(pd.to_numeric(mdf["FORECAST_CREDITS"], errors="coerce").fillna(0).sum()) * rate
                 lo = float(pd.to_numeric(mdf["LOWER_BOUND"], errors="coerce").fillna(0).sum()) * rate
                 hi = float(pd.to_numeric(mdf["UPPER_BOUND"], errors="coerce").fillna(0).sum()) * rate
@@ -199,8 +210,8 @@ def render() -> None:
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed
     if forecast is None:
-        forecast = (month_end_projection(daily, account_today(), engine=engine)
-                    if not daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
+        forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
+                    if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
 
     queries = _board_metric(board, "QUERIES")
     failed_queries = _board_metric(board, "FAILED_QUERIES")

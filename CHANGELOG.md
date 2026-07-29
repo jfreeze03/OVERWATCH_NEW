@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.66.0 — triage HIGH #1: month-end projection uses the full-month frame (app-only) (2026-07-29)
+
+Metrics-triage HIGH #1 (docs/reviews/METRICS_TRIAGE_2026-07-29.md). The Overview
+**Projected month-end** KPI was fed the exec-board `DAILY_SPEND` frame, which is
+windowed to the filter `days` (default 7) — so past ~day-8 of the month it summed
+month-to-date over a single week and understated the projection ~60–70% (it could
+even read below the account-wide MTD KPI beside it). The board frame is also
+company-scoped, while the Projected-month-end / MTD KPIs are account-wide.
+
+- Now projects from a **`proj_daily`** frame built from the account-wide 150d
+  `_bt_hist` already loaded for the MTD KPI and the backtest (zero extra reads):
+  full-month MTD base **and** account-wide scope, matching the KPI beside it and
+  the forecast backtest below it. The `ml_forecast` branch's MTD uses the same
+  frame. Falls back to the board `daily` frame only when the 150d mart read fails.
+- The exec-board `daily` frame still drives the company-scoped spend sparkline and
+  window total — only the forecast/MTD-base moved to the account-wide frame.
+- App-only, no migration. New `test_metrics_triage_fixes` lock; 1380 pytest green.
+
 ## 4.65.0 — compact triage-filter toolbar (app-only) (2026-07-29)
 
 The global filter strip above every page took ~5 stacked bands. Rebuilt as a
