@@ -143,8 +143,6 @@ def _views_popover() -> None:
     """Saved filter views + default landing (USER_PREFS, V013)."""
     from app.core.state import request_navigation
     from app.data import prefs_sql
-    from app.ui.components import legend_popover
-    legend_popover()
     with st.popover("Views"):
         prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                     source="USER_PREFS")
@@ -424,66 +422,44 @@ def _reset_scope() -> None:
         st.session_state[key] = default
 
 
-def _scope_chips() -> tuple[str, bool]:
-    """Chip row summarizing the ACTIVE scope. Non-default filters render as
-    accent chips (text filters amber — they narrow hardest); all-default
-    renders one muted account-wide chip. Values are user text: escaped."""
-    import html as _html
-
+def _scope_is_active() -> bool:
+    """True when any non-default filter is live — drives the strip's border glow
+    and the Reset button. (v4.65: replaced the scope-chip summary; the controls
+    themselves show the scope, and a live warehouse/user/schema filter auto-opens
+    the 'More filters' row below so it can never hide.)"""
     from app.core.state import FILTER_DEFAULTS
-    chips: list[str] = []
-
-    def _chip(label: str, value: str, kind: str = "accent") -> None:
-        chips.append(f'<span class="ow-chip ow-chip-{kind}">'
-                     f'<span class="ow-chip-dot"></span>{label} '
-                     f"<b>{_html.escape(str(value))}</b></span>")
-
-    if st.session_state.get("flt_company") != FILTER_DEFAULTS["flt_company"]:
-        _chip("Company", st.session_state.get("flt_company", ""))
-    if st.session_state.get("flt_environment") != FILTER_DEFAULTS["flt_environment"]:
-        # Item 8a (2026-07-14): Environment only narrows the database PICKER,
-        # it does not scope the data — label it so the chip is not read as an
-        # applied data filter.
-        _chip("Env (DB picker)", st.session_state.get("flt_environment", ""), kind="warn")
-    if st.session_state.get("flt_days") != FILTER_DEFAULTS["flt_days"]:
-        _chip("Window", f"{st.session_state.get('flt_days')}d")
-    if str(st.session_state.get("flt_database") or "").strip():
-        _chip("Database", st.session_state.get("flt_database", ""))
-    for key, label in (("flt_warehouse_contains", "Warehouse~"),
-                       ("flt_user_contains", "User~"),
-                       ("flt_schema_contains", "Schema~")):
-        if str(st.session_state.get(key) or "").strip():
-            _chip(label, st.session_state.get(key, ""), kind="warn")
-    active = bool(chips)
-    if not active:
-        chips.append('<span class="ow-chip">Account-wide · '
-                     f'default {FILTER_DEFAULTS["flt_days"]}d window</span>')
-    marker = '<div class="ow-scope-active"></div>' if active else ""
-    return f'{marker}<div class="ow-scope-chips">{"".join(chips)}</div>', active
+    for key in ("flt_company", "flt_environment", "flt_days"):
+        if st.session_state.get(key) != FILTER_DEFAULTS[key]:
+            return True
+    return bool(str(st.session_state.get("flt_database") or "").strip()) or any(
+        str(st.session_state.get(k) or "").strip()
+        for k in ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"))
 
 
 def _topbar_scope(health_vals: dict | None = None) -> None:
-    """Triage filter strip above every page, like the original OVERWATCH.
-    v4.39 visual pass: active-scope chips + one-click reset, and the strip
-    border glows while any non-default filter is live."""
+    """Compact triage-filter toolbar above every page (v4.65 sleek pass): the
+    kicker and Legend / Views / Reset share one thin header row, then the scope
+    controls, then 'More filters'. The strip border glows while any non-default
+    filter is live so scoped numbers never read as account-wide. Telemetry age
+    lives on the status-bar card below (it was duplicated here), and the
+    active-scope chip band is dropped — the controls show the scope and a live
+    warehouse/user/schema filter auto-opens 'More filters'. (health_vals is kept
+    for caller/signature stability; the header no longer reads telemetry.)"""
+    from app.ui.components import legend_popover
+    active = _scope_is_active()
     box = st.container(border=True)
     with box:
-        head_l, head_m, head_r = st.columns([3.6, 1.4, 1])
+        head_l, head_leg, head_view, head_reset = st.columns([4.4, 0.9, 0.9, 0.9])
         with head_l:
-            st.markdown('<div class="ow-kicker">Triage filters</div>', unsafe_allow_html=True)
-        with head_m:
-            vals = _health_values() if health_vals is None else health_vals
-            stale_h = vals.get("STALEST_SOURCE_H", ("-1", ""))[0] if vals else "-1"
-            if stale_h not in ("-1", ""):
-                st.caption(f"Telemetry ≤ {stale_h}h old")
-        with head_r:
+            marker = '<div class="ow-scope-active"></div>' if active else ""
+            st.markdown(f'{marker}<div class="ow-kicker">Triage filters</div>',
+                        unsafe_allow_html=True)
+        with head_leg:
+            legend_popover()
+        with head_view:
             _views_popover()
-        chips_html, _scope_is_active = _scope_chips()
-        chip_col, reset_col = st.columns([5.2, 0.8])
-        with chip_col:
-            st.markdown(chips_html, unsafe_allow_html=True)
-        with reset_col:
-            if _scope_is_active:
+        with head_reset:
+            if active:
                 st.button("Reset", key="flt_reset", on_click=_reset_scope,
                           help="Back to the account-wide default scope.",
                           use_container_width=True)

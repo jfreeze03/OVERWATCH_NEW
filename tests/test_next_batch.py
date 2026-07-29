@@ -28,8 +28,11 @@ def test_company_labels_use_evidence_udf_residual_unknown():
     assert "ELSE 'ALFA'" not in companies.database_case_sql()
 
 
-def test_environment_chip_marked_picker_only():
-    assert "Env (DB picker)" in (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+def test_environment_marked_picker_only():
+    """Item 8a: Environment only narrows the Database picker, it does not scope
+    the data — the control's own help says so. (The v4.39 'Env (DB picker)' scope
+    chip that also carried this was retired with the v4.65 compact filter bar.)"""
+    assert "Narrows the Database picker only" in (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
 
 
 def test_org_readers_document_latency_caveats():

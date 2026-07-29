@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.65.0 — compact triage-filter toolbar (app-only) (2026-07-29)
+
+The global filter strip above every page took ~5 stacked bands. Rebuilt as a
+compact toolbar (owner-chosen direction): the "Triage filters" kicker and the
+Legend / Views / Reset actions now share one thin header row, then the four scope
+controls, then "More filters" — cutting roughly 55–60% of the strip's height.
+
+- **Dropped the redundant telemetry caption** — "Telemetry ≤ Xh old" duplicated
+  the Telemetry-age card in the status bar right below it.
+- **Dropped the active-scope chip band** — the chips (`ALFA · 30d …`) restated the
+  visible controls. The active-filter signal is preserved by the strip's **border
+  glow** (kept) plus the existing behavior that a live warehouse/user/schema filter
+  **auto-opens "More filters,"** so a hidden filter can never go unseen.
+- **Reset** and the per-control clarity (e.g. Environment's "narrows the Database
+  picker only" help) are unchanged; `_scope_chips` and its scope-only CSS
+  (`.ow-scope-chips`/`.ow-chip-accent`/`.ow-chip-dot`) were removed. The `chip()`
+  helper's styling (status-bar pills) is untouched.
+- App-only, no migration. `test_design_system` re-pinned to the compact layout;
+  1379 pytest green, ruff + mypy clean.
+
 ## 4.64.0 — V058: per-node loader-timing observability (perf T3) (2026-07-29)
 
 Opening the **reconcile-scheduling** cluster (T3): a multi-agent design + an

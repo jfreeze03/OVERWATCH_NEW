@@ -105,18 +105,15 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-chip-bad { color:var(--ow-bad); border-color:rgba(251,113,133,0.45); background:var(--ow-bad-dim); }
 .ow-chip-warn { color:var(--ow-warn); border-color:rgba(251,191,36,0.45); background:var(--ow-warn-dim); }
 
-/* Triage scope chips (v4.39): the active scope reads at a glance, and the
-   strip itself glows when ANY non-default filter is live — scoped numbers
-   must never pass as account-wide. Token layer only. */
-.ow-scope-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:2px 0 6px 0;}
+/* Chip pills (chip() helper — scope summary in the status bar + severity pills).
+   The scope-chip BAND in the filter strip was retired in v4.65 for the compact
+   toolbar; the active-filter border glow below stays. Token layer only. */
 .ow-chip{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;
   border-radius:var(--ow-r-pill);font-size:0.72rem;font-weight:600;
   letter-spacing:.02em;line-height:1.55;border:1px solid var(--ow-hairline2);
   color:var(--ow-ink-soft);background:var(--ow-raised);}
 .ow-chip b{color:var(--ow-ink);font-weight:700;}
-.ow-chip-accent{border-color:rgba(56,189,248,0.45);background:var(--ow-info-dim);color:var(--ow-ink);}
 .ow-chip-warn{border-color:rgba(251,191,36,0.45);background:var(--ow-warn-dim);color:var(--ow-ink);}
-.ow-chip-dot{width:6px;height:6px;border-radius:var(--ow-r-pill);background:var(--ow-accent);display:inline-block;}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   border-color:rgba(56,189,248,0.40);
   box-shadow:0 0 0 1px rgba(56,189,248,0.22),var(--ow-shadow);}

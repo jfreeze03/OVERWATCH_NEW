@@ -107,21 +107,23 @@ def test_stale_elements_hidden_for_crisp_section_switch():
     from app import theme
     assert '[data-stale="true"]' in theme._CSS   # no bleed between lazy sections
 
-def test_triage_scope_chips_and_reset():
-    """v4.39: the active scope reads as chips, the strip glows when any
-    non-default filter is live, and one click resets — scoped numbers must
-    never pass as account-wide."""
+def test_triage_filter_toolbar_compact():
+    """v4.65: the triage filter bar is a compact toolbar — the kicker and
+    Legend / Views / Reset share one thin header row, then the controls. The
+    active-filter border glow and one-click Reset stay; the redundant telemetry
+    caption (now only on the status-bar card) and the scope-chip band are gone —
+    a live warehouse/user/schema filter instead auto-opens 'More filters'."""
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
-    for cls in (".ow-scope-chips{", ".ow-chip{", ".ow-chip-accent{",
-                ".ow-chip-warn{", ".ow-chip-dot{"):
-        assert cls in theme, cls
-    assert ':has(.ow-scope-active)' in theme               # the filtered glow
+    assert ':has(.ow-scope-active)' in theme                # active-filter glow kept
+    assert ".ow-chip{" in theme and ".ow-kicker {" in theme  # chip() pills + kicker kept
+    assert ".ow-scope-chips{" not in theme                 # retired chip band
     main = (root / "app" / "main.py").read_text(encoding="utf-8")
-    assert "_scope_chips" in main and "_reset_scope" in main
-    assert '_html.escape(str(value))' in main              # user text escaped
-    assert 'kind="warn"' in main                           # contains-filters read hotter
+    assert "_scope_is_active" in main and "_reset_scope" in main
     assert 'st.button("Reset", key="flt_reset", on_click=_reset_scope' in main
-    assert "Account-wide" in main                          # honest default chip
+    assert 'class="ow-scope-active"' in main               # glow marker still emitted when active
+    assert "legend_popover()" in main                       # Legend split into its own header slot
+    assert "_scope_chips" not in main                       # chip band removed
+    assert "Telemetry ≤" not in main                   # telemetry caption removed (status card only)
 
