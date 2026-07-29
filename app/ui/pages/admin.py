@@ -95,6 +95,9 @@ _EXPECTED_MIGRATIONS = {
     57: "FAILS token fix: four SP_LOAD_MARTS_V27 arms counted EXECUTION_STATUS="
         "'FAILED' (never matches) -> 'FAIL', so efficiency/qfam/role-hr/schema-hr "
         "marts report real failures",
+    58: "per-node loader-timing observability: MART_TASK_NODE_DAILY (queue + exec "
+        "delay per task node) via a new contained arm in SP_LOAD_MARTS_V27; "
+        "enables data-driven fan-out serialization / reconcile / de-collision",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

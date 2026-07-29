@@ -1,8 +1,8 @@
 -- validate.sql — post-install checks. Every row should read OK.
 
 WITH checks AS (
-    SELECT 'V001..V057 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 57) = 57,
+    SELECT 'V001..V058 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 58) = 58,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',

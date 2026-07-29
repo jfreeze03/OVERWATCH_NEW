@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.64.0 — V058: per-node loader-timing observability (perf T3) (2026-07-29)
+
+Opening the **reconcile-scheduling** cluster (T3): a multi-agent design + an
+adversarial loader-safety critique both concluded that **none** of the actual
+schedule changes — serializing the 5-way daily fan-out, retargeting the nightly
+reconcile, de-colliding the 06:30–06:50 root tasks — can be sized safely from code
+alone. `MART_TASK_GRAPH_DAILY` keeps only per-*pipeline* wall time and discards
+`SCHEDULED_TIME`, so the per-node queue delay and exec duration those changes need
+don't exist anywhere. Even a blind cron stagger just relocates a multi-minute
+overlap into another task's window. So T3 leads with the **measurement**; the
+schedule changes become data-driven fast-follows once a few mornings accumulate.
+
+- **New `MART_TASK_NODE_DAILY`** (grain DAY × DATABASE × SCHEMA × TASK_NAME):
+  `RUNS`, `FAILED`, `AVG/P95/MAX_QUEUE_SEC` (the `SCHEDULED_TIME→QUERY_START_TIME`
+  dispatch delay that quantifies the XSMALL contention), `AVG/P95/MAX_EXEC_SEC`,
+  `FIRST_START`, `LAST_COMPLETED`, `LOAD_TS`.
+- **Contained, additive loader change.** `SP_LOAD_MARTS_V27` is re-derived **from
+  V057** (preserving its four `EXECUTION_STATUS='FAIL'` fixes) with exactly one new
+  standalone guarded arm `[6b]` after the task-graph arm — a single extra
+  `TASK_HISTORY` scan at the same `-:d` window, MERGE-keyed on the grain for
+  idempotency, in its own `BEGIN…EXCEPTION` so a fault can't reach the other arms.
+  A lock test proves the proc equals V057 byte-for-byte **plus only** that arm.
+- **No task-graph surgery.** No `SCHEDULE`, no `AFTER` edge, no `SUSPEND`/`RESUME`,
+  no `CREATE/ALTER TASK` — `CREATE OR REPLACE PROCEDURE` needs no task suspended,
+  so the unattended loader's graph is provably untouched (the runbook has Joe diff
+  `SHOW TASKS` before/after to confirm). The table fills on the existing hourly
+  cadence, which reaches back over the morning's 06:40/06:45 runs.
+- **Deferred, honestly:** per-node **credits** (arm [6] already carries pipeline
+  credits — a clean fast-follow if reconcile-retargeting needs it) and the three
+  schedule changes themselves (A serialization, B reconcile retargeting, C
+  de-collision) — all now unblocked by this data.
+- Lockstep: `validate.sql` + admin `_EXPECTED_MIGRATIONS` to 58; rebuild bundle
+  `V001_V058`; teardown + run-lists extended; runbook `DEPLOY_V058_20260729.md`.
+
 ## 4.63.0 — performance round, #15: Cost first-paint batching (app-only) (2026-07-29)
 
 The default **Spend & Attribution** section fired ~10 serial blocking mart reads
