@@ -44,18 +44,25 @@ WITH runs AS (
         SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
     LEFT JOIN (
-        SELECT QUERY_ID, SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+        -- Roll each statement's compute up to the task's CALL query id via
+        -- COALESCE(ROOT_QUERY_ID, QUERY_ID): a task whose body is a stored
+        -- procedure attributes credits to its CHILD statements, which carry the
+        -- task's query id only as ROOT_QUERY_ID. The old join on the bare
+        -- QUERY_ID matched only the ~0-credit CALL row, collapsing proc-driven
+        -- pipeline cost to ~0 (audit #10; matches the rollup insights_sql uses).
+        SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS ROOT_ID,
+               SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
         FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
         WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())
           -- Prune before the GROUP BY: only task-run queries matter here.
           -- Aggregating the whole view was the 139s family (perf pass #9).
-          AND QUERY_ID IN (
+          AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (
               SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
               WHERE QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
                 AND STATE IN ('SUCCEEDED', 'FAILED')
           )
-        GROUP BY QUERY_ID
-    ) a ON a.QUERY_ID = h.QUERY_ID
+        GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)
+    ) a ON a.ROOT_ID = h.QUERY_ID
     WHERE {where}
     GROUP BY RUN_KEY
 )

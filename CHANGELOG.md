@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.60.0 — audit #10 + #15 confirmed and fixed (app-only) (2026-07-29)
+
+The two PLAUSIBLE audit items, adjudicated (prosecutor + defender per finding —
+all four agents landed on real-bug) and fixed. No migration.
+
+- **#10 task-graph pipeline cost read ~$0 for proc-driven tasks.**
+  `graph_daily_costs` aggregated `QUERY_ATTRIBUTION_HISTORY` by `QUERY_ID` and
+  joined `a.QUERY_ID = h.QUERY_ID`, where `h.QUERY_ID` is the task's root `CALL`
+  statement. Snowflake attributes a stored procedure's compute to its CHILD
+  statements (which carry the CALL's id only as `ROOT_QUERY_ID`), so the join
+  matched only the ~0-credit CALL row — every `CALL proc()` ETL task (the common
+  pattern) showed ~$0 measured credits. Now rolls up via
+  `COALESCE(ROOT_QUERY_ID, QUERY_ID)` (the same rollup `insights_sql` already
+  uses; the builder's own docstring already described this intended behavior).
+- **#15 compare "same N days" pairing produced unequal windows.** `period_pair`'s
+  MTD escape hatch clamped only window B to the prior-month boundary, so on a
+  month-end after a shorter prior month (Mar 31 vs Feb, May 31 vs Apr) window A
+  was longer than B yet labeled "same N days" — inflating the month-over-month
+  delta by a day of spend. Now caps BOTH sides to `min(n, prior-month length)`,
+  honoring the docstring's "equal-length windows or nothing" contract with a
+  truthful label. (Distinct builder from the formulas.py MTD fix in Batch A #8.)
+- This closes the 19-finding audit in full (7 high, 10 medium, 2 low — 15
+  confirmed + 4 plausible, all now confirmed and fixed).
+
 ## 4.59.0 — audit Batch B: loader / reconcile / alert correctness (V056) (2026-07-29)
 
 The migration half of the audit (docs/reviews/BUG_AUDIT_2026-07-28.md) — six

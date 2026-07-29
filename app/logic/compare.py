@@ -33,12 +33,16 @@ def period_pair(kind: str, today: date, include_partial: bool = False) -> dict:
         if include_partial:
             n = (today - cur0).days + 1          # MTD day-count incl. today
             b0 = _prev_month_start(today)
-            b1 = min(b0 + timedelta(days=n), cur0)
+            # Equal-length windows or nothing (docstring contract): cap BOTH
+            # sides to what the shorter prior month can supply. The old code
+            # clamped only B, so Mar 31 (n=31) paired a 31-day A against a 28-day
+            # B under a false "same 31 days" label (audit #15).
+            m = min(n, (cur0 - b0).days)         # (cur0 - b0).days = prior month length
             return {
-                "a": (cur0.isoformat(), (today + timedelta(days=1)).isoformat()),
-                "b": (b0.isoformat(), b1.isoformat()),
+                "a": (cur0.isoformat(), (cur0 + timedelta(days=m)).isoformat()),
+                "b": (b0.isoformat(), (b0 + timedelta(days=m)).isoformat()),
                 "label_a": f"{cur0:%Y-%m} (MTD, partial)",
-                "label_b": f"{b0:%Y-%m} (same {n} days)",
+                "label_b": f"{b0:%Y-%m} (same {m} days)",
                 "partial": True,
             }
         a0 = _prev_month_start(today)            # last FULL month

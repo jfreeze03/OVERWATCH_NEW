@@ -80,9 +80,13 @@ def test_jump_box_loads_live_targets_on_demand():
 # ---------------------------------------------------------------------------
 
 def test_graph_attribution_is_pruned_before_grouping():
+    # Still pruned to task-run queries before the GROUP BY (perf pass #9); the key
+    # is now the rolled-up COALESCE(ROOT_QUERY_ID, QUERY_ID) so proc children are
+    # attributed to the task root (audit #10) rather than dropped.
     sql = graph_sql.graph_daily_costs(30)
-    att = sql.split("QUERY_ATTRIBUTION_HISTORY", 1)[1].split("GROUP BY QUERY_ID", 1)[0]
-    assert "QUERY_ID IN (" in att and "TASK_HISTORY" in att
+    att = sql.split("QUERY_ATTRIBUTION_HISTORY", 1)[1].split(
+        "GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)", 1)[0]
+    assert "COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (" in att and "TASK_HISTORY" in att
 
 
 def test_procedure_attribution_is_pruned_before_grouping():

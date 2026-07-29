@@ -43,8 +43,22 @@ def test_partial_month_never_a_side_by_default_and_toggle_pairs_equal_days():
 
 
 def test_partial_pairing_clamps_at_a_short_prior_month():
+    # Mar 30: n=30, but Feb has only 28 days. Audit #15: BOTH sides clamp to 28
+    # so the windows are equal-length and the label is truthful — the old code
+    # left A at 30 days under a false "same 30 days" label.
     p = compare_logic.period_pair("month", date(2026, 3, 30), include_partial=True)
-    assert p["b"] == ("2026-02-01", "2026-03-01")         # Feb ends where Feb ends
+    assert p["a"] == ("2026-03-01", "2026-03-29")         # A clamped to 28 days too
+    assert p["b"] == ("2026-02-01", "2026-03-01")         # B is Feb's 28 days
+    assert "same 28 days" in p["label_b"]                 # truthful, not "same 30 days"
+
+
+def test_partial_pairing_month_end_after_shorter_prior_is_equal_length():
+    # May 31: n=31, April has 30. Both sides clamp to 30; no false "same 31 days".
+    p = compare_logic.period_pair("month", date(2026, 5, 31), include_partial=True)
+    a0, a1 = (date.fromisoformat(p["a"][0]), date.fromisoformat(p["a"][1]))
+    b0, b1 = (date.fromisoformat(p["b"][0]), date.fromisoformat(p["b"][1]))
+    assert (a1 - a0).days == (b1 - b0).days == 30
+    assert "same 30 days" in p["label_b"]
 
 
 def test_trailing_windows_are_contiguous_and_exclude_today():

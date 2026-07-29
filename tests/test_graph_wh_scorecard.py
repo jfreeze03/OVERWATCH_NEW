@@ -215,3 +215,16 @@ def test_registry_kpis_counts_and_empty():
         "changes": 5, "regressed": 1, "improved": 1, "pending": 2}
     assert wh_change.registry_kpis(pd.DataFrame()) == {
         "changes": 0, "regressed": 0, "improved": 0, "pending": 0}
+
+
+def test_graph_daily_costs_rolls_attribution_up_to_the_task_root():
+    """Audit #10: a task whose body is a stored proc attributes compute to its
+    CHILD statements (ROOT_QUERY_ID = the task's CALL id). Joining on the bare
+    QUERY_ID matched only the ~0-credit CALL row, so proc-driven pipeline cost
+    read ~$0. The credit rollup must key on COALESCE(ROOT_QUERY_ID, QUERY_ID)."""
+    sql = graph_sql.graph_daily_costs(30, "ALL")
+    assert "COALESCE(ROOT_QUERY_ID, QUERY_ID)" in sql
+    assert "GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)" in sql
+    assert "a ON a.ROOT_ID = h.QUERY_ID" in sql
+    # the old bare-QUERY_ID join (which dropped proc children) is gone
+    assert "a ON a.QUERY_ID = h.QUERY_ID" not in sql
