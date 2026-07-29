@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.59.0 — audit Batch B: loader / reconcile / alert correctness (V056) (2026-07-29)
+
+The migration half of the audit (docs/reviews/BUG_AUDIT_2026-07-28.md) — six
+confirmed bugs in stored procs, all derivation-law re-derivations, no schema
+change, no new object.
+
+- **#6 FACT_QUERY_DAILY partial-freeze.** `SP_LOAD_QH_EXTRACT`'s day-fact MERGE
+  read a rolling 72h window and overwrote the oldest calendar day with a
+  shrinking partial, freezing every aging day at ~its last hour (~95% undercount)
+  — feeding the exec-board query-volume windows. Day-aligned to `-2 CURRENT_DATE`
+  (the same fix shape as the V055 cloud-services mart).
+- **#7 nightly-reconcile D-3 damage.** `SP_NIGHTLY_RECONCILE` deleted the
+  query/extract-sourced day marts at `-3d` then rebuilt them from the 72h extract
+  via `SP_LOAD_MARTS_V27('HOURLY', 3)`, so day D-3 rebuilt ~28% short every night.
+  Fix: cap only the four **extract-fed** day arms of `SP_LOAD_MARTS_V27` at
+  `LEAST(:d, 2)` (the extract holds at most 2 whole days complete; the normal
+  hourly `d=2` call is unchanged), and delete those marts in the reconcile at
+  `-2d`. The reconcile keeps `d=3`/`-3d` for the marts it can rebuild D-3
+  complete — the full-retention marts (`MART_WAREHOUSE_EFFICIENCY_DAILY`,
+  `MART_TASK_GRAPH_DAILY`, which needs it for late-arriving attribution), the
+  hour-grain marts, and the primary metering facts. (Adversarial verification
+  caught the first cut wrongly dropping the two full-retention marts to `d=2`.)
+- **#14 ops-diag hour double-count.** `SP_LOAD_OPS_DIAG` deleted on hour-truncated
+  `HOUR_TS` with a non-hour-aligned bound while re-inserting a partial boundary
+  bucket → a complete + partial row the panels double-counted. Both bounds now
+  hour-aligned.
+- **#4** PIPE_TASK_FAILURES dedupe key gains `SCHEMA_NAME`. **#12** SEC_CRED_EXPIRY
+  dedupe key gains an EXPIRED/EXPIRING discriminator so the CRITICAL escalation
+  isn't deduped against the earlier same-week warning. **#13** COST_CLOUD_SVC_RATIO
+  company via `COMPANY_FOR_WAREHOUSE` (UNKNOWN warehouses no longer bill ALFA).
+- Process: heavy adversarial verification of a loader migration (the #7 fix
+  hinges on the hourly task using `d=2`, verified against V027). Lockstep to 56;
+  bundle `V001_V056`; deploy runbook `DEPLOY_V056_20260729.md`. This closes the
+  audit except the two PLAUSIBLE items (#10 task-graph proc-internal cost, #15
+  compare partial-month) still queued for verify-first.
+
 ## 4.58.0 — audit Batch A: 11 app-only correctness fixes (2026-07-28)
 
 A full multi-agent bug audit (find -> adversarially verify, 16 agents) surfaced

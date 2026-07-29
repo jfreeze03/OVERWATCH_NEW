@@ -122,6 +122,7 @@ snowflake/migrations/V052__exec_board_windows_180_365.sql -- exec-board 180/365 
 snowflake/migrations/V053__action_layer_remediation_verify.sql -- remediation + verify procs (action layer phase a)
 snowflake/migrations/V054__exec_board_window_history.sql -- exec-board 180/365 windows read full history (source-horizon fix + retention floor)
 snowflake/migrations/V055__cloud_services_breakdown.sql -- per-query cloud-services credits persisted (extract column + MART_CLOUD_SVC_DAILY) for the CS-ratio drill-down
+snowflake/migrations/V056__loader_reconcile_alert_fixes.sql -- Batch B: loader/reconcile day partial-freeze, ops-diag hour double-count, alert dedupe/classification
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```

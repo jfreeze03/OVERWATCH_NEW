@@ -90,6 +90,8 @@ _EXPECTED_MIGRATIONS = {
         "CTEs at 90); daily-fact retention floor raised 180->365",
     55: "per-query cloud-services credits persisted (OW_QH_EXTRACT column + "
         "MART_CLOUD_SVC_DAILY at shape/user grain) for the CS-ratio drill-down",
+    56: "audit Batch B: FACT_QUERY_DAILY + nightly-reconcile day partial-freeze, "
+        "ops-diag hour double-count, PIPE/SEC_CRED dedupe keys, cloud-svc company",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

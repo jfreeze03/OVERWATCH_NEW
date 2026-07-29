@@ -47,7 +47,7 @@ def write_copies() -> None:
 # a first-fill CALL and so pause for a minute+ during Run All. Extend when a new
 # migration adds a heavy first-fill (V054 repopulates the exec board).
 CALL_NOTE = ("V027/V029/V030/V031/V041/V042/V043/V044/V045/V048/V049/V050/V051/"
-             "V052/V053/V054/V055")
+             "V052/V053/V054/V055")  # V056 is proc-swaps only, no first-fill CALL
 
 
 def write_migrations_bundle() -> tuple[str, int]:
