@@ -234,6 +234,26 @@ def render() -> None:
     score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
                                           budget, rate)
                     if score_inputs.usable() else pd.DataFrame())
+    # Triage #3: the Stale-telemetry and Owner-queue drivers (and their SETTINGS
+    # weights) could never fire live because the caller omitted their signals.
+    # stale_sources rides the shell-shared health_strip cache entry (same SQL +
+    # key="health_strip" as main.py/brief — zero extra queries on a warm shell);
+    # open_high_actions comes from the ACTION_QUEUE read hoisted above the score
+    # (the Top-actions panel below reuses it).
+    _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+              source="ALERT_EVENTS + MART_SOURCE_FRESHNESS + FACT_METERING_DAILY")
+    stale_sources = 0
+    if _hs.ok and not _hs.empty:
+        _srow = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]
+        if not _srow.empty:
+            stale_sources = int(safe_float(_srow.iloc[0]["VALUE"]))
+    actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
+                      tier="live", source="ACTION_QUEUE")
+    open_high_actions = 0
+    if actions_res.ok and not actions_res.empty:
+        _adf = actions_res.df
+        open_high_actions = int(((_adf["STATUS"].astype(str).str.upper() == "OPEN")
+                                 & (_adf["SEVERITY"].astype(str).str.upper() == "HIGH")).sum())
     score = scoring.platform_score(signals={
         "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
         "critical_alerts": critical_alerts,
@@ -242,6 +262,8 @@ def render() -> None:
         "task_fail_pct": task_fail_pct,
         "queue_minutes": queued_minutes,
         "spill_gb": spill_gb,
+        "stale_sources": stale_sources,
+        "open_high_actions": open_high_actions,
     }, weights=scoring.resolve_weights(settings))
 
     # ---- KPI row -----------------------------------------------------------
@@ -399,8 +421,7 @@ def render() -> None:
 
     with left:
         st.subheader("Top actions")
-        actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
-                          tier="live", source="ACTION_QUEUE")
+        # actions_res loaded above the score (triage #3) — reused here.
         if not actions_res.ok:
             st.info("Action queue isn't installed yet — no placeholder rows.")
         elif actions_res.empty:

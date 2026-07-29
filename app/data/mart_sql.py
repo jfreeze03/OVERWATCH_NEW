@@ -6,7 +6,7 @@ lifecycle INSERT/UPDATE statements are built in the pages that own them.
 
 from __future__ import annotations
 
-from app.config import MAX_MART_WINDOW_DAYS, core_object, mart_object
+from app.config import MAX_MART_WINDOW_DAYS, THRESHOLDS, core_object, mart_object
 from app.core.sqlsafe import sql_literal
 from app.data.common import and_where, bounded_days
 
@@ -494,6 +494,18 @@ UNION ALL
 SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+UNION ALL
+-- Triage #3: stale-source COUNT for the live platform score (the strip's MAX-age
+-- arm can't say how many are stale). Same cadence rule as the Control Room
+-- freshness board: DAILY/METERING sources stale past {THRESHOLDS["stale_daily_fact_hours"]}h, hourly past
+-- {THRESHOLDS["stale_fact_hours"]}h. A never-loaded source (NULL LAST_LOAD_TS) is not counted, matching
+-- the board's safe_float(NULL)=0 behavior.
+SELECT 'STALE_SOURCES',
+       TO_VARCHAR(COUNT_IF(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0 >
+                  IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%',
+                      {THRESHOLDS["stale_daily_fact_hours"]}, {THRESHOLDS["stale_fact_hours"]}))),
+       'INFO'
+FROM {core_object("SOURCE_FRESHNESS_STATE")}
 """
 
 

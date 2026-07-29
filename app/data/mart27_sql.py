@@ -230,9 +230,13 @@ SELECT
     ANY_VALUE(f.SAMPLE_TEXT) AS SAMPLE_TEXT,
     SUM(f.RUNS) AS RUNS,
     ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / NULLIF(SUM(f.RUNS), 0) / 1000, 2) AS AVG_COMPILE_S,
-    ROUND(SUM(f.TOTAL_EXEC_SEC) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_TOTAL_S,
+    -- Triage #5 (V060): wall-clock elapsed, like the live builder's
+    -- TOTAL_ELAPSED_TIME — exec-only time made COMPILE_PCT exceed 100% for the
+    -- compile-dominated families this view selects. COALESCE degrades pre-V060
+    -- rows (never re-loaded beyond the trailing 2 days) to the old exec basis.
+    ROUND(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)) / NULLIF(SUM(f.RUNS), 0), 2) AS AVG_TOTAL_S,
     ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / 1000
-          / NULLIF(SUM(f.TOTAL_EXEC_SEC), 0) * 100, 1) AS COMPILE_PCT,
+          / NULLIF(SUM(COALESCE(f.TOTAL_ELAPSED_SEC, f.TOTAL_EXEC_SEC)), 0) * 100, 1) AS COMPILE_PCT,
     ROUND(SUM(f.COMPILE_MS_AVG * f.RUNS) / 3600000, 2) AS TOTAL_COMPILE_HOURS
 FROM {mart_object("MART_QUERY_FAMILY_DAILY")} f
 WHERE {where}
@@ -283,7 +287,7 @@ def role_share(days: int, company: str = "ALL") -> str:
     lesson) only picks display rows AFTER the share is computed, so an
     excluded role keeps its slice and this company's roles never absorb it."""
     days = bounded_days(days, 400)
-    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",  # verify round: match live twin's anchor
                       _company_arm(company))
     vis = and_where(companies.role_clause(company, "ROLE_NAME"))
     return f"""

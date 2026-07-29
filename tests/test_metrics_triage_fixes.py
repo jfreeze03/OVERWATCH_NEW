@@ -105,6 +105,36 @@ def test_ai_service_match_is_prefix_everywhere():
         assert "ILIKE '%AI%'" not in f.read_text(encoding="utf-8"), f.name
 
 
+def test_triage3_live_score_gets_all_nine_signals():
+    """MEDIUM #3 (v4.70.0): the live platform score's Stale-telemetry (cap 12) and
+    Owner-queue (cap 9) drivers can now fire — the caller passes stale_sources
+    (via the shell-shared health_strip entry, zero extra queries warm) and
+    open_high_actions (ACTION_QUEUE hoisted above the score and reused by the
+    Top-actions panel — still exactly one action_queue read on the page)."""
+    ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
+    assert '"stale_sources": stale_sources,' in ov
+    assert '"open_high_actions": open_high_actions,' in ov
+    assert 'key="health_strip"' in ov                              # shared cache entry
+    assert ov.count('key="action_queue"') == 1                     # hoisted, not duplicated
+    assert ov.index('key="action_queue"') < ov.index("scoring.platform_score")
+    hs = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
+    assert "'STALE_SOURCES'" in hs                                  # new health-strip arm
+    # the strip's SQL cadence rule mirrors the Control Room freshness board
+    assert "SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%'" in hs
+
+
+def test_role_share_anchor_matches_live_twin():
+    """Verify round: role_share (mart) now anchors on CURRENT_DATE like its live
+    twin chargeback_sql.role_share_within_warehouse, so the role-share tile
+    covers the same span whichever source serves it."""
+    from app.data import chargeback_sql, mart27_sql
+    mart = mart27_sql.role_share(7, "ALFA")
+    live = chargeback_sql.role_share_within_warehouse(7, "ALFA")
+    assert "HOUR_TS >= DATEADD('day', -7, CURRENT_DATE())" in mart
+    assert "START_TIME >= DATEADD('day', -7, CURRENT_DATE())" in live
+    assert "CURRENT_TIMESTAMP())" not in mart.split("WITH scoped")[0]   # rolling anchor gone
+
+
 def test_cache_pct_readers_scale_fraction_to_percent():
     """Chip fix: PERCENTAGE_SCANNED_FROM_CACHE is a 0-1 fraction (empirically
     confirmed on live rows, owner 2026-07-29), so BOTH repeat-query read points

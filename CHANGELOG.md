@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.70.0 — V060 (triage #5/#11 + alert guard) + triage #3 score wiring (2026-07-29)
+
+Closes the metrics triage in full: the two migration-level LOWs, the verify-round
+guard, and the deliberately carved-out #3 — the last open findings.
+
+**V060 (migration, one additive column + two proc re-derivations):**
+- **#5** `MART_QUERY_FAMILY_DAILY` gains `TOTAL_ELAPSED_SEC` (wall-clock); the qfam
+  arm stores it, and `family_compile_heavy` now averages and bounds `COMPILE_PCT`
+  on it — exec-only time let COMPILE_PCT exceed 100% for exactly the
+  compile-dominated families the view selects. Reader `COALESCE`s to
+  `TOTAL_EXEC_SEC` so pre-V060 rows (never re-loaded beyond the trailing 2 days)
+  degrade to the old basis instead of dropping out.
+- **#11** `FACT_QUERY_SCHEMA_HOURLY`'s `QUEUED_SEC` now includes provisioning-queue
+  time (OVERLOAD + PROVISIONING — the `FACT_QUERY_HOURLY` convention), so a schema
+  filter no longer silently under-reports the Queued KPI.
+- **Guard** `COST_CLOUD_SVC_RATIO`'s metering subquery gains `WAREHOUSE_ID > 0` so
+  the `CLOUD_SERVICES_ONLY` pseudo-warehouse (ratio = 100%) can never fire the
+  alert — parity with the live CS-ratio builder and every fact writer.
+- Derivation law: marts proc from **V059** (V057/V058/V059 fixes byte-proven to
+  survive), alert proc from **V056**; byte-restore tests pin both as
+  latest + only-the-enumerated-edits.
+
+**Triage #3 (app): the platform score's two dead drivers now fire.**
+- The live caller passed 7 of 9 signals, so Stale-telemetry (cap 12) and
+  Owner-queue (cap 9) — and their `SCORE_PTS_PER_STALE_SOURCE` /
+  `_PER_OPEN_ACTION` SETTINGS — could never take effect: the score read up to
+  21 pts high exactly when telemetry was stale or HIGH actions sat open.
+- `stale_sources` comes from a new `STALE_SOURCES` arm on the shell-shared
+  `health_strip` (same cadence rule as the Control Room freshness board:
+  DAILY/METERING sources stale past 30h, hourly past 3h) — rides the existing
+  `key="health_strip"` cache entry, zero extra queries on a warm shell.
+- `open_high_actions` counts OPEN×HIGH from the ACTION_QUEUE read **hoisted above
+  the score**; the Top-actions panel reuses the same result (still exactly one
+  `action_queue` read on the page).
+- Also: `role_share` (mart) now anchors on `CURRENT_DATE` like its chargeback live
+  twin (the verify round's residual same-tile anchor mismatch).
+
 ## 4.69.0 — cache-pct scale fix in the repeat-query insights chain (app-only) (2026-07-29)
 
 `PERCENTAGE_SCANNED_FROM_CACHE` is a **0–1 fraction** — now empirically confirmed

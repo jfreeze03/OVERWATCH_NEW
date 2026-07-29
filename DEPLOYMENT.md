@@ -65,6 +65,7 @@ snowflake/migrations/V056__loader_reconcile_alert_fixes.sql
 snowflake/migrations/V057__fail_status_token.sql
 snowflake/migrations/V058__task_node_timing.sql
 snowflake/migrations/V059__task_graph_root_credits.sql
+snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
