@@ -145,6 +145,12 @@ DDL (needs V059).
   meant to reconcile them.
 - **Fix:** reword to present `wh_usd` as the account-wide, rebate-applied warehouse
   portion of *this page's* billed spend (Overview ≤ it, and rebate-free).
+- **Correction (v4.68.1 verify round):** the prescription's direction claim was
+  itself wrong — Overview prices UNADJUSTED usage, so at company=ALL (or a dominant
+  company) it reads *above* the rebate-netted `wh_usd`, by ~the rebate. The shipped
+  wording states the different basis and both directions instead of an inequality.
+  Also: `wh_usd` *includes* reader metering, so "reader" must not be listed in the
+  remainder bucket.
 
 ---
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.68.1 — verify-round fix-forward: honest labels for #12/#13 (app-only) (2026-07-29)
+
+The 4.68.0 adversarial verification (7 agents, run against the shipped tree)
+returned CORRECT on all SQL: #6/#8/#9/#10 exact (De Morgan complement, measure
+parity, ×100-once, single MFA definition) and the anchors verified against every
+same-tile feeder. The two findings were **labels lying about verified-correct SQL**:
+
+- **#12 INCOMPLETE → fixed.** Control Room's pulse still said "24h" while its three
+  feeding builders are now midnight-anchored (days=1 = yesterday 00:00 → now,
+  24–48h). Relabeled: "Queries (since yday)" + help note, source label, empty-state,
+  comments, docstring. No SQL change.
+- **#13 DEFECTIVE → fixed.** The 4.68.0 rewording claimed Overview "reads at or
+  below" the rebate-netted warehouse figure, "never equal" — provably inverted at
+  company=ALL, where Overview prices UNADJUSTED usage and reads *above* it by ~the
+  rebate. (The triage doc's own prescription encoded the wrong direction — corrected
+  there too.) New wording states the different basis and both directions, and stops
+  listing "reader" in the remainder (it sits inside the warehouse figure).
+- The `%AI%` lock now scans **every** `app/data` SQL-builder module (the 4.68.0
+  test covered only the two changed files while the changelog claimed more).
+
 ## 4.68.0 — metrics-triage MEDIUM app batch + AI-prefix fix (app-only) (2026-07-29)
 
 Six MEDIUM fixes from the metrics triage (docs/reviews/METRICS_TRIAGE_2026-07-29.md)

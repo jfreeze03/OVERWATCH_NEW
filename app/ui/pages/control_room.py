@@ -1,8 +1,8 @@
 """Control Room — DBA morning triage on one screen.
 
 Ranked queue (alerts + task failures + spend anomalies), telemetry freshness,
-24h operations pulse, and spend movers. No button maze: the queue is visible
-on entry.
+the since-yesterday operations pulse, and spend movers. No button maze: the
+queue is visible on entry.
 """
 
 from __future__ import annotations
@@ -228,10 +228,12 @@ def render() -> None:
                 scope_note=f"{company} · last {days} days"
                            + (f" · {f['database']}" if f["database"] else ""))
 
-    # ---- 24h pulse -----------------------------------------------------------
-    # Fact-first 24h pulse (Codex #4): the hourly fact answers this without
+    # ---- pulse (since yesterday 00:00) ---------------------------------------
+    # Fact-first pulse (Codex #4): the hourly fact answers this without
     # a live QUERY_HISTORY scan; schema filter (no schema grain) or an empty
-    # fact falls back to live, exactly like the Operations page.
+    # fact falls back to live, exactly like the Operations page. Triage #12:
+    # all three feeding builders anchor on CURRENT_DATE, so days=1 covers
+    # yesterday 00:00 -> now (24-48h) — labels say "since yday", not "24h".
     pulse, pulse_from_mart = None, False
     if not f["schema_contains"]:
         m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
@@ -248,7 +250,7 @@ def render() -> None:
     if pulse is None:
         pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
                     page=_PAGE, key=f"pulse_{company}",
-                    tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (24h)")
+                    tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
     act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
               key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
     q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
@@ -259,7 +261,9 @@ def render() -> None:
         failed = safe_float(row.get("FAILED_COUNT"))
         _fail_bad = bool(qcount and failed / qcount > 0.02)
         kpi_row([
-            {"label": "Queries (24h)", "value": f"{qcount:,.0f}", "spark": q_spark},
+            {"label": "Queries (since yday)", "value": f"{qcount:,.0f}", "spark": q_spark,
+             "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
+                     "time of day) — the same span on the mart and live paths."},
             {"label": "Failed", "value": f"{failed:,.0f}",
              "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
              "delta_color": "inverse" if _fail_bad else "off",
@@ -271,9 +275,9 @@ def render() -> None:
         ])
         result_caption(pulse)
     elif not pulse.ok:
-        st.error(f"24h pulse unavailable: {pulse.error}")
+        st.error(f"Pulse unavailable: {pulse.error}")
     else:
-        st.info("No queries recorded in the last 24h for this scope.")
+        st.info("No queries recorded since yesterday 00:00 for this scope.")
 
 
     # ---- Incidents (V032) ------------------------------------------------------

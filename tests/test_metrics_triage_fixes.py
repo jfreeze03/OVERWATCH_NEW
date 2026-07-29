@@ -80,11 +80,17 @@ def test_triage12_query_window_anchors_match_live():
 
 
 def test_triage13_spend_lens_label_is_account_wide():
-    """MEDIUM #13: the 'why totals differ' expander no longer presents the
-    account-wide rebate-netted warehouse total as Overview's company-scoped KPI."""
+    """MEDIUM #13 (+ verify round): the 'why totals differ' expander no longer
+    presents the account-wide rebate-netted warehouse total as Overview's
+    company-scoped KPI — and makes no strict directional claim (at ALL scope
+    Overview prices UNADJUSTED usage and reads ABOVE the rebate-netted figure)."""
     sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     assert "Warehouse portion of that billed spend" in sp
     assert "Overview's company-scoped spend KPI — warehouse-exact" not in sp
+    assert "different basis" in sp                          # honest: not a slice/inequality
+    assert "reads at or below it" not in sp                 # the disproven strict claim
+    assert "reader metering included" in sp                 # reader sits INSIDE wh_usd
+    assert "(serverless, AI, replication, reader)" not in sp  # ...not in the remainder
 
 
 def test_ai_service_match_is_prefix_everywhere():
@@ -95,5 +101,5 @@ def test_ai_service_match_is_prefix_everywhere():
     from app.data import mart_sql
     m = mart_sql.fact_cortex_daily_spend(7)
     assert "ILIKE 'AI%'" in m
-    for rel in ("app/data/mart_sql.py", "app/data/cost_sql.py"):
-        assert "ILIKE '%AI%'" not in (_ROOT / rel).read_text(encoding="utf-8"), rel
+    for f in sorted((_ROOT / "app" / "data").glob("*.py")):   # every SQL builder module
+        assert "ILIKE '%AI%'" not in f.read_text(encoding="utf-8"), f.name
