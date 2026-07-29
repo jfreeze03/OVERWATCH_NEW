@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.69.0 — cache-pct scale fix in the repeat-query insights chain (app-only) (2026-07-29)
+
+`PERCENTAGE_SCANNED_FROM_CACHE` is a **0–1 fraction** — now empirically confirmed
+on this account's live rows (owner, 2026-07-29: `SELECT PERCENTAGE_SCANNED_FROM_CACHE
+… LIMIT 5` returned 0.xx values), settling the scale for three fixes at once (this
+one, and retroactively the v4.68.0 #9 CS-drill ×100).
+
+- Two chains treated the raw column as 0–100: the live repeat-query builder
+  (`insights_sql.py`, no ×100) and the family-mart reader (`mart27_sql.py:268`
+  over V027's unscaled `CACHE_PCT_AVG`). Consumer `flag_repeat_candidates` filters
+  `AVG_CACHE_PCT <= 25.0` (percent) — with 0–1 values **every** heavy query passed
+  the "cache-poor" filter (a no-op) and the WHY caption printed e.g. "1% cache" for
+  a fully-cached query.
+- Both read points now scale **×100 at read** — the established pattern from
+  triage #9 — leaving the mart loader untouched (no migration). Thresholds and
+  `test_insights` fixtures (already 0–100) are unchanged and now correct live.
+- Lock test pins both expressions with the empirical-confirmation provenance.
+
 ## 4.68.1 — verify-round fix-forward: honest labels for #12/#13 (app-only) (2026-07-29)
 
 The 4.68.0 adversarial verification (7 agents, run against the shipped tree)

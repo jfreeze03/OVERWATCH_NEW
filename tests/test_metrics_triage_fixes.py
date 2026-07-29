@@ -103,3 +103,15 @@ def test_ai_service_match_is_prefix_everywhere():
     assert "ILIKE 'AI%'" in m
     for f in sorted((_ROOT / "app" / "data").glob("*.py")):   # every SQL builder module
         assert "ILIKE '%AI%'" not in f.read_text(encoding="utf-8"), f.name
+
+
+def test_cache_pct_readers_scale_fraction_to_percent():
+    """Chip fix: PERCENTAGE_SCANNED_FROM_CACHE is a 0-1 fraction (empirically
+    confirmed on live rows, owner 2026-07-29), so BOTH repeat-query read points
+    scale x100 — otherwise flag_repeat_candidates' percent threshold
+    (REPEAT_LOW_CACHE_PCT=25.0) passes every row and captions misreport cache.
+    Matches the x100-at-read pattern established for MART_CLOUD_SVC_DAILY (#9)."""
+    ins = (_ROOT / "app" / "data" / "insights_sql.py").read_text(encoding="utf-8")
+    assert "AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100 AS AVG_CACHE_PCT" in ins
+    m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
+    assert "NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT" in m27
