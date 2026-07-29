@@ -138,8 +138,11 @@ def _rate_card_reconciliation(settings: dict) -> None:
     )
     org_m = run(cost_sql.org_account_month_usd(2), page=_PAGE, key="org_month_this",
                 tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account)")
-    model_m = run(mart_sql.fact_daily_spend(70), page=_PAGE, key="fact_daily_45",
-                  tier="recent", source="FACT_METERING_DAILY")
+    # triage #6: compute-ONLY so the model side matches the org COMPUTE_USD side
+    # (AI/Cortex priced at the compute rate was biasing DELTA_PCT up on any account
+    # with Cortex usage, and the caption invited "fixing" the global rate).
+    model_m = run(mart_sql.fact_daily_spend_compute(70), page=_PAGE, key="fact_daily_compute_70",
+                  tier="recent", source="FACT_METERING_DAILY (compute only, excl AI/Cortex)")
     if not org_m.usable():
         st.info("Needs ORGANIZATION_USAGE visibility (the org accounts panel below "
                 "has the grant).")

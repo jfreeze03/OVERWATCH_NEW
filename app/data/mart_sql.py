@@ -64,7 +64,10 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     from app.core.sqlsafe import contains_filter
 
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"]
+    # triage #12: midnight-aligned window (CURRENT_DATE) to match the live twin
+    # ops_sql.query_window_summary and fact_warehouse_pressure, so the same
+    # "24h"/"Nd" tile covers the same span whichever source serves it.
+    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     where.append(contains_filter("WAREHOUSE_NAME", warehouse_contains))
@@ -134,6 +137,25 @@ def fact_daily_spend(days: int) -> str:
 SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY DAY
+ORDER BY DAY
+"""
+
+
+def fact_daily_spend_compute(days: int) -> str:
+    """Account billed credits per day, COMPUTE ONLY (excludes AI/Cortex) — for the
+    rate-card reconciliation, whose org side (COMPUTE_USD) also excludes AI, so the
+    model and org sides compare like for like (triage #6). Negation of the AI
+    predicate in fact_cortex_daily_spend; COALESCE keeps NULL-service rows as
+    compute."""
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    return f"""
+SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%'
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%'
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'
 GROUP BY DAY
 ORDER BY DAY
 """
@@ -209,7 +231,12 @@ def fact_cloud_services_ratio(days: int, company: str = "ALL") -> str:
     windowed ratio this panel shows.
     """
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
+    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             # triage #8: match the live builder — drop the CLOUD_SERVICES_ONLY
+             # pseudo-warehouse (a 100%-CS metadata bucket that sorts first and
+             # spuriously triggers the compile-heavy drill); the >= 0.5 HAVING
+             # below drops near-idle warehouses, also matching live.
+             "UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     return f"""
@@ -227,7 +254,7 @@ SELECT
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
 WHERE {and_where(*where)}
 GROUP BY 1
-HAVING SUM(CREDITS_TOTAL) > 0
+HAVING SUM(CREDITS_TOTAL) >= 0.5
 ORDER BY CLOUD_SVC_PCT DESC
 LIMIT 500
 """
@@ -258,7 +285,7 @@ SELECT
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
     ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_PER_1K_RUNS,
     ROUND(SUM(EXEC_SEC_SUM) / NULLIF(SUM(RUNS), 0), 3) AS AVG_EXEC_S,
-    ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0), 0) AS AVG_CACHE_PCT
+    ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100, 0) AS AVG_CACHE_PCT
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
 WHERE {_cloud_svc_where(days, company, warehouse)}
 GROUP BY QUERY_PARAMETERIZED_HASH
@@ -1258,7 +1285,7 @@ SELECT
     SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE '%AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')
+  AND (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')
 GROUP BY 1, 2
 ORDER BY DAY
 """

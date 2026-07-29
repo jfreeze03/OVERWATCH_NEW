@@ -354,7 +354,7 @@ def schema_window_summary(days: int, company: str = "ALL", database: str = "",
     read that used to force a live QUERY_HISTORY scan whenever a schema
     filter was active. P95 is the peak hourly-group p95 (callers label it)."""
     days = bounded_days(days, 400)
-    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",  # triage #12: match live CURRENT_DATE anchor
              _company_arm(company),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():

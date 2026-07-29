@@ -1,4 +1,7 @@
-"""Locks for the metrics-triage HIGH fixes (docs/reviews/METRICS_TRIAGE_2026-07-29.md)."""
+"""Locks for the metrics-triage fixes (docs/reviews/METRICS_TRIAGE_2026-07-29.md).
+
+HIGH #1 (v4.66.0) + the MEDIUM app batch and AI-prefix chip fix (v4.68.0).
+"""
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -17,3 +20,80 @@ def test_triage1_month_end_projection_uses_full_month_account_frame():
     # the ml_forecast branch's MTD also derives from the full-month frame
     assert "proj_daily[pd.to_datetime(proj_daily.iloc[:, 0])" in ov
     assert "else:\n        proj_daily = daily" in ov              # graceful fallback when mart down
+
+
+# ---------------------------------------------------------------------------
+# MEDIUM app batch (v4.68.0)
+# ---------------------------------------------------------------------------
+
+def test_triage6_rate_card_model_is_compute_only():
+    """MEDIUM #6: the rate-card model side excludes AI/Cortex (org COMPUTE_USD
+    excludes AI), with a PREFIX 'AI%' match — '%AI%' would drop
+    SNOWPARK_CONTAINER_SERVICES (contAIner), which the org buckets as COMPUTE."""
+    from app.data import mart_sql
+    sql = mart_sql.fact_daily_spend_compute(70)
+    assert "NOT ILIKE '%CORTEX%'" in sql and "NOT ILIKE '%INTELLIGENCE%'" in sql
+    assert "NOT ILIKE 'AI%'" in sql
+    assert "NOT ILIKE '%AI%'" not in sql                      # the contAIner trap
+    ct = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "contract.py").read_text(encoding="utf-8")
+    assert "fact_daily_spend_compute(70)" in ct
+    assert 'key="fact_daily_compute_70"' in ct                # own cache identity
+    can = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
+    assert "mart.fact_daily_spend_compute" in can             # house law #4: builder has a canary
+
+
+def test_triage8_cs_ratio_matches_live_exclusions():
+    """MEDIUM #8: the mart CS-ratio drops the CLOUD_SERVICES_ONLY pseudo-warehouse
+    and floors near-idle warehouses at 0.5 credits, matching the live builder —
+    no more 100%-CS ELEVATED phantom row spuriously triggering the drill."""
+    from app.data import mart_sql
+    sql = mart_sql.fact_cloud_services_ratio(7, "ALFA")
+    assert "UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'" in sql
+    assert "HAVING SUM(CREDITS_TOTAL) >= 0.5" in sql
+    assert "HAVING SUM(CREDITS_TOTAL) > 0\n" not in sql
+
+
+def test_triage9_cs_cache_pct_scaled_to_percent():
+    """MEDIUM #9: CACHE_PCT_SUM sums 0-1 fractions (PERCENTAGE_SCANNED_FROM_CACHE),
+    so the shape drill multiplies by 100 — without it every row rendered 0% or 1%."""
+    from app.data import mart_sql
+    sql = mart_sql.cloud_svc_top_shapes(7, "ALFA")
+    assert "SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100" in sql
+
+
+def test_triage10_mfa_gap_single_definition():
+    """MEDIUM #10: both Access-panel builders use HAS_MFA like governance_counts
+    (native MFA counts; EXT_AUTHN_DUO was Duo-only and false-positived native MFA)."""
+    sec = (_ROOT / "app" / "data" / "security_sql.py").read_text(encoding="utf-8")
+    assert "EXT_AUTHN_DUO" not in sec
+    assert sec.count("COALESCE(U.HAS_MFA, FALSE) = FALSE") == 3   # 2 fixed + governance_counts
+
+
+def test_triage12_query_window_anchors_match_live():
+    """MEDIUM #12: mart and live query-window summaries share the CURRENT_DATE
+    anchor, so the same labeled tile covers the same span from either source."""
+    from app.data import mart27_sql, mart_sql
+    fact = mart_sql.fact_query_window_summary(30, "ALFA")
+    schema = mart27_sql.schema_window_summary(1, "ALFA", "ALFA_EDW_PRD", "stage")
+    assert "HOUR_TS >= DATEADD('day', -30, CURRENT_DATE())" in fact
+    assert "HOUR_TS >= DATEADD('day', -1, CURRENT_DATE())" in schema
+
+
+def test_triage13_spend_lens_label_is_account_wide():
+    """MEDIUM #13: the 'why totals differ' expander no longer presents the
+    account-wide rebate-netted warehouse total as Overview's company-scoped KPI."""
+    sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
+    assert "Warehouse portion of that billed spend" in sp
+    assert "Overview's company-scoped spend KPI — warehouse-exact" not in sp
+
+
+def test_ai_service_match_is_prefix_everywhere():
+    """Chip fix (with #6): 'AI' service matching is PREFIX-form in every SQL
+    builder — the contains-form '%AI%' matches SNOWPARK_CONTAINER_SERVICES
+    (contAIner) and would misprice container compute as Cortex. Mart + live
+    twins changed together to preserve parity."""
+    from app.data import mart_sql
+    m = mart_sql.fact_cortex_daily_spend(7)
+    assert "ILIKE 'AI%'" in m
+    for rel in ("app/data/mart_sql.py", "app/data/cost_sql.py"):
+        assert "ILIKE '%AI%'" not in (_ROOT / rel).read_text(encoding="utf-8"), rel

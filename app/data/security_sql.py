@@ -16,7 +16,7 @@ def users_without_mfa(company: str = "ALL") -> str:
         "U.DELETED_ON IS NULL",
         "COALESCE(U.DISABLED, FALSE) = FALSE",
         "COALESCE(U.HAS_PASSWORD, FALSE) = TRUE",
-        "COALESCE(U.EXT_AUTHN_DUO, FALSE) = FALSE",
+        "COALESCE(U.HAS_MFA, FALSE) = FALSE",  # triage #10: match governance_counts (native MFA counts, not Duo-only)
         companies.user_clause(company, "U.NAME"),
     )
     return f"""
@@ -54,7 +54,7 @@ def users_without_mfa_live(company: str = "ALL") -> str:
         "U.DELETED_ON IS NULL",
         "COALESCE(U.DISABLED, FALSE) = FALSE",
         "COALESCE(U.HAS_PASSWORD, FALSE) = TRUE",
-        "COALESCE(U.EXT_AUTHN_DUO, FALSE) = FALSE",
+        "COALESCE(U.HAS_MFA, FALSE) = FALSE",  # triage #10: match governance_counts (native MFA counts, not Duo-only)
         companies.user_clause(company, "U.NAME"),
     )
     return f"""

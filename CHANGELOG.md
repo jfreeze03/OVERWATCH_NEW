@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.68.0 — metrics-triage MEDIUM app batch + AI-prefix fix (app-only) (2026-07-29)
+
+Six MEDIUM fixes from the metrics triage (docs/reviews/METRICS_TRIAGE_2026-07-29.md)
+plus the AI-service-prefix chip fix, all app-only. **#3 (platform-score wiring) is
+deliberately carved out** to its own follow-up — it moves the headline exec score by
+up to 21 points and needs a stale-source *count* that no current read exposes.
+
+- **#6 rate-card compute-only.** The model side of the rate-card reconciliation
+  (`contract.py`) now uses a new `fact_daily_spend_compute` builder (with canary),
+  excluding AI/Cortex so it compares like-for-like against org `COMPUTE_USD` —
+  Cortex credits priced at the compute rate were biasing `DELTA_PCT` up and the
+  caption invited "fixing" the global rate. The AI exclusion uses the **prefix**
+  `'AI%'`: the contains-form would drop `SNOWPARK_CONTAINER_SERVICES` (cont**AI**ner),
+  which the org buckets under `RATING_TYPE='COMPUTE'`.
+- **AI-prefix everywhere (chip fix).** The same `%AI%` contains-trap existed in
+  `fact_cortex_daily_spend` (mart) **and its live twin** in `cost_sql` — both would
+  misprice container-services compute as Cortex. Both now use `'AI%'`, changed
+  together to preserve mart-vs-live parity; a lock test bans `ILIKE '%AI%'` from the
+  SQL builders repo-wide.
+- **#8 CS-ratio parity.** `fact_cloud_services_ratio` now excludes the
+  `CLOUD_SERVICES_ONLY` pseudo-warehouse and floors near-idle warehouses at 0.5
+  credits, matching the live builder — no more phantom 100%-CS ELEVATED row sorted
+  first and spuriously triggering the compile-heavy drill.
+- **#9 CS "Cache %" ×100.** `cloud_svc_top_shapes` scales the 0–1 cache fraction to
+  percent — previously every row rendered 0% or 1%.
+- **#10 MFA single definition.** Both Access-panel builders now use `HAS_MFA`
+  (matching `governance_counts`); the Duo-specific `EXT_AUTHN_DUO` false-positived
+  users with native (non-Duo) MFA.
+- **#12 window anchors unified.** `fact_query_window_summary` and
+  `schema_window_summary` anchor on `CURRENT_DATE` like their live twin, so the same
+  labeled tile covers the same span whichever source serves it.
+- **#13 honest label.** The "why totals differ" expander no longer presents the
+  account-wide, rebate-netted warehouse total as Overview's company-scoped KPI.
+- Chips filed during verification for two adjacent latent bugs (being handled
+  next): the 0–1 cache fraction vs 0–100 thresholds in the repeat-query insights
+  chain (needs one live row to confirm scale).
+
 ## 4.67.0 — V059: triage HIGH #2 — task-graph pipeline credits (2026-07-29)
 
 Metrics-triage HIGH #2. `MART_TASK_GRAPH_DAILY.WH_CREDITS` (pipeline spend /

@@ -138,6 +138,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("mart.fact_contract_consumed", lambda: mart_sql.fact_contract_consumed(
         (account_today() - timedelta(days=30)).isoformat())),
     ("mart.fact_daily_spend", lambda: mart_sql.fact_daily_spend(2)),
+    ("mart.fact_daily_spend_compute", lambda: mart_sql.fact_daily_spend_compute(2)),
     ("mart.fact_warehouse_daily", lambda: mart_sql.fact_warehouse_daily(2, "ALFA")),
     ("mart.fact_task_daily", lambda: mart_sql.fact_task_daily(2, "ALFA")),
     ("mart.fact_wh_window_vs_prior", lambda: mart_sql.fact_warehouse_window_vs_prior(2, "ALFA")),
