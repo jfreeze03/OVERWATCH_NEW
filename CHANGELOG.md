@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.62.0 — V057: FAILS token fix (silent-0 failure counts) (2026-07-29)
+
+Opening the loader-SQL cluster for the performance round's Tranche 2 (credit
+savings) surfaced a **correctness** bug that outranks every perf item there — so
+Tranche 2 leads with the fix. The perf items in that cluster are all confirmed
+LOW (WMH is tiny, the ACCOUNT_USAGE views are small, freshness aggregation is
+metadata-only), so they are deferred rather than bundled.
+
+- **Four mart failure counts were a constant 0.**
+  `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY.EXECUTION_STATUS` takes the values
+  `success` / `fail` / `incident`, and `OW_QH_EXTRACT` copies it verbatim, so a
+  failed query is stored as `'FAIL'` — never `'FAILED'`. The primary query facts
+  follow that convention (`FACT_QUERY_HOURLY` / `FACT_QUERY_DAILY` / `OPS_DIAG`
+  all use `= 'FAIL'`), but four HOURLY arms of `SP_LOAD_MARTS_V27` counted
+  failures with `EXECUTION_STATUS = 'FAILED'`, which never matches. So the `FAILS`
+  column was stuck at 0 in **MART_WAREHOUSE_EFFICIENCY_DAILY**,
+  **MART_QUERY_FAMILY_DAILY**, **FACT_QUERY_ROLE_HOURLY** and
+  **FACT_QUERY_SCHEMA_HOURLY**. V057 re-derives `SP_LOAD_MARTS_V27` from V056 with
+  exactly the four `'FAILED'` → `'FAIL'` swaps and nothing else (byte-compared).
+  The task-graph arm's `STATE = 'FAILED'` predicates are `TASK_HISTORY` states —
+  genuinely `'FAILED'` — and are deliberately left untouched.
+- **Paired app fix.** `change_impact_sql.warehouse_daily_series` (the per-warehouse
+  change-rule chart, live `QUERY_HISTORY`) had the same dead token; it now uses
+  `<> 'SUCCESS'`, matching its sibling proc-impact builder in that file (which also
+  captures `incident`). A regression test (`test_v057_fail_token.py`) locks
+  `app/` against the dead `EXECUTION_STATUS = 'FAILED'` token reappearing.
+- **How the data heals.** Forward loads self-correct on the next hourly cycle; the
+  nightly reconcile repairs the trailing days. To correct older history in one
+  pass, re-run the marts for a wider window — steps in
+  `docs/handoff/DEPLOY_V057_20260729.md`, which also carries a one-line Snowsight
+  pre-flight to confirm the `{SUCCESS, FAIL, INCIDENT}` domain before applying.
+- Lockstep: `validate.sql` floor and admin `_EXPECTED_MIGRATIONS` to 57; rebuild
+  bundle `V001_V057`; `DEPLOYMENT.md` / `README.md` run-lists extended. No schema
+  change, no new object.
+
 ## 4.61.0 — performance round, Tranche 1 (app-only) (2026-07-29)
 
 First tranche of the performance round (scope: docs/reviews/PERF_ROUND_SCOPE_2026-07-29.md).

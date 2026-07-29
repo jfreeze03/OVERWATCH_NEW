@@ -161,7 +161,10 @@ LEFT JOIN (
     SELECT DATE_TRUNC('day', START_TIME)::DATE AS DAY,
            ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 1) AS P95_S,
            COUNT(*) AS QUERIES,
-           COUNT_IF(EXECUTION_STATUS = 'FAILED') AS FAILS
+           -- QUERY_HISTORY.EXECUTION_STATUS is success/fail/incident; 'FAILED'
+           -- never matches (would read a constant 0). <> 'SUCCESS' matches the
+           -- proc-impact builder above and counts fail + incident.
+           COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
       AND WAREHOUSE_NAME = {sql_literal(wh)}

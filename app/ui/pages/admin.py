@@ -92,6 +92,9 @@ _EXPECTED_MIGRATIONS = {
         "MART_CLOUD_SVC_DAILY at shape/user grain) for the CS-ratio drill-down",
     56: "audit Batch B: FACT_QUERY_DAILY + nightly-reconcile day partial-freeze, "
         "ops-diag hour double-count, PIPE/SEC_CRED dedupe keys, cloud-svc company",
+    57: "FAILS token fix: four SP_LOAD_MARTS_V27 arms counted EXECUTION_STATUS="
+        "'FAILED' (never matches) -> 'FAIL', so efficiency/qfam/role-hr/schema-hr "
+        "marts report real failures",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -62,6 +62,7 @@ snowflake/migrations/V053__action_layer_remediation_verify.sql
 snowflake/migrations/V054__exec_board_window_history.sql
 snowflake/migrations/V055__cloud_services_breakdown.sql
 snowflake/migrations/V056__loader_reconcile_alert_fixes.sql
+snowflake/migrations/V057__fail_status_token.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
