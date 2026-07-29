@@ -17,12 +17,16 @@ RECHECKABLE: dict[str, tuple[bool, str]] = {
     "PERF_QUEUED_MINUTES": (True, "queued minutes today"),
     "PERF_SPILL_GB": (True, "remote spill GB today"),
     "COST_CLOUD_SVC_RATIO": (True, "cloud-services ratio % today"),
-    "PERF_QUERY_FAIL_PCT": (False, "query fail % today"),
+    "PERF_QUERY_FAIL_PCT": (False, "query fail % (24h)"),
 }
 
 
-def recheck_sql(rule_id: str, warehouse: str = "") -> str | None:
-    """Single-row SQL (CURRENT_VALUE) for the rule's condition today, or None."""
+def recheck_sql(rule_id: str, warehouse: str = "", company: str = "") -> str | None:
+    """Single-row SQL (CURRENT_VALUE) for the rule's condition today, or None.
+
+    ``company`` is the event's COMPANY — per-company rules (query-fail %) must
+    re-check the SAME company the alert fired on, not an account-wide blend.
+    """
     rid = str(rule_id or "").strip().upper()
     if rid not in RECHECKABLE:
         return None
@@ -67,11 +71,20 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
 WHERE START_TIME >= CURRENT_DATE() {wh_clause}
 """
     if rid == "PERF_QUERY_FAIL_PCT":
-        return """
-SELECT COUNT_IF(EXECUTION_STATUS = 'FAIL') / NULLIF(COUNT(*), 0) * 100 AS CURRENT_VALUE
-FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE START_TIME >= CURRENT_DATE()
-  AND WAREHOUSE_NAME IS NOT NULL
+        # Match the alert exactly: per-COMPANY, trailing 24h, from FACT_QUERY_HOURLY.
+        # The old recheck read an account-wide, since-midnight rate off raw
+        # QUERY_HISTORY, so it blended companies and could report "clear" while the
+        # company the alert fired on was still failing.
+        comp = ""
+        if str(company or "").strip() and str(company).strip().upper() != "ALL":
+            comp = f"AND COMPANY = {sql_literal(str(company).strip())}"
+        # < 20 queries reads as 0% (clear): the alert has HAVING SUM(QUERY_COUNT)
+        # >= 20, so below that volume it would not fire and the re-check must agree.
+        return f"""
+SELECT IFF(SUM(QUERY_COUNT) < 20, 0,
+           SUM(FAILED_COUNT) / SUM(QUERY_COUNT) * 100) AS CURRENT_VALUE
+FROM DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY
+WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) {comp}
 """
     return None
 

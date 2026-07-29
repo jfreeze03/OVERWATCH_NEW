@@ -122,9 +122,9 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
             "value": format_usd(mtd),
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
-            "help": "Billed credits, account-wide, first "
-                    f"{account_today().day} days of each month at today's rate."
-                    + budget_note}
+            "help": "Billed credits, account-wide, at today's rate. The value is "
+                    "this month to date; the pace delta compares the same number "
+                    "of days both months share." + budget_note}
 
 
 @safe_page(_PAGE)
@@ -371,13 +371,15 @@ def render() -> None:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
 
     if not score_series.empty:
-        with st.expander("Score trend — 30 days, retro-computed from facts"):
-            charts.daily_metric_line(score_series, "DAY", "SCORE", title="Platform score (retro)")
+        with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
+            charts.daily_metric_line(score_series, "DAY", "SCORE", title="Platform score (retro, account-wide)")
             st.caption(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "
                 "high — judge the trend, not the level. Weights calibrate on "
-                "Admin → Settings."
+                "Admin → Settings. Note: the retro inputs (FACT_PLATFORM_SCORE_DAILY) "
+                "have no company grain, so this trend is account-wide even under a "
+                "company filter — the headline score above is the company-scoped number."
             )
 
     # ---- Two-column: actions + cost drivers ---------------------------------

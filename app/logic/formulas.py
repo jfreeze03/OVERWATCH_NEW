@@ -238,12 +238,19 @@ def mtd_pace_vs_prior_month(daily, today):
     month_start = today.replace(day=1)
     prior_end = month_start - timedelta(days=1)
     prior_start = prior_end.replace(day=1)
-    n_days = min(today.day, prior_end.day)   # capped at the prior month's length
+    n_days = min(today.day, prior_end.day)   # equal-length window: capped at the prior month's length
     prior_cut = prior_start + timedelta(days=n_days)
+    mtd_cut = month_start + timedelta(days=n_days)
+    # Displayed MTD stays the TRUE full month-to-date (never understated at
+    # month-end). The pace DELTA compares EQUAL day counts — the "(same days)"
+    # contract. The old delta compared the full MTD against the day-capped prior,
+    # so at month-end after a shorter prior month (e.g. Mar 30 = 30 days vs
+    # Feb = 28) it over-counted the current side and read falsely high.
     mtd = float(frame[frame["DAY"] >= month_start]["USD"].map(safe_float).sum())
+    mtd_same = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] < mtd_cut)]["USD"].map(safe_float).sum())
     prior_rows = frame[(frame["DAY"] >= prior_start) & (frame["DAY"] < prior_cut)]
     prior = float(prior_rows["USD"].map(safe_float).sum())
     if prior_rows.empty or prior <= 0:
         return mtd, prior, None
-    return mtd, prior, (mtd - prior) / prior * 100.0
+    return mtd, prior, (mtd_same - prior) / prior * 100.0
 

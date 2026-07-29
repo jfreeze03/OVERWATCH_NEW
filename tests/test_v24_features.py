@@ -147,11 +147,14 @@ def test_recheck_rejects_hostile_targets():
 
 
 def test_recheck_account_rules_ignore_warehouse():
-    # PERF_QUERY_FAIL_PCT is account-wide (no per-warehouse grain), so it returns
-    # SQL with no warehouse filter. (COST_CLOUD_SVC_RATIO became warehouse-aware
-    # in V055 to match its per-warehouse alert — see test_v055_cloud_services.)
-    sql = recheck_sql.recheck_sql("PERF_QUERY_FAIL_PCT")
-    assert sql and "QUERY_HISTORY" in sql
+    # PERF_QUERY_FAIL_PCT ignores warehouse (no per-warehouse grain). Audit #5: it
+    # now matches the alert exactly — per-COMPANY, 24h, from FACT_QUERY_HOURLY
+    # (was an account-wide since-midnight rate off raw QUERY_HISTORY).
+    sql = recheck_sql.recheck_sql("PERF_QUERY_FAIL_PCT", company="ALFA")
+    assert sql and "FACT_QUERY_HOURLY" in sql
+    assert "DATEADD('hour', -24" in sql and "COMPANY = 'ALFA'" in sql
+    # no warehouse filter (it's a company rule, not a warehouse rule)
+    assert "WAREHOUSE_NAME" not in sql
 
 
 def test_score_inputs_and_metric_kinds_sql():

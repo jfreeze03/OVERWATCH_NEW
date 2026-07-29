@@ -227,16 +227,21 @@ def storage_by_database_calendar(company: str = "ALL", database: str = "", prior
     where = and_where(f"DAY >= {lo}", f"DAY < {hi}",
                       companies.database_clause(company),
                       companies.database_equals_clause(database))
+    # Divide by DAYS-IN-PERIOD, not days-with-a-row: Snowflake's monthly-average
+    # billing basis counts a database that existed only part of the window as 0
+    # on its absent days. AVG(present days) overstated created/dropped-mid-period
+    # databases. DAYS_AVERAGED still exposes how many days actually had a row.
+    period = f"NULLIF(DATEDIFF('day', {lo}, {hi}), 0)"
     return f"""
 SELECT DATABASE_NAME,
-       AVG(COALESCE(DB_BYTES, 0))       AS DB_BYTES,
-       AVG(COALESCE(FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+       SUM(COALESCE(DB_BYTES, 0)) / {period}       AS DB_BYTES,
+       SUM(COALESCE(FAILSAFE_BYTES, 0)) / {period} AS FAILSAFE_BYTES,
        COUNT(DISTINCT DAY)              AS DAYS_AVERAGED,
        MAX(DAY)                         AS LATEST_DAY
 FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(DB_BYTES, 0)) > 0
+HAVING SUM(COALESCE(DB_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 
@@ -253,17 +258,20 @@ def storage_by_database_calendar_live(company: str = "ALL", database: str = "", 
     where = and_where(f"USAGE_DATE >= {lo}", f"USAGE_DATE < {hi}",
                       companies.database_clause(company),
                       companies.database_equals_clause(database))
+    # Days-in-period denominator, matching storage_by_database_calendar (the mart
+    # path) so the two never disagree — see the note there.
+    period = f"NULLIF(DATEDIFF('day', {lo}, {hi}), 0)"
     return f"""
 SELECT
     DATABASE_NAME,
-    AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) AS DB_BYTES,
-    AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) AS FAILSAFE_BYTES,
+    SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) / {period} AS DB_BYTES,
+    SUM(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) / {period} AS FAILSAFE_BYTES,
     COUNT(DISTINCT USAGE_DATE)               AS DAYS_AVERAGED,
     MAX(USAGE_DATE)                          AS LATEST_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
+HAVING SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 

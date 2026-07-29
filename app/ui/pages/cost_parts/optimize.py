@@ -213,7 +213,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
             st.code(stmt_sz, language="sql")
             est_sz = 0.0
-            if str(srow.get("RECOMMENDATION", "")).upper().startswith("DOWN"):
+            # sizing.RECOMMEND_DOWN == "Size down candidate" -> "SIZE DOWN ...";
+            # the old startswith("DOWN") never matched, so the resize saving was
+            # dead code and every downsize booked $0.
+            if str(srow.get("RECOMMENDATION", "")).upper().startswith("SIZE DOWN"):
                 est_sz = round(max(0.0, safe_float(srow.get("MONTHLY_USD_NOW"))
                                     - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
                 st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until you verify it "

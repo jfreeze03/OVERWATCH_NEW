@@ -25,9 +25,14 @@ def department_window_credits(days: int, company: str = "ALL") -> str:
     """Exact credits per department and warehouse for the window.
     Mart-backed (FACT_WAREHOUSE_DAILY), so it honors the long window (v4.54)."""
     days = bounded_days(days, 365)
+    # Filter on the fact's evidence-based COMPANY column (COMPANY_FOR_WAREHOUSE at
+    # load, honors COMPANY_SCOPE mappings), NOT the WH_ALFA_% name pattern — a
+    # warehouse mapped to a company whose NAME doesn't match was silently dropped
+    # from the total and never surfaced as UNKNOWN (V044 evidence-based scope).
+    company_filter = "" if str(company).upper() in ("ALL", "") else f"M.COMPANY = {companies.sql_literal(company)}"
     where = and_where(
         f"M.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+        company_filter,
     )
     return f"""
 SELECT
@@ -91,10 +96,14 @@ def department_month_credits(month: str, company: str = "ALL") -> str:
     if len(text) != 7 or text[4] != "-" or not text.replace("-", "").isdigit():
         raise ValueError(f"month must be YYYY-MM, got {text!r}")
     month_start = f"DATE '{text}-01'"
+    # Evidence-based COMPANY column, not the WH name pattern — same fix as
+    # department_window_credits (audit #3); the monthly statement must not drop
+    # COMPANY_SCOPE-mapped warehouses whose names don't match.
+    month_company = "" if str(company).upper() in ("ALL", "") else f"M.COMPANY = {companies.sql_literal(company)}"
     where = and_where(
         f"M.DAY >= {month_start}",
         f"M.DAY < DATEADD('month', 1, {month_start})",
-        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+        month_company,
     )
     return f"""
 SELECT

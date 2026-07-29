@@ -61,31 +61,58 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
     rate = max(safe_float(ai_rate_usd, 2.20), 0.01)
     budget_credits = safe_float(ai_budget_usd) / rate  # 0 when unconfigured
 
-    def _classify(row) -> tuple[str, str] | None:
-        projected = safe_float(row.get("PROJECTED_30D_CREDITS"))
-        cpr = safe_float(row.get("CREDITS_PER_REQUEST"))
-        if budget_credits > 0:
-            if projected > budget_credits:
-                return "Critical", "Budget breach"
-            if projected > budget_credits * 0.50:
-                return "High", "Budget concentration"
-        if cpr > CPR_SPIKE_THRESHOLD:
-            return "High", "Cost per request spike"
-        if budget_credits > 0 and projected > budget_credits * 0.25:
-            return "Medium", "High usage"
-        return None
+    src = enriched.copy()
+    for col in ("PROJECTED_30D_CREDITS", "PROJECTED_30D_USD", "TOTAL_REQUESTS",
+                "TOTAL_CREDITS", "CREDITS_PER_REQUEST"):
+        if col in src.columns:
+            src[col] = src[col].map(safe_float)
+    rows: list[dict] = []
+    # --- Budget signals are PER-USER: a user's TOTAL 30d projection across every
+    # source (and every identity) vs the budget, with AGGREGATE dollars/requests
+    # so the reported ESTIMATED_USD is the real breach (audit #17: the per-source
+    # version both missed split breaches and under-reported the ones it caught).
+    # Sum ALL of a user's rows — a login NAME reused across USER_IDs (recreated
+    # user) yields distinct rows that are still that person's spend; dropping one
+    # (an interim fix did) would under-count and silently miss a breach.
+    if budget_credits > 0 and "USER_NAME" in src.columns:
+        sum_cols = [c for c in ("PROJECTED_30D_CREDITS", "PROJECTED_30D_USD",
+                                "TOTAL_REQUESTS", "TOTAL_CREDITS") if c in src.columns]
+        agg = src.groupby("USER_NAME", as_index=False)[sum_cols].sum()
+        if {"TOTAL_CREDITS", "TOTAL_REQUESTS"}.issubset(agg.columns):
+            agg["CREDITS_PER_REQUEST"] = (agg["TOTAL_CREDITS"]
+                / agg["TOTAL_REQUESTS"].where(agg["TOTAL_REQUESTS"] > 0, 1))
+        for _, u in agg.iterrows():
+            proj = safe_float(u.get("PROJECTED_30D_CREDITS"))
+            sig: tuple[str, str] | None = None
+            if proj > budget_credits:
+                sig = ("Critical", "Budget breach")
+            elif proj > budget_credits * 0.50:
+                sig = ("High", "Budget concentration")
+            elif proj > budget_credits * 0.25:
+                sig = ("Medium", "High usage")
+            if sig:
+                item = u.to_dict()
+                item["SOURCE"] = "(all sources)"
+                item["SEVERITY"], item["SIGNAL"] = sig
+                rows.append(item)
+    # --- CPR spikes are PER-SOURCE and independent of budget, so a spiking source
+    # still surfaces even for a user who is also a budget breach. De-dup on
+    # (user, source) keeping the worst variant so a source is never listed twice.
+    cpr_src = src
+    if {"USER_NAME", "SOURCE"}.issubset(src.columns):
+        cpr_src = (src.sort_values("CREDITS_PER_REQUEST", ascending=False)
+                      .drop_duplicates(subset=["USER_NAME", "SOURCE"], keep="first"))
+    for _, row in cpr_src.iterrows():
+        if safe_float(row.get("CREDITS_PER_REQUEST")) > CPR_SPIKE_THRESHOLD:
+            item = row.to_dict()
+            item["SEVERITY"], item["SIGNAL"] = "High", "Cost per request spike"
+            rows.append(item)
 
-    rows = []
-    for _, row in enriched.iterrows():
-        verdict = _classify(row)
-        if verdict is None:
-            continue
-        item = row.to_dict()
-        item["SEVERITY"], item["SIGNAL"] = verdict
-        rows.append(item)
     if not rows:
         return pd.DataFrame()
     out = pd.DataFrame(rows)
+    if "PROJECTED_30D_USD" not in out.columns:
+        out["PROJECTED_30D_USD"] = 0.0
     out["_S"] = out["SEVERITY"].map(_SEVERITY_ORDER).fillna(9)
     out = out.sort_values(["_S", "PROJECTED_30D_USD"], ascending=[True, False]).drop(columns="_S")
     return out.reset_index(drop=True)

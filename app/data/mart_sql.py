@@ -6,7 +6,7 @@ lifecycle INSERT/UPDATE statements are built in the pages that own them.
 
 from __future__ import annotations
 
-from app.config import core_object, mart_object
+from app.config import MAX_MART_WINDOW_DAYS, core_object, mart_object
 from app.core.sqlsafe import sql_literal
 from app.data.common import and_where, bounded_days
 
@@ -20,7 +20,12 @@ def _company_filter(company: str) -> str:
 
 def exec_board(company: str, days: int) -> str:
     """First-paint executive board rows for one company scope and window."""
-    days = bounded_days(days)
+    # Mart read: honor the long window (MART_EXEC_BOARD holds 180/365 rows,
+    # V052/V054). The live-scan default (90) would silently read the 90-day
+    # board rows under a 180/365 label — the KPIs, spend trend, and cost drivers
+    # would all show 90-day data. The page filter constrains days to
+    # DAY_WINDOW_OPTIONS, so WINDOW_DAYS always resolves to a populated board row.
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = and_where(_company_filter(company), f"WINDOW_DAYS = {days}")
     return f"""
 SELECT PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER, REFRESHED_AT
@@ -37,7 +42,7 @@ def source_freshness() -> str:
 def fact_metering_by_service(days: int) -> str:
     """Spend-tab hot path: same output shape as the live metering reader,
     served from the hourly-loaded fact instead of ACCOUNT_USAGE."""
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT DAY, SERVICE_TYPE, CREDITS_USED, CREDITS_BILLED, CREDITS_ADJUSTMENT
 FROM {mart_object("FACT_METERING_DAILY")}
@@ -58,7 +63,7 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     from app import companies
     from app.core.sqlsafe import contains_filter
 
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
@@ -121,7 +126,10 @@ ORDER BY DAY
 
 def fact_daily_spend(days: int) -> str:
     """Account billed credits per day from the daily fact (adjustment applied)."""
-    days = bounded_days(days)
+    # Mart read (FACT_METERING_DAILY, long retention): honor the long window so
+    # the forecast backtest labeled "3-month" (fact_daily_spend(150)) is not
+    # silently clamped to 90 days.
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
@@ -132,7 +140,7 @@ ORDER BY DAY
 
 
 def fact_warehouse_daily(days: int, company: str = "ALL") -> str:
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
@@ -145,7 +153,7 @@ ORDER BY DAY
 
 
 def fact_task_daily(days: int, company: str = "ALL", database: str = "") -> str:
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
@@ -167,7 +175,11 @@ def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     (perf pass: Control Room movers). Inherits up-to-an-hour loader lag —
     callers keep the live builder as fallback and label the source.
     """
-    days = bounded_days(days)
+    # This builder scans 2*days (current + prior equal windows). Cap at HALF the
+    # mart max so the pair stays within retention and the prior window has data —
+    # a naive bump to 365 would scan 730d and read the (empty, post-rebuild) prior
+    # half as a false 100% swing (audit Batch A verify).
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS // 2)
     where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())",
              "DAY < CURRENT_DATE()"]   # equal-length windows, exclude today (Codex P0-3)
     if str(company).upper() != "ALL":
@@ -196,7 +208,7 @@ def fact_cloud_services_ratio(days: int, company: str = "ALL") -> str:
     Daily grain vs the live builder's hourly precision; identical for the
     windowed ratio this panel shows.
     """
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
@@ -222,7 +234,7 @@ LIMIT 500
 
 
 def _cloud_svc_where(days: int, company: str, warehouse: str) -> str:
-    where = [f"DAY >= DATEADD('day', -{bounded_days(days)}, CURRENT_DATE())"]
+    where = [f"DAY >= DATEADD('day', -{bounded_days(days, MAX_MART_WINDOW_DAYS)}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     if str(warehouse or "").strip():
@@ -297,7 +309,7 @@ LIMIT {limit}
 
 
 def alert_event_history(days: int) -> str:
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT DATE(RAISED_AT) AS DAY, SEVERITY, COUNT(*) AS EVENTS
 FROM {core_object("ALERT_EVENTS")}
@@ -309,7 +321,7 @@ ORDER BY DAY
 
 def alert_mttr(days: int = 90) -> str:
     """Weekly MTTA/MTTR from alert lifecycle timestamps."""
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT
     DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
@@ -537,7 +549,7 @@ ORDER BY DEPARTMENT
 
 def app_usage_summary(days: int = 30) -> str:
     """Which pages actually get opened — adoption data for curation calls."""
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT PAGE, COUNT(*) AS VISITS, COUNT(DISTINCT USER_NAME) AS USERS,
        COUNT(DISTINCT IFF(AT >= DATEADD('day', -7, CURRENT_TIMESTAMP()),
@@ -1238,7 +1250,7 @@ def fact_cortex_daily_spend(days: int) -> str:
     """AI/Cortex service credits by day from the daily fact (Codex r16 #7) —
     same SERVICE_TYPE predicate and billed basis as the live builder it
     replaces; the fact carries DAY, SERVICE_TYPE, and CREDITS_BILLED."""
-    days = bounded_days(days)
+    days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
 SELECT
     DAY,

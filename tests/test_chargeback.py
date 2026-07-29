@@ -19,7 +19,11 @@ def test_department_window_is_exact_metering_with_unmapped_bucket():
     assert "COALESCE(D.DEPARTMENT, 'Unmapped')" in sql
     assert "DEPARTMENT_MAP" in sql
     assert re.search(r"DATEADD\('day',\s*-7", sql)
-    assert "WH!_ALFA!_%" in sql  # ALFA company scope (V044: evidence-based)
+    # Evidence-based scope: filter the fact's COMPANY column (COMPANY_FOR_WAREHOUSE
+    # at load), NOT the WH_ALFA_% name pattern (audit #3) — a mapped warehouse whose
+    # name doesn't match must not be silently dropped from the total.
+    assert "M.COMPANY = 'ALFA'" in sql
+    assert "WH!_ALFA!_%" not in sql
 
 
 def test_role_share_normalizes_per_warehouse():

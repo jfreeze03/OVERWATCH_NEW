@@ -93,8 +93,12 @@ def test_mtd_pace_caps_at_short_prior_months_and_never_fakes_zero():
     today = dt.date(2026, 3, 30)
     days = ([{"DAY": dt.date(2026, 2, d), "USD": 10.0} for d in range(1, 29)]
             + [{"DAY": dt.date(2026, 3, d), "USD": 10.0} for d in range(1, 31)])
-    mtd, prior, _pct = mtd_pace_vs_prior_month(pd.DataFrame(days), today)
+    mtd, prior, pct = mtd_pace_vs_prior_month(pd.DataFrame(days), today)
+    # Displayed MTD is the true full month-to-date (30 days); prior is capped to
+    # Feb's 28 days. Audit #8: the pace DELTA compares EQUAL day counts (Mar 1-28
+    # = 280 vs Feb 1-28 = 280) -> 0%, NOT the old full-vs-capped (300 vs 280) = +7%.
     assert prior == 280.0 and mtd == 300.0
+    assert pct == 0.0
     # no prior-month rows -> None, never a fabricated 0%
     only_now = pd.DataFrame([{"DAY": dt.date(2026, 7, 1), "USD": 5.0}])
     _, _, pct2 = mtd_pace_vs_prior_month(only_now, dt.date(2026, 7, 2))

@@ -54,6 +54,9 @@ _REQUIRED_ARGS: dict[str, object] = {
     "window_days": 3,
     "month": "2026-06",
     "proc_name": "MY_PROC",
+    # recheck_sql.recheck_sql gained a company param (audit #5) — drive it with the
+    # rule that actually honors company so the matrix injection-tests that filter.
+    "rule_id": "PERF_QUERY_FAIL_PCT",
 }
 
 # Free-text filter arguments — the other injection surface besides company.

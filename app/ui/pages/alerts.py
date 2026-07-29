@@ -209,7 +209,7 @@ def _open_events_section(events, is_operator: bool) -> None:
                 st.markdown(playbook_for(str(row["RULE_ID"])))
             _rid = str(row["RULE_ID"]).upper()
             _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
-            _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess)
+            _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
             if _rc_sql and st.button(
                     "Re-check condition now", key=f"recheck_{event_id[:8]}",
                     help="Runs this rule's condition against TODAY's data for "

@@ -197,8 +197,11 @@ SELECT
     DATE_TRUNC('day', START_TIME) AS DAY,
     COUNT(*) AS QUERIES,
     COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND COALESCE(BYTES_SCANNED, 0) = 0) AS ZERO_SCAN,
+    -- "share of SUCCESSFUL queries served zero-scan" (docstring): denominator is
+    -- successful queries, not all queries — else a spike in failures dilutes the
+    -- hit rate even though cache behavior did not change.
     ROUND(COUNT_IF(EXECUTION_STATUS = 'SUCCESS' AND COALESCE(BYTES_SCANNED, 0) = 0)
-          / NULLIF(COUNT(*), 0) * 100, 1) AS HIT_PCT
+          / NULLIF(COUNT_IF(EXECUTION_STATUS = 'SUCCESS'), 0) * 100, 1) AS HIT_PCT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {scope}
 GROUP BY 1

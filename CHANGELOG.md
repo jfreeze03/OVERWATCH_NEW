@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.58.0 — audit Batch A: 11 app-only correctness fixes (2026-07-28)
+
+A full multi-agent bug audit (find -> adversarially verify, 16 agents) surfaced
+19 confirmed bugs across all metrics/sections
+(docs/reviews/BUG_AUDIT_2026-07-28.md). This ships Batch A — the app-only fixes,
+no migration. Each is now pinned by a regression lock.
+
+- **#2 (high) — the 180/365 window finally reaches the pages.** `exec_board()`
+  clamped `days` at the live-scan default (90), so selecting 180/365 silently
+  read the 90-day board rows under a long-window label. Adversarial verification
+  found the same footgun in **~13 sibling mart readers** fed by the window filter
+  (metering-by-service, query/task/warehouse windows, cloud-services ratio, the
+  CS drill-down, Cortex spend, alert history/MTTR, app usage, the forecast
+  backtest #11). All now `bounded_days(days, MAX_MART_WINDOW_DAYS)`;
+  `fact_warehouse_window_vs_prior` (which scans `2*days`) caps at half the mart
+  max so it never over-reads the empty prior half as a false swing.
+- **#1 (high) — resize savings were dead code.** The estimate branch gated on
+  `startswith("DOWN")` but the recommendation is "Size down candidate" ->
+  "SIZE DOWN ...", so every downsize booked $0. Gate fixed.
+- **#3 (high) — chargeback scoped by warehouse NAME, not the COMPANY column.** A
+  COMPANY_SCOPE-mapped warehouse whose name didn't match `WH_ALFA_%` was dropped
+  from the total (and never surfaced as UNKNOWN). Now filters the fact's
+  evidence-based `COMPANY`.
+- **#5 (high) — the query-fail recheck matched the alert.** It computed an
+  account-wide, since-midnight rate off raw QUERY_HISTORY while the alert is
+  per-company, 24h, off FACT_QUERY_HOURLY — so the drawer could read "clear"
+  while the flagged company was still failing. Recheck now takes the event's
+  company and matches the alert exactly.
+- **#8 — MTD "(same days)" pace delta** now compares equal day counts (the
+  displayed MTD stays the true full month-to-date). **#9** — ALFA storage
+  includes `DBA_MAINT_DB` (aligned with `classify_database`). **#16** — the
+  platform-score trend is labeled account-wide (its fact has no company grain).
+  **#17** — an AI budget breach is judged on the user's total across sources
+  (was per source, so split spend never flagged Critical). **#18** — cache
+  hit-rate denominator is successful queries. **#19** — storage monthly average
+  divides by days-in-period, not days-with-a-row.
+- Batch B (loader partial-freeze/reconcile #6/#7/#14, alert dedupe/classification
+  #4/#12/#13 — one migration) and the two PLAUSIBLE items (#10/#15) remain queued.
+
 ## 4.57.0 — cloud-services ratio: drill to the query shapes & users (2026-07-28)
 
 Owner: a `COST_CLOUD_SVC_RATIO` alert sits >21% on two warehouses; "track the
