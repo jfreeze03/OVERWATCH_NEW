@@ -166,3 +166,29 @@ def test_unit_costs_reads_go_out_as_one_batch():
     assert 'tier="historical")' in src                 # same-tier group
     assert "else:" in src.split("_ub", 2)[2][:3000]    # serial fallback survives
 
+
+def test_cost_spend_section_batches_recent_and_defers_storage_unmapped():
+    """#15: the default 'Spend & Attribution' section submits its four independent
+    recent mart reads as ONE run_batch and defers Storage + Unmapped behind a
+    toggle, so first paint pays one parallel group instead of ~10 serial reads."""
+    cost = (_ROOT / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
+    spend = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
+    # one recent batch feeds the eager Spend + Attribution panels
+    assert "run_batch(_spend_attr_recent_jobs(" in cost and 'tier="recent")' in cost
+    for k in ("metering", "csr", "wh", "daily"):        # every member threaded, none dropped
+        assert f'_pf.get("{k}")' in cost, k
+    # the spec-builder lives in spend.py and references all four fact builders
+    assert "def _spend_attr_recent_jobs(" in spend
+    for b in ("fact_metering_by_service", "fact_cloud_services_ratio",
+              "fact_warehouse_window_vs_prior", "fact_warehouse_daily"):
+        assert b in spend, b
+    # Storage + Unmapped are inside the toggle gate (off the eager first paint)
+    assert 'st.toggle("Load storage & unmapped-entity detail", key="cost_spend_detail"' in cost
+    deferred = cost.split("cost_spend_detail", 1)[1]
+    assert "_storage_tab(" in deferred and "unmapped_entities" in deferred
+    # unmapped is DEFERRED, not batched — it must not appear in the recent batch spec
+    assert "unmapped_entities" not in spend.split("_spend_attr_recent_jobs", 1)[1].split("def ", 2)[0]
+    # each batched panel keeps its own live/historical fallback (prefetch-else-run)
+    assert spend.count("if metering_res is not None else run(") == 1
+    assert spend.count("if wh_res is not None else run(") == 1
+

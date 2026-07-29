@@ -49,11 +49,33 @@ def _categorize(service: str) -> str:
         return "AI / Cortex"
     return _SERVICE_CATEGORY.get(s, "Other")
 
-def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
+
+def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
+    """perf #15: the four INDEPENDENT tier='recent' mart reads that gate the
+    eager Spend + Attribution first paint, so cost.py can submit them as one
+    parallel run_batch instead of four serial round-trips. Each panel keeps its
+    own live/historical fallback for a cold or missing mart (the batch carries
+    only the mart leg). `daily` is fixed at 30d exactly as the panel reads it."""
+    return [
+        {"key": "metering", "sql": mart_sql.fact_metering_by_service(days),
+         "source": "FACT_METERING_DAILY (mart, loaded hourly)"},
+        {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company),
+         "source": "FACT_WAREHOUSE_DAILY (cloud-services share)"},
+        {"key": "wh", "sql": mart_sql.fact_warehouse_window_vs_prior(days, company),
+         "source": "FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)"},
+        {"key": "daily", "sql": mart_sql.fact_warehouse_daily(30, company),
+         "source": "FACT_WAREHOUSE_DAILY"},
+    ]
+
+
+def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
+               *, metering_res=None, csr_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
-    # to live ACCOUNT_USAGE only when the fact has no rows yet.
-    res = run(mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
-              tier="recent", source="FACT_METERING_DAILY (mart, loaded hourly)")
+    # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
+    # the prefetched batch result (perf #15); None -> read it serially here.
+    res = metering_res if metering_res is not None else run(
+        mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
+        tier="recent", source="FACT_METERING_DAILY (mart, loaded hourly)")
     if not res.ok or res.empty:
         res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
                   tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
@@ -101,9 +123,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
         "metadata-heavy patterns, or compile-heavy SQL. ELEVATED starts past 20%, "
         "where the COST_CLOUD_SVC_RATIO alert fires (editable on Alerts)."
     )
-    csr = run(mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
-              key=f"csr_fact_{company}_{days}", tier="recent",
-              source="FACT_WAREHOUSE_DAILY (cloud-services share)")
+    csr = csr_res if csr_res is not None else run(
+        mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
+        key=f"csr_fact_{company}_{days}", tier="recent",
+        source="FACT_WAREHOUSE_DAILY (cloud-services share)")
     if not csr.usable():  # mart not deployed/loaded yet -> bounded live scan
         csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
               key=f"cs_ratio_{company}_{days}", tier="recent",
@@ -172,10 +195,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float) -> None:
                     "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f")})
                 result_caption(users)
 
-def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "") -> None:
-    wh = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-             key=f"wh_vs_prior_fact_{company}_{days}", tier="recent",
-             source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "",
+                     *, wh_res=None, daily_res=None) -> None:
+    # wh_res / daily_res are the prefetched batch results (perf #15); None ->
+    # read serially here. The live/historical fallbacks below are unchanged.
+    wh = wh_res if wh_res is not None else run(
+        mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
+        key=f"wh_vs_prior_fact_{company}_{days}", tier="recent",
+        source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
     if not wh.usable():  # mart not deployed/loaded yet -> bounded live scan
         wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"wh_vs_prior_{company}_{days}", tier="historical",
@@ -250,8 +277,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                                f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}).")
 
     st.markdown("**Daily anomaly check (per warehouse)**")
-    daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
-                key=f"fact_wh_daily_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
+    daily = daily_res if daily_res is not None else run(
+        mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
+        key=f"fact_wh_daily_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
     if daily.usable():
         flagged = flag_anomalies(
             daily.df.assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))),

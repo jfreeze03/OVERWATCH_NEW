@@ -10,7 +10,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.config import OPERATOR_PROFILES, resolve_role_profile
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.session import current_role
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
@@ -40,6 +40,7 @@ from app.ui.pages.cost_parts.optimize import _optimization_tab, _savings_tab  # 
 from app.ui.pages.cost_parts.spend import (  # noqa: E402,F401
     _attribution_tab,
     _categorize,
+    _spend_attr_recent_jobs,
     _spend_tab,
     _storage_tab,
 )
@@ -62,32 +63,48 @@ def render() -> None:
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
          "Unit costs", "Compare", "Optimization & Savings"], key="cost_section")
     if section == "Spend & Attribution":
+        # perf #15: submit the four INDEPENDENT recent mart reads that gate the
+        # eager Spend + Attribution paint as ONE parallel batch instead of four
+        # serial round-trips. Each panel still falls back to its own mart/live
+        # read if the batch is unavailable (run_batch -> None) or a member misses
+        # (a None/empty prefetch triggers that panel's existing fallback).
+        _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),
+                        page=_PAGE, tier="recent") or {}
         section_header("Spend", "info", "spend")
-        _spend_tab(f["company"], f["days"], rate, ai_rate)
-        st.divider()
-        section_header("Storage", "info", "cost")
-        _storage_tab(f["company"], f["days"], settings)
+        _spend_tab(f["company"], f["days"], rate, ai_rate,
+                   metering_res=_pf.get("metering"), csr_res=_pf.get("csr"))
         st.divider()
         section_header("Attribution", "info", "chargeback")
-        _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
+        _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
+                         wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
         st.divider()
-        section_header("Unmapped entities", "warn", "chargeback")
-        st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
-                   "silently billing ALFA. Empty is the goal state.")
-        unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
-                  key=f"unmapped_{f['days']}", tier="recent",
-                  source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
-        if unm.ok and unm.empty:
-            st.success("Every entity in the window carries company evidence — nothing is billed blind.")
-        elif guard(unm, ""):
-            kpi_row([{"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
-                      "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
-                              "original company until a backfill re-run."}])
-            styled_table(unm.df, height=240)
-            st.caption("Classify explicitly, then the next loader pass re-stamps: "
-                       "`INSERT INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (SCOPE_TYPE, PATTERN, COMPANY) "
-                       "VALUES ('WAREHOUSE'|'DATABASE'|'USER_OVERRIDE', '<NAME>', 'ALFA'|'Trexis');`")
-            result_caption(unm)
+        # perf #15: Storage (3 reads) + Unmapped (1 read) are below-fold detail;
+        # gate both behind ONE toggle so the default first paint pays only the
+        # Spend/Attribution batch. A toggle (not st.expander) is required — an
+        # expander still executes its body every rerun and would not defer them.
+        if st.toggle("Load storage & unmapped-entity detail", key="cost_spend_detail",
+                     help="Storage economics (3 reads) and the unmapped-entity check "
+                          "(1 read), loaded on demand — kept off the default first paint."):
+            section_header("Storage", "info", "cost")
+            _storage_tab(f["company"], f["days"], settings)
+            st.divider()
+            section_header("Unmapped entities", "warn", "chargeback")
+            st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
+                       "silently billing ALFA. Empty is the goal state.")
+            unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
+                      key=f"unmapped_{f['days']}", tier="recent",
+                      source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
+            if unm.ok and unm.empty:
+                st.success("Every entity in the window carries company evidence — nothing is billed blind.")
+            elif guard(unm, ""):
+                kpi_row([{"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
+                          "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
+                                  "original company until a backfill re-run."}])
+                styled_table(unm.df, height=240)
+                st.caption("Classify explicitly, then the next loader pass re-stamps: "
+                           "`INSERT INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (SCOPE_TYPE, PATTERN, COMPANY) "
+                           "VALUES ('WAREHOUSE'|'DATABASE'|'USER_OVERRIDE', '<NAME>', 'ALFA'|'Trexis');`")
+                result_caption(unm)
     elif section == "Contract & Forecast":
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)

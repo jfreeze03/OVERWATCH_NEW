@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.63.0 — performance round, #15: Cost first-paint batching (app-only) (2026-07-29)
+
+The default **Spend & Attribution** section fired ~10 serial blocking mart reads
+on first paint, top-down, none batched. Now the four independent `tier="recent"`
+reads that gate the eager Spend + Attribution panels submit as **one parallel
+`run_batch`**, and the below-fold Storage + Unmapped detail is deferred behind a
+toggle — so a warm first paint pays one parallel group plus the two window-
+dependent allocation reads (~3 round-trips) instead of ~10 serial ones.
+
+- **One recent batch feeds Spend + Attribution.** `cost.py` submits
+  `metering` / `csr` / `wh` / `daily` (a new `_spend_attr_recent_jobs` spec-builder
+  in `spend.py`) as a single `run_batch(tier="recent")`; the results thread into
+  `_spend_tab` / `_attribution_tab` as keyword args. Each panel keeps its exact
+  mart-first→live-fallback: a `None`/empty/failed prefetch (batch unavailable or a
+  member miss) still triggers that panel's own serial mart and live-fallback read,
+  so no honesty label or degrade path is lost.
+- **Storage + Unmapped deferred behind one toggle** (`cost_spend_detail`, default
+  off) — 3 storage reads + 1 unmapped read leave the default first paint. A toggle,
+  not `st.expander` (which still executes its body every rerun), is what actually
+  defers the reads. Attribution stays eager (it's half the section name and its two
+  reads ride the batch at near-zero marginal cost).
+- **Kept separate, deliberately:** the two allocation reads (different `hourly`
+  tier + a `window_usd` control-flow dependency) and the cloud-services drill
+  (already toggle-gated in Tranche 1). Deferred as their own scope items: splitting
+  the batch cache boundary from parallelism (#12) and bounding batch concurrency
+  (#13) — a 4-member batch is well under the XS concurrency limit.
+- App-only, no migration. Locked by a new `test_perf_pass` assertion; all existing
+  cost/perf/design tests unchanged and green.
+
 ## 4.62.0 — V057: FAILS token fix (silent-0 failure counts) (2026-07-29)
 
 Opening the loader-SQL cluster for the performance round's Tranche 2 (credit
