@@ -203,6 +203,17 @@ def test_deploy_docs_track_the_migration_floor():
     assert "OVERWATCH_MONITOR" not in _read("README.md")  # retired-role reference stays dead
 
 
+def test_validate_sql_floor_tracks_the_latest_migration():
+    """validate.sql's 'V001..V0NN applied' floor and its count check must equal the
+    latest migration number — generic so a new migration that forgets to bump it
+    fails CI, without pinning the moving floor inside any per-migration test."""
+    migs = sorted((_ROOT / "snowflake" / "migrations").glob("V0*.sql"))
+    n = max(int(m.name[1:4]) for m in migs)
+    v = _read("snowflake/validate.sql")
+    assert f"V001..V{n:03d} applied" in v, f"validate.sql floor label != V{n:03d}"
+    assert f"BETWEEN 1 AND {n}) = {n}" in v, f"validate.sql count check != {n}"
+
+
 # ---------------------------------------------------------------------------
 # 7. Canary compile-only mode + registry caption honesty
 # ---------------------------------------------------------------------------

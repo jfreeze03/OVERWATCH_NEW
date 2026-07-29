@@ -125,6 +125,7 @@ snowflake/migrations/V055__cloud_services_breakdown.sql -- per-query cloud-servi
 snowflake/migrations/V056__loader_reconcile_alert_fixes.sql -- Batch B: loader/reconcile day partial-freeze, ops-diag hour double-count, alert dedupe/classification
 snowflake/migrations/V057__fail_status_token.sql -- FAILS token fix: 4 mart arms counted EXECUTION_STATUS='FAILED' (never matches) -> 'FAIL'; failure counts were a constant 0
 snowflake/migrations/V058__task_node_timing.sql -- per-node loader-timing observability: MART_TASK_NODE_DAILY (queue + exec delay per task) via a new contained arm; enables data-driven schedule tuning
+snowflake/migrations/V059__task_graph_root_credits.sql -- task-graph pipeline credits: arm [6] rolls attribution up by COALESCE(ROOT_QUERY_ID,QUERY_ID) so WH_CREDITS captures proc-body compute (was ~0 for CALL tasks)
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```

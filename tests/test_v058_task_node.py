@@ -95,9 +95,10 @@ def test_v058_is_derived_v057_plus_only_the_new_arm():
     assert stripped == v57, "V058 changed something other than inserting the new arm"
 
 
-def test_v058_teardown_and_lockstep():
+def test_v058_teardown_and_admin_entry():
+    """V058's own durable lockstep artifacts (the moving validate.sql floor is
+    asserted generically in test_v451_trust, not pinned per-migration)."""
     assert "DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.MART_TASK_NODE_DAILY;" in _read("snowflake/teardown.sql")
-    assert "V001..V058 applied" in _read("snowflake/validate.sql") and "BETWEEN 1 AND 58) = 58" in _read("snowflake/validate.sql")
     assert "58:" in _read("app/ui/pages/admin.py")
 
 

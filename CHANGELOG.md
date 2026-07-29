@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.67.0 — V059: triage HIGH #2 — task-graph pipeline credits (2026-07-29)
+
+Metrics-triage HIGH #2. `MART_TASK_GRAPH_DAILY.WH_CREDITS` (pipeline spend /
+$-per-run) read **~$0 for every proc-driven task**. `SP_LOAD_MARTS_V27` arm [6]
+rolled `QUERY_ATTRIBUTION_HISTORY` up by the **bare QUERY_ID** and joined
+`a.QUERY_ID = h.QUERY_ID`, but a task whose body is a stored procedure attributes
+its compute to CHILD statements that carry the CALL id only as `ROOT_QUERY_ID` —
+so the bare-id join matched only the ~0-credit CALL row.
+
+- The live twin (`graph_sql.graph_daily_costs`) got this fix in v4.60 (audit #10);
+  the default-**served** mart never did, so the mart under-reported while the live
+  fallback was right. V059 re-derives arm [6] to mirror the live builder: roll up
+  by `COALESCE(ROOT_QUERY_ID, QUERY_ID)`, prune on the same coalesced id, and join
+  `a.ROOT_ID = h.QUERY_ID`. Four token edits; every other statement byte-identical
+  (V057's FAIL fixes and V058's per-node arm [6b] preserved — proven by a
+  byte-restore test), and a test asserts the mart rollup matches the live twin.
+- Lockstep: `validate.sql` + admin `_EXPECTED_MIGRATIONS` to 59; rebuild bundle
+  `V001_V059`; run-lists + runbook `DEPLOY_V059_20260729.md`. Also added a generic
+  validate.sql-floor test that auto-tracks the latest migration (no more pinning
+  the moving floor per-migration). No schema change, no new object.
+
 ## 4.66.0 — triage HIGH #1: month-end projection uses the full-month frame (app-only) (2026-07-29)
 
 Metrics-triage HIGH #1 (docs/reviews/METRICS_TRIAGE_2026-07-29.md). The Overview
@@ -65,10 +86,11 @@ schedule changes become data-driven fast-follows once a few mornings accumulate.
   so the unattended loader's graph is provably untouched (the runbook has Joe diff
   `SHOW TASKS` before/after to confirm). The table fills on the existing hourly
   cadence, which reaches back over the morning's 06:40/06:45 runs.
-- **Deferred, honestly:** per-node **credits** (arm [6] already carries pipeline
-  credits — a clean fast-follow if reconcile-retargeting needs it) and the three
-  schedule changes themselves (A serialization, B reconcile retargeting, C
-  de-collision) — all now unblocked by this data.
+- **Deferred, honestly:** per-node **credits** (arm [6] carries pipeline-grain
+  credits — though the metrics triage later found *those* were themselves
+  under-counted for proc tasks, fixed in **V059**) and the three schedule changes
+  (A serialization, B reconcile retargeting, C de-collision) — all now unblocked by
+  this data.
 - Lockstep: `validate.sql` + admin `_EXPECTED_MIGRATIONS` to 58; rebuild bundle
   `V001_V058`; teardown + run-lists extended; runbook `DEPLOY_V058_20260729.md`.
 
