@@ -111,6 +111,12 @@ _EXPECTED_MIGRATIONS = {
         "(C2), MTD budget/forecast alerts + platform score priced at the AI "
         "rate (C1), COST_AI_CREEP seeded (C6), self-alert block count 17->20 "
         "(B41), SP_PURGE_FACTS covers 3 more daily facts (B33)",
+    62: "loader robustness + correctness: query fail predicate <> SUCCESS "
+        "(R3-4, app+mart), backfill day-cap fix (B5), reconcile boundary-hour "
+        "clamp (B10), hourly-facts watermark catch-up (B11), daily-facts/"
+        "object-cost transaction wraps (B34), daily alert blocks split to "
+        "SP_ALERT_SCAN_DAILY chained after TASK_LOAD_DAILY (C9). Webhook (B9) "
+        "and perf loader (T3) deferred to V063",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

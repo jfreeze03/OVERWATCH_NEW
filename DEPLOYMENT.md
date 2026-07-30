@@ -67,6 +67,7 @@ snowflake/migrations/V058__task_node_timing.sql
 snowflake/migrations/V059__task_graph_root_credits.sql
 snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql
 snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql
+snowflake/migrations/V062__loader_robustness_alert_split_webhook.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -76,6 +77,30 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > moving-timestamp AI arms corrupted (owner-chosen full-retention), and
 > `CALL SP_LOAD_PLATFORM_SCORE(120);` backfills the new `CREDITS_BILLED_AI` column.
 > The paired app change (score/scoring AI-rate blend) ships with the app release.
+
+> **V062 heal + verify (loader robustness + alert split):**
+> - The migration tail runs `CALL SP_LOAD_HOURLY_FACTS();` (B11 watermark catch-up —
+>   fills the interior holes the old fixed −3d window left after any >3‑day loader
+>   outage), and the task‑DAG section runs `CALL SP_ALERT_SCAN_DAILY();` once so the
+>   6 daily alert blocks fire immediately instead of waiting for the next daily root run.
+> - **Paired app release ships with V062 (R3‑4 parity):** the query "failed" predicate
+>   moved to `<> 'SUCCESS'` in the mart loaders **and** the 4 app live‑fallback reads
+>   (`ops_sql`, `insights_sql`, `mart_sql`) + `backfill_365.sql`. Apply the migration and
+>   redeploy the app together, or the "Failed" tiles disagree mart‑vs‑live (like V057).
+> - **New child task:** the DAG section adds `TASK_ALERT_SCAN_DAILY` after
+>   `TASK_LOAD_DAILY` (suspends the root, creates the child, resumes children‑first then
+>   the root, and calls `SYSTEM$TASK_DEPENDENTS_ENABLE`). Confirm the new task shows
+>   `started` in `SHOW TASKS` after apply.
+> - **NOT in V062 (deferred to V063):** despite the filename, V062 does **not** modify
+>   `SP_NOTIFY_WEBHOOK`. The **B9** webhook truncation‑delivery fix is deferred because
+>   an adversarial review found the authored fix re‑derived the fitting event set twice
+>   (message vs ledger) straddling the network send, so a concurrent `ALERT_EVENTS`
+>   insert or `CURRENT_TIMESTAMP` crossing 24h mid‑send could mark an unsent event
+>   delivered. The correct fix captures the fitting `EVENT_ID`s **once** into an array
+>   (`ARRAY_CONTAINS` in both the message and the ledger) — runtime semantics a
+>   byte‑compare cannot prove — so it ships in a smoke‑tested **V063** alongside the
+>   B34 partial‑failure observability refinement and the T3 perf‑loader restructures.
+>   Until V063, `SP_NOTIFY_WEBHOOK` keeps its current (V034‑lineage) behavior.
 
 Each migration records itself in `DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION`; re-running is
 safe (idempotent `CREATE OR REPLACE` / `CREATE IF NOT EXISTS` + MERGE seeds).

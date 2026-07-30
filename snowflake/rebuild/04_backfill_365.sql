@@ -107,8 +107,13 @@ UNION ALL SELECT 'FACT_STORAGE_DAILY', MIN(DAY), COUNT(*) FROM DBA_MAINT_DB.OVER
 -- marts (query families, cost allocation) default to 90d here on purpose:
 -- widen deliberately if you accept the scan cost.
 -- V041: the hourly marts read OW_QH_EXTRACT, so a wide backfill fills the
--- extract FIRST with the same window; the next hourly task run trims the
--- extract back to its 3-day retention on its own.
+-- extract FIRST with the same window. B12: TASK_LOAD_HOURLY is SUSPENDed
+-- across this whole extract-fed section (see the ALTER TASK below) so its
+-- minute-7 watermark trim cannot shrink that window before the HOURLY marts
+-- read it; RESUME + re-enable dependents runs at the end, and the next
+-- scheduled run then trims the extract back to its 3-day retention on its own.
+-- B5/V062: the old LEAST(:d,2) cap on the extract-fed day-grain arms is lifted,
+-- so 'HOURLY', 90 below now loads the full 90d (it silently loaded 2d before).
 -- ---------------------------------------------------------------------------
 -- V042 (r22 #1): a full year of the day-grain query fact. Same idempotent
 -- only-older-days rule as the dailies above; aggregation mirrors
@@ -125,7 +130,7 @@ FROM (
            COALESCE(DATABASE_NAME, 'NONE') AS DATABASE_NAME,
            COALESCE(USER_NAME, 'UNKNOWN') AS USER_NAME,
            COUNT(*) AS QUERY_COUNT,
-           SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)) AS FAILED_COUNT,
+           SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED_COUNT,
            SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000 AS ELAPSED_SEC_SUM,
            SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000 AS QUEUED_SEC_SUM,
            SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
@@ -136,6 +141,12 @@ FROM (
     GROUP BY 1, 2, 3, 4
 ) g;
 
+-- B12: suspend the hourly task graph before any extract-fed load. The root
+-- suspend halts the whole chain (extract -> V27 marts -> ops-diag), so the
+-- minute-7 TASK_LOAD_HOURLY watermark DELETE cannot trim the freshly-filled
+-- 90d OW_QH_EXTRACT mid-run and destroy up to ~87d of ops-diag history.
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY SUSPEND;
+
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(90);
@@ -145,4 +156,11 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(120);
 -- (fill the extract to the same width first):
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(365);
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 365);
+
+-- B12: backfill complete — re-enable the hourly task graph. RESUME the root,
+-- then SYSTEM$TASK_DEPENDENTS_ENABLE (a root RESUME does not resume children).
+-- Placed after the optional 365 sweep above so that sweep, if uncommented,
+-- stays inside the suspend window. The next scheduled run trims the extract.
+ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY RESUME;
+SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 

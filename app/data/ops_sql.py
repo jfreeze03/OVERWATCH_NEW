@@ -35,7 +35,7 @@ def query_window_summary(days: int, company: str = "ALL", warehouse_contains: st
     return f"""
 SELECT
     COUNT(*) AS QUERY_COUNT,
-    SUM(IFF(EXECUTION_STATUS = 'FAIL', 1, 0)) AS FAILED_COUNT,
+    SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED_COUNT,
     APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
     SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
@@ -76,7 +76,7 @@ def failures_by_error(days: int, company: str = "ALL", database: str = "", schem
     days = bounded_days(days)
     where = and_where(
         _query_scope(days, company, database=database, schema_contains=schema_contains),
-        "EXECUTION_STATUS = 'FAIL'",
+        "EXECUTION_STATUS <> 'SUCCESS'",
     )
     return f"""
 SELECT
