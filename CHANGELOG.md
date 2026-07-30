@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.90.0 — Codex R2 wave 2: honest executive downloads (rec 5, app-only) (2026-07-30)
+
+**rec 5 (HIGH)** — the executive summary export (HTML + .txt) now tells the same
+truth the screen does:
+- An **Incomplete** platform score exports as "Incomplete — health inputs
+  unavailable", not a real-looking `0/100` (which read as a catastrophic score).
+- **MTD & Projected** carry a `· account-wide` scope tag; **Window spend** is
+  labelled company‑scoped warehouse metering — so account‑wide figures no longer
+  sit silently under the company heading.
+- The footer no longer **blanket‑claims** the cloud‑services adjustment for every
+  number; it now states that MTD/Projected are billed credits (adjustment applied,
+  account‑wide) while window spend is warehouse metering (credits × rate, no
+  adjustment), and that an Incomplete score means required health inputs didn't load.
+- Timestamps use **account time** (America/Chicago), matching the app.
+
+Gates green: ruff, mypy, tests (+2 wave-2 locks).
+
 ## 4.89.0 — Codex R2 wave 1: uncapped Overview score + honest window + cache tiers (app-only) (2026-07-30)
 
 The first cluster from `docs/reviews/RECS_REVIEW_2026-07-31.md`, all residuals of

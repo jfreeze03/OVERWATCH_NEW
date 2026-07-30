@@ -67,3 +67,30 @@ def test_rec10_task_node_panel_on_hourly_tier():
     ops = _src("app/ui/pages/operations.py")
     node = ops.split('key=f"t_node_{company}_{days}"', 1)[1].split(")", 1)[0]
     assert 'tier="hourly"' in node   # MART_TASK_NODE_DAILY loads hourly, not every 5 min
+
+
+# ---------------------------------------------------------------------------
+# rec 5 — executive downloads built from the honest screen view-model
+# ---------------------------------------------------------------------------
+def test_rec5_export_incomplete_and_scope_honest():
+    ov = _src("app/ui/pages/overview.py")
+    # an Incomplete score must NOT export as a real-looking 0/100
+    assert '"Incomplete — health inputs unavailable"' in ov
+    assert "_score_export" in ov
+    # account-wide figures carry their scope; window spend is labelled company/metering
+    assert "· account-wide" in ov
+    assert "warehouse metering" in ov
+
+
+def test_rec5_footer_distinguishes_billed_vs_window_spend():
+    from app.logic.formulas import exec_summary_html
+    html = exec_summary_html(
+        company="ALFA", days=30, generated="2026-07-30 (account time)",
+        window_spend="$1 · ALFA, metering", mtd_line="$5 · account-wide",
+        forecast_line="$4 · account-wide", alerts_line="0 critical",
+        score_line="Incomplete — health inputs unavailable", drivers=[], actions=[])
+    # the footer no longer blanket-claims the cloud-services adjustment for ALL numbers
+    assert "cloud-services adjustment applied; telemetry" not in html
+    assert "window spend is warehouse metering" in html
+    # the Incomplete score renders as honest text, not a fake 0/100
+    assert "Incomplete" in html and "0/100" not in html

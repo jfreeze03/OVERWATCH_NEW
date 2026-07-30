@@ -10,8 +10,6 @@ Contract (the old app broke all four of these):
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 
@@ -24,6 +22,7 @@ from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
+    account_now,
     account_today,
     blended_billed_usd,
     exec_summary_html,
@@ -593,28 +592,35 @@ def render() -> None:
             st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only.")
 
     # ---- Executive summary download -----------------------------------------
+    # rec 5: export the SAME honest view-model the screen shows. An Incomplete score
+    # must NOT export as a real-looking 0/100; account-wide figures must not sit under
+    # a company-scoped heading unlabelled; and the footer must not blanket-claim the
+    # cloud-services adjustment for the warehouse window-spend number (which excludes it).
+    _score_export = ("Incomplete — health inputs unavailable" if _score_incomplete
+                     else f"{score.score}/100 ({score.state})")
+    _mtd_export = ((format_usd(mtd_spend) if mtd_source else "n/a (daily facts not deployed)")
+                   + (f" vs budget {format_usd(budget)}" if budget > 0 else " (no budget configured)")
+                   + " · account-wide")
+    _fc_export = ((format_usd(forecast.projected_usd)
+                   + f" ({format_usd(forecast.low_usd)}–{format_usd(forecast.high_usd)}) · account-wide")
+                  if forecast.ok else "insufficient history")
     summary = (
         f"OVERWATCH executive summary — {company}, last {days} days — "
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
-        f"Window spend: {format_usd(window_spend)}\n"
-        f"MTD spend: {format_usd(mtd_spend) if mtd_source else 'n/a (daily facts not deployed)'}"
-        f"{' vs budget ' + format_usd(budget) if budget > 0 else ' (no budget configured)'}\n"
-        f"Projected month-end: "
-        f"{format_usd(forecast.projected_usd) + ' (' + format_usd(forecast.low_usd) + '-' + format_usd(forecast.high_usd) + ')' if forecast.ok else 'insufficient history'}\n"
+        f"{account_now().strftime('%Y-%m-%d %H:%M')} (account time)\n"
+        f"Window spend ({company}, warehouse metering, credits × rate): {format_usd(window_spend)}\n"
+        f"MTD spend: {_mtd_export}\n"
+        f"Projected month-end: {_fc_export}\n"
         f"Open alerts: {critical_alerts} critical, {high_alerts} high\n"
-        f"Platform score: {score.score}/100 ({score.state})"
+        f"Platform score: {_score_export}"
         + ("".join(f"\n  - {d.driver}: -{d.penalty:.1f} pts ({d.evidence})" for d in score.drivers) if score.drivers else "")
     )
     html = exec_summary_html(
-        company=company, days=days, generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        window_spend=format_usd(window_spend),
-        mtd_line=(format_usd(mtd_spend) if mtd_source else "n/a")
-                 + (f" vs {format_usd(budget)} budget" if budget > 0 else ""),
-        forecast_line=(format_usd(forecast.projected_usd)
-                       + f" ({format_usd(forecast.low_usd)}–{format_usd(forecast.high_usd)})")
-                      if forecast.ok else "insufficient history",
+        company=company, days=days, generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
+        window_spend=f"{format_usd(window_spend)} · {company}, metering",
+        mtd_line=_mtd_export,
+        forecast_line=_fc_export,
         alerts_line=f"{critical_alerts} critical · {high_alerts} high",
-        score_line=f"{score.score}/100 ({score.state})",
+        score_line=_score_export,
         drivers=[(d.driver, f"{d.penalty:.1f}", d.evidence) for d in score.drivers],
         actions=action_lines,
     )

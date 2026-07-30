@@ -246,8 +246,10 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
 <table><tr><th>Driver</th><th>Points</th><th>Evidence</th></tr>{driver_rows}</table>
 <h2>Top actions</h2>
 <ul>{action_items}</ul>
-<div class="foot">Numbers come from ACCOUNT_USAGE-derived facts with the cloud-services
-adjustment applied; telemetry lags up to ~45 min (metering daily up to 24h).</div>
+<div class="foot">MTD &amp; projected are billed credits (cloud-services adjustment applied) and
+are account-wide; window spend is warehouse metering (credits &times; rate, no adjustment) and
+is company-scoped. All figures use account time; telemetry lags up to ~45 min (metering
+daily up to 24h). An <em>Incomplete</em> score means required health inputs did not load.</div>
 </body></html>"""
 
 def mtd_pace_vs_prior_month(daily, today):
