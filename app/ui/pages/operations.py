@@ -497,7 +497,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
     st.divider()
     st.markdown("**Per-node timing (dispatch queue & exec p95)**")
     nres = run(mart27_sql.task_nodes(days, company, database, schema_contains),
-               page=_PAGE, key=f"t_node_{company}_{days}", tier="recent",
+               page=_PAGE, key=f"t_node_{company}_{days}", tier="hourly",  # rec 10: MART_TASK_NODE_DAILY loads hourly
                source="MART_TASK_NODE_DAILY")
     if guard(nres, "No per-node timing yet — MART_TASK_NODE_DAILY is empty for this scope "
                    "(it loads hourly once V058 is applied)."):

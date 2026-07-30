@@ -134,16 +134,20 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
 
 def _open_alert_counts(company: str = "ALL",
                        prefetched: QueryResult | None = None) -> tuple[QueryResult, int, int]:
+    # A-score-1: count criticals/highs from the UNCAPPED severity aggregate (the same
+    # source as the Alerts-page KPI, C4/C7), NOT a 500-row feed that undercounts in a
+    # storm — these counts feed BOTH the KPI and the platform score, so a >500-alert
+    # storm would otherwise inflate the score exactly when it must be trusted. Overview
+    # renders no alert LIST, so the 500 rows were fetched only to be counted.
     # N4: accept a pre-fetched result from the first-paint run_batch, else read solo.
     res = prefetched if prefetched is not None else run(
-        mart_sql.open_alert_events(500, company), page=_PAGE,
-        key=f"open_alerts_{company}", tier="live",
-        source="ALERT_EVENTS" if company == "ALL"
-        else f"ALERT_EVENTS ({company} + account-level)")
+        mart_sql.open_alert_severity_counts(company), page=_PAGE,
+        key=f"alert_counts_{company}", tier="live",
+        source="ALERT_EVENTS (COUNT_IF by severity, uncapped)")
     if not res.ok or res.empty:
         return res, 0, 0
-    sev = res.df["SEVERITY"].astype(str).str.upper()
-    return res, int((sev == "CRITICAL").sum()), int((sev == "HIGH").sum())
+    _row = res.df.iloc[0]
+    return res, int(safe_float(_row.get("CRIT"))), int(safe_float(_row.get("HIGH")))
 
 
 def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
@@ -232,18 +236,18 @@ def render() -> None:
     else:
         proj_daily = daily
     # N4: Overview never adopted the first-paint run_batch that Brief/Control Room
-    # use. The two independent LIVE reads (open alerts + owner-action queue) now
-    # fetch in one round trip. health_strip stays out (the shell already fetched it
-    # — shared cache, r15 #14); the exec board stays out (filter-scoped own key,
-    # Codex #4). Each key matches its solo cache key, so warm hits are unchanged.
+    # use. The two independent LIVE reads (uncapped alert counts + owner-action
+    # queue) now fetch in one round trip. health_strip stays out (the shell already
+    # fetched it — shared cache, r15 #14); the exec board stays out (filter-scoped
+    # own key, Codex #4). Each key matches its solo cache key, so warm hits are
+    # unchanged. A-score-1: the alert leg is the uncapped severity aggregate.
     _live_pf = run_batch([
-        {"key": f"open_alerts_{company}", "sql": mart_sql.open_alert_events(500, company),
-         "source": ("ALERT_EVENTS" if company == "ALL"
-                    else f"ALERT_EVENTS ({company} + account-level)")},
+        {"key": f"alert_counts_{company}", "sql": mart_sql.open_alert_severity_counts(company),
+         "source": "ALERT_EVENTS (COUNT_IF by severity, uncapped)"},
         {"key": "action_queue", "sql": mart_sql.action_queue(200), "source": "ACTION_QUEUE"},
     ], page=_PAGE, tier="live") or {}
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(
-        company, prefetched=_live_pf.get(f"open_alerts_{company}"))
+        company, prefetched=_live_pf.get(f"alert_counts_{company}"))
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
     if engine == "ml_forecast":
@@ -288,18 +292,24 @@ def render() -> None:
     # window, so a normal week dwarfs the spike-sized 10-min/5-GB thresholds and
     # trips a near-constant deduction that grows with the window; and the retro
     # sparkline is per-day, an incomparable basis. This read is per-recent-day.
+    # A-score-3: this is a midnight-aligned window (yesterday 00:00 → now), so it
+    # spans the PREVIOUS + CURRENT calendar day (24h at midnight, ~48h by end of
+    # day) — deliberately aligned to the live ops tiles, not a rolling 24h. rec 10:
+    # the source refreshes hourly, so cache at the hourly tier (salt still forces refresh).
     _thr = run(mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company),
-               page=_PAGE, key=f"score_throughput_{company}", tier="recent",
-               source="FACT_QUERY_HOURLY (fixed 24h health window)")
+               page=_PAGE, key=f"score_throughput_{company}", tier="hourly",
+               source="FACT_QUERY_HOURLY (prev + current calendar day)")
     _tr = _thr.df.iloc[0] if _thr.usable() and not _thr.empty else None
     queries = safe_float(_tr.get("QUERY_COUNT")) if _tr is not None else 0.0
     failed_queries = safe_float(_tr.get("FAILED_COUNT")) if _tr is not None else 0.0
     fail_pct = (failed_queries / queries * 100) if queries else 0.0
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0) if _tr is not None else 0.0
     spill_gb = safe_float(_tr.get("SPILL_REMOTE_GB")) if _tr is not None else 0.0
+    # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
+    # calendar day (it can't be sub-day windowed). rec 10: daily source → hourly tier.
     _tk = run(mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company),
-              page=_PAGE, key=f"score_tasks_{company}", tier="recent",
-              source="FACT_TASK_DAILY (fixed 24h health window)")
+              page=_PAGE, key=f"score_tasks_{company}", tier="hourly",
+              source="FACT_TASK_DAILY (prev + current calendar day)")
     _tk_ok = _tk.usable() and not _tk.empty
     task_runs = float(_tk.df["RUNS"].map(safe_float).sum()) if _tk_ok else 0.0
     task_failures = float(_tk.df["FAILED"].map(safe_float).sum()) if _tk_ok else 0.0
@@ -313,7 +323,7 @@ def render() -> None:
         page=_PAGE, key="score_inputs",
         mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
         live_source="facts + ALERT_EVENTS (retro score inputs, live fallback)",
-        mart_tier="recent", live_tier="recent")
+        mart_tier="hourly", live_tier="hourly")  # rec 10: score facts refresh daily
     score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
                                           budget, rate, ai_rate)  # C1: AI-rate-blended budget
                     if score_inputs.usable() else pd.DataFrame())
@@ -412,11 +422,11 @@ def render() -> None:
             "help": ("Throughput or alerts didn't load — a real score would be a lie while "
                      "health signals are missing (see the deductions below)."
                      if _score_incomplete
-                     else "Throughput & pressure (queries, failures, queue, spill) read a "
-                          "fixed 24h window and are company-scoped; budget, open alerts, "
-                          "stale telemetry and the owner queue are account-wide — so the "
-                          "score does NOT move when you change the spend window. Every "
-                          "deduction is itemized below the trend; sparkline = 14d retro."),
+                     else "Throughput & pressure (queries, failures, queue, spill) read the "
+                          "previous + current calendar day and are company-scoped; budget, "
+                          "open alerts, stale telemetry and the owner queue are account-wide "
+                          "— so the score does NOT move when you change the spend window. "
+                          "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
     kpi_row(kpis)

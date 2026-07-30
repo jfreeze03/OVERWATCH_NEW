@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.89.0 — Codex R2 wave 1: uncapped Overview score + honest window + cache tiers (app-only) (2026-07-30)
+
+The first cluster from `docs/reviews/RECS_REVIEW_2026-07-31.md`, all residuals of
+this session's own work. App-only.
+
+- **A-score-1 (CRITICAL) — the platform score no longer undercounts criticals in a
+  storm.** C4/C7 uncapped the alert counts on the Alerts page but left Overview's
+  "Open critical/high" KPI **and the platform score** counting from a 500-row feed,
+  so a >500 open-alert storm would undercount criticals into the score — inflating
+  the headline number exactly when it must be trusted. Overview renders no alert
+  *list*, so it now counts from the uncapped `open_alert_severity_counts` aggregate
+  (same source as the Alerts KPI); the 500-row fetch it discarded is gone. A parity
+  test locks the two surfaces to the same source so the split can't recur.
+- **A-score-3 (MEDIUM) — the score window is labelled honestly.** The C2/N5 fixed
+  window is midnight-aligned (yesterday 00:00 → now), i.e. the **previous + current
+  calendar day** (24h at midnight, ~48h by end of day), deliberately aligned to the
+  live ops tiles — not a rolling 24h. The source labels and KPI help said "fixed
+  24h"; they now say "previous + current calendar day" and note the day-grain task leg.
+- **rec 10 (LOW) — score/task-node reads match their source cadence.** The score
+  throughput/task reads, the retro `score_inputs`, and the C18 per-node timing panel
+  sat on the 5-minute `recent` tier though their facts refresh hourly/daily — re-paying
+  unchanged reads up to ~11×/hour. Moved to the `hourly` tier (refresh-salt
+  invalidation retained). Alert counts stay `live` (30s).
+
+Gates green: ruff, mypy, tests (+6 wave-1 locks in `tests/test_codex_r2_wave.py`).
+
 ## 4.88.0 — V063 owner migration: webhook capture-once + daily-facts fail-guard (2026-07-30)
 
 The two correctness/robustness fixes deferred from V062 after its adversarial

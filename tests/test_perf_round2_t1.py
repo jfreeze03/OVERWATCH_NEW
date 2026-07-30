@@ -21,8 +21,9 @@ def test_t1_1_overview_facts_on_hourly_tier():
                 'key="spark_activity", tier="hourly"',
                 'key="daily_digest", tier="hourly"'):
         assert key in ov, key
-    # the deliberate recent exception (score-inputs) is preserved
-    assert 'mart_tier="recent", live_tier="recent")' in ov
+    # rec 10 (v4.89): score-inputs moved recent -> hourly too — FACT_PLATFORM_SCORE_DAILY
+    # / the retro facts refresh daily, so the 5-min tier only re-paid unchanged reads.
+    assert 'mart_tier="hourly", live_tier="hourly"' in ov
 
 
 def test_t1_1_spend_facts_on_hourly_tier():
@@ -97,7 +98,11 @@ def test_t2_3_run_mart_first_has_preloaded_seam():
 # --- T1.9: open_alert_events standardized at LIMIT 500 -----------------------
 
 def test_t1_9_open_alert_events_limit_standardized():
-    assert 'mart_sql.open_alert_events(500, company)' in _read("app/ui/pages/overview.py")
+    # A-score-1 (v4.89): Overview no longer fetches the 500-row feed — it renders no
+    # alert LIST, so it counts criticals/highs from the uncapped severity aggregate
+    # (open_alert_severity_counts). Alerts + Control Room keep the feed for their lists.
+    assert 'mart_sql.open_alert_events(500, company)' not in _read("app/ui/pages/overview.py")
+    assert 'mart_sql.open_alert_severity_counts(company)' in _read("app/ui/pages/overview.py")
     assert 'mart_sql.open_alert_events(500, company)' in _read("app/ui/pages/alerts.py")
     assert 'mart_sql.open_alert_events(500, company)' in _read("app/ui/pages/control_room.py")
     # no stale caption claiming the old cap
