@@ -97,6 +97,43 @@ def test_n7_storage_transfer_disclosure_on_overview_and_brief():
 
 
 # ---------------------------------------------------------------------------
+# N10 — spend collapse gets a distinct identity from a spike
+# ---------------------------------------------------------------------------
+def test_n10_spend_collapse_distinct_from_spike():
+    collapse = triage_queue(None, None, [{"label": "WH_DEAD", "value": 10.0, "z": -6.5}])
+    row = collapse.iloc[0]
+    assert row["KIND"] == "Spend collapse"
+    assert "collapsed" in row["TITLE"]
+    assert "stalled" in row["DETAIL"].lower()
+    assert row["SEVERITY"] == "HIGH"  # abs(z) >= 5
+    # a positive-z spike keeps the original "Spend anomaly" identity
+    spike = triage_queue(None, None, [{"label": "WH_HOT", "value": 900.0, "z": 6.2}])
+    assert spike.iloc[0]["KIND"] == "Spend anomaly"
+
+
+# ---------------------------------------------------------------------------
+# C18 — per-node timing reader + Operations panel
+# ---------------------------------------------------------------------------
+def test_c18_task_nodes_reader():
+    from app.data import mart27_sql
+    sql = mart27_sql.task_nodes(30, "ALFA")
+    assert "MART_TASK_NODE_DAILY" in sql
+    assert "P95_QUEUE_SEC" in sql and "P95_EXEC_SEC" in sql
+    assert "ORDER BY P95_QUEUE_SEC DESC" in sql
+    # no COMPANY column on the mart — must scope via DATABASE_NAME, not COMPANY=
+    assert "COMPANY" not in sql
+    assert "DATABASE_NAME" in sql
+
+
+def test_c18_operations_panel_wired_mart_only():
+    ops = _src("app/ui/pages/operations.py")
+    assert "task_nodes(days, company" in ops
+    assert "Per-node timing" in ops
+    # mart-only: must NOT be wrapped in run_mart_first (no numerically-agreeing live leg)
+    assert "run_mart_first(mart27_sql.task_nodes" not in ops
+
+
+# ---------------------------------------------------------------------------
 # N1 — forecasts must exclude today's PARTIAL day from the forward daily rate
 # ---------------------------------------------------------------------------
 def test_n1_forecast_excludes_partial_today_from_rate():

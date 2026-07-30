@@ -464,7 +464,8 @@ def render() -> None:
             _qr = queue.iloc[int(sel_q)]
             _dest = {"Alert": ("Alerts", "Open events"),
                      "Task failure": ("Operations", ""),
-                     "Spend anomaly": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
+                     "Spend anomaly": ("Cost & Contract", ""),
+                     "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
             request_navigation(_dest[0], _dest[1])
 
     # ---- Incident correlation timeline -----------------------------------------

@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.84.0 — NEXT wave 2: anomaly collapse-vs-spike + per-node timing panel (app-only) (2026-07-30)
+
+N10 + C18 from `docs/reviews/RECS_REVIEW_2026-07-30.md`. App-only; no migration.
+
+- **N10 (MEDIUM) — a spend collapse is no longer read like a spike.** The anomaly
+  detector already flagged both directions (|z| ≥ threshold), but the triage queue
+  labeled every one a generic "Spend anomaly" and the Operations table sorted by
+  raw z (burying large-negative collapses at the bottom). A collapse (z < 0) is
+  usually a stalled loader / dead pipeline — a real outage signal. Now: the triage
+  queue gives collapses a distinct **"Spend collapse"** kind + "possible stalled
+  workload / dead pipeline" detail (spikes keep "Spend anomaly"); the Control Room
+  triage routes both to Cost & Contract; the Operations anomaly table ranks by
+  |z| so collapses surface next to spikes; and the Spend & Attribution warning
+  distinguishes collapse from overspend. Detector math unchanged (signed z already
+  propagated).
+- **C18 (MEDIUM) — the per-node loader-timing mart finally has a reader.**
+  `MART_TASK_NODE_DAILY` (shipped V058) loaded but nothing read it. A new
+  Operations → Tasks "Per-node timing" panel surfaces per-node dispatch-queue
+  delay (SCHEDULED→START — warehouse contention / late start) and exec p95/max
+  (START→COMPLETE) that the coarse `FACT_TASK_DAILY` summary can't show, ranked by
+  p95 dispatch queue. Mart-only via plain `run()` (no live-parity builder computes
+  the dispatch delay, so a fallback leg would diverge); scoped by DATABASE_NAME
+  (the mart has no COMPANY grain); failure-rate derived at read.
+
+Gates green: ruff, mypy (pure layers), tests (+3 wave-2 locks).
+
 ## 4.83.0 — NEXT wave 1: platform-score honesty on Overview (app-only) (2026-07-30)
 
 C2 + N5 + C11 + N7 from `docs/reviews/RECS_REVIEW_2026-07-30.md`, scoped by the

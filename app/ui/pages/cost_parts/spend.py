@@ -305,7 +305,13 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         hits = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
         if hits:
             for h in hits[:5]:
-                st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} is a statistical outlier (z {h['z']:+.1f}) — investigate.")
+                # N10: a collapse (z<0) reads differently from an overspend spike.
+                if float(h.get("z", 0) or 0.0) < 0:
+                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} collapsed "
+                               f"(z {h['z']:+.1f}) — possible stalled workload / dead pipeline.")
+                else:
+                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} is a statistical "
+                               f"outlier (z {h['z']:+.1f}) — investigate.")
         else:
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:

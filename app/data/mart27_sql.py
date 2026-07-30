@@ -115,6 +115,31 @@ LIMIT 5000
 """
 
 
+def task_nodes(days: int, company: str = "ALL", database: str = "",
+               schema_contains: str = "") -> str:
+    """C18: per-node loader timing from MART_TASK_NODE_DAILY (V058), which loads
+    but had no reader. No COMPANY column -> scope via database_clause on
+    DATABASE_NAME, same as task_graphs. Mart-ONLY (no live-parity builder: the
+    dispatch-queue delay needs SCHEDULED_TIME, which no app live builder computes,
+    so a fallback leg would diverge numerically). p95 dispatch queue first surfaces
+    the late-start / contention offenders the mart exists to quantify."""
+    days = bounded_days(days, 400)
+    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+             companies.database_clause(company, "DATABASE_NAME"),
+             contains_filter("SCHEMA_NAME", schema_contains)]
+    if str(database or "").strip():
+        parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+    return f"""
+SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, RUNS, FAILED,
+       AVG_QUEUE_SEC, P95_QUEUE_SEC, MAX_QUEUE_SEC,
+       AVG_EXEC_SEC, P95_EXEC_SEC, MAX_EXEC_SEC, FIRST_START, LAST_COMPLETED
+FROM {mart_object("MART_TASK_NODE_DAILY")}
+WHERE {and_where(*parts)}
+ORDER BY P95_QUEUE_SEC DESC NULLS LAST, FAILED DESC
+LIMIT 2000
+"""
+
+
 def security_posture(days: int = 90) -> str:
     days = bounded_days(days, 400)
     return f"""

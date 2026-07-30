@@ -491,6 +491,28 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
     _failure_timeline_section(company, database, schema_contains,
                               known_failures=locals().get("_known_failed") if days >= 7 else None)
 
+    # C18: MART_TASK_NODE_DAILY (V058) loaded but had no reader — surface the
+    # per-node dispatch-queue + exec timing it captures (late-start / warehouse
+    # contention that the coarse FACT_TASK_DAILY summary above cannot show).
+    st.divider()
+    st.markdown("**Per-node timing (dispatch queue & exec p95)**")
+    nres = run(mart27_sql.task_nodes(days, company, database, schema_contains),
+               page=_PAGE, key=f"t_node_{company}_{days}", tier="recent",
+               source="MART_TASK_NODE_DAILY")
+    if guard(nres, "No per-node timing yet — MART_TASK_NODE_DAILY is empty for this scope "
+                   "(it loads hourly once V058 is applied)."):
+        ndf = nres.df.copy()
+        if {"FAILED", "RUNS"}.issubset(ndf.columns):
+            # failure-rate is derived at read (the loader stores counts, not a rate);
+            # zero-RUNS guard avoids divide-by-zero.
+            ndf["FAIL_PCT"] = [round(safe_float(fl) / safe_float(rn) * 100, 1) if safe_float(rn) else 0.0
+                               for fl, rn in zip(ndf["FAILED"], ndf["RUNS"], strict=False)]
+        styled_table(ndf)
+        st.caption("Dispatch queue = SCHEDULED→START delay (warehouse contention / late start); "
+                   "exec = START→COMPLETE runtime. Ranked by p95 dispatch queue. Mart-only — no "
+                   "live equivalent (the queue delay needs SCHEDULED_TIME). Task grain, scoped by "
+                   "database; one task name can appear under multiple schemas.")
+
     st.markdown("**Task graph (DAG)**")
     if st.toggle("Render account task topology", key="ops_dag_toggle",
                  help="Latest task versions + predecessors; red = failed in 24h, gray = suspended."):
@@ -542,8 +564,12 @@ def _warehouses_tab(company: str, rate: float) -> None:
         st.success("No per-warehouse daily anomalies (30d, median/MAD z ≥ 3.5).")
     else:
         st.warning(f"{len(anomalies)} anomalous warehouse-day(s):")
+        # N10: rank by |z| so spend COLLAPSES (large negative z — a stalled-loader
+        # signal) surface next to spikes instead of sinking to the bottom.
+        _anom = anomalies[["DAY", "WAREHOUSE_NAME", "USD", "Z_SCORE"]]
+        _anom = _anom.reindex(_anom["Z_SCORE"].abs().sort_values(ascending=False).index)
         st.dataframe(
-            anomalies[["DAY", "WAREHOUSE_NAME", "USD", "Z_SCORE"]].sort_values("Z_SCORE", ascending=False),
+            _anom,
             hide_index=True, use_container_width=True,
             column_config={
                 "USD": st.column_config.NumberColumn("Spend $", format="$%.0f"),

@@ -124,17 +124,33 @@ def triage_queue(
                 "EVENT_ID": "",
                 "RULE_ID": "",
             })
-    rows.extend({
-        "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",
-        "KIND": "Spend anomaly",
-        "DATABASE": "",
-        "TITLE": f"{a.get('label', 'warehouse')} daily spend z={a.get('z', 0):+.1f}",
-        "DETAIL": f"Daily spend ${a.get('value', 0):,.0f} vs robust baseline.",
-        "SOURCE": "FACT_WAREHOUSE_DAILY",
-        "RAISED_AT": None,
-        "EVENT_ID": "",
-        "RULE_ID": "",
-    } for a in anomalies or [])
+    for a in anomalies or []:
+        z = float(a.get("z", 0) or 0.0)
+        label = a.get("label", "warehouse")
+        value = a.get("value", 0)
+        # N10: a spend COLLAPSE (z << 0) is usually a stalled loader / dead
+        # pipeline — a real outage signal — not the same thing as a spend SPIKE.
+        # Give it a distinct identity so a DBA doesn't triage it like an overspend.
+        if z < 0:
+            kind = "Spend collapse"
+            title = f"{label} daily spend collapsed z={z:+.1f}"
+            detail = (f"Daily spend ${value:,.0f} far below robust baseline — "
+                      "possible stalled workload / dead pipeline.")
+        else:
+            kind = "Spend anomaly"
+            title = f"{label} daily spend z={z:+.1f}"
+            detail = f"Daily spend ${value:,.0f} vs robust baseline."
+        rows.append({
+            "SEVERITY": "HIGH" if abs(z) >= 5 else "MEDIUM",
+            "KIND": kind,
+            "DATABASE": "",
+            "TITLE": title,
+            "DETAIL": detail,
+            "SOURCE": "FACT_WAREHOUSE_DAILY",
+            "RAISED_AT": None,
+            "EVENT_ID": "",
+            "RULE_ID": "",
+        })
     if not rows:
         return pd.DataFrame()
     queue = pd.DataFrame(rows)
