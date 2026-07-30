@@ -79,7 +79,10 @@ def test_mtd_pace_vs_prior_month_same_days_basis():
     days = ([{"DAY": dt.date(2026, 6, d), "USD": 100.0} for d in range(1, 31)]
             + [{"DAY": dt.date(2026, 7, d), "USD": 150.0} for d in range(1, 11)])
     mtd, prior, pct = mtd_pace_vs_prior_month(pd.DataFrame(days), today)
-    assert mtd == 1500.0 and prior == 1000.0            # first 10 days each
+    # R3-7: displayed MTD is the full month-to-date incl. today (10 days x 150);
+    # the pace delta compares COMPLETED days only — 9 each side (today excluded),
+    # so prior = 9 x 100 = 900 and the ratio (1350 vs 900) is still +50%.
+    assert mtd == 1500.0 and prior == 900.0
     assert round(pct, 1) == 50.0
 
 

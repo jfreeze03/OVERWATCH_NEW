@@ -306,6 +306,11 @@ def snowsight_profile_column(df, page: str, id_col: str = "QUERY_ID"):
                   page=page, key="snowsight_ctx", tier="metadata", source="session context")
         org = str(res.df.iloc[0].get("ORG", "") or "") if res.usable() else ""
         acct = str(res.df.iloc[0].get("ACCT", "") or "") if res.usable() else ""
+        if not org or not acct:
+            # R3-3: a failed/empty probe must NOT be cached — writing ('','') pins the
+            # not-None guard for the whole session and permanently disables the links.
+            # Leave session_state unset so the next rerun re-probes (metadata tier).
+            return df, {}
         ctx = (org.lower(), acct.lower())
         st.session_state["_ow_snowsight_ctx"] = ctx
     org, acct = ctx

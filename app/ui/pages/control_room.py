@@ -414,13 +414,17 @@ def render() -> None:
         anomalies,
     )
     if queue.empty:
-        sources_ok = alerts.ok and tasks.ok
+        # R3-1: wh_daily gates the spend-anomaly scan — if that read failed the
+        # queue is empty for the WRONG reason, so a failed FACT_WAREHOUSE_DAILY must
+        # demote the all-clear (a runaway-warehouse day must never hide behind green).
+        sources_ok = alerts.ok and tasks.ok and wh_daily.ok
         if sources_ok:
             st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
         else:
             st.info("Triage inputs incomplete: "
                     + ("alert tables not installed; " if not alerts.ok else "")
-                    + ("task facts not installed." if not tasks.ok else ""))
+                    + ("task facts not installed; " if not tasks.ok else "")
+                    + ("warehouse spend fact unavailable — spend anomalies not scanned." if not wh_daily.ok else ""))
     else:
         styled_table(queue)
         st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies."

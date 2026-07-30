@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.80.0 — bug round 3 fixes (app-only) (2026-07-30)
+
+Six of the seven CONFIRMED bugs from the bug-round-3 campaign
+(docs/reviews/BUG_ROUND_3_2026-07-30.md); R3-4 is deferred (see below).
+
+- **R3-1 (MEDIUM) — Control Room "nothing to triage" hid a failed spend source.** When
+  `FACT_WAREHOUSE_DAILY` failed to load *and* there were no open alerts/task failures, the
+  green all-clear showed while the spend-anomaly scan never ran. `sources_ok` now also
+  requires `wh_daily.ok`, and a failed read demotes the banner to the incomplete-inputs info.
+- **R3-2 (MEDIUM) — query-inspector cache % was off by 100×.** `query_detail` selected
+  `PERCENTAGE_SCANNED_FROM_CACHE` raw (0-1) so an 85%-cache query read "1%". Now `* 100 AS
+  CACHE_PCT` (matching the sibling read and the mart readers).
+- **R3-3 (LOW) — snowsight profile links died for the session on a transient probe.**
+  `snowsight_profile_column` cached a *failed* org/account probe (`('','')`), pinning the
+  not-None guard and disabling deep links until a reload. A failed probe now returns early
+  without caching, so the next rerun re-probes.
+- **R3-5 (LOW) — bulk-ACK wrote a false audit row for already-ACK events.** The UPDATE only
+  transitions OPEN→ACK, but the audit re-selected any event now in ACK. The audit is now
+  scoped to events this actor just stamped (`ACK_BY` + a 2-minute recency window).
+- **R3-6 (LOW) — closed-loop reverse-hint mislabeled an auto-suspend fix.** A binary ternary
+  fell through to "cluster-range" for auto-suspend changes; the hint now keys off the same
+  `fix_kind` branching that builds the statement (three-way, incl. `AUTO_SUSPEND`).
+- **R3-7 (LOW) — MTD-vs-prior pace delta counted today's partial day.** The equal-length
+  "same days" window included today on the current side (still growing) vs full days on the
+  prior side, biasing the delta low. It now compares completed days only (`today.day - 1`);
+  the displayed full-month MTD is unchanged.
+
+**Deferred — R3-4 (LOW):** the query-failure counters use `EXECUTION_STATUS = 'FAIL'` (drops
+the rare INCIDENT status). The clean fix (`<> 'SUCCESS'`) must change the app live builders
+*and* their mart-loader twins together (`FACT_QUERY_HOURLY` counts `= 'FAIL'`) or it creates a
+mart-vs-live divergence — so it's bundled into V062 with the loader changes.
+
+New `test_bug_round3` locks all six; 1469 pytest green, ruff+mypy clean.
+
 ## 4.79.0 — show First/Last names everywhere a USER_NAME login appears (app-only) (2026-07-30)
 
 Owner ask: the cryptic Snowflake login (`USER_NAME`) rarely says *who* the person is —

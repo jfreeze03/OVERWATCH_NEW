@@ -271,7 +271,11 @@ def mtd_pace_vs_prior_month(daily, today):
     month_start = today.replace(day=1)
     prior_end = month_start - timedelta(days=1)
     prior_start = prior_end.replace(day=1)
-    n_days = min(today.day, prior_end.day)   # equal-length window: capped at the prior month's length
+    # R3-7: compare only COMPLETED days on both sides — today is still growing, so
+    # counting it on the current side (while the prior side has full days) biases the
+    # pace low all day. eff_day = today.day - 1 drops today; still capped at the prior
+    # month's length. The displayed full-month `mtd` below keeps today (unchanged).
+    n_days = min(max(today.day - 1, 0), prior_end.day)   # equal-length window of completed days
     prior_cut = prior_start + timedelta(days=n_days)
     mtd_cut = month_start + timedelta(days=n_days)
     # Displayed MTD stays the TRUE full month-to-date (never understated at

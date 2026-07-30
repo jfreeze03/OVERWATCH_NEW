@@ -98,7 +98,12 @@ def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str 
             f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = {identity_sql()}, "
             f"ACK_AT = CURRENT_TIMESTAMP() WHERE EVENT_ID IN ({ids}) AND STATUS = 'OPEN';"
         )
-        state_filter = "STATUS = 'ACK'"
+        # R3-5: the UPDATE only transitions OPEN->ACK, but the feed also offers
+        # already-ACK events; matching bare STATUS='ACK' would write a false audit row
+        # for those no-op events. Scope the audit to events THIS actor just stamped
+        # (RESOLVE below needs no such guard — nothing is pre-RESOLVED in the feed).
+        state_filter = (f"STATUS = 'ACK' AND ACK_BY = {identity_sql()} "
+                        f"AND ACK_AT >= DATEADD('minute', -2, CURRENT_TIMESTAMP())")
     else:
         set_kind = f", RESOLUTION_KIND = {sql_literal(kind)}" if kind else ""
         update = (
@@ -289,9 +294,13 @@ def _open_events_section(events, is_operator: bool) -> None:
                     if is_operator:
                         from app.ui.components import blast_radius
                         blast_radius(wh_inline, _PAGE)
-                        st.caption(remediation.reverse_hint(
-                            "STATEMENT_TIMEOUT" if "STATEMENT_TIMEOUT" in stmt_cl else "CLUSTER_RANGE",
-                            wh_inline))
+                        # R3-6: key the reverse-hint off the SAME fix_kind branching that
+                        # built stmt_cl (the old binary ternary mislabeled an auto-suspend
+                        # fix as a cluster-range change — its token matched neither arm).
+                        _rev_kind = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
+                                     else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
+                                     else "CLUSTER_RANGE")
+                        st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
                         conf_cl = st.text_input("Type the warehouse name to confirm",
                                                 key=f"clf_confirm_{event_id[:8]}")
                         if st.button("Execute + audit + book estimate", key=f"clf_exec_{event_id[:8]}",
