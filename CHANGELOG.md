@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.92.0 — Codex R2 wave 4: canonical contract runway (rec 20, app-side) (2026-07-30)
+
+**rec 20 (HIGH)** — N11 fixed the contract projection on the Contract page, but the
+Brief's runway (and the `COST_CONTRACT_BREACH` alert) still read
+`mart_sql.contract_exhaustion()`, whose `DAILY_BURN` summed a **31-date span that
+included today's partial metering and divided by a literal 30** — biasing burn low,
+overstating days-left, and able to **suppress the breach alert**. It now uses the
+canonical **trailing-30-COMPLETE-days** burn: `SUM(billed) over DAY BETWEEN today-30
+AND today-1` (today excluded) divided by the count of complete days actually present
+— the same basis the renewal planner uses (N11), so the Brief runway can no longer
+contradict the Contract page.
+
+Added rec #2: the docstring's self-referential *"Same math as the
+COST_CONTRACT_BREACH scan block"* — which was the drift signal, and already stale
+since N11 — is removed and replaced with the canonical definition.
+
+**Owner-migration follow-up (V065):** the `COST_CONTRACT_BREACH` alert block (now in
+`SP_ALERT_SCAN_DAILY`, V062 C9) still carries the old math and must be aligned to the
+same trailing-30-complete-days window when V065 ships.
+
+Gates green: ruff, mypy, tests (+1 wave-4 lock).
+
 ## 4.91.0 — Codex R2 wave 3: every score input fails closed (A-score-2, app-only) (2026-07-30)
 
 **A-score-2 (HIGH)** — C1 made the platform score fail closed when the two REQUIRED

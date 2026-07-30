@@ -696,8 +696,15 @@ ORDER BY VISITS DESC
 
 
 def contract_exhaustion() -> str:
-    """The CIO number: projected contract exhaustion at trailing 30d burn.
-    Same math as the COST_CONTRACT_BREACH scan block; n/a until configured."""
+    """The CIO number: projected contract exhaustion at the canonical trailing-30-
+    COMPLETE-days burn (rec 20). DAILY_BURN = SUM(billed) over DAY BETWEEN today-30
+    AND today-1 (today's PARTIAL metering excluded) divided by the count of complete
+    days actually present — the SAME basis the renewal planner uses (contract.py, N11),
+    so the Brief runway can't contradict the Contract page. The old form summed a
+    31-date span that INCLUDED today's partial and divided by a literal 30, biasing
+    burn low, overstating days-left, and potentially suppressing COST_CONTRACT_BREACH.
+    n/a until configured. NOTE: the COST_CONTRACT_BREACH alert block (SP_ALERT_SCAN_
+    DAILY, V062 C9) still carries the OLD math — align it in the V065 owner migration."""
     return f"""
 SELECT TOTAL, CONSUMED, DAILY_BURN,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
@@ -710,8 +717,10 @@ FROM (
         (SELECT COALESCE(SUM(CREDITS_BILLED), 0) FROM {mart_object("FACT_METERING_DAILY")}
          WHERE DAY >= COALESCE((SELECT TRY_TO_DATE(MAX(IFF(KEY = 'CONTRACT_START_DATE', VALUE, NULL)))
                                 FROM {core_object("SETTINGS")}), CURRENT_DATE())) AS CONSUMED,
-        (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / 30 FROM {mart_object("FACT_METERING_DAILY")}
-         WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())) AS DAILY_BURN
+        (SELECT COALESCE(SUM(CREDITS_BILLED), 0) / NULLIF(COUNT(DISTINCT DAY), 0)
+         FROM {mart_object("FACT_METERING_DAILY")}
+         WHERE DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())
+                       AND DATEADD('day', -1, CURRENT_DATE())) AS DAILY_BURN
 )
 """
 

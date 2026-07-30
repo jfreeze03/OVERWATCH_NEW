@@ -139,3 +139,19 @@ def test_ascore2_overview_wires_degraded_by_error_kind():
     assert "degraded=_degraded" in ov
     # the budget special-case only fails closed on a genuine outage, not an absent mart
     assert 'getattr(_bt_hist, "error_kind", "") != "absent"' in ov
+
+
+# ---------------------------------------------------------------------------
+# rec 20 — contract runway: canonical trailing-30-COMPLETE-days burn
+# ---------------------------------------------------------------------------
+def test_rec20_contract_exhaustion_complete_days_only():
+    from app.data import mart_sql
+    sql = mart_sql.contract_exhaustion()
+    # trailing 30 COMPLETE days (today's partial excluded), divided by actual count
+    assert "DAY BETWEEN DATEADD('day', -30, CURRENT_DATE())" in sql
+    assert "DATEADD('day', -1, CURRENT_DATE())" in sql
+    assert "NULLIF(COUNT(DISTINCT DAY), 0)" in sql
+    # the old partial-day-inclusive "/ 30" form is gone
+    assert "SUM(CREDITS_BILLED), 0) / 30 FROM" not in sql
+    # rec #2: the self-referential "same math as the alert block" drift comment is gone
+    assert "Same math as the COST_CONTRACT_BREACH" not in sql
