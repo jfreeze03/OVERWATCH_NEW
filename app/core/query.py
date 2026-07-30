@@ -82,38 +82,26 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
         if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random()):
             return
         st.session_state["_ow_qtel_n"] = done + 1
-        session = get_session()
         base = (
             f"{sql_literal(str(page)[:80])}, {sql_literal(str(tier)[:20])}, "
             f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
             f"{int(rows)}, {'TRUE' if ok else 'FALSE'}"
         )
-        if not st.session_state.get("_ow_qtel_oldshape"):
-            # V027 shape; one failure (pre-V027 live) drops to the old shape.
-            statement = session.sql(
-                f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
-                "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
-                "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED) VALUES ("
-                + base + f", {_b(cache_hit)}, "
-                f"{sql_literal(str(sql_hash)[:64]) if sql_hash else 'NULL'}, "
-                f"{int(batch_size) if batch_size is not None else 'NULL'}, {_b(truncated)})"
-            )
-            try:
-                try:
-                    statement.collect_nowait()
-                except AttributeError:
-                    statement.collect()
-                return
-            except Exception:
-                st.session_state["_ow_qtel_oldshape"] = True
-        statement = session.sql(
-            f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
-            "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) VALUES (" + base + ")"
-        )
-        try:
-            statement.collect_nowait()
-        except AttributeError:
-            statement.collect()
+        # N12: enqueue instead of one INSERT round trip per row. VALUES -> SELECT so
+        # the buffered flush is a single multi-row INSERT ... SELECT ... UNION ALL.
+        # A flush failure of the V027 shape downgrades to the 6-col shape next call.
+        if st.session_state.get("_ow_qtel_oldshape"):
+            prefix = (f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+                      "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) ")
+            row = "SELECT " + base
+        else:
+            prefix = (f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+                      "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
+                      "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED) ")
+            row = ("SELECT " + base + f", {_b(cache_hit)}, "
+                   f"{sql_literal(str(sql_hash)[:64]) if sql_hash else 'NULL'}, "
+                   f"{int(batch_size) if batch_size is not None else 'NULL'}, {_b(truncated)}")
+        _buffer_write(prefix, row, off_flag="_ow_qtel_off", downgrade_flag="_ow_qtel_oldshape")
     except Exception:
         # Table missing (pre-V021) or no INSERT grant: stop trying this session.
         st.session_state["_ow_qtel_off"] = True
@@ -642,6 +630,65 @@ def execute_statement_async(sql: str, *, page: str) -> bool:
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement_async: {sql[:200]}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# N12: telemetry/usage write buffer. Every rerun used to fire one single-row
+# INSERT per usage/telemetry event on the shared warehouse — a round trip each.
+# Buffer row fragments per target-table+column-shape during a rerun and flush
+# each group as ONE multi-row `INSERT ... SELECT ... UNION ALL SELECT ...` — still
+# a single allow-listed statement, one round trip per table instead of per row.
+# ---------------------------------------------------------------------------
+_WRITE_BUFFER_KEY = "_ow_write_buffer"
+_WRITE_BUFFER_FLUSH_N = 25
+
+
+def _flush_group(prefix: str) -> None:
+    """Flush one buffered target (``prefix`` identifies its table + column shape)."""
+    try:
+        buf = st.session_state.get(_WRITE_BUFFER_KEY) or {}
+        group = buf.pop(prefix, None)
+        if not group or not group.get("rows"):
+            return
+        stmt = prefix + " UNION ALL ".join(group["rows"])
+        if not execute_statement_async(stmt, page="Telemetry"):
+            # a shape mismatch downgrades the producer to its old shape next time;
+            # a hard failure (missing table / no grant) turns it off. The failed
+            # batch is dropped either way — telemetry is best-effort.
+            flag = group.get("downgrade") or group.get("off")
+            if flag:
+                st.session_state[flag] = True
+    except Exception:
+        pass
+
+
+def _buffer_write(insert_prefix: str, row_select: str, *,
+                  off_flag: str | None = None, downgrade_flag: str | None = None) -> None:
+    """Enqueue one row for a buffered write. ``insert_prefix`` is the full
+    'INSERT INTO tbl (cols) ' string (its identity groups shape-compatible rows);
+    ``row_select`` is a bare 'SELECT v1, v2, ...' — no leading INSERT, no trailing
+    semicolon. Auto-flushes the group once it reaches ``_WRITE_BUFFER_FLUSH_N``."""
+    try:
+        buf = st.session_state.setdefault(_WRITE_BUFFER_KEY, {})
+        group = buf.setdefault(insert_prefix, {"off": off_flag, "downgrade": downgrade_flag, "rows": []})
+        group["off"], group["downgrade"] = off_flag, downgrade_flag
+        group["rows"].append(row_select)
+        if len(group["rows"]) >= _WRITE_BUFFER_FLUSH_N:
+            _flush_group(insert_prefix)
+    except Exception:
+        pass
+
+
+def flush_write_buffer() -> None:
+    """Drain every buffered write group (one multi-row INSERT per table+shape).
+    Called at the top and end of each rerun so nothing is lost when st.rerun()
+    unwinds past the end-of-render flush (session_state is the durability seam)."""
+    try:
+        buf = st.session_state.get(_WRITE_BUFFER_KEY) or {}
+        for prefix in list(buf.keys()):
+            _flush_group(prefix)
+    except Exception:
+        pass
 
 
 def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:

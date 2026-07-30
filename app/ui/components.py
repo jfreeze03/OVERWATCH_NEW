@@ -826,14 +826,17 @@ def log_ui_event(kind: str, page: str = "") -> None:
     silently no-ops pre-V027 (missing columns) or when usage is disabled."""
     import streamlit as st
 
-    from app.core.query import execute_statement_async
+    from app.core.query import _buffer_write
     from app.core.sqlsafe import sql_literal
 
     if st.session_state.get("_ow_usage_off") or st.session_state.get("_ow_usage_oldshape"):
         return
     from app.core.identity import identity_sql
-    execute_statement_async(
-        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) "
+    # N12: enqueue into the shared write buffer (flushed once per rerun) instead of
+    # one INSERT round trip per UI action. A flush failure downgrades usage to its
+    # old shape, matching this function's oldshape guard above (it then no-ops).
+    _buffer_write(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) ",
         f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE, {identity_sql()}",
-        page="Usage")
+        off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")
 

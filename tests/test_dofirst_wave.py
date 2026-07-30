@@ -134,6 +134,102 @@ def test_c18_operations_panel_wired_mart_only():
 
 
 # ---------------------------------------------------------------------------
+# N4 — Overview batches its two independent live first-paint reads
+# ---------------------------------------------------------------------------
+def test_n4_overview_batches_live_first_paint_reads():
+    ov = _src("app/ui/pages/overview.py")
+    assert "run_batch(" in ov
+    assert 'open_alerts_{company}' in ov and '"key": "action_queue"' in ov
+    # health_strip stays OUT of the batch (shared shell cache, r15 #14)
+    assert 'run_batch' in ov and 'health_strip' not in ov.split("run_batch(", 1)[1].split("], page", 1)[0]
+    # the batched action_queue result is reused, not re-read blindly
+    assert '_live_pf.get("action_queue")' in ov
+
+
+# ---------------------------------------------------------------------------
+# N12 — telemetry/usage single-row INSERTs buffered into one multi-row flush
+# ---------------------------------------------------------------------------
+def test_n12_flushed_statement_passes_allow_list():
+    from app.core.query import _statement_allowed
+    usage_prefix = "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) "
+    tel_prefix = ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY "
+                  "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) ")
+    for prefix, body in ((usage_prefix, "SELECT 'Overview', 5, 'page_visit', FALSE, CURRENT_USER()"),
+                         (tel_prefix, "SELECT 'Overview', 'live', 'k', 5.0, 1, TRUE")):
+        stmt = prefix + " UNION ALL ".join([body, body, body])
+        ok, why = _statement_allowed(stmt)
+        assert ok, why
+        assert stmt.count(" UNION ALL ") == 2  # N rows -> N-1 joiners
+
+
+def test_n12_semicolon_in_quoted_value_still_allowed():
+    from app.core.query import _statement_allowed
+    from app.core.sqlsafe import sql_literal
+    prefix = "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) "
+    tricky = sql_literal("O'Brien; DROP")  # embedded quote + semicolon, escaped
+    body = f"SELECT {tricky}, {sql_literal('csv;export')}, FALSE, CURRENT_USER()"
+    stmt = prefix + " UNION ALL ".join([body, body])
+    ok, why = _statement_allowed(stmt)
+    assert ok, why  # the interior-semicolon guard blanks quoted literals first
+
+
+def test_n12_buffer_accumulates_and_flushes(monkeypatch):
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+    sent: list[str] = []
+    monkeypatch.setattr(q, "execute_statement_async", lambda sql, *, page: (sent.append(sql), True)[1])
+    prefix = "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
+    for i in range(3):
+        q._buffer_write(prefix, f"SELECT 'p{i}', {i}", off_flag="_ow_usage_off")
+    assert not sent  # nothing sent until flush (below the 25-row auto-flush cap)
+    q.flush_write_buffer()
+    assert len(sent) == 1 and sent[0].count(" UNION ALL ") == 2  # one 3-row INSERT
+    st.session_state.clear()
+
+
+def test_n12_two_tables_flush_as_two_statements(monkeypatch):
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+    sent: list[str] = []
+    monkeypatch.setattr(q, "execute_statement_async", lambda sql, *, page: (sent.append(sql), True)[1])
+    q._buffer_write("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) ", "SELECT 'p', 1")
+    for i in range(5):
+        q._buffer_write("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY "
+                        "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) ",
+                        f"SELECT 'p', 'live', 'k{i}', 1.0, 1, TRUE")
+    q.flush_write_buffer()
+    assert len(sent) == 2  # exactly one INSERT per target table+shape
+    st.session_state.clear()
+
+
+def test_n12_auto_flush_at_cap(monkeypatch):
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+    sent: list[str] = []
+    monkeypatch.setattr(q, "execute_statement_async", lambda sql, *, page: (sent.append(sql), True)[1])
+    prefix = "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
+    for i in range(q._WRITE_BUFFER_FLUSH_N):
+        q._buffer_write(prefix, f"SELECT 'p', {i}", off_flag="_ow_usage_off")
+    assert len(sent) == 1  # auto-flushed exactly at the cap
+    assert sent[0].count(" UNION ALL ") == q._WRITE_BUFFER_FLUSH_N - 1
+    st.session_state.clear()
+
+
+def test_n12_producers_enqueue_not_direct_insert():
+    assert "_buffer_write(" in _src("app/main.py")           # _log_usage
+    assert "_buffer_write(" in _src("app/ui/components.py")  # log_ui_event
+    assert "_buffer_write(" in _src("app/core/query.py")     # _persist_telemetry
+    # flush wired at both ends of the rerun
+    assert _src("app/main.py").count("flush_write_buffer()") >= 2
+
+
+# ---------------------------------------------------------------------------
 # N1 — forecasts must exclude today's PARTIAL day from the forward daily rate
 # ---------------------------------------------------------------------------
 def test_n1_forecast_excludes_partial_today_from_rate():

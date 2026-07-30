@@ -23,9 +23,10 @@ from app.config import (  # noqa: E402
 )
 from app.core.identity import identity_sql  # noqa: E402
 from app.core.query import (  # noqa: E402
+    _buffer_write,
     bump_refresh_salt,
     execute_statement,
-    execute_statement_async,
+    flush_write_buffer,
     run,
 )
 from app.core.session import connection_available, current_role  # noqa: E402
@@ -275,21 +276,21 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
         st.session_state["_ow_last_logged"] = page
         kind = "page_visit"
         ms = "NULL" if render_ms is None else str(max(0, min(int(render_ms), 600000)))
+    # N12: enqueue into the shared write buffer (flushed once per rerun) instead
+    # of a single-row INSERT round trip here. A V027-shape flush failure downgrades
+    # to the old shape next call; an old-shape failure turns usage off.
     if not st.session_state.get("_ow_usage_oldshape"):
-        ok = execute_statement_async(
-            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) "
+        _buffer_write(
+            "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS, EVENT_KIND, IS_RERUN, USER_NAME) ",
             f"SELECT {sql_literal(str(page)[:80])}, {ms}, {sql_literal(kind)}, "
-            f"{'TRUE' if is_rerun else 'FALSE'}, {identity_sql()}", page="Sidebar")
-        if ok:
-            return
-        st.session_state["_ow_usage_oldshape"] = True
+            f"{'TRUE' if is_rerun else 'FALSE'}, {identity_sql()}",
+            off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")
+        return
     if is_rerun:
         return
-    ok = execute_statement_async(
-        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) "
-        f"SELECT {sql_literal(str(page)[:80])}, {ms}", page="Sidebar")
-    if not ok:
-        st.session_state["_ow_usage_off"] = True
+    _buffer_write(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, RENDER_MS) ",
+        f"SELECT {sql_literal(str(page)[:80])}, {ms}", off_flag="_ow_usage_off")
 
 
 def _global_jump(pages: tuple) -> None:
@@ -540,6 +541,10 @@ def _topbar_scope_controls() -> None:
 
 def main() -> None:
     _main_started = time.perf_counter()  # full render incl. chrome (Codex #18)
+    # N12: drain any telemetry/usage rows a PRIOR rerun buffered but couldn't
+    # flush because st.rerun() unwound past its end-of-render flush (session_state
+    # is the durability seam). Cheap no-op when the buffer is empty.
+    flush_write_buffer()
     consume_pending_navigation()
     inject_theme()
     if "_ow_refreshed_at" not in st.session_state:
@@ -589,6 +594,9 @@ def main() -> None:
     # RENDER_MS now spans sidebar/topbar/status chrome too, not just the page
     # body — chrome overhead was invisible in APP_USAGE (Codex #18).
     _log_usage(page, int((time.perf_counter() - _main_started) * 1000))
+    # N12: flush the render's buffered telemetry/usage rows as one INSERT per
+    # table+shape (this render enqueued page reads' telemetry + the usage row).
+    flush_write_buffer()
 
 
 if __name__ == "__main__":

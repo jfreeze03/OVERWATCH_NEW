@@ -56,7 +56,14 @@ def test_overview_decoupled_and_day_replay_batched():
     # Codex #4: the filter-scoped board must NOT share a batch cache with the
     # fixed 45d MTD read (every filter change cold-started the fixed read).
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
-    assert "run_batch" not in ov and "Deliberately NOT batched" in ov
+    # N4 (v4.85): Overview batches its two independent LIVE first-paint reads
+    # (open alerts + owner-action queue). The exec board keeps its own cache key
+    # and stays OUT of the batch — assert neither the board nor the fixed daily
+    # read is inside the run_batch spec block.
+    assert "Deliberately NOT batched" in ov
+    _batch_block = ov.split("run_batch(", 1)[1].split("], page", 1)[0]
+    assert "_load_board" not in _batch_block and "board" not in _batch_block
+    assert "fact_daily" not in _batch_block
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
     # retro recent + historical groups, plus the T2.1 live-trio group (open
     # incidents / proposals / triage alerts submitted as one live round trip)

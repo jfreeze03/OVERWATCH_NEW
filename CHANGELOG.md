@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.85.0 — NEXT wave 3: Overview first-paint batching + telemetry write buffer (app-only) (2026-07-30)
+
+N4 + N12 from `docs/reviews/RECS_REVIEW_2026-07-30.md`. App-only; no migration.
+
+- **N4 (MEDIUM) — Overview adopts first-paint batching.** Overview was the last
+  data-heavy page still issuing its live first-paint reads serially. The two
+  independent live reads — open alerts and the owner-action queue — now fetch in
+  one `run_batch` round trip (each key preserved, so warm-cache hits are
+  unchanged). `health_strip` stays out (the shell already fetched it — shared
+  cache, r15 #14) and the filter-scoped exec board stays out (its own key,
+  Codex #4).
+- **N12 (MEDIUM) — telemetry/usage writes are buffered.** Three per-render write
+  paths (`_persist_telemetry`, `_log_usage`, `log_ui_event`) each fired their own
+  single-row INSERT on the shared warehouse — one round trip apiece, on the app's
+  own dime. They now enqueue row fragments into a session buffer keyed by target
+  table + column shape, flushed once per rerun as ONE multi-row
+  `INSERT … SELECT … UNION ALL SELECT …` per shape (auto-flush at 25 rows;
+  a top-of-rerun flush drains rows a prior `st.rerun()` cut short). The flushed
+  statement is still a single allow-listed write — routing telemetry through the
+  allow-list is a hardening bonus. Best-effort semantics preserved: a V027-shape
+  flush failure downgrades to the old column shape, a hard failure turns the
+  producer off.
+
+Gates green: ruff, mypy (pure layers), 1509 tests (+8 wave-3 locks).
+
 ## 4.84.0 — NEXT wave 2: anomaly collapse-vs-spike + per-node timing panel (app-only) (2026-07-30)
 
 N10 + C18 from `docs/reviews/RECS_REVIEW_2026-07-30.md`. App-only; no migration.

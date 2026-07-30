@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.core.result import QueryResult
 from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql
@@ -132,11 +132,14 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
     return spend, res.source
 
 
-def _open_alert_counts(company: str = "ALL") -> tuple[QueryResult, int, int]:
-    res = run(mart_sql.open_alert_events(500, company), page=_PAGE,
-              key=f"open_alerts_{company}", tier="live",
-              source="ALERT_EVENTS" if company == "ALL"
-              else f"ALERT_EVENTS ({company} + account-level)")
+def _open_alert_counts(company: str = "ALL",
+                       prefetched: QueryResult | None = None) -> tuple[QueryResult, int, int]:
+    # N4: accept a pre-fetched result from the first-paint run_batch, else read solo.
+    res = prefetched if prefetched is not None else run(
+        mart_sql.open_alert_events(500, company), page=_PAGE,
+        key=f"open_alerts_{company}", tier="live",
+        source="ALERT_EVENTS" if company == "ALL"
+        else f"ALERT_EVENTS ({company} + account-level)")
     if not res.ok or res.empty:
         return res, 0, 0
     sev = res.df["SEVERITY"].astype(str).str.upper()
@@ -228,7 +231,19 @@ def render() -> None:
         proj_daily = _proj[["DAY", "USD"]]
     else:
         proj_daily = daily
-    alerts_res, critical_alerts, high_alerts = _open_alert_counts(company)
+    # N4: Overview never adopted the first-paint run_batch that Brief/Control Room
+    # use. The two independent LIVE reads (open alerts + owner-action queue) now
+    # fetch in one round trip. health_strip stays out (the shell already fetched it
+    # — shared cache, r15 #14); the exec board stays out (filter-scoped own key,
+    # Codex #4). Each key matches its solo cache key, so warm hits are unchanged.
+    _live_pf = run_batch([
+        {"key": f"open_alerts_{company}", "sql": mart_sql.open_alert_events(500, company),
+         "source": ("ALERT_EVENTS" if company == "ALL"
+                    else f"ALERT_EVENTS ({company} + account-level)")},
+        {"key": "action_queue", "sql": mart_sql.action_queue(200), "source": "ACTION_QUEUE"},
+    ], page=_PAGE, tier="live") or {}
+    alerts_res, critical_alerts, high_alerts = _open_alert_counts(
+        company, prefetched=_live_pf.get(f"open_alerts_{company}"))
     engine = str(settings.get("FORECAST_ENGINE") or "linear").strip().lower()
     forecast = None
     if engine == "ml_forecast":
@@ -315,8 +330,9 @@ def render() -> None:
         _srow = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]
         if not _srow.empty:
             stale_sources = int(safe_float(_srow.iloc[0]["VALUE"]))
-    actions_res = run(mart_sql.action_queue(200), page=_PAGE, key="action_queue",
-                      tier="live", source="ACTION_QUEUE")
+    actions_res = _live_pf.get("action_queue") or run(
+        mart_sql.action_queue(200), page=_PAGE, key="action_queue",
+        tier="live", source="ACTION_QUEUE")  # N4: reuse the first-paint batch
     open_high_actions = 0
     if actions_res.ok and not actions_res.empty:
         _adf = actions_res.df
