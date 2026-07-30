@@ -14,7 +14,7 @@ from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
 from app.logic.actions import rank_actions
-from app.logic.formulas import format_usd, safe_float
+from app.logic.formulas import blended_billed_usd, format_usd, safe_float
 from app.ui import charts
 from app.ui.components import kpi_row, load_settings, page_header, styled_table
 
@@ -26,6 +26,7 @@ def render() -> None:
     page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     company = filters()["company"]
 
     # Two tier-grouped parallel batches (live round 10: ten serial reads made
@@ -59,12 +60,20 @@ def render() -> None:
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}
             if strip_up else {})
     mtd_credits = safe_float(vals.get("MTD_CREDITS"))
+    # C1: price AI/Cortex credits at the AI rate, not the flat compute rate. The
+    # strip carries the split; fall back to the flat rate only if a stale cache
+    # predates it (both split arms absent) so we never silently show $0.
+    if "MTD_CREDITS_OTHER" in vals or "MTD_CREDITS_AI" in vals:
+        mtd_usd = blended_billed_usd(safe_float(vals.get("MTD_CREDITS_OTHER")),
+                                     safe_float(vals.get("MTD_CREDITS_AI")), rate, ai_rate)
+    else:
+        mtd_usd = mtd_credits * rate
     # Honesty contract: when telemetry is unreachable the Brief says SO —
     # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
         {"label": "MTD spend (account)",
          "badge": "mart" if strip_up else "stale",
-         "value": format_usd(mtd_credits * rate) if strip_up else "n/a",
+         "value": format_usd(mtd_usd) if strip_up else "n/a",
          "delta": (f"{mtd_credits:,.0f} credits" if strip_up else "telemetry unreachable"),
          "delta_color": "off",
          "severity": "" if strip_up else "warn",

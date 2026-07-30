@@ -20,7 +20,13 @@ import streamlit as st
 from app.core.query import run, run_batch
 from app.data import mart27_sql
 from app.logic import compare as compare_logic
-from app.logic.formulas import account_today, format_usd, pct_delta, safe_float
+from app.logic.formulas import (
+    account_today,
+    blended_billed_usd,
+    format_usd,
+    pct_delta,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import guard, kpi_row, result_caption, styled_table
 
@@ -47,7 +53,7 @@ def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
     return f"{d:+.{decimals}f}% vs B"
 
 
-def _compare_tab(company: str, rate: float) -> None:
+def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     pick = st.radio("Pairing", list(_PAIRINGS), horizontal=True, key="cmp_kind")
     kind = _PAIRINGS[pick]
     include_partial = False
@@ -118,15 +124,24 @@ def _compare_tab(company: str, rate: float) -> None:
                      "delta_color": "inverse" if aqu > bqu else "normal",
                      "help": f"B = {bqu / 60:,.0f} min."})
     if bill.usable():
-        ab = _side_value(bill.df, "A", "CREDITS_BILLED") * rate
-        bb = _side_value(bill.df, "B", "CREDITS_BILLED") * rate
+        # C1: price AI/Cortex credits at the AI rate. compare_billed carries the
+        # AI/OTHER split; fall back to the flat rate if it's absent (old cache).
+        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"} <= set(bill.df.columns):
+            ab = blended_billed_usd(_side_value(bill.df, "A", "CREDITS_BILLED_OTHER"),
+                                    _side_value(bill.df, "A", "CREDITS_BILLED_AI"), rate, ai_rate)
+            bb = blended_billed_usd(_side_value(bill.df, "B", "CREDITS_BILLED_OTHER"),
+                                    _side_value(bill.df, "B", "CREDITS_BILLED_AI"), rate, ai_rate)
+        else:
+            ab = _side_value(bill.df, "A", "CREDITS_BILLED") * rate
+            bb = _side_value(bill.df, "B", "CREDITS_BILLED") * rate
         kpis.append({
             "label": "Account billed",
             "value": format_usd(ab),
             "delta": _delta_chip(ab, bb),
             "delta_color": "inverse" if ab > bb else "normal",
             "help": "Every service, account-wide — metering-daily has no "
-                    f"company grain, so this ignores the company filter. B = {format_usd(bb)}.",
+                    "company grain, so this ignores the company filter. AI/Cortex "
+                    f"credits price at the AI rate. B = {format_usd(bb)}.",
         })
     if kpis:
         kpi_row(kpis)

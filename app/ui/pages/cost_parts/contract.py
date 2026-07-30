@@ -17,7 +17,13 @@ from app.core.query import run
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
-from app.logic.formulas import account_today, format_usd, safe_float
+from app.logic.formulas import (
+    account_today,
+    blended_billed_usd,
+    blended_credit_rate,
+    format_usd,
+    safe_float,
+)
 from app.logic.insights import idle_advisor
 from app.ui import charts
 from app.ui.components import (
@@ -106,20 +112,37 @@ def _year_projection_strip(settings: dict) -> None:
     cydf = cy.df.copy()
     cydf["DAY"] = pd.to_datetime(cydf["DAY"], errors="coerce").dt.date
     today = account_today()
-    ytd = float(cydf["CREDITS_BILLED"].map(safe_float).sum())
-    tail = cydf[cydf["DAY"] >= today - timedelta(days=30)]
-    burn = (float(tail["CREDITS_BILLED"].map(safe_float).sum()) / max(len(tail), 1))
-    days_left = (date(today.year, 12, 31) - today).days
     rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    projected = ytd + burn * days_left
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+    # C1: project AI and compute credits on their own straight lines so both the
+    # YTD and projected dollar figures price AI at the AI rate (the credit totals
+    # shown are the two partitions summed, unchanged). Falls back to a flat total
+    # if a live/older frame lacks the split columns.
+    _split = "CREDITS_BILLED_OTHER" in cydf.columns and "CREDITS_BILLED_AI" in cydf.columns
+    other_col = "CREDITS_BILLED_OTHER" if _split else "CREDITS_BILLED"
+    ai_col = "CREDITS_BILLED_AI" if _split else None
+    ytd_other = float(cydf[other_col].map(safe_float).sum())
+    ytd_ai = float(cydf[ai_col].map(safe_float).sum()) if ai_col else 0.0
+    tail = cydf[cydf["DAY"] >= today - timedelta(days=30)]
+    n_tail = max(len(tail), 1)
+    burn_other = float(tail[other_col].map(safe_float).sum()) / n_tail
+    burn_ai = (float(tail[ai_col].map(safe_float).sum()) / n_tail) if ai_col else 0.0
+    days_left = (date(today.year, 12, 31) - today).days
+    ytd = ytd_other + ytd_ai
+    proj_other = ytd_other + burn_other * days_left
+    proj_ai = ytd_ai + burn_ai * days_left
+    projected = proj_other + proj_ai
     kpi_row([
         {"label": f"{today.year} YTD (billed)", "value": f"{ytd:,.0f} cr",
-         "delta": format_usd(ytd * rate_now), "delta_color": "off"},
+         "delta": format_usd(blended_billed_usd(ytd_other, ytd_ai, rate_now, ai_rate)),
+         "delta_color": "off"},
         {"label": f"Projected {today.year} total", "value": f"{projected:,.0f} cr",
-         "delta": format_usd(projected * rate_now), "delta_color": "off",
+         "delta": format_usd(blended_billed_usd(proj_other, proj_ai, rate_now, ai_rate)),
+         "delta_color": "off",
          "help": "Straight-line: YTD billed credits + trailing-30d daily burn x "
                  f"{days_left} days remaining (early in a year the burn basis is "
-                 "YTD itself). Seasonality-aware month-end projections live on "
+                 "YTD itself). AI/Cortex credits price at the AI rate, the rest at "
+                 "the compute rate. Seasonality-aware month-end projections live on "
                  "Overview; contract pacing below is term-aware."},
     ])
 
@@ -349,9 +372,21 @@ def _contract_tab(settings: dict) -> None:
                    tier="recent", source="FACT_METERING_DAILY")
     if guard(burn_res, "Need the metering fact loaded to plan (run the hourly task once)."):
         rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
         bdf = burn_res.df.copy()
-        daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * rate_now
-        remaining_usd = max(0.0, (contract_credits - consumed) * rate_now)
+        # C1: derive one effective $/credit from the observed 30d compute+AI mix
+        # and price the daily burn, the extra-load what-if, and the remaining
+        # commitment all on it — so the planner stays internally consistent and
+        # AI credits are not over-valued at the compute rate. Flat rate if the
+        # split columns are absent (older cache / live fallback).
+        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"} <= set(bdf.columns):
+            _sum_other = float(pd.to_numeric(bdf["CREDITS_BILLED_OTHER"], errors="coerce").fillna(0).sum())
+            _sum_ai = float(pd.to_numeric(bdf["CREDITS_BILLED_AI"], errors="coerce").fillna(0).sum())
+            eff_rate = blended_credit_rate(_sum_other, _sum_ai, rate_now, ai_rate)
+        else:
+            eff_rate = rate_now
+        daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * eff_rate
+        remaining_usd = max(0.0, (contract_credits - consumed) * eff_rate)
         col1, col2, col3 = st.columns(3)
         term_months = col1.slider("Next term (months)", 12, 36, 12, step=6, key="plan_term")
         buffer_pct = col2.slider("Safety buffer %", 0, 40, 15, step=5, key="plan_buffer")
@@ -360,7 +395,7 @@ def _contract_tab(settings: dict) -> None:
                                           help="Hypothetical new workload (e.g. a planned XL "
                                                "warehouse). Reprojects every scenario and the "
                                                "exhaustion date.")
-        daily_usd_adj = daily_usd + float(extra_credits) * rate_now
+        daily_usd_adj = daily_usd + float(extra_credits) * eff_rate
         rows = contract_planner.plan_scenarios(daily_usd_adj, term_months, buffer_pct, remaining_usd)
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
                      column_config={
@@ -368,8 +403,9 @@ def _contract_tab(settings: dict) -> None:
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
                          "DAILY_BURN_USD": st.column_config.NumberColumn("Daily burn", format="$%.2f"),
                      })
-        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${rate_now}/credit"
-                   + (f" + ${float(extra_credits) * rate_now:,.0f}/day hypothetical load"
+        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${eff_rate:,.2f}/credit "
+                   f"blended (compute ${rate_now}, AI ${ai_rate})"
+                   + (f" + ${float(extra_credits) * eff_rate:,.0f}/day hypothetical load"
                       if extra_credits else "") + ". "
                    "Exhaustion applies to the current contract's remaining "
                    f"{contract_credits - consumed:,.0f} credits.")

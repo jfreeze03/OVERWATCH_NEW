@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.73.0 — cost review C1: price AI/Cortex credits at the AI rate everywhere (app-only) (2026-07-29)
+
+Cost review C1 (HIGH): every all-service billed-dollar rollup summed
+`CREDITS_BILLED` across all service types and multiplied the mixed total by the
+single compute rate ($3.68), so AI/Cortex credits (which bill at
+`AI_CREDIT_PRICE_USD`, $2.20 default) were overstated by (compute − AI) × AI
+credits. Two surfaces both labeled "billed spend" — the Spend page (already
+AI-rate-correct) and the exec KPIs/forecasts/contract pacing — disagreed.
+
+- **Shared readers now carry the split.** `fact_daily_spend`,
+  `fact_daily_spend_year`, `health_strip`'s MTD arm, and `compare_billed` emit
+  `CREDITS_BILLED_AI` + `CREDITS_BILLED_OTHER` (the proven
+  `AI% / %CORTEX% / %INTELLIGENCE%` predicate; NULL service → OTHER/compute).
+  The `CREDITS_BILLED` total is unchanged, so credit-space consumers (Brief
+  sparkline, contract exhaustion) keep working.
+- **New `formulas.blended_billed_usd(other, ai, rate, ai_rate)`** and
+  `blended_credit_rate(...)` — the one tested place credits→dollars happens for a
+  mixed total, honoring the credits-to-USD-only-in-formulas law.
+- **Consumers dollarize with the blend:** Overview (MTD spend, MTD-vs-prior pace,
+  month-end projection frame, 3-month backtest), Brief (MTD spend KPI), Cost &
+  Contract (year projection legs, renewal planner on one effective blended $/credit
+  for burn + remaining + what-if), and Compare (Account-billed KPI). Each falls
+  back to the flat rate if a frame predates the split (live fallback / cold cache).
+- **Disclosed, not hidden:** the Spend page "why totals differ" expander gains a
+  rate-axis bullet; the two seeded budget alerts (pace, forecast) and the ML
+  forecast still price the mixed total at the compute rate until their server-side
+  rebuild — queued for V061.
+- **Verified no missed dollar KPI:** the rate-card model side stays compute-only
+  by design (`fact_daily_spend_compute`, triage #6); AI chargeback already prices
+  at the AI rate; the platform-score budget input (mart-sourced) and the alert
+  legs are mart-side and go to V061.
+
+Scope skipped after verification: `contract_exhaustion` is credit-vs-credit
+(credit commitment), never dollarized — no split needed. New
+`test_cost_c1_ai_rate` locks the formula, the reader splits, and every consumer;
+1426 pytest green, ruff+mypy clean.
+
 ## 4.72.0 — bug round 2 batch 2: state/nav/anomaly HIGHs (app-only) (2026-07-29)
 
 Four more HIGH bugs from bug round 2, all app-layer:

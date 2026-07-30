@@ -80,6 +80,39 @@ def credits_to_usd(credits: float, rate_usd: float = DEFAULT_CREDIT_PRICE_USD) -
     return round(safe_float(credits) * safe_float(rate_usd, DEFAULT_CREDIT_PRICE_USD), 2)
 
 
+def blended_billed_usd(credits_other: float, credits_ai: float,
+                       rate_usd: float = DEFAULT_CREDIT_PRICE_USD,
+                       ai_rate_usd: float = DEFAULT_AI_CREDIT_PRICE_USD) -> float:
+    """Dollarize a billed-credit total that mixes compute and AI/Cortex credits.
+
+    AI/Cortex credits bill at AI_CREDIT_PRICE_USD ($2.20 default), not the
+    compute rate ($3.68); pricing an all-service credit total at the single
+    compute rate overstates the bill by (rate - ai_rate) x AI credits (cost
+    review C1). Every all-service rollup must price the two partitions
+    separately. The shared readers emit CREDITS_BILLED_OTHER + CREDITS_BILLED_AI
+    (they sum to CREDITS_BILLED by construction); pass them here.
+    """
+    other = safe_float(credits_other) * safe_float(rate_usd, DEFAULT_CREDIT_PRICE_USD)
+    ai = safe_float(credits_ai) * safe_float(ai_rate_usd, DEFAULT_AI_CREDIT_PRICE_USD)
+    return round(other + ai, 2)
+
+
+def blended_credit_rate(credits_other: float, credits_ai: float,
+                        rate_usd: float = DEFAULT_CREDIT_PRICE_USD,
+                        ai_rate_usd: float = DEFAULT_AI_CREDIT_PRICE_USD) -> float:
+    """Effective $/credit for an observed compute+AI credit mix.
+
+    Lets a forward projection that only carries a total-credit number (renewal
+    planner, remaining-commitment valuation) stay consistent with the AI-aware
+    dollar burn instead of falling back to the flat compute rate. Empty mix
+    falls back to the compute rate.
+    """
+    total = safe_float(credits_other) + safe_float(credits_ai)
+    if total <= 0.0:
+        return safe_float(rate_usd, DEFAULT_CREDIT_PRICE_USD)
+    return blended_billed_usd(credits_other, credits_ai, rate_usd, ai_rate_usd) / total
+
+
 def billed_credits(credits_used: float, cloud_services_adjustment: float = 0.0) -> float:
     """Billed credits = used + adjustment (adjustment is negative or zero).
 

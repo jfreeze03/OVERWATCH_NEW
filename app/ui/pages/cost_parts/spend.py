@@ -116,6 +116,11 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
             "- **Snowsight → Cost Management reads higher than both:** it adds storage and data "
             "transfer dollars and prices from USAGE_IN_CURRENCY (list/contract currency), and its "
             "MTD window follows calendar-month boundaries in account time.\n"
+            "- **Rate axis:** AI/Cortex credits bill at the configured AI rate, not the compute "
+            "rate — this page and the Overview/Brief/Contract/Compare dollar figures all split "
+            "the two. The two seeded budget alerts (pace, forecast) still price the mixed total "
+            "at the compute rate and read slightly high on AI-heavy months until their next "
+            "server-side rebuild.\n"
             "- Same telemetry, different lenses — each number is exact for its own question."
         )
     result_caption(res)

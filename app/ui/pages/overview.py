@@ -23,7 +23,14 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
-from app.logic.formulas import account_today, exec_summary_html, format_usd, month_days, safe_float
+from app.logic.formulas import (
+    account_today,
+    blended_billed_usd,
+    exec_summary_html,
+    format_usd,
+    month_days,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import (
     download_text_button,
@@ -72,8 +79,20 @@ def _live_fallback_daily(company: str, days: int, rate: float) -> tuple[pd.DataF
     return daily[["DAY", "USD"]], res
 
 
-def _mtd_spend_usd(rate: float, preloaded: QueryResult | None = None) -> tuple[float, str]:
-    """MTD account billed spend (adjustment applied) from the daily fact."""
+def _billed_usd_series(frame: pd.DataFrame, rate: float, ai_rate: float) -> pd.Series:
+    """Per-day billed USD from the AI/OTHER split (C1): AI credits price at the
+    AI rate, the rest at the compute rate. Falls back to the flat rate on the
+    total when a frame predates the split columns (live fallback / old cache)."""
+    if "CREDITS_BILLED_OTHER" in frame.columns and "CREDITS_BILLED_AI" in frame.columns:
+        return (frame["CREDITS_BILLED_OTHER"].map(safe_float) * rate
+                + frame["CREDITS_BILLED_AI"].map(safe_float) * ai_rate)
+    return frame["CREDITS_BILLED"].map(safe_float) * rate
+
+
+def _mtd_spend_usd(rate: float, ai_rate: float,
+                   preloaded: QueryResult | None = None) -> tuple[float, str]:
+    """MTD account billed spend (adjustment applied) from the daily fact,
+    AI credits priced at the AI rate (C1)."""
     res = preloaded if preloaded is not None and preloaded.ok else run(
         mart_sql.fact_daily_spend(45), page=_PAGE, key="fact_daily_45",
         tier="recent", source="FACT_METERING_DAILY")
@@ -82,8 +101,14 @@ def _mtd_spend_usd(rate: float, preloaded: QueryResult | None = None) -> tuple[f
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
-    mtd_credits = frame[frame["DAY"] >= month_start]["CREDITS_BILLED"].map(safe_float).sum()
-    return mtd_credits * rate, res.source
+    mtd = frame[frame["DAY"] >= month_start]
+    if "CREDITS_BILLED_OTHER" in mtd.columns and "CREDITS_BILLED_AI" in mtd.columns:
+        spend = blended_billed_usd(mtd["CREDITS_BILLED_OTHER"].map(safe_float).sum(),
+                                   mtd["CREDITS_BILLED_AI"].map(safe_float).sum(),
+                                   rate, ai_rate)
+    else:
+        spend = mtd["CREDITS_BILLED"].map(safe_float).sum() * rate
+    return spend, res.source
 
 
 def _open_alert_counts(company: str = "ALL") -> tuple[QueryResult, int, int]:
@@ -98,7 +123,7 @@ def _open_alert_counts(company: str = "ALL") -> tuple[QueryResult, int, int]:
 
 
 def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
-                  budget: float) -> dict:
+                  ai_rate: float, budget: float) -> dict:
     """MTD paced against the prior month's same first-N-days (owner
     2026-07-13: the Monthly-budget KPI read 'Not configured' forever —
     replaced with a pace that needs no configuration). Reuses the 150d
@@ -110,7 +135,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
         return {"label": "MTD spend", "value": format_usd(mtd_spend),
                 "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
     frame = hist.df.copy()
-    frame["USD"] = frame["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+    frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
     mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
@@ -133,6 +158,7 @@ def render() -> None:
     company, days = f["company"], f["days"]
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
 
     page_header(
         "Overview",
@@ -167,7 +193,7 @@ def render() -> None:
     # inside _mtd_spend_usd when this one fails.
     _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
                    tier="recent", source="FACT_METERING_DAILY (150d)")
-    mtd_spend, mtd_source = _mtd_spend_usd(rate, preloaded=_bt_hist)
+    mtd_spend, mtd_source = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
     # Triage #1: the exec-board `daily` frame is windowed to the filter `days`
     # (default 7) and is company-scoped, so it truncates month-to-date for most of
     # the month and mismatches the account-wide "Projected month-end" KPI (which
@@ -175,7 +201,7 @@ def render() -> None:
     # frame already loaded above; fall back to the board frame only if it failed.
     if _bt_hist.usable():
         _proj = _bt_hist.df.copy()
-        _proj["USD"] = _proj["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+        _proj["USD"] = _billed_usd_series(_proj, rate, ai_rate)
         proj_daily = _proj[["DAY", "USD"]]
     else:
         proj_daily = daily
@@ -192,6 +218,11 @@ def render() -> None:
             mdf["DAY"] = pd.to_datetime(mdf["DAY"]).dt.date
             mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
             if not mdf.empty:
+                # mtd_now rides proj_daily, already AI-split-priced (C1). The
+                # FORECAST_* legs price at the compute rate: FORECAST_ML_DAILY
+                # forecasts one blended-credit number per day with no service
+                # split, so an exact AI-aware forecast needs the mart to model AI
+                # separately (queued for V061). Opt-in engine; 'linear' is default.
                 mtd_now = float(pd.to_numeric(
                     proj_daily[pd.to_datetime(proj_daily.iloc[:, 0]).dt.date >= today.replace(day=1)]
                     .iloc[:, -1], errors="coerce").fillna(0).sum()) if not proj_daily.empty else 0.0
@@ -280,7 +311,7 @@ def render() -> None:
                     "are on Cost & Contract -> Spend & Attribution; Snowsight adds storage and transfer, so it "
                     "reads higher.",
         },
-        _mtd_pace_kpi(mtd_spend, _bt_hist, rate, budget) if mtd_source else {
+        _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
             "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",
@@ -376,7 +407,7 @@ def render() -> None:
         _bt = pd.DataFrame()
         if _bt_hist.usable() and len(_bt_hist.df) >= 50:
             _bt_daily = _bt_hist.df.copy()
-            _bt_daily["USD"] = _bt_daily["CREDITS_BILLED"].map(lambda c: safe_float(c) * rate)
+            _bt_daily["USD"] = _billed_usd_series(_bt_daily, rate, ai_rate)
             _bt = backtest_forecasts(_bt_daily[["DAY", "USD"]])
         if not _bt.empty:
             # Compact forecast-quality readout (Codex r6 #17): the number

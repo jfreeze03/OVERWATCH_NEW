@@ -652,11 +652,16 @@ WHERE {either}
 
 def compare_billed(a_start: str, a_end: str, b_start: str, b_end: str) -> str:
     """Account-billed credits per side (FACT_METERING_DAILY — account-wide
-    by construction; the strip labels it so)."""
+    by construction; the strip labels it so). Carries the AI/OTHER split (C1)
+    so the caller prices AI credits at the AI rate, not the compute rate."""
     in_a, _in_b, either = _side_windows(a_start, a_end, b_start, b_end)
+    _ai = ("(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' "
+           "OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')")
     return f"""SELECT
     IFF({in_a}, 'A', 'B') AS SIDE,
-    SUM(CREDITS_BILLED) AS CREDITS_BILLED
+    SUM(CREDITS_BILLED) AS CREDITS_BILLED,
+    SUM(CASE WHEN {_ai} THEN CREDITS_BILLED ELSE 0 END) AS CREDITS_BILLED_AI,
+    SUM(CASE WHEN {_ai} THEN 0 ELSE CREDITS_BILLED END) AS CREDITS_BILLED_OTHER
 FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
 WHERE {either}
 GROUP BY 1"""

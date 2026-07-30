@@ -63,7 +63,7 @@ def test_overview_budget_kpi_replaced_by_the_pace_kpi():
     survives as help-text context only."""
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "budget_kpi" not in ov                        # the dead KPI is gone
-    assert "_mtd_pace_kpi(mtd_spend, _bt_hist, rate, budget)" in ov
+    assert "_mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget)" in ov
     assert "mtd_pace_vs_prior_month" in ov
     assert "MTD vs last month (same days)" in ov
     assert "Budget context" in ov                        # configured budgets still visible

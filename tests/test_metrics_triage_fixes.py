@@ -14,7 +14,7 @@ def test_triage1_month_end_projection_uses_full_month_account_frame():
     the account-wide Projected-month-end / MTD KPIs."""
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert 'proj_daily = _proj[["DAY", "USD"]]' in ov              # built from _bt_hist
-    assert '_proj["USD"] = _proj["CREDITS_BILLED"].map' in ov      # account-wide billed frame
+    assert '_proj["USD"] = _billed_usd_series(_proj, rate, ai_rate)' in ov  # account-wide billed frame (AI-split priced, C1)
     assert "month_end_projection(proj_daily," in ov               # projection uses it
     assert "month_end_projection(daily," not in ov                # never the windowed board frame
     # the ml_forecast branch's MTD also derives from the full-month frame

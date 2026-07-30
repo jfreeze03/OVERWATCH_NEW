@@ -114,12 +114,36 @@ LIMIT 30
 """
 
 
+# Canonical AI/Cortex service-type predicate over FACT_METERING_DAILY.SERVICE_TYPE
+# — the exact one proven in fact_cortex_daily_spend / fact_daily_spend_compute.
+# NULL SERVICE_TYPE evaluates NULL here, so the CASE below routes it to OTHER
+# (compute), matching fact_daily_spend_compute's COALESCE(...,'') NOT ILIKE arm.
+_AI_SERVICE_PRED = (
+    "(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' "
+    "OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')"
+)
+
+
+def _billed_split_cols(credits_col: str = "CREDITS_BILLED") -> str:
+    """SELECT fragment splitting billed credits into AI vs OTHER partitions.
+
+    Cost review C1: AI/Cortex credits bill at AI_CREDIT_PRICE_USD, not the
+    compute rate, so every all-service rollup carries the split and the caller
+    dollarizes with formulas.blended_billed_usd. AI + OTHER = total by
+    construction (every row lands in exactly one bucket)."""
+    return (
+        f"SUM({credits_col}) AS CREDITS_BILLED, "
+        f"SUM(CASE WHEN {_AI_SERVICE_PRED} THEN {credits_col} ELSE 0 END) AS CREDITS_BILLED_AI, "
+        f"SUM(CASE WHEN {_AI_SERVICE_PRED} THEN 0 ELSE {credits_col} END) AS CREDITS_BILLED_OTHER"
+    )
+
+
 def fact_daily_spend_year() -> str:
     """Calendar-year billed credits per day (COST_DB recon R9). Own builder:
     bounded_days clamps at 90 by default, which would silently turn "YTD"
     into "last 90 days" in the back half of a year."""
     return f"""
-SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+SELECT DAY, {_billed_split_cols()}
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATE_TRUNC('year', CURRENT_DATE())
 GROUP BY DAY
@@ -128,13 +152,16 @@ ORDER BY DAY
 
 
 def fact_daily_spend(days: int) -> str:
-    """Account billed credits per day from the daily fact (adjustment applied)."""
+    """Account billed credits per day from the daily fact (adjustment applied).
+
+    Emits the AI/OTHER split (C1) alongside the CREDITS_BILLED total so
+    consumers can price AI credits at the AI rate; total is unchanged."""
     # Mart read (FACT_METERING_DAILY, long retention): honor the long window so
     # the forecast backtest labeled "3-month" (fact_daily_spend(150)) is not
     # silently clamped to 90 days.
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
-SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+SELECT DAY, {_billed_split_cols()}
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 GROUP BY DAY
@@ -494,6 +521,20 @@ UNION ALL
 SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+UNION ALL
+-- C1: MTD credits split AI vs compute so the Brief prices AI credits at the AI
+-- rate (blended_billed_usd), not the flat compute rate. The two partitions sum
+-- to MTD_CREDITS; NULL SERVICE_TYPE falls to the OTHER/compute arm.
+SELECT 'MTD_CREDITS_AI', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE()) AND {_AI_SERVICE_PRED}
+UNION ALL
+SELECT 'MTD_CREDITS_OTHER', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
+FROM {mart_object("FACT_METERING_DAILY")}
+WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%'
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%'
+  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'
 UNION ALL
 -- Triage #3: stale-source COUNT for the live platform score (the strip's MAX-age
 -- arm can't say how many are stale). Same cadence rule as the Control Room

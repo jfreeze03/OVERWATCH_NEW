@@ -158,7 +158,7 @@ def render() -> None:
     elif section == "Compare":
         section_header("Compare — period vs period", "info", "cost")
         from app.ui.pages.cost_parts.compare import _compare_tab
-        _compare_tab(f["company"], rate)
+        _compare_tab(f["company"], rate, ai_rate)
     else:
         section_header("Optimization", "info", "optimize")
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
