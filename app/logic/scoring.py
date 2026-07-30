@@ -63,7 +63,10 @@ def resolve_weights(settings: dict | None) -> dict:
 
 #: Sources whose failure silently zeros health penalties — the score is only
 #: trustworthy when these loaded. Passed via ``available`` from the caller.
-REQUIRED_SIGNAL_SOURCES = frozenset({"board", "alerts"})
+#: C2/N5: throughput = the fixed-window FACT_QUERY_HOURLY read that feeds
+#: query/task/queue/spill (replaced the exec board, which was windowed to the
+#: user's spend scope and so silently redefined the score).
+REQUIRED_SIGNAL_SOURCES = frozenset({"throughput", "alerts"})
 
 
 def platform_score(signals: dict, weights: dict | None = None,
@@ -79,8 +82,9 @@ def platform_score(signals: dict, weights: dict | None = None,
     C1: a *failed* read (vs a legitimate zero) removes that source's penalty, so
     an outage that suppresses real failures/alerts would IMPROVE the score — the
     cardinal monitoring sin. When ``available`` (the set of source keys that
-    actually loaded) is provided and a health-bearing source (exec board, alerts)
-    is missing, the score is reported ``Incomplete`` rather than a false green.
+    actually loaded) is provided and a health-bearing source (the fixed-window
+    throughput read, alerts) is missing, the score is reported ``Incomplete``
+    rather than a false green.
     """
     if available is not None and not REQUIRED_SIGNAL_SOURCES.issubset(available):
         missing = ", ".join(sorted(REQUIRED_SIGNAL_SOURCES - set(available)))

@@ -39,16 +39,18 @@ def test_c1_missing_required_source_is_incomplete_not_healthy():
 
 
 def test_c1_partial_coverage_still_incomplete():
-    # Board loaded but alerts did not — a real critical could be hidden.
-    res = platform_score(signals={"critical_alerts": 0}, available={"board"})
+    # Throughput loaded but alerts did not — a real critical could be hidden.
+    res = platform_score(signals={"critical_alerts": 0}, available={"throughput"})
     assert res.state == "Incomplete"
-    assert set(REQUIRED_SIGNAL_SOURCES) == {"board", "alerts"}
+    # C2/N5: the required health source is the fixed-window throughput read, not
+    # the spend-windowed exec board.
+    assert set(REQUIRED_SIGNAL_SOURCES) == {"throughput", "alerts"}
 
 
 def test_c1_full_coverage_scores_normally():
-    healthy = platform_score(signals={}, available={"board", "alerts"})
+    healthy = platform_score(signals={}, available={"throughput", "alerts"})
     assert healthy.state == "Healthy" and healthy.score == 100
-    degraded = platform_score(signals={"critical_alerts": 9}, available={"board", "alerts"})
+    degraded = platform_score(signals={"critical_alerts": 9}, available={"throughput", "alerts"})
     assert degraded.state != "Incomplete" and degraded.score < 100
 
 
@@ -56,6 +58,42 @@ def test_c1_available_none_is_backward_compatible():
     # Callers that don't pass coverage (older code / retro history) still score.
     res = platform_score(signals={"critical_alerts": 1}, available=None)
     assert res.state != "Incomplete"
+
+
+# ---------------------------------------------------------------------------
+# C2 / N5 — score health pinned to a fixed window, required source repointed
+# ---------------------------------------------------------------------------
+def test_c2n5_score_health_reads_a_fixed_window():
+    ov = _src("app/ui/pages/overview.py")
+    assert "_SCORE_HEALTH_WINDOW_DAYS = 1" in ov
+    assert "fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS" in ov
+    assert "fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS" in ov
+    # the spend-windowed board metrics no longer feed the score's queue/spill
+    assert '_board_metric(board, "QUEUED_MINUTES")' not in ov
+    assert '_board_metric(board, "SPILL_GB")' not in ov
+
+
+def test_c2n5_required_source_repointed_and_wired_failclosed():
+    # C1 fail-open guard: repointing the required source WITHOUT adding it to the
+    # coverage set would silently zero the query/task/queue/spill penalties.
+    from app.logic.scoring import REQUIRED_SIGNAL_SOURCES
+    assert "throughput" in REQUIRED_SIGNAL_SOURCES and "board" not in REQUIRED_SIGNAL_SOURCES
+    ov = _src("app/ui/pages/overview.py")
+    assert '_available.add("throughput")' in ov  # both halves land together
+
+
+# ---------------------------------------------------------------------------
+# C11 / N7 — account-wide badges + storage/transfer exclusion disclosure
+# ---------------------------------------------------------------------------
+def test_c11_account_wide_badges_on_metering_kpis():
+    ov = _src("app/ui/pages/overview.py")
+    # 3 MTD returns in _mtd_pace_kpi + the MTD fallback + Projected month-end
+    assert ov.count('"badge": "account-wide"') >= 5
+
+
+def test_n7_storage_transfer_disclosure_on_overview_and_brief():
+    assert "Storage and data-transfer bill separately" in _src("app/ui/pages/overview.py")
+    assert "storage and data-transfer bill separately" in _src("app/ui/pages/brief.py")
 
 
 # ---------------------------------------------------------------------------

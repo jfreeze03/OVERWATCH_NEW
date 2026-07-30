@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.83.0 — NEXT wave 1: platform-score honesty on Overview (app-only) (2026-07-30)
+
+C2 + N5 + C11 + N7 from `docs/reviews/RECS_REVIEW_2026-07-30.md`, scoped by the
+verification workflow. App-only; no migration.
+
+- **C2 + N5 (MEDIUM) — the platform score no longer moves when you change the
+  spend window.** The score's throughput/pressure signals (queries, failures,
+  queued minutes, remote spill, task runs/failures) were read from the exec board,
+  which is windowed to the user's 7/30/90-day spend scope. Over a long window the
+  cumulative `QUEUED_MINUTES`/`SPILL_GB` dwarf the spike-sized 10-min/5-GB
+  thresholds and trip a near-constant deduction (13× larger at 90d than 7d), and
+  the retro sparkline (per-day basis) was incomparable to the headline. Those six
+  signals now read a **fixed 24h window** (`fact_query_window_summary(1)` +
+  `fact_task_daily(1)`), matching the retro's per-day basis; budget/alerts/stale/
+  owner-queue stay account-wide. The required-source key for C1's fail-open gating
+  is repointed `board → throughput` (and added to the coverage set in the same
+  change, so a throughput-read outage still reports `Incomplete`, not a false
+  green). The score's help and the retro caption now state the blend honestly
+  (the old caption falsely called the headline "the company-scoped number").
+- **C11 (MEDIUM) — account-wide badges.** MTD and Projected month-end are
+  account-wide (metering-daily has no company grain); they now carry an
+  `account-wide` badge so the numbers aren't misread as company-scoped under a
+  company filter.
+- **N7 (MEDIUM) — storage/transfer disclosure.** Overview and Brief now disclose
+  that MTD/Projected cover credit-billed services (compute, serverless, AI) and
+  that storage + data-transfer bill separately (Cost & Contract → org rate card).
+  Disclosure only — folding them in would break the credits × rate contract and
+  double-count against the rate-card panel.
+
+Gates green: ruff, mypy (pure layers), tests (+4 wave-1 locks in
+`tests/test_dofirst_wave.py`).
+
 ## 4.82.0 — DO-FIRST wave: KPI-trust + morning-surface actionability (app-only) (2026-07-30)
 
 The ten cheapest, highest-trust fixes from the recommendations review

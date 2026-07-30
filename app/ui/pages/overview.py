@@ -59,6 +59,12 @@ _SCORE_DRIVER_NAV = {
     "Inputs unavailable": "Admin",
 }
 
+# C2/N5: the platform score's throughput+pressure health signals read a FIXED
+# recent window, not the user's spend window — so flipping 7/30/90d never moves
+# the score, the spike-sized thresholds see spike-sized inputs, and the headline
+# shares the per-day basis of the retro sparkline. 1 = midnight-aligned 24-48h.
+_SCORE_HEALTH_WINDOW_DAYS = 1
+
 
 def _board_metric(board: pd.DataFrame, metric: str, column: str = "VALUE") -> float:
     rows = board[(board["PANEL"] == "KPI") & (board["METRIC"] == metric)]
@@ -146,8 +152,10 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     queries. A configured budget still shows, inside help, not as a KPI."""
     from app.logic.formulas import mtd_pace_vs_prior_month
 
+    # C11: metering-daily has no company grain, so MTD is account-wide even under
+    # a company filter — the badge says so on the card (the help already did).
     if not hist.usable():
-        return {"label": "MTD spend", "value": format_usd(mtd_spend),
+        return {"label": "MTD spend", "value": format_usd(mtd_spend), "badge": "account-wide",
                 "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
     frame = hist.df.copy()
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
@@ -155,11 +163,11 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
     if pct is None:
-        return {"label": "MTD spend", "value": format_usd(mtd),
+        return {"label": "MTD spend", "value": format_usd(mtd), "badge": "account-wide",
                 "help": "Pace vs last month appears once the prior month has "
                         "daily facts (backfill_365.sql loads the year)." + budget_note}
     return {"label": "MTD vs last month (same days)",
-            "value": format_usd(mtd),
+            "value": format_usd(mtd), "badge": "account-wide",
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
             "help": "Billed credits, account-wide, at today's rate. The value is "
@@ -259,13 +267,27 @@ def render() -> None:
         forecast = (month_end_projection(proj_daily, account_today(), engine=engine)
                     if not proj_daily.empty else month_end_projection(pd.DataFrame(), account_today(), engine=engine))
 
-    queries = _board_metric(board, "QUERIES")
-    failed_queries = _board_metric(board, "FAILED_QUERIES")
+    # C2/N5: pull the score's throughput+pressure signals from a FIXED recent
+    # window (not the exec board, which is windowed to the user's 7/30/90d spend
+    # scope). On the board, QUEUED_MINUTES/SPILL_GB are cumulative sums over the
+    # window, so a normal week dwarfs the spike-sized 10-min/5-GB thresholds and
+    # trips a near-constant deduction that grows with the window; and the retro
+    # sparkline is per-day, an incomparable basis. This read is per-recent-day.
+    _thr = run(mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company),
+               page=_PAGE, key=f"score_throughput_{company}", tier="recent",
+               source="FACT_QUERY_HOURLY (fixed 24h health window)")
+    _tr = _thr.df.iloc[0] if _thr.usable() and not _thr.empty else None
+    queries = safe_float(_tr.get("QUERY_COUNT")) if _tr is not None else 0.0
+    failed_queries = safe_float(_tr.get("FAILED_COUNT")) if _tr is not None else 0.0
     fail_pct = (failed_queries / queries * 100) if queries else 0.0
-    queued_minutes = _board_metric(board, "QUEUED_MINUTES")
-    spill_gb = _board_metric(board, "SPILL_GB")
-    task_runs = _board_metric(board, "TASK_RUNS")
-    task_failures = _board_metric(board, "TASK_FAILURES")
+    queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0) if _tr is not None else 0.0
+    spill_gb = safe_float(_tr.get("SPILL_REMOTE_GB")) if _tr is not None else 0.0
+    _tk = run(mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company),
+              page=_PAGE, key=f"score_tasks_{company}", tier="recent",
+              source="FACT_TASK_DAILY (fixed 24h health window)")
+    _tk_ok = _tk.usable() and not _tk.empty
+    task_runs = float(_tk.df["RUNS"].map(safe_float).sum()) if _tk_ok else 0.0
+    task_failures = float(_tk.df["FAILED"].map(safe_float).sum()) if _tk_ok else 0.0
     task_fail_pct = (task_failures / task_runs * 100) if task_runs else 0.0
 
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
@@ -300,12 +322,14 @@ def render() -> None:
         _adf = actions_res.df
         open_high_actions = int(((_adf["STATUS"].astype(str).str.upper() == "OPEN")
                                  & (_adf["SEVERITY"].astype(str).str.upper() == "HIGH")).sum())
-    # C1: tell the score which health-bearing sources actually LOADED. If the exec
-    # board or the alerts read failed, their signals are silently 0 (an outage would
-    # otherwise raise the score) — the score reports Incomplete instead of a false green.
+    # C1: tell the score which health-bearing sources actually LOADED. If the
+    # throughput read or the alerts read failed, their signals are silently 0 (an
+    # outage would otherwise raise the score) — the score reports Incomplete instead
+    # of a false green. C2/N5: the required health source is now the fixed-window
+    # throughput read (not the exec board, which no longer feeds the score).
     _available = set()
-    if board_res.usable():
-        _available.add("board")
+    if _thr.usable():
+        _available.add("throughput")
     if alerts_res.ok:
         _available.add("alerts")
     if _hs.ok:
@@ -343,11 +367,13 @@ def render() -> None:
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
+            "badge": "account-wide",
             "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",
         },
         {
             "label": "Projected month-end",
             "value": format_usd(forecast.projected_usd) if forecast.ok else "Needs history",
+            "badge": "account-wide",
             "help": (f"{forecast.basis} Range {format_usd(forecast.low_usd)}-{format_usd(forecast.high_usd)}."
                      if forecast.ok else forecast.basis),
         },
@@ -367,14 +393,23 @@ def render() -> None:
             "severity": _score_sev,
             "spark": (None if _score_incomplete else score_series["SCORE"].tail(14).tolist()
                       if not score_series.empty else None),
-            "help": ("Exec board or alerts didn't load — a real score would be a lie while "
+            "help": ("Throughput or alerts didn't load — a real score would be a lie while "
                      "health signals are missing (see the deductions below)."
                      if _score_incomplete
-                     else "Every deduction is itemized below the trend. "
-                          "Sparkline = 14d retro score from facts."),
+                     else "Throughput & pressure (queries, failures, queue, spill) read a "
+                          "fixed 24h window and are company-scoped; budget, open alerts, "
+                          "stale telemetry and the owner queue are account-wide — so the "
+                          "score does NOT move when you change the spend window. Every "
+                          "deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
     kpi_row(kpis)
+    # N7: MTD & Projected are credit-billed services (compute + serverless + AI).
+    # Storage and data-transfer are separate invoice lines the app reads on Cost &
+    # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
+    # the whole bill. Not folded in: that would break the credits x rate contract.
+    st.caption("MTD & Projected cover credit-billed services (compute, serverless, AI). "
+               "Storage and data-transfer bill separately — see Cost & Contract → org rate card.")
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
     st.subheader("Monthly spend by warehouse")
@@ -481,7 +516,9 @@ def render() -> None:
                 "high — judge the trend, not the level. Weights calibrate on "
                 "Admin → Settings. Note: the retro inputs (FACT_PLATFORM_SCORE_DAILY) "
                 "have no company grain, so this trend is account-wide even under a "
-                "company filter — the headline score above is the company-scoped number."
+                "company filter. The headline blends company-scoped 24h throughput/"
+                "pressure (same per-day basis as this line) with account-wide budget, "
+                "alerts, telemetry and owner-queue signals, so its level can differ."
             )
 
     # ---- Two-column: actions + cost drivers ---------------------------------

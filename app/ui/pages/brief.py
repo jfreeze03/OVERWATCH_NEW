@@ -164,6 +164,10 @@ def render() -> None:
                     "The Control Room owns the queue; this is the executive glance.",
         })
     kpi_row(kpis)
+    # N7: same disclosure as Overview — the headline dollars are credit-billed
+    # services; storage and data-transfer bill separately (Cost & Contract).
+    st.caption("Spend covers credit-billed services (compute, serverless, AI); "
+               "storage and data-transfer bill separately.")
 
     spend = _b_rec.get("spark") or run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
                 source="FACT_METERING_DAILY")
