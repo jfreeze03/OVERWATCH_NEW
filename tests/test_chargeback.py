@@ -49,7 +49,7 @@ def test_v008_seed_covers_known_warehouses():
         sql += v019.read_text(encoding="utf-8")   # WH_TRXS_LINEAGE mapped here
     for wh in companies.TREXIS_WAREHOUSES:
         assert f"'{wh}'" in sql, f"chargeback seed missing {wh}"
-    assert "'WH_ALFA_OVERWATCH'" in sql
+    assert "'WH_ALFA_ADMIN'" in sql
     # Billing-truth posture is documented, not implied
     assert "Unmapped" in chargeback_sql.department_window_credits(7)
 

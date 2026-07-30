@@ -73,7 +73,7 @@ labels its source and lag.
 **Streamlit-in-Snowflake specifics:** each viewer runs under their own
 role. `ALTER SESSION` is not available to the app (capability detected at
 connect; query tags/timeouts degrade to warehouse-level backstops). The app
-and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_OVERWATCH**
+and all tasks run on the dedicated XSMALL warehouse **WH_ALFA_ADMIN**
 (no resource monitor since v4.45 — OVERWATCH_RM was suspending it mid-use).
 
 ## 3. Install / upgrade
@@ -83,7 +83,7 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | Migration | Creates |
 |---|---|
 | V001 core | DB context, `SETTINGS`, `COMPANY_SCOPE` (+`COMPANY_FOR_USER()`), `APP_ERROR_LOG`, `SCHEMA_VERSION` |
-| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY` (dropped by V043, restored by V045), `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_OVERWATCH` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
+| V002 facts | `FACT_METERING_DAILY`, `FACT_WAREHOUSE_DAILY`, `FACT_QUERY_HOURLY`, `FACT_TASK_DAILY` (dropped by V043, restored by V045), `FACT_LOGIN_DAILY`, `FACT_STORAGE_DAILY`, loader procs, `WH_ALFA_ADMIN` + `OVERWATCH_RM`, `TASK_LOAD_HOURLY`/`TASK_LOAD_DAILY` |
 | V003 marts | `MART_EXEC_BOARD` (+refresh proc/task), control-room snapshot, `MART_SOURCE_FRESHNESS` |
 | V004 alerts | `ALERT_CONFIG`, `ALERT_EVENTS`, `ALERT_AUDIT`, `SP_ALERT_SCAN`, `TASK_ALERT_SCAN` |
 | V005 actions | `ACTION_QUEUE`, `SAVINGS_LEDGER` |
@@ -148,7 +148,7 @@ blocks, per-block dedupe, rule carryover on every regeneration); runtime
 failures are the sentinel's and OPS_SCAN_DEGRADED's job — a broken block
 logs `rule_block_failed` and self-alerts, which IS the failure-injection
 test running in production, safely. **DT pilot cost:** MART_SPEND_ROLLUP_DT
-refreshes on WH_ALFA_OVERWATCH, so its cost shows up in Admin → App
+refreshes on WH_ALFA_ADMIN, so its cost shows up in Admin → App
 self-cost; compare against the loader tasks before migrating more marts.
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
@@ -284,7 +284,7 @@ SOC. **Governance drift score** at top (§6). Sections:
 ### Admin
 Settings (edit any SETTINGS key with typed confirm) · **Emergency** (§10) ·
 Migrations & freshness (SCHEMA_VERSION vs expected 1..15 + drift warning) ·
-App self-cost (the app's own queries/failures on WH_ALFA_OVERWATCH) · Org
+App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) · Org
 spend (ORGANIZATION_USAGE currency by account) · Performance (slowest app
 statement families by parameterized hash + session cache-hit estimate) ·
 Canary (§13) · Errors & telemetry (session + persisted APP_ERROR_LOG).
@@ -519,7 +519,7 @@ SCHEDULED_TIME DESC` for the error; fix; `ALTER TASK ... RESUME;`.
 
 **~~Warehouse suspended by the resource monitor.~~** Retired v4.45:
 OVERWATCH_RM is gone (it was suspending the app warehouse mid-use — the
-owner correction). A suspended WH_ALFA_OVERWATCH now means someone ran the
+owner correction). A suspended WH_ALFA_ADMIN now means someone ran the
 suspend lever (Operations → Emergency) or an account-level change; resume it
 and check App self-cost for the burn.
 
@@ -663,10 +663,10 @@ cold-starts the caches (the expensive scans re-run).
 Diagnose where the 600 lives, then raise it for the app's execution path:
 
 ```sql
-SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_OVERWATCH;
+SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN WAREHOUSE WH_ALFA_ADMIN;
 SHOW PARAMETERS LIKE 'STATEMENT_TIMEOUT_IN_SECONDS' IN ACCOUNT;
 -- warehouse-level 600 (likely): raise just the app warehouse
-ALTER WAREHOUSE WH_ALFA_OVERWATCH SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;  -- 8h
+ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;  -- 8h
 -- account-level 600: leave the account guard; raise per app user instead
 -- (effective timeout is the LOWEST of warehouse vs session level)
 ALTER USER <app_user> SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;
@@ -675,9 +675,9 @@ ALTER USER <app_user> SET STATEMENT_TIMEOUT_IN_SECONDS = 28800;
 Idle cost is bounded by two existing controls, not by the statement timeout:
 Streamlit-in-Snowflake ends the app session after ~15 minutes without
 browser interaction (platform behavior, not configurable), and V002 set
-`AUTO_SUSPEND = 60` on WH_ALFA_OVERWATCH — so a forgotten tab costs at most
+`AUTO_SUSPEND = 60` on WH_ALFA_ADMIN — so a forgotten tab costs at most
 ~16 minutes of XS credits. Hard backstop if wanted: a resource monitor with
-a daily quota on WH_ALFA_OVERWATCH. The app's own queries stay bounded by
+a daily quota on WH_ALFA_ADMIN. The app's own queries stay bounded by
 window clamps and row caps regardless of the parent statement's ceiling.
 
 ## §21 Incidents — the operator SOP (V032)

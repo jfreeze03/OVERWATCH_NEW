@@ -256,12 +256,12 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 
 def _self_cost_tab() -> None:
     st.caption(
-        "The monitoring app must never become the cost problem: WH_ALFA_OVERWATCH is XSMALL with a "
+        "The monitoring app must never become the cost problem: WH_ALFA_ADMIN is XSMALL with a "
         "60-second auto-suspend, and every app query carries an OVERWATCH query tag (no resource monitor since v4.45 — OVERWATCH_RM was suspending the warehouse mid-use)."
     )
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
-              source="ACCOUNT_USAGE.QUERY_HISTORY (OVERWATCH tag or WH_ALFA_OVERWATCH)")
+              source="ACCOUNT_USAGE.QUERY_HISTORY (OVERWATCH tag or WH_ALFA_ADMIN)")
     if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
         df = res.df.copy()
         total = int(pd.to_numeric(df["APP_QUERIES"], errors="coerce").fillna(0).sum())
@@ -359,7 +359,7 @@ def _observability_tab() -> None:
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
-        "Every statement family the app has run on WH_ALFA_OVERWATCH, grouped by "
+        "Every statement family the app has run on WH_ALFA_ADMIN, grouped by "
         "parameterized hash — the slowest rows are the builders worth optimizing next."
     )
     telemetry = query_telemetry()
@@ -375,9 +375,9 @@ def _performance_tab() -> None:
         ])
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_OVERWATCH)")
+              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN)")
     if guard(res, "No statements on the app warehouse in the last 7 days.",
-             setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_OVERWATCH."):
+             setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_ADMIN."):
         st.dataframe(res.df, hide_index=True, use_container_width=True,
                      column_config={
                          "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),

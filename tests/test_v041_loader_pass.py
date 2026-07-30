@@ -476,8 +476,8 @@ def test_every_v041_task_has_a_matching_resume_or_dependents_enable():
         assert f"ALTER TASK IF EXISTS DBA_MAINT_DB.OVERWATCH.{root} RESUME;" in _V41
         assert f"SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.{root}');" in _V41
     # phasing: extract is the hourly root's child; the marts task consumes it
-    assert "TASK_QH_EXTRACT\n    WAREHOUSE = WH_ALFA_OVERWATCH\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY" in _V41
-    assert "TASK_LOAD_MARTS_V27_HOURLY\n    WAREHOUSE = WH_ALFA_OVERWATCH\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT" in _V41
+    assert "TASK_QH_EXTRACT\n    WAREHOUSE = WH_ALFA_ADMIN\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY" in _V41
+    assert "TASK_LOAD_MARTS_V27_HOURLY\n    WAREHOUSE = WH_ALFA_ADMIN\n    AFTER DBA_MAINT_DB.OVERWATCH.TASK_QH_EXTRACT" in _V41
     # v4.36.1: the graph resumes BEFORE the first fills (a halted worksheet
     # run must never strand the tree suspended — the 07-12 outage class),
     # and the same block repeats at the very end. Two enables per root.

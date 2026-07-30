@@ -59,11 +59,11 @@ def test_round3_builders():
     from app.data import ops_sql as _o
     from app.data import security_sql as _s
 
-    rq = _o.running_queries("WH_ALFA_OVERWATCH")
+    rq = _o.running_queries("WH_ALFA_ADMIN")
     # BY_WAREHOUSE since v4.30.1: the no-arg form scopes to CURRENT USER,
     # which owner's-rights (SiS) execution cannot access — live 090234.
     assert "QUERY_HISTORY_BY_WAREHOUSE" in rq and "'RUNNING'" in rq and "LIMIT" in rq
-    assert "'WH_ALFA_OVERWATCH'" in rq
+    assert "'WH_ALFA_ADMIN'" in rq
     import pytest as _pt
     with _pt.raises(ValueError):
         _o.running_queries("")                            # warehouse is required now

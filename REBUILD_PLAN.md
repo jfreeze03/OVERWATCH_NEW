@@ -36,7 +36,7 @@ panel review of the old repo.
       filter state + query-param navigation.
 - [x] **P4 — Snowflake migrations**: V001 core (db/schemas/settings/company
       scope/schema_version/error log), V002 facts (6 fact tables, hourly/daily
-      MERGE procs, WH_ALFA_OVERWATCH XSMALL + resource monitor, chained tasks),
+      MERGE procs, WH_ALFA_ADMIN XSMALL + resource monitor, chained tasks),
       V003 marts (exec board + control-room snapshot + freshness view),
       V004 alerts (config/events/audit + scan proc + native templates),
       V005 actions (action queue + savings ledger). Roles + validate scripts.

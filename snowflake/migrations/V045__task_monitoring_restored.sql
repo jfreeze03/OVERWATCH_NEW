@@ -11,7 +11,7 @@
 --     [19] COST_EGRESS_SPIKE) — the scan now runs 19 arms.
 --   * KEPT from V044: the exec board's UNKNOWN scope.
 --   * REMOVED instead: the OVERWATCH_RM resource monitor — the 30-credit
---     monthly cap that was suspending WH_ALFA_OVERWATCH mid-use (the real
+--     monthly cap that was suspending WH_ALFA_ADMIN mid-use (the real
 --     source of the error storm).
 --
 -- Safe whether or not V043 ran: CREATE IF NOT EXISTS + CREATE OR REPLACE
@@ -2174,7 +2174,7 @@ UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG
  WHERE RULE_ID = 'PIPE_TASK_FAILURES';
 
 -- >>> resource monitor OUT (the owner's actual target)
-ALTER WAREHOUSE IF EXISTS WH_ALFA_OVERWATCH SET RESOURCE_MONITOR = NULL;
+ALTER WAREHOUSE IF EXISTS WH_ALFA_ADMIN SET RESOURCE_MONITOR = NULL;
 DROP RESOURCE MONITOR IF EXISTS OVERWATCH_RM;
 
 -- >>> refill (idempotent: rebuild the trailing 120d window either way)

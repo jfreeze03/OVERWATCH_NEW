@@ -3,7 +3,7 @@
 # filled copy — the private key path is machine-local.
 
 [environments.prod]
-url = "jdbc:snowflake://<account>.snowflakecomputing.com/?db=DBA_MAINT_DB&schema=OVERWATCH&warehouse=WH_ALFA_OVERWATCH&role=OVERWATCH_DEPLOY"
+url = "jdbc:snowflake://<account>.snowflakecomputing.com/?db=DBA_MAINT_DB&schema=OVERWATCH&warehouse=WH_ALFA_ADMIN&role=OVERWATCH_DEPLOY"
 user = "FLYWAY_SVC"
 # key-pair auth (JDBC >= 3.11): no password in this file, ever
 jdbcProperties = { authenticator = "SNOWFLAKE_JWT", private_key_file = "/path/to/flyway_svc_rsa_key.p8" }

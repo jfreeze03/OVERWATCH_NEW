@@ -157,7 +157,7 @@ FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD;
 -- Chain: refresh the board right after each hourly fact load
 -- ---------------------------------------------------------------------------
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_REFRESH_EXEC_BOARD
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
 AS
     CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();

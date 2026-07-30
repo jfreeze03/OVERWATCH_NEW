@@ -9,7 +9,7 @@
 -- FACT_QUERY_HOURLY is deliberately NOT backfilled: a year at hourly x
 -- warehouse x database x user grain is large and low-value vs the dailies.
 -- Run as a role that can read SNOWFLAKE.ACCOUNT_USAGE and write the schema.
--- Expect a few minutes on WH_ALFA_OVERWATCH.
+-- Expect a few minutes on WH_ALFA_ADMIN.
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
     (DAY, SERVICE_TYPE, CREDITS_COMPUTE, CREDITS_CLOUD_SVCS, CREDITS_ADJUSTMENT, CREDITS_USED, CREDITS_BILLED)

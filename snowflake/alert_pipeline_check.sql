@@ -89,7 +89,7 @@ SHOW NOTIFICATION INTEGRATIONS;
 -- tasks queue or fail even though the app (same warehouse, your session)
 -- may still respond from cache.
 -- ---------------------------------------------------------------------------
-SHOW WAREHOUSES LIKE 'WH_ALFA_OVERWATCH';
+SHOW WAREHOUSES LIKE 'WH_ALFA_ADMIN';
 SHOW RESOURCE MONITORS;  -- expect none since V045
 
 -- ============================================================================

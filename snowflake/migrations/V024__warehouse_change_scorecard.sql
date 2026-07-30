@@ -333,7 +333,7 @@ $$;
 -- Daily at 06:40 (before the object change-impact scan at 06:50); the first
 -- run only seeds the snapshot baseline.
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_WAREHOUSE_CHANGE_SCAN
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 40 6 * * * America/Chicago'
 AS
     CALL DBA_MAINT_DB.OVERWATCH.SP_WAREHOUSE_CHANGE_SCAN();

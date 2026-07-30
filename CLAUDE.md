@@ -81,7 +81,7 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
   resource monitor, not task monitoring"). V045 restored it end-to-end.
 - **Resource monitors are GONE** (same correction). OVERWATCH_RM was
   suspending the app warehouse mid-use. No monitor levers/deductions in the
-  app; auto-suspend tracking stays. No hard cap on WH_ALFA_OVERWATCH — COST
+  app; auto-suspend tracking stays. No hard cap on WH_ALFA_ADMIN — COST
   alert rules are the guardrails.
 - **UNKNOWN classification is law** (V044/V048): unmapped entities surface on
   Cost → Chargeback ("Unmapped entities" worklist) instead of silently

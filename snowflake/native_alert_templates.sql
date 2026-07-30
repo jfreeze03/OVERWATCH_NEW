@@ -13,7 +13,7 @@
 
 -- 1) New critical/high OVERWATCH alert events -> email within 30 minutes.
 CREATE OR REPLACE ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_NEW_EVENTS
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = '30 MINUTE'
 IF (EXISTS (
     SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS
@@ -31,7 +31,7 @@ THEN
 
 -- 2) OVERWATCH self-health: hourly facts stale > 3 hours -> email.
 CREATE OR REPLACE ALERT DBA_MAINT_DB.OVERWATCH.NATIVE_ALERT_STALE_FACTS
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = '60 MINUTE'
 IF (EXISTS (
     SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
@@ -42,7 +42,7 @@ THEN
         'OVERWATCH_EMAIL',
         'dba-team@example.com',
         'OVERWATCH: telemetry loads are stale',
-        'FACT_QUERY_HOURLY has not loaded for over 3 hours. Check TASK_LOAD_HOURLY and WH_ALFA_OVERWATCH.'
+        'FACT_QUERY_HOURLY has not loaded for over 3 hours. Check TASK_LOAD_HOURLY and WH_ALFA_ADMIN.'
     );
 
 -- Alerts are created suspended by default:

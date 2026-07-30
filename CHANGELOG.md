@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.81.0 — rename the app warehouse WH_ALFA_OVERWATCH → WH_ALFA_ADMIN (rebuild required) (2026-07-30)
+
+Owner renamed the app's dedicated warehouse in Snowflake. Renamed every reference
+across the codebase (93 occurrences / 54 files): `app/config.py` `APP_WAREHOUSE`, the
+app-side SQL/labels (`mart_sql`, `remediation` task template, `admin`/`brief` sources,
+`canary` smoke tests), all migrations (V002 `CREATE WAREHOUSE` + `ALTER` + task
+bindings, and the task-warehouse bindings in V003/V004/V007/V008/V010/V012/V014-V016/
+V018/V021/V024/V027/V032/V033/V035/V036/V038/V040/V041/V045/V046/V048), `roles.sql`,
+`teardown.sql`, `validate.sql`, `backfill_365.sql`, the standalone alert/ML helpers,
+the deploy config (`.streamlit/secrets.toml.example`, `snowflake.yml` `query_warehouse`,
+`flyway.toml.example` JDBC), `outputs/gen_v045.py`, and the current-state docs. The
+rebuild bundle was regenerated; the derived-migration byte-compare tests and the
+warehouse-name assertion tests all pass.
+
+**This is a teardown + rebuild change** (the warehouse rename orphans the app's
+task→warehouse bindings), so the historical migrations were edited in place rather than
+fixed-forward — the whole point is a from-scratch rebuild. Operational steps for the
+apply:
+1. Run `snowflake/teardown.sql` (drops the app tasks/rebuildables; the shared warehouse
+   itself is preserved — the DROP WAREHOUSE lines stay commented).
+2. Re-apply the migrations (or `snowflake/rebuild/`), which `CREATE WAREHOUSE IF NOT
+   EXISTS WH_ALFA_ADMIN` (a no-op post-rename) and rebind every task to it.
+3. Redeploy the Streamlit-in-Snowflake app so `snowflake.yml`'s new `query_warehouse`
+   takes effect; update any local `secrets.toml` / Flyway config.
+
+Dated historical records (`CHANGELOG` prior entries, `docs/reviews/*`, `docs/handoff/*`)
+keep the old name intentionally — they describe the system as it was.
+
 ## 4.80.0 — bug round 3 fixes (app-only) (2026-07-30)
 
 Six of the seven CONFIRMED bugs from the bug-round-3 campaign

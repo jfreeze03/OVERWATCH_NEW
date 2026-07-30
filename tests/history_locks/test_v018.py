@@ -62,7 +62,7 @@ def test_roi_readers_never_mix_estimates_with_verified():
     assert "STATE = 'VERIFIED'" in s and "STATE = 'ESTIMATED'" in s
     assert "DATE_TRUNC('quarter'" in s
     c = _m.app_cost_quarter()
-    assert "WH_ALFA_OVERWATCH" in c and "DATE_TRUNC('quarter'" in c
+    assert "WH_ALFA_ADMIN" in c and "DATE_TRUNC('quarter'" in c
     led = _m.ledger_for_event("ab12cd34")
     assert "'%event ab12cd34%'" in led and "LIMIT 5" in led
     with _pt.raises(ValueError):

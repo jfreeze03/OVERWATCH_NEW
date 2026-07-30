@@ -45,10 +45,10 @@ WITH checks AS (
     -- WAREHOUSE_EVENTS_HISTORY (any lifecycle event proves the warehouse
     -- exists). Events can lag ~1-3h after CREATE WAREHOUSE, hence CHECK not
     -- FAIL — confirm with SHOW WAREHOUSES on a fresh install.
-    SELECT 'WH_ALFA_OVERWATCH exists (event evidence)',
+    SELECT 'WH_ALFA_ADMIN exists (event evidence)',
            IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
-                        WHERE WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'),
-               'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_OVERWATCH via SHOW WAREHOUSES')
+                        WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'),
+               'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_ADMIN via SHOW WAREHOUSES')
     UNION ALL
     SELECT 'Alert rules seeded',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')

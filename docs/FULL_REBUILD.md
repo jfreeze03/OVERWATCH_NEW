@@ -51,7 +51,7 @@ resumes its graph both before and after its first fills now, but the rule
 stands for every file). Notes:
 
 - V027, V029, V030, V031, V041 end with first-fill CALLs — the slow ones;
-  expect a few minutes each on WH_ALFA_OVERWATCH.
+  expect a few minutes each on WH_ALFA_ADMIN.
 - If you kept operator data, SCHEMA_VERSION already holds 1..41: the
   guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
   and the version MERGEs no-op. That is the designed restore path.

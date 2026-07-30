@@ -117,7 +117,7 @@ Three rules keep the app fast without spending more on the warehouse:
    behind toggles.
 
 Admin > Performance shows the app's own statement families on
-`WH_ALFA_OVERWATCH` (p95, GB scanned, by parameterized hash) and the
+`WH_ALFA_ADMIN` (p95, GB scanned, by parameterized hash) and the
 session's approximate cache-hit rate — measure before optimizing further.
 
 ## Deliberate choices reviewers will ask about

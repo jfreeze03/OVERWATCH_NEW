@@ -31,7 +31,7 @@ USING (
         ('WAREHOUSE', 'POSIT_WORKBENCH',              'ALFA Analytics',        'DBA'),
         ('WAREHOUSE', 'SNOWFLAKE_LEARNING_WH',        'Platform / DBA',        'DBA'),
         ('WAREHOUSE', 'SYSTEM$STREAMLIT_NOTEBOOK_WH', 'Platform / DBA',        'DBA'),
-        ('WAREHOUSE', 'WH_ALFA_OVERWATCH',            'Platform / DBA',        'DBA'),
+        ('WAREHOUSE', 'WH_ALFA_ADMIN',            'Platform / DBA',        'DBA'),
         -- Trexis
         ('WAREHOUSE', 'WH_TRXS_LOAD',                 'Trexis Data Engineering', 'DBA'),
         ('WAREHOUSE', 'WH_TRXS_TRANSFORM',            'Trexis Data Engineering', 'DBA'),

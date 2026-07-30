@@ -53,13 +53,13 @@ def suspend_schedule(warehouse: str, quiet_start_hour: int, quiet_end_hour: int,
     dow = "1-5" if weekdays_only else "*"
     return f"""-- Off-hours schedule for {wh}: suspend {qs:02d}:00, resume {qe:02d}:00 ({tz})
 CREATE OR REPLACE TASK DBA_MAINT_DB.OVERWATCH.OVERWATCH_SUSPEND_{wh}
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 0 {qs} * * {dow} {tz}'
 AS
     ALTER WAREHOUSE {wh} SUSPEND;
 
 CREATE OR REPLACE TASK DBA_MAINT_DB.OVERWATCH.OVERWATCH_RESUME_{wh}
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 0 {qe} * * {dow} {tz}'
 AS
     ALTER WAREHOUSE {wh} RESUME IF SUSPENDED;

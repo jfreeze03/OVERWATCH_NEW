@@ -6,7 +6,7 @@
 -- Dedicated compute with a hard monthly cap (the monitoring app must never
 -- become the cost problem it monitors).
 -- ---------------------------------------------------------------------------
-CREATE WAREHOUSE IF NOT EXISTS WH_ALFA_OVERWATCH
+CREATE WAREHOUSE IF NOT EXISTS WH_ALFA_ADMIN
     WAREHOUSE_SIZE = XSMALL
     AUTO_SUSPEND = 60
     AUTO_RESUME = TRUE
@@ -17,7 +17,7 @@ CREATE WAREHOUSE IF NOT EXISTS WH_ALFA_OVERWATCH
 -- Warehouse-level timeout is the runaway backstop: Streamlit-in-Snowflake
 -- runs in an owner's-rights procedure where ALTER SESSION (and therefore
 -- session-level timeouts/query tags) is unsupported.
-ALTER WAREHOUSE WH_ALFA_OVERWATCH SET STATEMENT_TIMEOUT_IN_SECONDS = 300;
+ALTER WAREHOUSE WH_ALFA_ADMIN SET STATEMENT_TIMEOUT_IN_SECONDS = 300;
 
 CREATE RESOURCE MONITOR IF NOT EXISTS OVERWATCH_RM
     WITH CREDIT_QUOTA = 30
@@ -27,7 +27,7 @@ CREATE RESOURCE MONITOR IF NOT EXISTS OVERWATCH_RM
         ON 80 PERCENT DO NOTIFY
         ON 100 PERCENT DO SUSPEND;
 
-ALTER WAREHOUSE WH_ALFA_OVERWATCH SET RESOURCE_MONITOR = OVERWATCH_RM;
+ALTER WAREHOUSE WH_ALFA_ADMIN SET RESOURCE_MONITOR = OVERWATCH_RM;
 
 -- COLLISION GUARD: the previous app may already own tables with these names
 -- (notably FACT_QUERY_HOURLY) in DBA_MAINT_DB.OVERWATCH with different
@@ -250,14 +250,14 @@ $$;
 -- Task chain roots (children are added by V003/V004 with AFTER)
 -- ---------------------------------------------------------------------------
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 7 * * * * America/Chicago'
     COMMENT = 'Hourly query/warehouse facts; exec board + alert scan chain after this.'
 AS
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
 
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_LOAD_DAILY
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 45 6 * * * America/Chicago'
     COMMENT = 'Daily metering (billed w/ adjustment), tasks, logins, storage.'
 AS

@@ -74,7 +74,7 @@ def test_fact_metering_matches_live_columns():
 
 def test_app_statement_stats_scoped_to_app_warehouse():
     sql = mart_sql.app_statement_stats(9999)
-    assert "WAREHOUSE_NAME = 'WH_ALFA_OVERWATCH'" in sql
+    assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in sql
     assert "QUERY_PARAMETERIZED_HASH" in sql
     assert "DATEADD('day', -30" in sql  # clamped to 30
     assert "LIMIT 30" in sql

@@ -256,7 +256,7 @@ END;
 $$;
 
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_DAILY_DIGEST
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 20 7 * * * America/Chicago'
     COMMENT = 'Grounded Cortex digest after the morning loads. Uses Cortex credits (~1 call/day).'
 AS
@@ -322,7 +322,7 @@ END;
 $$;
 
 CREATE TASK IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.TASK_VERIFY_SAVINGS
-    WAREHOUSE = WH_ALFA_OVERWATCH
+    WAREHOUSE = WH_ALFA_ADMIN
     SCHEDULE = 'USING CRON 40 7 1 * * America/Chicago'
     COMMENT = 'Monthly re-measurement of ESTIMATED auto-suspend savings; operator approves VERIFIED.'
 AS

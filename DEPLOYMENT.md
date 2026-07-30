@@ -83,7 +83,7 @@ The Admin page compares `SCHEMA_VERSION` against the versions bundled with the
 app and flags drift.
 
 Cost controls installed by V002:
-- `WH_ALFA_OVERWATCH` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to the app + tasks.
+- `WH_ALFA_ADMIN` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to the app + tasks.
   No resource monitor since v4.45 (owner correction: OVERWATCH_RM's 30-credit
   cap was suspending the warehouse mid-use — V045 dropped it).
 
@@ -99,7 +99,7 @@ rename them first (e.g. `ALTER TABLE ... RENAME TO ALERT_CONFIG_V3;`), then
 run the migrations. `snowflake/validate.sql` checks the shapes and flags any
 survivor.
 
-The loader chain runs on the dedicated **`WH_ALFA_OVERWATCH`** warehouse
+The loader chain runs on the dedicated **`WH_ALFA_ADMIN`** warehouse
 (XSMALL, 60s auto-suspend; no resource monitor since v4.45).
 
 ## 2. Roles and execution model (owner's rights)
@@ -153,7 +153,7 @@ PUT file://app/*            @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/ OVE
 CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
     ROOT_LOCATION = '@DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app'
     MAIN_FILE = 'streamlit_app.py'
-    QUERY_WAREHOUSE = WH_ALFA_OVERWATCH
+    QUERY_WAREHOUSE = WH_ALFA_ADMIN
     TITLE = 'OVERWATCH — Snowflake Command Center';
 ```
 
@@ -162,7 +162,7 @@ shows what is deployed; re-running PUT with OVERWRITE replaces files and the
 app picks them up on next open.
 
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
-WH_ALFA_OVERWATCH`); `environment.yml` pins the Snowflake-channel packages.
+WH_ALFA_ADMIN`); `environment.yml` pins the Snowflake-channel packages.
 Queries execute with the app owner's rights; USAGE on the Streamlit object
 (two roles only) is the access-control model.
 
@@ -176,7 +176,7 @@ account = "<account>"
 user = "<user>"
 authenticator = "externalbrowser"   # or password
 role = "SNOW_SYSADMINS"
-warehouse = "WH_ALFA_OVERWATCH"
+warehouse = "WH_ALFA_ADMIN"
 database = "DBA_MAINT_DB"
 schema = "OVERWATCH"
 ```
