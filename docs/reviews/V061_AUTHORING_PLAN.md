@@ -180,12 +180,34 @@ run-list, not as silent side effects.
 
 ---
 
-## Open questions for the owner before authoring
+## Decisions locked (owner, 2026-07-29)
 
-1. **Phasing** — V061 correctness-only + V062 perf (recommended), or one bundle?
-2. **C5 damage horizon** — how far back to heal the AI-arm truncation? (Bounded
-   by FACT retention; a full 365-day `SP_LOAD_MARTS_V27('DAILY', 365)` is the
-   safe upper bound but a heavier one-time scan.)
-3. **AI_MONTHLY_BUDGET_USD** — seed a pace arm in COST_AI_CREEP, or growth-only?
-4. **B5/B12 backfill redesign** — day-by-day loop vs staging-swap; the
-   staging-swap is safer against the concurrent-trim race but a bigger change.
+1. **Phasing → correctness-only V061, perf V062.** V061 = C5, C6, C1-mart, C2,
+   B5, B9, B10, B11, B12 + safe LOWs (B33, B41). T3.1–T3.4 + B34 → V062.
+2. **C5 heal horizon → full retention.** The migration tail runs
+   `CALL SP_LOAD_MARTS_V27('DAILY', 365)` so every possibly-truncated AI-arm day
+   up to the fact retention floor is rewritten. (Heavier one-time scan on apply;
+   goes in the DEPLOYMENT.md V061 run-list, flagged as the heal step.)
+3. Still open, decide when authoring the respective fix: AI_MONTHLY_BUDGET_USD
+   pace arm in COST_AI_CREEP (vs growth-only); B5/B12 backfill redesign
+   (day-by-day loop vs staging-swap).
+
+## Verified derivation needles (pre-authoring checks)
+
+- **C5 (SP_LOAD_MARTS_V27, from V060):** `DATEADD('day', -:d, CURRENT_TIMESTAMP())`
+  occurs **exactly 3×**, all three the AI arms (Snowsight/CLI code + Functions);
+  the other 7 daily arms already use `CURRENT_DATE()`. A count-3 `apply_n`
+  replace `CURRENT_TIMESTAMP()` → `CURRENT_DATE()` is safe with zero collateral.
+  Guardrails to assert survive: V057 FAIL fix (×4), V058 arm [6b], V059 ROOT
+  rollup, V060 `TOTAL_ELAPSED_SEC` + provisioning-queue edits.
+
+## Build sequencing (safe, footgun-free)
+
+Author `outputs/gen_v061.py` incrementally, generating the V061 SQL, but **do
+NOT bump `validate.sql` floor / admin `_EXPECTED_MIGRATIONS` / DEPLOYMENT run-list
+until the full correctness set is authored and adversarially verified** — the
+run-list is the apply gate, so an incomplete-but-committed V061 file cannot be
+mistakenly applied. Order: C5 (data-corruption first) → C1-mart + C6 (AI alert
+correctness) → C2 (QAS mart twins + V010) → B9/B33/B41 (self-contained) →
+B5/B10/B11/B12 (backfill/reconcile robustness, design B5+B12 together) →
+C1-score DDL. Then the final lockstep + byte-compare tests + rebuild bundle.
