@@ -1,6 +1,17 @@
 # V061 authoring plan — consolidate the deferred loader/mart fixes — 2026-07-29
 
-**Status:** plan for review, not yet authored. V061 touches the live loaders
+**Status (updated 2026-07-29):** V061 **AUTHORED + SHIPPED** as
+`V061__ai_loader_alert_score_purge_fixes.sql` (v4.78.0) — C5, C2, C1 (mart + score +
+app), C6, B41, B33, byte-compared + adversarially verified + full lockstep. **Held
+for V062** (a dedicated, smoke-tested / byte-exact pass): `SP_NOTIFY_WEBHOOK` B9
+(untestable ARRAY runtime semantics), the loader-robustness cluster B5/B10/B11/B12
+(design-only, 5 open decisions, MEDIUM confidence — and its `SP_LOAD_MARTS_V27` base
+must now re-base from **V061**, not V060), plus the perf loader restructures T3.1–T3.4
+and B34. The rest of this document is the original plan (retained as the V062 spec).
+
+---
+
+**Original plan.** V061 touches the live loaders
 (`SP_LOAD_MARTS_V27`, `SP_ALERT_SCAN`, `SP_PURGE_FACTS`, `SP_NOTIFY_WEBHOOK`,
 `backfill_365`, the nightly reconcile) that **Joe applies in Snowsight** — the
 agent authors the SQL + lockstep and never runs it. Because a derivation slip
