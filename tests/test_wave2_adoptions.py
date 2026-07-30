@@ -36,7 +36,8 @@ _SEC = _page("security.py")
 def test_run_mart_first_exists_and_is_the_adoption_vehicle():
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     assert "def run_mart_first(" in comp
-    assert 'run(mart_sql, page=page, key=f"{key}_fact"' in comp   # distinct cache key
+    assert 'key=f"{key}_fact"' in comp                            # distinct cache key
+    assert "preloaded is not None and preloaded.ok" in comp       # T2.3 prefetch-else-run seam
     total = sum(p.count("run_mart_first(") for p in (_OPT, _SPEND, _CB, _OPS))
     assert total >= 6, total                                      # the swap sites
 

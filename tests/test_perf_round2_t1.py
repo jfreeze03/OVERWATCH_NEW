@@ -71,6 +71,29 @@ def test_t1_4_change_impact_drills_are_gated():
     assert 'key=f"chg_hist_{pick}", tier="recent"' not in op
 
 
+# --- T2.1: Control Room live trio batched; proposals gated to operators ------
+
+def test_t2_1_control_room_live_trio_batched():
+    cr = _read("app/ui/pages/control_room.py")
+    assert 'run_batch(_live_specs, page=_PAGE, tier="live")' in cr        # one live round trip
+    for m in ('"key": "oi"', '"key": "cra"', '"key": "props"'):
+        assert m in cr, m
+    # each read is prefetch-else-run (batch member or its own serial fallback)
+    assert '_live_pf.get("oi") or run(' in cr
+    assert '_live_pf.get("cra") or run(' in cr
+    # proposals only fetched for operators (non-operators stop paying for it)
+    assert 'if _is_op:\n        _live_specs.append(' in cr
+    assert '_live_pf.get("props") or run(' in cr
+    assert ") if _is_op else None" in cr
+
+
+def test_t2_3_run_mart_first_has_preloaded_seam():
+    comp = _read("app/ui/components.py")
+    fn = comp.split("def run_mart_first(", 1)[1].split("\ndef ", 1)[0]
+    assert "preloaded=None" in fn
+    assert "preloaded if (preloaded is not None and preloaded.ok) else run(" in fn
+
+
 # --- T1.9: open_alert_events standardized at LIMIT 500 -----------------------
 
 def test_t1_9_open_alert_events_limit_standardized():

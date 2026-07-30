@@ -288,10 +288,27 @@ def render() -> None:
     # ---- Incidents (V032) ------------------------------------------------------
     st.subheader("Incidents")
     from app.config import OPERATOR_PROFILES, resolve_role_profile
-    from app.core.query import execute_statement
+    from app.core.query import execute_statement, run_batch
     from app.core.session import current_role
     from app.ui.components import log_ui_event, notify
     _is_op = resolve_role_profile(current_role()) in OPERATOR_PROFILES
+    # T2.1: the three live-tier reads this screen makes (open incidents, proposals,
+    # triage alerts) are each re-paid every 30s in steady state. Submit them as ONE
+    # live run_batch so morning triage makes one round trip, not three. Proposals
+    # render for operators only, so the batch carries that member only when _is_op —
+    # non-operators stop paying for it. Each read keeps its own serial fallback if
+    # the batch is unavailable or a member misses (prefetch-else-run).
+    _live_specs = [
+        {"key": "oi", "sql": mart_sql.open_incidents(50, company),
+         "source": f"INCIDENTS (open + mitigated, {company} + account-level)"},
+        {"key": "cra", "sql": mart_sql.open_alert_events(500, company),
+         "source": "ALERT_EVENTS" if company == "ALL"
+                   else f"ALERT_EVENTS ({company} + account-level)"},
+    ]
+    if _is_op:
+        _live_specs.append({"key": "props", "sql": mart_sql.incident_proposals(20, company),
+                            "source": f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)"})
+    _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
     inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
                   key=f"inc_metrics_{company}", tier="recent",
                   source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
@@ -307,7 +324,7 @@ def render() -> None:
              "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
                      "Alerts -> History."},
         ])
-    oi = run(mart_sql.open_incidents(50, company), page=_PAGE,
+    oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
              key=f"open_incidents_{company}", tier="live",
              source=f"INCIDENTS (open + mitigated, {company} + account-level)")
     if oi.ok and oi.empty:
@@ -335,10 +352,12 @@ def render() -> None:
                         notify(ok, msg)
                         if ok:
                             log_ui_event("incident_close", page=_PAGE)
-    props = run(mart_sql.incident_proposals(20, company), page=_PAGE,
+    # Read proposals only for operators (they alone can act on them) — prefetched in
+    # the live batch above when _is_op, else read serially here.
+    props = (_live_pf.get("props") or run(mart_sql.incident_proposals(20, company), page=_PAGE,
                 key=f"inc_props_{company}", tier="live",
-                source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")
-    if props.usable() and _is_op:
+                source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")) if _is_op else None
+    if _is_op and props is not None and props.usable():
         with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
             styled_table(props.df)
             _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
@@ -364,7 +383,7 @@ def render() -> None:
 
     # ---- Triage queue ----------------------------------------------------------
     st.subheader("Triage queue")
-    alerts = run(mart_sql.open_alert_events(500, company), page=_PAGE,
+    alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
                  key=f"cr_alerts_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
                  else f"ALERT_EVENTS ({company} + account-level)")

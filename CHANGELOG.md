@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.77.0 — perf round 2 T2.1: Control Room live-trio batch + run_mart_first seam (app-only) (2026-07-29)
+
+- **T2.1 — Control Room morning-triage live reads batched.** The three live-tier
+  reads on the triage screen (open incidents, incident proposals, triage alerts)
+  were issued serially and each re-paid every ~30s in steady state. They now go out
+  as one `live` `run_batch` (one round trip, not three), each threaded back via
+  prefetch-else-run so its own serial fallback survives if the batch is unavailable
+  or a member misses. **Proposals are now fetched only for operators** — the read
+  fed an operator-only expander, so non-operators were paying for it every render;
+  the batch carries that member only when `_is_op`.
+- **`run_mart_first` gains a `preloaded=` seam** (reusable enabler): a section can
+  prefetch its independent mart legs in one batch and hand them to `run_mart_first`,
+  which still applies `mart_accept` and falls through to the serial mart read on a
+  missing/failed prefetch.
+
+Scope note — the remaining T2 first-paint batching (Overview, Contract, and Control
+Room's *mart* group) is deferred. After T1.1 those reads sit on the `hourly` tier
+(3600s), so batching them helps only the cold first paint (~once/hour/viewer), and
+Overview carries an explicit anti-coupling decision (the filter-scoped board must
+not share a batch cache with the fixed reads). Those restructures reshape the
+hottest pages' whole render flow and warrant a browser first-paint smoke-test, so
+they're held for a dedicated pass rather than shipped blind. This release delivers
+the one T2 change with clear *steady-state* value (the 30s live trio).
+
+New `test_perf_round2_t1` cases lock the live-trio batch, operator gating, and the
+seam; 1443 pytest green, ruff+mypy clean.
+
 ## 4.76.0 — perf round 2 T1.4: gate the change-impact drill scans (app-only) (2026-07-29)
 
 - **T1.4 (owner-approved) — Operations change-impact drills stopped auto-scanning.**

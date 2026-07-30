@@ -324,16 +324,22 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",
                    max_rows: int | None = None, empty_is_answer: bool = False,
-                   mart_accept=None):
+                   mart_accept=None, preloaded=None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
     its own cache key; callers surface the source via result_caption, so
-    a viewer can always tell which path served the panel."""
+    a viewer can always tell which path served the panel.
+
+    T2.3: ``preloaded`` accepts the mart leg's result from a run_batch prefetch
+    (prefetch-else-run) so a section can issue its independent mart reads as one
+    parallel group; mart_accept still applies, and a missing/failed prefetch
+    falls through to the serial mart read exactly as before."""
     from app.core.query import run
     kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
-    res = run(mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
-              source=mart_source, **kwargs)
+    res = preloaded if (preloaded is not None and preloaded.ok) else run(
+        mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
+        source=mart_source, **kwargs)
     if res.usable():
         try:
             accepted = mart_accept is None or bool(mart_accept(res.df))

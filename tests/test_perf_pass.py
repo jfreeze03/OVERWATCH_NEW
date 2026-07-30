@@ -58,7 +58,10 @@ def test_overview_decoupled_and_day_replay_batched():
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "run_batch" not in ov and "Deliberately NOT batched" in ov
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
-    assert cr.count("run_batch(") == 2                            # recent + historical groups
+    # retro recent + historical groups, plus the T2.1 live-trio group (open
+    # incidents / proposals / triage alerts submitted as one live round trip)
+    assert cr.count("run_batch(") == 3
+    assert 'run_batch(_live_specs, page=_PAGE, tier="live")' in cr
     assert "else:" in cr.split("_b_hist", 2)[2][:2000]            # serial fallback survives
 
 
