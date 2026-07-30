@@ -68,9 +68,27 @@ snowflake/migrations/V059__task_graph_root_credits.sql
 snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql
 snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql
 snowflake/migrations/V062__loader_robustness_alert_split_webhook.sql
+snowflake/migrations/V063__webhook_capture_once_daily_facts_failguard.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
+
+> **V063 verify (webhook capture-once + daily-facts fail-guard):**
+> - **⚠ B9 webhook — OWNER SMOKE TEST REQUIRED (ARRAY binding is runtime-only; a
+>   byte-compare cannot prove it).** In a non-prod clone: pick an enabled route with a
+>   real integration, insert ~25 OPEN `ALERT_EVENTS` (same company/family/severity,
+>   each `TITLE` ~140 chars, staggered `RAISED_AT` within the last hour) so the escaped
+>   message would exceed 3000 chars; `CALL SP_NOTIFY_WEBHOOK();` and confirm (a) the
+>   delivered message is **not** truncated mid-event, (b) **only** the events that fit
+>   (`ARRAY_CONTAINS(:fits_ids)`) get `NOTIFIED_AT` set and a `ALERT_DELIVERIES` row,
+>   and (c) the non-fitting events keep `NOTIFIED_AT = NULL` and send on the **next**
+>   run (no silent loss, no double-send). If a non-fitting event is marked delivered,
+>   revert `SP_NOTIFY_WEBHOOK` to the V034/V062 body and report back.
+> - **B34 daily-facts fail-guard** (byte-verifiable, but runtime-sensitive on recovery):
+>   optionally verify in a clone that inducing a failure in one of the three per-table
+>   wraps (e.g. rename a target column) leaves the `DAILY_FACTS` watermark **unchanged**,
+>   returns a non-success string, and that the **next** run re-covers the missed day.
+> - No new objects and no data heal — both are forward-healing proc swaps.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

@@ -117,6 +117,11 @@ _EXPECTED_MIGRATIONS = {
         "object-cost transaction wraps (B34), daily alert blocks split to "
         "SP_ALERT_SCAN_DAILY chained after TASK_LOAD_DAILY (C9). Webhook (B9) "
         "and perf loader (T3) deferred to V063",
+    63: "webhook capture-once + daily-facts fail-guard: SP_NOTIFY_WEBHOOK freezes "
+        "the fitting event set into ONE array so the message, the delivery ledger, "
+        "and NOTIFIED_AT can't diverge (B9, no send-vs-ledger race; owner smoke "
+        "test); SP_LOAD_DAILY_FACTS holds the watermark + returns non-success on a "
+        "per-table failure instead of a false success (B34). Perf loader (T3) in V064",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
