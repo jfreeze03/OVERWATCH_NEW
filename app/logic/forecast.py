@@ -110,10 +110,18 @@ def contract_pace(
     contract_start: date,
     contract_end: date,
     today: date,
+    trailing_daily_credits: float | None = None,
 ) -> dict:
     """Contract burn pacing: consumed share vs elapsed-time share.
 
     pace_ratio > 1.0 means burning faster than the contract clock.
+
+    N11: when ``trailing_daily_credits`` is supplied, the forward projection uses
+    that recent daily burn (the same trailing-30d basis the renewal planner and
+    year strip use) so the prominent KPI can't contradict the planner below it —
+    booked ``consumed`` plus the remaining days at recent burn. Without it, the
+    lifetime-average fallback is kept for backward compatibility. The share/pace
+    fields stay lifetime ACTUALS (are-you-ahead-of-the-clock), which don't conflict.
     """
     total = safe_float(contract_credits)
     term_days = (contract_end - contract_start).days
@@ -123,8 +131,14 @@ def contract_pace(
     time_share = elapsed_days / term_days
     consumed_share = safe_float(consumed_credits) / total
     pace_ratio = consumed_share / time_share if time_share > 0 else 0.0
-    run_rate_daily = safe_float(consumed_credits) / max(elapsed_days, 1)
-    projected_total = run_rate_daily * term_days
+    if trailing_daily_credits is not None and safe_float(trailing_daily_credits) >= 0:
+        run_rate_daily = safe_float(trailing_daily_credits)
+        projected_total = safe_float(consumed_credits) + run_rate_daily * (term_days - elapsed_days)
+        basis = "trailing-30d burn"
+    else:  # backward-compatible lifetime fallback (no daily frame available)
+        run_rate_daily = safe_float(consumed_credits) / max(elapsed_days, 1)
+        projected_total = run_rate_daily * term_days
+        basis = "lifetime average"
     return {
         "ok": True,
         "consumed_share": round(consumed_share * 100, 1),
@@ -133,6 +147,7 @@ def contract_pace(
         "projected_term_credits": round(projected_total, 1),
         "projected_overage_credits": round(max(0.0, projected_total - total), 1),
         "days_remaining": term_days - elapsed_days,
+        "basis": basis,
     }
 
 

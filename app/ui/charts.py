@@ -4,6 +4,8 @@ callers use components.guard() first."""
 
 from __future__ import annotations
 
+import zlib
+
 import altair as alt
 import pandas as pd
 import streamlit as st
@@ -124,7 +126,7 @@ def spend_trend(
         # Visible without hover (screenshots, phones) — Codex r4 #17.
         layers.append(
             alt.Chart(rule_df)
-            .mark_text(align="left", dx=6, dy=-7, fontSize=10, color="#f87171",
+            .mark_text(align="left", dx=6, dy=-7, fontSize=11, color="#f87171",  # C15: >=11px floor
                        text=f"budget ${daily_budget_usd:,.0f}/day")
             .encode(y="y:Q", x=alt.value(6))
         )
@@ -180,6 +182,30 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
     st.altair_chart(chart, use_container_width=True)
 
 
+# C15 (a11y): a fixed categorical palette + a NAME-stable index, so a given
+# entity ("ALFA", "WH_X") keeps the SAME color across renders regardless of which
+# other entities share the frame. Default Altair coloring assigns by set order, so
+# adding/removing one series recolors all of them — disorienting run-to-run. crc32
+# (not hash()) so the mapping is deterministic across processes (hash() is salted).
+_STABLE_PALETTE = ("#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2",
+                   "#eeca3b", "#b279a2", "#ff9da6", "#9d755d", "#bab0ac")
+
+
+def _stable_color_map(names) -> dict:
+    """Deterministic {entity: hex} — pure, so the stability contract is testable."""
+    uniq = sorted({str(n) for n in names})
+    return {n: _STABLE_PALETTE[zlib.crc32(n.encode("utf-8")) % len(_STABLE_PALETTE)] for n in uniq}
+
+
+def _stable_color(field: str, names, legend=None) -> alt.Color:
+    cmap = _stable_color_map(names)
+    uniq = list(cmap.keys())
+    kwargs = {"scale": alt.Scale(domain=uniq, range=[cmap[n] for n in uniq])}
+    if legend is not None:
+        kwargs["legend"] = legend
+    return alt.Color(f"{field}:N", **kwargs)
+
+
 def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
                         value_col: str, title: str = "Count") -> None:
     """Per-day stacked bars by category (counts) over a TIME axis — the
@@ -195,7 +221,8 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
             x=alt.X("yearmonthdate(Day):T", title=None,
                     axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
             y=alt.Y("sum(Value):Q", title=title, axis=alt.Axis(format=",.0f")),
-            color=alt.Color("Category:N", legend=alt.Legend(orient="bottom", title=None)),
+            color=_stable_color("Category", data["Category"],
+                                legend=alt.Legend(orient="bottom", title=None)),
             tooltip=[alt.Tooltip("Day:T"), alt.Tooltip("Category:N"),
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
@@ -227,7 +254,8 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
         .encode(
             x=alt.X("yearmonthdate(Day):T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
             y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
-            color=alt.Color("Category:N", legend=alt.Legend(orient="bottom", title=None)),
+            color=_stable_color("Category", data["Category"],
+                                legend=alt.Legend(orient="bottom", title=None)),
             tooltip=[
                 alt.Tooltip("Day:T"),
                 alt.Tooltip("Category:N"),

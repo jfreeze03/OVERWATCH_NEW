@@ -313,7 +313,23 @@ def _contract_tab(settings: dict) -> None:
     _fd = pd.to_datetime(_first_raw, errors="coerce")
     if pd.notna(_fd) and _fd.date() > start:
         coverage_from = _fd.date()
-    pace = contract_pace(consumed, contract_credits, start, end, account_today())
+    # N11: project the term on the SAME trailing-30d burn the renewal planner (and
+    # the year strip) use, so the prominent "Projected term total" can't disagree
+    # with the planner below. Excludes today's partial day (N1); reuses the
+    # planner's cache key so it costs no extra query.
+    _burn = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
+                tier="recent", source="FACT_METERING_DAILY")
+    _trailing_daily = None
+    if _burn.usable() and "CREDITS_BILLED" in _burn.df.columns:
+        _bdf = _burn.df.copy()
+        if "DAY" in _bdf.columns:
+            _bd = pd.to_datetime(_bdf["DAY"], errors="coerce").dt.date
+            _whole = _bdf[_bd < account_today()]
+            if not _whole.empty:
+                _bdf = _whole
+        _trailing_daily = float(pd.to_numeric(_bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
+    pace = contract_pace(consumed, contract_credits, start, end, account_today(),
+                         trailing_daily_credits=_trailing_daily)
     if not pace.get("ok"):
         st.info(str(pace.get("reason")))
         return
@@ -336,7 +352,10 @@ def _contract_tab(settings: dict) -> None:
          "delta_color": "inverse" if pace["pace_ratio"] > 1 else "normal"},
         {"label": "Projected term total", "value": f"{pace['projected_term_credits']:,.0f} cr",
          "delta": (f"+{pace['projected_overage_credits']:,.0f} cr overage" if pace["projected_overage_credits"] > 0 else "within contract"),
-         "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal"},
+         "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal",
+         "help": f"Booked consumption + remaining days at the {pace.get('basis', 'trailing-30d burn')} — "
+                 "the same basis as the renewal planner below and the year projection above "
+                 "(no longer the optimistic lifetime average)."},
     ])
     result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
     # C8: a Snowflake capacity commitment is a DOLLAR balance drawn by compute,

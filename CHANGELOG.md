@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.86.0 — NEXT wave 4: contract-pace/planner reconciliation + a11y (app-only) (2026-07-30)
+
+N11 + C15 from `docs/reviews/RECS_REVIEW_2026-07-30.md`. App-only; no migration.
+Completes the NEXT-tier block.
+
+- **N11 (MEDIUM) — the prominent contract projection stops contradicting the
+  planner.** Cost & Contract showed two forward projections on the same page:
+  the headline "Projected term total" used a **lifetime-average** burn (optimistic
+  on any accelerating account), while the renewal planner and year strip below it
+  used **trailing-30d** burn. `contract_pace()` gains an optional
+  `trailing_daily_credits`; when supplied it projects **booked consumption +
+  remaining days at recent burn** (same basis as the planner, today's partial day
+  excluded per N1), so the most prominent number is now the conservative,
+  page-consistent one. The lifetime pace/share ratios stay as honest actuals
+  (are-you-ahead-of-the-clock); the 5-arg lifetime fallback is preserved for
+  backward compatibility.
+- **C15 (LOW) — two accessibility wins.** (1) A **stable entity→color** map
+  (`crc32(name) → fixed palette`) on the daily stacked charts, so a given
+  warehouse/company keeps the same color across renders instead of being recolored
+  whenever the set of series changes. (2) A **≥11px label floor** — the one
+  sub-floor chart label (the 10px budget-rule annotation) is bumped to 11 (axis
+  and legend labels were already 11 in the theme).
+
+Gates green: ruff, mypy (pure layers), 1514 tests (+7 wave-4 locks). This closes
+the NEXT-tier app-only block (C2+N5, N4, C18, C11+N7, N10, N12, N11, C15).
+
 ## 4.85.0 — NEXT wave 3: Overview first-paint batching + telemetry write buffer (app-only) (2026-07-30)
 
 N4 + N12 from `docs/reviews/RECS_REVIEW_2026-07-30.md`. App-only; no migration.

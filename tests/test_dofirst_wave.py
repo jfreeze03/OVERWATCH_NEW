@@ -230,6 +230,54 @@ def test_n12_producers_enqueue_not_direct_insert():
 
 
 # ---------------------------------------------------------------------------
+# N11 — contract term projection unified onto trailing-30d burn
+# ---------------------------------------------------------------------------
+def test_n11_contract_pace_trailing_basis():
+    from app.logic.forecast import contract_pace
+    start, end = date(2026, 1, 1), date(2026, 4, 11)  # 100-day term
+    today = date(2026, 2, 20)
+    trail = contract_pace(500, 1000, start, end, today, trailing_daily_credits=8.0)
+    assert trail["basis"] == "trailing-30d burn"
+    # booked consumed + remaining days at recent burn (NOT lifetime average)
+    assert trail["projected_term_credits"] == round(500 + 8.0 * trail["days_remaining"], 1)
+
+
+def test_n11_contract_pace_lifetime_fallback_backward_compatible():
+    # 5-arg callers (existing tests) still hit the lifetime path unchanged
+    from app.logic.forecast import contract_pace
+    r = contract_pace(500, 1000, date(2026, 1, 1), date(2026, 4, 11), date(2026, 2, 20))
+    assert r["ok"] and r["basis"] == "lifetime average"
+
+
+def test_n11_contract_page_passes_trailing_burn():
+    ct = _src("app/ui/pages/cost_parts/contract.py")
+    assert "trailing_daily_credits=" in ct
+    assert 'key="planner_burn"' in ct  # reuses the planner's cache key
+
+
+# ---------------------------------------------------------------------------
+# C15 — stable entity colors + label size floor
+# ---------------------------------------------------------------------------
+def test_c15_stable_entity_color_map():
+    import zlib
+
+    from app.ui.charts import _STABLE_PALETTE, _stable_color_map
+    # a given entity gets the SAME color regardless of which others share the frame
+    m1 = _stable_color_map(["ALFA", "TRXS", "WH_X"])
+    m2 = _stable_color_map(["WH_X", "ALFA"])
+    assert m1["ALFA"] == m2["ALFA"]
+    assert m1["WH_X"] == m2["WH_X"]
+    # deterministic across processes (crc32, not salted hash())
+    assert m1["ALFA"] == _STABLE_PALETTE[zlib.crc32(b"ALFA") % len(_STABLE_PALETTE)]
+
+
+def test_c15_label_font_floor():
+    ch = _src("app/ui/charts.py")
+    assert "fontSize=10" not in ch  # >= 11px floor; theme defaults are already 11
+    assert "_stable_color(" in ch   # applied to the stacked charts
+
+
+# ---------------------------------------------------------------------------
 # N1 — forecasts must exclude today's PARTIAL day from the forward daily rate
 # ---------------------------------------------------------------------------
 def test_n1_forecast_excludes_partial_today_from_rate():
