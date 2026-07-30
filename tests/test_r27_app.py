@@ -34,6 +34,18 @@ def test_executor_enforces_the_allow_list():
     assert ok
     ok, _ = _statement_allowed("ALTER WAREHOUSE WH_X SUSPEND;")
     assert ok
+    # bug round 2 B1: emergency levers (all built from _ident-validated inputs)
+    for stmt in ("ALTER PIPE A.B.C SET PIPE_EXECUTION_PAUSED = TRUE;",
+                 "ALTER TASK A.B.C SUSPEND;",
+                 "ALTER USER U SET DISABLED = TRUE;",
+                 "ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 7200;"):
+        assert _statement_allowed(stmt)[0], stmt
+    # ...but the broader ALTER ACCOUNT (non-SET) and other ALTERs stay refused
+    for stmt in ("ALTER ACCOUNT UNSET STATEMENT_TIMEOUT_IN_SECONDS;",
+                 "ALTER TABLE DBA_MAINT_DB.OVERWATCH.SETTINGS ADD COLUMN X INT;",
+                 "ALTER SESSION SET TIMEZONE = 'UTC';",
+                 "GRANT ROLE X TO USER U;"):
+        assert not _statement_allowed(stmt)[0], stmt
     ok, why = _statement_allowed("DROP TABLE DBA_MAINT_DB.OVERWATCH.SETTINGS;")
     assert not ok and "allow-list" in why
     ok, why = _statement_allowed("SELECT 1; SELECT 2;")
@@ -44,6 +56,44 @@ def test_executor_enforces_the_allow_list():
     assert ok
     ok, _ = _statement_allowed("CREATE TABLE DBA_MAINT_DB.OVERWATCH.X (A INT);")
     assert not ok
+
+
+def test_emergency_builders_are_the_injection_defense():
+    """B1 widened the allow-list on the contract that the remediation builders
+    validate every interpolation (the allow-list is now defense-in-depth, not the
+    sole guard). Each lever must reject non-identifier input and build only its
+    exact intended shape."""
+    import pytest
+
+    from app.logic import remediation
+    for bad in ("x; DROP TABLE y", "x'--", "x OR 1=1", "x SET PASSWORD='p'", "x y"):
+        with pytest.raises(ValueError):
+            remediation.disable_user(bad)
+        with pytest.raises(ValueError):
+            remediation.pause_pipe("db", "sc", bad)
+        with pytest.raises(ValueError):
+            remediation.suspend_task_fqn("db", "sc", bad)
+    with pytest.raises(ValueError):
+        remediation.cortex_allowlist("model'; DROP TABLE x; --")
+    # valid inputs build exactly the four allow-listed shapes, nothing more
+    assert remediation.disable_user("SVC_BOT") == "ALTER USER SVC_BOT SET DISABLED = TRUE;"
+    assert remediation.suspend_task_fqn("D", "S", "T") == "ALTER TASK D.S.T SUSPEND;"
+    assert remediation.pause_pipe("D", "S", "P") == "ALTER PIPE D.S.P SET PIPE_EXECUTION_PAUSED = TRUE;"
+    assert remediation.account_statement_timeout(7200) == \
+        "ALTER ACCOUNT SET STATEMENT_TIMEOUT_IN_SECONDS = 7200;"
+
+
+def test_cancel_query_seam_validates_the_id():
+    import inspect
+
+    from app.core.query import _QUERY_ID_RE, execute_cancel_query
+    src = inspect.getsource(execute_cancel_query)
+    assert "_QUERY_ID_RE.match(qid)" in src                          # id regex-gated
+    assert "SYSTEM$CANCEL_QUERY({sql_literal(qid)})" in src          # exact statement built here
+    assert _QUERY_ID_RE.match("01b2c3d4-0000-1111-2222-333344445555")
+    assert not _QUERY_ID_RE.match("01b'); DROP TABLE X; --")
+    ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
+    assert "execute_cancel_query(qid, page=_PAGE)" in ops            # kill-switch uses the seam
 
 
 def test_writes_invalidate_domains_not_the_world():

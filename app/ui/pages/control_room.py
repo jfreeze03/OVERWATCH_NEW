@@ -38,20 +38,25 @@ _PAGE = "Control Room"
 
 def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> str:
     """Generate-then-run declare: one incident + every open alert of the
-    proposal's dedupe family as members (48h window). Three statements
-    sharing a session variable — same review-then-execute flow as alerts."""
+    proposal's dedupe family as members (48h window). Two INSERTs sharing an
+    APP-generated incident id (bug round 2 B3: the previous session-variable
+    opener was outside the operator allow-list, so it was refused and the
+    variable never existed — declare wrote zero rows. An inlined uuid keeps the
+    id shared across both INSERTs, and both are allow-listed OVERWATCH DML)."""
+    import uuid
+
     from app.config import core_object
     from app.core.sqlsafe import sql_literal
     fam = sql_literal(str(proposal_key).split("|", 1)[0])
+    inc_id = sql_literal(str(uuid.uuid4()))
     return (
-        "SET OW_INC_ID = UUID_STRING();\n"
         f"INSERT INTO {core_object('INCIDENTS')} "
         "(INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, ROOT_CAUSE_KIND) "
-        f"SELECT $OW_INC_ID, {sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
+        f"SELECT {inc_id}, {sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
         f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN';\n"
         f"INSERT INTO {core_object('INCIDENT_MEMBERS')} "
         "(INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED) "
-        f"SELECT $OW_INC_ID, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE "
+        f"SELECT {inc_id}, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE "
         f"FROM {core_object('ALERT_EVENTS')} e "
         "WHERE e.STATUS IN ('OPEN', 'ACK') "
         "AND e.RAISED_AT >= DATEADD('day', -2, CURRENT_TIMESTAMP()) "

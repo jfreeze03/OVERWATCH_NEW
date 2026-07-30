@@ -9,7 +9,7 @@ import streamlit as st
 from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
-from app.core.query import execute_statement, run, run_batch
+from app.core.query import execute_cancel_query, execute_statement, run, run_batch
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -900,8 +900,7 @@ def _emergency_extras(is_operator: bool) -> None:
                 confirm_q = st.text_input("Type CANCEL to confirm", key="emg_rq_confirm")
                 if st.button("Cancel query + audit", key="emg_rq_exec",
                              disabled=(confirm_q != "CANCEL")):
-                    ok, msg = execute_statement(
-                        f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})", page=_PAGE)
+                    ok, msg = execute_cancel_query(qid, page=_PAGE)   # B2: SELECT is outside the write allow-list
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
                         "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "

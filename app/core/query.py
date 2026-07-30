@@ -270,12 +270,25 @@ def _bump_refresh(sql: str) -> None:
 # one statement, aimed at OVERWATCH objects or a warehouse lever.
 _WRITE_PREFIXES = (
     "ALTER WAREHOUSE ",
+    # Bug round 2 B1: the Emergency-tab levers (Operations) build these exact
+    # shapes; every one interpolates only _ident-validated identifiers / a
+    # regex-validated value (app/logic/remediation.py), so the builder is the
+    # injection defense and the allow-list is defense-in-depth. Without them
+    # every non-warehouse lever was refused and logged a FAILED audit row.
+    # ALTER ACCOUNT SET (not the broader ALTER ACCOUNT) + the multi-statement
+    # guard (interior ';' rejected) keep the surface tight.
+    "ALTER PIPE ",
+    "ALTER TASK ",
+    "ALTER USER ",
+    "ALTER ACCOUNT SET ",
     "INSERT INTO DBA_MAINT_DB.OVERWATCH.",
     "UPDATE DBA_MAINT_DB.OVERWATCH.",
     "DELETE FROM DBA_MAINT_DB.OVERWATCH.",
     "MERGE INTO DBA_MAINT_DB.OVERWATCH.",
     "CALL DBA_MAINT_DB.OVERWATCH.",
 )
+
+_QUERY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _statement_allowed(sql: str) -> tuple[bool, str]:
@@ -650,6 +663,29 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
         return True, "Statement executed."
     except Exception as exc:
         record_error(page, exc, context=f"execute_statement: {sql[:200]}")
+        return False, format_snowflake_error(exc)
+
+
+def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
+    """Cancel a running query by id — the Operations kill-switch (bug round 2 B2).
+
+    SYSTEM$CANCEL_QUERY is a SELECT, outside the write-prefix allow-list, so it
+    gets its own seam instead of a blanket SELECT allowance: the id is
+    regex-validated and the exact statement is built here, so no operator text
+    reaches the SQL beyond a validated query id. The role + typed-confirm gate is
+    upstream; the caller still writes the REMEDIATION_LOG audit row.
+    """
+    qid = str(query_id or "").strip()
+    if not _QUERY_ID_RE.match(qid):
+        return False, f"Invalid query id: {query_id!r}"
+    from app.core.sqlsafe import sql_literal
+    try:
+        session = get_session()
+        apply_query_tag(session, build_query_tag(page=page, tier="write"))
+        session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})").collect()
+        return True, f"Cancel requested for {qid}."
+    except Exception as exc:
+        record_error(page, exc, context=f"execute_cancel_query: {qid}")
         return False, format_snowflake_error(exc)
 
 

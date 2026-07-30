@@ -51,6 +51,12 @@ def test_declare_links_members_by_company_and_family():
     # company's alerts as members (live round 8)
     assert "e.COMPANY = {sql_literal(str(company))}" in body
     assert "UPPER(e.COMPANY) = 'ALL'" in body                        # account rows ride along
+    # bug round 2 B3: the SET session-var opener was refused by the operator
+    # allow-list (declare wrote nothing); the id is now generated app-side and
+    # shared across both INSERTs, which ARE allow-listed OVERWATCH DML.
+    assert "SET OW_INC_ID" not in body and "$OW_INC_ID" not in body
+    assert "inc_id = sql_literal(str(uuid.uuid4()))" in body
+    assert body.count("SELECT {inc_id},") == 2
 
 
 # ---------------------------------------------------------------------------

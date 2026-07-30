@@ -113,7 +113,12 @@ def test_control_room_incidents_section():
 
 def test_declare_sql_links_the_family_without_doubling():
     body = _CR.split("def _incident_declare_sql", 1)[1].split("\ndef ", 1)[0]
-    assert "SET OW_INC_ID = UUID_STRING();" in body           # three statements, one id
+    # bug round 2 B3: the SET-session-var opener was refused by the operator
+    # allow-list (declare wrote nothing); the id is generated app-side and shared
+    # across both allow-listed INSERTs.
+    assert "SET OW_INC_ID" not in body
+    assert "inc_id = sql_literal(str(uuid.uuid4()))" in body   # one id, app-generated
+    assert body.count("SELECT {inc_id},") == 2                 # both INSERTs share it
     assert "SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1)" in body
     assert "NOT EXISTS" in body                               # already-member alerts skipped
 

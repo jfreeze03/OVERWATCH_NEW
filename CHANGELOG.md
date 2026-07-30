@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.71.0 — bug round 2 batch 1: three dead incident-response write paths (app-only) (2026-07-29)
+
+Bug round 2 (docs/reviews/BUG_ROUND_2_2026-07-29.md) found the top of the queue was
+three fully-dead operator write paths — every click failed the r27 executor
+allow-list and logged a FAILED audit row. Fixed with owner sign-off on the
+allow-list change:
+
+- **B1 — Emergency levers.** The Operations Emergency tab's ALTER PIPE / TASK /
+  USER / ACCOUNT-SET levers were refused because the executor allow-list admitted
+  only ALTER WAREHOUSE + OVERWATCH DML/CALL. Added the four builder-generated
+  prefixes (each lever interpolates only `_ident`-validated identifiers / a
+  regex-validated value in `remediation.py`, so the builder is the injection
+  defense and the allow-list is defense-in-depth); `ALTER ACCOUNT SET ` — not the
+  broader `ALTER ACCOUNT ` — plus the existing interior-`;` guard keep it tight.
+- **B2 — running-query kill switch.** `SYSTEM$CANCEL_QUERY` is a `SELECT`, outside
+  the write allow-list, so it never ran. Added a dedicated `execute_cancel_query`
+  seam: the query id is regex-gated (`^[A-Za-z0-9_-]{1,64}$`) and the exact
+  statement is built server-side — no blanket `SELECT` allowance, no operator text
+  in the SQL beyond a validated id.
+- **B3 — Control Room incident-declare.** The generate-then-run declare opened with
+  `SET OW_INC_ID = UUID_STRING();`, refused by the allow-list, so `$OW_INC_ID`
+  never existed and both INSERTs failed — the manual declare wrote zero rows.
+  The incident id is now generated app-side (`uuid.uuid4()`) and inlined into both
+  (already-allow-listed) INSERTs.
+- Locks: `test_r27_app` asserts the four prefixes pass while `ALTER ACCOUNT`
+  (non-SET) / `ALTER TABLE` / `ALTER SESSION` / `GRANT` stay refused, and the
+  cancel seam's id-regex rejects injection; `test_v032_incidents` /
+  `test_live_round8` pin the app-side declare id.
+
 ## 4.70.1 — verify-round fix-forward: repeat-fingerprints onto the elapsed basis (app-only) (2026-07-29)
 
 The 4.70.0 adversarial verification returned CORRECT on the schema-queued fix, the
