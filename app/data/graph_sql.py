@@ -51,7 +51,7 @@ WITH runs AS (
         -- QUERY_ID matched only the ~0-credit CALL row, collapsing proc-driven
         -- pipeline cost to ~0 (audit #10; matches the rollup insights_sql uses).
         SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS ROOT_ID,
-               SUM(CREDITS_ATTRIBUTED_COMPUTE) AS CREDITS
+               SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
         FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
         WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())
           -- Prune before the GROUP BY: only task-run queries matter here.

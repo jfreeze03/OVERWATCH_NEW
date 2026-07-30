@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 from app import companies
-from app.core.sqlsafe import contains_filter
+from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days
 
 
 def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
                  database: str = "", schema_contains: str = "") -> str:
+    # C10: scope QUERY_HISTORY by WAREHOUSE company only — COMPANY_FOR_WAREHOUSE, the
+    # exact stamp the FACT_QUERY_HOURLY loader and the Cost pages use — NOT warehouse
+    # AND user. The old intersection dropped all cross-company activity (a Trexis user
+    # on an ALFA warehouse appeared only under ALL, and ALFA+Trexis+UNKNOWN did not
+    # partition ALL) and could never reconcile against warehouse-grain spend. The
+    # user_contains free-text filter still applies within the scope.
+    comp = str(company or "ALL")
+    company_scope = ("" if comp.upper() == "ALL"
+                     else f"{companies.company_case_sql('WAREHOUSE_NAME')} = {sql_literal(comp)}")
     return and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.warehouse_clause(company),
-        companies.user_clause(company),
+        company_scope,
         companies.database_equals_clause(database),
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
         contains_filter("USER_NAME", user_contains),

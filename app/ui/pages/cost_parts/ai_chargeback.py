@@ -193,6 +193,12 @@ def _statement_export(company: str, rate: float) -> None:
     prev = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     month = st.selectbox("Statement month", [prev, this_month], key="cb_month",
                          help="Prior month is the finance-ready one; current month is partial.")
+    st.caption(
+        "Scope: warehouse compute only. Storage, serverless, AI/Cortex, and data-transfer "
+        "dollars are not allocated here (DEPARTMENT_MAP maps warehouses and roles), so these "
+        "statements will not tie out against the full invoice — allocate the rest from the "
+        "org rate-card totals on Contract & Forecast."
+    )
     if st.button("Build department statements", key="cb_build"):
         import io
         import zipfile
@@ -217,7 +223,11 @@ def _statement_export(company: str, rate: float) -> None:
                     f"OVERWATCH chargeback statements - {company} - {month}\n"
                     f"Rate: ${rate:.2f}/credit (CORE settings). Warehouse metering is exact; "
                     f"idle time bills to the owning department.\n"
-                    f"Total: ${float(frame['USD'].sum()):,.2f} across "
+                    "Scope: warehouse compute only. Storage, serverless, AI/Cortex, and data "
+                    "transfer dollars are NOT allocated in these statements — see Cost & "
+                    "Contract > Contract & Forecast for org rate-card totals. These statements "
+                    "will not tie out against the full invoice.\n"
+                    f"Total (warehouse compute): ${float(frame['USD'].sum()):,.2f} across "
                     f"{frame['DEPARTMENT'].nunique()} departments.",
                 )
             st.download_button(
@@ -243,9 +253,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
 
     kpi_row([
         {"label": f"Chargeback total ({days}d)", "value": format_usd(total_usd),
-         "help": "Exact warehouse metering x rate — includes each warehouse's "
+         "help": "Exact WAREHOUSE-COMPUTE metering x rate — includes each warehouse's "
                  "cloud-services credits, unadjusted (the account-level rebate lives "
-                 "on Cost & Contract → Spend & Attribution). Reconciles to the scoped spend by construction."},
+                 "on Cost & Contract → Spend & Attribution). Reconciles to the scoped "
+                 "warehouse spend by construction; storage, serverless, AI, and transfer "
+                 "are not allocated here."},
         {"label": "Departments", "value": f"{dept['DEPARTMENT'].nunique()}"},
         {"label": "Unmapped", "value": format_usd(unmapped_usd),
          "delta": "map warehouses below" if unmapped_usd > 0 else "fully mapped",

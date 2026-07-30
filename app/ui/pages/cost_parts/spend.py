@@ -8,13 +8,15 @@ and says so; estimated and verified savings never mix.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
 from app.core.query import run
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
-from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
+from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -369,10 +371,24 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
     # day) with the prior completed month for trend — not a trailing-N
     # window. Fact-first with a live DATABASE_STORAGE_USAGE_HISTORY fallback.
     _db = st.session_state.get("flt_database", "")
+    today = account_today()
     res = run(cost_sql.storage_by_database_calendar(company, _db, prior=False), page=_PAGE,
               key=f"storage_mtd_{company}", tier="historical",
               source="FACT_STORAGE_DAILY (MTD daily-average, billing basis)")
-    if not res.ok or res.empty:
+    # C4: coverage guard. The calendar builder divides SUM(bytes) by days-in-period,
+    # so a stalled loader (missing recent days) prices those days as zero storage —
+    # a silent understatement the old empty-only fallback never caught. Accept the
+    # fact only when its latest day is within a 2-day lag of yesterday; otherwise
+    # read the source live. LATEST_DAY is per-DB; the account view is its max.
+    def _latest_day(r: object) -> object:
+        if not (getattr(r, "ok", False) and not r.empty and "LATEST_DAY" in r.df.columns):
+            return None
+        ld = pd.to_datetime(r.df["LATEST_DAY"], errors="coerce").max()
+        return ld.date() if pd.notna(ld) else None
+    fact_latest = _latest_day(res)
+    fact_stale = res.ok and not res.empty and (
+        fact_latest is None or fact_latest < today - timedelta(days=2))
+    if not res.ok or res.empty or fact_stale:
         res = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=False), page=_PAGE,
                   key=f"storage_mtd_live_{company}", tier="historical",
                   source="DATABASE_STORAGE_USAGE_HISTORY (MTD daily-average, live)")
@@ -403,4 +419,17 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         charts.bar_usd(df.sort_values("USD_MONTH", ascending=False),
                        "DATABASE_NAME", "USD_MONTH", title="$/month by database (MTD est.)")
         result_caption(res)
+        # C4: expose coverage so a short month reads as short, not as low spend.
+        # Expected complete days = day-of-month minus today's excluded partial day.
+        expected_days = max(today.day - 1, 0)
+        covered = int(df["DAYS_AVERAGED"].map(safe_float).max()) if "DAYS_AVERAGED" in df.columns else 0
+        latest = _latest_day(res)
+        latest_txt = latest.isoformat() if latest else "n/a"
+        if expected_days > 0 and covered < expected_days - 2:
+            st.warning(f"Storage MTD covers {covered} of {expected_days} elapsed days "
+                       f"(latest {latest_txt}) — the daily loader is behind, so this "
+                       "average understates. Backfill FACT_STORAGE_DAILY to correct it.")
+        else:
+            st.caption(f"Coverage: averaged {covered} of {expected_days} month-to-date "
+                       f"days; latest {latest_txt}.")
     _account_storage_tiers(company, days, settings)

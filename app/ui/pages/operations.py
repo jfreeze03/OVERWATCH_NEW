@@ -42,6 +42,13 @@ _PAGE = "Operations"
 
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  database: str = "", schema_contains: str = "") -> None:
+    if str(company or "ALL").upper() != "ALL":
+        st.caption(
+            f"Scope: queries on {company} warehouses (by COMPANY_FOR_WAREHOUSE, matching "
+            "Cost). A cross-company user's queries on those warehouses are included here and "
+            "counted under the warehouse's company, not the user's (C10) — use ALL for the "
+            "account-wide total."
+        )
     # Hot path: the hourly fact answers this without scanning QUERY_HISTORY.
     # The fact has warehouse/user/database dims but no schema — fall back to
     # live when a schema filter is on, or the mart has no rows yet.

@@ -468,6 +468,12 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # submit server-side async in one shot; any failure falls back to the
     # serial per-query calls below, unchanged.
     st.markdown("**Who changed what (DDL/DCL)**")
+    if str(company or "ALL").upper() != "ALL":
+        st.caption(
+            "Scope: change evidence follows the actor's company OR the object's — so "
+            "account-level GRANT/REVOKE (no database) appears under its author's company "
+            "and cross-company DDL shows under both lenses (C11). Use ALL for the account-wide view."
+        )
     res = run(security_sql.recent_ddl_changes(days, company, database, schema_contains), page=_PAGE,
               key=f"ddl_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (DDL/DCL types)")

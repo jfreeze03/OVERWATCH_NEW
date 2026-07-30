@@ -1,5 +1,58 @@
 # Changelog
 
+## 4.74.0 — cost review MEDIUMs C2–C12 (app-only) (2026-07-29)
+
+Eleven MEDIUM cost-accuracy and attribution findings from the cost review, all
+app-layer. The mart twins (C2 V059/V010 arms, and the C5/C6 AI-loader items) are
+queued for V061.
+
+- **C2 — Query Acceleration dropped from proc/CALL/pipeline cost.** The proc,
+  CALL, and task-graph attribution surfaces summed `CREDITS_ATTRIBUTED_COMPUTE`
+  alone while the query-grain surfaces (the same "measured = compute + QAS"
+  contract) added QAS — so proc totals disagreed with the query view and could not
+  tie to the Query Acceleration service line. Added the QAS term to all five app
+  sites (`procedure_costs_usd`, `call_cost_lookup`, `call_children_costs`,
+  `proc_cost_trend`, `graph_daily_costs`); a lock test asserts every attribution
+  credit reference carries it.
+- **C3 — per-DB storage dropped fail-safe-only databases.** All four per-DB
+  storage builders guarded on active bytes only (`HAVING SUM(DB_BYTES) > 0`), so a
+  dropped database still in its 7-day fail-safe window (active 0, fail-safe > 0)
+  vanished though the panel prices DB + fail-safe. Fail-safe is now in every HAVING.
+- **C4 — storage MTD trusted a stalled loader.** `_storage_tab` fell back to live
+  only on an empty fact; a partially-loaded fact priced missing days as zero
+  storage (the calendar builder divides by days-in-period). Added a coverage guard
+  (fall back to live when the fact's latest day is >2 days stale) and a coverage
+  caption ("averaged N of M month-to-date days; latest …"), with a warning when short.
+- **C7 — contract "consumed" had no coverage guard on the live/Brief path.** The
+  live fallback only sees ~365d of history; for a contract older than that, consumed
+  was a silent floor while the caption asserted "since contract start". The live
+  builder now exposes an *unfiltered* `SOURCE_FIRST_DAY` (retention floor, mirroring
+  the mart's r14 #8-safe design — no false gap on a quiet-start contract), and the
+  page labels consumed a floor + points at the org balance when coverage is short.
+- **C8 — contract burn is credits-only.** Pacing, year projection, and the renewal
+  planner extrapolate credit-billed services; storage and transfer draw the same
+  dollar commitment. Added the caveat where each claim is made.
+- **C9 — chargeback statements are compute-only.** The exported MANIFEST claimed a
+  reconciling total with no scope line. Added an explicit "warehouse compute only —
+  will not tie out against the full invoice" line to the MANIFEST, a caption by the
+  Build button, and corrected the "reconciles by construction" KPI help.
+- **C10 — Operations company lens was warehouse-AND-user.** `_query_scope` ANDed
+  warehouse and user clauses, so a cross-company user's queries on a warehouse
+  vanished from every scope and ALFA+Trexis+UNKNOWN did not partition ALL. Now
+  scoped by `COMPANY_FOR_WAREHOUSE` only — the exact FACT_QUERY_HOURLY loader stamp
+  the Cost pages use — with a disclosure caption on the Queries tab.
+- **C11 — Security → Changes hid account-level and cross-company DDL.** GRANT/REVOKE
+  (NULL database) and cross-company DDL failed the actor-AND-object filter. Scoped by
+  actor **or** object now (union semantics), with a caption stating the rule.
+- **C12 — incident timeline used pre-V044 company labeling.** The 7d/fallback path
+  labeled company with `IFF(DATABASE_NAME LIKE 'TRXS%', …)` (mislabeling NULL/non-TRXS
+  as ALFA) while the 48h mart path used the evidence-based UDF. Both paths now use
+  `COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME,''))`.
+
+Scope skipped after verification: C5 (AI loader boundary clobber) and C6 (AI alert
+coverage) are migration-side → V061. New `test_cost_mediums_c2_c12` locks all app
+fixes; 1437 pytest green, ruff+mypy clean.
+
 ## 4.73.0 — cost review C1: price AI/Cortex credits at the AI rate everywhere (app-only) (2026-07-29)
 
 Cost review C1 (HIGH): every all-service billed-dollar rollup summed

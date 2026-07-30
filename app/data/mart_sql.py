@@ -557,8 +557,12 @@ def incident_timeline(days: int, company: str = "ALL") -> str:
     comp = str(company or "ALL")
     alert_filter = "" if comp.upper() == "ALL" else \
         f"AND COMPANY IN ({sql_literal(comp)}, 'ALL')"
+    # C12: label rows by the evidence-based loader UDF, not the pre-V044
+    # 'TRXS else ALFA' IFF that mislabeled every non-TRXS (and NULL) database
+    # ALFA — so this 7d/fallback path agrees with the 48h MART_INCIDENT_TIMELINE
+    # path (COMPANY_FOR_DATABASE, V027 arm [8]) instead of contradicting it.
     entity_filter = "" if comp.upper() == "ALL" else (
-        "AND IFF(DATABASE_NAME LIKE 'TRXS%', 'Trexis', 'ALFA') = " + sql_literal(comp))
+        "AND DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')) = " + sql_literal(comp))
     return f"""
 SELECT 'ALERT' AS EVENT_TYPE, RAISED_AT::TIMESTAMP_NTZ AS AT, SEVERITY,
        LEFT(TITLE, 120) AS LABEL

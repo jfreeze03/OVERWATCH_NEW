@@ -295,12 +295,38 @@ def _contract_tab(settings: dict) -> None:
     if not guard(res, "No metering rows since the contract start."):
         return
     consumed = safe_float(res.df.iloc[0].get("CREDITS_BILLED_TO_DATE"))
+    # C7 coverage: the mart leg is gated upstream (FACT_FIRST_DAY <= start), so it
+    # is always complete. The live fallback only sees ~365d of METERING_DAILY_HISTORY;
+    # when its earliest in-window day is AFTER the contract start, consumed is a
+    # FLOOR, not the true total, and pace / projected-term read low. Detect the gap
+    # from whichever leg served (mart: FACT_FIRST_DAY, live: FIRST_DAY) and label it.
+    _row = res.df.iloc[0]
+    # Both legs expose an UNFILTERED earliest retained day (mart: FACT_FIRST_DAY,
+    # live: SOURCE_FIRST_DAY) — the retention floor, not a contract-filtered MIN —
+    # so a quiet-start contract is not misread as a coverage gap (r14 #8).
+    _first_raw = (_row.get("FACT_FIRST_DAY") if "FACT_FIRST_DAY" in res.df.columns
+                  else _row.get("SOURCE_FIRST_DAY"))
+    coverage_from = None
+    _fd = pd.to_datetime(_first_raw, errors="coerce")
+    if pd.notna(_fd) and _fd.date() > start:
+        coverage_from = _fd.date()
     pace = contract_pace(consumed, contract_credits, start, end, account_today())
     if not pace.get("ok"):
         st.info(str(pace.get("reason")))
         return
+    if coverage_from:
+        st.warning(
+            f"Retained metering history only reaches {coverage_from.isoformat()}, after the "
+            f"contract start ({start.isoformat()}). **Consumed is a floor** — pace and "
+            "projected-term understate. "
+            + ("Use the org REMAINING_BALANCE panel above for the dollar truth."
+               if org_shown else "Backfill FACT_METERING_DAILY to the contract start for exact pacing.")
+        )
+    _floor = " (floor — see coverage note)" if coverage_from else ""
     kpi_row([
-        {"label": "Consumed", "value": f"{consumed:,.0f} cr", "delta": f"{pace['consumed_share']:.1f}% of contract"},
+        {"label": "Consumed", "value": f"{consumed:,.0f} cr",
+         "delta": f"{pace['consumed_share']:.1f}% of contract",
+         "help": f"Billed credits since contract start.{_floor}"},
         {"label": "Contract clock", "value": f"{pace['time_share']:.1f}%", "help": f"{pace['days_remaining']} days remaining."},
         {"label": "Pace", "value": f"{pace['pace_ratio']:.2f}x",
          "delta": "burning fast" if pace["pace_ratio"] > 1 else "under pace",
@@ -310,6 +336,17 @@ def _contract_tab(settings: dict) -> None:
          "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal"},
     ])
     result_caption(res, note="Billed credits (cloud-services adjustment applied) since contract start.")
+    # C8: a Snowflake capacity commitment is a DOLLAR balance drawn by compute,
+    # storage AND transfer; this pacing counts credit-billed services only
+    # (compute + serverless + AI). Storage and data-transfer dollars draw the same
+    # commitment and are not in these credits, so the real balance paces to exhaust
+    # earlier than shown. The org REMAINING_BALANCE panel above is the dollar truth.
+    st.caption(
+        "Credits burn only — storage and data-transfer dollars draw the same "
+        + ("commitment but are not counted here; the org balance panel above is the dollar truth."
+           if org_shown
+           else "commitment but are not counted here. Grant ORGANIZATION_USAGE to see the dollar balance.")
+    )
 
     st.markdown("**Steering to commit — the levers, in dollars per day**")
     # r13 #6: mart-first steering — the live idle join and pattern
@@ -366,7 +403,10 @@ def _contract_tab(settings: dict) -> None:
     panel_help(
         "Straight-line scenarios from the trailing 30-day burn — no seasonality is "
         "invented. Recommended commit = term consumption plus your buffer. Use it to "
-        "walk into the renewal with a number instead of a feeling."
+        "walk into the renewal with a number instead of a feeling. Basis is credit-billed "
+        "services (compute + serverless + AI); storage and data-transfer dollars draw the "
+        "same commitment, so the recommended commit is biased slightly short — add their "
+        "share (org rate-card panel above) before signing."
     )
     burn_res = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
                    tier="recent", source="FACT_METERING_DAILY")

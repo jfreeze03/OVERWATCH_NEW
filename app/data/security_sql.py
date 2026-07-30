@@ -176,6 +176,15 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
     days = bounded_days(days, maximum=30)
     from app.core.sqlsafe import contains_filter
 
+    # C11: scope change evidence by ACTOR *or* OBJECT, not actor AND object. GRANT /
+    # REVOKE and other account-level DDL carry a NULL DATABASE_NAME (dropped by the
+    # database lens), and a cross-company change (a Trexis user's DDL in an ALFA
+    # database) failed both lenses under the old AND — visible only under ALL. OR-ing
+    # follows the actor's company for context-less DDL and shows cross-company changes
+    # under both lenses (union semantics; the disclosure caption states the rule).
+    _uc = companies.user_clause(company)
+    _dc = companies.database_clause(company)
+    _actor_or_object = f"({_uc} OR {_dc})" if _uc and _dc else (_uc or _dc)
     where = and_where(
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
@@ -183,8 +192,7 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
         "EXECUTION_STATUS = 'SUCCESS'",
         ("QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_VIEW', 'ALTER', 'ALTER_TABLE_MODIFY_COLUMN', "
          "'ALTER_SESSION', 'DROP', 'GRANT', 'REVOKE', 'CREATE_TABLE_AS_SELECT', 'RENAME_TABLE', 'TRUNCATE_TABLE')"),
-        companies.user_clause(company),
-        companies.database_clause(company),
+        _actor_or_object,
     )
     return f"""
 SELECT

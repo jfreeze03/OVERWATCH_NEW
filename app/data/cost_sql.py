@@ -183,7 +183,7 @@ SELECT DATABASE_NAME,
 FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(DB_BYTES, 0)) > 0
+HAVING AVG(COALESCE(DB_BYTES, 0)) + AVG(COALESCE(FAILSAFE_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 
@@ -208,7 +208,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
+HAVING AVG(COALESCE(AVERAGE_DATABASE_BYTES, 0)) + AVG(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 
@@ -241,7 +241,7 @@ SELECT DATABASE_NAME,
 FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_DAILY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING SUM(COALESCE(DB_BYTES, 0)) > 0
+HAVING SUM(COALESCE(DB_BYTES, 0)) + SUM(COALESCE(FAILSAFE_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 
@@ -271,7 +271,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_STORAGE_USAGE_HISTORY
 WHERE {where}
 GROUP BY DATABASE_NAME
-HAVING SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) > 0
+HAVING SUM(COALESCE(AVERAGE_DATABASE_BYTES, 0)) + SUM(COALESCE(AVERAGE_FAILSAFE_BYTES, 0)) > 0
 ORDER BY DB_BYTES DESC
 """
 
@@ -437,13 +437,17 @@ def contract_consumed_credits(contract_start_date: str) -> str:
     text = str(contract_start_date or "").strip()
     if len(text) != 10 or text[4] != "-" or text[7] != "-" or not text.replace("-", "").isdigit():
         raise ValueError(f"contract_start_date must be YYYY-MM-DD, got {text!r}")
+    # C7 coverage: sum the contract window via IFF (no WHERE) so SOURCE_FIRST_DAY is
+    # the source's own earliest RETAINED day — the retention floor — NOT a
+    # contract-filtered MIN (which read a quiet-start contract as no-coverage: the
+    # exact r14 #8 trap the mart builder already avoids). The caller flags a gap only
+    # when SOURCE_FIRST_DAY is truly after the contract start (retention too short).
     return f"""
 SELECT
-    SUM({_BILLED}) AS CREDITS_BILLED_TO_DATE,
-    MIN(USAGE_DATE) AS FIRST_DAY,
+    SUM(IFF(USAGE_DATE >= DATE '{text}', {_BILLED}, 0)) AS CREDITS_BILLED_TO_DATE,
+    MIN(USAGE_DATE) AS SOURCE_FIRST_DAY,
     MAX(USAGE_DATE) AS LAST_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
-WHERE USAGE_DATE >= DATE '{text}'
 """
 
 
