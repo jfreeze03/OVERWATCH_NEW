@@ -155,3 +155,34 @@ def test_rec20_contract_exhaustion_complete_days_only():
     assert "SUM(CREDITS_BILLED), 0) / 30 FROM" not in sql
     # rec #2: the self-referential "same math as the alert block" drift comment is gone
     assert "Same math as the COST_CONTRACT_BREACH" not in sql
+
+
+# ---------------------------------------------------------------------------
+# rec 4 / added rec #3 — one effective window shared by the pool + every share
+# ---------------------------------------------------------------------------
+def test_rec3_resolve_effective_window():
+    from app.config import MAX_MART_WINDOW_DAYS
+    from app.data.common import resolve_effective_window
+    # clamps to the vs-prior half-window cap and excludes today (half-open)
+    eff, frag = resolve_effective_window(365)
+    assert eff == MAX_MART_WINDOW_DAYS // 2   # 365 -> 182
+    assert "< CURRENT_DATE()" in frag
+    assert "DATEADD('day', -182, CURRENT_DATE())" in frag
+    # below the cap passes through; column + max_days override honored
+    eff2, frag2 = resolve_effective_window(7, "x.DAY", max_days=90)
+    assert eff2 == 7 and "x.DAY >= DATEADD('day', -7, CURRENT_DATE())" in frag2
+
+
+def test_rec4_pool_and_shares_share_one_window():
+    from app.data import mart27_sql, mart_sql
+    # the dollar POOL and the allocation SHARE denominator resolve through the SAME
+    # helper: a share can no longer span 365d-with-today while the pool spans
+    # 182d-without-today, so per-entity ALLOCATED_USD reconciles to the pool.
+    pool = mart_sql.fact_warehouse_window_vs_prior(365, "ALFA")
+    share = mart27_sql.alloc_xdim_attribution(365, "USER", "ALFA")
+    for sql in (pool, share):
+        assert "DATEADD('day', -182, CURRENT_DATE())" in sql   # same clamped window
+        assert "< CURRENT_DATE()" in sql                        # both exclude today
+    # the live fallback denominator excludes today + shares the contract (90-day cap)
+    live = _src("app/data/cost_sql.py")
+    assert 'resolve_effective_window(days, "START_TIME", max_days=90)' in live

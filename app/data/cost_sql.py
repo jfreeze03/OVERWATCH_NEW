@@ -11,7 +11,7 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days, lag_offset_start
+from app.data.common import and_where, bounded_days, lag_offset_start, resolve_effective_window
 
 _BILLED = (
     "COALESCE(CREDITS_BILLED, GREATEST(0, COALESCE(CREDITS_USED, 0) "
@@ -107,14 +107,18 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
     'cost' the whole window). Database/schema filters and the dimension
     visibility rules only choose which rows DISPLAY — the denominator
     never moves, so a filtered view shows its true slice."""
-    days = bounded_days(days)
+    # rec 4: exclude today's partial and share the effective-window contract with the
+    # mart share + the dollar pool (resolve_effective_window), so the live fallback's
+    # denominator lines up too. Keep the 90-day cap here — this is a live QUERY_HISTORY
+    # scan, and the mart path (182d, credit-weighted) is the normal, preferred estimate.
+    days, _win = resolve_effective_window(days, "START_TIME", max_days=90)
     dim = "USER_NAME" if str(dimension).upper() == "USER_NAME" else "DATABASE_NAME"
     vis = (companies.user_clause(company) if dim == "USER_NAME"
            else companies.database_visibility_clause(company))
     from app.core.sqlsafe import contains_filter
 
     scope_where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        _win,
         "EXECUTION_STATUS = 'SUCCESS'",
         "WAREHOUSE_NAME IS NOT NULL",
         companies.warehouse_clause(company),

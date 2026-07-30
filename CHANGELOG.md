@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.93.0 — Codex R2 wave 5: one effective cost-allocation window (rec 4, app-only) (2026-07-30)
+
+**rec 4 (HIGH)** — per-entity cost attribution mis-reconciled because the warehouse
+dollar **pool** and the allocation **shares** used divergent windows: the pool
+(`fact_warehouse_window_vs_prior`) clamped 365→182 and **excluded** today, while the
+share denominator (`alloc_xdim_attribution`) clamped 365→400 and **included** today —
+so a 365-day share (with today's partial) was multiplied by a 182-day, today-excluded
+dollar total, mis-allocating each user's/database's cost.
+
+- **Added rec #3**: a new `common.resolve_effective_window(days)` is the single source
+  of truth — it clamps to the vs-prior half-window cap (`MAX_MART_WINDOW_DAYS // 2` =
+  182) and returns the **half-open `[today - eff_days, today)`** fragment (today
+  excluded). The dollar pool, the mart allocation share denominator, **and** the live
+  fallback denominator (`cost_sql.allocated_attribution`, kept at its 90-day
+  live-scan cap) all resolve through it, so the numbers reconcile on every path.
+
+Gates green: ruff, mypy, tests (+2 wave-5 locks). This closes the Codex R2 DO-FIRST
+block (A-score-1, rec 5, A-score-2, rec 20, rec 4 + the A-score-3/rec-10 riders).
+
 ## 4.92.0 — Codex R2 wave 4: canonical contract runway (rec 20, app-side) (2026-07-30)
 
 **rec 20 (HIGH)** — N11 fixed the contract projection on the Contract page, but the

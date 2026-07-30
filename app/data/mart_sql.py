@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from app.config import MAX_MART_WINDOW_DAYS, THRESHOLDS, core_object, mart_object
 from app.core.sqlsafe import sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 
 def _company_filter(company: str) -> str:
@@ -227,8 +227,10 @@ def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     # This builder scans 2*days (current + prior equal windows). Cap at HALF the
     # mart max so the pair stays within retention and the prior window has data —
     # a naive bump to 365 would scan 730d and read the (empty, post-rebuild) prior
-    # half as a false 100% swing (audit Batch A verify).
-    days = bounded_days(days, MAX_MART_WINDOW_DAYS // 2)
+    # half as a false 100% swing (audit Batch A verify). rec 4: the CURRENT window
+    # [today-days, today) IS the shared effective window (resolve_effective_window)
+    # the allocation shares must span, so pool dollars and share denominators reconcile.
+    days, _ = resolve_effective_window(days)   # clamped MAX_MART_WINDOW_DAYS // 2, today-excluded
     where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())",
              "DAY < CURRENT_DATE()"]   # equal-length windows, exclude today (Codex P0-3)
     if str(company).upper() != "ALL":

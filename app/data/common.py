@@ -16,6 +16,25 @@ def bounded_days(days: object, maximum: int = 90) -> int:
     return clamp_days(days, maximum)
 
 
+def resolve_effective_window(days: object, column: str = "DAY",
+                             max_days: int | None = None) -> tuple[int, str]:
+    """rec 4 / added rec #3: the ONE half-open effective window the warehouse dollar
+    POOL and every allocation DENOMINATOR must share, so per-entity allocation shares
+    reconcile to the dollar pool instead of applying a 365-day share to a 182-day pool
+    (or including today's partial on one side and not the other).
+
+    Clamps ``days`` to ``max_days`` (default ``MAX_MART_WINDOW_DAYS // 2`` — the
+    vs-prior half-window cap the pool uses so its current+prior pair fits in retention)
+    and EXCLUDES today (partial metering). Returns ``(eff_days, where_fragment)`` where
+    the fragment bounds ``column`` to the half-open ``[today - eff_days, today)``."""
+    from app.config import MAX_MART_WINDOW_DAYS
+    cap = (MAX_MART_WINDOW_DAYS // 2) if max_days is None else max_days
+    eff = bounded_days(days, cap)
+    frag = (f"{column} >= DATEADD('day', -{eff}, CURRENT_DATE()) "
+            f"AND {column} < CURRENT_DATE()")
+    return eff, frag
+
+
 def lag_offset_start(days: int, lag_hours: int = 24) -> str:
     """Window start that ends before the ACCOUNT_USAGE completeness horizon.
 

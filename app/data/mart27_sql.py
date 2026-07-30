@@ -12,7 +12,7 @@ from __future__ import annotations
 from app import companies
 from app.config import mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 
 def _company_arm(company: str, column: str = "COMPANY") -> str:
@@ -760,13 +760,17 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     database filter and dimension visibility rules only pick which rows
     DISPLAY. No schema grain here by design — schema-filtered views stay on
     the live builder. Qualified (x.) per the alias-shadow rule."""
-    days = bounded_days(days, 400)
+    # rec 4: the share DENOMINATOR must span the SAME half-open window as the
+    # warehouse dollar POOL it will be multiplied by (spend.py), else a 365-day share
+    # (including today's partial) applied to the pool's clamped 182-day, today-excluded
+    # dollars mis-attributes per-entity cost. resolve_effective_window is the one truth.
+    days, _win = resolve_effective_window(days, "x.DAY")
     dim = str(dimension or "USER").upper()
     if dim not in ("USER", "DATABASE"):
         raise ValueError(f"dimension must be USER/DATABASE, got {dimension!r}")
     dim_col = "x.USER_NAME" if dim == "USER" else "x.DATABASE_NAME"
     scope_where = and_where(
-        f"x.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        _win,
         companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
     )
     vis = (companies.user_clause(company, "KEY_NAME") if dim == "USER"
