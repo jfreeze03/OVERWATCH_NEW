@@ -48,7 +48,10 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     month_start = today.replace(day=1)
     mtd = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] <= today)]["USD"].sum())
 
-    baseline = frame[frame["DAY"] <= today].tail(_BASELINE_DAYS)
+    # N1: today is a PARTIAL day — averaging it into the daily rate biases every
+    # projection low (same class as the pace/anomaly partial-day fixes). MTD above
+    # keeps today's actual; the forward rate is built only from completed days.
+    baseline = frame[frame["DAY"] < today].tail(_BASELINE_DAYS)
     if len(baseline) < _MIN_POINTS:
         return MonthEndForecast(
             ok=False,

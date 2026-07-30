@@ -13,7 +13,7 @@ import streamlit as st
 from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run, run_batch
-from app.core.state import filters
+from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import triage_queue
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
@@ -206,20 +206,32 @@ def _freshness_board() -> None:
         st.info("Freshness view exists but has no rows — have the loader tasks run yet?")
         return
     df = res.df.copy()
+    # C3: a source that has NEVER loaded comes back with a NULL LAST_LOAD_TS →
+    # NULL HOURS_SINCE_LOAD → safe_float 0, which would render as "0.0h, fresh".
+    # A source with no data is not fresh — it is the most broken state there is.
+    df["NOT_LOADED"] = df["LAST_LOAD_TS"].isna()
     df["HOURS_SINCE_LOAD"] = df["HOURS_SINCE_LOAD"].map(safe_float)
 
-    def _stale(row) -> bool:
+    def _status(row) -> str:
+        if row["NOT_LOADED"]:
+            return "NOT LOADED"
         limit = (THRESHOLDS["stale_daily_fact_hours"]
                  if "DAILY" in str(row["SOURCE_NAME"]) or "METERING" in str(row["SOURCE_NAME"])
                  else THRESHOLDS["stale_fact_hours"])
-        return row["HOURS_SINCE_LOAD"] > limit
+        return "STALE" if row["HOURS_SINCE_LOAD"] > limit else "OK"
 
-    df["STALE"] = df.apply(_stale, axis=1)
-    stale_count = int(df["STALE"].sum())
+    df["STATUS"] = df.apply(_status, axis=1)
+    # Never-loaded first, then oldest-relative drift, so the worst is at the top.
+    df = df.sort_values(["NOT_LOADED", "HOURS_SINCE_LOAD"], ascending=[False, False])
+    not_loaded = int(df["NOT_LOADED"].sum())
+    stale_count = int((df["STATUS"] == "STALE").sum())
+    if not_loaded:
+        st.error(f"{not_loaded} source(s) have NEVER loaded — their panels are blank or wrong "
+                 "until the loader task runs. Check Admin → Migrations & freshness.")
     if stale_count:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
     styled_table(
-        df[["SOURCE_NAME", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD", "STALE"]],
+        df[["SOURCE_NAME", "STATUS", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD"]],
         column_config={"HOURS_SINCE_LOAD": st.column_config.NumberColumn("Hours since load", format="%.1f")},
     )
 
@@ -233,6 +245,19 @@ def render() -> None:
     page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.", icon_name="control",
                 scope_note=f"{company} · last {days} days"
                            + (f" · {f['database']}" if f["database"] else ""))
+
+    # N2: undelivered-critical banner up top — the DBA's first triage question is
+    # "did last night's page actually reach anyone?". Rides the shell-shared
+    # health_strip cache entry (same SQL + key as the sidebar), zero extra queries.
+    _strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+                 source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    if _strip.ok and not _strip.empty:
+        _sv = {str(r["METRIC"]): str(r["VALUE"]) for _, r in _strip.df.iterrows()}
+        _und = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
+        if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery) — "
+                              "check delivery →", key="cr_undelivered", type="primary",
+                              use_container_width=True):
+            request_navigation("Alerts", "Native delivery")
 
     # ---- pulse (since yesterday 00:00) ---------------------------------------
     # Fact-first pulse (Codex #4): the hourly fact answers this without
@@ -426,10 +451,21 @@ def render() -> None:
                     + ("task facts not installed; " if not tasks.ok else "")
                     + ("warehouse spend fact unavailable — spend anomalies not scanned." if not wh_daily.ok else ""))
     else:
-        styled_table(queue)
-        st.caption(f"{len(queue)} item(s), ranked by severity. Sources: alerts, task facts, spend anomalies."
+        # N3: the DBA's one morning list is now actionable — select a row to jump
+        # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
+        _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
+                 if c in queue.columns]
+        sel_q = selectable_table(queue[_disp], key="cr_triage_sel", height=260)
+        st.caption(f"{len(queue)} item(s), ranked by severity — select one to open its page. "
+                   "Sources: alerts, task facts, spend anomalies."
                    + (" Task failures follow the database filter; alerts and "
                       "spend anomalies don't have database grain." if f["database"] else ""))
+        if sel_q is not None:
+            _qr = queue.iloc[int(sel_q)]
+            _dest = {"Alert": ("Alerts", "Open events"),
+                     "Task failure": ("Operations", ""),
+                     "Spend anomaly": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
+            request_navigation(_dest[0], _dest[1])
 
     # ---- Incident correlation timeline -----------------------------------------
     st.subheader("Incident correlation timeline")

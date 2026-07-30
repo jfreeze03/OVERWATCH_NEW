@@ -123,7 +123,10 @@ def _year_projection_strip(settings: dict) -> None:
     ai_col = "CREDITS_BILLED_AI" if _split else None
     ytd_other = float(cydf[other_col].map(safe_float).sum())
     ytd_ai = float(cydf[ai_col].map(safe_float).sum()) if ai_col else 0.0
-    tail = cydf[cydf["DAY"] >= today - timedelta(days=30)]
+    # N1: today is partial — dividing trailing spend that includes it by a
+    # day-count that treats today as whole biases the daily burn (and the
+    # year projection) low. YTD keeps today's actual; the burn uses whole days.
+    tail = cydf[(cydf["DAY"] >= today - timedelta(days=30)) & (cydf["DAY"] < today)]
     n_tail = max(len(tail), 1)
     burn_other = float(tail[other_col].map(safe_float).sum()) / n_tail
     burn_ai = (float(tail[ai_col].map(safe_float).sum()) / n_tail) if ai_col else 0.0
@@ -414,6 +417,14 @@ def _contract_tab(settings: dict) -> None:
         rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
         ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
         bdf = burn_res.df.copy()
+        # N1: exclude today's partial day so the trailing daily burn (and every
+        # scenario built on it) averages whole days only — a partial today drags
+        # the mean low and under-sizes the recommended commit.
+        if "DAY" in bdf.columns:
+            _bd = pd.to_datetime(bdf["DAY"], errors="coerce").dt.date
+            _whole = bdf[_bd < account_today()]
+            if not _whole.empty:  # keep today only if it is the sole row we have
+                bdf = _whole
         # C1: derive one effective $/credit from the observed 30d compute+AI mix
         # and price the daily burn, the extra-load what-if, and the remaining
         # commitment all on it — so the planner stays internally consistent and

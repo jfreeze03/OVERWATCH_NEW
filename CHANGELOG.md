@@ -1,5 +1,59 @@
 # Changelog
 
+## 4.82.0 — DO-FIRST wave: KPI-trust + morning-surface actionability (app-only) (2026-07-30)
+
+The ten cheapest, highest-trust fixes from the recommendations review
+(`docs/reviews/RECS_REVIEW_2026-07-30.md`): the two headline-KPI trust bugs
+(fail-open score, low-biased projection) and the three morning-surface dead-ends
+(undelivered criticals, triage actionability, score drill). All app-only /
+read-side — no migration.
+
+- **C1 (HIGH) — platform score no longer fails OPEN.** An outage that suppressed
+  the health signals used to remove their penalties, so a degraded platform could
+  read 100/Healthy — the cardinal monitoring sin. `platform_score` now takes an
+  `available` coverage set; when a required source (exec board, alerts) did not
+  load it returns `Incomplete`/0 with an "Inputs unavailable" driver instead of a
+  false green. `overview.py` computes coverage from the actual reads and renders
+  the KPI as *Incomplete* when gated.
+- **N1 (HIGH) — forecasts stop averaging today's PARTIAL day into the rate.**
+  Month-end (`forecast.py`), the year projection, and the renewal planner
+  (`cost_parts/contract.py`) built their forward daily rate over a window that
+  included today's incomplete spend, biasing every projection low. MTD keeps
+  today's actual; the forward rate now uses complete days only (`DAY < today`).
+- **C3 / N14 / N15 (MEDIUM) — freshness tells the truth at deploy.** A
+  never-loaded source (NULL `LAST_LOAD_TS`) used to render "0.0h, fresh". The
+  Control Room board now shows a distinct **NOT LOADED** status (sorted to the
+  top, counted, error-banner), the score's `STALE_SOURCES` count includes NULL-ts
+  sources, and the sidebar/Brief "stalest telemetry" badge is **cadence-aware**
+  (a daily fact at 7h is on time, an hourly fact is not) and **names the source**
+  instead of only its age.
+- **N2 (HIGH) — undelivered criticals surface on the morning surfaces.** A
+  critical that is 30+ min old with no delivery row (it paged nobody) was buried
+  in Alerts → delivery SLO. The always-on `health_strip` now carries
+  `UNDELIVERED_CRITICAL`, and the sidebar, Brief, and Control Room show a
+  one-click "N critical(s) reached nobody →" banner into the delivery view.
+- **N3 (HIGH) — Control Room triage queue is actionable.** The morning list was a
+  read-only wall that dropped `EVENT_ID`/`RULE_ID`. The queue now carries those
+  ids and is a `selectable_table`: selecting a row jumps to the page that owns it
+  (alerts → Alerts, task failure → Operations, spend anomaly → Cost & Contract).
+- **C4 + C7 (LOW) — alert KPI tiles count uncapped.** The Open critical/high/total
+  tiles were derived from the 500-row feed, undercounting in exactly the storm
+  they exist to flag. A single `open_alert_severity_counts` `COUNT_IF` aggregate
+  now feeds the tiles (feed-derived counts remain the fallback).
+- **N6 (MEDIUM) — boss chart current-month uses `account_today()`** (America/
+  Chicago) instead of server UTC wall-clock, so it no longer jumps a month early
+  on a month-end evening.
+- **N8 (MEDIUM) — score-driver expander is now a prescription.** Each deduction
+  gets an "Investigate →" button routing to the page that can act on it
+  (`_SCORE_DRIVER_NAV`), reusing the existing navigation plumbing.
+- **N9 (MEDIUM) — small-frame CSV serialized once, not every rerun.** Tables of
+  4–200 rows re-encoded a full CSV on every 30s rerun (the large-frame path was
+  fixed in T1.6; the small path never was). Now memoized by content fingerprint,
+  one-click UX preserved.
+
+Gates green: ruff, mypy (pure layers), 1492 tests (+20 wave locks in
+`tests/test_dofirst_wave.py`).
+
 ## 4.81.0 — rename the app warehouse WH_ALFA_OVERWATCH → WH_ALFA_ADMIN (rebuild required) (2026-07-30)
 
 Owner renamed the app's dedicated warehouse in Snowflake. Renamed every reference

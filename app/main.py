@@ -379,9 +379,20 @@ def _health_strip(vals: dict | None = None) -> None:
             request_navigation("Alerts", "Open events")
     else:
         _strip_line("OK", "No open criticals")
+    # N2: a critical that paged nobody is worse than a busy pager — surface it
+    # loudly on the shell, one click to the delivery view.
+    und, und_state = vals.get("UNDELIVERED_CRITICAL", ("0", "OK"))
+    if und_state == "BAD" and st.button(f"{und} critical(s) reached nobody →",
+                                        key="strip_undelivered", use_container_width=True,
+                                        type="primary"):
+        request_navigation("Alerts", "Native delivery")
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
-    if stale != "-1":
-        _strip_line(stale_state, f"Stalest telemetry: {stale}h")
+    stale_name = vals.get("STALEST_SOURCE_NAME", ("", ""))[0]
+    _src = f"{stale_name} " if stale_name and stale_name != "none" else ""
+    if stale == "-1" and stale_state == "BAD":   # N15: worst source has never loaded
+        _strip_line("BAD", f"Stalest telemetry: {_src}never loaded")
+    elif stale != "-1":
+        _strip_line(stale_state, f"Stalest telemetry: {_src}{stale}h")
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     if mtd:
         _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
@@ -404,7 +415,8 @@ def _persistent_status_bar(vals: dict | None = None) -> None:
          "icon": "refresh", "sev": ""},
         {"k": "Open criticals", "v": crit, "icon": "alerts",
          "sev": "bad" if crit not in ("0", "") else "ok"},
-        {"k": "Telemetry age", "v": (f"{stale}h" if stale != "-1" else "n/a"),
+        {"k": "Telemetry age",
+         "v": (f"{stale}h" if stale != "-1" else ("none" if stale_state == "BAD" else "n/a")),
          "icon": "clock", "sev": _sev.get(stale_state, "")},
     ]
     if mtd:

@@ -362,6 +362,26 @@ LIMIT {limit}
 """
 
 
+def open_alert_severity_counts(company: str = "ALL") -> str:
+    """C4/C7: TRUE open+ack counts by severity in ONE aggregate row, so the Alerts
+    KPI tiles never undercount when a storm exceeds the 500-row feed cap. Same
+    STATUS + company predicate as open_alert_events() so the numbers reconcile."""
+    where = ["STATUS IN ('OPEN', 'ACK')"]
+    comp = str(company or "ALL").strip()
+    if comp.upper() != "ALL":
+        where.append(f"(COMPANY = {sql_literal(comp)} OR UPPER(COMPANY) = 'ALL')")
+    return f"""
+SELECT
+    COUNT_IF(UPPER(SEVERITY) = 'CRITICAL') AS CRIT,
+    COUNT_IF(UPPER(SEVERITY) = 'HIGH')     AS HIGH,
+    COUNT_IF(UPPER(SEVERITY) = 'MEDIUM')   AS MED,
+    COUNT_IF(UPPER(SEVERITY) NOT IN ('CRITICAL', 'HIGH', 'MEDIUM')) AS LOW,
+    COUNT(*) AS TOTAL
+FROM {core_object("ALERT_EVENTS")}
+WHERE {and_where(*where)}
+"""
+
+
 def alert_event_history(days: int) -> str:
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     return f"""
@@ -504,19 +524,49 @@ LIMIT {limit}
 def health_strip() -> str:
     """Three always-on sidebar badges in one cached statement: open
     criticals, stalest telemetry source, month-to-date billed credits."""
+    # N14/N15/C3: freshness is judged RELATIVE TO EACH SOURCE'S OWN CADENCE — a
+    # daily fact at 7h is on time, an hourly fact at 7h is not — and a
+    # never-loaded source (NULL ts) is maximally urgent (finite 1e9 sentinel so
+    # it wins the pick without NULL-poisoning the aggregates).
+    _age = "DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0"
+    _lim = ("IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', "
+            f"{THRESHOLDS['stale_daily_fact_hours']}, {THRESHOLDS['stale_fact_hours']})")
+    _urgency = f"IFF(LAST_LOAD_TS IS NULL, 1e9, {_age} / {_lim})"
     return f"""
 SELECT 'OPEN_CRITICAL' AS METRIC, TO_VARCHAR(COUNT(*)) AS VALUE,
        IFF(COUNT(*) > 0, 'BAD', 'OK') AS STATE
 FROM {core_object("ALERT_EVENTS")}
 WHERE STATUS = 'OPEN' AND SEVERITY = 'CRITICAL'
 UNION ALL
+-- N2: OPEN criticals that are 30+ min old and have NO delivery row — a page that
+-- reached nobody. Buried in Alerts -> delivery SLO before; now always-on so the
+-- morning surfaces cannot show green while a critical silently failed to route.
+-- Tiny scan (open criticals only), same predicate as delivery_slo_summary's
+-- UNDELIVERED_CRITICALS_30M.
+SELECT 'UNDELIVERED_CRITICAL', TO_VARCHAR(COUNT(*)),
+       IFF(COUNT(*) > 0, 'BAD', 'OK')
+FROM {core_object("ALERT_EVENTS")} e
+WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
+  AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+  AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
+                  WHERE d.EVENT_ID = e.EVENT_ID)
+UNION ALL
+-- STALEST: the single worst source by cadence-ratio (never-loaded ranks above
+-- everything). VALUE is that source's age in hours (-1 when it has never loaded,
+-- so 'BAD' + -1 reads as "the worst source has no data"); NAME (below) says which.
 SELECT 'STALEST_SOURCE_H',
-       TO_VARCHAR(COALESCE(ROUND(MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0, 1), -1)),
-       CASE WHEN MAX(LAST_LOAD_TS) IS NULL THEN 'MUTED'
-            WHEN MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0 > 26 THEN 'BAD'
-            WHEN MAX(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP())) / 60.0 > 3 THEN 'WARN'
+       TO_VARCHAR(COALESCE(ROUND(MAX_BY(f.AGE_H, f.URGENCY), 1), -1)),
+       CASE WHEN COUNT(*) = 0 THEN 'MUTED'
+            WHEN MAX(f.URGENCY) > 1 THEN 'BAD'
+            WHEN MAX(f.URGENCY) > 0.75 THEN 'WARN'
             ELSE 'OK' END
-FROM {core_object("SOURCE_FRESHNESS_STATE")}
+FROM (SELECT SOURCE_NAME, {_age} AS AGE_H, {_urgency} AS URGENCY
+      FROM {core_object("SOURCE_FRESHNESS_STATE")}) f
+UNION ALL
+SELECT 'STALEST_SOURCE_NAME',
+       COALESCE(MAX_BY(f.SOURCE_NAME, f.URGENCY), 'none'), 'INFO'
+FROM (SELECT SOURCE_NAME, {_urgency} AS URGENCY
+      FROM {core_object("SOURCE_FRESHNESS_STATE")}) f
 UNION ALL
 SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
 FROM {mart_object("FACT_METERING_DAILY")}
@@ -539,12 +589,10 @@ UNION ALL
 -- Triage #3: stale-source COUNT for the live platform score (the strip's MAX-age
 -- arm can't say how many are stale). Same cadence rule as the Control Room
 -- freshness board: DAILY/METERING sources stale past {THRESHOLDS["stale_daily_fact_hours"]}h, hourly past
--- {THRESHOLDS["stale_fact_hours"]}h. A never-loaded source (NULL LAST_LOAD_TS) is not counted, matching
--- the board's safe_float(NULL)=0 behavior.
+-- {THRESHOLDS["stale_fact_hours"]}h. C3: a never-loaded source (NULL LAST_LOAD_TS) counts as stale —
+-- it is a source with NO data at all, which is worse than late, not better.
 SELECT 'STALE_SOURCES',
-       TO_VARCHAR(COUNT_IF(DATEDIFF('minute', LAST_LOAD_TS, CURRENT_TIMESTAMP()) / 60.0 >
-                  IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%',
-                      {THRESHOLDS["stale_daily_fact_hours"]}, {THRESHOLDS["stale_fact_hours"]}))),
+       TO_VARCHAR(COUNT_IF(LAST_LOAD_TS IS NULL OR {_age} > {_lim})),
        'INFO'
 FROM {core_object("SOURCE_FRESHNESS_STATE")}
 """

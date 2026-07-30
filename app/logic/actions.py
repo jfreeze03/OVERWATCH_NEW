@@ -90,6 +90,8 @@ def triage_queue(
     morning-triage queue for the Control Room. (Restored 2026-07-13 — the
     owner meant resource monitors, not task monitoring.)"""
     rows: list[dict] = []
+    # N3: carry EVENT_ID / RULE_ID (empty for non-alert kinds) so the Control Room
+    # queue can link a row back to its origin instead of being a read-only wall.
     if alerts is not None and not alerts.empty:
         for _, r in alerts.iterrows():
             rows.append({
@@ -100,6 +102,8 @@ def triage_queue(
                 "DETAIL": str(r.get("DETAIL", ""))[:220],
                 "SOURCE": "ALERT_EVENTS",
                 "RAISED_AT": r.get("RAISED_AT"),
+                "EVENT_ID": str(r.get("EVENT_ID", "") or ""),
+                "RULE_ID": str(r.get("RULE_ID", "") or ""),
             })
     if task_failures is not None and not task_failures.empty:
         for _, r in task_failures.iterrows():
@@ -117,6 +121,8 @@ def triage_queue(
                 "DETAIL": str(r.get("LAST_ERROR", "") or "")[:220],
                 "SOURCE": "FACT_TASK_DAILY",
                 "RAISED_AT": r.get("DAY"),
+                "EVENT_ID": "",
+                "RULE_ID": "",
             })
     rows.extend({
         "SEVERITY": "HIGH" if abs(a.get("z", 0)) >= 5 else "MEDIUM",
@@ -126,6 +132,8 @@ def triage_queue(
         "DETAIL": f"Daily spend ${a.get('value', 0):,.0f} vs robust baseline.",
         "SOURCE": "FACT_WAREHOUSE_DAILY",
         "RAISED_AT": None,
+        "EVENT_ID": "",
+        "RULE_ID": "",
     } for a in anomalies or [])
     if not rows:
         return pd.DataFrame()

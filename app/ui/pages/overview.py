@@ -18,7 +18,7 @@ import streamlit as st
 from app.core.errors import safe_page
 from app.core.query import run
 from app.core.result import QueryResult
-from app.core.state import filters
+from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic import scoring
 from app.logic.actions import rank_actions
@@ -43,6 +43,21 @@ from app.ui.components import (
 )
 
 _PAGE = "Overview"
+
+# N8: each score-deduction driver → the page that lets you act on it. Off-profile
+# targets are clamped to Overview by consume_pending_navigation (B8), so this is safe.
+_SCORE_DRIVER_NAV = {
+    "Over budget": "Cost & Contract",
+    "Critical alerts": "Alerts",
+    "High alerts": "Alerts",
+    "Query failures": "Operations",
+    "Task failures": "Operations",
+    "Queueing": "Operations",
+    "Remote spill": "Operations",
+    "Stale telemetry": "Control Room",
+    "Owner queue": "Alerts",
+    "Inputs unavailable": "Admin",
+}
 
 
 def _board_metric(board: pd.DataFrame, metric: str, column: str = "VALUE") -> float:
@@ -285,6 +300,18 @@ def render() -> None:
         _adf = actions_res.df
         open_high_actions = int(((_adf["STATUS"].astype(str).str.upper() == "OPEN")
                                  & (_adf["SEVERITY"].astype(str).str.upper() == "HIGH")).sum())
+    # C1: tell the score which health-bearing sources actually LOADED. If the exec
+    # board or the alerts read failed, their signals are silently 0 (an outage would
+    # otherwise raise the score) — the score reports Incomplete instead of a false green.
+    _available = set()
+    if board_res.usable():
+        _available.add("board")
+    if alerts_res.ok:
+        _available.add("alerts")
+    if _hs.ok:
+        _available.add("health")
+    if actions_res.ok:
+        _available.add("actions")
     score = scoring.platform_score(signals={
         "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
         "critical_alerts": critical_alerts,
@@ -295,11 +322,13 @@ def render() -> None:
         "spill_gb": spill_gb,
         "stale_sources": stale_sources,
         "open_high_actions": open_high_actions,
-    }, weights=scoring.resolve_weights(settings))
+    }, weights=scoring.resolve_weights(settings), available=_available)
 
     # ---- KPI row -----------------------------------------------------------
     _spend_spark = (daily["USD"].tail(14).tolist() if not daily.empty else None)
-    _score_sev = ("ok" if score.score >= 85 else "warn" if score.score >= 70 else "bad")
+    _score_incomplete = score.state == "Incomplete"   # C1
+    _score_sev = ("warn" if _score_incomplete
+                  else "ok" if score.score >= 85 else "warn" if score.score >= 70 else "bad")
     kpis = [
         {
             "label": f"Spend, last {days}d ({company})",
@@ -332,14 +361,17 @@ def render() -> None:
         },
         {
             "label": "Platform score",
-            "value": f"{score.score}/100",
-            "delta": score.state,
+            "value": "Incomplete" if _score_incomplete else f"{score.score}/100",
+            "delta": "inputs unavailable" if _score_incomplete else score.state,
             "delta_color": "off",
             "severity": _score_sev,
-            "spark": (score_series["SCORE"].tail(14).tolist()
+            "spark": (None if _score_incomplete else score_series["SCORE"].tail(14).tolist()
                       if not score_series.empty else None),
-            "help": "Every deduction is itemized below the trend. "
-                    "Sparkline = 14d retro score from facts.",
+            "help": ("Exec board or alerts didn't load — a real score would be a lie while "
+                     "health signals are missing (see the deductions below)."
+                     if _score_incomplete
+                     else "Every deduction is itemized below the trend. "
+                          "Sparkline = 14d retro score from facts."),
         },
     ]
     kpi_row(kpis)
@@ -358,7 +390,7 @@ def render() -> None:
     if _mres.ok and not _mres.empty:
         _md = _mres.df.copy()
         _md["USD"] = _md["CREDITS"].map(safe_float) * rate
-        _cur = pd.Timestamp.now().strftime("%Y-%m")
+        _cur = account_today().strftime("%Y-%m")   # N6: account time, not the UTC server clock
         charts.monthly_stacked_usd(_md, "MONTH", "WAREHOUSE_NAME", "USD",
                                    partial_month=_cur)
         _tot = _md.groupby("MONTH")["USD"].sum().sort_index()
@@ -431,8 +463,14 @@ def render() -> None:
 
     if score.drivers:
         with st.expander(f"Platform score deductions ({score.score}/100 · {score.state})"):
-            for d in score.drivers:
-                st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
+            # N8: every deduction maps to a page — make the highest-value screen
+            # actionable (diagnosis + one-click prescription), reusing the nav plumbing.
+            for _i, d in enumerate(score.drivers):
+                _c1, _c2 = st.columns([6, 1])
+                _c1.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
+                _dest = _SCORE_DRIVER_NAV.get(d.driver)
+                if _dest and _c2.button("Investigate →", key=f"score_drv_{_i}", type="tertiary"):
+                    request_navigation(_dest)
 
     if not score_series.empty:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):

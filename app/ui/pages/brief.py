@@ -21,6 +21,19 @@ from app.ui.components import kpi_row, load_settings, page_header, styled_table
 _PAGE = "Brief"
 
 
+def _stalest_label(vals: dict) -> str:
+    """Stalest-telemetry badge text: source name + age, or 'name never loaded'.
+
+    The strip's STALEST_SOURCE_H is -1 exactly when the worst source has no data
+    at all (C3); STALEST_SOURCE_NAME says which one (N15)."""
+    hours = str(vals.get("STALEST_SOURCE_H", "?"))
+    name = str(vals.get("STALEST_SOURCE_NAME", "") or "")
+    src = f"{name} " if name and name != "none" else ""
+    if hours == "-1":
+        return f"{src}never loaded" if src else "no data yet"
+    return f"{src}{hours}h"
+
+
 @safe_page(_PAGE)
 def render() -> None:
     page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
@@ -85,7 +98,9 @@ def render() -> None:
          "severity": "" if strip_up else "warn",
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
         {"label": "Stalest telemetry",
-         "value": f"{vals.get('STALEST_SOURCE_H', '?')}h" if strip_up else "unknown",
+         # N15: name the source, not just the age — "which one?" is the DBA's
+         # first question. N14: the strip's age arm is already cadence-aware.
+         "value": _stalest_label(vals) if strip_up else "unknown",
          "severity": "" if strip_up else "warn"},
     ]
     if not strip_up:
@@ -161,6 +176,13 @@ def render() -> None:
         drow = digest.df.iloc[0]
         with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=True):
             st.markdown(str(drow.get("BODY") or ""))
+
+    # N2: a critical that paged nobody hides behind a green board — call it out
+    # on the one surface a half-awake on-call actually reads.
+    _und = int(safe_float(vals.get("UNDELIVERED_CRITICAL", "0"))) if strip_up else 0
+    if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody — check delivery →",
+                          key="brief_undelivered", type="primary", use_container_width=True):
+        request_navigation("Alerts", "Native delivery")
 
     st.markdown("**Fires**")
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse

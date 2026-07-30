@@ -669,9 +669,27 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             seq = int(st.session_state.get("_ow_dl_seq", 0))
             st.session_state["_ow_dl_seq"] = seq + 1
             if len(df) <= 200:
-                # Small frame: CSV cost is negligible; keep one-click export.
+                # N9: keep one-click export, but serialize ONCE per content instead
+                # of re-encoding the frame on every 30s rerun (the large-frame path
+                # already memoizes; the small path re-shipped the full CSV each pass).
+                # The fingerprint guard means a stale slot never serves wrong bytes.
+                _fp = _download_fingerprint(df)
+                _cache = st.session_state.get("_ow_dlsmall")
+                if not isinstance(_cache, dict):
+                    _cache = {}
+                    st.session_state["_ow_dlsmall"] = _cache
+                if len(_cache) > 64:      # bound memory; a rare re-encode is harmless
+                    _cache.clear()
+                _dlk = f"{key or ''}_{seq}"
+                _slot = _cache.get(_dlk)
+                if (isinstance(_slot, dict) and _slot.get("fp") == _fp
+                        and isinstance(_slot.get("bytes"), (bytes, bytearray))):
+                    _csv = bytes(_slot["bytes"])
+                else:
+                    _csv = df.to_csv(index=False).encode("utf-8")
+                    _cache[_dlk] = {"fp": _fp, "bytes": _csv}
                 # Downloads are frontend-only, no rerun (r19 #20).
-                st.download_button("⬇", df.to_csv(index=False).encode("utf-8"),
+                st.download_button("⬇", _csv,
                                    file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                    on_click="ignore",

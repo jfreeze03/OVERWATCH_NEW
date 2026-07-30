@@ -476,18 +476,35 @@ def render() -> None:
                  key=f"alert_events_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
                  else f"ALERT_EVENTS ({company} + account-level)")
-    if events.ok:
-        sev = events.df["SEVERITY"].astype(str).str.upper() if not events.empty else None
-        crit_n = int((sev == "CRITICAL").sum()) if sev is not None else 0
-        high_n = int((sev == "HIGH").sum()) if sev is not None else 0
+    # C4/C7: count severities with a single uncapped COUNT_IF aggregate — the
+    # 500-row feed below undercounts the tiles exactly when it matters most (a
+    # storm of >500 open events). The feed-derived counts remain the fallback.
+    counts = run(mart_sql.open_alert_severity_counts(company), page=_PAGE,
+                 key=f"alert_counts_{company}", tier="live",
+                 source="ALERT_EVENTS (COUNT_IF by severity, uncapped)")
+    if counts.usable():
+        _c0 = counts.df.iloc[0]
+        crit_n = int(safe_float(_c0.get("CRIT")))
+        high_n = int(safe_float(_c0.get("HIGH")))
+        total_n = int(safe_float(_c0.get("TOTAL")))
+    elif events.ok and not events.empty:
+        _sev = events.df["SEVERITY"].astype(str).str.upper()
+        crit_n = int((_sev == "CRITICAL").sum())
+        high_n = int((_sev == "HIGH").sum())
+        total_n = len(events.df)
+    else:
+        crit_n = high_n = total_n = 0
+    if counts.usable() or events.ok:
         kpi_row([
             {"label": "Open critical", "value": f"{crit_n}",
              "severity": "bad" if crit_n else "ok",
              "delta_color": "inverse" if crit_n else "off"},
             {"label": "Open high", "value": f"{high_n}",
              "severity": "warn" if high_n else "ok"},
-            {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}",
-             "help": "Open events in the feed (capped at 500, severity-ranked then newest).",
+            {"label": "Open total", "value": f"{total_n}",
+             "help": ("True open+ack count across all severities. The feed table below "
+                      "shows the 500 most severe/newest; tiles count every open event."
+                      if total_n > 500 else "Open + acknowledged events across all severities."),
              "severity": "info"},
         ])
 

@@ -61,7 +61,13 @@ def resolve_weights(settings: dict | None) -> dict:
     return weights
 
 
-def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
+#: Sources whose failure silently zeros health penalties — the score is only
+#: trustworthy when these loaded. Passed via ``available`` from the caller.
+REQUIRED_SIGNAL_SOURCES = frozenset({"board", "alerts"})
+
+
+def platform_score(signals: dict, weights: dict | None = None,
+                   available: set[str] | None = None) -> PlatformScore:
     """Score 0-100 from a signals dict. Missing signals simply add no penalty.
 
     Expected keys (all optional):
@@ -69,7 +75,18 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
       queue_minutes, spill_gb, stale_sources, open_high_actions
     Weights come from resolve_weights(settings) so executives can ask "why is
     a critical worth N points?" and get "because we set it" — not magic.
+
+    C1: a *failed* read (vs a legitimate zero) removes that source's penalty, so
+    an outage that suppresses real failures/alerts would IMPROVE the score — the
+    cardinal monitoring sin. When ``available`` (the set of source keys that
+    actually loaded) is provided and a health-bearing source (exec board, alerts)
+    is missing, the score is reported ``Incomplete`` rather than a false green.
     """
+    if available is not None and not REQUIRED_SIGNAL_SOURCES.issubset(available):
+        missing = ", ".join(sorted(REQUIRED_SIGNAL_SOURCES - set(available)))
+        return PlatformScore(score=0, state="Incomplete",
+                             drivers=(ScoreDriver("Inputs unavailable", 0.0,
+                                                  f"Health signals did not load: {missing}."),))
     w = dict(DEFAULT_WEIGHTS)
     w.update(weights or {})
     drivers: list[ScoreDriver] = []
