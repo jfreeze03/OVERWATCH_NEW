@@ -56,6 +56,21 @@ def test_t1_6_csv_prep_is_page_and_content_keyed():
     assert "ow_dlprep_{key or ''}_{seq}" not in cmp                   # positional key gone
 
 
+# --- T1.4: change-impact drill scans gated behind selection/toggle -----------
+
+def test_t1_4_change_impact_drills_are_gated():
+    op = _read("app/ui/pages/operations.py")
+    # warehouse 28d history runs only on an explicit row selection, historical tier
+    assert "if sel is not None:\n            hist = run(change_impact_sql.warehouse_daily_series" in op
+    assert 'key=f"whchg_hist_{row[\'WAREHOUSE_NAME\']}", tier="historical"' in op
+    # object 28d history behind a row click or a load toggle, historical tier
+    assert 'st.toggle("Load 28-day run history", key="chg_hist_toggle")' in op
+    assert 'key=f"chg_hist_{pick}", tier="historical"' in op
+    # the old unconditional-scan tiers are gone
+    assert 'key=f"whchg_hist_{row[\'WAREHOUSE_NAME\']}", tier="recent"' not in op
+    assert 'key=f"chg_hist_{pick}", tier="recent"' not in op
+
+
 # --- T1.9: open_alert_events standardized at LIMIT 500 -----------------------
 
 def test_t1_9_open_alert_events_limit_standardized():

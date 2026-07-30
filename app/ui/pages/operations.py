@@ -650,13 +650,19 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
             } for d in deltas[:5]])
         else:
             st.caption("Before/after stats still accumulating for this change.")
-        hist = run(change_impact_sql.warehouse_daily_series(str(row["WAREHOUSE_NAME"]), 28),
-                   page=_PAGE, key=f"whchg_hist_{row['WAREHOUSE_NAME']}", tier="recent",
-                   source="WAREHOUSE_METERING_HISTORY + QUERY_HISTORY")
-        if guard(hist, "No activity recorded for this warehouse in the last 28 days."):
-            charts.daily_metric_line(hist.df, "DAY", "CREDITS", title="credits/day",
-                                     rule_date=row.get("CHANGE_SEEN_AT"))
-            st.caption("Dashed line marks the detected change (seen within a day of the ALTER).")
+        # T1.4: the 28d WMH+QH history join is heavy and used to run every render on
+        # the defaulted first row. Load it only on an explicit row selection, and off
+        # the live cadence (historical tier — the sources lag 45min+).
+        if sel is not None:
+            hist = run(change_impact_sql.warehouse_daily_series(str(row["WAREHOUSE_NAME"]), 28),
+                       page=_PAGE, key=f"whchg_hist_{row['WAREHOUSE_NAME']}", tier="historical",
+                       source="WAREHOUSE_METERING_HISTORY + QUERY_HISTORY")
+            if guard(hist, "No activity recorded for this warehouse in the last 28 days."):
+                charts.daily_metric_line(hist.df, "DAY", "CREDITS", title="credits/day",
+                                         rule_date=row.get("CHANGE_SEEN_AT"))
+                st.caption("Dashed line marks the detected change (seen within a day of the ALTER).")
+        else:
+            st.caption("Select a change above to load its 28-day credits/day history.")
     if is_operator:
         if st.button("Run warehouse scan now", key="whchg_scan_now",
                      help="Snapshots settings, registers diffs, and re-evaluates verdicts immediately."):
@@ -710,10 +716,15 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             crow = df.iloc[int(sel_ci)]
             clicked_obj = f"{crow['OBJECT_TYPE']} {crow['OBJECT_NAME']}"
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
-        if pick:
+        # T1.4: the 28d QUERY/TASK_HISTORY scan used to run every render on the
+        # auto-selected first object. A row click loads it immediately; otherwise it
+        # waits behind a load toggle (the DAG/streams pattern on this page). Historical.
+        _load_hist = pick and (sel_ci is not None
+                               or st.toggle("Load 28-day run history", key="chg_hist_toggle"))
+        if _load_hist:
             otype, _, name = pick.partition(" ")
             hist = run(change_impact_sql.object_run_history(otype, name, 28),
-                       page=_PAGE, key=f"chg_hist_{pick}", tier="recent",
+                       page=_PAGE, key=f"chg_hist_{pick}", tier="historical",
                        source="ACCOUNT_USAGE.QUERY_HISTORY" if otype == "PROCEDURE"
                               else "ACCOUNT_USAGE.TASK_HISTORY")
             if guard(hist, "No runs recorded for this object in the last 28 days."):

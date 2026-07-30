@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.76.0 — perf round 2 T1.4: gate the change-impact drill scans (app-only) (2026-07-29)
+
+- **T1.4 (owner-approved) — Operations change-impact drills stopped auto-scanning.**
+  The warehouse drill ran a 28-day WAREHOUSE_METERING + QUERY_HISTORY join on every
+  render against the auto-selected first row, and the object drill ran a 28-day
+  QUERY/TASK_HISTORY scan against the auto-selected first object — both re-missing
+  every ~300s while the section was open, with no user selection. The warehouse
+  history now loads only on an explicit row selection; the object history loads on a
+  row click or behind a "Load 28-day run history" toggle (the DAG/streams pattern
+  already on the page). Both moved to the `historical` tier (sources lag 45min+).
+  Owner signed off on the one-click trade for the object drill.
+
+Deferred (owner declined): **T2.4** health_strip retier — kept on the live tier so
+new criticals and cross-viewer alert ack/close stay visible within ~30s.
+
 ## 4.75.0 — perf round 2 T1 quick wins: hourly tier, CSV keying, alert LIMIT (app-only) (2026-07-29)
 
 First tranche of perf round 2 (docs/reviews/PERF_ROUND_2_SCOPE_2026-07-29.md),
