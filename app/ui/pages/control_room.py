@@ -30,6 +30,7 @@ from app.ui.components import (
     run_mart_first,
     selectable_table,
     styled_table,
+    with_user_names,
 )
 
 _PAGE = "Control Room"
@@ -175,12 +176,12 @@ def _day_replay() -> None:
         if ddl.ok and ddl.empty:
             st.success("No DDL that day.")
         elif guard(ddl, ""):
-            styled_table(ddl.df, height=240)
+            styled_table(with_user_names(ddl.df, _PAGE), height=240)
         st.markdown("**Grant changes**")
         if grants.ok and grants.empty:
             st.success("No grant changes that day.")
         elif guard(grants, ""):
-            styled_table(grants.df, height=200)
+            styled_table(with_user_names(grants.df, _PAGE, user_col="GRANTEE_NAME"), height=200)
     st.markdown("**Alerts raised that day**")
     if alerts_d.ok and alerts_d.empty:
         st.success("No alerts raised that day.")
@@ -330,13 +331,15 @@ def render() -> None:
     if oi.ok and oi.empty:
         st.success("No open incidents.")
     elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
-        sel_i = selectable_table(oi.df, key="cr_inc_sel", height=190)
+        sel_i = selectable_table(
+            with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
+            key="cr_inc_sel", height=190)
         if sel_i is not None:
             _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
             mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
                       key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
             if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
-                styled_table(mem.df)
+                styled_table(with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"))
             if _is_op:
                 with st.expander("Close this incident (audited, forward-only)"):
                     _kind = st.selectbox("Root cause",

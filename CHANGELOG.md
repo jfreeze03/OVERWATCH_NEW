@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.79.0 — show First/Last names everywhere a USER_NAME login appears (app-only) (2026-07-30)
+
+Owner ask: the cryptic Snowflake login (`USER_NAME`) rarely says *who* the person is —
+show their name too, the way the Cortex AI user attribution already does. Generalized
+that treatment into a small reusable resolver and applied it to every login-bearing
+surface (mapped exhaustively + completeness-critiqued via multi-agent review).
+
+- **Reusable machinery** — `app/data/directory_sql.user_directory()` (one cached,
+  account-global `ACCOUNT_USAGE.USERS` read, deduped by login, metadata tier — a single
+  shared cache entry for the whole app), `app/logic/directory` (`display_name_map` /
+  `resolve_display` / `attach_display_name`: "First Last" with a login fallback for
+  service/dropped accounts — never blank, never invented), and
+  `components.with_user_names(df, page)` / `user_display_map(page)`.
+- **Applied** across ~30 surfaces: Security (MFA gaps, failed logins, privileged/role
+  grants incl. `GRANTED_BY`, new-network logins, expiring credentials, dormant users,
+  unload activity, DDL-changes chart + table), Operations (heaviest queries, running-
+  queries kill-switch, change registry `CHANGED_BY`), the shared **blast-radius** panel
+  shown before every suspend/cancel (Alerts + Optimization), Cost (expensive queries,
+  cloud-services-by-user, attribution chart, unit-cost query KPI + table, tag-governance
+  KPI + table), Control Room (day-replay DDL/grants, incidents `DECLARED_BY`, members
+  `LINKED_BY`), Alerts (events `ACK_BY`, routes `CREATED_BY`), Admin (settings
+  `UPDATED_BY`), and Chargeback (dept budgets / department map `UPDATED_BY`). Detail
+  tables gain a `User`/`…by` name column beside the login (both stay visible); charts
+  and KPIs relabel to the name.
+- **Deliberately not touched:** the `OWNER` fields (`ACTION_QUEUE`/`ALERT_CONFIG.OWNER`
+  default to the team string `'DBA'`, not a login), the incident-timeline event label
+  (login is concatenated into free text), the Unmapped-entities table (its raw login is
+  copy-paste-load-bearing for the `COMPANY_SCOPE` INSERT), and aggregate distinct-user
+  counts. `ACCOUNT_USAGE.USERS` can lag ~2h, so a just-created login briefly shows raw.
+
+New `test_user_directory` locks the resolver, the shared helpers, and a coverage guard
+that every page rendering a login column wires the resolver; 1464 pytest green.
+
 ## 4.78.0 — V061 migration: AI loader/alert/score/purge correctness (2026-07-29)
 
 Consolidates the deferred loader/mart correctness fixes into `V061` (authored +

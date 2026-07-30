@@ -364,6 +364,28 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                source=live_source, **kwargs)
 
 
+def user_display_map(page: str) -> dict:
+    """Cached login -> "First Last" directory from ACCOUNT_USAGE.USERS.
+
+    One small account-global read (metadata tier) shared by every page — the SQL,
+    tier and (empty) scope are constant, so all callers hit one cache entry. Pass
+    the returned map to logic.directory.attach_display_name / resolve_display so a
+    person's name shows next to the login everywhere. Empty on a failed read (the
+    resolvers then fall back to the raw login — never blank)."""
+    from app.core.query import run
+    from app.data import directory_sql
+    from app.logic.directory import display_name_map
+    res = run(directory_sql.user_directory(), page=page, key="user_directory",
+              tier="metadata", source="ACCOUNT_USAGE.USERS (name directory)")
+    return display_name_map(res.df) if res.usable() else {}
+
+
+def with_user_names(df, page: str, *, user_col: str = "USER_NAME", display_col: str = "USER"):
+    """Add a "First Last" ``display_col`` (login fallback) beside ``user_col`` using
+    the cached directory — the one-liner for detail tables. No-op if the frame has
+    no ``user_col``."""
+    from app.logic.directory import attach_display_name
+    return attach_display_name(df, user_display_map(page), user_col=user_col, display_col=display_col)
 
 
 def legend_popover() -> None:
@@ -738,7 +760,7 @@ def blast_radius(warehouse: str, page: str) -> None:
         + (f"; scheduled/tooling tags present ({tagged.iloc[0][:40]}…)" if len(tagged) else "")
         + ". Review before executing."
     )
-    styled_table(df, height=200)
+    styled_table(with_user_names(df, page), height=200)   # show WHO you'd interrupt
 
 
 def notify(ok: bool, msg: str) -> None:

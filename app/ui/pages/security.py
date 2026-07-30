@@ -13,6 +13,7 @@ from app.core.errors import safe_page
 from app.core.query import run, run_batch
 from app.core.state import filters
 from app.data import insights_sql, mart27_sql, security_sql
+from app.logic.directory import resolve_display
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.ui import charts
@@ -26,6 +27,8 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     styled_table,
+    user_display_map,
+    with_user_names,
 )
 
 _PAGE = "Security"
@@ -71,7 +74,7 @@ def _access_tab(company: str, days: int) -> None:
             "value": f"{len(mfa.df)}",
             "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
         }])
-        styled_table(mfa.df)
+        styled_table(with_user_names(mfa.df, _PAGE))
         result_caption(mfa)
 
     left, right = st.columns(2)
@@ -83,13 +86,14 @@ def _access_tab(company: str, days: int) -> None:
         if res.ok and res.empty:
             st.success("No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
-            styled_table(res.df)
+            styled_table(with_user_names(res.df, _PAGE))
     with right:
         st.markdown("**Privileged role holders**")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
-            styled_table(res.df)
+            styled_table(with_user_names(with_user_names(res.df, _PAGE), _PAGE,
+                                         user_col="GRANTED_BY", display_col="Granted by"))
             st.caption("This list should be short and every name should be expected.")
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
@@ -117,7 +121,7 @@ def _access_tab(company: str, days: int) -> None:
                     "An IP quiet for 90+ days re-flags on purpose — better a stale re-flag "
                     "than a silent novel network.",
         }])
-        styled_table(nn.df)
+        styled_table(with_user_names(nn.df, _PAGE))
         st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
@@ -137,7 +141,7 @@ def _access_tab(company: str, days: int) -> None:
              "delta_color": "inverse" if expired else "off",
              "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
         ])
-        styled_table(cdf, height=280)
+        styled_table(with_user_names(cdf, _PAGE), height=280)
         st.caption("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
@@ -162,7 +166,9 @@ def _access_tab(company: str, days: int) -> None:
                  "delta_color": "inverse" if len(high) else "off"},
             ])
             styled_table(
-                ranked[["SEVERITY", "USER_NAME", "EMAIL", "DAYS_DORMANT", "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
+                with_user_names(ranked, _PAGE)[[
+                    "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
+                    "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
             )
             st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
             result_caption(res)
@@ -188,7 +194,8 @@ def _access_tab(company: str, days: int) -> None:
     if res.ok and res.empty:
         st.success("No new role grants in this window.")
     elif guard(res, ""):
-        styled_table(res.df)
+        styled_table(with_user_names(with_user_names(res.df, _PAGE), _PAGE,
+                                     user_col="GRANTED_BY", display_col="Granted by"))
         result_caption(res)
 
 
@@ -235,7 +242,7 @@ def _egress_tab(company: str, days: int) -> None:
             {"label": "GB written out", "value": f"{float(udf['GB_OUT'].sum()):,.1f}"},
             {"label": "Users unloading", "value": f"{udf['USER_NAME'].nunique()}"},
         ])
-        styled_table(udf, height=320)
+        styled_table(with_user_names(udf, _PAGE), height=320)
         st.caption("Every name here should have a business reason to move data out. New names are the finding.")
         result_caption(unl)
 
@@ -493,13 +500,15 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             charts.daily_stacked_count(daily.sort_values("DAY"), "DAY", "CHANGE_KIND",
                                        "STATEMENTS", title="Change statements/day")
         with right:
+            _nm = user_display_map(_PAGE)
             by_user = (ddl_df.groupby("USER_NAME", as_index=False)["STATEMENTS"].sum()
                        .sort_values("STATEMENTS", ascending=False))
-            charts.bar_count(by_user, "USER_NAME", "STATEMENTS",
+            by_user["USER"] = by_user["USER_NAME"].map(lambda u: resolve_display(u, _nm))
+            charts.bar_count(by_user, "USER", "STATEMENTS",
                              title="Statements by user", top_n=8)
         st.caption("Left: what kind of change landed each day (create / alter / "
                    "drop-truncate / grants / other). Right: who made them. Rows below have the objects.")
-        styled_table(res.df)
+        styled_table(with_user_names(res.df, _PAGE))
         result_caption(res)
 
     st.markdown("**Break-glass role activity (should hug zero)**")

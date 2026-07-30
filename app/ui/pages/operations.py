@@ -35,6 +35,7 @@ from app.ui.components import (
     selectable_table,
     snowsight_profile_column,
     styled_table,
+    with_user_names,
 )
 
 _PAGE = "Operations"
@@ -142,7 +143,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # r24: every QUERY_ID row links straight to its Snowsight profile
         # (owner ask — the drill's single link earned its keep).
         _tp, _tp_cfg = snowsight_profile_column(top.df, _PAGE)
-        _tp_cols = ["START_TIME", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
+        _tp = with_user_names(_tp, _PAGE)
+        _tp_cols = ["START_TIME", "USER", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
                     "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]
         if "PROFILE" in _tp.columns:
             _tp_cols.append("PROFILE")
@@ -701,11 +703,12 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             {"label": "Still accumulating", "value": f"{int((verdicts == 'PENDING').sum())}",
              "help": "Fewer than 5 post-change runs so far — no verdict yet."},
         ])
+        _ci = with_user_names(df, _PAGE, user_col="CHANGED_BY", display_col="Changed by")
         show_cols = ["VERDICT", "OBJECT_TYPE", "DATABASE_NAME", "SCHEMA_NAME", "OBJECT_NAME",
-                     "CHANGE_SEEN_AT", "CHANGED_BY", "BASELINE_CALLS", "AFTER_CALLS",
+                     "CHANGE_SEEN_AT", "Changed by", "CHANGED_BY", "BASELINE_CALLS", "AFTER_CALLS",
                      "BASELINE_P95_S", "AFTER_P95_S",
                      "BASELINE_CREDITS_PER_CALL", "AFTER_CREDITS_PER_CALL", "VERDICT_DETAIL"]
-        sel_ci = selectable_table(df[[c for c in show_cols if c in df.columns]],
+        sel_ci = selectable_table(_ci[[c for c in show_cols if c in _ci.columns]],
                                   key="chg_sel", height=320)
         result_caption(res)
 
@@ -911,6 +914,7 @@ def _emergency_extras(is_operator: bool) -> None:
             st.success("Nothing running or queued right now.")
         elif guard(rq, ""):
             _rqdf, _rq_cfg = snowsight_profile_column(rq.df, _PAGE)
+            _rqdf = with_user_names(_rqdf, _PAGE)   # who you'd cancel
             sel_rq = selectable_table(_rqdf, key="emg_rq_sel", height=240,
                                       column_config=_rq_cfg or None)
             if sel_rq is not None and is_operator:

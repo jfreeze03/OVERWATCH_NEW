@@ -16,6 +16,7 @@ import streamlit as st
 from app.core.query import run
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
+from app.logic.directory import resolve_display
 from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
@@ -24,6 +25,8 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     styled_table,
+    user_display_map,
+    with_user_names,
 )
 
 _PAGE = "Cost & Contract"
@@ -201,7 +204,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
                         source="MART_CLOUD_SVC_DAILY (CS credits by user/role)")
             if guard(users, "No per-user cloud-services credits for this warehouse yet."):
                 st.markdown("**Who's driving it** (user / role / tool)")
-                styled_table(users.df, height=220, column_config={
+                styled_table(with_user_names(users.df, _PAGE), height=220, column_config={
                     "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f")})
                 result_caption(users)
 
@@ -278,6 +281,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     # dollarization of mart credits used a different window
                     # and included idle — SYSTEM alone exceeded the caption.
                     alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
+                    if dim == "USER_NAME":   # show people, not logins (leave DB names as-is)
+                        _nm = user_display_map(_PAGE)
+                        alloc["DIMENSION"] = [resolve_display(u, _nm) for u in alloc["DIMENSION"]]
                     if len(alloc) > 1:
                         charts.waterfall_usd(alloc.head(10), "DIMENSION", "ALLOCATED_USD")
                         st.caption("Waterfall: top 10 contributors (allocated).")

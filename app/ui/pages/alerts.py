@@ -38,6 +38,7 @@ from app.ui.components import (
     selectable_table,
     severity_sort,
     styled_table,
+    with_user_names,
 )
 
 _PAGE = "Alerts"
@@ -179,7 +180,8 @@ def _open_events_section(events, is_operator: bool) -> None:
                        "Toggle off to open a drawer, bulk-ack, or investigate.")
             return
         sel = selectable_table(
-            edf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "ACK_BY"]],
+            with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")[
+                ["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
             key="alert_events_sel")
         result_caption(events)
         if sel is None:
@@ -655,7 +657,7 @@ def render() -> None:
                      source="ALERT_ROUTES")
         if guard(routes, "No routes configured yet.",
                  setup_hint=_SETUP_HINT):
-            styled_table(routes.df)
+            styled_table(with_user_names(routes.df, _PAGE, user_col="CREATED_BY", display_col="Created by"))
             st.code(
                 "-- add a route (operator): send all PIPELINE alerts of MEDIUM+ to #dataeng\n"
                 "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)\n"

@@ -37,6 +37,7 @@ from app.ui.components import (
     snowsight_profile_column,
     styled_table,
     toggle_cost_hint,
+    with_user_names,
 )
 
 _PAGE = "Cost & Contract"
@@ -275,7 +276,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "value": format_usd(float(edf_q["ALLOCATED_USD"].max())) if len(edf_q) else "$0"},
             ])
             _eq, _eq_cfg = snowsight_profile_column(edf_q, _PAGE)
-            _eq_cols = ["ALLOCATED_USD", "USER_NAME", "WAREHOUSE_NAME", "QUERY_TYPE",
+            _eq = with_user_names(_eq, _PAGE)
+            _eq_cols = ["ALLOCATED_USD", "USER", "USER_NAME", "WAREHOUSE_NAME", "QUERY_TYPE",
                         "EXECUTION_STATUS", "ELAPSED_SEC", "START_TIME", "QUERY_SNIPPET", "QUERY_ID"]
             if "PROFILE" in _eq.columns:
                 _eq_cols.append("PROFILE")

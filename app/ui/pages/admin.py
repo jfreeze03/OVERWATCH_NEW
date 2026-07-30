@@ -35,6 +35,7 @@ from app.ui.components import (
     run_mart_first,
     selectable_table,
     styled_table,
+    with_user_names,
 )
 
 _PAGE = "Admin"
@@ -143,7 +144,7 @@ def _settings_tab(is_operator: bool) -> None:
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
               source="SETTINGS")
     if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):
-        styled_table(res.df)
+        styled_table(with_user_names(res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
         result_caption(res)
         # r27 H2: keys the app no longer reads (retired features leave rows
         # behind — SCORE_PTS_TASK_FAIL_PER_PCT after V043, for instance).

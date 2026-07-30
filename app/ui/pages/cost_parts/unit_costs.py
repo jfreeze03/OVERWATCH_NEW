@@ -18,6 +18,7 @@ import streamlit as st
 from app.core.query import run, run_batch
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
+from app.logic.directory import resolve_display
 from app.logic.formulas import credits_to_usd, format_usd, safe_float
 from app.ui import charts
 from app.ui.components import (
@@ -27,6 +28,8 @@ from app.ui.components import (
     run_mart_first,
     snowsight_profile_column,
     styled_table,
+    user_display_map,
+    with_user_names,
 )
 
 _PAGE = "Cost & Contract"
@@ -84,7 +87,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         top_q = q_res.df.iloc[0]
         kpis.append({"label": "Priciest single query",
                      "value": format_usd(credits_to_usd(safe_float(top_q.get("CREDITS")), rate)),
-                     "delta": f"{top_q.get('USER_NAME')} · {top_q.get('WAREHOUSE_NAME')}",
+                     "delta": f"{resolve_display(top_q.get('USER_NAME'), user_display_map(_PAGE))} "
+                              f"· {top_q.get('WAREHOUSE_NAME')}",
                      "delta_color": "off"})
     if p_res.usable():
         top_p = p_res.df.iloc[0]
@@ -104,7 +108,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
         qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
-        styled_table(qdf, height=280, column_config={
+        styled_table(with_user_names(qdf, _PAGE), height=280, column_config={
             "USD": st.column_config.NumberColumn("$", format="$%.4f"),
         })
         result_caption(q_res, note="Idle-time excluded by design — that burn lives with "

@@ -14,6 +14,7 @@ from app.core.query import run, run_batch
 from app.core.session import current_role
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
+from app.logic.directory import resolve_display
 from app.logic.formulas import safe_float
 from app.ui.components import (
     guard,
@@ -25,6 +26,8 @@ from app.ui.components import (
     run_mart_first,
     section_header,
     styled_table,
+    user_display_map,
+    with_user_names,
 )
 
 _PAGE = "Cost & Contract"
@@ -130,11 +133,12 @@ def render() -> None:
                  "value": f"{(1 - untagged / total_exec) * 100 if total_exec else 100:,.1f}%",
                  "severity": "ok" if total_exec and untagged / total_exec < 0.3 else "warn"},
                 {"label": "Top untagged user",
-                 "value": str(tdf_g.iloc[0]["USER_NAME"]) if len(tdf_g) else "n/a",
+                 "value": (resolve_display(tdf_g.iloc[0]["USER_NAME"], user_display_map(_PAGE))
+                           if len(tdf_g) else "n/a"),
                  "delta": f"{float(tdf_g.iloc[0]['UNTAGGED_EXEC_SEC']) / 3600:,.1f}h untagged" if len(tdf_g) else None,
                  "delta_color": "off"},
             ])
-            styled_table(tdf_g, height=260, column_config={
+            styled_table(with_user_names(tdf_g, _PAGE), height=260, column_config={
                 "TAGGED_PCT": st.column_config.NumberColumn("Tagged %", format="%.1f%%")})
             st.caption("Fix at the source: set QUERY_TAG in the tool/session that runs the "
                        "workload; the scoreboard moves within a day.")

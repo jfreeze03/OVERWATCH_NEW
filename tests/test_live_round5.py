@@ -99,7 +99,7 @@ def test_heaviest_queries_carry_the_date():
     assert "START_TIME," in sql                        # in the builder
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
     body = ops.split("Heaviest queries", 1)[1]
-    assert '"START_TIME", "USER_NAME"' in body         # first column in the table
+    assert '"START_TIME", "USER", "USER_NAME"' in body  # START_TIME first; USER (First Last) beside the login
     assert 'DatetimeColumn("Started"' in body
 
 

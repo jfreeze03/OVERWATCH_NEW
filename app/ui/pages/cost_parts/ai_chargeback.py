@@ -26,6 +26,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     styled_table,
+    with_user_names,
 )
 
 _PAGE = "Cost & Contract"
@@ -312,7 +313,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     bud = run(mart_sql.dept_budgets(), page=_PAGE, key="dept_budgets", tier="live",
               source="DEPT_BUDGETS")
     if bud.ok and not bud.empty:
-        styled_table(bud.df)
+        styled_table(with_user_names(bud.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
     elif bud.ok:
         st.info("No department budgets set yet — add one below and the pace alert goes live.")
     if is_operator:
@@ -346,7 +347,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         map_res = run(chargeback_sql.department_map(), page=_PAGE, key="cb_map", tier="recent",
                       source="DEPARTMENT_MAP")
         if map_res.usable():
-            styled_table(map_res.df, height=280)
+            styled_table(with_user_names(map_res.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"),
+                         height=280)
         unmapped_whs = sorted(df[df["DEPARTMENT"] == "Unmapped"]["WAREHOUSE_NAME"].unique())
         c1, c2, c3 = st.columns(3)
         with c1:
