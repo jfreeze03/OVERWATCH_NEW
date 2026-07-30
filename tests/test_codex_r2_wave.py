@@ -94,3 +94,48 @@ def test_rec5_footer_distinguishes_billed_vs_window_spend():
     assert "window spend is warehouse metering" in html
     # the Incomplete score renders as honest text, not a fake 0/100
     assert "Incomplete" in html and "0/100" not in html
+
+
+# ---------------------------------------------------------------------------
+# A-score-2 — every penalty-bearing score input fails closed on a genuine outage
+# ---------------------------------------------------------------------------
+class _FakeRes:
+    def __init__(self, ok, error_kind=""):
+        self.ok, self.error_kind = ok, error_kind
+
+
+def test_ascore2_degraded_sources_golden_matrix():
+    # ADDED REC #5: outage kinds (timeout/unknown_function/other) fail closed; an
+    # 'absent' mart (not installed) and an ok read stay zero-penalty. This is the
+    # golden matrix that keeps a freshly-provisioned deployment from oscillating
+    # between Incomplete and a falsely-healthy score.
+    from app.logic.scoring import degraded_sources
+    res = degraded_sources({
+        "task": _FakeRes(False, "timeout"),
+        "freshness": _FakeRes(False, "unknown_function"),
+        "owner-queue": _FakeRes(False, "other"),
+        "installed-ok": _FakeRes(True, ""),
+        "not-installed": _FakeRes(False, "absent"),
+    })
+    assert res == {"task", "freshness", "owner-queue"}
+
+
+def test_ascore2_platform_score_incomplete_on_degraded():
+    from app.logic.scoring import platform_score
+    # both REQUIRED present, but a degraded penalty source -> Incomplete (fail closed)
+    r = platform_score(signals={}, available={"throughput", "alerts"}, degraded={"task"})
+    assert r.state == "Incomplete" and r.score == 0
+    assert "task" in r.drivers[0].evidence
+    # empty degraded + full required -> scores normally (no regression)
+    ok = platform_score(signals={}, available={"throughput", "alerts"}, degraded=set())
+    assert ok.state == "Healthy"
+    # backward-compat: degraded defaults to None (older callers unaffected)
+    assert platform_score(signals={"critical_alerts": 1}).state != "Incomplete"
+
+
+def test_ascore2_overview_wires_degraded_by_error_kind():
+    ov = _src("app/ui/pages/overview.py")
+    assert "scoring.degraded_sources(" in ov
+    assert "degraded=_degraded" in ov
+    # the budget special-case only fails closed on a genuine outage, not an absent mart
+    assert 'getattr(_bt_hist, "error_kind", "") != "absent"' in ov

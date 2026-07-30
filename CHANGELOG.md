@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.91.0 — Codex R2 wave 3: every score input fails closed (A-score-2, app-only) (2026-07-30)
+
+**A-score-2 (HIGH)** — C1 made the platform score fail closed when the two REQUIRED
+sources (throughput, alerts) didn't load, but the other four penalty-bearing inputs
+still fell through as silent 0 penalties: a failed **task**, **freshness**,
+**owner-queue**, or **budget/MTD** read zeroed its deduction and *raised* the score —
+the exact cardinal sin C1 was built to kill.
+
+- New pure `scoring.degraded_sources(results)` classifies each read: a genuine
+  **outage** (`ok is False` AND `error_kind != 'absent'` — timeout / unknown_function
+  / other) is degraded; an **absent** mart (simply not installed) stays a legitimate
+  zero, so a partial deployment is not permanently `Incomplete`.
+- `platform_score` gains a `degraded` gate alongside `available`: any degraded
+  penalty source → `Incomplete`. Overview builds the set from `_tk` (task), `_hs`
+  (freshness), `actions_res` (owner-queue), and — only when a budget is configured
+  and the MTD read didn't resolve — the metering read (budget).
+- A golden test matrix (added rec #5) locks the classification: outage kinds fail
+  closed, `absent`/ok stay zero-penalty, keeping a freshly-provisioned deployment
+  from oscillating between `Incomplete` and a falsely-healthy score.
+
+Backward-compatible (the `degraded` param defaults to `None`).
+Gates green: ruff, mypy, tests (+4 wave-3 locks).
+
 ## 4.90.0 — Codex R2 wave 2: honest executive downloads (rec 5, app-only) (2026-07-30)
 
 **rec 5 (HIGH)** — the executive summary export (HTML + .txt) now tells the same

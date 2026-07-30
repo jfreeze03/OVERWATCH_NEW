@@ -357,10 +357,16 @@ def render() -> None:
         _available.add("throughput")
     if alerts_res.ok:
         _available.add("alerts")
-    if _hs.ok:
-        _available.add("health")
-    if actions_res.ok:
-        _available.add("actions")
+    # A-score-2: extend C1's fail-closed principle to the OTHER penalty-bearing
+    # sources. A read that hit a GENUINE outage (timeout/unknown_function/other — not
+    # 'absent', which just means the mart isn't installed on a partial deployment)
+    # silently zeros its penalty, which would raise the score. task/freshness/owner-
+    # queue fail the score closed on outage; budget only matters when a budget is set
+    # and the MTD read didn't resolve.
+    _degraded = scoring.degraded_sources(
+        {"task": _tk, "freshness": _hs, "owner-queue": actions_res})
+    if budget > 0 and not mtd_source and getattr(_bt_hist, "error_kind", "") != "absent":
+        _degraded.add("budget")
     score = scoring.platform_score(signals={
         "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
         "critical_alerts": critical_alerts,
@@ -371,7 +377,7 @@ def render() -> None:
         "spill_gb": spill_gb,
         "stale_sources": stale_sources,
         "open_high_actions": open_high_actions,
-    }, weights=scoring.resolve_weights(settings), available=_available)
+    }, weights=scoring.resolve_weights(settings), available=_available, degraded=_degraded)
 
     # ---- KPI row -----------------------------------------------------------
     _spend_spark = (daily["USD"].tail(14).tolist() if not daily.empty else None)

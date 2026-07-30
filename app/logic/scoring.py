@@ -69,8 +69,22 @@ def resolve_weights(settings: dict | None) -> dict:
 REQUIRED_SIGNAL_SOURCES = frozenset({"throughput", "alerts"})
 
 
+def degraded_sources(results: dict) -> set[str]:
+    """A-score-2: the penalty-bearing sources whose read is a genuine OUTAGE — i.e.
+    ``ok is False`` AND ``error_kind != 'absent'``. An 'absent' read means the mart
+    is simply not installed (a legitimate zero on a partial deployment), NOT a
+    suppressed signal; those stay zero-penalty. A timeout / unknown_function / other
+    failure, by contrast, could be hiding a real task-failure / staleness / owner-queue
+    / over-budget condition, so it must fail the score closed (extends C1's principle
+    beyond the two REQUIRED sources). ``results`` maps source-name -> QueryResult-like
+    (anything with ``.ok`` and ``.error_kind``)."""
+    return {name for name, r in results.items()
+            if (not getattr(r, "ok", True)) and getattr(r, "error_kind", "") != "absent"}
+
+
 def platform_score(signals: dict, weights: dict | None = None,
-                   available: set[str] | None = None) -> PlatformScore:
+                   available: set[str] | None = None,
+                   degraded: set[str] | None = None) -> PlatformScore:
     """Score 0-100 from a signals dict. Missing signals simply add no penalty.
 
     Expected keys (all optional):
@@ -81,16 +95,22 @@ def platform_score(signals: dict, weights: dict | None = None,
 
     C1: a *failed* read (vs a legitimate zero) removes that source's penalty, so
     an outage that suppresses real failures/alerts would IMPROVE the score — the
-    cardinal monitoring sin. When ``available`` (the set of source keys that
-    actually loaded) is provided and a health-bearing source (the fixed-window
-    throughput read, alerts) is missing, the score is reported ``Incomplete``
-    rather than a false green.
+    cardinal monitoring sin. Two gates report ``Incomplete`` instead of a false green:
+    ``available`` (the REQUIRED source keys that loaded — throughput+alerts) must be
+    complete, AND ``degraded`` (A-score-2: penalty-bearing sources that hit a genuine
+    outage, via ``degraded_sources``) must be empty. An 'absent' mart is a legitimate
+    zero on a partial deployment and is NOT degraded.
     """
-    if available is not None and not REQUIRED_SIGNAL_SOURCES.issubset(available):
-        missing = ", ".join(sorted(REQUIRED_SIGNAL_SOURCES - set(available)))
+    _missing = (available is not None and not REQUIRED_SIGNAL_SOURCES.issubset(available))
+    if _missing or degraded:
+        parts = []
+        if _missing:
+            parts.append(", ".join(sorted(REQUIRED_SIGNAL_SOURCES - set(available or ()))))
+        if degraded:
+            parts.append(", ".join(sorted(degraded)))
         return PlatformScore(score=0, state="Incomplete",
                              drivers=(ScoreDriver("Inputs unavailable", 0.0,
-                                                  f"Health signals did not load: {missing}."),))
+                                                  f"Health signals did not load: {'; '.join(parts)}."),))
     w = dict(DEFAULT_WEIGHTS)
     w.update(weights or {})
     drivers: list[ScoreDriver] = []
