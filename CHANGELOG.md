@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.94.0 — Codex R2 NEXT wave A: score-read batching + single allocation chart (app-only) (2026-07-30)
+
+- **rec 9 (MEDIUM)** — finish the Overview first-paint batching for the score path.
+  The two hourly score-health reads (`score_throughput` + `score_tasks`) are
+  independent and company-scoped, so they now fetch in one `run_batch` round trip
+  (member-level fallback preserved). The board and 150-day reads stay unbatched by
+  design (filter-scoped + fixed cold-start each other, Codex #4); `health_strip`
+  stays on the shared shell cache; the live alert/action reads batch separately.
+- **rec 12 (MEDIUM)** — the user/database allocation panel rendered a waterfall AND a
+  bar of the identical top-10 (both defaulted to `top_n=10`), and the waterfall's
+  cumulative form falsely implied full reconciliation. Now ONE sorted contribution
+  bar with an explicit **"Other / not shown"** row (= scoped pool − shown
+  contributors), so the chart accounts for 100% of the pool, not just the top rows.
+
+Gates green: ruff, mypy, tests (+2 wave-A locks).
+
 ## 4.93.0 — Codex R2 wave 5: one effective cost-allocation window (rec 4, app-only) (2026-07-30)
 
 **rec 4 (HIGH)** — per-entity cost attribution mis-reconciled because the warehouse

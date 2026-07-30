@@ -186,3 +186,22 @@ def test_rec4_pool_and_shares_share_one_window():
     # the live fallback denominator excludes today + shares the contract (90-day cap)
     live = _src("app/data/cost_sql.py")
     assert 'resolve_effective_window(days, "START_TIME", max_days=90)' in live
+
+
+# ---------------------------------------------------------------------------
+# NEXT tier wave A — rec 9 (batch score reads) + rec 12 (dedup allocation chart)
+# ---------------------------------------------------------------------------
+def test_rec9_score_health_reads_batched():
+    ov = _src("app/ui/pages/overview.py")
+    assert "_score_pf = run_batch(" in ov
+    assert '"key": f"score_throughput_{company}"' in ov and '"key": f"score_tasks_{company}"' in ov
+    # both consumers pull from the batch (member-level fallback preserved)
+    assert '_score_pf.get(f"score_throughput_{company}")' in ov
+    assert '_score_pf.get(f"score_tasks_{company}")' in ov
+
+
+def test_rec12_single_allocation_bar_with_other_row():
+    sp = _src("app/ui/pages/cost_parts/spend.py")
+    assert "charts.waterfall_usd(alloc" not in sp   # the duplicate cumulative waterfall is gone
+    assert '"Other / not shown"' in sp              # explicit remainder row so the bar sums to 100%
+    assert "top_n=11" in sp

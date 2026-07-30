@@ -295,9 +295,21 @@ def render() -> None:
     # spans the PREVIOUS + CURRENT calendar day (24h at midnight, ~48h by end of
     # day) — deliberately aligned to the live ops tiles, not a rolling 24h. rec 10:
     # the source refreshes hourly, so cache at the hourly tier (salt still forces refresh).
-    _thr = run(mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company),
-               page=_PAGE, key=f"score_throughput_{company}", tier="hourly",
-               source="FACT_QUERY_HOURLY (prev + current calendar day)")
+    # rec 9: the two hourly score-health reads (throughput + task) are independent and
+    # company-scoped — batch them into one round trip (finishing N4 for the score path).
+    # board/150d stay unbatched (filter-scoped + fixed cold-start each other, Codex #4);
+    # health_strip stays on the shared shell cache; the live alert/action reads batch above.
+    _thr_sql = mart_sql.fact_query_window_summary(_SCORE_HEALTH_WINDOW_DAYS, company)
+    _tk_sql = mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company)
+    _score_pf = run_batch([
+        {"key": f"score_throughput_{company}", "sql": _thr_sql,
+         "source": "FACT_QUERY_HOURLY (prev + current calendar day)"},
+        {"key": f"score_tasks_{company}", "sql": _tk_sql,
+         "source": "FACT_TASK_DAILY (prev + current calendar day)"},
+    ], page=_PAGE, tier="hourly") or {}
+    _thr = _score_pf.get(f"score_throughput_{company}") or run(
+        _thr_sql, page=_PAGE, key=f"score_throughput_{company}", tier="hourly",
+        source="FACT_QUERY_HOURLY (prev + current calendar day)")
     _tr = _thr.df.iloc[0] if _thr.usable() and not _thr.empty else None
     queries = safe_float(_tr.get("QUERY_COUNT")) if _tr is not None else 0.0
     failed_queries = safe_float(_tr.get("FAILED_COUNT")) if _tr is not None else 0.0
@@ -306,9 +318,10 @@ def render() -> None:
     spill_gb = safe_float(_tr.get("SPILL_REMOTE_GB")) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
     # calendar day (it can't be sub-day windowed). rec 10: daily source → hourly tier.
-    _tk = run(mart_sql.fact_task_daily(_SCORE_HEALTH_WINDOW_DAYS, company),
-              page=_PAGE, key=f"score_tasks_{company}", tier="hourly",
-              source="FACT_TASK_DAILY (prev + current calendar day)")
+    # rec 9: served from the score-read batch above.
+    _tk = _score_pf.get(f"score_tasks_{company}") or run(
+        _tk_sql, page=_PAGE, key=f"score_tasks_{company}", tier="hourly",
+        source="FACT_TASK_DAILY (prev + current calendar day)")
     _tk_ok = _tk.usable() and not _tk.empty
     task_runs = float(_tk.df["RUNS"].map(safe_float).sum()) if _tk_ok else 0.0
     task_failures = float(_tk.df["FAILED"].map(safe_float).sum()) if _tk_ok else 0.0

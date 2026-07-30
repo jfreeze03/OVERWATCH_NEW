@@ -284,13 +284,23 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     if dim == "USER_NAME":   # show people, not logins (leave DB names as-is)
                         _nm = user_display_map(_PAGE)
                         alloc["DIMENSION"] = [resolve_display(u, _nm) for u in alloc["DIMENSION"]]
-                    if len(alloc) > 1:
-                        charts.waterfall_usd(alloc.head(10), "DIMENSION", "ALLOCATED_USD")
-                        st.caption("Waterfall: top 10 contributors (allocated).")
-                    charts.bar_usd(alloc, "DIMENSION", "ALLOCATED_USD", title=f"Allocated $ by {label}")
+                    # rec 12: ONE sorted contribution bar — the old waterfall + bar plotted
+                    # the SAME top-10 twice, and the waterfall's cumulative form falsely
+                    # implied full reconciliation. Append an explicit "Other / not shown" row
+                    # (= the scoped pool minus the shown contributors) so the chart accounts
+                    # for 100% of the pool, not just the top rows.
                     shown = float(alloc["ELAPSED_SHARE"].map(safe_float).sum())
-                    st.caption(f"Rows shown cover {shown:.0%} of scoped spend "
-                               f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}).")
+                    _top = (alloc.sort_values("ALLOCATED_USD", ascending=False)
+                            .head(10)[["DIMENSION", "ALLOCATED_USD"]])
+                    _other = max(0.0, window_usd - float(_top["ALLOCATED_USD"].map(safe_float).sum()))
+                    _bar = (pd.concat([_top, pd.DataFrame(
+                        [{"DIMENSION": "Other / not shown", "ALLOCATED_USD": _other}])],
+                        ignore_index=True) if _other > 0 else _top)
+                    charts.bar_usd(_bar, "DIMENSION", "ALLOCATED_USD",
+                                   title=f"Allocated $ by {label}", top_n=11)
+                    st.caption(f"Named rows cover {shown:.0%} of scoped spend "
+                               f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}); "
+                               "'Other / not shown' is the remainder of the pool.")
 
     st.markdown("**Daily anomaly check (per warehouse)**")
     daily = daily_res if daily_res is not None else run(
