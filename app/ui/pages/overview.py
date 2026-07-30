@@ -59,7 +59,7 @@ def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
 def _load_board(company: str, days: int) -> QueryResult:
     return run(
         mart_sql.exec_board(company, days),
-        page=_PAGE, key=f"exec_board_{company}_{days}", tier="recent",
+        page=_PAGE, key=f"exec_board_{company}_{days}", tier="hourly",
         source="MART_EXEC_BOARD",
     )
 
@@ -95,7 +95,7 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
     AI credits priced at the AI rate (C1)."""
     res = preloaded if preloaded is not None and preloaded.ok else run(
         mart_sql.fact_daily_spend(45), page=_PAGE, key="fact_daily_45",
-        tier="recent", source="FACT_METERING_DAILY")
+        tier="hourly", source="FACT_METERING_DAILY")
     if not res.usable():
         return 0.0, ""
     frame = res.df.copy()
@@ -192,7 +192,7 @@ def render() -> None:
     # (Codex r16 #17) — the separate 45d read survives only as the fallback
     # inside _mtd_spend_usd when this one fails.
     _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
-                   tier="recent", source="FACT_METERING_DAILY (150d)")
+                   tier="hourly", source="FACT_METERING_DAILY (150d)")
     mtd_spend, mtd_source = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
     # Triage #1: the exec-board `daily` frame is windowed to the filter `days`
     # (default 7) and is company-scoped, so it truncates month-to-date for most of
@@ -210,7 +210,7 @@ def render() -> None:
     forecast = None
     if engine == "ml_forecast":
         mlres = run(mart_sql.ml_forecast_daily(), page=_PAGE, key="ml_forecast",
-                    tier="recent", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
+                    tier="hourly", source="FORECAST_ML_DAILY (SNOWFLAKE.ML.FORECAST)")
         if mlres.usable():
             mdf = mlres.df.copy()
             today = account_today()
@@ -391,7 +391,7 @@ def render() -> None:
         # rectangle was the "what does this mean" magnet (owner, twice).
         charts.spend_trend(daily, daily_budget_usd=daily_budget)
         activity = run(mart_sql.fact_daily_activity(14, company), page=_PAGE,
-                       key="spark_activity", tier="recent",
+                       key="spark_activity", tier="hourly",
                        source="FACT_QUERY_HOURLY (daily)")
         adf = activity.df if activity.ok and not activity.empty else None
         spend14 = daily.tail(14) if len(daily) else None
@@ -482,7 +482,7 @@ def render() -> None:
             st.info("No cost-driver rows for this scope/window.")
 
     # ---- Daily AI digest ------------------------------------------------------
-    digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
+    digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="hourly",
                  source="DAILY_DIGEST (Cortex, grounded in the exec board)")
     if digest.usable():
         row = digest.df.iloc[0]

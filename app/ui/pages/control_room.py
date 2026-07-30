@@ -364,7 +364,7 @@ def render() -> None:
 
     # ---- Triage queue ----------------------------------------------------------
     st.subheader("Triage queue")
-    alerts = run(mart_sql.open_alert_events(100, company), page=_PAGE,
+    alerts = run(mart_sql.open_alert_events(500, company), page=_PAGE,
                  key=f"cr_alerts_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
                  else f"ALERT_EVENTS ({company} + account-level)")

@@ -123,6 +123,7 @@ def _section_slug(label: str) -> str:
 
 def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str = "") -> None:
     st.session_state["_ow_dl_seq"] = 0
+    st.session_state["_ow_dl_page"] = str(title)   # T1.6: page identity for the CSV-prep slot
     st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
     if icon_name:
         st.markdown(
@@ -646,20 +647,45 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 # r13 #19 + r19 #19: big frames build their CSV ONCE at prep
                 # (bytes stored, not a boolean that reserialized every rerun)
                 # and the download no longer reruns the app.
-                _prep_key = f"ow_dlprep_{key or ''}_{seq}"
-                _blob = st.session_state.get(_prep_key)
-                if isinstance(_blob, (bytes, bytearray)):
-                    st.download_button("⬇ CSV ready", bytes(_blob),
+                # T1.6: the old positional key (ow_dlprep_<key>_<seq>) collided
+                # across pages — _ow_dl_seq resets per page_header, and nothing
+                # ever evicted the blob, so a page/section switch served the
+                # PREVIOUS table's bytes under a reused seq. Key by PAGE + a
+                # content fingerprint of THIS frame, keep ONE slot per session
+                # (self-evicting), and serve the ready-branch only on an exact match.
+                _fp = _download_fingerprint(df)
+                _slot = st.session_state.get("_ow_dlprep")
+                _ready = (isinstance(_slot, dict) and _slot.get("fp") == _fp
+                          and isinstance(_slot.get("bytes"), (bytes, bytearray)))
+                if _ready:
+                    st.download_button("⬇ CSV ready", bytes(_slot["bytes"]),
                                        file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
                                        key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                        on_click="ignore")
                 elif st.button("⬇", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
                                help=f"Prepare {len(df):,} rows as CSV (account time)."):
-                    st.session_state[_prep_key] = df.to_csv(index=False).encode("utf-8")
+                    st.session_state["_ow_dlprep"] = {
+                        "fp": _fp, "bytes": df.to_csv(index=False).encode("utf-8")}
                     st.rerun()
     except Exception:  # noqa: BLE001 - export is a convenience, never break the table
         pass
     return selected
+
+
+def _download_fingerprint(df) -> str:
+    """Session-stable identity for the current table: page + shape + columns +
+    a content hash (T1.6). Bounds the hash cost and never raises — a bad hash
+    just falls back to page+shape, which is still page-scoped."""
+    import hashlib
+
+    import pandas as pd
+    page = str(st.session_state.get("_ow_dl_page", ""))
+    base = f"{page}|{df.shape}|{tuple(map(str, df.columns))}"
+    try:
+        content = str(int(pd.util.hash_pandas_object(df, index=True).sum()))
+    except Exception:  # noqa: BLE001 - fingerprint is best-effort, never break export
+        content = ""
+    return hashlib.md5(f"{base}|{content}".encode()).hexdigest()[:16]
 
 
 def styled_table(df, *, height: int | None = None, column_config: dict | None = None) -> None:

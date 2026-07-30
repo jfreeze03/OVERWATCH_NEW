@@ -461,7 +461,7 @@ def render() -> None:
     is_operator = profile in OPERATOR_PROFILES
 
     company = f["company"]
-    events = run(mart_sql.open_alert_events(300, company), page=_PAGE,
+    events = run(mart_sql.open_alert_events(500, company), page=_PAGE,
                  key=f"alert_events_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
                  else f"ALERT_EVENTS ({company} + account-level)")
@@ -476,7 +476,7 @@ def render() -> None:
             {"label": "Open high", "value": f"{high_n}",
              "severity": "warn" if high_n else "ok"},
             {"label": "Open total", "value": f"{len(events.df) if not events.empty else 0}",
-             "help": "Counts the 300 most recent open events — the feed cap.",
+             "help": "Open events in the feed (capped at 500, severity-ranked then newest).",
              "severity": "info"},
         ])
 

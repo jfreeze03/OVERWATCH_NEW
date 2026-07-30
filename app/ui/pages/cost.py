@@ -69,7 +69,7 @@ def render() -> None:
         # read if the batch is unavailable (run_batch -> None) or a member misses
         # (a None/empty prefetch triggers that panel's existing fallback).
         _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),
-                        page=_PAGE, tier="recent") or {}
+                        page=_PAGE, tier="hourly") or {}
         section_header("Spend", "info", "spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate,
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"))
@@ -92,7 +92,7 @@ def render() -> None:
             st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
                        "silently billing ALFA. Empty is the goal state.")
             unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
-                      key=f"unmapped_{f['days']}", tier="recent",
+                      key=f"unmapped_{f['days']}", tier="hourly",
                       source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
             if unm.ok and unm.empty:
                 st.success("Every entity in the window carries company evidence — nothing is billed blind.")

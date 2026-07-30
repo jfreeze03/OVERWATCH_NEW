@@ -61,6 +61,10 @@ def test_exports_cache_bytes_and_never_rerun_on_download():
         _p = (_ROOT / "app" / "ui" / "pages" / pg).read_text(encoding="utf-8")
         assert _p.count("download_button") == _p.count('on_click="ignore"')
     assert "df.to_csv(index=False).encode" in _CMP        # prep stores BYTES
-    prep = _CMP.split("_prep_key = ", 1)[1]
-    assert "st.session_state[_prep_key] = df.to_csv" in prep
-    assert "st.session_state[_prep_key] = True" not in _CMP
+    # T1.6: the prep blob is a single self-evicting session slot keyed by page +
+    # content fingerprint (was a positional key that collided across pages and
+    # served the wrong table's bytes). Stores bytes in the slot, never a boolean.
+    assert 'st.session_state["_ow_dlprep"] = {' in _CMP
+    assert '"bytes": df.to_csv(index=False).encode' in _CMP
+    assert "_download_fingerprint(df)" in _CMP
+    assert "] = True" not in _CMP.split("_ow_dlprep", 1)[1][:200]

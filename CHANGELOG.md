@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.75.0 — perf round 2 T1 quick wins: hourly tier, CSV keying, alert LIMIT (app-only) (2026-07-29)
+
+First tranche of perf round 2 (docs/reviews/PERF_ROUND_2_SCOPE_2026-07-29.md),
+scoped to the two hottest cost/landing surfaces plus two hygiene fixes.
+
+- **T1.1 — hourly cache tier for hourly-loaded facts (Overview + Cost/Spend).**
+  The `hourly` tier (3600s TTL) had zero direct adopters, so multi-day FACT_*/MART_*
+  reads sat on `recent` (300s) and cold-missed ~12x/hour per viewer. Moved the
+  Overview facts (exec board, 45d/150d metering, ML forecast, activity spark, daily
+  digest) and the Cost/Spend facts (metering, CS ratio, CS shapes/users, warehouse
+  window-vs-prior, warehouse daily, account storage, the 4-member spend batch, and
+  unmapped-entities) to `hourly`. Preserved the deliberate exceptions: Overview
+  score-inputs stays `recent`, the live WAREHOUSE_METERING fallback stays `recent`.
+  (Control Room / Operations facts are deferred to the T2 batching restructure,
+  where those reads get regrouped anyway.)
+- **T1.6 — CSV prep blob served the wrong table's bytes.** The download-prep key was
+  positional (`ow_dlprep_<key>_<seq>`) and `_ow_dl_seq` resets per page, so a page/
+  section switch could serve a previous table's bytes under a reused seq — and the
+  blob was never evicted. Now keyed by page identity + a content fingerprint of the
+  exact frame, kept in one self-evicting session slot, served only on an exact match.
+- **T1.9 — `open_alert_events` LIMIT standardized at 500.** Overview (500), Alerts
+  (300), and Control Room (100) differed only by the LIMIT baked into the SQL — the
+  sole cache-key splitter on the live tier. Unified at 500 (order-safe: the SQL ranks
+  severity then RAISED_AT before LIMIT), so the three share one live cache entry, and
+  crit/high counts stop truncating; fixed the stale "300 most recent" caption.
+
+Declined after review: **T1.11** (retier the Admin SETTINGS read live→recent) — the
+win is micro-credits on a secondary page, and SETTINGS is a deliberately-live
+operator-edit surface (audit rule, test_codex_r24) so a concurrent admin sees edits
+within 30s; kept live.
+
+New `test_perf_round2_t1` locks the tiers, CSV keying, and LIMIT; 1442 pytest green.
+
 ## 4.74.0 — cost review MEDIUMs C2–C12 (app-only) (2026-07-29)
 
 Eleven MEDIUM cost-accuracy and attribution findings from the cost review, all

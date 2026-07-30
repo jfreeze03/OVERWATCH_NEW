@@ -173,8 +173,9 @@ def test_cost_spend_section_batches_recent_and_defers_storage_unmapped():
     toggle, so first paint pays one parallel group instead of ~10 serial reads."""
     cost = (_ROOT / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
     spend = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
-    # one recent batch feeds the eager Spend + Attribution panels
-    assert "run_batch(_spend_attr_recent_jobs(" in cost and 'tier="recent")' in cost
+    # one batch feeds the eager Spend + Attribution panels (T1.1: hourly tier —
+    # the members are hourly-loaded facts, so 3600s TTL not 300s)
+    assert "run_batch(_spend_attr_recent_jobs(" in cost and 'tier="hourly")' in cost
     for k in ("metering", "csr", "wh", "daily"):        # every member threaded, none dropped
         assert f'_pf.get("{k}")' in cost, k
     # the spec-builder lives in spend.py and references all four fact builders

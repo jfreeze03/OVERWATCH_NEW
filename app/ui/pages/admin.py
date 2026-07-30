@@ -132,6 +132,9 @@ def _context_section() -> None:
 def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
     st.caption(f"Values from: {settings.get('_source')}. Rates confirmed 2026-07: $3.68 compute / $2.20 Cortex.")
+    # Deliberately live (audit rule, r24 #8): SETTINGS is an operator-edit surface, so
+    # a concurrent admin's change must surface within 30s, not one cache cycle. The
+    # perf T1.11 retier was declined here to keep that guarantee — see test_codex_r24.
     res = run(mart_sql.settings(), page=_PAGE, key="settings_table", tier="live",
               source="SETTINGS")
     if guard(res, "SETTINGS is empty.", setup_hint="Run migration V001 to create and seed it."):

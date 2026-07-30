@@ -77,7 +77,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
     # the prefetched batch result (perf #15); None -> read it serially here.
     res = metering_res if metering_res is not None else run(
         mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
-        tier="recent", source="FACT_METERING_DAILY (mart, loaded hourly)")
+        tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
     if not res.ok or res.empty:
         res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
                   tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
@@ -135,7 +135,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
     )
     csr = csr_res if csr_res is not None else run(
         mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
-        key=f"csr_fact_{company}_{days}", tier="recent",
+        key=f"csr_fact_{company}_{days}", tier="hourly",
         source="FACT_WAREHOUSE_DAILY (cloud-services share)")
     if not csr.usable():  # mart not deployed/loaded yet -> bounded live scan
         csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
@@ -184,7 +184,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
                                  "metadata bucket (WAREHOUSE_NAME resolves to NONE).")
         wh_arg = "" if pick == _ALL else pick
         shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg), page=_PAGE,
-                     key=f"cs_shapes_{company}_{days}_{pick}", tier="recent",
+                     key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly",
                      source="MART_CLOUD_SVC_DAILY (per-query CS credits, loaded hourly)")
         if guard(shapes, "No cloud-services credits recorded for this warehouse yet "
                          "(the mart loads hourly; needs V055 deployed)."):
@@ -197,7 +197,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
                 "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%d%%")})
             result_caption(shapes)
             users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg), page=_PAGE,
-                        key=f"cs_users_{company}_{days}_{pick}", tier="recent",
+                        key=f"cs_users_{company}_{days}_{pick}", tier="hourly",
                         source="MART_CLOUD_SVC_DAILY (CS credits by user/role)")
             if guard(users, "No per-user cloud-services credits for this warehouse yet."):
                 st.markdown("**Who's driving it** (user / role / tool)")
@@ -211,7 +211,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
     # read serially here. The live/historical fallbacks below are unchanged.
     wh = wh_res if wh_res is not None else run(
         mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-        key=f"wh_vs_prior_fact_{company}_{days}", tier="recent",
+        key=f"wh_vs_prior_fact_{company}_{days}", tier="hourly",
         source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
     if not wh.usable():  # mart not deployed/loaded yet -> bounded live scan
         wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
@@ -289,7 +289,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
     st.markdown("**Daily anomaly check (per warehouse)**")
     daily = daily_res if daily_res is not None else run(
         mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
-        key=f"fact_wh_daily_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
+        key=f"fact_wh_daily_{company}", tier="hourly", source="FACT_WAREHOUSE_DAILY")
     if daily.usable():
         flagged = flag_anomalies(
             complete_days_only(daily.df)  # B4: don't score today's partial row
@@ -313,7 +313,7 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
     tiers, so the company filter does not narrow it."""
     st.markdown("**Account storage by tier (billing basis)**")
     res = run(cost_sql.storage_account_truth(days), page=_PAGE,
-              key=f"stor_acct_{days}", tier="recent",
+              key=f"stor_acct_{days}", tier="hourly",
               source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
     if not res.ok or res.empty:
         res = run(cost_sql.storage_account_truth_live(days), page=_PAGE,
