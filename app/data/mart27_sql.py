@@ -839,8 +839,13 @@ def platform_score_inputs(days: int = 30) -> str:
     no coverage gate is needed — empty means undeployed, and run_mart_first
     falls back to the live aggregation."""
     days = max(7, min(int(days or 30), 120))
+    # C1 (V061): CREDITS_BILLED_AI is the AI partition of billed credits so the
+    # score's budget_pct prices AI at the AI rate. COALESCE(...,0) degrades pre-V061
+    # rows (NULL until SP_LOAD_PLATFORM_SCORE backfills) to all-compute, never NaN.
+    # Column list stays aligned with score_inputs_daily (run_mart_first swaps them).
     return f"""
-SELECT DAY, CREDITS_BILLED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB,
+SELECT DAY, CREDITS_BILLED, COALESCE(CREDITS_BILLED_AI, 0) AS CREDITS_BILLED_AI,
+       QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB,
        TASK_RUNS, TASK_FAILED, CRIT_RAISED, HIGH_RAISED
 FROM {mart_object("FACT_PLATFORM_SCORE_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())

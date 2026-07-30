@@ -66,9 +66,16 @@ snowflake/migrations/V057__fail_status_token.sql
 snowflake/migrations/V058__task_node_timing.sql
 snowflake/migrations/V059__task_graph_root_credits.sql
 snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql
+snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
+
+> **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
+> `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
+> moving-timestamp AI arms corrupted (owner-chosen full-retention), and
+> `CALL SP_LOAD_PLATFORM_SCORE(120);` backfills the new `CREDITS_BILLED_AI` column.
+> The paired app change (score/scoring AI-rate blend) ships with the app release.
 
 Each migration records itself in `DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION`; re-running is
 safe (idempotent `CREATE OR REPLACE` / `CREATE IF NOT EXISTS` + MERGE seeds).

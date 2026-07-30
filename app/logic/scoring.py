@@ -129,13 +129,14 @@ def platform_score(signals: dict, weights: dict | None = None) -> PlatformScore:
 
 
 def score_history(inputs: pd.DataFrame, weights: dict | None = None,
-                  monthly_budget_usd: float = 0.0, rate_usd: float = 3.68) -> pd.DataFrame:
+                  monthly_budget_usd: float = 0.0, rate_usd: float = 3.68,
+                  ai_rate_usd: float = 2.20) -> pd.DataFrame:
     """Retro platform score per day from fact-derived signals.
 
-    ``inputs`` (one row per DAY): CREDITS_BILLED, CRIT_RAISED, HIGH_RAISED,
-    QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB, TASK_RUNS, TASK_FAILED.
-    Budget pct uses the month-to-date cumulative spend against the monthly
-    budget, like the live score. Labeled RETRO: the live score also counts
+    ``inputs`` (one row per DAY): CREDITS_BILLED, CREDITS_BILLED_AI, CRIT_RAISED,
+    HIGH_RAISED, QUERY_COUNT, FAILED_COUNT, QUEUED_SEC, SPILL_GB, TASK_RUNS,
+    TASK_FAILED. Budget pct uses the month-to-date cumulative spend against the
+    monthly budget, like the live score. Labeled RETRO: the live score also counts
     stale sources and open actions, which facts don't carry per-day — the
     trend is comparable, the absolute value can differ by a few points.
     """
@@ -144,11 +145,18 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     frame = inputs.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce")
     frame = frame.dropna(subset=["DAY"]).sort_values("DAY")
-    for col in ("CREDITS_BILLED", "CRIT_RAISED", "HIGH_RAISED", "QUERY_COUNT",
+    for col in ("CREDITS_BILLED", "CREDITS_BILLED_AI", "CRIT_RAISED", "HIGH_RAISED", "QUERY_COUNT",
                 "FAILED_COUNT", "QUEUED_SEC", "SPILL_GB", "TASK_RUNS", "TASK_FAILED"):
         frame[col] = frame.get(col, 0).map(safe_float) if col in frame.columns else 0.0
     frame["_MONTH"] = frame["DAY"].dt.to_period("M")
-    frame["_MTD_USD"] = frame.groupby("_MONTH")["CREDITS_BILLED"].cumsum() * safe_float(rate_usd, 3.68)
+    # C1 (V061): price AI/Cortex credits at the AI rate. MTD_USD = cumulative
+    # OTHER credits x rate + cumulative AI credits x ai_rate (CREDITS_BILLED_AI is 0
+    # for pre-V061 rows / readers that predate the split, so it degrades to all-compute).
+    _rate = safe_float(rate_usd, 3.68)
+    _ai_rate = safe_float(ai_rate_usd, 2.20)
+    frame["_OTHER_CR"] = frame["CREDITS_BILLED"] - frame["CREDITS_BILLED_AI"]
+    frame["_MTD_USD"] = (frame.groupby("_MONTH")["_OTHER_CR"].cumsum() * _rate
+                         + frame.groupby("_MONTH")["CREDITS_BILLED_AI"].cumsum() * _ai_rate)
     budget = safe_float(monthly_budget_usd)
     rows = []
     for _, r in frame.iterrows():

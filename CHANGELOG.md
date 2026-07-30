@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.78.0 — V061 migration: AI loader/alert/score/purge correctness (2026-07-29)
+
+Consolidates the deferred loader/mart correctness fixes into `V061` (authored +
+lockstepped here; **Joe applies it in Snowsight** — the app never runs it). Scope was
+set by the owner to correctness-only (perf loader restructures → V062); the
+loader-robustness cluster (B5/B10/B11/B12) and `SP_NOTIFY_WEBHOOK` B9 (ARRAY runtime
+semantics that can't be smoke-tested here) are held for a dedicated pass. Built via
+`outputs/gen_v061.py` (each proc re-derived from its current definition with
+count-asserted needles), byte-compared by `tests/test_v061_ai_loader_alert.py`, and
+adversarially verified against the *generated* SQL (4 skeptics, one LOW finding fixed).
+
+- **C5 (data-corruption HIGH)** — the three `SP_LOAD_MARTS_V27` AI arms windowed on
+  `CURRENT_TIMESTAMP()` while every other daily arm uses `CURRENT_DATE()`, so the MERGE
+  overwrote a complete day with a post-06:45 partial recount once it left the window.
+  Day-aligned all three; the migration tail runs `CALL SP_LOAD_MARTS_V27('DAILY', 365)`
+  (owner-chosen full-retention heal) to rewrite corrupted `FACT_AI_USAGE_DAILY` rows.
+- **C2** — Query-Acceleration credits added to the proc/pipeline attribution sums:
+  `SP_LOAD_MARTS_V27` arm-[6] and both `SP_CHANGE_IMPACT_SCAN` arms now
+  `SUM(COMPUTE + COALESCE(QAS,0))`, matching the app twin (shipped v4.74.0).
+- **C1** — `SP_ALERT_SCAN` `COST_BUDGET_PACE`/`COST_FORECAST_BREACH` price MTD as
+  OTHER×compute + AI×AI-rate; `FACT_PLATFORM_SCORE_DAILY` gains `CREDITS_BILLED_AI` and
+  `SP_LOAD_PLATFORM_SCORE` populates it. **App follow-up (ships with the app):** both
+  score readers emit the column and `scoring.score_history` blends `budget_pct` at the
+  AI rate (`CALL SP_LOAD_PLATFORM_SCORE(120)` in the tail backfills history).
+- **C6** — seeded `COST_AI_CREEP` + the `[13b]` arm: week-over-week AI-bucket growth at
+  the AI rate. A brand-new AI workload (prior week 0) now fires via a finite sentinel
+  instead of a NULL ratio silently dropping the row (adversarial-verify hardening).
+- **B41** — self-alert block count `17 → 20`; **B33** — `SP_PURGE_FACTS` now purges
+  `FACT_OBJECT_COST_DAILY`, `FACT_STORAGE_ACCOUNT_DAILY`, `MART_TASK_NODE_DAILY`.
+
+Lockstep: validate floor → V061, admin `_EXPECTED_MIGRATIONS[61]`, rebuild bundle
+regenerated, DEPLOYMENT/README run-lists + heal note, teardown (objects pre-exist).
+1458 pytest green, ruff+mypy clean.
+
 ## 4.77.0 — perf round 2 T2.1: Control Room live-trio batch + run_mart_first seam (app-only) (2026-07-29)
 
 - **T2.1 — Control Room morning-triage live reads batched.** The three live-tier

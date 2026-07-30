@@ -263,7 +263,7 @@ def render() -> None:
         live_source="facts + ALERT_EVENTS (retro score inputs, live fallback)",
         mart_tier="recent", live_tier="recent")
     score_series = (scoring.score_history(score_inputs.df, scoring.resolve_weights(settings),
-                                          budget, rate)
+                                          budget, rate, ai_rate)  # C1: AI-rate-blended budget
                     if score_inputs.usable() else pd.DataFrame())
     # Triage #3: the Stale-telemetry and Owner-queue drivers (and their SETTINGS
     # weights) could never fire live because the caller omitted their signals.

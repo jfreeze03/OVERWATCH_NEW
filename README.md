@@ -127,6 +127,7 @@ snowflake/migrations/V057__fail_status_token.sql -- FAILS token fix: 4 mart arms
 snowflake/migrations/V058__task_node_timing.sql -- per-node loader-timing observability: MART_TASK_NODE_DAILY (queue + exec delay per task) via a new contained arm; enables data-driven schedule tuning
 snowflake/migrations/V059__task_graph_root_credits.sql -- task-graph pipeline credits: arm [6] rolls attribution up by COALESCE(ROOT_QUERY_ID,QUERY_ID) so WH_CREDITS captures proc-body compute (was ~0 for CALL tasks)
 snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql -- triage #5/#11 + guard: family mart gains TOTAL_ELAPSED_SEC (COMPILE_PCT bounded), schema-hourly queued includes provisioning, CS-ratio alert excludes the pseudo-warehouse
+snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql -- AI loader/alert/score/purge correctness: AI arms day-aligned (C5), QAS added to proc/pipeline attribution (C2), MTD alerts + score priced at the AI rate (C1), COST_AI_CREEP seeded (C6), self-alert block count fixed (B41), purge covers 3 more daily facts (B33). Tail heals FACT_AI_USAGE_DAILY (365) + score AI column.
 snowflake/roles.sql                      -- direct grants to SNOW_ACCOUNTADMINS / SNOW_SYSADMINS (monitor/operator layer retired v4.42)
 snowflake/validate.sql                   -- post-install checks
 ```

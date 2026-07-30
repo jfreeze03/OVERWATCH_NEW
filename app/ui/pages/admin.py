@@ -105,6 +105,11 @@ _EXPECTED_MIGRATIONS = {
         "TOTAL_ELAPSED_SEC (COMPILE_PCT bounded 0-100 on post-V060 rows), "
         "schema-hourly queued includes provisioning, CS-ratio alert excludes "
         "CLOUD_SERVICES_ONLY",
+    61: "AI loader/alert/score/purge correctness: AI usage arms day-aligned "
+        "(C5), Query-Acceleration credits added to proc/pipeline attribution "
+        "(C2), MTD budget/forecast alerts + platform score priced at the AI "
+        "rate (C1), COST_AI_CREEP seeded (C6), self-alert block count 17->20 "
+        "(B41), SP_PURGE_FACTS covers 3 more daily facts (B33)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

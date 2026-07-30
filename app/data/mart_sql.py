@@ -878,7 +878,8 @@ def score_inputs_daily(days: int = 30) -> str:
     days = max(7, min(int(days or 30), 120))
     return f"""
 WITH spend AS (
-    SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
+    SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED,
+           SUM(CASE WHEN {_AI_SERVICE_PRED} THEN CREDITS_BILLED ELSE 0 END) AS CREDITS_BILLED_AI
     FROM {core_object("FACT_METERING_DAILY")}
     WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
     GROUP BY DAY
@@ -909,6 +910,7 @@ a AS (
 )
 SELECT spend.DAY,
        spend.CREDITS_BILLED,
+       spend.CREDITS_BILLED_AI,
        COALESCE(q.QUERY_COUNT, 0)  AS QUERY_COUNT,
        COALESCE(q.FAILED_COUNT, 0) AS FAILED_COUNT,
        COALESCE(q.QUEUED_SEC, 0)   AS QUEUED_SEC,
