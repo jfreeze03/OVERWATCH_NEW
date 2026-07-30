@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.72.0 — bug round 2 batch 2: state/nav/anomaly HIGHs (app-only) (2026-07-29)
+
+Four more HIGH bugs from bug round 2, all app-layer:
+
+- **B4 — morning false anomalies.** All three app anomaly scorers fed today's
+  still-growing `FACT_WAREHOUSE_DAILY` row to `flag_anomalies`, so a steady
+  warehouse's part-day spend scored as a low outlier and stamped a recurring
+  false `SEVERITY=HIGH` in the flagship triage queue every morning. New
+  `anomaly.complete_days_only()` drops the current day before scoring (mirroring
+  the server twin `SP_ANOMALY_SWEEP`'s `DAY < CURRENT_DATE()`); trend charts keep
+  the full frame. Applied in Control Room, Cost→Spend, and Operations→Warehouses.
+- **B6 — Jump-to box was a silent no-op.** `consume_pending_navigation` cleared
+  `_ow_jump` on *every* rerun, before `_global_jump` could read the pick and fire
+  the navigation — so every Jump-to selection was erased on the rerun that
+  delivered it. The reset now runs only when a queued jump is actually consumed.
+- **B7 — live-inventory DB picks silently reverted.** `init_filters` validated
+  `flt_database` against the static company/env tuples, so `DBA_MAINT_DB` and any
+  new `ALFA_*`/`TRXS_*` database the SHOW-DATABASES picker offers was un-picked
+  next run (and applied saved views lost their DB scope). Now validates with the
+  same `classify_databases` rules the picker uses.
+- **B8 — cross-profile navigation.** `consume_pending_navigation` wrote
+  `_ow_nav_radio` unconditionally, so an EXECUTIVE-profile viewer following an
+  Investigate → link to a PERF_/SEC_ page crashed the radio or landed on a dead
+  page. The target is now clamped to the viewer's profile pages (fallback Overview).
+
+New `test_bug_round2` locks all four; 1417 pytest green.
+
 ## 4.71.0 — bug round 2 batch 1: three dead incident-response write paths (app-only) (2026-07-29)
 
 Bug round 2 (docs/reviews/BUG_ROUND_2_2026-07-29.md) found the top of the queue was

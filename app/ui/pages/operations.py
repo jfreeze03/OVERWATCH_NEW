@@ -16,7 +16,7 @@ from app.core.state import filters
 from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
-from app.logic.anomaly import flag_anomalies
+from app.logic.anomaly import complete_days_only, flag_anomalies
 from app.logic.formulas import account_today, credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.ui import charts
@@ -523,7 +523,9 @@ def _warehouses_tab(company: str, rate: float) -> None:
         return
     df = res.df.copy()
     df["USD"] = df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
-    flagged = flag_anomalies(df, "USD", group_col="WAREHOUSE_NAME")
+    # B4: score only complete days (today's partial row false-flags a steady wh);
+    # the trend chart below keeps the full frame including today.
+    flagged = flag_anomalies(complete_days_only(df), "USD", group_col="WAREHOUSE_NAME")
     daily = df.groupby("DAY", as_index=False)["USD"].sum()
     charts.spend_trend(daily)
     anomalies = flagged[flagged["IS_ANOMALY"]]

@@ -29,12 +29,16 @@ def init_filters() -> None:
         st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
     if st.session_state["flt_days"] not in DAY_WINDOW_OPTIONS:
         st.session_state["flt_days"] = DEFAULT_DAY_WINDOW
-    # A database selection from another company OR environment scope resets
-    # to All (a PROD scope must not keep a lingering DEV database pin).
-    from app.companies import databases_for  # local import: tiny, avoids cycles
-    valid_dbs = databases_for(st.session_state["flt_company"],
-                              st.session_state["flt_environment"])
-    if st.session_state["flt_database"] and st.session_state["flt_database"] not in valid_dbs:
+    # A database selection from another company OR environment scope resets to All
+    # (a PROD scope must not keep a lingering DEV database pin). Bug round 2 B7:
+    # validate with the SAME live-inventory classification the picker uses, not the
+    # static company/environment tuples — otherwise DBA_MAINT_DB and any new
+    # ALFA_*/TRXS_* database (offered by the SHOW-DATABASES picker) is silently
+    # un-picked on the next run, and applied saved views lose their DB scope.
+    from app.companies import classify_databases  # local import: tiny, avoids cycles
+    _db = str(st.session_state["flt_database"] or "").strip()
+    if _db and _db.upper() not in classify_databases(
+            (_db,), st.session_state["flt_company"], st.session_state["flt_environment"]):
         st.session_state["flt_database"] = ""
 
 
@@ -88,13 +92,26 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
 
 def consume_pending_navigation() -> None:
     """Call first thing in main(): applies a queued jump pre-instantiation."""
-    st.session_state["_ow_jump"] = None  # clear the jump box pre-instantiation
     pending = st.session_state.pop("_ow_nav_pending", None)
     if not pending:
         return
+    # B6: reset the jump box ONLY when we actually consumed a jump. The old
+    # unconditional clear ran every rerun and erased the user's pick on the very
+    # rerun that delivered it (before _global_jump could read _ow_jump and fire
+    # request_navigation) — the whole Jump-to box was a silent no-op.
+    st.session_state["_ow_jump"] = None
     from app.logic.navigate import PAGE_SECTION_KEYS
 
     page = str(pending.get("page") or "")
+    # B8: never route a viewer to a page their profile does not offer — writing an
+    # off-profile value to _ow_nav_radio crashes the radio (its options are the
+    # profile's pages) or lands on a dead page. Clamp to the viewer's pages.
+    if page:
+        from app.config import PAGES_BY_PROFILE, resolve_role_profile
+        from app.core.session import current_role
+        allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+        if allowed and page not in allowed:
+            page = "Overview"  # offered by every profile
     if page:
         st.session_state["_ow_nav_radio"] = page
         st.session_state["_ow_page"] = page

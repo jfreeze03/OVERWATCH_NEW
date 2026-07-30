@@ -14,6 +14,21 @@ _MEANAD_K = 0.7979
 DEFAULT_THRESHOLD = 3.5
 
 
+def complete_days_only(df: pd.DataFrame, day_col: str = "DAY") -> pd.DataFrame:
+    """Drop the current, still-growing day before anomaly scoring (bug round 2 B4).
+
+    FACT_WAREHOUSE_DAILY carries a partial row for today that grows through the
+    day, so a steady warehouse's part-day spend scores as a low outlier and stamps
+    a recurring false SEVERITY=HIGH every morning. The server twin SP_ANOMALY_SWEEP
+    already bounds DAY < CURRENT_DATE(); this mirrors it for the app-side scorers.
+    Callers keep the full frame for trend charts.
+    """
+    from app.logic.formulas import account_today
+    if df is None or df.empty or day_col not in df.columns:
+        return df
+    return df[pd.to_datetime(df[day_col], errors="coerce").dt.date < account_today()]
+
+
 def robust_zscores(values: pd.Series) -> pd.Series:
     """Return modified z-scores; zeros when there is no dispersion or <5 points.
 

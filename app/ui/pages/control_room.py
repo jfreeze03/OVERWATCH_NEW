@@ -16,7 +16,7 @@ from app.core.query import run, run_batch
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import triage_queue
-from app.logic.anomaly import anomaly_summary, flag_anomalies
+from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
 from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
@@ -380,7 +380,8 @@ def render() -> None:
     anomalies: list[dict] = []
     if wh_daily.usable():
         flagged = flag_anomalies(
-            wh_daily.df.assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))),
+            complete_days_only(wh_daily.df)  # B4: don't score today's partial row
+            .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))),
             "USD", group_col="WAREHOUSE_NAME",
         )
         anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
