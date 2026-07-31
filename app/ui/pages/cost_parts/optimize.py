@@ -21,7 +21,13 @@ from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.formulas import format_usd, md_dollars, safe_float
-from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
+from app.logic.insights import (
+    IDLE_TARGET_SUSPEND_SEC,
+    flag_repeat_candidates,
+    idle_advisor,
+    idle_suspend_sql,
+    storage_movers,
+)
 from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -121,7 +127,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if guard(idle_res, "No warehouse metering in this window."):
-        advisor = idle_advisor(idle_res.df, rate, days)
+        # A3: give the advisor each warehouse's CURRENT auto-suspend so it never
+        # proposes RAISING an already-tuned one (and ranks tuned warehouses below
+        # ones that can still be fixed). Metadata-tier SHOW, shared cache key.
+        _idle_df = idle_res.df
+        _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+                   tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        if _whs.ok and not _whs.empty:
+            _wd = _whs.df.copy()
+            _wd.columns = [str(c).lower() for c in _wd.columns]
+            if {"name", "auto_suspend"}.issubset(_wd.columns):
+                _susp = {str(n): safe_float(s, 0.0)
+                         for n, s in zip(_wd["name"], _wd["auto_suspend"], strict=False)}
+                _idle_df = _idle_df.copy()
+                _idle_df["AUTO_SUSPEND"] = _idle_df["WAREHOUSE_NAME"].astype(str).map(_susp)
+        advisor = idle_advisor(_idle_df, rate, days)
         flagged = advisor[advisor["FLAGGED"]]
         total_idle = float(advisor["IDLE_USD"].sum())
         kpi_row([
@@ -145,7 +165,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             with st.expander("Generated remediation + savings-ledger entries"):
                 statements = []
                 for _, r in flagged.head(10).iterrows():
-                    statements.append(idle_suspend_sql(r["WAREHOUSE_NAME"]))
+                    # A3: never generate an ALTER that RAISES a tuned warehouse's
+                    # suspend — clamp the target to min(current, 60s) and skip
+                    # warehouses already at/below target (their idle is resume overhead).
+                    _cur = safe_float(r.get("AUTO_SUSPEND"), 0.0)
+                    if 0 < _cur <= IDLE_TARGET_SUSPEND_SEC:
+                        continue
+                    _target = int(min(_cur, IDLE_TARGET_SUSPEND_SEC)) if _cur > 0 else IDLE_TARGET_SUSPEND_SEC
+                    statements.append(idle_suspend_sql(r["WAREHOUSE_NAME"], _target))
                     statements.append(
                         f"INSERT INTO {core_object('SAVINGS_LEDGER')} (DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL)\n"
                         f"VALUES ({sql_literal('Auto-suspend tune: ' + str(r['WAREHOUSE_NAME']))}, 'ESTIMATED', "

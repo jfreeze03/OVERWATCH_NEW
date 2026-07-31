@@ -12,6 +12,10 @@ from .formulas import safe_div, safe_float
 
 IDLE_PCT_FLAG = 20.0     # flag warehouses wasting >=20% of credits idle
 IDLE_MIN_CREDITS = 1.0   # and at least 1 idle credit in the window
+# A3: the suspend target the advisor steers toward. A warehouse already at or
+# below this is NOT a tuning target — never propose raising it (the old hardcoded
+# "e.g. 60s" wording did exactly that to a 30s warehouse).
+IDLE_TARGET_SUSPEND_SEC = 60
 
 
 def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> pd.DataFrame:
@@ -28,13 +32,41 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
     out["IDLE_USD"] = (out["IDLE_CREDITS"] * rate).round(2)
     out["PROJECTED_MONTHLY_IDLE_USD"] = (out["IDLE_USD"] / days * 30).round(2)
     out["FLAGGED"] = (out["IDLE_PCT"] >= IDLE_PCT_FLAG) & (out["IDLE_CREDITS"] >= IDLE_MIN_CREDITS)
-    out["RECOMMENDATION"] = out.apply(
-        lambda r: (
-            f"Reduce AUTO_SUSPEND (e.g. 60s) on {r['WAREHOUSE_NAME']}: "
-            f"~{r['IDLE_PCT']:.0f}% of its credits burn in hours with zero queries."
-        ) if r["FLAGGED"] else "Idle share within tolerance.",
-        axis=1,
-    )
+
+    # A3 (audit 2026-07-31): the advice must respect the warehouse's CURRENT
+    # AUTO_SUSPEND. The old text hardcoded "e.g. 60s" for everything, so a
+    # warehouse already tuned to 30s got told to RAISE it to 60 — the generated
+    # ALTER made things worse — and a fully-tuned warehouse still ranked #1 with
+    # no way to tell it apart. When the current setting is already at/below the
+    # 60s target, the residual is resume overhead, not a tuning gap. Callers that
+    # have SHOW WAREHOUSES data pass AUTO_SUSPEND; without it, behaviour is the
+    # old generic wording (no column, no claim).
+    has_current = "AUTO_SUSPEND" in out.columns
+    if has_current:
+        out["AUTO_SUSPEND"] = out["AUTO_SUSPEND"].map(lambda v: safe_float(v, 0.0))
+
+    def _advice(r) -> str:
+        if not r["FLAGGED"]:
+            return "Idle share within tolerance."
+        cur = safe_float(r.get("AUTO_SUSPEND"), 0.0) if has_current else 0.0
+        if has_current and 0 < cur <= IDLE_TARGET_SUSPEND_SEC:
+            return (f"{r['WAREHOUSE_NAME']} is already at AUTO_SUSPEND={cur:.0f}s — "
+                    f"~{r['IDLE_PCT']:.0f}% idle here is resume overhead, not a tuning gap. "
+                    "Look at query cadence/scheduling instead of the suspend timer.")
+        target = int(min(cur, IDLE_TARGET_SUSPEND_SEC)) if cur > 0 else IDLE_TARGET_SUSPEND_SEC
+        now = f" (currently {cur:.0f}s)" if cur > 0 else ""
+        return (f"Reduce AUTO_SUSPEND to {target}s on {r['WAREHOUSE_NAME']}{now}: "
+                f"~{r['IDLE_PCT']:.0f}% of its credits burn in hours with zero queries.")
+
+    out["RECOMMENDATION"] = out.apply(_advice, axis=1)
+    # Already-tuned warehouses are not actionable tuning targets — keep them in the
+    # table (the idle $ is real) but rank them below ones that can still be fixed.
+    if has_current:
+        out["_TUNABLE"] = ~((out["AUTO_SUSPEND"] > 0)
+                            & (out["AUTO_SUSPEND"] <= IDLE_TARGET_SUSPEND_SEC)
+                            & out["FLAGGED"])
+        out = out.sort_values(["_TUNABLE", "IDLE_USD"], ascending=[False, False]).drop(columns=["_TUNABLE"])
+        return out.reset_index(drop=True)
     return out.sort_values("IDLE_USD", ascending=False).reset_index(drop=True)
 
 

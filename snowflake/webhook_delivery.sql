@@ -11,16 +11,37 @@
 -- Run as ACCOUNTADMIN, paste your Slack/Teams webhook URL, then re-run
 -- V018 (or just: ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;)
 
-CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL
-    TYPE = GENERIC_STRING
-    SECRET_STRING = 'https://hooks.slack.com/services/T000/B000/XXXX';
-
-CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
-    TYPE = WEBHOOK ENABLED = TRUE
-    WEBHOOK_URL = 'https://hooks.slack.com/services/T000/B000/XXXX'
-    WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL
-    WEBHOOK_BODY_TEMPLATE = '{"text": "SNOWFLAKE_WEBHOOK_MESSAGE"}'
-    WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+-- ---------------------------------------------------------------------------
+-- SLACK (OVERWATCH_WEBHOOK) — NOT USED. Owner 2026-07-31: "we only use
+-- OVERWATCH_TEAMS_URL and OVERWATCH_WEBHOOK_TEAMS." Commented out because the
+-- URL below is a PLACEHOLDER: creating this integration would wire a route to
+-- an endpoint that can only fail. Kept as the reference recipe.
+--
+-- CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL
+--     TYPE = GENERIC_STRING
+--     SECRET_STRING = '<slack-webhook-url>';
+--
+-- CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
+--     TYPE = WEBHOOK ENABLED = TRUE
+--     WEBHOOK_URL = '<slack-webhook-url>'
+--     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_WEBHOOK_URL
+--     WEBHOOK_BODY_TEMPLATE = '{"text": "SNOWFLAKE_WEBHOOK_MESSAGE"}'
+--     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+--
+-- THREE THINGS STILL NAME 'OVERWATCH_WEBHOOK' ON A TEAMS-ONLY INSTALL:
+--  1. V012 seeds a DEFAULT route ('ALL','HIGH','OVERWATCH_WEBHOOK') into
+--     ALERT_ROUTES (V012__routing_anomaly_remediation.sql:29). On this account it
+--     points at an integration that does not exist, so every SP_NOTIFY_WEBHOOK run
+--     logs a route_send_failed for it. The live sender isolates per route, so it
+--     does NOT block Teams — but it buries the real Teams error in the log. Disable:
+--        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+--           SET ENABLED = FALSE WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK';
+--  2. SP_DAILY_DIGEST hardcodes INTEGRATION('OVERWATCH_WEBHOOK')
+--     (V018__delivery_first_class.sql:104) and swallows the error with
+--     `WHEN OTHER THEN NULL` -> the morning digest has NEVER been deliverable here.
+--     Do not read "no digest" as a signal. Fix belongs in a future migration.
+--  3. V018's auto-resume gate only RESUMEs TASK_ALERT_NOTIFY when
+--     OVERWATCH_WEBHOOK exists; this file's trailing RESUME is what covers that.
 
 -- ---------------------------------------------------------------------------
 -- MICROSOFT TEAMS (Workflows / Power Automate) — live lesson 2026-07-08.
@@ -39,8 +60,20 @@ CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK
      WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
      WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
      WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
- INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
- SELECT 'ALL', 'HIGH', 'OVERWATCH_WEBHOOK_TEAMS';
+ -- !! RE-RUN HAZARD: this is a bare INSERT, not a MERGE — running this file again
+ -- mints a SECOND route row for OVERWATCH_WEBHOOK_TEAMS (duplicate Teams cards).
+ -- And CREATE OR REPLACE on the integration above DROPS AND RECREATES it, which
+ -- DESTROYS every grant on it — SP_NOTIFY_WEBHOOK runs EXECUTE AS OWNER, so if the
+ -- owning role loses USAGE, every send throws "insufficient privileges" and Teams
+ -- goes silent with only route_send_failed rows to show for it. After any re-run:
+ --   SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS;   -- re-grant USAGE if bare
+ -- Use the guarded form instead of the bare INSERT:
+ MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES t
+ USING (SELECT 'ALL' AS FAMILY, 'HIGH' AS MIN_SEVERITY,
+               'OVERWATCH_WEBHOOK_TEAMS' AS INTEGRATION_NAME) s
+ ON t.FAMILY = s.FAMILY AND t.INTEGRATION_NAME = s.INTEGRATION_NAME
+ WHEN NOT MATCHED THEN INSERT (FAMILY, MIN_SEVERITY, INTEGRATION_NAME)
+      VALUES (s.FAMILY, s.MIN_SEVERITY, s.INTEGRATION_NAME);
 
 -- V026's sender JSON-escapes the message (quotes, newlines, tabs), so
 -- multi-alert digests render as line breaks in the card instead of

@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.113.0 — Recommendation engines Tier A: three engines were advising in the WRONG DIRECTION (2026-07-31)
+
+A full audit of every in-app recommendation engine (14 engines, one adjudicator each)
+found three that emit **executable** advice pointing the wrong way. A wrong number on a
+dashboard misleads; a wrong `ALTER` makes the account worse — so these ship first, with
+behavioural (not source-lock) tests.
+
+- **A1 — threshold tuning inverted on inverse-metric rules.** `logic/tuning.py` assumed
+  every rule fires when `METRIC_VALUE >= THRESHOLD`. But `SEC_CRED_EXPIRY` (days-until-expiry)
+  and `COST_CONTRACT_BREACH` (projected days-left) fire when the value is **≤** the
+  threshold — so the engine's "raise it to cut noise" suggestion **widened** firing, the
+  exact opposite of its own stated basis. Added `LOWER_IS_WORSE`, threaded `rule_id`
+  through `suggestions_by_rule`, and mirrored the whole computation (noise **p10** vs the
+  actioned **ceiling**; pure-noise moves **down**). Also replaced the `METRIC_VALUE > 0`
+  filter with a finite-only filter — on an inverse rule, `0` (expires today) and negatives
+  (already expired) are the *most* actionable evidence and were being silently discarded.
+- **A2 — quiet-window proposer mixed timezones.** `data/insights_sql.py`
+  `warehouse_hourly_activity` took `HOUR(START_TIME)` from `ACCOUNT_USAGE` (TIMESTAMP_LTZ →
+  **session** tz, i.e. UTC off-SiS) and joined it against `FACT_QUERY_HOURLY.HOUR_TS`
+  (naive **account** time). The winning "quiet" hours were then pasted into an
+  America/Chicago `CRON` by the schedule advisor — proposing a SUSPEND **up to 5–6 hours
+  early, into the morning ramp**. Both sides now use
+  `CONVERT_TIMEZONE('America/Chicago', …)`, including the `DAYS_SEEN` day-count.
+- **A3 — idle advisor ignored the current `AUTO_SUSPEND`.** The recommendation hardcoded
+  "e.g. 60s", so a warehouse already tuned to 30s was told to **raise** it, and
+  fully-tuned warehouses still ranked #1 with nothing to distinguish them. The advisor now
+  takes the live `AUTO_SUSPEND` (already fetched on the page), targets `min(current, 60)`,
+  re-words already-tuned warehouses as *"residual is resume overhead, not a tuning gap"*,
+  ranks them below fixable ones, and the **generated `ALTER` skips them entirely**.
+
+Gates green: ruff, mypy (pure layers), pytest 1695 passed / 1 skipped (+12 Tier-A locks).
+
+*Remaining audit findings (Tier B–E: ledger double-counting, the systemic live-fallback
+window mismatch, ranking-proxy quality, caption honesty) and the perf plan (P1 health_strip,
+P2 AI-users mart-first, P3 batch telemetry) are queued — see the session plan.*
+
 ## 4.112.0 — Live-screenshot fixes: $-in-markdown math-font bug (house-wide) + V068 freshness stamps (2026-07-31)
 
 Two defects the owner spotted in the deployed app (screenshots, v4.111.0):

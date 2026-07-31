@@ -433,7 +433,17 @@ LIMIT 50
 
 def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
     """Hour-of-day credits vs query activity per warehouse — the input to
-    the off-hours schedule advisor (credits with no queries = waste)."""
+    the off-hours schedule advisor (credits with no queries = waste).
+
+    A2 (audit 2026-07-31): BOTH CTEs must report the hour in ACCOUNT time. The
+    metering side reads ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY, whose START_TIME
+    is TIMESTAMP_LTZ and therefore renders in the SESSION timezone (UTC on a
+    non-SiS runtime), while FACT_QUERY_HOURLY.HOUR_TS is naive account time. Joining
+    those two hour keys silently mixed timezones, and the winning "quiet" hours were
+    then pasted into an America/Chicago CRON by the schedule advisor — proposing a
+    SUSPEND up to 5-6 hours early, into the morning ramp. CONVERT_TIMEZONE pins the
+    metering side to account time so the two sides mean the same thing.
+    """
     days = bounded_days(days, 30)
     where_m = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
@@ -441,9 +451,10 @@ def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
     )
     return f"""
 WITH m AS (
-    SELECT WAREHOUSE_NAME, HOUR(START_TIME) AS HR,
+    SELECT WAREHOUSE_NAME,
+           HOUR(CONVERT_TIMEZONE('America/Chicago', START_TIME)) AS HR,
            SUM(CREDITS_USED) AS CR,
-           COUNT(DISTINCT DATE(START_TIME)) AS DAYS_SEEN
+           COUNT(DISTINCT DATE(CONVERT_TIMEZONE('America/Chicago', START_TIME))) AS DAYS_SEEN
     FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
     WHERE {where_m}
       AND WAREHOUSE_ID > 0
