@@ -21,7 +21,10 @@ _TOKENS = """
 :root {
   --ow-bg:#0a0f1c; --ow-surface:#0f1729; --ow-raised:#131d33;
   --ow-hairline:rgba(148,163,184,0.16); --ow-hairline2:rgba(148,163,184,0.28);
-  --ow-ink:#e8eef7; --ow-ink-soft:#aab6c8; --ow-ink-mute:#6b7a90;
+  /* rec 15 (a11y): --ow-ink-mute lifted #6b7a90 -> #8593a8 so the small (0.62-0.70rem)
+     muted labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.1, surface 5.7,
+     raised 5.4). Every muted label references this one token, so one change fixes all. */
+  --ow-ink:#e8eef7; --ow-ink-soft:#aab6c8; --ow-ink-mute:#8593a8;
   --ow-accent:#38bdf8; --ow-accent2:#22d3ee;
   --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#fb7185; --ow-info:#38bdf8;
   --ow-ok-dim:rgba(52,211,153,0.14); --ow-warn-dim:rgba(251,191,36,0.14);
@@ -56,7 +59,7 @@ div[data-testid="stMetric"] {
 div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
   background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); opacity:0.85; }
 div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
-[data-testid="stMetricLabel"] p { font-size:0.70rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
+[data-testid="stMetricLabel"] p { font-size:0.72rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
 [data-testid="stMetricValue"] { font-size:1.62rem; font-weight:720; color:var(--ow-ink); }
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
 .ow-sev-warn div[data-testid="stMetric"]::before { background:var(--ow-warn); opacity:1; }
@@ -77,9 +80,28 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-src-badge--other { color:#8b98ad; border-color:rgba(139,152,173,0.3); }
 .ow-src-badge--method { color:#c084fc; border-color:rgba(192,132,252,0.35); }  /* rec 13: how derived */
 .ow-src-badge--scope { color:#a5b4cf; border-color:rgba(165,180,207,0.4); }    /* rec 13: account-wide / company */
-.ow-card__title { font-size:0.70rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
+.ow-card__title { font-size:0.72rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
 .ow-card__value { font-size:1.55rem; font-weight:720; color:var(--ow-ink); margin-top:3px; font-variant-numeric:tabular-nums; }
 .ow-card__meta { font-size:0.78rem; color:var(--ow-ink-soft); margin-top:2px; }
+
+/* rec 15 (a11y): keyboard-focusable + touch-tappable KPI help. Replaces the
+   hover-only card title= tooltip (invisible on touch, unreachable by keyboard).
+   The affordance is a focusable '?' badge; the tooltip fires on hover AND focus,
+   so Tab-users and touch-users both get it. CSP-safe (no JS): content:attr(). */
+.ow-help { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
+  flex:0 0 auto; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2);
+  color:var(--ow-ink-mute); font-size:10px; font-weight:700; line-height:1; cursor:help;
+  position:relative; outline:none; text-transform:none; letter-spacing:0; }
+.ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
+.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(56,189,248,0.45); }
+.ow-help[data-help]::after {
+  content:attr(data-help); position:absolute; left:0; top:calc(100% + 6px);
+  min-width:200px; max-width:300px; padding:8px 10px; border-radius:var(--ow-r-sm);
+  background:var(--ow-raised); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft);
+  font-size:0.72rem; line-height:1.42; font-weight:500; letter-spacing:0; text-transform:none;
+  text-align:left; white-space:normal; box-shadow:var(--ow-shadow2); z-index:60;
+  opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
+.ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
 .ow-section { display:flex; align-items:center; gap:10px; margin:6px 0 6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
   border-left:3px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.06),transparent 60%); }
@@ -97,7 +119,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-stat::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r-sm) 0 0 var(--ow-r-sm); background:var(--ow-accent); }
 .ow-stat--ok::before { background:var(--ow-ok); } .ow-stat--warn::before { background:var(--ow-warn); }
 .ow-stat--bad::before { background:var(--ow-bad); } .ow-stat--info::before { background:var(--ow-info); }
-.ow-stat__k { font-size:0.62rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
+.ow-stat__k { font-size:0.66rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
 .ow-stat__v { font-size:1.04rem; font-weight:720; color:var(--ow-ink); font-variant-numeric:tabular-nums; display:flex; align-items:center; gap:6px; }
 .ow-stat__spark { margin-top:2px; opacity:0.9; }
 
@@ -130,8 +152,12 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   -webkit-text-fill-color:transparent; background-clip:text; }
 
 div[role="radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label="Window"] {
+  /* rec 15 (a11y): WRAP instead of horizontal overflow-scroll + nowrap. A scroll
+     edge hides radio options off-screen — invisible to touch and a keyboard trap;
+     wrapping keeps every option reachable. r-lg (not the pill radius) so a two-row
+     group still reads as one grouped control. */
   gap:4px; padding:4px; background:var(--ow-surface); border:1px solid var(--ow-hairline);
-  border-radius:var(--ow-r-pill); overflow-x:auto; scrollbar-width:thin; flex-wrap:nowrap; }
+  border-radius:var(--ow-r-lg); flex-wrap:wrap; }
 div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-label="Window"] label {
   border-radius:var(--ow-r-pill); padding:3px 12px; margin:0; white-space:nowrap; transition:background var(--ow-ease),color var(--ow-ease); }
 div[role="radiogroup"][aria-label="Section"] label:hover { background:rgba(148,163,184,0.10); }

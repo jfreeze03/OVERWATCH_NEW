@@ -6,6 +6,7 @@ rec 10 (score/task-node reads sit on the hourly tier matching their source caden
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -257,3 +258,59 @@ def test_rec11_section_scope_note_only_fires_on_ignored_filters():
 def test_rec11_overview_renders_section_scope_note():
     ov = _src("app/ui/pages/overview.py")
     assert "section_scope_note(f)" in ov   # wired on the Overview headline KPIs
+
+
+# ---------------------------------------------------------------------------
+# rec 15 — a11y: WCAG-AA muted contrast, wrapping controls, focusable KPI help
+# ---------------------------------------------------------------------------
+def _wcag_ratio(fg: str, bg: str) -> float:
+    def _lin(v: float) -> float:
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    def _lum(hexs: str) -> float:
+        r, g, b = (int(hexs[i:i + 2], 16) for i in (1, 3, 5))
+        return 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+
+    la, lb = _lum(fg), _lum(bg)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _token(theme: str, name: str) -> str:
+    m = re.search(rf"{re.escape(name)}\s*:\s*(#[0-9a-fA-F]{{6}})", theme)
+    assert m, f"token {name} not found"
+    return m.group(1)
+
+
+def test_rec15_muted_ink_clears_wcag_aa():
+    theme = _src("app/theme.py")
+    mute = _token(theme, "--ow-ink-mute")
+    # muted labels land on bg, surface AND raised — clear 4.5:1 on the DARKEST-contrast
+    # (lightest) of them, which is --ow-raised. If that clears, all three do.
+    for surface in ("--ow-bg", "--ow-surface", "--ow-raised"):
+        assert _wcag_ratio(mute, _token(theme, surface)) >= 4.5, surface
+
+
+def test_rec15_segmented_controls_wrap_not_scroll():
+    theme = _src("app/theme.py")
+    rule = theme.split('radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label="Window"] {', 1)[1].split("}", 1)[0]
+    assert "flex-wrap:wrap" in rule          # options wrap to a second row...
+    assert "overflow-x:auto" not in rule     # ...instead of hiding behind a scroll edge
+
+
+def test_rec15_kpi_help_is_focusable_not_hover_only():
+    from app.ui.components import metric_card_html
+    h = metric_card_html({"label": "MTD", "value": "$1", "help": "how this is computed"})
+    assert 'class="ow-help"' in h
+    assert 'tabindex="0"' in h                       # reachable by keyboard Tab
+    assert 'aria-label="how this is computed"' in h  # announced to screen readers
+    assert 'data-help="how this is computed"' in h   # drives the CSS (hover+focus) tooltip
+    # a card with no help renders no affordance
+    assert "ow-help" not in metric_card_html({"label": "x", "value": "1"})
+
+
+def test_rec15_help_tooltip_fires_on_focus_in_theme():
+    theme = _src("app/theme.py")
+    assert ".ow-help" in theme
+    assert ".ow-help:focus::after" in theme or ".ow-help:focus-visible::after" in theme

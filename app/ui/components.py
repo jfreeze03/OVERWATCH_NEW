@@ -213,7 +213,14 @@ def metric_card_html(item: dict) -> str:
         spark = ('<div class="ow-card__meta" style="margin-top:6px">'
                  + spark_svg(item["spark"], color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
     delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
-    title_attr = f' title="{help_t}"' if help_t else ""
+    # rec 15 (a11y): a keyboard-focusable + touch-tappable '?' affordance carrying the
+    # help text, replacing the hover-only card title= (invisible on touch, unreachable
+    # by Tab). aria-label announces it to screen readers; the CSS tooltip fires on hover
+    # AND focus; native title= stays as a pointer fallback. Empty help -> no affordance.
+    help_html = ""
+    if help_t:
+        help_html = (f'<span class="ow-help" tabindex="0" aria-label="{help_t}" '
+                     f'data-help="{help_t}" title="{help_t}">?</span>')
     # Codex r7 #12 + rec 13: tiny trust chips INSIDE the card. THREE distinct tokens
     # so scope and freshness no longer compete for one slot (C11 crammed 'account-wide'
     # into the freshness badge, so a card could show scope OR freshness, never both):
@@ -230,8 +237,8 @@ def metric_card_html(item: dict) -> str:
         _v = str(item.get(_kind, "") or "")
         if _v:
             badge += f'<span class="ow-src-badge ow-src-badge--{_kind}">{html.escape(_v)}</span>'
-    return (f'<div class="{cls}" style="min-height:96px"{title_attr}>'
-            f'<div class="ow-card__title">{label}{badge}</div>'
+    return (f'<div class="{cls}" style="min-height:96px">'
+            f'<div class="ow-card__title">{label}{help_html}{badge}</div>'
             f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
 
 

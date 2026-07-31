@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.96.0 — Codex R2 NEXT wave C: accessibility floor (rec 15, app-only) (2026-07-30)
+
+**rec 15 (MEDIUM)** — a11y polish on the dense KPI/status surfaces:
+
+- **WCAG-AA muted contrast** — `--ow-ink-mute` lifted `#6b7a90` → `#8593a8`. The old
+  value computed ~4.35:1 on the app background — under the 4.5:1 AA floor for the small
+  (0.62–0.72rem) labels that use it. The new value clears 4.5:1 on all three surfaces it
+  lands on (bg 6.1, surface 5.7, raised 5.4). One token, every muted label fixed at once;
+  a self-computing test asserts the ratio so it can't silently regress.
+- **Keyboard/touch KPI help** — the metric card's help was a hover-only `title=` on the
+  whole card: invisible on touch, unreachable by Tab. Replaced with a focusable `?`
+  affordance carrying `aria-label` (screen-reader announced) + a CSS tooltip that fires on
+  hover **and** focus. CSP-safe (no JS, `content:attr(data-help)`); native `title=` kept as
+  a pointer fallback.
+- **Wrapping segmented controls** — the Section/Window radiogroups used
+  `overflow-x:auto; flex-wrap:nowrap`, hiding options behind an off-screen scroll edge
+  (a keyboard trap, invisible to touch). Now `flex-wrap:wrap` so every option stays
+  reachable.
+- **Label size floor** — raised the two smallest info-bearing labels off the floor
+  (`.ow-stat__k` 0.62→0.66rem, metric/card titles 0.70→0.72rem).
+
+Gates green: ruff, mypy, tests (+4 wave-C locks, incl. a self-verifying WCAG ratio).
+
 ## 4.95.0 — Codex R2 NEXT wave B: distinct card trust tokens + section scope (rec 13/11, app-only) (2026-07-30)
 
 - **rec 13 (MEDIUM)** — the KPI card had ONE chip slot, so scope and freshness competed
