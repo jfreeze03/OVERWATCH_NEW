@@ -400,3 +400,15 @@ def test_rec14_sidebar_renders_grouped_single_select():
     assert 'f"_ow_nav_{group}"' in m
     assert "on_change=_nav_pick" in m
     assert "st.session_state.pop(_k, None)" in m
+
+
+# ---------------------------------------------------------------------------
+# rec 17 — one consolidated cost-coverage ladder (scoped: a read-only expander)
+# ---------------------------------------------------------------------------
+def test_rec17_coverage_ladder_expander_on_spend():
+    sp = _src("app/ui/pages/cost_parts/spend.py")
+    assert "Cost coverage ladder" in sp
+    # names each grain of the ladder + where its residual is proven
+    assert "Exact at warehouse grain" in sp
+    assert "Object cost ledger" in sp and "rate-card reconciliation" in sp
+    assert "directional estimate" in sp   # the allocated grain is labelled as estimate

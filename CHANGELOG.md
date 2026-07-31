@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.100.0 — Codex R2 backlog: executable metric registry + cost coverage ladder (rec 16/17, app-only) (2026-07-30)
+
+Completes the Codex-R2 backlog (and the whole review).
+
+- **rec 16 (executable metric contract)** — the metric registry was descriptive metadata.
+  Each `Metric` now carries an EXECUTABLE contract: `window` (from a `WINDOWS` vocabulary),
+  `partial_day`, `unit`, `filters` (which global chips it honors), `required_sources`
+  (structured), `coverage`, and `owner`. A new `validate()` asserts every metric declares a
+  complete, enum-valid contract; a `get(key)` accessor lets code key off the registry. The
+  missing **`contract_runway`** metric was added and CI-**drift-guarded**: a test asserts its
+  declared window (trailing-30-**complete**-days, today excluded) matches the actual
+  `contract_exhaustion()` SQL — revert that SQL to the old `/30` partial-day form and the
+  build breaks, not just the alert. This is the drift class this session repeatedly
+  hand-patched (rec 4/5/11/20). Wiring every panel to read its registry key at runtime
+  remains the larger follow-on; the contract + CI guard land now.
+- **rec 17 (cost coverage ladder)** — a single read-only "Coverage ladder" expander on the
+  Spend attribution tab consolidates, in one place, how much of the bill each grain explains
+  and where its residual is proven: billed/metered pool (warehouse-exact) → allocated
+  user/db (estimate, residual = "Other") → measured-query/object grain (Object ledger
+  RESIDUAL + the additive-contract recon) → billed-vs-model (rate-card recon). Reuses the
+  in-scope `window_usd`; no new marts or queries.
+
+Gates green: ruff, mypy, tests (+9 rec 16/17 locks incl. the runway drift-guard).
+
 ## 4.99.0 — Codex R2 backlog: workflow-grouped sidebar (rec 14, app-only) (2026-07-30)
 
 - **rec 14 (Watch / Analyze / Govern nav)** — the sidebar was a flat page list. It now

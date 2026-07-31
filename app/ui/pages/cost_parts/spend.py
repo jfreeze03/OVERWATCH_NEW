@@ -302,6 +302,31 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                                f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}); "
                                "'Other / not shown' is the remainder of the pool.")
 
+        # rec17: one read-only "coverage ladder" — the per-grain residuals/coverage
+        # already exist scattered across surfaces; this consolidates the MAP (which
+        # grain explains how much, and where each residual is proven) in one place,
+        # anchored on the exact warehouse pool. No new marts/queries.
+        with st.expander("Cost coverage ladder — how much of the bill each grain explains"):
+            st.markdown(
+                f"- **Billed / metered pool (this window):** {format_usd(window_usd)} — the "
+                "warehouse-metering total above. **Exact at warehouse grain** (100% covered; "
+                "includes each warehouse's idle time + unadjusted cloud-services credits).\n"
+                "- **Allocated to user / database:** the elapsed-time (or credit-weighted) "
+                "share above — a **directional estimate**. The 'Named rows cover N%' caption on "
+                "each chart is its coverage; 'Other / not shown' is the residual.\n"
+                "- **Measured-query / object grain:** the **Object cost ledger** (Operations → "
+                "Optimize) splits query credits into read / write / **residual** (queries that "
+                "touched no base object) and proves *arms + residual = attribution credits* "
+                "(the additive-contract recon on Admin).\n"
+                "- **Billed-vs-model residual:** the **rate-card reconciliation** (Cost & "
+                "Contract → Contract) frames the gap to the invoice as storage / transfer / "
+                "serverless / discounts.\n\n"
+                "Non-additive tracks (idle, serverless, AI, storage, the cloud-services rebate) "
+                "are on the Spend service breakdown, **not** folded into this query-grain ladder."
+            )
+            st.caption("Each rung narrows scope and adds estimation error — the warehouse row is "
+                       "the only exact one. Nothing here re-bills; it maps where the residual lives.")
+
     st.markdown("**Daily anomaly check (per warehouse)**")
     daily = daily_res if daily_res is not None else run(
         mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
