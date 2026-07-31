@@ -56,6 +56,12 @@ def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> d
         "on_demand_usd": on_demand,
         "burn_per_day_usd": burn,
         "runway_days": round(runway, 0) if runway is not None else None,
+        # E1: burn divides by non_topup_days, so THAT is the number a caption
+        # may call "the average". burn_days_observed (drop-days only) is kept
+        # because it answers a different, still-useful question — how many of
+        # those days actually drew the balance down — but a UI that prints it
+        # as the averaging basis contradicts the math above.
+        "burn_basis_days": non_topup_days,
         "burn_days_observed": len(drops),
     }
 

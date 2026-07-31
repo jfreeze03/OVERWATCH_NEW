@@ -96,7 +96,13 @@ def test_admin_panel_degrades_honestly_without_flyway():
 
 def test_cortex_code_reads_are_probes_with_a_truthful_note():
     ai = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert ai.count('_USAGE_HISTORY", probe=True)') == 2           # both reads
+    # P2/P9 (2026-07-31): the Cortex Code reads are now fact-first over
+    # FACT_AI_USAGE_DAILY, and the LIVE fallback is ONE superset fetch (the scans are
+    # window-flat, so one 365d read is strictly cheaper than two) sliced in pandas —
+    # so there is one probe read where there used to be two. The probe + the truthful
+    # note are what this test guards, not the number of scans.
+    assert "probe=True" in ai                                      # the live leg still probes
+    assert "run_mart_first" in ai                                  # fact-first, live as fallback
     assert "SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION" in ai         # the why, in the code
     assert "nothing is misconfigured" in ai                        # honest, not alarming
     adm2 = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")

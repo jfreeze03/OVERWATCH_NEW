@@ -255,9 +255,14 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     if known_failures is not None and known_failures <= 0:
         st.success("No task failures in the last 7 days for this scope.")
         return
+    # P6: hourly, not recent. This is the page's most expensive read (~15s: a 7-day
+    # TASK_HISTORY failure scan) and ACCOUNT_USAGE.TASK_HISTORY lags up to ~45 min
+    # (ACCOUNT_USAGE_LAG_NOTE), so a 300s TTL bought no freshness whatsoever — it
+    # just re-paid 15 seconds up to 12x an hour for bytes that could not have
+    # changed. An hour still refreshes well inside the source's own latency.
     res = run(insights_sql.task_failure_details(7, company, database, schema_contains), page=_PAGE,
-              key=f"t_rca_{company}", tier="recent",
-              source="ACCOUNT_USAGE.TASK_HISTORY (failures)")
+              key=f"t_rca_{company}", tier="hourly",
+              source="ACCOUNT_USAGE.TASK_HISTORY (failures, ~45 min source lag)")
     if not res.ok:
         st.error(f"Failure detail unavailable: {res.error}")
         return

@@ -584,20 +584,33 @@ def test_alloc_xdim_reader_contract_and_share_law():
     assert "''" in mart27_sql.alloc_xdim_attribution(7, "USER", "ALFA", "x'y")
 
 
-def test_ai_users_tab_is_live_first_again_with_exact_columns():
-    """Owner decision 2026-07-12: the R3 mart swap shipped NULL emails and
-    day-grain usage stamps — the exact EMAIL + FIRST/LAST timestamps are the
-    point of that table. The tab is byte-identical to v4.34.2 again (live
-    reads with probe semantics); a correct R3 needs EMAIL + FIRST_TS/LAST_TS
-    columns ON THE FACT first and is queued, not shipped."""
+def test_ai_users_tab_is_fact_first_now_that_the_fact_carries_the_columns():
+    """SUPERSEDES test_ai_users_tab_is_live_first_again_with_exact_columns.
+
+    Owner decision 2026-07-12 reverted the first mart swap because the fact
+    shipped NULL emails and day-grain usage stamps — the exact EMAIL +
+    FIRST/LAST timestamps are the point of that table — and set the condition
+    for re-landing it: "a correct R3 needs EMAIL + FIRST_TS/LAST_TS columns ON
+    THE FACT first". V042 added all three columns and V061 arm [9] populates
+    them (with a 365d reconcile heal), so the condition is met and the swap
+    lands (P2): 22s + 15s of live secure-view scanning per render becomes a
+    fact read. What this test now guards is that the swap kept every property
+    the revert was about."""
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
     body = cb.split("def _ai_users_tab", 1)[1].split("\ndef ", 1)[0]
-    assert "cortex_sql.cortex_code_user_rollup" in body
-    assert 'source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True' in body
-    assert "ai_code_user_rollup" not in body                # the degraded swap is gone
+    assert "mart27_sql.ai_code_user_rollup(days, company)" in body
+    assert "probe=True" in body                             # 002139 probe semantics kept
     assert 'error_kind == "unknown_function"' in body       # 002139 note survives
+    # the live fallback still exists, and is now ONE 365d days-independent read
+    assert "cortex_sql.cortex_code_user_daily(company)" in body
+    # the columns whose absence caused the 2026-07-12 revert
     m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
-    assert "def ai_code_user_rollup" not in m27             # reader removed with it
+    reader = m27.split("def ai_code_user_rollup", 1)[1].split("\ndef ", 1)[0]
+    for col in ("EMAIL", "FIRST_TS", "LAST_TS", "FIRST_NAME", "LAST_NAME"):
+        assert col in reader, col
+    v042 = (_ROOT / "snowflake" / "migrations" / "V042__codex_r22.sql").read_text(encoding="utf-8")
+    for col in ("EMAIL", "FIRST_TS", "LAST_TS"):
+        assert f"FACT_AI_USAGE_DAILY ADD COLUMN IF NOT EXISTS {col}" in v042
 
 
 def test_ops_diag_readers_and_first_paint_gate():

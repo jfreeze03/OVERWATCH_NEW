@@ -213,6 +213,10 @@ def render() -> None:
                 st.markdown(md_dollars(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
                             f"{a.get('OWNER') or 'unassigned'}"
                             + (f" · ~{format_usd(est)}" if est > 0 else "")))
+            # D1: the top three, by WHAT? Severity first, dollars only as a tiebreak
+            # inside a band — without this line a reader takes a $-annotated list for
+            # a $-ordered one and asks why the biggest number is not on top.
+            st.caption("Top 3 by severity, then overdue, then estimated $, then age.")
     else:
         st.success("Action queue is empty." if actions.ok else "Action queue not installed yet.")
 

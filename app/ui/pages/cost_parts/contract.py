@@ -43,6 +43,54 @@ _PAGE = "Cost & Contract"
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
 # cost.py; ruff --fix prunes what this section does not use.
 
+# C4 (audit 2026-07-31): the window BOTH steering reads ask for. The monthly
+# lever projections below MUST normalize by this same number — the two SQL
+# builders keep the literal 30 inline (a mart-first perf lock greps for it),
+# so a change here has to be mirrored there, deliberately, in one place.
+_STEER_WINDOW_DAYS = 30
+
+# C4: how much of an ESTIMATED lever a team actually banks. These are planning
+# haircuts, not measurements — no realization rate has been proven on this
+# account yet, so they are set from how executable each lever is:
+#   idle 0.70    — one ALTER WAREHOUSE ... SET AUTO_SUSPEND per named warehouse;
+#                  the residual is resume overhead the timer cannot remove.
+#   patterns 0.40 — every query family needs someone to cache/materialize/rewrite
+#                  it, and some of that spend is load-bearing work that never goes
+#                  away; the app's own savings verifier is the arbiter after the fact.
+# Deliberately conservative: an overstated lever tells an exec the renewal is
+# handled when it is not. Replace both with the verifier's MEASURED realization
+# once it has enough proven remediations to average.
+_REALIZABLE_IDLE = 0.70
+_REALIZABLE_PATTERNS = 0.40
+
+
+def _whole_day_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """N1: drop today's partial metering row before averaging a daily burn.
+
+    Today is still filling, so averaging it in drags every burn-derived figure
+    (trailing daily, blended rate, projected term, planner scenarios) low.
+    Today is kept only when it is the sole row we have."""
+    if "DAY" not in df.columns:
+        return df
+    whole = df[pd.to_datetime(df["DAY"], errors="coerce").dt.date < account_today()]
+    return whole if not whole.empty else df
+
+
+def _blended_rate(df: pd.DataFrame, rate_now: float, ai_rate: float) -> float:
+    """C1/C4: ONE effective $/credit from the window's observed compute+AI mix.
+
+    Hoisted out of the renewal planner (audit 2026-07-31): the steering gap was
+    priced at the flat compute rate while the planner immediately below priced
+    the same credits at the blended rate, so the page put two different dollar
+    values on one overage. Falls back to the flat compute rate when the split
+    columns are absent (older cache / live fallback shape)."""
+    if not {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"} <= set(df.columns):
+        return rate_now
+    sum_other = float(pd.to_numeric(df["CREDITS_BILLED_OTHER"], errors="coerce").fillna(0).sum())
+    sum_ai = float(pd.to_numeric(df["CREDITS_BILLED_AI"], errors="coerce").fillna(0).sum())
+    return blended_credit_rate(sum_other, sum_ai, rate_now, ai_rate)
+
+
 def _org_truth_panel() -> bool:
     """Contract balance straight from Snowflake billing metadata.
 
@@ -78,13 +126,28 @@ def _org_truth_panel() -> bool:
     kpis = [
         {"label": "Remaining balance", "value": format_usd(summary["remaining_usd"]),
          "delta": f"as of {summary['as_of']}", "delta_color": "off"},
+        # E1: the delta must name the number the burn actually divides by.
+        # burn = total draw-down / non-top-up days, but this said "avg of N burn
+        # day(s)" using the DROP-day count — on a weekend-idle account those two
+        # differ by ~2x, so the caption claimed a burn the KPI had not computed.
         {"label": "Burn / day", "value": format_usd(burn) if burn > 0 else "n/a",
-         "delta": f"avg of {summary['burn_days_observed']} burn day(s)" if burn > 0 else "no burn days observed",
-         "delta_color": "off"},
+         "delta": (f"avg over {summary.get('burn_basis_days', 0)} non-top-up day(s)"
+                   if burn > 0 else "no burn days observed"),
+         "delta_color": "off",
+         "help": ("Total draw-down divided by every non-top-up day in the window, "
+                  f"including the {summary.get('burn_basis_days', 0) - summary.get('burn_days_observed', 0)} "
+                  "idle day(s) that drew nothing. Renewal top-ups (balance rises) are "
+                  "excluded from both sides.") if burn > 0 else None},
         {"label": "Runway at this burn",
          "value": f"{runway:,.0f} days" if runway is not None else "n/a",
          "delta": f"contract ends {end_note}" if end_note else None,
-         "delta_color": "off"},
+         "delta_color": "off",
+         # E1: name the basis — this is the DOLLAR-balance answer to "when does
+         # the contract run dry". The renewal planner below answers the same
+         # question from SETTINGS credits x the blended rate, and the two can
+         # disagree; each now says which basis it used.
+         "help": "Org balance dollars / the burn at left — billing truth. The renewal "
+                 "planner below re-answers this from SETTINGS contract credits."},
     ]
     on_demand = safe_float(summary.get("on_demand_usd"))
     if on_demand < 0:
@@ -96,9 +159,12 @@ def _org_truth_panel() -> bool:
     charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING", title="Remaining balance ($)")
     if items.usable():
         styled_table(items.df, height=160)
+    # E1: the caption contradicted the (already corrected) math — the burn stopped
+    # averaging "only down-days" when idle days were put back in the denominator.
     result_caption(bal, note="Dollars at your contract rates, straight from Snowflake "
                              "billing (refreshed daily; can lag up to a day). Burn/day "
-                             "averages only down-days, so renewal top-ups don't distort it.")
+                             "averages all non-top-up days — idle days count as the zero-burn "
+                             "days they were, and renewal top-ups drop out entirely.")
     return True
 
 
@@ -320,15 +386,18 @@ def _contract_tab(settings: dict) -> None:
     # planner's cache key so it costs no extra query.
     _burn = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
                 tier="recent", source="FACT_METERING_DAILY")
+    rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+    # C4: the burn frame is read ONCE here and shared by everything below it —
+    # the projected term, the steering gap and the renewal planner. Hoisting the
+    # blended $/credit out of the planner is the point: the gap used to be priced
+    # at the flat compute rate while the planner beside it used the blended rate,
+    # so one overage carried two dollar values on the same screen.
+    _burn_df = _whole_day_rows(_burn.df.copy()) if _burn.usable() else None
+    eff_rate = _blended_rate(_burn_df, rate_now, ai_rate) if _burn_df is not None else rate_now
     _trailing_daily = None
-    if _burn.usable() and "CREDITS_BILLED" in _burn.df.columns:
-        _bdf = _burn.df.copy()
-        if "DAY" in _bdf.columns:
-            _bd = pd.to_datetime(_bdf["DAY"], errors="coerce").dt.date
-            _whole = _bdf[_bd < account_today()]
-            if not _whole.empty:
-                _bdf = _whole
-        _trailing_daily = float(pd.to_numeric(_bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
+    if _burn_df is not None and "CREDITS_BILLED" in _burn_df.columns:
+        _trailing_daily = float(pd.to_numeric(_burn_df["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
     pace = contract_pace(consumed, contract_credits, start, end, account_today(),
                          trailing_daily_credits=_trailing_daily)
     if not pace.get("ok"):
@@ -390,26 +459,43 @@ def _contract_tab(settings: dict) -> None:
         page=_PAGE, key="steer_pats",
         mart_source="MART_PATTERN_COST_DAILY (measured, V037)",
         live_source="QUERY_HISTORY x METERING (hour-share, live fallback)")
-    rate_st = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    # C4: the LEVERS are warehouse compute credits (idle burn, attributed pattern
+    # credits) — they price at the compute rate, never the blended one. The GAP is
+    # projected-term vs contract credits, a compute+AI mix, so it prices at the same
+    # blended eff_rate the renewal planner below uses. Two rates, on purpose.
     levers: dict = {}
     if idle_lv.usable():
-        adv_st = idle_advisor(idle_lv.df, rate_st, 30)
-        levers["Auto-suspend tuning (idle burn)"] = float(
-            adv_st["PROJECTED_MONTHLY_IDLE_USD"].sum())
+        adv_st = idle_advisor(idle_lv.df, rate_now, _STEER_WINDOW_DAYS)
+        # C4: only FLAGGED warehouses are auto-suspend targets. The advisor labels
+        # the rest "Idle share within tolerance" (or already-tuned, where the residual
+        # is resume overhead a timer cannot remove) — summing every row turned
+        # tolerable idle into promised savings and inflated the coverage %.
+        _flagged = adv_st[adv_st["FLAGGED"]] if "FLAGGED" in adv_st.columns else adv_st
+        _idle_monthly = float(pd.to_numeric(
+            _flagged.get("PROJECTED_MONTHLY_IDLE_USD", pd.Series(dtype=float)),
+            errors="coerce").fillna(0).sum()) * _REALIZABLE_IDLE
+        if _idle_monthly > 0:
+            levers[f"Auto-suspend tuning, flagged only ({_REALIZABLE_IDLE:.0%} realizable)"] = _idle_monthly
     if pats_lv.usable():
         top5 = pats_lv.df.head(5)
         if "CREDITS_PER_DAY" in top5.columns:      # live shape: per-day allocated
             _pat_monthly = float((pd.to_numeric(top5["CREDITS_PER_DAY"],
-                                                errors="coerce").fillna(0) * rate_st).sum() * 30)
+                                                errors="coerce").fillna(0) * rate_now).sum() * 30)
         else:                                      # mart shape: measured window total
-            _pat_monthly = float(pd.to_numeric(top5.get("CREDITS"),
-                                               errors="coerce").fillna(0).sum() / 30 * 30 * rate_st)
-        levers["Top-5 recurring patterns (cache/materialize)"] = _pat_monthly
+            # C4: normalize by the window actually asked for, then re-scale to a
+            # month. The old `/ 30 * 30` cancelled to a raw window TOTAL that only
+            # happened to be monthly because the read is 30d — widening the steering
+            # window would have silently relabelled a bigger total as "monthly".
+            _pat_monthly = (float(pd.to_numeric(top5.get("CREDITS"), errors="coerce").fillna(0).sum())
+                            / _STEER_WINDOW_DAYS * 30 * rate_now)
+        _pat_monthly *= _REALIZABLE_PATTERNS
+        if _pat_monthly > 0:
+            levers[f"Top-5 recurring patterns ({_REALIZABLE_PATTERNS:.0%} realizable)"] = _pat_monthly
     plan = steering.steering_plan(
         projected_term_credits=pace["projected_term_credits"],
         contract_credits=contract_credits,
         days_remaining=pace["days_remaining"],
-        rate_usd=rate_st, levers_monthly_usd=levers,
+        rate_usd=eff_rate, levers_monthly_usd=levers,
     )
     if not plan.get("ok"):
         st.info(str(plan.get("verdict")))
@@ -418,11 +504,16 @@ def _contract_tab(settings: dict) -> None:
             plan["verdict"])
         if plan["rows"]:
             styled_table(pd.DataFrame(plan["rows"]), height=140)
-        st.caption(
-            "Lever estimates come straight from the idle advisor and recurring-pattern "
-            "panels (execute them on Optimization & Savings). Estimates, not promises — "
-            "the savings verifier proves them after the fact."
-        )
+        # $-escape: the rate pair below is two '$' tokens in one markdown sink
+        st.caption(md_dollars(
+            "Lever estimates come from the idle advisor (flagged warehouses only) and the "
+            "recurring-pattern panel — execute them on Optimization & Savings. Each is shown "
+            f"AFTER a realizable haircut ({_REALIZABLE_IDLE:.0%} idle, {_REALIZABLE_PATTERNS:.0%} "
+            "patterns), so the coverage % is what the levers plausibly bank, not what they "
+            "theoretically total. Levers price at the compute rate "
+            f"(${rate_now:,.2f}/credit); the gap prices at the blended ${eff_rate:,.2f}/credit "
+            "the renewal planner uses. Estimates, not promises — the savings verifier proves "
+            "them after the fact."))
 
     st.divider()
     st.markdown("**Renewal planner (what-if)**")
@@ -437,28 +528,12 @@ def _contract_tab(settings: dict) -> None:
     burn_res = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
                    tier="recent", source="FACT_METERING_DAILY")
     if guard(burn_res, "Need the metering fact loaded to plan (run the hourly task once)."):
-        rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-        bdf = burn_res.df.copy()
-        # N1: exclude today's partial day so the trailing daily burn (and every
-        # scenario built on it) averages whole days only — a partial today drags
-        # the mean low and under-sizes the recommended commit.
-        if "DAY" in bdf.columns:
-            _bd = pd.to_datetime(bdf["DAY"], errors="coerce").dt.date
-            _whole = bdf[_bd < account_today()]
-            if not _whole.empty:  # keep today only if it is the sole row we have
-                bdf = _whole
-        # C1: derive one effective $/credit from the observed 30d compute+AI mix
-        # and price the daily burn, the extra-load what-if, and the remaining
-        # commitment all on it — so the planner stays internally consistent and
-        # AI credits are not over-valued at the compute rate. Flat rate if the
-        # split columns are absent (older cache / live fallback).
-        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"} <= set(bdf.columns):
-            _sum_other = float(pd.to_numeric(bdf["CREDITS_BILLED_OTHER"], errors="coerce").fillna(0).sum())
-            _sum_ai = float(pd.to_numeric(bdf["CREDITS_BILLED_AI"], errors="coerce").fillna(0).sum())
-            eff_rate = blended_credit_rate(_sum_other, _sum_ai, rate_now, ai_rate)
-        else:
-            eff_rate = rate_now
+        # C1/C4: rate_now, ai_rate, the whole-day filter (N1) and the blended
+        # eff_rate are all hoisted above the steering block now — the planner
+        # reuses the SAME numbers instead of re-deriving its own, which is how
+        # the gap and the planner came to disagree in the first place. Same
+        # cache key as `_burn`, so this read costs nothing extra.
+        bdf = _burn_df if _burn_df is not None else _whole_day_rows(burn_res.df.copy())
         daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * eff_rate
         remaining_usd = max(0.0, (contract_credits - consumed) * eff_rate)
         col1, col2, col3 = st.columns(3)
@@ -477,11 +552,25 @@ def _contract_tab(settings: dict) -> None:
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
                          "DAILY_BURN_USD": st.column_config.NumberColumn("Daily burn", format="$%.2f"),
                      })
+        # E1: the page answers "when does the money run out?" twice, on two bases —
+        # say which is which instead of leaving a reader to reconcile them.
+        # CURRENT_CONTRACT_EXHAUSTED here = SETTINGS credits still unconsumed, priced
+        # at the blended rate; the org panel's runway = the actual dollar balance
+        # Snowflake bills down (which also carries storage/transfer, so it lands
+        # EARLIER). We deliberately do NOT feed org dollars into plan_scenarios:
+        # credits-remaining and balance-remaining are different quantities, and
+        # silently swapping one for the other would make the credits column a lie.
         # $-escape: 4-5 dollar figures in one caption pair into LaTeX math spans
         st.caption(md_dollars(
                    f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${eff_rate:,.2f}/credit "
                    f"blended (compute ${rate_now}, AI ${ai_rate})"
                    + (f" + ${float(extra_credits) * eff_rate:,.0f}/day hypothetical load"
                       if extra_credits else "") + ". "
-                   "Exhaustion applies to the current contract's remaining "
-                   f"{contract_credits - consumed:,.0f} credits."))
+                   "Exhaustion here is CREDITS-based: the current contract's remaining "
+                   f"{contract_credits - consumed:,.0f} credits (SETTINGS) at that rate."
+                   + (" The 'Runway at this burn' KPI above is the BALANCE-based answer "
+                      "(org billing dollars, which also carry storage and transfer) — it "
+                      "normally lands earlier, and it is the one to trust."
+                      if org_shown else
+                      " Grant ORGANIZATION_USAGE for the balance-based answer, which "
+                      "also counts the storage and transfer dollars this one cannot see.")))

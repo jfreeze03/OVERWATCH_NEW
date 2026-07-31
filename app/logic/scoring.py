@@ -32,6 +32,18 @@ def _cap(value: float, cap: float) -> float:
     return min(max(value, 0.0), cap)
 
 
+def _cap_note(raw: float, cap: float) -> str:
+    """E3: ' (capped)' when the per-driver cap actually bit.
+
+    The caps are deliberate — no single driver may dominate the score — but they
+    were INVISIBLE. '12 fact sources stale' at 4 pts each reads as a 48-point hit
+    while the driver is pinned at 12, so the deductions expander did not add up
+    and nothing told the reader that fixing 6 of the 12 would not move the score
+    at all. Naming the saturation makes both facts legible.
+    """
+    return " (capped)" if raw > cap else ""
+
+
 # Per-unit penalty weights. UNCALIBRATED STARTING POINTS — tune them against
 # your incident history via SETTINGS (SCORE_PTS_*); caps stay fixed so no
 # single driver can dominate the score.
@@ -90,6 +102,8 @@ def platform_score(signals: dict, weights: dict | None = None,
     Expected keys (all optional):
       budget_pct, critical_alerts, high_alerts, query_fail_pct, task_fail_pct,
       queue_minutes, spill_gb, stale_sources, open_high_actions
+    queue_minutes and spill_gb are PER-DAY rates (C8) — pass a window total and
+    the penalty scales with the window length instead of with the platform.
     Weights come from resolve_weights(settings) so executives can ask "why is
     a critical worth N points?" and get "because we set it" — not magic.
 
@@ -117,49 +131,70 @@ def platform_score(signals: dict, weights: dict | None = None,
 
     budget_pct = safe_float(signals.get("budget_pct"))
     if budget_pct > 100:
-        penalty = _cap((budget_pct - 100) * w["SCORE_PTS_BUDGET_PER_PCT"], 20)
-        drivers.append(ScoreDriver("Over budget", penalty, f"Spend at {budget_pct:.0f}% of monthly budget."))
+        _raw = (budget_pct - 100) * w["SCORE_PTS_BUDGET_PER_PCT"]
+        drivers.append(ScoreDriver("Over budget", _cap(_raw, 20),
+                                   f"Spend at {budget_pct:.0f}% of monthly budget." + _cap_note(_raw, 20)))
 
     critical = safe_float(signals.get("critical_alerts"))
     if critical > 0:
-        drivers.append(ScoreDriver("Critical alerts", _cap(critical * w["SCORE_PTS_PER_CRITICAL"], 24), f"{critical:.0f} open critical alerts."))
+        _raw = critical * w["SCORE_PTS_PER_CRITICAL"]
+        drivers.append(ScoreDriver("Critical alerts", _cap(_raw, 24),
+                                   f"{critical:.0f} open critical alerts." + _cap_note(_raw, 24)))
 
     high = safe_float(signals.get("high_alerts"))
     if high > 0:
-        drivers.append(ScoreDriver("High alerts", _cap(high * w["SCORE_PTS_PER_HIGH"], 10), f"{high:.0f} open high alerts."))
+        _raw = high * w["SCORE_PTS_PER_HIGH"]
+        drivers.append(ScoreDriver("High alerts", _cap(_raw, 10),
+                                   f"{high:.0f} open high alerts." + _cap_note(_raw, 10)))
 
     query_fail = safe_float(signals.get("query_fail_pct"))
     if query_fail > 2:
+        _raw = (query_fail - 2) * w["SCORE_PTS_QUERY_FAIL_PER_PCT"]
         drivers.append(
-            ScoreDriver("Query failures", _cap((query_fail - 2) * w["SCORE_PTS_QUERY_FAIL_PER_PCT"], 12), f"{query_fail:.1f}% of queries failed.")
+            ScoreDriver("Query failures", _cap(_raw, 12),
+                        f"{query_fail:.1f}% of queries failed." + _cap_note(_raw, 12))
         )
 
     task_fail = safe_float(signals.get("task_fail_pct"))
     if task_fail > 1:
+        _raw = (task_fail - 1) * w["SCORE_PTS_TASK_FAIL_PER_PCT"]
         drivers.append(
-            ScoreDriver("Task failures", _cap((task_fail - 1) * w["SCORE_PTS_TASK_FAIL_PER_PCT"], 14), f"{task_fail:.1f}% of task runs failed.")
+            ScoreDriver("Task failures", _cap(_raw, 14),
+                        f"{task_fail:.1f}% of task runs failed." + _cap_note(_raw, 14))
         )
 
+    # C8: queue_minutes and spill_gb are PER-DAY RATES, not window totals. Callers
+    # reading a multi-hour cumulative sum must divide by the days the window covers
+    # (overview.py does) — otherwise the same steady load trips these fixed
+    # thresholds purely as a function of how long the window has been open.
     queue_minutes = safe_float(signals.get("queue_minutes"))
     if queue_minutes > 10:
+        _raw = (queue_minutes - 10) * w["SCORE_PTS_QUEUE_PER_MIN"]
         drivers.append(
-            ScoreDriver("Queueing", _cap((queue_minutes - 10) * w["SCORE_PTS_QUEUE_PER_MIN"], 10), f"{queue_minutes:.0f} queued minutes in window.")
+            ScoreDriver("Queueing", _cap(_raw, 10),
+                        f"{queue_minutes:.0f} queued minutes per day." + _cap_note(_raw, 10))
         )
 
     spill_gb = safe_float(signals.get("spill_gb"))
     if spill_gb > 5:
+        _raw = (spill_gb - 5) * w["SCORE_PTS_SPILL_PER_GB"]
         drivers.append(
-            ScoreDriver("Remote spill", _cap((spill_gb - 5) * w["SCORE_PTS_SPILL_PER_GB"], 8), f"{spill_gb:.1f} GB spilled to remote storage.")
+            ScoreDriver("Remote spill", _cap(_raw, 8),
+                        f"{spill_gb:.1f} GB per day spilled to remote storage." + _cap_note(_raw, 8))
         )
 
     stale = safe_float(signals.get("stale_sources"))
     if stale > 0:
-        drivers.append(ScoreDriver("Stale telemetry", _cap(stale * w["SCORE_PTS_PER_STALE_SOURCE"], 12), f"{stale:.0f} fact sources stale."))
+        _raw = stale * w["SCORE_PTS_PER_STALE_SOURCE"]
+        drivers.append(ScoreDriver("Stale telemetry", _cap(_raw, 12),
+                                   f"{stale:.0f} fact sources stale." + _cap_note(_raw, 12)))
 
     open_high_actions = safe_float(signals.get("open_high_actions"))
     if open_high_actions > 0:
+        _raw = open_high_actions * w["SCORE_PTS_PER_OPEN_ACTION"]
         drivers.append(
-            ScoreDriver("Owner queue", _cap(open_high_actions * w["SCORE_PTS_PER_OPEN_ACTION"], 9), f"{open_high_actions:.0f} open high-severity actions.")
+            ScoreDriver("Owner queue", _cap(_raw, 9),
+                        f"{open_high_actions:.0f} open high-severity actions." + _cap_note(_raw, 9))
         )
 
     total_penalty = sum(d.penalty for d in drivers)
@@ -180,6 +215,15 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     monthly budget, like the live score. Labeled RETRO: the live score also counts
     stale sources and open actions, which facts don't carry per-day — the
     trend is comparable, the absolute value can differ by a few points.
+
+    E3 — first-partial-month artifact: MTD is a cumsum WITHIN each ``_MONTH`` group
+    of the frame it is handed, so when the window opens mid-month (a 30-day call on
+    the 12th starts on the 13th of the prior month) that first month's cumsum
+    restarts at the window edge and understates true month-to-date spend. The
+    budget penalty is therefore too small — the score too HIGH — for the leading
+    partial month, and steps down when the first whole month begins. Read the left
+    edge of the trend as unreliable rather than as an improvement that reversed;
+    it self-corrects at the first month boundary inside the window.
     """
     if inputs is None or inputs.empty or "DAY" not in inputs.columns:
         return pd.DataFrame()

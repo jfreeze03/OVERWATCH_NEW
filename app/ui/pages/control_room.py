@@ -15,9 +15,14 @@ from app.core.errors import safe_page
 from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
-from app.logic.actions import triage_queue
-from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
-from app.logic.formulas import credits_to_usd, format_usd, pct_delta, safe_float
+from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
+from app.logic.anomaly import (
+    DEFAULT_THRESHOLD,
+    anomaly_summary,
+    complete_days_only,
+    flag_anomalies,
+)
+from app.logic.formulas import credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -426,11 +431,28 @@ def render() -> None:
     wh_daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
                    key=f"cr_wh_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
     anomalies: list[dict] = []
+    _base_median_usd = 0.0      # median of the per-warehouse baselines, for the caption
+    _thin_warehouses = 0        # warehouses with too few days to score (see below)
     if wh_daily.usable():
         _wh_complete = (complete_days_only(wh_daily.df)  # B4: don't score today's partial row
                         .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))))
         flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME")
         anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
+        # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
+        # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production
+        # warehouse. Attach each hit's excess over its own robust (median) baseline
+        # — the exact baseline robust_zscores used — so triage_queue can escalate
+        # and rank on money. Signed: a collapse comes through negative, and
+        # triage_queue takes the magnitude.
+        _med = _wh_complete.groupby("WAREHOUSE_NAME")["USD"].median()
+        for _a in anomalies:
+            _a["excess_usd"] = safe_float(_a.get("value")) - safe_float(_med.get(_a.get("label")))
+        _base_median_usd = safe_float(_med.median()) if len(_med) else 0.0
+        # E5: robust_zscores returns all-zero for a series with <5 points, so a
+        # warehouse created this week CANNOT be flagged however wild its spend.
+        # That exclusion has to be visible, or the all-clear over-promises.
+        _day_counts = _wh_complete.groupby("WAREHOUSE_NAME")["DAY"].nunique()
+        _thin_warehouses = int((_day_counts < 5).sum())
         # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
         # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
         # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
@@ -463,8 +485,10 @@ def render() -> None:
         _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
                  if c in queue.columns]
         sel_q = selectable_table(queue[_disp], key="cr_triage_sel", height=260)
-        st.caption(f"{len(queue)} item(s), ranked by severity — select one to open its page. "
-                   "Sources: alerts, task facts, spend anomalies."
+        st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
+                   "— select one to open its page. Sources: alerts, task facts, spend "
+                   "anomalies. Task rows are one per task (failures summed across the "
+                   "2-day window), not one per day."
                    + (" Task failures follow the database filter; alerts and "
                       "spend anomalies don't have database grain." if f["database"] else ""))
         if sel_q is not None:
@@ -474,6 +498,23 @@ def render() -> None:
                      "Spend anomaly": ("Cost & Contract", ""),
                      "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
             request_navigation(_dest[0], _dest[1])
+    # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
+    # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
+    # otherwise every spend break arrived twice, once from each scorer, at two
+    # different severities. E5: name the baseline, the scoring minimum and the money
+    # floor OUTSIDE the empty/non-empty branch, because "nothing to triage" is
+    # exactly where the reader most needs to know what was never in scope.
+    if wh_daily.usable():
+        st.caption(md_dollars(
+            "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
+            f"complete days (baseline median {format_usd(_base_median_usd)}/day). Flagged at "
+            f"|z| >= {DEFAULT_THRESHOLD}; HIGH at |z| >= {ANOMALY_HIGH_Z:.0f} or "
+            f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — the same escalation "
+            "SP_ANOMALY_SWEEP applies, whose duplicate COST_ANOMALY_SWEEP events are excluded "
+            "here and shown on Alerts instead. A warehouse needs 5+ complete days of history "
+            "to be scored at all"
+            + (f" — {_thin_warehouses} currently do not have them and are unscored."
+               if _thin_warehouses else ".")))
 
     # ---- Incident correlation timeline -----------------------------------------
     section_header("Incident correlation timeline")

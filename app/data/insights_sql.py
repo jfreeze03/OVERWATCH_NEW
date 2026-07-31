@@ -23,12 +23,48 @@ def _iso_date(value: str, name: str) -> str:
 # 1. Idle warehouse analysis: metered warehouse-hours with zero query activity
 # ---------------------------------------------------------------------------
 
+# D2 (audit 2026-07-31): the ONE definition of "a warehouse-hour in which a
+# query was actually running", shared by the idle advisor and the sizing
+# profile so the two can never disagree about the same warehouse's idle share.
+#
+# The old form was `SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour',
+# START_TIME)` — the query's START hour only. A query that begins at 10:59 and
+# runs three hours marked hour 10 active and left hours 11 and 12 looking IDLE,
+# so long-running warehouses' idle credits (and IDLE_PCT, and every dollar
+# derived from them) were systematically overstated. Expanding each query
+# across the hours it SPANS is the fix. The 25-row generator bounds the
+# expansion; a query running past 24h keeps only its first 25 hours, which can
+# only under-mark activity (the conservative direction for an idle claim).
+_ACTIVE_HOUR_SPAN = 25
+
+
+def _active_hours_cte(days: int, company: str) -> str:
+    """CTE pair (`q_spans`, `query_hours`) yielding one row per active
+    warehouse-hour. Callers LEFT JOIN metering to `query_hours`."""
+    return f"""q_spans AS (
+    SELECT WAREHOUSE_NAME,
+           DATE_TRUNC('hour', START_TIME) AS H0,
+           DATE_TRUNC('hour', COALESCE(END_TIME, START_TIME)) AS H1
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+      AND {companies.warehouse_clause(company) or "1 = 1"}
+),
+query_hours AS (
+    SELECT DISTINCT s.WAREHOUSE_NAME, DATEADD('hour', g.SEQ, s.H0) AS HOUR_TS
+    FROM q_spans s
+    JOIN (SELECT SEQ4() AS SEQ FROM TABLE(GENERATOR(ROWCOUNT => {_ACTIVE_HOUR_SPAN}))) g
+      ON DATEADD('hour', g.SEQ, s.H0) <= s.H1
+)"""
+
+
 def idle_warehouse_analysis(days: int, company: str = "ALL") -> str:
     """Per warehouse: total vs idle credits (hour slices with no queries).
 
     WAREHOUSE_METERING_HISTORY bills by hour slice; joining each slice to
     query activity in the same warehouse-hour isolates credits burned while
-    nothing ran — the auto-suspend opportunity.
+    nothing ran — the auto-suspend opportunity. "Active" is span-based (see
+    _active_hours_cte), not start-hour-based.
     """
     days = bounded_days(days)
     where = and_where(
@@ -36,13 +72,7 @@ def idle_warehouse_analysis(days: int, company: str = "ALL") -> str:
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
     return f"""
-WITH query_hours AS (
-    SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS
-    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
-      AND WAREHOUSE_NAME IS NOT NULL
-      AND {companies.warehouse_clause(company) or "1 = 1"}
-)
+WITH {_active_hours_cte(days, company)}
 SELECT
     M.WAREHOUSE_NAME,
     {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
@@ -67,8 +97,35 @@ LIMIT 100
 # 2. Repeat-query fingerprints (cache/materialization candidates)
 # ---------------------------------------------------------------------------
 
+# D3 (audit 2026-07-31): credit weight per warehouse-hour by size. Snowflake's
+# ladder doubles the credit rate per step (X-Small = 1 credit/hour), so
+# EXECUTION_TIME x this factor is a size-aware credit ESTIMATE — enough to rank
+# fingerprints by money instead of by wall-clock hours, without paying for the
+# hour-share allocation join. Rows with no warehouse (result-cache/metadata
+# answers) carry no compute credits, hence ELSE 0.
+_SIZE_CREDIT_FACTOR_SQL = """CASE UPPER(COALESCE(WAREHOUSE_SIZE, ''))
+             WHEN 'X-SMALL'  THEN 1   WHEN 'SMALL'    THEN 2
+             WHEN 'MEDIUM'   THEN 4   WHEN 'LARGE'    THEN 8
+             WHEN 'X-LARGE'  THEN 16  WHEN '2X-LARGE' THEN 32
+             WHEN '3X-LARGE' THEN 64  WHEN '4X-LARGE' THEN 128
+             WHEN '5X-LARGE' THEN 256 WHEN '6X-LARGE' THEN 512
+             ELSE 0 END"""
+
+
 def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 10,
                               database: str = "", schema_contains: str = "") -> str:
+    """Repeated query shapes ranked by ESTIMATED credits x cache-miss.
+
+    D3 (audit 2026-07-31): the old ORDER BY was TOTAL_ELAPSED_HOURS — wall
+    clock, which counts queue and compile time and treats an X-Small hour as
+    equal to a 4X-Large hour (128x the money). Ranking now uses EST_CREDITS
+    (execution time x the size factor) weighted by the cache MISS share, so the
+    top of the list is where caching/materialization actually pays. Cache % is
+    BYTES_SCANNED-weighted and ignores zero-scan runs (a run answered from the
+    result cache scans nothing — averaging its 0% "local cache" reading in made
+    well-cached families look cache-poor); a family whose runs ALL scan zero
+    bytes is fully cached already, hence the COALESCE to 100.
+    """
     from app.core.sqlsafe import contains_filter
 
     days = bounded_days(days)
@@ -93,14 +150,19 @@ SELECT
     SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 3600000.0 AS TOTAL_ELAPSED_HOURS,
     AVG(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS AVG_ELAPSED_SEC,
     SUM(COALESCE(BYTES_SCANNED, 0)) / POWER(1024, 4) AS TOTAL_TB_SCANNED,
-    AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100 AS AVG_CACHE_PCT,
+    COALESCE(
+        SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0,
+                COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED, 0))
+        / NULLIF(SUM(IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)), 0) * 100,
+        100) AS AVG_CACHE_PCT,
+    SUM(COALESCE(EXECUTION_TIME, 0) / 3600000.0 * {_SIZE_CREDIT_FACTOR_SQL}) AS EST_CREDITS,
     ANY_VALUE(LEFT(QUERY_TEXT, 200)) AS QUERY_PREVIEW,
     MAX(START_TIME) AS LAST_RUN
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY QUERY_PARAMETERIZED_HASH
 HAVING COUNT(*) >= {min_runs}
-ORDER BY TOTAL_ELAPSED_HOURS DESC
+ORDER BY EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC, TOTAL_ELAPSED_HOURS DESC
 LIMIT 100
 """
 
@@ -110,6 +172,15 @@ LIMIT 100
 # ---------------------------------------------------------------------------
 
 def storage_growth_by_database(days: int, company: str = "ALL") -> str:
+    """Per-database storage endpoints PLUS a least-squares slope.
+
+    D4 (audit 2026-07-31): (LAST - FIRST) / SPAN is an endpoint diff — one
+    reload, clone, or purge on either endpoint day becomes the whole trend and
+    the x30 projection multiplies it. REGR_SLOPE over every observed day is the
+    resistant answer; DAYS_OBSERVED lets the caller mark a short/sparse series
+    LOW CONFIDENCE instead of projecting it as fact. Endpoints stay in the
+    output because the current/first sizes are what a reader recognises.
+    """
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
@@ -134,7 +205,9 @@ SELECT
     MIN_BY(DB_BYTES, USAGE_DATE) AS FIRST_BYTES,
     MAX_BY(DB_BYTES, USAGE_DATE) AS LAST_BYTES,
     MAX_BY(FAILSAFE_BYTES, USAGE_DATE) AS FAILSAFE_BYTES,
-    DATEDIFF('day', MIN(USAGE_DATE), MAX(USAGE_DATE)) AS SPAN_DAYS
+    DATEDIFF('day', MIN(USAGE_DATE), MAX(USAGE_DATE)) AS SPAN_DAYS,
+    COUNT(*) AS DAYS_OBSERVED,
+    REGR_SLOPE(DB_BYTES, DATEDIFF('day', DATE '1970-01-01', USAGE_DATE)) AS SLOPE_BYTES_PER_DAY
 FROM daily
 GROUP BY 1, 2
 HAVING MAX_BY(DB_BYTES, USAGE_DATE) > 0 OR MIN_BY(DB_BYTES, USAGE_DATE) > 0
@@ -252,7 +325,8 @@ WITH query_stats AS (
         WAREHOUSE_NAME,
         COUNT(*) AS QUERY_COUNT,
         APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
-        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+        SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+        SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_PROVISIONING_SEC,
         SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -260,13 +334,7 @@ WITH query_stats AS (
       AND {companies.warehouse_clause(company) or "1 = 1"}
     GROUP BY WAREHOUSE_NAME
 ),
-query_hours AS (
-    SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME) AS HOUR_TS
-    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
-      AND WAREHOUSE_NAME IS NOT NULL
-      AND {companies.warehouse_clause(company) or "1 = 1"}
-)
+{_active_hours_cte(days, company)}
 SELECT
     M.WAREHOUSE_NAME,
     {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
@@ -276,6 +344,7 @@ SELECT
     COALESCE(MAX(Q.QUERY_COUNT), 0) AS QUERY_COUNT,
     COALESCE(MAX(Q.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
     COALESCE(MAX(Q.QUEUED_SEC), 0) AS QUEUED_SEC,
+    COALESCE(MAX(Q.QUEUED_PROVISIONING_SEC), 0) AS QUEUED_PROVISIONING_SEC,
     COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
 LEFT JOIN query_hours H
@@ -399,6 +468,19 @@ LIMIT 300
 """
 
 
+# B4 (audit 2026-07-31): the retention-fix estimator needs the table's CURRENT
+# DATA_RETENTION_TIME_IN_DAYS to answer "how much of the time-travel bytes does
+# cutting retention to N actually free" — without it the page priced the whole
+# time-travel + failsafe pile as recoverable. ACCOUNT_USAGE.TABLES carries it
+# keyed by the same TABLE_ID the DML join already uses.
+_RETENTION_JOIN_SQL = """LEFT JOIN (
+    SELECT TABLE_ID, MAX(RETENTION_TIME) AS RETENTION_DAYS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES
+    WHERE DELETED IS NULL
+    GROUP BY 1
+) rt ON rt.TABLE_ID = m.ID"""
+
+
 def storage_waste(company: str = "ALL", min_gb: float = 1.0) -> str:
     """Tables carrying heavy Time-Travel/failsafe bytes, flagged STALE when
     no DML touched them in 90 days — retention money for nothing."""
@@ -416,6 +498,7 @@ SELECT
     ROUND(m.ACTIVE_BYTES / POWER(1024, 3), 2) AS ACTIVE_GB,
     ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
     ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2) AS FAILSAFE_GB,
+    COALESCE(rt.RETENTION_DAYS, 0) AS RETENTION_DAYS,
     d.LAST_DML,
     IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS
 FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
@@ -425,6 +508,7 @@ LEFT JOIN (
     WHERE START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
     GROUP BY 1
 ) d ON d.TABLE_ID = m.ID
+{_RETENTION_JOIN_SQL}
 WHERE {where}
 ORDER BY m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES DESC
 LIMIT 50
@@ -443,6 +527,15 @@ def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
     then pasted into an America/Chicago CRON by the schedule advisor — proposing a
     SUSPEND up to 5-6 hours early, into the morning ramp. CONVERT_TIMEZONE pins the
     metering side to account time so the two sides mean the same thing.
+
+    B1 (audit 2026-07-31): AVG_CREDITS/AVG_QUERIES are now per CALENDAR day of the
+    window, not per METERED day. DAYS_SEEN counts only the days that
+    (warehouse, hour-of-day) actually metered, so a warehouse that burns at 02:00
+    on 4 of 14 days reported its 4-day average as if it happened nightly — and the
+    schedule advisor then monetized that x30 CALENDAR days, overstating the saving
+    ~3.5x. Dividing by the full window makes the number mean "credits this hour
+    costs on an average day", which is exactly what the x30 monthly claim assumes.
+    DAYS_METERED stays in the output so a reader can see how sparse the hour is.
     """
     days = bounded_days(days, 30)
     where_m = and_where(
@@ -468,8 +561,9 @@ q AS (
     GROUP BY 1, 2
 )
 SELECT m.WAREHOUSE_NAME, m.HR AS HOUR_OF_DAY,
-       ROUND(m.CR / NULLIF(m.DAYS_SEEN, 0), 3) AS AVG_CREDITS,
-       ROUND(COALESCE(q.QC, 0) / NULLIF(m.DAYS_SEEN, 0), 1) AS AVG_QUERIES
+       ROUND(m.CR / {days}, 3) AS AVG_CREDITS,
+       ROUND(COALESCE(q.QC, 0) / {days}, 1) AS AVG_QUERIES,
+       m.DAYS_SEEN AS DAYS_METERED
 FROM m
 LEFT JOIN q ON q.WAREHOUSE_NAME = m.WAREHOUSE_NAME AND q.HR = m.HR
 ORDER BY m.WAREHOUSE_NAME, m.HR
@@ -592,6 +686,13 @@ def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 
     storage_waste() when this errors. Deliberately NOT in the canary registry:
     on Standard edition it would be a permanently red row (alert noise), and
     the panel already labels the degraded state.
+
+    D4 (audit 2026-07-31): reads join on objectId, not on the assembled
+    "DB.SCHEMA.TABLE" string. ACCESS_HISTORY reports objectName exactly as the
+    identifier was created, so any quoted/mixed-case or special-character
+    identifier never matched TABLE_STORAGE_METRICS' columns and the table came
+    back NEVER_READ = TRUE — a "safe to archive" verdict on a table that is
+    read every day. objectId is the same TABLE_ID the DML leg already joins on.
     """
     read_days = bounded_days(read_days, 90)
     min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
@@ -602,11 +703,12 @@ def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 
     )
     return f"""
 WITH reads AS (
-    SELECT f.value:"objectName"::STRING AS FQN, MAX(a.QUERY_START_TIME) AS LAST_READ
+    SELECT f.value:"objectId"::NUMBER AS TABLE_ID, MAX(a.QUERY_START_TIME) AS LAST_READ
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
     WHERE a.QUERY_START_TIME >= DATEADD('day', -{read_days}, CURRENT_TIMESTAMP())
       AND f.value:"objectDomain"::STRING = 'Table'
+      AND f.value:"objectId" IS NOT NULL
     GROUP BY 1
 )
 SELECT
@@ -617,6 +719,7 @@ SELECT
     ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
     ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2)    AS FAILSAFE_GB,
     ROUND(m.RETAINED_FOR_CLONE_BYTES / POWER(1024, 3), 2) AS CLONE_RETAINED_GB,
+    COALESCE(rt.RETENTION_DAYS, 0) AS RETENTION_DAYS,
     d.LAST_DML,
     r.LAST_READ,
     IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS DML_STATUS,
@@ -628,8 +731,8 @@ LEFT JOIN (
     WHERE START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
     GROUP BY 1
 ) d ON d.TABLE_ID = m.ID
-LEFT JOIN reads r
-       ON r.FQN = m.TABLE_CATALOG || '.' || m.TABLE_SCHEMA || '.' || m.TABLE_NAME
+{_RETENTION_JOIN_SQL}
+LEFT JOIN reads r ON r.TABLE_ID = m.ID
 WHERE {where}
 ORDER BY (m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES + m.RETAINED_FOR_CLONE_BYTES) DESC
 LIMIT 50
@@ -641,6 +744,13 @@ def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> 
 
     One $9 query run 400x/day outranks a single $300 one — this is where
     caching/materialization actually pays. USD_PER_DAY = allocated / window.
+
+    Attribution law (C3, audit 2026-07-31): the QUERY_PARAMETERIZED_HASH filter
+    picks DISPLAY rows in the OUTER query only. It used to sit in the q CTE that
+    also builds the `t` denominator, so a warehouse-hour's credits were divided
+    across only the hashed queries in that hour — every pattern's $ (and the
+    $/run the pricing panel feeds to price_per_run_bounds) was inflated by the
+    unhashed share. Same fix, same reason, as expensive_queries_usd's `vis`.
     """
     days = bounded_days(days)
     limit = max(5, min(int(limit or 30), 100))
@@ -648,7 +758,6 @@ def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> 
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
         companies.warehouse_clause(company),
     )
     where_m = and_where(
@@ -686,6 +795,7 @@ SELECT
 FROM q
 JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS
 JOIN m ON m.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND m.HOUR_TS = q.HOUR_TS
+WHERE q.PATTERN_HASH IS NOT NULL
 GROUP BY q.PATTERN_HASH
 HAVING RUNS >= 5 AND ALLOCATED_CREDITS > 0
 ORDER BY ALLOCATED_CREDITS DESC

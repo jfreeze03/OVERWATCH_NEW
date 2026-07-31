@@ -34,6 +34,43 @@ def test_rules():
     assert rec["BUSY_FIT"] == RECOMMEND_KEEP
     # pressure first in the ordering
     assert out.iloc[0]["RECOMMENDATION"] == RECOMMEND_UP
+    # D2: a reversible timer fix outranks the speculative size-down bet
+    order = list(out["RECOMMENDATION"])
+    assert order.index(RECOMMEND_SUSPEND) < order.index(RECOMMEND_DOWN)
+
+
+def test_spill_signal_is_per_day_not_a_window_total():
+    """D2: spill was a WINDOW TOTAL sitting next to a per-day queue threshold,
+    so the same warehouse crossed it at 90d and not at 7d."""
+    df = pd.DataFrame([_wh("SPILLY", spill=9.0)])     # 9 GB of remote spill
+    out7 = size_recommendations(df, 3.68, 7)
+    assert out7.iloc[0]["SPILL_GB_PER_DAY"] == 1.29
+    assert out7.iloc[0]["RECOMMENDATION"] == RECOMMEND_UP    # 1.29 GB/day is pressure
+    out90 = size_recommendations(df, 3.68, 90)
+    assert out90.iloc[0]["SPILL_GB_PER_DAY"] == 0.1
+    assert out90.iloc[0]["RECOMMENDATION"] != RECOMMEND_UP   # same 9 GB over 90d is noise
+
+
+def test_provisioning_time_is_not_a_size_up_signal():
+    """D2: QUEUED_PROVISIONING_SEC is a warehouse waking up. Sizing up to fix
+    resume overhead buys nothing — it belongs in the suspend rationale."""
+    df = pd.DataFrame([{**_wh("WAKER", idle=70.0), "QUEUED_PROVISIONING_SEC": 7 * 40 * 60}])
+    row = size_recommendations(df, 3.68, 7).iloc[0]
+    assert row["RECOMMENDATION"] == RECOMMEND_SUSPEND
+    assert "provisioning" in row["RATIONALE"]
+    assert row["PROVISION_MIN_PER_DAY"] == 40.0
+
+
+def test_suspend_rows_carry_measured_idle_dollars():
+    """D2: the SUSPEND recommendation had no number next to it while the
+    speculative half-rate scenario got the KPI."""
+    df = pd.DataFrame([_wh("MOSTLY_IDLE", credits=70.0, idle=80.0)])
+    out = size_recommendations(df, 3.68, 7)
+    row = out.iloc[0]
+    assert row["IDLE_MONTHLY_USD"] == round(row["MONTHLY_USD_NOW"] * 0.8, 0)
+    summary = sizing_summary(out)
+    assert summary["idle_saving_usd"] == row["IDLE_MONTHLY_USD"]
+    assert summary["potential_saving_usd"] == 0.0    # kept apart: model vs measurement
 
 
 def test_scenario_math_and_saving():

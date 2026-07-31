@@ -318,8 +318,22 @@ def render() -> None:
     queries = safe_float(_tr.get("QUERY_COUNT")) if _tr is not None else 0.0
     failed_queries = safe_float(_tr.get("FAILED_COUNT")) if _tr is not None else 0.0
     fail_pct = (failed_queries / queries * 100) if queries else 0.0
-    queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0) if _tr is not None else 0.0
-    spill_gb = safe_float(_tr.get("SPILL_REMOTE_GB")) if _tr is not None else 0.0
+    # C8: QUEUED_SEC and SPILL_REMOTE_GB are cumulative SUMs over a MIDNIGHT-ALIGNED
+    # window that grows from 24h (just after midnight) to ~48h (late evening). Fed
+    # raw into fixed 10-minute / 5-GB thresholds, an unchanged workload therefore
+    # earned a penalty that doubled through the day and snapped back at midnight —
+    # a sawtooth that reordered the "why is the score 74?" driver list by clock time,
+    # not by anything happening on the platform. Divide by the days the window has
+    # actually covered to get a per-DAY rate: stable across the day, and the same
+    # basis the retro score sparkline uses (score_history feeds one day per row).
+    # The failure percentages are ratios and were already time-invariant.
+    _win_start = pd.Timestamp(account_today()) - pd.Timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
+    # Floor at 1.0: the window opens a full day before midnight of today, so elapsed
+    # is >= 1 by construction — the clamp only defends against a skewed clock, and it
+    # errs toward the smaller divisor (never dilutes a real penalty away).
+    _elapsed_days = max((pd.Timestamp(account_now()) - _win_start).total_seconds() / 86400.0, 1.0)
+    queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
+    spill_gb = (safe_float(_tr.get("SPILL_REMOTE_GB")) / _elapsed_days) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
     # calendar day (it can't be sub-day windowed). rec 10: daily source → hourly tier.
     # rec 9: served from the score-read batch above.
@@ -500,7 +514,12 @@ def render() -> None:
                 if _sel is not None and _sel != st.session_state.get("_ov_actions_last"):
                     st.session_state["_ov_actions_last"] = _sel
                     request_navigation("Control Room")
-                st.caption("Click a row to open it in the Control Room queue.")
+                # D1: say what "top" means. The ranking is severity, then overdue,
+                # then estimated dollars, then age — an executive reading a top-5
+                # otherwise assumes it is sorted by money, which it is not (money
+                # only breaks ties inside a severity band).
+                st.caption("Ranked by severity, then overdue, then estimated $, then age. "
+                           "Click a row to open it in the Control Room queue.")
                 result_caption(actions_res)
                 action_lines = [
                     f"[{a['SEVERITY']}] {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"
@@ -517,8 +536,14 @@ def render() -> None:
             _dtot = float(view["VALUE_USD"].map(safe_float).sum())
             if _dtot > 0 and len(view):
                 _d0 = view.iloc[0]
+                # C5: the COST_DRIVER panel is built from warehouse compute only —
+                # serverless (tasks, Snowpipe, materialized views) and AI/Cortex bill
+                # on separate meters that this panel does not read. "% of tracked
+                # drivers" read as "% of spend" and over-claimed; say which pie the
+                # slice is out of until the mart arm covering the other meters ships.
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
-                           f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of tracked drivers).")
+                           f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse "
+                           "compute spend — serverless & AI bill separately).")
         elif not using_mart and not daily.empty:
             st.caption("Driver ranking appears once the exec board mart is installed.")
         else:
@@ -639,6 +664,16 @@ def render() -> None:
                 _dest = _SCORE_DRIVER_NAV.get(d.driver)
                 if _dest and _c2.button("Investigate →", key=f"score_drv_{_i}", type="tertiary"):
                     request_navigation(_dest)
+            # E3: the point values are UNCALIBRATED defaults until someone tunes them
+            # against this account's incident history. Saying so here — where the
+            # arithmetic is on screen — stops "−6 pts per critical" from reading as a
+            # measured fact. Once SETTINGS overrides any weight, the line disappears.
+            if scoring.resolve_weights(settings) == scoring.DEFAULT_WEIGHTS:
+                st.caption("Point values are the shipped defaults — uncalibrated starting "
+                           "points, not measured impact. Tune them per driver via the "
+                           "SCORE_PTS_* settings on Admin → Settings. '(capped)' means the "
+                           "driver is pinned at its maximum: more of it will not lower the "
+                           "score further.")
 
     if not score_series.empty:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
@@ -651,7 +686,10 @@ def render() -> None:
                 "have no company grain, so this trend is account-wide even under a "
                 "company filter. The headline blends company-scoped 24h throughput/"
                 "pressure (same per-day basis as this line) with account-wide budget, "
-                "alerts, telemetry and owner-queue signals, so its level can differ."
+                "alerts, telemetry and owner-queue signals, so its level can differ. "
+                "Month-to-date spend restarts at the left edge of this window, so "
+                "the budget penalty is understated until the first whole month begins "
+                "— read the first few days as unreliable, not as a real improvement."
             )
 
     # ---- Daily AI digest ------------------------------------------------------

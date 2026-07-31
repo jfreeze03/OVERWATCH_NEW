@@ -87,4 +87,10 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
 
     score = round(max(0.0, 100.0 - sum(d.penalty for d in drivers)))
     state = "Healthy" if score >= 90 else ("Watch" if score >= 75 else "Act")
-    return GovernanceDrift(score=score, state=state, drivers=tuple(drivers))
+    # C8: rank by penalty, matching platform_score. These came out in SOURCE ORDER —
+    # MFA first, no-auto-suspend last, regardless of size — so the deductions list
+    # led with whichever category happened to be coded first, and a 24-point expired-
+    # credential hit could sit under a 2-point one. "Why 82?" has to answer with the
+    # biggest deduction at the top, or the reader fixes the wrong thing first.
+    ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
+    return GovernanceDrift(score=score, state=state, drivers=ranked)

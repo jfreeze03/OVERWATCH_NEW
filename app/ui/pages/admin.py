@@ -153,6 +153,15 @@ _EXPECTED_MIGRATIONS = {
         "they were never given when V041 retired the snapshot sweep (their rows froze at "
         "apply time; the Brief card showed MART_LOCK_WAIT_DAILY 448h stale). Stamped as a "
         "RUN timestamp so zero-event windows read fresh; migration tail heals both rows",
+    69: "exec-board serverless + AI cost drivers (audit C5): SP_REFRESH_EXEC_BOARD built its "
+        "COST_DRIVER rows from FACT_WAREHOUSE_DAILY alone, so serverless (auto-clustering, MV "
+        "refresh, search optimization, snowpipe, serverless tasks) and AI/Cortex spend could "
+        "never reach the Overview driver panel even as the fastest-growing line - while the "
+        "same page's KPIs cover compute + serverless + AI. A second COST_DRIVER arm over "
+        "FACT_METERING_DAILY excludes warehouse metering, prices AI credits at "
+        "AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD, keeps the same window "
+        "semantics and column contract, and labels drivers 'Serverless:'/'AI/Cortex:' so the "
+        "app needs no change. Account-level metering lands on the ALL scope only",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -330,7 +339,13 @@ def _access_self_check() -> None:
     if not st.button("Run access self-check", key="adm_access_check"):
         return
     probes = [
-        ("ACCOUNT_USAGE core", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY LIMIT 1",
+        # P10: DATABASES, not QUERY_HISTORY. The grant being probed is IMPORTED
+        # PRIVILEGES on the SNOWFLAKE database, which is all-or-nothing across
+        # the ACCOUNT_USAGE schema — so any view in it proves the same thing.
+        # QUERY_HISTORY is the most expensive one to touch (~10s even for LIMIT 1
+        # against an account-lifetime view); DATABASES is a handful of rows and
+        # answers instantly. Identical semantics, 10 seconds off the self-check.
+        ("ACCOUNT_USAGE core", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASES LIMIT 1",
          "GRANT IMPORTED PRIVILEGES ON DATABASE SNOWFLAKE TO ROLE SNOW_ACCOUNTADMINS; (roles.sql)"),
         ("LOGIN_HISTORY", "SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY LIMIT 1",
          "Covered by IMPORTED PRIVILEGES — if core is OK and this is not, contact Snowflake."),
@@ -404,8 +419,10 @@ def _observability_tab() -> None:
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
     st.caption(
-        "Every statement family the app has run on WH_ALFA_ADMIN, grouped by "
-        "parameterized hash — the slowest rows are the builders worth optimizing next."
+        "Every fetch the app persisted, grouped by page and query key — the slowest "
+        "rows are the builders worth optimizing next, and the key names the call site. "
+        "The WH_ALFA_ADMIN statement-family scan (grouped by parameterized hash, with "
+        "bytes scanned) is one toggle below."
     )
     telemetry = query_telemetry()
     if not telemetry.empty:
@@ -418,19 +435,50 @@ def _performance_tab() -> None:
             {"label": "Failed", "value": f"{int((~telemetry['ok']).sum())}",
              "delta_color": "inverse" if (~telemetry["ok"]).any() else "off"},
         ])
-    st.caption(_SCAN_NOTE)
-    res = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN)")
-    if guard(res, "No statements on the app warehouse in the last 7 days.",
-             setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_ADMIN."):
+    # P11: served from the app's OWN persisted telemetry by default. The old
+    # default was a 7-day ACCOUNT_USAGE.QUERY_HISTORY scan (4.6s) — this panel
+    # exists to prove the app is fast and was itself one of the app's slowest
+    # reads. APP_QUERY_TELEMETRY already has the timings at a better grain
+    # (page + query key names the CALL SITE, not just a statement hash). The
+    # one thing it cannot have is BYTES_SCANNED, so the scan stays one click away.
+    res = run(mart_sql.app_statement_stats_telemetry(7), page=_PAGE, key="app_stmt_tel",
+              tier="recent", source="APP_QUERY_TELEMETRY (the app's own fetch log)")
+    if guard(res, "No fetches persisted in the last 7 days.",
+             setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
         st.dataframe(res.df, hide_index=True, use_container_width=True,
                      column_config={
                          "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
                          "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
-                         "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
+                         "EST_WAIT_S": st.column_config.NumberColumn("Est. wait s", format="%.1f"),
+                         "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
                      })
         result_caption(res)
-        st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
+        st.caption(
+            "Ranked by EST_WAIT_S — estimated total fleet seconds spent on that key, "
+            "sample-reweighted. RUNS is what was PERSISTED (every slow/failed fetch plus "
+            "a ~2% healthy sample), so MEDIAN_S/P95_S read high; EST_RUNS is the "
+            "re-weighted true count."
+        )
+    if st.checkbox("Also scan ACCOUNT_USAGE for bytes scanned (slower)", key="adm_stmt_scan",
+                   help="The GB-scanned figure only exists in QUERY_HISTORY — this is the "
+                        "one thing the app's own telemetry cannot record."):
+        st.caption(_SCAN_NOTE)
+        scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
+                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN)")
+        if guard(scan, "No statements on the app warehouse in the last 7 days.",
+                 setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_ADMIN."):
+            # House convention: styled_table, not a raw st.dataframe — it carries the
+            # status/delta coloring, header prettifier, pinned identity column, and the
+            # self-identifying CSV export that every other table on the page has.
+            styled_table(
+                scan.df,
+                column_config={
+                    "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
+                    "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
+                    "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
+                })
+            result_caption(scan)
+            st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
 
     st.markdown("**Page adoption (30d)**")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",
@@ -473,16 +521,35 @@ def _perf_rider_panels(fq_df=None) -> None:
         st.caption("Cache-hit % covers PERSISTED fetches only (slow/failed always + the 2% "
                    "healthy sample) and rows new enough to carry CACHE_HIT — a floor, not a census.")
         # Ranked next-tuning-targets (Codex r7 #3, minus the speculative
-        # "likely fix" text): pain = p95 x slow-count, from the same frame.
+        # "likely fix" text). D5: PAIN is now EST_WAIT_S — the sample-reweighted
+        # total seconds the fleet waited on the page — not p95 x slow-count.
+        # The old metric could only see fetches that crossed the 2s persist
+        # threshold, so a page whose real cost is tens of thousands of 1.4s
+        # fetches scored ZERO pain while a page with three 30s outliers topped
+        # the board. Ranking on summed wait puts the cheap-but-constant pages
+        # where they belong; p95 stays on the table as the severity lens.
         _tt = tbp.df.copy()
         try:
-            _tt["PAIN"] = (_tt["P95_S"].astype(float) * _tt["SLOW_2S"].astype(float)).round(1)
-            _tt = _tt.sort_values("PAIN", ascending=False).head(5)
-            st.markdown("**Next tuning targets** — pain = p95 x slow fetches; "
-                        "the telemetry picks, not opinions.")
-            _sel = selectable_table(
-                _tt[["PAGE", "P95_S", "SLOW_2S", "FAILED", "PAIN"]],  # r24: CACHE_HIT_PCT off — 0.0 by construction until weighted telemetry (review #3/#4)
-                key="adm_tt_sel", height=160)
+            _tt["PAIN"] = _tt["EST_WAIT_S"].astype(float).round(1)
+            # D5: a page with no measurable wait is not a tuning target — it used
+            # to fill the board with PAIN=0 rows whenever fewer than five pages
+            # had any, and every one of those was an un-drillable dead end.
+            _tt = _tt[_tt["PAIN"] > 0].sort_values("PAIN", ascending=False).head(5)
+            st.markdown("**Next tuning targets** — pain = estimated total fleet seconds "
+                        "waited (sample-reweighted); the telemetry picks, not opinions.")
+            if _tt.empty:
+                st.caption("No page has measurable persisted wait in 7d — nothing to rank.")
+                _sel = None
+            else:
+                _sel = selectable_table(
+                    _tt[["PAGE", "PAIN", "P95_S", "SLOW_2S", "FAILED"]],  # r24: CACHE_HIT_PCT off — 0.0 by construction until weighted telemetry (review #3/#4)
+                    key="adm_tt_sel", height=160)
+                st.caption(
+                    "Sub-2s pain is invisible here except through the ~2% healthy sample; "
+                    "p95 is exception-weighted (every ≥2s fetch persists, almost no fast one "
+                    "does) and reads higher than true fleet latency. PAIN re-weights by "
+                    "1/sample-probability, which is why it can rank a page the p95 column does not."
+                )
             # Codex r8 #1: click a target, see the slow keys behind the pain
             if _sel is not None:
                 # selectable_table returns a POSITIONAL index into the frame
@@ -491,9 +558,21 @@ def _perf_rider_panels(fq_df=None) -> None:
                 # (Joe 2026-07-11: "the screen flashes and does nothing").
                 _pg = str(_tt.iloc[int(_sel)]["PAGE"])
                 _det = None if fq_df is None else fq_df[fq_df["PAGE"].astype(str) == _pg]
+                # C6: fq_df is the fleet list, LIMIT 40 by p95 — a page can top the
+                # PAIN board and still have every slow key below that cut. Absence
+                # from fq_df is therefore NOT evidence of absence, and the old
+                # caption asserted two things ("nothing persisted" and "the pain is
+                # sub-2s") that could both be false. Ask for the page directly
+                # before saying anything.
                 if _det is None or _det.empty:
-                    st.caption(f"{_pg}: nothing slow or failed persisted for this page "
-                               "in 7d — its pain is spread across sub-2s fetches.")
+                    _one = run(mart_sql.fleet_query_stats(7, page=_pg), page=_PAGE,
+                               key=f"fleet_qstats_pg:{_pg}", tier="recent",
+                               source="APP_QUERY_TELEMETRY (V021), this page only")
+                    _det = _one.df if _one.usable() else None
+                if _det is None or _det.empty:
+                    st.caption(f"{_pg}: no slow (≥2s) or failed fetch persisted for this page "
+                               "in 7d — its wait is spread across sub-2s fetches, which only "
+                               "the ~2% sample sees.")
                 else:
                     st.markdown(f"**{_pg} — the slow keys behind the pain (7d persisted)**")
                     styled_table(_det, height=200)

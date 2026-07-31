@@ -28,6 +28,60 @@ _COMBINED_CODE_USAGE = """
 """
 
 
+# The Cortex Code scans are window-FLAT: measured 22.1s at 7d, 27.3s at 30d,
+# 25.6s at 365d. The cost is secure-view expansion plus the per-call
+# SYSTEM$GET_CORTEX_CODE_*_SUBSCRIPTION probe, not rows — so a narrow window
+# buys nothing and a days-keyed cache re-pays the whole 22s every time the
+# window picker moves. LIVE_DERIVE_DAYS fetches the full retention ONCE.
+LIVE_DERIVE_DAYS = 365
+
+
+def cortex_code_user_daily(company: str = "ALL") -> str:
+    """The ONE live Cortex Code scan: 365d at user-day-source grain.
+
+    This is the fallback leg for BOTH ai_chargeback panels (the user rollup
+    and the daily-by-source chart). It is deliberately days-INDEPENDENT so
+    every window the picker offers shares a single cache entry and a single
+    22s payment per TTL; app/logic/cortex.py slices the window and derives
+    both aggregates in pandas (cortex_code_user_rollup / cortex_code_daily
+    remain the tested contract those derivations reproduce).
+
+    Company scope is applied POST-aggregation over the ~50 distinct grouped
+    users. cortex_code_daily's live form called COMPANY_FOR_USER on every
+    RAW usage row (one UDF invocation per Cortex request) — that is pure
+    waste when the answer only varies per user.
+
+    Honors the long window (v4.54): the owner-named live exception to the
+    90d ACCOUNT_USAGE cap. Per-user token telemetry is low-volume, unlike a
+    QUERY_HISTORY-scale read (still capped at 90).
+    """
+    outer_scope = companies.user_clause(company, "USER_NAME")
+    return f"""
+WITH combined AS ({_COMBINED_CODE_USAGE.format(days=LIVE_DERIVE_DAYS)}),
+user_daily AS (
+    SELECT
+        COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
+        U.EMAIL,
+        U.FIRST_NAME,
+        U.LAST_NAME,
+        C.SOURCE,
+        C.USAGE_TIME::DATE AS USAGE_DATE,
+        COUNT(*) AS REQUESTS,
+        SUM(COALESCE(C.TOKEN_CREDITS, 0)) AS CREDITS,
+        SUM(COALESCE(C.TOKENS, 0)) AS TOKENS,
+        MIN(C.USAGE_TIME) AS FIRST_TS,
+        MAX(C.USAGE_TIME) AS LAST_TS
+    FROM combined C
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
+    GROUP BY 1, 2, 3, 4, 5, 6
+)
+SELECT * FROM user_daily
+WHERE {outer_scope if outer_scope else '1 = 1'}
+ORDER BY USAGE_DATE, USER_NAME
+LIMIT 200000
+"""
+
+
 def cortex_code_user_rollup(days: int, company: str = "ALL") -> str:
     """Per-user Cortex Code rollup: requests, token credits, usage intensity.
 

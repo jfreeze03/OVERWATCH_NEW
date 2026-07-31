@@ -35,7 +35,10 @@ def test_panel_wired_with_page_filters_and_canaried():
     uc = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
     assert "Trend one procedure" in uc
     assert "proc_cost_trend(" in uc
-    assert "_pname.strip(), days, company, database, schema_contains" in uc  # triage-filter law
+    # triage-filter law: the panel must carry the page's company/database/schema filters.
+    # `days` became `uc_days` (P5, 2026-07-31) — the unit-cost reads clamp to <=30d
+    # independently of the picker; the filter law is unchanged.
+    assert "_pname.strip(), uc_days, company, database, schema_contains" in uc
     assert "charts.spend_trend(tdf" in uc                         # the house trend chart
     assert "same caveats as the leaderboard" in uc
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")

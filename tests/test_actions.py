@@ -1,6 +1,8 @@
 import pandas as pd
 
 from app.logic.actions import (
+    ANOMALY_HIGH_EXCESS_USD,
+    ANOMALY_HIGH_Z,
     LEDGER_ESTIMATED,
     LEDGER_VERIFIED,
     can_verify,
@@ -8,6 +10,7 @@ from app.logic.actions import (
     rank_actions,
     triage_queue,
 )
+from app.logic.formulas import account_today
 
 
 def test_rank_actions_severity_then_overdue():
@@ -92,3 +95,108 @@ def test_triage_queue_raised_at_is_arrow_safe_text():
 
 def test_triage_queue_empty_inputs():
     assert triage_queue(None, None, None).empty
+
+
+# --- D1: $-aware, day-aligned, unknown-severity-visible action ranking ---------
+
+def test_rank_actions_dollars_break_ties_within_severity():
+    df = pd.DataFrame([
+        {"SEVERITY": "HIGH", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-01-01",
+         "ESTIMATED_USD": 40, "TITLE": "old-cheap"},
+        {"SEVERITY": "HIGH", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 40000, "TITLE": "new-expensive"},
+        {"SEVERITY": "CRITICAL", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 1, "TITLE": "crit"},
+    ])
+    titles = rank_actions(df)["TITLE"].tolist()
+    # severity still dominates; dollars order the tie inside the HIGH band
+    assert titles == ["crit", "new-expensive", "old-cheap"]
+
+
+def test_rank_actions_due_today_is_not_overdue():
+    """Regression: DUE_DATE lands at midnight, so `due < now` called an action
+    overdue from 00:00:01 of the day it was due."""
+    today = account_today().isoformat()
+    df = pd.DataFrame([
+        {"SEVERITY": "HIGH", "STATUS": "OPEN", "DUE_DATE": today, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 0, "TITLE": "due-today"},
+        {"SEVERITY": "HIGH", "STATUS": "OPEN", "DUE_DATE": "2020-01-01", "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 0, "TITLE": "genuinely-overdue"},
+    ])
+    assert rank_actions(df)["TITLE"].tolist() == ["genuinely-overdue", "due-today"]
+
+
+def test_rank_actions_unknown_severity_is_flagged_not_buried():
+    df = pd.DataFrame([
+        {"SEVERITY": "URGENT", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 0, "TITLE": "mislabeled"},
+        {"SEVERITY": "", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 0, "TITLE": "blank"},
+        {"SEVERITY": "INFO", "STATUS": "OPEN", "DUE_DATE": None, "CREATED_AT": "2026-07-01",
+         "ESTIMATED_USD": 0, "TITLE": "info"},
+    ])
+    ranked = rank_actions(df)
+    # both unknowns rank at the MEDIUM tier, i.e. ABOVE INFO — not silently last
+    assert ranked["TITLE"].tolist()[-1] == "info"
+    flags = set(ranked[ranked["TITLE"] != "info"]["SEVERITY"])
+    assert flags == {"URGENT?", "UNSET?"}
+
+
+def test_rank_actions_survives_missing_optional_columns():
+    df = pd.DataFrame([{"SEVERITY": "HIGH", "STATUS": "OPEN", "TITLE": "bare"}])
+    assert rank_actions(df)["TITLE"].tolist() == ["bare"]
+
+
+# --- C2 / D6: triage feed dedupe, $-aware escalation, per-task collapse --------
+
+def test_triage_queue_drops_the_server_sweep_twin():
+    alerts = pd.DataFrame([
+        {"RULE_ID": "COST_ANOMALY_SWEEP", "SEVERITY": "MEDIUM", "TITLE": "WAREHOUSE X spent...",
+         "DETAIL": "", "RAISED_AT": "2026-07-07"},
+        {"RULE_ID": "TASK_FAILURE_BURST", "SEVERITY": "HIGH", "TITLE": "real alert",
+         "DETAIL": "", "RAISED_AT": "2026-07-07"},
+    ])
+    queue = triage_queue(alerts, None, [])
+    assert queue["TITLE"].tolist() == ["real alert"]
+
+
+def test_triage_queue_high_on_dollars_even_at_modest_z():
+    """D6: z below the (server-aligned) escalation bar but real money -> HIGH."""
+    tame_z = ANOMALY_HIGH_Z - 2
+    anomalies = [
+        {"label": "PROD_WH", "value": 9000.0, "z": tame_z,
+         "excess_usd": ANOMALY_HIGH_EXCESS_USD * 10, "day": "2026-07-07"},
+        {"label": "SANDBOX_WH", "value": 14.0, "z": tame_z, "excess_usd": 9.0, "day": "2026-07-07"},
+    ]
+    queue = triage_queue(None, None, anomalies)
+    by_title = dict(zip(queue["TITLE"], queue["SEVERITY"], strict=True))
+    assert [s for t, s in by_title.items() if t.startswith("PROD_WH")] == ["HIGH"]
+    assert [s for t, s in by_title.items() if t.startswith("SANDBOX_WH")] == ["MEDIUM"]
+    # and the expensive one leads the list
+    assert queue.iloc[0]["TITLE"].startswith("PROD_WH")
+
+
+def test_triage_queue_z_gate_matches_the_server_sweep():
+    """C2: the app escalated at z>=5 while SP_ANOMALY_SWEEP escalates at 2*3.5."""
+    assert ANOMALY_HIGH_Z == 7.0
+    mid = triage_queue(None, None, [{"label": "W", "value": 1.0, "z": 6.0, "day": "d"}])
+    assert mid.iloc[0]["SEVERITY"] == "MEDIUM"
+    hot = triage_queue(None, None, [{"label": "W", "value": 1.0, "z": 7.5, "day": "d"}])
+    assert hot.iloc[0]["SEVERITY"] == "HIGH"
+
+
+def test_triage_queue_collapses_per_day_task_rows():
+    """D6: FACT_TASK_DAILY is DAY grain — two days of the same task was two rows,
+    each severity-scored on one day's slice."""
+    tasks = pd.DataFrame([
+        {"TASK_NAME": "LOAD_A", "DATABASE_NAME": "DB", "SCHEMA_NAME": "S", "FAILED": 2,
+         "LAST_ERROR": "older", "DAY": "2026-07-06"},
+        {"TASK_NAME": "LOAD_A", "DATABASE_NAME": "DB", "SCHEMA_NAME": "S", "FAILED": 2,
+         "LAST_ERROR": "newest", "DAY": "2026-07-07"},
+    ])
+    queue = triage_queue(None, tasks, [])
+    assert len(queue) == 1
+    row = queue.iloc[0]
+    assert "failed 4x" in row["TITLE"]      # summed, not one day's slice
+    assert row["SEVERITY"] == "HIGH"        # 4 >= 3, which neither day reached alone
+    assert row["DETAIL"] == "newest"        # newest day's error survives

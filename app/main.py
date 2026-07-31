@@ -26,6 +26,7 @@ from app.core.identity import identity_sql  # noqa: E402
 from app.core.query import (  # noqa: E402
     _buffer_write,
     bump_refresh_salt,
+    cache_scope,
     execute_statement,
     flush_write_buffer,
     run,
@@ -409,18 +410,42 @@ def _strip_line(state: str, text: str) -> None:
 _UNSET: object = object()
 
 
+class _HealthUnavailable(Exception):
+    """The health read FAILED. Raised out of the cache_data-wrapped parse so a
+    failure is never pinned for the wrapper's TTL — the same all-or-nothing
+    invariant core.query relies on (Streamlit does not cache exceptions)."""
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=8)
+def _health_values_cached(scope: str) -> dict[str, tuple[str, str]]:
+    """P1: the strip renders on the SHELL of every page, so at the 30s live TTL
+    every viewer re-paid it several times a minute for badges whose inputs move
+    on a 10-minute (freshness snapshot) / daily (metering) cadence. 120s is the
+    shell's own budget; the underlying run() stays on the live tier so the
+    Brief/Control Room reads of the SAME statement keep sharing one cache entry,
+    and the in-page Alerts panels are untouched — they are the live surface.
+
+    ``scope`` is core.query's cache identity (role + refresh salt + the alerts
+    domain salt), so Refresh and any ack/resolve write still invalidate this
+    layer immediately rather than leaving a stale badge for 2 minutes."""
+    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
+              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    if not res.ok:
+        raise _HealthUnavailable(res.error or "health strip read failed")
+    if res.empty:
+        return {}
+    return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
+
+
 def _health_values() -> dict[str, tuple[str, str]] | None:
     """One fetch+parse of the health-strip mart, shared by the sidebar strip,
     the persistent status bar, and the top bar (they used to parse it thrice
     with three different source labels). Returns None on a read ERROR, {} on a
     successful-but-empty read (see _UNSET note)."""
-    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
-              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
-    if not res.ok:
+    try:
+        return _health_values_cached(cache_scope(mart_sql.health_strip()))
+    except _HealthUnavailable:
         return None
-    if res.empty:
-        return {}
-    return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
 
 
 def _health_strip(vals: object = _UNSET) -> None:

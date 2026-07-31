@@ -426,6 +426,147 @@ LIMIT 200
 """
 
 
+# --- Cortex Code user attribution off the fact (P2) --------------------------
+# The two live CORTEX_CODE_* scans behind Cost > Chargeback & AI cost 22s and
+# 15s EVERY render — 30 of the Cost page's 88 slow fetches — and the numbers
+# they compute are already in FACT_AI_USAGE_DAILY at (DAY, USER_NAME, SOURCE,
+# MODEL_NAME) grain from V061 loader arm [9]. These two readers reproduce the
+# live builders' output contracts column-for-column so the panel can go
+# fact-first with the live scans as fallback.
+#
+# SOURCE <> 'Functions' on both: the live builders read ONLY the Snowsight/CLI
+# code views. The fact also carries the Functions arm (USER_NAME 'ACCOUNT',
+# a synthetic account-wide row) — including it would inflate ACTIVE_USERS and
+# put a non-person in the per-user chargeback table.
+#
+# COVERAGE GATE (the same guard as unused_roles_via_fact): emit ZERO rows
+# unless the fact's own first day is at or before the start of the asked
+# window. run_mart_first/the panel only fall back to live on an EMPTY or
+# failed mart read, so without this a 3-week-old fact would answer a 180/365d
+# question with three weeks of credits and silently UNDER-REPORT the spend —
+# the exact failure mode that makes a budget breach invisible. MIN(DAY) is
+# taken over the SAME source filter we serve: the Functions arm's history
+# says nothing about how far back the code views were loaded.
+_AI_CODE_SOURCE_ARM = "SOURCE <> 'Functions'"
+
+
+def _ai_code_coverage_cte() -> str:
+    return f"""cov AS (
+    SELECT MIN(DAY) AS FIRST_DAY
+    FROM {mart_object("FACT_AI_USAGE_DAILY")}
+    WHERE {_AI_CODE_SOURCE_ARM}
+)"""
+
+
+def _ai_code_window(days: int) -> str:
+    return (f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())\n"
+            f"      AND {_AI_CODE_SOURCE_ARM}\n"
+            f"      AND (SELECT FIRST_DAY FROM cov) "
+            f"<= DATEADD('day', -{days} + 1, CURRENT_DATE())")
+
+
+def ai_code_user_rollup(days: int, company: str = "ALL") -> str:
+    """cortex_sql.cortex_code_user_rollup contract from FACT_AI_USAGE_DAILY.
+
+    Company scope is applied ONCE per grouped user (a ~50-row set), not per
+    fact row — same reasoning as the live builder's outer WHERE.
+
+    FIRST_NAME/LAST_NAME are not on the fact but ARE part of the live
+    contract (they drive DISPLAY_NAME on the spend chart, owner ask v4.50),
+    so they ride a post-aggregation join to the small USERS dimension. The
+    join is pre-collapsed to one row per NAME: a recreated login yields
+    several USERS rows, and a fan-out here would DOUBLE a user's credits.
+    """
+    days = bounded_days(days, 400)
+    scope = ""
+    if str(company or "ALL").upper() != "ALL":
+        scope = f"WHERE {companies.COMPANY_FOR_USER_FN}(b.USER_NAME) = {sql_literal(company)}"
+    return f"""
+WITH {_ai_code_coverage_cte()},
+by_user AS (
+    SELECT
+        USER_NAME,
+        ANY_VALUE(EMAIL) AS EMAIL,
+        SOURCE,
+        COUNT(DISTINCT DAY) AS ACTIVE_DAYS,
+        SUM(COALESCE(REQUESTS, 0)) AS TOTAL_REQUESTS,
+        SUM(COALESCE(CREDITS, 0)) AS TOTAL_CREDITS,
+        SUM(COALESCE(TOKENS, 0)) AS TOTAL_TOKENS,
+        MIN(FIRST_TS) AS FIRST_USAGE,
+        MAX(LAST_TS) AS LAST_USAGE
+    FROM {mart_object("FACT_AI_USAGE_DAILY")}
+    WHERE {_ai_code_window(days)}
+    GROUP BY USER_NAME, SOURCE
+),
+named AS (
+    SELECT NAME, ANY_VALUE(FIRST_NAME) AS FIRST_NAME, ANY_VALUE(LAST_NAME) AS LAST_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.USERS
+    WHERE DELETED_ON IS NULL
+    GROUP BY NAME
+)
+SELECT
+    b.USER_NAME,
+    b.EMAIL,
+    n.FIRST_NAME,
+    n.LAST_NAME,
+    b.SOURCE,
+    b.ACTIVE_DAYS,
+    b.TOTAL_REQUESTS,
+    b.TOTAL_CREDITS,
+    b.TOTAL_TOKENS,
+    b.FIRST_USAGE,
+    b.LAST_USAGE,
+    b.TOTAL_CREDITS / NULLIF(b.TOTAL_REQUESTS, 0) AS CREDITS_PER_REQUEST,
+    b.TOTAL_CREDITS / NULLIF(b.ACTIVE_DAYS, 0) AS AVG_DAILY_CREDITS
+FROM by_user b
+LEFT JOIN named n ON n.NAME = b.USER_NAME
+{scope}
+ORDER BY b.TOTAL_CREDITS DESC
+LIMIT 500
+"""
+
+
+def ai_code_daily(days: int, company: str = "ALL") -> str:
+    """cortex_sql.cortex_code_daily contract from FACT_AI_USAGE_DAILY.
+
+    ACTIVE_USERS counts distinct USER_NAME where the live builder counts
+    distinct USER_ID — the fact has no USER_ID. Same number unless a login
+    was dropped and recreated inside the window, where counting the PERSON
+    is the honest answer anyway.
+
+    Company scope evaluates COMPANY_FOR_USER once per DISTINCT user rather
+    than once per fact row (the live builder's per-raw-row UDF call is the
+    P9 finding); the day/source grouping then needs no UDF at all.
+    """
+    days = bounded_days(days, 400)
+    scope = ""
+    if str(company or "ALL").upper() != "ALL":
+        scope = f"""
+      AND USER_NAME IN (
+          SELECT USER_NAME FROM (
+              SELECT DISTINCT USER_NAME
+              FROM {mart_object("FACT_AI_USAGE_DAILY")}
+              WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+                AND {_AI_CODE_SOURCE_ARM}
+          )
+          WHERE {companies.COMPANY_FOR_USER_FN}(USER_NAME) = {sql_literal(company)}
+      )"""
+    return f"""
+WITH {_ai_code_coverage_cte()}
+SELECT
+    DAY,
+    SOURCE,
+    COUNT(DISTINCT USER_NAME) AS ACTIVE_USERS,
+    SUM(COALESCE(REQUESTS, 0)) AS TOTAL_REQUESTS,
+    SUM(COALESCE(CREDITS, 0)) AS TOTAL_CREDITS,
+    SUM(COALESCE(TOKENS, 0)) AS TOTAL_TOKENS
+FROM {mart_object("FACT_AI_USAGE_DAILY")}
+WHERE {_ai_code_window(days)}{scope}
+GROUP BY DAY, SOURCE
+ORDER BY DAY, SOURCE
+LIMIT 5000
+"""
+
 
 def unused_roles_via_fact(days: int = 90) -> str:
     """security_sql.unused_roles contract from FACT_QUERY_ROLE_HOURLY (live

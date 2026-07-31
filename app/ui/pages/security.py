@@ -272,6 +272,18 @@ def _trust_center_tab() -> None:
         result_caption(tcf)
 
 
+#: C8: every input governance_drift() can score, and the human name for it. A key
+#: MISSING from the inputs dict contributes zero penalty — identical to a clean
+#: zero — so the set has to be checked explicitly to tell "no debt" from "no data".
+_GOV_SIGNALS = {
+    "mfa_gap_users": "MFA gaps",
+    "expired_credentials": "Expired credentials",
+    "expiring_credentials": "Expiring credentials",
+    "breakglass_grants_30d": "Break-glass grants",
+    "warehouses_no_autosuspend": "Warehouses without auto-suspend",
+}
+
+
 def _governance_score_panel():
     """Governance debt as a number with named deductions (CoCo item 14a)."""
     # Posture-snapshot-first (live round 6: gov_counts topped the fleet
@@ -291,9 +303,14 @@ def _governance_score_panel():
             inputs = {
                 "mfa_gap_users": snap.get("MFA_GAP_USERS"),
                 "expired_credentials": snap.get("EXPIRED_CRED"),
-                "expiring_credentials": snap.get("EXPIRING_CRED_10D", 0),
                 "breakglass_grants_30d": snap.get("BREAKGLASS_GRANTS_30D"),
             }
+            # C8: only claim an expiring-credential count when the snapshot HAS one.
+            # The old `snap.get(..., 0)` turned a pre-V0xx posture row that never
+            # carried the metric into a confident "0 credentials expire within 10
+            # days" — a clean bill of health manufactured from a missing column.
+            if "EXPIRING_CRED_10D" in set(snap.index.astype(str)):
+                inputs["expiring_credentials"] = snap.get("EXPIRING_CRED_10D")
             if "WH_NO_AUTOSUSPEND" in set(snap.index.astype(str)):
                 # V041 R11 posture row; the WH_NO_MONITOR twin is ignored
                 # since v4.45 (owner runs no resource monitors).
@@ -319,22 +336,41 @@ def _governance_score_panel():
         if "auto_suspend" in wdf.columns:
             asus = pd.to_numeric(wdf["auto_suspend"], errors="coerce").fillna(0)
             inputs["warehouses_no_autosuspend"] = int((asus <= 0).sum())
+    # C8: fail the governance score OPEN-EYED, the way platform_score fails closed.
+    # An input that did not resolve — posture mart absent AND the live fallback timed
+    # out, or the SHOW WAREHOUSES read refused — contributes NO penalty, which is
+    # arithmetically identical to a perfectly clean signal. So an outage in the
+    # security telemetry made governance look BETTER. The score can't be recomputed
+    # without the data, but it can stop presenting itself as complete.
+    unresolved = [label for key, label in _GOV_SIGNALS.items() if key not in inputs]
     if not inputs:
+        st.warning("Governance drift score unavailable: no hygiene signal resolved "
+                   "(the posture snapshot and the live fallback both failed). Absent "
+                   "inputs score zero, so no number is shown rather than a false 100.")
+        st.divider()
         return post
     settings = load_settings(_PAGE)
     drift = governance_drift(inputs, weights=resolve_gov_weights(settings))
     kpi_row([
         {"label": "Governance drift score", "value": f"{drift.score}/100",
-         "delta": drift.state, "delta_color": "off",
+         "delta": f"{drift.state} · incomplete" if unresolved else drift.state, "delta_color": "off",
          "help": "Countable hygiene debt: MFA gaps, credential rotation, break-glass "
                  "grants, warehouses without auto-suspend. Default weights "
-                 "(SETTINGS-overridable), capped per category."},
+                 "(SETTINGS-overridable), capped per category."
+                 + (" Some inputs did not resolve — see the caption below."
+                    if unresolved else "")},
         {"label": "Deductions", "value": f"{len(drift.drivers)}"},
     ])
+    if unresolved:
+        st.caption("Incomplete: " + ", ".join(unresolved)
+                   + " did not resolve, and an unresolved signal deducts nothing. Treat "
+                     f"{drift.score}/100 as a CEILING — the real drift can only be worse. "
+                     "Source: " + (post.source or "posture snapshot") + ".")
     if drift.drivers:
         with st.expander(f"Governance deductions ({drift.score}/100 · {drift.state})"):
             for d in drift.drivers:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
+            st.caption("Ranked largest deduction first.")
     st.divider()
     return post
 

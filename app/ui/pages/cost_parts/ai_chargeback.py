@@ -8,6 +8,8 @@ and says so; estimated and verified savings never mix.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
@@ -15,8 +17,20 @@ from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import chargeback_sql, cortex_sql, cost_sql, mart27_sql, mart_sql
-from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
-from app.logic.formulas import account_today, credits_to_usd, format_usd, safe_float
+from app.logic.cortex import (
+    BUDGET_LADDER,
+    CPR_MIN_PROJECTED_USD,
+    CPR_MIN_REQUESTS,
+    CPR_SPIKE_THRESHOLD,
+    classify_exceptions,
+    daily_from_user_daily,
+    effective_window_days,
+    enrich_user_rollup,
+    rollup_from_user_daily,
+    rollup_summary,
+    with_aggregate_budget_row,
+)
+from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -59,25 +73,53 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     computed in tested logic, and budget severities only exist when an AI
     budget is actually configured."""
     ai_budget = safe_float(settings.get("AI_MONTHLY_BUDGET_USD"))
-    rollup_res = run(cortex_sql.cortex_code_user_rollup(days, company), page=_PAGE,
-                     key=f"cortex_users_{company}_{days}", tier="historical",
-                     source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
-    if not rollup_res.ok and rollup_res.error_kind == "unknown_function":
-        # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
-        # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
-        # Cortex Code subscription that function does not exist (002139), so
-        # OUR read throws even though our SQL never names it.
-        st.info("Cortex Code usage telemetry is not available in this account/region yet - "
-                "Snowflake's usage views probe a subscription that is not present (002139). "
-                "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
-        return
+    # P2: FACT_AI_USAGE_DAILY (V061 loader arm [9]) already holds exactly what
+    # the two live CORTEX_CODE_* scans compute — 22s + 15s on EVERY render, 30
+    # of this page's 88 slow fetches. Go fact-first; the live scan only runs
+    # when the fact cannot cover the asked window (mart27_sql's coverage gate
+    # returns zero rows rather than a short answer).
+    #
+    # Deliberately NOT run_mart_first, for two reasons the helper cannot serve:
+    #  1. probe=True. Accounts with no Cortex Code subscription fail with 002139
+    #     (see below) — an EXPECTED absence that must not be error-logged and
+    #     counted as a failed fetch on every render. run_mart_first has no probe
+    #     passthrough.
+    #  2. The live leg answers at a DIFFERENT grain on purpose (P9): ONE 365d
+    #     user-day-source fetch under a days-independent cache key, from which
+    #     BOTH this rollup and the daily-by-source chart are folded in pandas.
+    #     One 22s payment per TTL instead of two per window.
+    rollup_res = run(mart27_sql.ai_code_user_rollup(days, company), page=_PAGE,
+                     key=f"cortex_users_{company}_{days}", tier="hourly",
+                     source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
+    live_res = None
+    if not rollup_res.usable():
+        live_res = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
+                       key=f"cortex_user_daily_{company}", tier="metadata",
+                       source=("ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY "
+                               "(365d live fallback, window derived in-app)"),
+                       probe=True, max_rows=200_000)
+        if not live_res.ok and live_res.error_kind == "unknown_function":
+            # Live finding 2026-07-10 (Joe traced it): the CORTEX_CODE_* views
+            # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
+            # Cortex Code subscription that function does not exist (002139), so
+            # OUR read throws even though our SQL never names it.
+            st.info("Cortex Code usage telemetry is not available in this account/region yet - "
+                    "Snowflake's usage views probe a subscription that is not present (002139). "
+                    "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
+            return
+        # Keep the live result's source/freshness/error for the caption and the
+        # guard; swap in the window-sliced rollup the panel actually renders.
+        rollup_res = replace(live_res, df=rollup_from_user_daily(live_res.df, days))
     if not guard(rollup_res,
                  "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
                  setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
         return
 
-    enriched = enrich_user_rollup(rollup_res.df, ai_rate, days)
-    summary = rollup_summary(enriched, days)
+    # P8/C7: one divisor for the whole tab — days the scope has actually been
+    # observable, never the asked window when the data is younger than it.
+    eff_days = effective_window_days(rollup_res.df, days)
+    enriched = enrich_user_rollup(rollup_res.df, ai_rate, eff_days)
+    summary = rollup_summary(enriched, eff_days)
     budget_kpi_item = (
         {"label": "AI monthly budget", "value": format_usd(ai_budget),
          "help": "AI_MONTHLY_BUDGET_USD from SETTINGS; drives the severity flags below."}
@@ -91,7 +133,11 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         {"label": "Cortex Code spend", "value": format_usd(summary["spend_usd"]),
          "help": f"Exact token credits x ${ai_rate:.2f}/credit."},
         {"label": "Projected 30d", "value": format_usd(summary["projected_30d_usd"]),
-         "help": "Window run-rate extended to 30 days."},
+         "help": (f"Run-rate over the {eff_days} day(s) this scope has actually been "
+                  f"active, extended to 30 days."
+                  + ("" if eff_days >= days else
+                     f" Asked window was {days}d — dividing by days that predate the "
+                     "first Cortex request would under-report the burn."))},
         budget_kpi_item,
     ])
 
@@ -105,9 +151,18 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         charts.bar_usd(by_user, "DISPLAY_NAME", "SPEND_USD", title="Spend (USD)", top_n=12)
     with right:
         st.markdown("**Daily usage by source**")
-        daily_res = run(cortex_sql.cortex_code_daily(days, company), page=_PAGE,
-                        key=f"cortex_daily_{company}_{days}", tier="historical",
-                        source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True)
+        if live_res is not None:
+            # The 365d fetch that served the rollup already holds every day —
+            # folding it costs nothing, where the old live cortex_code_daily
+            # was a second 15s secure-view scan of the same two views.
+            daily_res = replace(live_res, df=daily_from_user_daily(live_res.df, days))
+        else:
+            # The rollup came off the fact, so the fact covers this window: an
+            # empty daily read here is the ANSWER, not a cold mart. Reviving the
+            # live scan would pay 15s to confirm what we already know.
+            daily_res = run(mart27_sql.ai_code_daily(days, company), page=_PAGE,
+                            key=f"cortex_daily_{company}_{days}", tier="hourly",
+                            source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
         if guard(daily_res, "No daily Cortex Code usage rows."):
             daily = daily_res.df.copy()
             daily["USD"] = daily["TOTAL_CREDITS"].map(safe_float) * ai_rate
@@ -128,18 +183,35 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     )
     result_caption(rollup_res, note="Cortex Code token metering is exact per user; no allocation involved.")
 
-    exceptions = classify_exceptions(enriched, ai_budget, ai_rate)
+    # C7: the per-user ladder plus the SCOPE-wide breach. Ten users at 20% of
+    # budget each is 200% of the budget and used to print "no users over 25%".
+    exceptions = with_aggregate_budget_row(
+        classify_exceptions(enriched, ai_budget, ai_rate), summary, ai_budget)
+    # E4: the thresholds belong wherever the verdicts are read — an operator
+    # looking at a populated table should not have to empty it to learn what
+    # "High" meant. One line, both rule families, the live constants.
+    _rules = (
+        "Rules — budget ladder on projected 30d spend: "
+        + ", ".join(f"over {int(frac * 100)}% = {sev}" for frac, sev, _ in BUDGET_LADDER)
+        + f" (per user, and once for the scope total). Cost-per-request spike = High above "
+        f"{CPR_SPIKE_THRESHOLD:.2f} credits/request, counted only with at least "
+        f"{CPR_MIN_REQUESTS} requests and {format_usd(CPR_MIN_PROJECTED_USD)} projected 30d "
+        f"— one expensive call is not a trend."
+    )
     st.markdown("**Exceptions**")
     if exceptions.empty:
         if ai_budget > 0:
-            st.success("No users over 25% of the AI budget and no cost-per-request spikes.")
+            st.success("No users over 25% of the AI budget, scope total inside budget, "
+                       "and no cost-per-request spikes.")
         else:
             st.info("No cost-per-request spikes. Configure AI_MONTHLY_BUDGET_USD to also flag budget pressure.")
+        st.caption(md_dollars(_rules))
     else:
         styled_table(
             exceptions[["SEVERITY", "SIGNAL", "USER_NAME", "SOURCE", "TOTAL_REQUESTS",
                          "CREDITS_PER_REQUEST", "PROJECTED_30D_USD"]],
         )
+        st.caption(md_dollars(_rules))
         with st.expander("Queue top exceptions to the Action Queue"):
             statements = []
             for _, r in exceptions.head(10).iterrows():
@@ -177,8 +249,12 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                          help="Scans CORTEX_AI_FUNCTIONS_USAGE_HISTORY once, then cached."):
             st.caption("Off until you ask — this view needs its own history scan.")
             return
+        # P8: metadata tier (4h) like the other Cortex reads on this tab. The
+        # source view lags hours and the numbers are exact token metering —
+        # an hourly re-scan re-pays the secure-view expansion for an answer
+        # that provably cannot have changed.
         fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
-                     key=f"cortex_fn_{days}", tier="historical",
+                     key=f"cortex_fn_{days}", tier="metadata",
                      source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
         if fn_res.ok and not fn_res.empty:
             fn = fn_res.df.copy()

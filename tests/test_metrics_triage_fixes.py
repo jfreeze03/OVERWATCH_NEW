@@ -142,6 +142,10 @@ def test_cache_pct_readers_scale_fraction_to_percent():
     (REPEAT_LOW_CACHE_PCT=25.0) passes every row and captions misreport cache.
     Matches the x100-at-read pattern established for MART_CLOUD_SVC_DAILY (#9)."""
     ins = (_ROOT / "app" / "data" / "insights_sql.py").read_text(encoding="utf-8")
-    assert "AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100 AS AVG_CACHE_PCT" in ins
+    # D3 (audit 2026-07-31) changed the AGGREGATION (BYTES_SCANNED-weighted, zero-scan
+    # runs excluded) but NOT the scale contract this test exists to pin: the 0-1
+    # fraction is still multiplied by 100 before flag_repeat_candidates sees it.
+    assert "COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * BYTES_SCANNED" in ins
+    assert "0)), 0) * 100,\n        100) AS AVG_CACHE_PCT" in ins
     m27 = (_ROOT / "app" / "data" / "mart27_sql.py").read_text(encoding="utf-8")
     assert "NULLIF(SUM(f.RUNS), 0) * 100, 1) AS AVG_CACHE_PCT" in m27

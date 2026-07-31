@@ -1,5 +1,71 @@
 # Changelog
 
+## 4.114.0 — Perf round 3 (live telemetry) + recommendation engines Tiers B–E + V069 (2026-07-31)
+
+The full plan from the owner's live Admin→Performance screenshots and the 14-engine
+recommendation audit, implemented across five disjoint file groups plus one owner migration.
+
+### The pain board was measuring itself wrong
+`query.py` gave **every batch member the whole batch's wall time**, so `batch:q`/`batch:p`
+reported identical inflated P50/P95 and Cost & Contract's "25× worse" pain was partly an
+artifact of one batch counted twice. Members are now timed individually (via a ContextVar —
+the durations can't ride the return value, which is `st.cache_data`-cached and would replay a
+miss's timings on a hit), and the batch wall time is logged once as `batch_wall:{tier}`. The
+Admin board now ranks on **`EST_WAIT_S`** (sample-weighted total wait, excluding the
+`batch_wall:` superset rows) instead of exception-weighted p95 × slow-count — which also
+removes the sub-2s blind spot.
+
+### Perf
+- **AI-users panel is fact-first** — `FACT_AI_USAGE_DAILY` already existed at exactly the
+  right grain (V061 arm [9]); the panel was scanning live regardless. Two new mart readers
+  with column-for-column matching contracts, a coverage gate so a young fact can't silently
+  under-report a 180/365d window, and — since the Cortex scans are **window-flat** (cost is
+  secure-view + subscription-probe overhead, not rows) — the live fallback is now **one 365d
+  superset fetch** sliced in pandas instead of two. Kills the two heaviest slow-key families.
+- **`health_strip`** — 8 UNION arms → 3 single-pass CTEs unpivoted via `LATERAL FLATTEN`
+  (not 8 `FROM strip` arms: Snowflake doesn't guarantee CTE materialization, which would
+  have silently undone the fix), each source scanned exactly once, behind a 120s TTL. It
+  runs on the shell of every page.
+- **user_directory** 24h cache · **unit-costs** ≤30d window cap · **`cs_types`** mart-first ·
+  **t_rca** tier honest to a ~45-min source lag · **ACCOUNT_USAGE probe** hits a metadata view
+  instead of scanning `QUERY_HISTORY` · **app statement stats** served from the app's own
+  telemetry with the history scan behind a toggle.
+
+### Recommendation engines
+- **C1 (systemic)** — live builders clamp to 90d while the picker goes to 365, and four
+  engines divided by the *requested* window: idle, sizing, quiet-window and what-if all read
+  **~4× low** on a 365d view. Fixed once via `components.served_days(result, days)`, now the
+  documented divisor rule for the whole file.
+- **B1/B3/B4** — quiet-window savings monetized metered days × 30 *calendar* days (~3.5×
+  over); the idle ledger booked 100% of idle as recoverable when Snowflake's 60s resume
+  minimum makes that unattainable (now books recoverable idle, resume-tail deducted); the
+  retention-fix estimate counted failsafe that drains in 7d regardless.
+- **C3** — repeat-pattern $ violated the house attribution law (the hash filter sat in the
+  denominator CTE, so hour credits were split across only the hashed queries, inflating every
+  pattern), and the engine's actual recommendation text + LAST_RUN were computed but never
+  rendered.
+- **C2/C4/C7/C8** — duplicate anomaly rows with *contradicting* severities between the app and
+  the server sweep; contract levers summing unrealizable savings (now with explicit
+  realizability haircuts, so "room to spare" can't fire on optimism); a Cortex "High" on a
+  single request plus a new aggregate-budget signal (ten users at 20% each no longer reads
+  "no users over 25%"); evidence scores that sawtoothed with wall-clock.
+- **D1–D7 / E1–E6** — $-blind action ranking, spill-vs-queue unit mismatch, storage growth
+  ranked by TB instead of $, and caption honesty throughout.
+
+### V069 — exec-board serverless/AI cost drivers
+`SP_REFRESH_EXEC_BOARD` re-derived from V054: the `COST_DRIVER` panel read **only**
+`FACT_WAREHOUSE_DAILY`, so serverless and AI spend could never appear as a cost driver while
+the same page's KPIs claimed to cover them. The new arm reads `FACT_METERING_DAILY` with the
+correct two-rate split (AI at `:ai_credit_price`, rest at `:credit_price`, both from SETTINGS)
+and fills the identical column contract — no app change. Deliberately **not** fanned across
+the ALFA/Trexis pills: `FACT_METERING_DAILY` has no `COMPANY` column, and splitting
+account-level metering would invent attribution.
+
+Gates green: ruff, mypy (pure layers), **pytest 1774 passed / 1 skipped**. Six test pins
+reconciled — five were stale source-shape assertions (an `except` that slid past an arbitrary
+2000-char window, `days`→`uc_days`, two probe reads becoming one superset), and one was a
+genuine style regression (a raw `st.dataframe` converted back to `styled_table`).
+
 ## 4.113.0 — Recommendation engines Tier A: three engines were advising in the WRONG DIRECTION (2026-07-31)
 
 A full audit of every in-app recommendation engine (14 engines, one adjudicator each)

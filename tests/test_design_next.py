@@ -90,4 +90,9 @@ def test_a5_axis_title_consistent():
 # rec15 — the cost-drivers panel leads with its conclusion
 def test_rec15_cost_driver_takeaway():
     ov = _src("app/ui/pages/overview.py")
-    assert "Top driver:" in ov and "% of tracked drivers" in ov
+    assert "Top driver:" in ov
+    # C5: the denominator was described as "tracked drivers", which readers took
+    # for total spend. The panel only covers warehouse compute — serverless and
+    # AI/Cortex bill on meters it never reads — so the share must name its pie.
+    assert "% of warehouse " in ov and "serverless & AI bill separately" in ov
+    assert "% of tracked drivers" not in ov

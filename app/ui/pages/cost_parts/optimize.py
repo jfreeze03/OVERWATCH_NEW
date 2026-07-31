@@ -4,6 +4,14 @@ scans, guarded remediation, savings ledger).
 Formula honesty rules: billed dollars always include the cloud-services
 adjustment; warehouse spend is exact; user/database spend is share-allocated
 and says so; estimated and verified savings never mix.
+
+C1 (audit 2026-07-31) — the divisor rule for this whole file: the live SQL
+builders clamp to MAX_LIVE_WINDOW_DAYS (90) while the window picker goes to
+365. Any per-day rate or x30 projection must divide by the
+window that was actually SERVED — components.served_days(result, days) for a
+run_mart_first read, bounded_days(days) for a plain live read — never by the
+requested `days`. Dividing 90 days of credits by 365 read ~4x low on every
+projection on this page.
 """
 
 from __future__ import annotations
@@ -17,6 +25,7 @@ from app.core.query import execute_statement, run
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data.common import bounded_days
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
@@ -40,6 +49,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     selectable_table,
+    served_days,
     snowsight_profile_column,
     styled_table,
     toggle_cost_hint,
@@ -88,6 +98,16 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             sus_wi = st.select_slider("New auto-suspend (s)",
                                       options=[30, 60, 120, 300, 600, 900],
                                       value=60, key="whatif_suspend")
+        if not live_size:
+            # D2: the sim silently fell back to MEDIUM, so a size step off an
+            # X-Small warehouse quoted 4x the real dollars — and the only hint
+            # ("SHOW WAREHOUSES did not return its size") lived on the failure
+            # branch that the MEDIUM default made unreachable.
+            st.warning(
+                "SHOW WAREHOUSES did not return this warehouse's size — the scenario below "
+                "assumes MEDIUM. Treat the size-step dollars as illustrative only; the "
+                "auto-suspend half of the answer is unaffected."
+            )
         idle_wi = safe_float(wrow_wi.get("CREDITS_TOTAL")) * safe_float(wrow_wi.get("IDLE_PCT")) / 100.0
         sim = simulate_scenario(
             size=live_size or "MEDIUM",
@@ -123,7 +143,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     idle_res = run_mart_first(
         mart27_sql.eff_idle_analysis(days, company),
         insights_sql.idle_warehouse_analysis(days, company),
-        page=_PAGE, key=f"idle_{company}_{days}",
+        page=_PAGE, key=f"idle_{company}_{days}", days=days,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if guard(idle_res, "No warehouse metering in this window."):
@@ -141,26 +161,44 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                          for n, s in zip(_wd["name"], _wd["auto_suspend"], strict=False)}
                 _idle_df = _idle_df.copy()
                 _idle_df["AUTO_SUSPEND"] = _idle_df["WAREHOUSE_NAME"].astype(str).map(_susp)
-        advisor = idle_advisor(_idle_df, rate, days)
+        # C1: the mart serves up to 365d but the live fallback clamps to 90d —
+        # divide by what was served, or the x30 projection reads ~4x low.
+        idle_days = served_days(idle_res, days)
+        advisor = idle_advisor(_idle_df, rate, idle_days)
         flagged = advisor[advisor["FLAGGED"]]
         total_idle = float(advisor["IDLE_USD"].sum())
         kpi_row([
-            {"label": f"Idle spend ({days}d)", "value": format_usd(total_idle),
+            {"label": f"Idle spend ({idle_days}d)", "value": format_usd(total_idle),
              "help": "Credits billed while no query ran on the warehouse."},
-            {"label": "Projected monthly idle", "value": format_usd(float(advisor["PROJECTED_MONTHLY_IDLE_USD"].sum()))},
+            {"label": "Projected monthly idle",
+             "value": format_usd(float(advisor["PROJECTED_MONTHLY_IDLE_USD"].sum())),
+             "help": "All idle, monthly-ized — the gross number, not the recoverable one."},
+            {"label": "Recoverable monthly",
+             "value": format_usd(float(advisor["RECOVERABLE_MONTHLY_USD"].sum())),
+             "help": f"Idle minus the unavoidable ~{IDLE_TARGET_SUSPEND_SEC}s resume/suspend tail per "
+                     "active metered hour (Snowflake bills a 60s minimum per resume). This is what "
+                     "the savings ledger books."},
             {"label": "Warehouses flagged", "value": f"{len(flagged)}",
              "help": ">=20% idle share and >=1 idle credit."},
         ])
         styled_table(
             advisor[["WAREHOUSE_NAME", "COMPANY", "TOTAL_CREDITS", "IDLE_CREDITS",
-                      "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD", "FLAGGED", "RECOMMENDATION"]],
+                      "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD",
+                      "RECOVERABLE_MONTHLY_USD", "FLAGGED", "RECOMMENDATION"]],
             column_config={
                 "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
                 "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
                 "PROJECTED_MONTHLY_IDLE_USD": st.column_config.NumberColumn("Proj. monthly $", format="$%.0f"),
+                "RECOVERABLE_MONTHLY_USD": st.column_config.NumberColumn("Recoverable $/mo", format="$%.0f"),
             },
         )
         result_caption(idle_res, note="Hour-slice granularity; short auto-suspends already reduce this.")
+        st.caption(
+            f"Recoverable $ = idle minus one ~{IDLE_TARGET_SUSPEND_SEC}s suspend/resume tail per active "
+            "metered hour: Snowflake bills a 60-second minimum every time a warehouse wakes, so no "
+            "auto-suspend setting reclaims 100% of idle. Booking the gross number would promise a "
+            "saving the change cannot deliver."
+        )
         if not flagged.empty:
             with st.expander("Generated remediation + savings-ledger entries"):
                 statements = []
@@ -173,17 +211,21 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         continue
                     _target = int(min(_cur, IDLE_TARGET_SUSPEND_SEC)) if _cur > 0 else IDLE_TARGET_SUSPEND_SEC
                     statements.append(idle_suspend_sql(r["WAREHOUSE_NAME"], _target))
+                    # B3: book the RECOVERABLE figure, and say in the DESCRIPTION
+                    # what was deducted — the ledger is the number people quote.
                     statements.append(
                         f"INSERT INTO {core_object('SAVINGS_LEDGER')} (DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL)\n"
-                        f"VALUES ({sql_literal('Auto-suspend tune: ' + str(r['WAREHOUSE_NAME']))}, 'ESTIMATED', "
-                        f"{sql_number(r['PROJECTED_MONTHLY_IDLE_USD'])}, "
+                        f"VALUES ({sql_literal('Auto-suspend tune: ' + str(r['WAREHOUSE_NAME']) + ' (idle net of ~' + str(IDLE_TARGET_SUSPEND_SEC) + 's resume tail per active hour)')}, 'ESTIMATED', "
+                        f"{sql_number(r['RECOVERABLE_MONTHLY_USD'])}, "
                         f"{sql_literal('Re-run idle analysis for ' + str(r['WAREHOUSE_NAME']) + ' after the change; verify idle $ drop.')});"
                     )
                 st.code("\n".join(statements), language="sql")
-                st.caption("Review and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS. Warehouse changes are never executed from the app.")
+                st.caption("Review and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS. Warehouse changes are "
+                           "never executed from the app. Booked amounts are the recoverable idle "
+                           "(resume tail deducted), not the gross idle.")
         ai_evaluation_panel(
             key=f"idle_{company}_{days}",
-            prompt=idle_warehouse_prompt(advisor, company, days),
+            prompt=idle_warehouse_prompt(advisor, company, idle_days),
             settings=settings,
             page=_PAGE,
             subject="evaluate idle warehouse spend",
@@ -207,30 +249,44 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     elif guard((prof_res := run_mart_first(
                     mart27_sql.eff_sizing_profile(days, company),
                     insights_sql.warehouse_sizing_profile(days, company),
-                    page=_PAGE, key=f"sizing_{company}_{days}",
+                    page=_PAGE, key=f"sizing_{company}_{days}", days=days,
                     mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                     live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                "No warehouse activity to profile in this window."):
-        sized = size_recommendations(prof_res.df, rate, days)
+        # C1: same divisor rule — every per-day rate and the x30 monthly figure
+        # inside size_recommendations divides by the window actually served.
+        sizing_days = served_days(prof_res, days)
+        sized = size_recommendations(prof_res.df, rate, sizing_days)
         summary = sizing_summary(sized)
+        _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
+                    "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
+                    "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
+        if "PROVISION_MIN_PER_DAY" in sized.columns:
+            _sz_cols.insert(_sz_cols.index("SPILL_GB_PER_DAY"), "PROVISION_MIN_PER_DAY")
         kpi_row([
             {"label": "Size up / add cluster", "value": f"{summary['up']}",
              "delta_color": "inverse" if summary["up"] else "off",
-             "help": "Sustained queueing or remote spill in the window."},
-            {"label": "Size-down candidates", "value": f"{summary['down']}"},
+             "help": "Sustained overload queueing or remote spill, both PER DAY. Provisioning "
+                     "(resume) time is excluded — that is a suspend-timer signal, not concurrency."},
             {"label": "Tune auto-suspend first", "value": f"{summary['suspend']}"},
+            {"label": "Idle spend on those", "value": format_usd(summary["idle_saving_usd"]),
+             "help": "Measured idle share of today's bill on the auto-suspend rows — reversible, "
+                     "unlike the size-down bet."},
+            {"label": "Size-down candidates", "value": f"{summary['down']}"},
             {"label": "Potential saving (down)", "value": format_usd(summary["potential_saving_usd"]),
-             "help": "Half-rate scenario on down candidates only. Model, not a promise."},
+             "help": "Speculative: the mechanical half-rate scenario on down candidates only. "
+                     "Model, not a promise — the idle number to its left is measured."},
         ])
         sel_sz = selectable_table(
-            sized[["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
-                    "MONTHLY_USD_NOW", "SCENARIO_DOWN_USD", "SCENARIO_UP_USD",
-                    "QUEUED_MIN_PER_DAY", "SPILL_REMOTE_GB", "P95_ELAPSED_SEC", "IDLE_PCT"]],
+            sized[_sz_cols],
             key="sizing_sel",
             column_config={
                 "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
+                "IDLE_MONTHLY_USD": st.column_config.NumberColumn("of which idle $/mo", format="$%.0f"),
                 "SCENARIO_DOWN_USD": st.column_config.NumberColumn("x0.5 $/mo", format="$%.0f"),
                 "SCENARIO_UP_USD": st.column_config.NumberColumn("x2 $/mo", format="$%.0f"),
+                "SPILL_GB_PER_DAY": st.column_config.NumberColumn("Spill GB/day", format="%.2f"),
+                "PROVISION_MIN_PER_DAY": st.column_config.NumberColumn("Provision min/day", format="%.1f"),
                 "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
             },
         )
@@ -274,7 +330,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
                         f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
                 notify(ok, msg)
-        _whatif_panel(sized, days, rate)
+        _whatif_panel(sized, sizing_days, rate)
         result_caption(prof_res)
 
     st.divider()
@@ -329,6 +385,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                    key=f"exppat_{company}_{days}", tier="historical",
                    source="QUERY_HISTORY x METERING (hour-share, by QUERY_PARAMETERIZED_HASH)")
         if guard(pats, "No fingerprint with 5+ runs carrying allocated credits in this window."):
+            # E2: expensive_patterns_usd is a plain live builder, so the window it
+            # scanned is the CLAMPED one — the labels must say what was measured.
+            pat_days = bounded_days(days)
             pdf_c = pats.df.copy()
             pdf_c["USD_TOTAL"] = pdf_c["ALLOCATED_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
             pdf_c["USD_PER_DAY"] = pdf_c["CREDITS_PER_DAY"].map(lambda c: round(safe_float(c) * rate, 2))
@@ -337,7 +396,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                        "QUERY_SNIPPET", "PATTERN_HASH"]],
                 column_config={
                     "USD_PER_DAY": st.column_config.NumberColumn("$/day", format="$%.2f"),
-                    "USD_TOTAL": st.column_config.NumberColumn(f"$ ({days}d)", format="$%.2f"),
+                    "USD_TOTAL": st.column_config.NumberColumn(f"$ ({pat_days}d)", format="$%.2f"),
                 },
             )
             result_caption(pats, note="candidates for result-cache reuse, materialization, or a schedule")
@@ -352,7 +411,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                           int(prow["RUNS"]), rate, int(delta_pr))
             kpi_row([
                 {"label": "Observed $/run", "value": f"${bounds['per_run_now_usd']:.4f}",
-                 "help": f"{int(prow['RUNS'])} runs in {days}d, hour-share allocated."},
+                 "help": f"{int(prow['RUNS'])} runs in {pat_days}d, hour-share allocated."},
                 {"label": f"At {'+' if delta_pr > 0 else ''}{delta_pr} size step",
                  "value": f"${bounds['per_run_low_usd']:.4f} – ${bounds['per_run_high_usd']:.4f}",
                  "help": "Bounds: rate-scaled (same wall time) vs cost-neutral "
@@ -378,29 +437,54 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     days, company,
                     database=st.session_state.get("flt_database", ""),
                     schema_contains=st.session_state.get("flt_schema_contains", "")),
-                page=_PAGE, key=f"repeatq_{company}_{days}",
+                page=_PAGE, key=f"repeatq_{company}_{days}", days=days,
                 mart_source="MART_QUERY_FAMILY_DAILY (mart — wall-clock elapsed, day-level LAST_RUN)",
                 live_source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live fallback)")
         if guard(rq_res, "No query fingerprints with 10+ successful runs in this window.",
                  setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
-            candidates = flag_repeat_candidates(rq_res.df)
+            # C1/D3: window-relative gate — the same fingerprint must not become
+            # a "candidate" merely because the picker moved from 7d to 365d.
+            rq_days = served_days(rq_res, days)
+            candidates = flag_repeat_candidates(rq_res.df, rq_days)
             hot = candidates[candidates["CANDIDATE"]]
             kpi_row([
                 {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
                 {"label": "Materialization candidates", "value": f"{len(hot)}",
-                 "help": ">=0.5h total compute and <=25% cache hit."},
+                 "help": ">=0.5h of compute per 30 days (scaled to this window) and <=25% cache hit."},
                 {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
             ])
-            styled_table(
-                candidates[["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
-                             "TOTAL_TB_SCANNED", "AVG_CACHE_PCT", "CANDIDATE", "QUERY_PREVIEW"]],
-                column_config={
-                    "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
-                    "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
-                    "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
-                },
-            )
+            # C3: WHY and LAST_RUN were computed on every path and rendered on
+            # none — the engine's own recommendation, and the "is this pattern
+            # still running?" column, were dead code. Both belong in the table.
+            _rq_df = candidates.copy()
+            _rq_cols = ["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
+                        "TOTAL_TB_SCANNED", "AVG_CACHE_PCT"]
+            _rq_cfg = {
+                "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
+                "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
+                "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
+            }
+            _rq_priced = "EST_CREDITS" in _rq_df.columns
+            if _rq_priced:
+                # D3: rank and label by money. Size-weighted execution time is an
+                # ESTIMATE; the family mart has no size grain and shows no $.
+                _rq_df["EST_USD"] = _rq_df["EST_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
+                _rq_cols.insert(0, "EST_USD")
+                _rq_cfg["EST_USD"] = st.column_config.NumberColumn("Est. $", format="$%.2f")
+            if "LAST_RUN" in _rq_df.columns:
+                _rq_cols.append("LAST_RUN")
+            _rq_cols += ["CANDIDATE", "WHY", "QUERY_PREVIEW"]
+            styled_table(_rq_df[_rq_cols], column_config=_rq_cfg)
             result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
+            st.caption(
+                "Ranked by estimated credits x cache-miss share, not wall-clock hours: an X-Small "
+                "hour and a 4X-Large hour differ 128x in money, and an already-cached family has "
+                "nothing left to reclaim. Est. $ is execution time x the size's credit rate — an "
+                "estimate, not the hour-share allocation the panels above use."
+                if _rq_priced else
+                "Served from the query-family mart, which carries no warehouse-size grain — the "
+                "ordering here is by compute hours; the live scan adds the credit-weighted ranking."
+            )
 
     st.divider()
     # ---- Object cost ledger ----------------------------------------------------
@@ -447,25 +531,45 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  source="DATABASE_STORAGE_USAGE_HISTORY")
     if guard(sg_res, "No storage history for this scope."):
         movers = storage_movers(sg_res.df, safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0))
-        growing = movers[movers["GROWTH_TB"] > 0]
+        # D4: the chart's top-10 cut is by projected DOLLARS — the database adding
+        # the most TB is not necessarily the one adding the most money, and this
+        # panel's own axis is $/mo.
+        growing = movers[movers["GROWTH_USD_30D"] > 0].sort_values("GROWTH_USD_30D", ascending=False)
+        _shrinking = int((movers["GROWTH_USD_30D"] < 0).sum())
         kpi_row([
             {"label": "Current storage", "value": f"{float(movers['CURRENT_TB'].sum()):,.2f} TB"},
             {"label": f"Growth ({days_storage}d)", "value": f"{float(movers['GROWTH_TB'].sum()):,.2f} TB"},
-            {"label": "Projected growth $/mo", "value": format_usd(float(growing['GROWTH_USD_30D'].sum())),
-             "help": "Growth rate extended 30 days x storage rate. Display estimate."},
+            # E6: gainers-only, and it always was — the label now says so instead
+            # of reading like the account's net storage trend.
+            {"label": "Projected growth $/mo (gainers)",
+             "value": format_usd(float(growing["GROWTH_USD_30D"].sum())),
+             "help": f"Growing databases only; the {_shrinking} shrinking one(s) are excluded, so "
+                     "this is not a net trend. Slope extended 30 days x storage rate. Estimate."},
         ])
         charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D", title="Projected growth $/mo")
+        _mv_cols = ["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
+                    "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
+        if "LOW_CONFIDENCE" in movers.columns:
+            _mv_cols.append("LOW_CONFIDENCE")
         st.dataframe(
-            movers[["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
-                     "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]],
+            movers[_mv_cols],
             hide_index=True, use_container_width=True,
             column_config={
                 "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
                 "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
+                "LOW_CONFIDENCE": st.column_config.CheckboxColumn("Low confidence"),
             },
         )
         result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
                                      if days < days_storage else f"{days_storage}d window."))
+        _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
+        st.caption(
+            "The projection is a least-squares slope over every observed day, not first-vs-last "
+            "bytes — one reload on an endpoint day used to become the whole trend."
+            + (f" {_low} database(s) have fewer than 7 observed days and are flagged low "
+               "confidence: treat their $/mo as a placeholder, not a forecast." if _low else "")
+            + " Failsafe % is the failsafe share of TOTAL billed bytes (database + failsafe)."
+        )
 
     st.divider()
     st.markdown("**Query efficiency (pruning + result cache)**")
@@ -532,11 +636,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 })
             kpi_row(kpis_w)
             sel_w = selectable_table(sdf, key="waste_sel", height=300)
+            # D4: "or dropping" is only defensible when read evidence exists. On
+            # the degraded (DML-only) path a table can be read constantly and
+            # still look stale — recommending a DROP there is dangerous advice.
             st.caption("Stale + heavy retention = candidates for DATA_RETENTION_TIME_IN_DAYS "
-                       "reduction, transient conversion, or dropping."
-                       + ("" if reads_available else
-                          " Read evidence unavailable (ACCESS_HISTORY needs Enterprise edition) — "
-                          "showing DML-only staleness."))
+                       + ("reduction, transient conversion, or dropping."
+                          if reads_available else
+                          "reduction or transient conversion. Read evidence is unavailable "
+                          "(ACCESS_HISTORY needs Enterprise edition), so STALE here means no DML "
+                          "only — a table nobody writes may still be read every day. These are "
+                          "not drop candidates."))
             result_caption(waste)
             if sel_w is not None:
                 _trow = sdf.iloc[int(sel_w)]
@@ -584,10 +693,30 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                                    str(wrow["SCHEMA_NAME"]),
                                                    str(wrow["TABLE_NAME"]), int(keep_days))
                 st.code(stmt_w, language="sql")
-                est_w = round((safe_float(wrow.get("TIME_TRAVEL_GB")) + safe_float(wrow.get("FAILSAFE_GB")))
-                              / 1024 * safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0), 2)
-                st.caption(f"Frees ~{safe_float(wrow.get('TIME_TRAVEL_GB')) + safe_float(wrow.get('FAILSAFE_GB')):,.0f} GB "
-                           f"of retention (~${est_w:,.2f}/mo, ESTIMATED). Failsafe drains over 7 days.")
+                # B4: only the TIME-TRAVEL bytes the shorter window no longer holds
+                # are freed by this change. Failsafe is excluded outright — it is a
+                # fixed 7-day tail Snowflake keeps whatever DATA_RETENTION_TIME_IN_DAYS
+                # says, so counting it made every quote high. With no known current
+                # retention we claim no ratio rather than falling back to the pile.
+                _tt_gb = safe_float(wrow.get("TIME_TRAVEL_GB"))
+                _fs_gb = safe_float(wrow.get("FAILSAFE_GB"))
+                _cur_ret = safe_float(wrow.get("RETENTION_DAYS"), 0.0)
+                _rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+                if _cur_ret > 0:
+                    _freed_gb = _tt_gb * max(0.0, _cur_ret - int(keep_days)) / _cur_ret
+                    _basis = (f"{_cur_ret:,.0f}d -> {int(keep_days)}d retention releases about "
+                              f"{_freed_gb:,.0f} of {_tt_gb:,.0f} GB of Time Travel")
+                else:
+                    _freed_gb = 0.0
+                    _basis = ("current DATA_RETENTION_TIME_IN_DAYS is unknown for this table, so no "
+                              "freed-bytes estimate is claimed")
+                est_w = round(_freed_gb / 1024 * _rate_tb, 2)
+                st.caption(
+                    f"{_basis} (~${est_w:,.2f}/mo, ESTIMATED). Time-Travel bytes also age out on "
+                    f"their own as the existing window rolls forward. The {_fs_gb:,.0f} GB of "
+                    "failsafe is NOT included: it drains on a fixed 7-day schedule regardless of "
+                    "this setting."
+                )
                 confirm_w = st.text_input("Type the table name to confirm", key="waste_confirm")
                 if st.button("Execute retention change + log", key="waste_exec",
                              disabled=(confirm_w != str(wrow["TABLE_NAME"]))):
@@ -640,7 +769,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     idle_res = run_mart_first(
         mart27_sql.eff_idle_analysis(days, company),
         insights_sql.idle_warehouse_analysis(days, company),
-        page=_PAGE, key=f"remed_idle_{company}_{days}",
+        page=_PAGE, key=f"remed_idle_{company}_{days}", days=days,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if guard(idle_res, "No warehouse activity in the window to remediate."):
@@ -651,12 +780,24 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             horizontal=True, key="remed_kind")
         row = idf[idf["WAREHOUSE_NAME"].astype(str) == wh_pick]
         idle_credits = float(pd.to_numeric(row["IDLE_CREDITS"], errors="coerce").fillna(0).iloc[0]) if not row.empty else 0.0
-        est_monthly = remediation.monthly_savings_estimate(idle_credits, days, rate)
+        # C1: divide by the window actually served, not the requested one.
+        remed_days = served_days(idle_res, days)
+        # B3: book the SAME recoverable number the advisor shows — idle net of the
+        # resume tail a 60s-minimum billing model makes unavoidable. Reuses
+        # idle_advisor so the two panels can never quote different savings for the
+        # same warehouse; monthly_savings_estimate stays the gross-idle fallback.
+        _rec_all = idle_advisor(idf, rate, remed_days)
+        _rec_row = _rec_all[_rec_all["WAREHOUSE_NAME"].astype(str) == wh_pick]
+        est_monthly = (round(float(_rec_row["RECOVERABLE_MONTHLY_USD"].iloc[0]), 2)
+                       if not _rec_row.empty
+                       else remediation.monthly_savings_estimate(idle_credits, remed_days, rate))
 
         stmt = ""
         if fix_kind.startswith("Tighten"):
             stmt = remediation.auto_suspend_fix(wh_pick, 60)
-            st.caption(f"Idle credits in window: {idle_credits:,.1f} → estimated ${est_monthly:,.0f}/mo if suspend catches them (ESTIMATED until verified).")
+            st.caption(f"Idle credits in window ({remed_days}d): {idle_credits:,.1f} → recoverable "
+                       f"${est_monthly:,.0f}/mo once the unavoidable ~{IDLE_TARGET_SUSPEND_SEC}s resume tail per "
+                       "active hour is deducted (ESTIMATED until verified).")
         else:
             prof = run(insights_sql.warehouse_hourly_activity(14, company), page=_PAGE,
                        key=f"remed_prof_{company}", tier="recent",
@@ -678,6 +819,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         f"if a job fires early."
                     )
                     stmt = remediation.suspend_schedule(wh_pick, proposal["start"], proposal["end"])
+                    # B1: avg_credits_per_day is now per CALENDAR day of the profile
+                    # window (insights_sql.warehouse_hourly_activity divides by the
+                    # window, not by the days that particular hour happened to
+                    # meter). It used to be a per-METERED-day figure monetized x30
+                    # calendar days — a ~3.5x overstatement on any warehouse that
+                    # burns in that hour only some nights. x5/7 because the CRON
+                    # suspends on weekdays only.
                     est_monthly = round(proposal["avg_credits_per_day"] * 30 * rate * 5 / 7, 2)
 
         if stmt:

@@ -74,7 +74,13 @@ def test_failed_login_reasons_capped_to_30d():
 def test_bug4_health_read_distinguishes_error_from_empty():
     m = _src("app/main.py")
     assert "def _health_values() -> dict[str, tuple[str, str]] | None:" in m
-    assert "if not res.ok:\n        return None" in m
+    # P1 moved the read behind a 120s st.cache_data wrapper. The error/empty
+    # distinction is unchanged, it is just carried by an exception now — which
+    # is also what keeps a FAILED read from being pinned for the whole TTL
+    # (Streamlit does not cache exceptions).
+    assert "raise _HealthUnavailable(" in m
+    assert "except _HealthUnavailable:\n        return None" in m
+    assert "if res.empty:\n        return {}" in m
     assert 'if vals is None:   # r6-bug4' in m           # callers render "unavailable"
 
 

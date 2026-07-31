@@ -1,12 +1,25 @@
 """Tests for the ported AI/Cortex user-attribution feature."""
 
 import re
+from datetime import timedelta
 
 import pandas as pd
 import pytest
 
-from app.data import cortex_sql
-from app.logic.cortex import classify_exceptions, enrich_user_rollup, rollup_summary
+from app.data import cortex_sql, mart27_sql
+from app.logic.cortex import (
+    CPR_MIN_PROJECTED_USD,
+    CPR_MIN_REQUESTS,
+    aggregate_budget_row,
+    classify_exceptions,
+    daily_from_user_daily,
+    effective_window_days,
+    enrich_user_rollup,
+    rollup_from_user_daily,
+    rollup_summary,
+    with_aggregate_budget_row,
+)
+from app.logic.formulas import account_today
 
 # ---- SQL builders ---------------------------------------------------------
 
@@ -144,3 +157,173 @@ def test_empty_inputs_are_safe():
     assert enrich_user_rollup(pd.DataFrame(), 2.2, 7).empty
     assert classify_exceptions(pd.DataFrame(), 100, 2.2).empty
     assert rollup_summary(pd.DataFrame(), 7)["active_users"] == 0
+    assert rollup_from_user_daily(pd.DataFrame(), 7).empty
+    assert daily_from_user_daily(pd.DataFrame(), 7).empty
+    assert aggregate_budget_row({}, 100.0) is None
+    assert with_aggregate_budget_row(pd.DataFrame(), {}, 100.0).empty
+
+
+# ---- P2: the fact readers must match the live builders' contracts ----------
+
+def _select_columns(sql: str) -> list[str]:
+    """Output column names of the FINAL SELECT (alias if present)."""
+    body = sql.rsplit("\nSELECT\n", 1)[1].split("\nFROM ", 1)[0]
+    out = []
+    for raw in body.split(",\n"):
+        token = raw.strip().rstrip(",")
+        if " AS " in token.upper():
+            token = re.split(r"\s+AS\s+", token, flags=re.IGNORECASE)[-1]
+        out.append(token.strip().split(".")[-1])
+    return out
+
+
+def test_ai_code_rollup_matches_the_live_rollup_contract():
+    # The live builder is SELECT * over by_user; its column order is the CTE's.
+    live = cortex_sql.cortex_code_user_rollup(30, "ALL")
+    live_cols = _select_columns(live.split("by_user AS (", 1)[1])
+    mart_cols = _select_columns(mart27_sql.ai_code_user_rollup(30, "ALL"))
+    assert mart_cols == live_cols
+
+
+def test_ai_code_daily_matches_the_live_daily_contract():
+    live_cols = _select_columns(cortex_sql.cortex_code_daily(30, "ALL"))
+    mart_cols = _select_columns(mart27_sql.ai_code_daily(30, "ALL"))
+    assert mart_cols == live_cols
+
+
+def test_fact_readers_exclude_the_functions_arm():
+    # The live builders read ONLY the Snowsight/CLI code views; the fact also
+    # carries the account-wide Functions arm (USER_NAME 'ACCOUNT').
+    for sql in (mart27_sql.ai_code_user_rollup(30, "ALL"),
+                mart27_sql.ai_code_daily(30, "ALL")):
+        assert "SOURCE <> 'Functions'" in sql
+
+
+def test_fact_readers_are_coverage_gated():
+    # A young fact must emit ZERO rows for a window it cannot cover, so the
+    # panel falls back to live instead of silently UNDER-REPORTING spend.
+    for sql in (mart27_sql.ai_code_user_rollup(180, "ALL"),
+                mart27_sql.ai_code_daily(180, "ALL")):
+        assert "MIN(DAY) AS FIRST_DAY" in sql
+        assert "(SELECT FIRST_DAY FROM cov) <= DATEADD('day', -180 + 1, CURRENT_DATE())" in sql
+
+
+def test_fact_rollup_scopes_company_after_grouping():
+    sql = mart27_sql.ai_code_user_rollup(30, "Trexis")
+    assert sql.count("COMPANY_FOR_USER") == 1
+    # ...and after the GROUP BY, not inside the scanned CTE.
+    assert sql.index("GROUP BY USER_NAME, SOURCE") < sql.index("COMPANY_FOR_USER")
+    assert "COMPANY_FOR_USER" not in mart27_sql.ai_code_user_rollup(30, "ALL")
+
+
+def test_fact_rollup_cannot_fan_out_on_recreated_logins():
+    # A login dropped and recreated has several ACCOUNT_USAGE.USERS rows; a raw
+    # join would DOUBLE that user's credits. The name join is pre-collapsed.
+    sql = mart27_sql.ai_code_user_rollup(30, "ALL")
+    assert "named AS (" in sql and "GROUP BY NAME" in sql
+
+
+# ---- P9: one 365d live fetch, both aggregates derived in pandas ------------
+
+def test_live_derive_fetch_is_days_independent_and_long_window():
+    sql = cortex_sql.cortex_code_user_daily("ALFA")
+    assert "-365," in sql.replace(" ", "")
+    assert cortex_sql.cortex_code_user_daily("ALFA") == sql        # no days knob at all
+    # company scope is applied ONCE post-aggregation, not per raw usage row
+    assert sql.count("COMPANY_FOR_USER") == 1
+    assert sql.index("GROUP BY 1, 2, 3, 4, 5, 6") < sql.index("COMPANY_FOR_USER")
+
+
+def _user_daily(days_back=(0, 1, 2), user="KEBARR1", source="CLI", credits=1.0):
+    today = account_today()
+    return pd.DataFrame([
+        {"USER_NAME": user, "EMAIL": "k@x.com", "FIRST_NAME": "Kevin", "LAST_NAME": "Barr",
+         "SOURCE": source, "USAGE_DATE": today - timedelta(days=d),
+         "REQUESTS": 10, "CREDITS": credits, "TOKENS": 100,
+         "FIRST_TS": pd.Timestamp(today - timedelta(days=d)),
+         "LAST_TS": pd.Timestamp(today - timedelta(days=d))}
+        for d in days_back
+    ])
+
+
+def test_derived_rollup_matches_the_sql_contract_columns():
+    live_cols = _select_columns(
+        cortex_sql.cortex_code_user_rollup(30, "ALL").split("by_user AS (", 1)[1])
+    out = rollup_from_user_daily(_user_daily(), 30)
+    assert list(out.columns) == live_cols
+    row = out.iloc[0]
+    assert row["ACTIVE_DAYS"] == 3 and row["TOTAL_REQUESTS"] == 30
+    assert row["CREDITS_PER_REQUEST"] == pytest.approx(0.1)
+    assert row["AVG_DAILY_CREDITS"] == pytest.approx(1.0)
+
+
+def test_derived_daily_matches_the_sql_contract_columns():
+    live_cols = _select_columns(cortex_sql.cortex_code_daily(30, "ALL"))
+    out = daily_from_user_daily(_user_daily(), 30)
+    assert list(out.columns) == live_cols
+    assert len(out) == 3 and out["ACTIVE_USERS"].max() == 1
+
+
+def test_window_slice_drops_days_outside_the_asked_window():
+    frame = pd.concat([_user_daily((0, 1)), _user_daily((200,))], ignore_index=True)
+    assert rollup_from_user_daily(frame, 7).iloc[0]["ACTIVE_DAYS"] == 2
+    assert rollup_from_user_daily(frame, 365).iloc[0]["ACTIVE_DAYS"] == 3
+
+
+# ---- C7: classifier corrections -------------------------------------------
+
+def test_projection_divisor_clamps_to_days_since_first_usage():
+    # 3 observed days inside a 365d ask: dividing by 365 would report ~1/120th
+    # of the real burn and the budget ladder would never fire.
+    rollup = rollup_from_user_daily(_user_daily(), 365)
+    assert effective_window_days(rollup, 365) == 3
+    assert effective_window_days(rollup, 2) == 2          # never widens the ask
+    enriched = enrich_user_rollup(rollup, 2.20, 365)
+    assert enriched.iloc[0]["PROJECTED_30D_CREDITS"] == pytest.approx(30.0)  # 3cr/3d * 30
+    # the KPI row must use the same divisor as the per-user rows
+    assert rollup_summary(enriched, 365)["window_days"] == 3
+
+
+def test_cpr_spike_needs_a_real_sample_and_real_money():
+    # One request at 0.5 cr/request is $1.10 a month — not an exception.
+    tiny = enrich_user_rollup(_rollup(TOTAL_REQUESTS=1, TOTAL_CREDITS=0.5,
+                                      CREDITS_PER_REQUEST=0.5), 2.20, 30)
+    assert classify_exceptions(tiny, 0.0, 2.20).empty
+    # Enough requests but trivial money is still not worth an operator's time.
+    cheap = enrich_user_rollup(_rollup(TOTAL_REQUESTS=CPR_MIN_REQUESTS, TOTAL_CREDITS=2.2,
+                                       CREDITS_PER_REQUEST=0.11), 2.20, 30)
+    assert cheap.iloc[0]["PROJECTED_30D_USD"] < CPR_MIN_PROJECTED_USD
+    assert classify_exceptions(cheap, 0.0, 2.20).empty
+    # Both floors cleared -> the spike is real.
+    real = enrich_user_rollup(_rollup(TOTAL_REQUESTS=200, TOTAL_CREDITS=30.0,
+                                      CREDITS_PER_REQUEST=0.15), 2.20, 30)
+    assert classify_exceptions(real, 0.0, 2.20).iloc[0]["SIGNAL"] == "Cost per request spike"
+
+
+def test_aggregate_budget_breach_is_reported_even_when_no_user_breaches():
+    # Ten users at 20% of budget each = 200% of budget. Every per-user rule
+    # stays silent; the scope total must not.
+    frames = [_rollup(USER_NAME=f"U{i}", TOTAL_CREDITS=18.0) for i in range(10)]
+    enriched = enrich_user_rollup(pd.concat(frames, ignore_index=True), 2.20, 30)
+    budget = 200.0                       # 180 cr projected total vs ~90.9 cr budget
+    per_user = classify_exceptions(enriched, budget, 2.20)
+    assert per_user.empty                # 18cr each is under 25% of 90.9cr
+    summary = rollup_summary(enriched, 30)
+    assert summary["projected_30d_usd"] > budget
+    out = with_aggregate_budget_row(per_user, summary, budget)
+    assert len(out) == 1
+    assert out.iloc[0]["SEVERITY"] == "Critical"
+    assert out.iloc[0]["USER_NAME"] == "(all users)"
+    # the columns the panel table and the Action Queue insert both read
+    for col in ("SIGNAL", "SOURCE", "TOTAL_REQUESTS", "CREDITS_PER_REQUEST", "PROJECTED_30D_USD"):
+        assert col in out.columns
+
+
+def test_aggregate_row_leads_and_never_fires_without_a_budget():
+    enriched = enrich_user_rollup(_rollup(TOTAL_CREDITS=300.0), 2.20, 30)
+    summary = rollup_summary(enriched, 30)
+    per_user = classify_exceptions(enriched, 440.0, 2.20)
+    out = with_aggregate_budget_row(per_user, summary, 440.0)
+    assert out.iloc[0]["USER_NAME"] == "(all users)"     # headline first
+    assert len(out) == len(per_user) + 1
+    assert with_aggregate_budget_row(per_user, summary, 0.0).equals(per_user)

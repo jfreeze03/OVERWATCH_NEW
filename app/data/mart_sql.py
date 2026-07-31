@@ -114,6 +114,47 @@ LIMIT 30
 """
 
 
+def app_statement_stats_telemetry(days: int = 7) -> str:
+    """P11: the app's own slowest statement families, from the app's OWN
+    telemetry instead of a QUERY_HISTORY scan.
+
+    app_statement_stats() answers the same question by scanning
+    ACCOUNT_USAGE.QUERY_HISTORY for a week of WH_ALFA_ADMIN traffic — 4.6s, and
+    ironically the Admin > Performance panel's own worst offender. APP_QUERY_TELEMETRY
+    already records every fetch the app decided to keep, keyed by PAGE + QUERY_KEY,
+    which is a BETTER grain than QUERY_PARAMETERIZED_HASH for "which builder do I
+    optimize": the key names the call site.
+
+    What this cannot give is BYTES_SCANNED — that only exists in QUERY_HISTORY —
+    so the scanning builder stays available behind an explicit toggle for the
+    GB figure. Note the sampling: RUNS is a persisted count (slow/failed always,
+    ~2% of healthy), EST_RUNS re-weights it by 1/SAMPLE_PROB, and MEDIAN_S is
+    therefore exception-weighted — the same caveat the fleet panels carry.
+    """
+    days = bounded_days(days, 90)
+    return f"""
+SELECT
+    PAGE,
+    QUERY_KEY,
+    COUNT(*) AS RUNS,
+    ROUND(SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))) AS EST_RUNS,
+    COUNT_IF(NOT OK) AS FAILS,
+    ROUND(MEDIAN(ELAPSED_MS) / 1000, 2) AS MEDIAN_S,
+    ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
+    ROUND(SUM(ELAPSED_MS / 1000.0 / COALESCE(SAMPLE_PROB, 1.0)), 1) AS EST_WAIT_S,
+    ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
+    MAX(AT) AS NEWEST
+FROM {core_object("APP_QUERY_TELEMETRY")}
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  -- P3: the batch wall-clock rows are a superset of their 'batch:%' members;
+  -- they are not a builder anyone can optimize, and they would double-count wait.
+  AND NOT STARTSWITH(QUERY_KEY, 'batch_wall:')
+GROUP BY PAGE, QUERY_KEY
+ORDER BY EST_WAIT_S DESC NULLS LAST
+LIMIT 30
+"""
+
+
 # Canonical AI/Cortex service-type predicate over FACT_METERING_DAILY.SERVICE_TYPE
 # — the exact one proven in fact_cortex_daily_spend / fact_daily_spend_compute.
 # NULL SERVICE_TYPE evaluates NULL here, so the CASE below routes it to OTHER
@@ -342,6 +383,36 @@ LIMIT 25
 """
 
 
+def cs_by_query_type_mart(days: int, company: str = "ALL") -> str:
+    """K2: cost_sql.cs_by_query_type served from MART_CLOUD_SVC_DAILY.
+
+    Byte-identical output contract to the live builder — QUERY_TYPE, QUERIES,
+    CS_CREDITS, CS_CREDITS_PER_1K, same ORDER BY / LIMIT 12 — so spend.py can
+    put the two behind run_mart_first without touching the render.
+
+    Two honest differences from the live path, both in the mart's favour:
+    the mart is loaded from the QH extract at CS>0 only (matching the live
+    ``CREDITS_USED_CLOUD_SERVICES > 0`` filter) and its COMPANY column comes
+    from COMPANY_FOR_WAREHOUSE at load time rather than the app's warehouse
+    name-pattern clause — the loader's mapping is the authoritative one. The
+    mart also reaches MAX_MART_WINDOW_DAYS where the live scan clamps at 90,
+    which is exactly why callers must read the served window via
+    components.served_days() instead of assuming the requested one.
+    """
+    return f"""
+SELECT
+    QUERY_TYPE,
+    SUM(RUNS) AS QUERIES,
+    ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
+    ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K
+FROM {mart_object("MART_CLOUD_SVC_DAILY")}
+WHERE {_cloud_svc_where(days, company, "")}
+GROUP BY QUERY_TYPE
+ORDER BY CS_CREDITS DESC
+LIMIT 12
+"""
+
+
 def open_alert_events(limit: int = 200, company: str = "ALL") -> str:
     """Open/ack events, most severe first, honoring the company filter.
 
@@ -544,69 +615,98 @@ def health_strip() -> str:
     _lim = ("IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', "
             f"{THRESHOLDS['stale_daily_fact_hours']}, {THRESHOLDS['stale_fact_hours']})")
     _urgency = f"IFF(LAST_LOAD_TS IS NULL, 1e9, {_age} / {_lim})"
+    _not_ai = ("COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%' "
+               "AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%' "
+               "AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'")
+    # P1 (perf): this statement runs on the SHELL of every page, so it was the
+    # app's most-repeated read — and it used to be nine UNION ALL arms that
+    # re-scanned ALERT_EVENTS twice, SOURCE_FRESHNESS_STATE three times and
+    # FACT_METERING_DAILY three times (2.4s per shell render). Now: ONE scan per
+    # source table, conditional aggregation inside it, the three single-row CTEs
+    # cross-joined into one row, and that row unpivoted into the metric rows by
+    # FLATTEN. The FLATTEN is deliberate — Snowflake does not guarantee CTE
+    # materialization, so eight `... FROM strip` UNION arms could quietly
+    # re-execute each CTE and undo the whole fix; one row fanned out cannot.
+    #
+    # The OUTPUT CONTRACT IS UNCHANGED and must stay that way: main.py parses
+    # these rows BY METRIC NAME (see _health_values), so every METRIC/VALUE/STATE
+    # expression below is the byte-equivalent of the arm it replaces.
+    # OBJECT_CONSTRUCT drops NULL values, which would silently delete a metric —
+    # every VALUE expression is COALESCEd to a non-NULL scalar for that reason.
     return f"""
-SELECT 'OPEN_CRITICAL' AS METRIC, TO_VARCHAR(COUNT(*)) AS VALUE,
-       IFF(COUNT(*) > 0, 'BAD', 'OK') AS STATE
-FROM {core_object("ALERT_EVENTS")}
-WHERE STATUS = 'OPEN' AND SEVERITY = 'CRITICAL'
-UNION ALL
--- N2: OPEN criticals that are 30+ min old and have NO delivery row — a page that
--- reached nobody. Buried in Alerts -> delivery SLO before; now always-on so the
--- morning surfaces cannot show green while a critical silently failed to route.
--- Tiny scan (open criticals only), same predicate as delivery_slo_summary's
--- UNDELIVERED_CRITICALS_30M.
-SELECT 'UNDELIVERED_CRITICAL', TO_VARCHAR(COUNT(*)),
-       IFF(COUNT(*) > 0, 'BAD', 'OK')
-FROM {core_object("ALERT_EVENTS")} e
-WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
-  AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
-  AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
-                  WHERE d.EVENT_ID = e.EVENT_ID)
-UNION ALL
--- STALEST: the single worst source by cadence-ratio (never-loaded ranks above
--- everything). VALUE is that source's age in hours (-1 when it has never loaded,
--- so 'BAD' + -1 reads as "the worst source has no data"); NAME (below) says which.
-SELECT 'STALEST_SOURCE_H',
-       TO_VARCHAR(COALESCE(ROUND(MAX_BY(f.AGE_H, f.URGENCY), 1), -1)),
-       CASE WHEN COUNT(*) = 0 THEN 'MUTED'
-            WHEN MAX(f.URGENCY) > 1 THEN 'BAD'
-            WHEN MAX(f.URGENCY) > 0.75 THEN 'WARN'
-            ELSE 'OK' END
-FROM (SELECT SOURCE_NAME, {_age} AS AGE_H, {_urgency} AS URGENCY
-      FROM {core_object("SOURCE_FRESHNESS_STATE")}) f
-UNION ALL
-SELECT 'STALEST_SOURCE_NAME',
-       COALESCE(MAX_BY(f.SOURCE_NAME, f.URGENCY), 'none'), 'INFO'
-FROM (SELECT SOURCE_NAME, {_urgency} AS URGENCY
-      FROM {core_object("SOURCE_FRESHNESS_STATE")}) f
-UNION ALL
-SELECT 'MTD_CREDITS', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
-FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
-UNION ALL
--- C1: MTD credits split AI vs compute so the Brief prices AI credits at the AI
--- rate (blended_billed_usd), not the flat compute rate. The two partitions sum
--- to MTD_CREDITS; NULL SERVICE_TYPE falls to the OTHER/compute arm.
-SELECT 'MTD_CREDITS_AI', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
-FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE()) AND {_AI_SERVICE_PRED}
-UNION ALL
-SELECT 'MTD_CREDITS_OTHER', TO_VARCHAR(ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0)), 'INFO'
-FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%'
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%'
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'
-UNION ALL
--- Triage #3: stale-source COUNT for the live platform score (the strip's MAX-age
--- arm can't say how many are stale). Same cadence rule as the Control Room
--- freshness board: DAILY/METERING sources stale past {THRESHOLDS["stale_daily_fact_hours"]}h, hourly past
--- {THRESHOLDS["stale_fact_hours"]}h. C3: a never-loaded source (NULL LAST_LOAD_TS) counts as stale —
--- it is a source with NO data at all, which is worse than late, not better.
-SELECT 'STALE_SOURCES',
-       TO_VARCHAR(COUNT_IF(LAST_LOAD_TS IS NULL OR {_age} > {_lim})),
-       'INFO'
-FROM {core_object("SOURCE_FRESHNESS_STATE")}
+WITH crit AS (
+    -- One pass over the OPEN criticals. The delivery check is a LEFT JOIN to
+    -- DISTINCT EVENT_IDs rather than a correlated NOT EXISTS: the anti-join
+    -- cannot be expressed inside COUNT_IF, and DISTINCT keeps the join from
+    -- multiplying rows and inflating OPEN_CRITICAL_N.
+    SELECT
+        COUNT_IF(e.SEVERITY = 'CRITICAL') AS OPEN_CRITICAL_N,
+        -- N2: OPEN criticals 30+ min old with NO delivery row — a page that
+        -- reached nobody. Same predicate as delivery_slo_summary's
+        -- UNDELIVERED_CRITICALS_30M, always-on so the morning surfaces cannot
+        -- show green while a critical silently failed to route.
+        COUNT_IF(e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+                 AND d.EVENT_ID IS NULL) AS UNDELIVERED_N
+    FROM {core_object("ALERT_EVENTS")} e
+    LEFT JOIN (SELECT DISTINCT EVENT_ID FROM {core_object("ALERT_DELIVERIES")}) d
+           ON d.EVENT_ID = e.EVENT_ID
+    WHERE e.STATUS = 'OPEN' AND UPPER(e.SEVERITY) = 'CRITICAL'
+),
+fresh AS (
+    -- STALEST: the single worst source by cadence-ratio (never-loaded ranks above
+    -- everything). AGE_H is that source's age in hours (-1 when it has never
+    -- loaded, so 'BAD' + -1 reads as "the worst source has no data").
+    -- STALE_N (triage #3) is the COUNT the MAX-age arm cannot express: DAILY/
+    -- METERING sources stale past {THRESHOLDS["stale_daily_fact_hours"]}h, hourly past {THRESHOLDS["stale_fact_hours"]}h. C3: a never-loaded
+    -- source counts as stale — no data at all is worse than late, not better.
+    SELECT
+        COUNT(*)                                              AS SOURCE_N,
+        COALESCE(ROUND(MAX_BY(f.AGE_H, f.URGENCY), 1), -1)    AS WORST_AGE_H,
+        COALESCE(MAX_BY(f.SOURCE_NAME, f.URGENCY), 'none')    AS WORST_NAME,
+        MAX(f.URGENCY)                                        AS MAX_URGENCY,
+        COUNT_IF(f.LAST_LOAD_TS IS NULL OR f.AGE_H > f.LIM)   AS STALE_N
+    FROM (SELECT SOURCE_NAME, LAST_LOAD_TS, {_age} AS AGE_H,
+                 {_lim} AS LIM, {_urgency} AS URGENCY
+          FROM {core_object("SOURCE_FRESHNESS_STATE")}) f
+),
+mtd AS (
+    -- C1: MTD credits split AI vs compute so the Brief prices AI credits at the
+    -- AI rate (blended_billed_usd), not the flat compute rate. The two
+    -- partitions sum to the total; NULL SERVICE_TYPE falls to the OTHER arm
+    -- (IFF on a NULL predicate takes the else branch, exactly as the old
+    -- WHERE-filtered arms did).
+    SELECT
+        ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0) AS MTD_ALL,
+        ROUND(COALESCE(SUM(IFF({_AI_SERVICE_PRED}, CREDITS_BILLED, 0)), 0), 0) AS MTD_AI,
+        ROUND(COALESCE(SUM(IFF({_not_ai}, CREDITS_BILLED, 0)), 0), 0) AS MTD_OTHER
+    FROM {mart_object("FACT_METERING_DAILY")}
+    WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+),
+strip AS (SELECT * FROM crit, fresh, mtd)
+SELECT r.value:"m"::VARCHAR AS METRIC,
+       r.value:"v"::VARCHAR AS VALUE,
+       r.value:"s"::VARCHAR AS STATE
+FROM strip s,
+     LATERAL FLATTEN(input => ARRAY_CONSTRUCT(
+        OBJECT_CONSTRUCT('m', 'OPEN_CRITICAL',
+                         'v', TO_VARCHAR(s.OPEN_CRITICAL_N),
+                         's', IFF(s.OPEN_CRITICAL_N > 0, 'BAD', 'OK')),
+        OBJECT_CONSTRUCT('m', 'UNDELIVERED_CRITICAL',
+                         'v', TO_VARCHAR(s.UNDELIVERED_N),
+                         's', IFF(s.UNDELIVERED_N > 0, 'BAD', 'OK')),
+        OBJECT_CONSTRUCT('m', 'STALEST_SOURCE_H',
+                         'v', TO_VARCHAR(s.WORST_AGE_H),
+                         's', CASE WHEN s.SOURCE_N = 0 THEN 'MUTED'
+                                   WHEN s.MAX_URGENCY > 1 THEN 'BAD'
+                                   WHEN s.MAX_URGENCY > 0.75 THEN 'WARN'
+                                   ELSE 'OK' END),
+        OBJECT_CONSTRUCT('m', 'STALEST_SOURCE_NAME', 'v', s.WORST_NAME, 's', 'INFO'),
+        OBJECT_CONSTRUCT('m', 'MTD_CREDITS', 'v', TO_VARCHAR(s.MTD_ALL), 's', 'INFO'),
+        OBJECT_CONSTRUCT('m', 'MTD_CREDITS_AI', 'v', TO_VARCHAR(s.MTD_AI), 's', 'INFO'),
+        OBJECT_CONSTRUCT('m', 'MTD_CREDITS_OTHER', 'v', TO_VARCHAR(s.MTD_OTHER), 's', 'INFO'),
+        OBJECT_CONSTRUCT('m', 'STALE_SOURCES', 'v', TO_VARCHAR(s.STALE_N), 's', 'INFO')
+     )) r
+ORDER BY r.INDEX
 """
 
 
@@ -874,14 +974,20 @@ FROM f_q, l_q
 """
 
 
-def fleet_query_stats(days: int = 7) -> str:
+def fleet_query_stats(days: int = 7, page: str = "") -> str:
     """Slow/failed fetches across ALL viewers (APP_QUERY_TELEMETRY, V021).
 
     Only rows the app chose to persist land here (>=2s or failed), so this is
     the regression surface, not a complete census — the note on the panel
     says so.
+
+    C6: ``page`` narrows to one page. The unfiltered call is LIMIT 40 by p95,
+    so a page can be ranked a top tuning target and still have every one of its
+    slow keys sitting below that cut — the drill-down needs to ask for the page
+    directly before it can honestly say "nothing slow persisted".
     """
     days = max(1, min(int(days or 7), 90))
+    page_filter = (f"\n  AND PAGE = {sql_literal(str(page))}" if str(page or "").strip() else "")
     return f"""
 SELECT
     PAGE,
@@ -897,7 +1003,7 @@ SELECT
     -- rows and cache hits (no server query ran).
     MAX_BY(QUERY_ID, ELAPSED_MS)               AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
-WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){page_filter}
 GROUP BY PAGE, QUERY_KEY
 ORDER BY P95_MS DESC NULLS LAST
 LIMIT 40
@@ -905,15 +1011,35 @@ LIMIT 40
 
 def rule_metric_kinds(days: int = 90) -> str:
     """Raw material for threshold suggestions: each resolved event's metric
-    value and its resolution kind (V021). The tuning logic aggregates."""
+    value and its resolution kind (V021). The tuning logic aggregates.
+
+    D7: UNTAGGED_N rides along per rule — the count of that rule's resolved
+    events in the SAME window that were closed with no resolution kind. The
+    suggestion is computed only from ACTIONED/NOISE rows, so a rule with 4
+    tagged and 196 untagged closes produces advice that LOOKS as authoritative
+    as one with 200 tagged closes. The column is the denominator that says so;
+    the display side decides how to warn."""
     days = max(7, min(int(days or 90), 365))
     return f"""
-SELECT RULE_ID, METRIC_VALUE, RESOLUTION_KIND
-FROM {core_object("ALERT_EVENTS")}
-WHERE STATUS = 'RESOLVED'
-  AND RESOLUTION_KIND IN ('ACTIONED', 'NOISE')
-  AND METRIC_VALUE IS NOT NULL
-  AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WITH resolved AS (
+    SELECT RULE_ID, METRIC_VALUE, RESOLUTION_KIND
+    FROM {core_object("ALERT_EVENTS")}
+    WHERE STATUS = 'RESOLVED'
+      AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+),
+untagged AS (
+    -- Same "untagged" spelling as alert_fatigue: NULL or empty kind.
+    SELECT RULE_ID, COUNT(*) AS UNTAGGED_N
+    FROM resolved
+    WHERE COALESCE(RESOLUTION_KIND, '') = ''
+    GROUP BY RULE_ID
+)
+SELECT r.RULE_ID, r.METRIC_VALUE, r.RESOLUTION_KIND,
+       COALESCE(u.UNTAGGED_N, 0) AS UNTAGGED_N
+FROM resolved r
+LEFT JOIN untagged u ON u.RULE_ID = r.RULE_ID
+WHERE r.RESOLUTION_KIND IN ('ACTIONED', 'NOISE')
+  AND r.METRIC_VALUE IS NOT NULL
 LIMIT 5000
 """
 
@@ -1280,12 +1406,26 @@ def telemetry_by_page(days: int = 7) -> str:
     census; EST_TRUE_FETCHES re-weights each row by 1/SAMPLE_PROB (rec18, V064) so
     the healthy baseline the sampler undercounts ~50x is restored. P95_S/SLOW_2S
     are tail-complete (all >=2s rows persist at prob 1.0); CACHE_HIT_PCT is over
-    the persisted set. Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe)."""
+    the persisted set. Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe).
+
+    D5: EST_WAIT_S is the RANKING column for tuning targets — the estimated total
+    seconds the fleet actually spent waiting on this page, each row re-weighted by
+    1/SAMPLE_PROB like EST_TRUE_FETCHES. p95 x slow-count could not see the pain
+    that matters most in practice: 40,000 sub-2s fetches at 1.4s never enter
+    SLOW_2S and barely move an exception-weighted p95, yet they are most of the
+    wall-clock a viewer experiences. p95 stays as a column (it is the right lens
+    for "how bad does this get"), just not as the rank."""
     days = bounded_days(days, 90)
     return f"""
 SELECT PAGE,
        COUNT(*) AS FETCHES,
        ROUND(SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))) AS EST_TRUE_FETCHES,
+       -- P3 note: 'batch_wall:%' rows are the whole batch's wall clock, a SUPERSET
+       -- of the per-member 'batch:%' rows written beside them. Summing both would
+       -- count one batch's seconds twice, so the wall rows are excluded here and
+       -- kept only for the eyeball view of end-to-end batch cost.
+       ROUND(SUM(IFF(STARTSWITH(QUERY_KEY, 'batch_wall:'), 0,
+                     ELAPSED_MS / 1000.0 / COALESCE(SAMPLE_PROB, 1.0))), 1) AS EST_WAIT_S,
        ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
        ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
        COUNT_IF(NOT OK) AS FAILED,
@@ -1295,7 +1435,7 @@ SELECT PAGE,
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY PAGE
-ORDER BY EST_TRUE_FETCHES DESC
+ORDER BY EST_WAIT_S DESC NULLS LAST
 LIMIT 50
 """
 

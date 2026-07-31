@@ -142,18 +142,23 @@ def test_purge_covers_the_v027_and_v041_tables():
     assert purge.count("DELETE FROM") == 24              # 8 original + 16 new
 
 
-def test_ai_fact_gains_exact_stamps_and_the_tab_stays_live_first():
+def test_ai_fact_gains_exact_stamps_and_the_tab_is_now_fact_first():
     assert "ADD COLUMN IF NOT EXISTS EMAIL VARCHAR(320)" in _V42
     assert "ADD COLUMN IF NOT EXISTS FIRST_TS TIMESTAMP_NTZ" in _V42
     marts = _proc(_V42, "SP_LOAD_MARTS_V27")
     assert "ANY_VALUE(u.EMAIL) AS EMAIL" in marts
     assert "MIN(c.USAGE_TIME) AS FIRST_TS" in marts
     assert marts.count("FIRST_TS = s.FIRST_TS") == 2      # code + functions arms
-    # owner decision 2026-07-12 stands: the users tab is live-first until the
-    # fact proves it can serve the FULL contract
+    # Owner decision 2026-07-12 held the tab live-first "until the fact proves
+    # it can serve the FULL contract". These very columns are that proof: with
+    # EMAIL + FIRST_TS/LAST_TS on the fact (V042) and populated (V061 arm [9]),
+    # the tab went fact-first in P2. The 002139 probe semantics and the live
+    # fallback both survive — the reasons for the original revert do not recur.
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert 'source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY", probe=True' in cb
-    assert "ai_code_user_rollup" not in cb
+    assert "mart27_sql.ai_code_user_rollup(days, company)" in cb
+    assert "cortex_sql.cortex_code_user_daily(company)" in cb      # live leg kept
+    assert "probe=True" in cb
+    assert "ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY" in cb       # still labeled as such
 
 
 # ---------------------------------------------------------------------------

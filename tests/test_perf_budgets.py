@@ -74,7 +74,11 @@ _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
     "app/ui/pages/cost_parts/spend.py": 10,     # +1 v4.30: CS-by-QUERY_TYPE drill (COST_DB recon R6); +1 v4.50: the v4.46 storage-tier live fallback moved here with the storage panels (probe-gated, non-first-paint, unchanged)
     "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # -1 v4.50: the storage-tier live fallback moved to spend.py with the storage panels
-    "app/ui/pages/operations.py": 22,  # restored v4.45 (owner correction: task monitoring stays; the r26 cut had misread "resource monitor")
+    # +2 (2026-07-31, P6): NOT new scans — this budget counts the literal string (see the
+    # honesty note above). The t_rca tier fix added one explanatory COMMENT naming
+    # ACCOUNT_USAGE.TASK_HISTORY's ~45-min lag and one `source=` label naming the same view.
+    # The builder-level gate (test_v451_trust) confirms the reachable table set is UNCHANGED.
+    "app/ui/pages/operations.py": 24,  # restored v4.45 (owner correction: task monitoring stays; the r26 cut had misread "resource monitor")
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
     "app/ui/pages/security.py": 22,  # +4 v4.41/r25 (owner picked #6+#7): new-network batch rider on Access + Egress lazy section (DATA_TRANSFER_HISTORY, UNLOAD scan) — zero first-paint cost, all click-gated

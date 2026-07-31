@@ -74,6 +74,7 @@ snowflake/migrations/V065__alert_run_rate_windows.sql
 snowflake/migrations/V066__alert_escalation_serverless_window_timeline_atomicity.sql
 snowflake/migrations/V067__alert_attribution_onset_supersede_objectcost.sql
 snowflake/migrations/V068__standalone_mart_freshness_stamps.sql
+snowflake/migrations/V069__exec_board_serverless_ai_drivers.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -156,6 +157,28 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > ('MART_LOCK_WAIT_DAILY','MART_PATTERN_COST_DAILY');` — both rows should show a
 > just-now timestamp (they had been frozen at apply time, ~2026-07-09), and the Brief
 > "stalest telemetry" card stops naming MART_LOCK_WAIT_DAILY on the next app refresh.
+
+> **V069 verify (exec-board serverless + AI cost drivers — no smoke test):** re-derives
+> `SP_REFRESH_EXEC_BOARD` from V054; byte-verified by
+> `tests/test_v069_exec_board_drivers.py`. No new objects, no app change (the new rows fill
+> the existing COST_DRIVER contract). The migration tail CALLs the proc, so verify is
+> immediate — read-only:
+> ```sql
+> SELECT DIMENSION, VALUE AS CREDITS, VALUE_USD
+> FROM DBA_MAINT_DB.OVERWATCH.MART_EXEC_BOARD
+> WHERE COMPANY = 'ALL' AND WINDOW_DAYS = 30 AND PANEL = 'COST_DRIVER'
+>   AND (DIMENSION LIKE 'Serverless: %' OR DIMENSION LIKE 'AI/Cortex: %')
+> ORDER BY VALUE_USD DESC;
+> ```
+> Expect one row per non-warehouse `SERVICE_TYPE` present in `FACT_METERING_DAILY`
+> (auto-clustering, MV refresh, search optimization, snowpipe, serverless tasks, AI
+> services…), and none named for a warehouse — warehouse metering stays on the original
+> arm. Spot-check the house rate law: an `AI/Cortex:` row's `VALUE_USD / VALUE` should equal
+> `AI_CREDIT_PRICE_USD` (2.20 by default) and a `Serverless:` row's should equal
+> `CREDIT_PRICE_USD` (3.68). The rows appear on the **ALL** company pill only —
+> `FACT_METERING_DAILY` is account-level and carries no company dimension, so splitting it
+> across ALFA/Trexis would invent attribution. Overview → "Top cost drivers" then shows the
+> serverless/AI lines alongside the warehouses on the next app refresh.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

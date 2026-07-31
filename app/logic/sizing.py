@@ -13,7 +13,13 @@ import pandas as pd
 from .formulas import safe_div, safe_float
 
 QUEUE_UP_MIN_PER_DAY = 30.0    # sustained queueing -> size up / add cluster
-SPILL_UP_GB = 5.0              # remote spill in window -> size up
+# D2 (audit 2026-07-31): every load signal is now PER DAY. The spill threshold
+# used to be a WINDOW TOTAL sitting next to a per-day queue threshold, so the
+# same warehouse crossed it at 90d and not at 7d — the advice moved with the
+# window picker. 1 GB/day of REMOTE spill is real memory pressure; a tenth of
+# that is the noise floor a size-DOWN must stay under.
+SPILL_UP_GB_PER_DAY = 1.0
+SPILL_DOWN_MAX_GB_PER_DAY = 0.1
 DOWN_P95_SEC = 10.0            # fast p95 and calm queue -> down candidate
 DOWN_IDLE_PCT = 30.0           # meaningful idle share strengthens down case
 SUSPEND_FIRST_IDLE_PCT = 50.0  # mostly idle -> fix auto-suspend before resizing
@@ -28,7 +34,17 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     """Score each warehouse row and attach scenario dollars + recommendation.
 
     Expects columns: WAREHOUSE_NAME, CREDITS_TOTAL, QUERY_COUNT, P95_ELAPSED_SEC,
-    QUEUED_SEC, SPILL_REMOTE_GB, IDLE_PCT (optional).
+    QUEUED_SEC, SPILL_REMOTE_GB, IDLE_PCT (optional),
+    QUEUED_PROVISIONING_SEC (optional).
+
+    ``window_days`` must be the window actually SERVED (components.served_days),
+    not the requested one: every per-day rate and the x30 monthly figure below
+    divide by it, and a live builder clamped to 90d fed a 365d divisor reads ~4x
+    low.
+
+    D2: QUEUED_SEC is OVERLOAD queueing only where the reader can split it.
+    Provisioning time is a warehouse waking up — an auto-suspend/scheduling
+    signal, not concurrency pressure — so sizing up to "fix" it buys nothing.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -36,33 +52,45 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     days = max(int(window_days or 1), 1)
     out = df.copy()
     for col in ("CREDITS_TOTAL", "QUERY_COUNT", "P95_ELAPSED_SEC", "QUEUED_SEC",
-                "SPILL_REMOTE_GB", "IDLE_PCT"):
+                "QUEUED_PROVISIONING_SEC", "SPILL_REMOTE_GB", "IDLE_PCT"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
     if "IDLE_PCT" not in out.columns:
         out["IDLE_PCT"] = 0.0
+    has_prov = "QUEUED_PROVISIONING_SEC" in out.columns
 
     out["QUEUED_MIN_PER_DAY"] = (out["QUEUED_SEC"] / 60.0 / days).round(1)
+    out["SPILL_GB_PER_DAY"] = (out["SPILL_REMOTE_GB"] / days).round(2)
+    if has_prov:
+        out["PROVISION_MIN_PER_DAY"] = (out["QUEUED_PROVISIONING_SEC"] / 60.0 / days).round(1)
     out["MONTHLY_USD_NOW"] = (out["CREDITS_TOTAL"] * rate / days * 30).round(0)
     out["SCENARIO_DOWN_USD"] = (out["MONTHLY_USD_NOW"] * 0.5).round(0)
     out["SCENARIO_UP_USD"] = (out["MONTHLY_USD_NOW"] * 2.0).round(0)
+    # D2: the idle share of today's bill — the money a SUSPEND row is really
+    # about. Unlike the x0.5 scenario this is measured, not speculative.
+    out["IDLE_MONTHLY_USD"] = (out["MONTHLY_USD_NOW"] * out["IDLE_PCT"].clip(0, 100) / 100).round(0)
 
     def _recommend(row) -> tuple[str, str]:
         queued = row["QUEUED_MIN_PER_DAY"]
-        spill = row["SPILL_REMOTE_GB"]
+        spill = row["SPILL_GB_PER_DAY"]
         idle = row["IDLE_PCT"]
         p95 = row["P95_ELAPSED_SEC"]
-        if queued >= QUEUE_UP_MIN_PER_DAY or spill >= SPILL_UP_GB:
+        if queued >= QUEUE_UP_MIN_PER_DAY or spill >= SPILL_UP_GB_PER_DAY:
             why = []
             if queued >= QUEUE_UP_MIN_PER_DAY:
-                why.append(f"{queued:.0f} queued min/day")
-            if spill >= SPILL_UP_GB:
-                why.append(f"{spill:.1f} GB remote spill")
+                why.append(f"{queued:.0f} overload-queued min/day")
+            if spill >= SPILL_UP_GB_PER_DAY:
+                why.append(f"{spill:.1f} GB/day remote spill")
             return RECOMMEND_UP, "Concurrency/memory pressure: " + ", ".join(why) + "."
         if idle >= SUSPEND_FIRST_IDLE_PCT:
+            prov = ""
+            if has_prov and row.get("PROVISION_MIN_PER_DAY", 0) >= 1:
+                prov = (f" ({row['PROVISION_MIN_PER_DAY']:.0f} provisioning min/day — "
+                        "resume overhead, not concurrency)")
             return RECOMMEND_SUSPEND, (
-                f"{idle:.0f}% of credits are idle-hours - shorten AUTO_SUSPEND before resizing.")
-        if queued < 1 and spill < 0.5 and p95 <= DOWN_P95_SEC and idle >= DOWN_IDLE_PCT:
+                f"{idle:.0f}% of credits are idle-hours{prov} - shorten AUTO_SUSPEND before resizing.")
+        if (queued < 1 and spill < SPILL_DOWN_MAX_GB_PER_DAY
+                and p95 <= DOWN_P95_SEC and idle >= DOWN_IDLE_PCT):
             return RECOMMEND_DOWN, (
                 f"No queueing, no spill, p95 {p95:.1f}s, {idle:.0f}% idle - "
                 "one size down likely holds SLAs at half the rate.")
@@ -76,21 +104,35 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
         if r["RECOMMENDATION"] == RECOMMEND_DOWN else 0.0,
         axis=1,
     )
-    order = {RECOMMEND_UP: 0, RECOMMEND_DOWN: 1, RECOMMEND_SUSPEND: 2, RECOMMEND_KEEP: 3}
+    # D2: SUSPEND outranks DOWN. Tuning a timer is reversible, costs nothing, and
+    # its saving is measured idle; a size-down is a speculative SLA bet whose
+    # "saving" is the mechanical half-rate scenario. The old order sold the bet
+    # first.
+    order = {RECOMMEND_UP: 0, RECOMMEND_SUSPEND: 1, RECOMMEND_DOWN: 2, RECOMMEND_KEEP: 3}
     out["_O"] = out["RECOMMENDATION"].map(order).fillna(9)
     return (out.sort_values(["_O", "MONTHLY_USD_NOW"], ascending=[True, False])
             .drop(columns="_O").reset_index(drop=True))
 
 
 def sizing_summary(out: pd.DataFrame) -> dict:
+    """Counts plus the TWO savings numbers, kept apart on purpose (D2):
+    ``potential_saving_usd`` is the speculative half-rate scenario on size-down
+    candidates; ``idle_saving_usd`` is the measured idle spend on the rows that
+    need an auto-suspend fix. Adding them would mix a model with a measurement.
+    """
     if out is None or out.empty:
-        return {"up": 0, "down": 0, "suspend": 0, "potential_saving_usd": 0.0}
+        return {"up": 0, "down": 0, "suspend": 0,
+                "potential_saving_usd": 0.0, "idle_saving_usd": 0.0}
     rec = out["RECOMMENDATION"]
+    idle_usd = 0.0
+    if "IDLE_MONTHLY_USD" in out.columns:
+        idle_usd = round(float(out.loc[rec == RECOMMEND_SUSPEND, "IDLE_MONTHLY_USD"].sum()), 0)
     return {
         "up": int((rec == RECOMMEND_UP).sum()),
         "down": int((rec == RECOMMEND_DOWN).sum()),
         "suspend": int((rec == RECOMMEND_SUSPEND).sum()),
         "potential_saving_usd": round(float(out["POTENTIAL_MONTHLY_SAVING_USD"].sum()), 0),
+        "idle_saving_usd": idle_usd,
     }
 
 

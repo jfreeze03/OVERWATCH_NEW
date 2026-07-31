@@ -408,11 +408,48 @@ def snowsight_profile_column(df, page: str, id_col: str = "QUERY_ID"):
         help="Query profile in Snowsight — plan, partitions, spilling.")}
 
 
+def _mark_served(result, *, live: bool, days: int | None):
+    """K1: stamp which leg actually answered, and over what window, onto the
+    frame the caller receives. Callers must read it through ``served_days()``.
+
+    WHY it lives on ``df.attrs`` and not on QueryResult: the live builders clamp
+    to MAX_LIVE_WINDOW_DAYS (90) while the marts honor 365, so a page that asked
+    for 365d and got the live fallback was labeling a 90-day answer "365 days".
+    QueryResult is the cached payload shared by both legs; attrs travel with the
+    frame through Streamlit's cache copy and through pandas operations, and cost
+    nothing when nobody looks."""
+    from app.config import clamp_days
+    df = getattr(result, "df", None)
+    if df is None:
+        return result
+    df.attrs["_ow_served_live"] = bool(live)
+    if days is not None:
+        df.attrs["_ow_effective_days"] = clamp_days(days) if live else int(days)
+    return result
+
+
+def served_days(result, requested_days: int) -> int:
+    """The window a run_mart_first result ACTUALLY covers (K1 contract).
+
+    The live fallback clamps to MAX_LIVE_WINDOW_DAYS, so captions, per-day
+    averages and run-rate math must divide by this, not by the requested days.
+    Falls back to ``requested_days`` for any result that did not come through
+    run_mart_first — an honest no-op, never a wrong clamp."""
+    from app.config import clamp_days
+    attrs = getattr(getattr(result, "df", None), "attrs", None) or {}
+    effective = attrs.get("_ow_effective_days")
+    if isinstance(effective, int) and effective > 0:
+        return effective
+    if attrs.get("_ow_served_live"):
+        return clamp_days(requested_days)
+    return int(requested_days)
+
+
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",
                    max_rows: int | None = None, empty_is_answer: bool = False,
-                   mart_accept=None, preloaded=None):
+                   mart_accept=None, preloaded=None, days: int | None = None):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -422,7 +459,11 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     T2.3: ``preloaded`` accepts the mart leg's result from a run_batch prefetch
     (prefetch-else-run) so a section can issue its independent mart reads as one
     parallel group; mart_accept still applies, and a missing/failed prefetch
-    falls through to the serial mart read exactly as before."""
+    falls through to the serial mart read exactly as before.
+
+    K1: pass ``days`` (the window the caller ASKED for) and read the window that
+    was actually served back with ``served_days(result, days)`` — the live legs
+    clamp to 90 and the marts do not."""
     from app.core.query import run
     kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
     res = preloaded if (preloaded is not None and preloaded.ok) else run(
@@ -442,22 +483,49 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
             except Exception:  # noqa: BLE001
                 pass
         if accepted:
-            return res
+            return _mark_served(res, live=False, days=days)
         # r11 #2: the mart answered but does not cover enough of the asked
         # window (an accruing mart holds weeks of a 13-month chart). Prefer
         # live; if live cannot answer, the partial mart still beats an empty
         # panel — and the source label says which path served.
         live = run(live_sql, page=page, key=key, tier=live_tier,
                    source=live_source, **kwargs)
-        return live if live.usable() else res
+        if live.usable():
+            return _mark_served(live, live=True, days=days)
+        return _mark_served(res, live=False, days=days)
     # Codex r9 #2: for marts whose table only exists once loaded (V035), a
     # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
     # scan would pay 46-56 GB to confirm an answer we already hold. Marts
     # with young-coverage ambiguity keep the default (fallback on empty).
     if empty_is_answer and res.ok:
-        return res
-    return run(live_sql, page=page, key=key, tier=live_tier,
-               source=live_source, **kwargs)
+        return _mark_served(res, live=False, days=days)
+    return _mark_served(
+        run(live_sql, page=page, key=key, tier=live_tier, source=live_source, **kwargs),
+        live=True, days=days)
+
+
+class _DirectoryUnavailable(Exception):
+    """The directory read failed. Raised out of the cache_data-wrapped build so
+    the empty-map FAILURE is never pinned for a day (Streamlit does not cache
+    exceptions) — the caller still gets {} and the raw-login fallback."""
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=4)
+def _user_display_map_cached(scope: str, _page: str) -> dict:
+    """P4: the directory read is ~11s over 223 rows and sat on the 4h metadata
+    TTL, so it cold-started several times a day for a fact that changes when
+    someone is HIRED. 24h is the right budget; the Refresh button still clears
+    it because ``scope`` carries the refresh salt. ``_page`` is underscored on
+    purpose — Streamlit excludes underscored args from the cache key, so every
+    page keeps sharing the ONE entry while telemetry still records the caller."""
+    from app.core.query import run
+    from app.data import directory_sql
+    from app.logic.directory import display_name_map
+    res = run(directory_sql.user_directory(), page=_page, key="user_directory",
+              tier="metadata", source="ACCOUNT_USAGE.USERS (name directory)")
+    if not res.usable():
+        raise _DirectoryUnavailable(res.error or "user directory unavailable")
+    return display_name_map(res.df)
 
 
 def user_display_map(page: str) -> dict:
@@ -468,12 +536,12 @@ def user_display_map(page: str) -> dict:
     the returned map to logic.directory.attach_display_name / resolve_display so a
     person's name shows next to the login everywhere. Empty on a failed read (the
     resolvers then fall back to the raw login — never blank)."""
-    from app.core.query import run
+    from app.core.query import cache_scope
     from app.data import directory_sql
-    from app.logic.directory import display_name_map
-    res = run(directory_sql.user_directory(), page=page, key="user_directory",
-              tier="metadata", source="ACCOUNT_USAGE.USERS (name directory)")
-    return display_name_map(res.df) if res.usable() else {}
+    try:
+        return _user_display_map_cached(cache_scope(directory_sql.user_directory()), page)
+    except _DirectoryUnavailable:
+        return {}
 
 
 def with_user_names(df, page: str, *, user_col: str = "USER_NAME", display_col: str = "USER"):

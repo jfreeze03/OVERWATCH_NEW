@@ -181,6 +181,13 @@ from contextvars import ContextVar  # noqa: E402  (kept beside its single use)
 # Streamlit session threads, corrupting cache-hit telemetry either way.
 _FETCH_MISS: ContextVar[bool] = ContextVar("ow_fetch_miss", default=False)
 _LAST_QUERY_ID: ContextVar[str] = ContextVar("ow_last_query_id", default="")
+# P3: per-member gather time for the batch just executed, {member index: ms}.
+# It cannot ride the RETURN value: that value is st.cache_data-cached, so a
+# cache hit would replay the original miss's durations and re-inflate exactly
+# what this fix removes. Same sentinel discipline as _FETCH_MISS — _execute_batch
+# fills it, run_batch resets it before the fetch and reads it after, and an empty
+# dict (cache hit) means "no server work happened", so wall time stands in.
+_BATCH_MEMBER_MS: ContextVar[dict | None] = ContextVar("ow_batch_member_ms", default=None)
 
 
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
@@ -342,6 +349,16 @@ def _cache_scope(sql: str = "") -> str:
     return f"role={role}|{user_part}salt={salt}|{extra}"
 
 
+def cache_scope(sql: str = "") -> str:
+    """Public read of the cache identity string (role + refresh salt + the
+    domain salts this SQL is invalidated by). For callers that memoize the
+    PARSED shape of a read on top of run()'s own cache — main.py's health strip
+    — so the Refresh button and post-write invalidation still reach them. Any
+    such wrapper must pass this as a cache-key argument, or it goes stale for
+    its whole TTL after an ack/resolve."""
+    return _cache_scope(sql)
+
+
 def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok: bool,
                cache_hit: bool | None = None, sql_hash: str | None = None,
                batch_size: int | None = None, truncated: bool | None = None,
@@ -400,6 +417,27 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
+    # P3: INCREMENTAL gather time per member, not the batch wall clock. Every
+    # member used to be stamped with the whole batch's duration, so a 2-query
+    # batch reported two identical inflated samples — batch:q and batch:p read
+    # the same p50/p95, and any sum over telemetry (the Cost/Admin "pain"
+    # boards) counted one batch's seconds N times. Incremental deltas are
+    # SUM-PRESERVING: they add up to the gather wall time exactly once.
+    # Caveat worth knowing: the jobs run in PARALLEL but are gathered in
+    # submission order, so a fast member that finished behind a slow one reads
+    # near-zero. That understates an individual member but never double-counts
+    # the fleet total, which is the number the tuning boards rank on. The true
+    # per-query duration lives in ACCOUNT_USAGE via the persisted QUERY_ID.
+    member_ms: dict[int, float] = {}
+    _BATCH_MEMBER_MS.set(member_ms)
+    _mark = time.perf_counter()
+
+    def _stamp(idx: int) -> None:
+        nonlocal _mark
+        now = time.perf_counter()
+        member_ms[idx] = (now - _mark) * 1000
+        _mark = now
+
     jobs: list = []
     try:
         for sql in sqls:
@@ -407,21 +445,27 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     except Exception as sub_exc:
         frames0: dict = {}        # those queries RUN server-side either way, and
         errors0: dict = {}        # dropping the handles re-paid them in fallback.
+        _mark = time.perf_counter()   # submission cost is not any one member's
         for idx, job in enumerate(jobs):
             try:
                 frames0[idx] = _normalize(job.result())
             except Exception as exc2:
                 errors0[idx] = exc2
+            finally:
+                _stamp(idx)
         errors0[len(jobs)] = sub_exc          # the member whose submit raised
         pending0 = set(range(len(jobs) + 1, len(sqls)))
         raise _BatchPartial(frames0, errors0, pending0) from sub_exc
     frames: dict = {}
     errors: dict = {}
+    _mark = time.perf_counter()               # clock the GATHER, not the submits
     for idx, job in enumerate(jobs):
         try:
             frames[idx] = _normalize(job.result())
         except Exception as exc:
             errors[idx] = exc
+        finally:
+            _stamp(idx)
     if errors:
         raise _BatchPartial(frames, errors)
     return tuple(frames[i] for i in range(len(jobs)))
@@ -455,6 +499,14 @@ def _fetch_hourly_batch(sqls: tuple, scope: str, _page: str = "") -> tuple:
 _BATCH_FETCHERS = {"recent": _fetch_recent_batch, "historical": _fetch_historical_batch,
                    "hourly": _fetch_hourly_batch,
                    "live": _fetch_live_batch, "metadata": _fetch_metadata_batch}
+
+
+def _member_elapsed(idx: int, wall_ms: float) -> float:
+    """This batch member's own gather time (P3), falling back to the batch wall
+    clock. The fallback is what a CACHE HIT reports — nothing ran server-side,
+    so wall_ms is ~0 and honest — and also covers a Snowpark build that never
+    reached the timing loop."""
+    return float((_BATCH_MEMBER_MS.get() or {}).get(idx, wall_ms))
 
 
 def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
@@ -503,6 +555,10 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         caps.append(cap)
     try:
         scope = _cache_scope("\n".join(capped))
+        # P3: clear first — a stale dict from an EARLIER batch in this same
+        # thread context would otherwise be read as this batch's timings when
+        # the fetcher answers from cache (its body never runs).
+        _BATCH_MEMBER_MS.set(None)
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except _BatchPartial as bp:
         elapsed = (time.perf_counter() - started) * 1000
@@ -523,12 +579,13 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                 truncated = bool(caps[idx]) and len(df) > caps[idx]
                 if truncated:
                     df = df.head(caps[idx])
-                _telemetry(page, tier, f"batch:{spec['key']}", elapsed,
+                member_ms = _member_elapsed(idx, elapsed)
+                _telemetry(page, tier, f"batch:{spec['key']}", member_ms,
                            len(df), ok=True, batch_size=len(bspecs), truncated=truncated)
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
-                    fetched_at=datetime.now(), elapsed_ms=elapsed)
+                    fetched_at=datetime.now(), elapsed_ms=member_ms)
             else:
                 out[str(spec["key"])] = run(
                     str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
@@ -554,16 +611,25 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         return {**out, **out_direct}
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}
-    for spec, df, cap in zip(bspecs, frames, caps, strict=True):
+    rows_total = 0
+    for idx, (spec, df, cap) in enumerate(zip(bspecs, frames, caps, strict=True)):
         truncated = bool(cap) and len(df) > cap
         if truncated:
             df = df.head(cap)
-        _telemetry(page, tier, f"batch:{spec['key']}", elapsed, len(df), ok=True,
+        rows_total += len(df)
+        member_ms = _member_elapsed(idx, elapsed)
+        _telemetry(page, tier, f"batch:{spec['key']}", member_ms, len(df), ok=True,
                    batch_size=len(bspecs), truncated=truncated)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
-            tier=tier, fetched_at=datetime.now(), elapsed_ms=elapsed,
+            tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
         )
+    # P3: the members now carry their own slices, so the batch's END-TO-END cost
+    # (submits + gather + Snowpark overhead) would vanish from telemetry. Record
+    # it ONCE under its own key. Aggregators that SUM elapsed must exclude
+    # 'batch_wall:%' — it is a superset of its members, not extra work.
+    _telemetry(page, tier, f"batch_wall:{tier}:n{len(bspecs)}", elapsed, rows_total,
+               ok=True, batch_size=len(bspecs))
     return {**out, **out_direct}
 
 

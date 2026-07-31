@@ -37,6 +37,75 @@ def test_repeat_fingerprints_exclude_overwatch_and_clamp_min_runs():
     assert "QUERY_PARAMETERIZED_HASH" in sql
 
 
+def test_active_hours_use_a_span_join_not_the_start_hour():
+    """D2: a query that starts at 10:59 and runs 3h must mark hours 11 and 12
+    active too — the start-hour DISTINCT booked them as idle."""
+    for sql in (insights_sql.idle_warehouse_analysis(30, "ALFA"),
+                insights_sql.warehouse_sizing_profile(30, "ALFA")):
+        assert "q_spans" in sql and "GENERATOR(ROWCOUNT =>" in sql
+        assert "DATEADD('hour', g.SEQ, s.H0) <= s.H1" in sql
+        # the naive start-hour set is gone from both builders
+        assert "SELECT DISTINCT WAREHOUSE_NAME, DATE_TRUNC('hour', START_TIME)" not in sql
+
+
+def test_sizing_profile_splits_provisioning_out_of_queueing():
+    """D2: provisioning time is a warehouse waking up (a suspend-timer signal),
+    not concurrency pressure — sizing up to 'fix' it buys nothing."""
+    sql = insights_sql.warehouse_sizing_profile(30, "ALFA")
+    assert "SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000.0 AS QUEUED_SEC" in sql
+    assert "QUEUED_PROVISIONING_SEC" in sql
+    assert "QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME" not in sql
+
+
+def test_repeat_fingerprints_rank_credit_weighted_and_weight_cache_by_bytes():
+    sql = insights_sql.repeat_query_fingerprints(7, "ALFA")
+    assert "EST_CREDITS" in sql and "WAREHOUSE_SIZE" in sql
+    assert "ORDER BY EST_CREDITS * (1 - AVG_CACHE_PCT / 100) DESC" in sql
+    # cache % is BYTES_SCANNED-weighted and ignores zero-scan (result-cache) runs
+    assert "IFF(COALESCE(BYTES_SCANNED, 0) > 0, BYTES_SCANNED, 0)" in sql
+    assert "AVG(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0)) * 100" not in sql
+
+
+def test_patterns_hash_filter_sits_outside_the_denominator():
+    """C3 / attribution law: the hash filter picks DISPLAY rows only. Inside the
+    q CTE it also shrank the warehouse-hour denominator, inflating every $."""
+    sql = insights_sql.expensive_patterns_usd(7, "ALFA", 30)
+    head, tail = sql.split("SELECT\n    q.PATTERN_HASH", 1)
+    assert "QUERY_PARAMETERIZED_HASH IS NOT NULL" not in head   # not in q/t/m
+    assert "WHERE q.PATTERN_HASH IS NOT NULL" in tail
+
+
+def test_hourly_activity_averages_over_calendar_days():
+    """B1: AVG_CREDITS is per calendar day of the window; a per-METERED-day
+    average monetized x30 calendar days overstated the schedule saving ~3.5x."""
+    sql = insights_sql.warehouse_hourly_activity(14, "ALFA")
+    assert "ROUND(m.CR / 14, 3) AS AVG_CREDITS" in sql
+    assert "ROUND(COALESCE(q.QC, 0) / 14, 1) AS AVG_QUERIES" in sql
+    assert "NULLIF(m.DAYS_SEEN, 0)" not in sql
+    assert "DAYS_METERED" in sql          # kept for transparency
+
+
+def test_storage_builders_carry_current_retention():
+    """B4: the retention-fix estimate needs the CURRENT retention to say how
+    much of the Time Travel a shorter window actually releases."""
+    for sql in (insights_sql.storage_waste("ALFA"), insights_sql.storage_reclaim("ALFA")):
+        assert "RETENTION_DAYS" in sql and "ACCOUNT_USAGE.TABLES" in sql
+
+
+def test_reclaim_joins_reads_by_object_id():
+    """D4: joining ACCESS_HISTORY by assembled name made every quoted/mixed-case
+    identifier look NEVER_READ — a 'safe to archive' verdict on a hot table."""
+    sql = insights_sql.storage_reclaim("ALFA")
+    assert 'f.value:"objectId"::NUMBER AS TABLE_ID' in sql
+    assert "LEFT JOIN reads r ON r.TABLE_ID = m.ID" in sql
+    assert "r.FQN = m.TABLE_CATALOG" not in sql
+
+
+def test_storage_growth_exposes_a_regression_slope():
+    sql = insights_sql.storage_growth_by_database(30, "ALFA")
+    assert "REGR_SLOPE(DB_BYTES" in sql and "DAYS_OBSERVED" in sql
+
+
 def test_release_compare_validates_date():
     with pytest.raises(ValueError):
         insights_sql.release_query_compare("07/01/2026", 7)
@@ -81,6 +150,28 @@ def test_idle_advisor_math_and_flag():
     assert not bool(out.iloc[1]["FLAGGED"])
 
 
+def test_idle_advisor_haircuts_the_unavoidable_resume_tail():
+    """B3: 100% of idle is not recoverable — Snowflake bills a 60s minimum per
+    resume, so one target-suspend tail per ACTIVE metered hour is deducted."""
+    df = pd.DataFrame([{
+        "WAREHOUSE_NAME": "WH_A", "COMPANY": "ALFA", "METERED_HOURS": 100,
+        "IDLE_HOURS": 60, "TOTAL_CREDITS": 100.0, "IDLE_CREDITS": 40.0,
+    }])
+    row = insights.idle_advisor(df, credit_rate_usd=3.68, window_days=30).iloc[0]
+    # 40 active hours x 60s x (100 credits / 100 hours) = 0.667 idle credits are tail
+    tail_credits = 40 * (insights.IDLE_RESUME_TAIL_SEC / 3600.0) * 1.0
+    assert row["RECOVERABLE_IDLE_USD"] == round((40.0 - tail_credits) * 3.68, 2)
+    assert row["RECOVERABLE_IDLE_USD"] < row["IDLE_USD"]          # never the gross number
+    assert row["RECOVERABLE_MONTHLY_USD"] <= row["PROJECTED_MONTHLY_IDLE_USD"]
+
+
+def test_idle_advisor_recoverable_never_goes_negative():
+    df = pd.DataFrame([{"WAREHOUSE_NAME": "W", "COMPANY": "ALFA", "METERED_HOURS": 100,
+                        "IDLE_HOURS": 1, "TOTAL_CREDITS": 500.0, "IDLE_CREDITS": 0.2}])
+    row = insights.idle_advisor(df, 3.68, 30).iloc[0]
+    assert row["RECOVERABLE_IDLE_USD"] == 0.0
+
+
 def test_idle_suspend_sql_validates_identifier():
     assert insights.idle_suspend_sql("WH_ALFA_QUERY") == "ALTER WAREHOUSE WH_ALFA_QUERY SET AUTO_SUSPEND = 60;"
     with pytest.raises(ValueError):
@@ -101,6 +192,35 @@ def test_repeat_candidates_flag_heavy_cache_poor():
     assert not bool(out[out["FINGERPRINT"] == "c"]["CANDIDATE"].iloc[0])      # too cheap to matter
 
 
+def test_repeat_gate_is_window_relative():
+    """D3: the gate is 0.5h of compute per 30 DAYS. The same fingerprint must
+    not become a candidate merely because the window picker moved."""
+    row = {"FINGERPRINT": "a", "RUNS": 100, "TOTAL_ELAPSED_HOURS": 0.6,
+           "AVG_CACHE_PCT": 5.0, "TOTAL_TB_SCANNED": 1.0}
+    df = pd.DataFrame([row])
+    assert bool(insights.flag_repeat_candidates(df, 30).iloc[0]["CANDIDATE"])
+    # same 0.6h spread over a YEAR is 0.05h/30d — not a materialization target
+    assert not bool(insights.flag_repeat_candidates(df, 365).iloc[0]["CANDIDATE"])
+    # and over 3 days it is 6h/30d — clearly one
+    assert bool(insights.flag_repeat_candidates(df, 3).iloc[0]["CANDIDATE"])
+
+
+def test_repeat_candidates_rank_by_money_not_hours():
+    """D3: an X-Small hour and a 4X-Large hour differ 128x in money, and an
+    already-cached family has nothing left to reclaim."""
+    df = pd.DataFrame([
+        {"FINGERPRINT": "long_but_tiny", "RUNS": 10, "TOTAL_ELAPSED_HOURS": 40.0,
+         "AVG_CACHE_PCT": 0.0, "TOTAL_TB_SCANNED": 0.1, "EST_CREDITS": 2.0},
+        {"FINGERPRINT": "short_but_huge", "RUNS": 10, "TOTAL_ELAPSED_HOURS": 2.0,
+         "AVG_CACHE_PCT": 0.0, "TOTAL_TB_SCANNED": 5.0, "EST_CREDITS": 200.0},
+        {"FINGERPRINT": "huge_but_cached", "RUNS": 10, "TOTAL_ELAPSED_HOURS": 30.0,
+         "AVG_CACHE_PCT": 99.0, "TOTAL_TB_SCANNED": 5.0, "EST_CREDITS": 150.0},
+    ])
+    ranked = list(insights.flag_repeat_candidates(df, 30)["FINGERPRINT"])
+    assert ranked[0] == "short_but_huge"
+    assert ranked.index("huge_but_cached") > ranked.index("long_but_tiny")
+
+
 # ---- 3. storage movers -----------------------------------------------------------
 
 def test_storage_movers_projection():
@@ -114,9 +234,44 @@ def test_storage_movers_projection():
     row = out.iloc[0]
     assert row["CURRENT_TB"] == 2.0
     assert row["GROWTH_TB"] == 1.0
-    assert row["GROWTH_TB_30D"] == 1.0
+    assert row["GROWTH_TB_30D"] == 1.0        # no slope column -> endpoint basis
     assert row["GROWTH_USD_30D"] == 23.0
-    assert row["FAILSAFE_SHARE_PCT"] == 25.0
+    assert row["TREND_BASIS"] == "endpoints"
+    # E6 (audit 2026-07-31): failsafe is billed ALONGSIDE the database bytes, so
+    # the share is of the TOTAL (0.5 / 2.5), not of the database alone (0.5 / 2.0
+    # = 25%, which could and did exceed 100% on failsafe-heavy databases).
+    assert row["FAILSAFE_SHARE_PCT"] == 20.0
+
+
+def test_storage_movers_failsafe_share_cannot_exceed_100():
+    tb = 1024.0**4
+    df = pd.DataFrame([{"DATABASE_NAME": "D", "COMPANY": "ALFA", "FIRST_BYTES": 1.0 * tb,
+                        "LAST_BYTES": 1.0 * tb, "FAILSAFE_BYTES": 9.0 * tb, "SPAN_DAYS": 30}])
+    row = insights.storage_movers(df, usd_per_tb_month=23.0).iloc[0]
+    assert 0 <= row["FAILSAFE_SHARE_PCT"] <= 100
+
+
+def test_storage_movers_prefer_slope_and_flag_short_series():
+    """D4: the x30 projection follows the regression slope over observed days,
+    and a series too short to trend is flagged rather than projected as fact."""
+    tb = 1024.0**4
+    df = pd.DataFrame([
+        # endpoints say +9 TB (a one-day spike on the last day); the slope over
+        # 30 observed days says +0.1 TB/day = 3 TB/30d.
+        {"DATABASE_NAME": "SPIKE", "COMPANY": "ALFA", "FIRST_BYTES": 1.0 * tb,
+         "LAST_BYTES": 10.0 * tb, "FAILSAFE_BYTES": 0.0, "SPAN_DAYS": 30,
+         "DAYS_OBSERVED": 30, "SLOPE_BYTES_PER_DAY": 0.1 * tb},
+        {"DATABASE_NAME": "NEW", "COMPANY": "ALFA", "FIRST_BYTES": 1.0 * tb,
+         "LAST_BYTES": 2.0 * tb, "FAILSAFE_BYTES": 0.0, "SPAN_DAYS": 2,
+         "DAYS_OBSERVED": 3, "SLOPE_BYTES_PER_DAY": 0.5 * tb},
+    ])
+    out = insights.storage_movers(df, usd_per_tb_month=23.0).set_index("DATABASE_NAME")
+    assert out.loc["SPIKE", "GROWTH_TB_30D"] == 3.0          # not the 9 TB endpoint jump
+    assert out.loc["SPIKE", "TREND_BASIS"] == "regression"
+    assert not bool(out.loc["SPIKE", "LOW_CONFIDENCE"])
+    assert bool(out.loc["NEW", "LOW_CONFIDENCE"])            # 3 observed days
+    # ordering is by projected dollars (what the chart's top-10 cut means)
+    assert insights.storage_movers(df, 23.0)["DATABASE_NAME"].iloc[0] == "NEW"
 
 
 # ---- 4. release compare -----------------------------------------------------------

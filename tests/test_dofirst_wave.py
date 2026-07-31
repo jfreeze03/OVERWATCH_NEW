@@ -105,12 +105,15 @@ def test_n7_storage_transfer_disclosure_on_overview_and_brief():
 # N10 — spend collapse gets a distinct identity from a spike
 # ---------------------------------------------------------------------------
 def test_n10_spend_collapse_distinct_from_spike():
-    collapse = triage_queue(None, None, [{"label": "WH_DEAD", "value": 10.0, "z": -6.5}])
+    # C2 (2026-07-31): the HIGH bar moved from abs(z) >= 5 to abs(z) >= 7, matching
+    # SP_ANOMALY_SWEEP's IFF(z >= zthr*2, 'HIGH', ...) so the app and the server twin
+    # can no longer disagree about the same warehouse-day. z=-7.5 keeps this row HIGH.
+    collapse = triage_queue(None, None, [{"label": "WH_DEAD", "value": 10.0, "z": -7.5}])
     row = collapse.iloc[0]
     assert row["KIND"] == "Spend collapse"
     assert "collapsed" in row["TITLE"]
     assert "stalled" in row["DETAIL"].lower()
-    assert row["SEVERITY"] == "HIGH"  # abs(z) >= 5
+    assert row["SEVERITY"] == "HIGH"
     # a positive-z spike keeps the original "Spend anomaly" identity
     spike = triage_queue(None, None, [{"label": "WH_HOT", "value": 900.0, "z": 6.2}])
     assert spike.iloc[0]["KIND"] == "Spend anomaly"

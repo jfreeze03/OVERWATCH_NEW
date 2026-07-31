@@ -14,17 +14,49 @@ from app.logic.formulas import account_now
 SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 OPEN_STATUSES = ("OPEN", "IN_PROGRESS")
 
+#: C2: rules whose server-side events DUPLICATE a signal the app computes itself.
+#: SP_ANOMALY_SWEEP writes COST_ANOMALY_SWEEP events from the same
+#: FACT_WAREHOUSE_DAILY series the app scores in-process, so the morning queue
+#: showed each spend break twice — and with DISAGREEING severities, because the
+#: sweep escalates at z >= 2*threshold while the app escalated at z >= 5. They
+#: still belong on the Alerts page (that is the alert surface); they are dropped
+#: only from this merged triage feed, where the app's own row is the richer twin.
+DUPLICATE_ALERT_RULE_IDS = ("COST_ANOMALY_SWEEP",)
+
+#: D6/C2: escalate a spend anomaly to HIGH on SHAPE **or** on MONEY.
+#: The z gate matches SP_ANOMALY_SWEEP's ``IFF(z >= zthr * 2, 'HIGH', 'MEDIUM')``
+#: with its default threshold of 3.5 — the app used to say HIGH from z >= 5, so
+#: the same warehouse-day could arrive as HIGH (app) and MEDIUM (server) in one
+#: list. Raising the z gate alone would DEMOTE real money, so the dollar arm
+#: escalates any break whose excess over its own baseline clears the floor,
+#: however tame its z. The floor is an uncalibrated starting point: roughly
+#: "a five-figure annualized surprise", tune it against real incidents.
+ANOMALY_HIGH_Z = 7.0
+ANOMALY_HIGH_EXCESS_USD = 500.0
+
 LEDGER_ESTIMATED = "ESTIMATED"
 LEDGER_VERIFIED = "VERIFIED"
 LEDGER_REJECTED = "REJECTED"
 LEDGER_STATES = (LEDGER_ESTIMATED, LEDGER_VERIFIED, LEDGER_REJECTED)
 
 
-def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
-    """Rank open actions: severity, then overdue-ness, then age.
+def _datetime_col(view: pd.DataFrame, column: str) -> pd.Series:
+    """Coerce ``column`` to a datetime Series, or an all-NaT one when absent.
 
-    Expects columns SEVERITY, STATUS, DUE_DATE, CREATED_AT (extra columns pass
-    through untouched). Non-open rows are dropped.
+    ``view.get(missing)`` returns None, and ``pd.to_datetime(None)`` is the NaT
+    SCALAR — which has no ``.dt``/``.notna()`` — so a frame without DUE_DATE or
+    CREATED_AT would blow up in ranking rather than degrade to "unknown".
+    """
+    if column not in view.columns:
+        return pd.Series(pd.NaT, index=view.index, dtype="datetime64[ns]")
+    return pd.to_datetime(view[column], errors="coerce")
+
+
+def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
+    """Rank open actions: severity, then overdue-ness, then dollars, then age.
+
+    Expects columns SEVERITY, STATUS, DUE_DATE, CREATED_AT, ESTIMATED_USD (extra
+    columns pass through untouched). Non-open rows are dropped.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -33,17 +65,42 @@ def rank_actions(df: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     view = view[view["STATUS"].isin(OPEN_STATUSES)].copy()
     if view.empty:
         return view
-    view["_SEV"] = view.get("SEVERITY", "").astype(str).str.upper().map(SEVERITY_RANK).fillna(9)
-    due = pd.to_datetime(view.get("DUE_DATE"), errors="coerce")
-    created = pd.to_datetime(view.get("CREATED_AT"), errors="coerce")
+    # Same reason as _datetime_col: `view.get("SEVERITY", "")` hands back a bare str
+    # when the column is absent, and str has no .astype.
+    _sev_raw = (view["SEVERITY"] if "SEVERITY" in view.columns
+                else pd.Series("", index=view.index)).astype(str).str.upper().str.strip()
+    view["_SEV"] = _sev_raw.map(SEVERITY_RANK)
+    # D1: an unrecognized or blank SEVERITY used to fall through to rank 9 and sort
+    # BELOW INFO, so one loader typo or a severity token we don't know yet silently
+    # dropped a possibly-critical row off the bottom of a top-5 list. Rank unknowns
+    # at the MEDIUM tier instead — the same neutral default triage_queue gives a
+    # severity-less alert — and mark the cell so the bad label gets FIXED rather
+    # than quietly tolerated. A blank renders as "UNSET?", not as an empty cell.
+    _unknown = view["_SEV"].isna()
+    view["_SEV"] = view["_SEV"].fillna(float(SEVERITY_RANK["MEDIUM"]))
+    if bool(_unknown.any()):
+        view.loc[_unknown, "SEVERITY"] = _sev_raw[_unknown].replace("", "UNSET") + "?"
+    due = _datetime_col(view, "DUE_DATE")
+    created = _datetime_col(view, "CREATED_AT")
     # Account time: DUE_DATE and CREATED_AT are mart columns and the marts store
     # account time. A server-clock now() runs 5-6 hours ahead under SiS and would
     # flag rows overdue before they are.
     now = pd.Timestamp(account_now())
-    view["_OVERDUE"] = (due.notna() & (due < now)).astype(int)
+    # D1: compare DAYS, not instants. DUE_DATE is a date and lands at midnight, so
+    # `due < now` called an action due TODAY overdue from 00:00:01 of its own due
+    # day — the owner lost the whole day they were given. Normalizing both sides
+    # makes an item overdue only once its due date is genuinely in the past.
+    view["_OVERDUE"] = (due.notna() & (due.dt.normalize() < now.normalize())).astype(int)
+    # D1: the queue was $-BLIND — a $40k idle-warehouse action and a $40 one at the
+    # same severity were separated only by age, so the cheap-but-old row led the
+    # executive list. Dollars break the tie within a severity band (after the hard
+    # overdue signal, which is a commitment, not an estimate).
+    view["_USD"] = (pd.to_numeric(view["ESTIMATED_USD"], errors="coerce").fillna(0.0)
+                    if "ESTIMATED_USD" in view.columns else 0.0)
     view["_AGE_H"] = ((now - created).dt.total_seconds() / 3600).fillna(0).clip(lower=0)
-    view = view.sort_values(["_SEV", "_OVERDUE", "_AGE_H"], ascending=[True, False, False])
-    return view.drop(columns=["_SEV", "_OVERDUE", "_AGE_H"]).head(limit)
+    view = view.sort_values(["_SEV", "_OVERDUE", "_USD", "_AGE_H"],
+                            ascending=[True, False, False, False])
+    return view.drop(columns=["_SEV", "_OVERDUE", "_USD", "_AGE_H"]).head(limit)
 
 
 def can_verify(row: dict) -> tuple[bool, str]:
@@ -81,19 +138,64 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     }
 
 
+def _dedupe_alert_feed(alerts: pd.DataFrame) -> pd.DataFrame:
+    """C2: drop the server-sweep events the app recomputes itself (see
+    DUPLICATE_ALERT_RULE_IDS). Frames without a RULE_ID column pass through —
+    an older reader that cannot tell the rules apart keeps every row rather
+    than guessing which ones are twins."""
+    if "RULE_ID" not in alerts.columns:
+        return alerts
+    rule = alerts["RULE_ID"].astype(str).str.upper().str.strip()
+    return alerts[~rule.isin(DUPLICATE_ALERT_RULE_IDS)]
+
+
+def _collapse_task_failures(task_failures: pd.DataFrame) -> pd.DataFrame:
+    """D6: one row per TASK, not one per task-DAY.
+
+    The Control Room reads FACT_TASK_DAILY over a 2-day window, which is DAY
+    grain — a task failing on both days produced TWO queue rows that then ranked
+    independently, so a single broken task could take two of the top slots and
+    push a different fire off the bottom of the morning list. Worse, severity
+    keyed off ONE day's count: two days of 2 failures each read as MEDIUM twice
+    instead of the HIGH that 4 failures deserves. Sum FAILED across the window
+    and keep the newest day's state/error, then rank once.
+    """
+    keys = [c for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME") if c in task_failures.columns]
+    if not keys:
+        return task_failures
+    view = task_failures.copy()
+    if "FAILED" in view.columns:
+        view["FAILED"] = pd.to_numeric(view["FAILED"], errors="coerce").fillna(0.0)
+    else:
+        view["FAILED"] = 0.0
+    view["FAILED"] = view.groupby(keys, dropna=False)["FAILED"].transform("sum")
+    # Sort oldest-first so keep="last" retains the most recent day's LAST_ERROR /
+    # LAST_STATE; frames without a DAY column (the live TASK_HISTORY fallback is
+    # already one row per task) sort as all-NaT and collapse to a no-op.
+    view["_ORDER"] = (pd.to_datetime(view["DAY"], errors="coerce") if "DAY" in view.columns
+                      else pd.Series(pd.NaT, index=view.index, dtype="datetime64[ns]"))
+    view = view.sort_values("_ORDER", na_position="first")
+    return view.drop_duplicates(subset=keys, keep="last").drop(columns=["_ORDER"])
+
+
 def triage_queue(
     alerts: pd.DataFrame | None,
     task_failures: pd.DataFrame | None,
     anomalies: list[dict] | None,
+    high_excess_usd: float = ANOMALY_HIGH_EXCESS_USD,
 ) -> pd.DataFrame:
     """Merge alert events, task failures, and spend anomalies into one ranked
     morning-triage queue for the Control Room. (Restored 2026-07-13 — the
-    owner meant resource monitors, not task monitoring.)"""
+    owner meant resource monitors, not task monitoring.)
+
+    ``anomalies`` rows may carry ``excess_usd`` (spend over that series' own
+    robust baseline); when present it drives both escalation and ranking (D6).
+    """
     rows: list[dict] = []
     # N3: carry EVENT_ID / RULE_ID (empty for non-alert kinds) so the Control Room
     # queue can link a row back to its origin instead of being a read-only wall.
     if alerts is not None and not alerts.empty:
-        for _, r in alerts.iterrows():
+        for _, r in _dedupe_alert_feed(alerts).iterrows():
             rows.append({
                 "SEVERITY": str(r.get("SEVERITY", "MEDIUM")).upper(),
                 "KIND": "Alert",
@@ -104,9 +206,12 @@ def triage_queue(
                 "RAISED_AT": r.get("RAISED_AT"),
                 "EVENT_ID": str(r.get("EVENT_ID", "") or ""),
                 "RULE_ID": str(r.get("RULE_ID", "") or ""),
+                # Alerts carry no comparable dollar figure; 0.0 keeps them in the
+                # severity band but behind any priced row (see the sort below).
+                "_USD": 0.0,
             })
     if task_failures is not None and not task_failures.empty:
-        for _, r in task_failures.iterrows():
+        for _, r in _collapse_task_failures(task_failures).iterrows():
             failed = int(float(r.get("FAILED", 0) or 0))
             if failed <= 0:
                 continue
@@ -123,11 +228,18 @@ def triage_queue(
                 "RAISED_AT": r.get("DAY"),
                 "EVENT_ID": "",
                 "RULE_ID": "",
+                # A failed loader has a real cost, but not one this row can price.
+                "_USD": 0.0,
             })
     for a in anomalies or []:
         z = float(a.get("z", 0) or 0.0)
         label = a.get("label", "warehouse")
         value = a.get("value", 0)
+        # D6: dollars over the series' own robust baseline. Callers that predate
+        # the field (or cannot compute a baseline) leave it out and get 0.0, which
+        # degrades this row to the pure-z behavior — never to a false escalation.
+        excess = abs(float(a.get("excess_usd", 0.0) or 0.0))
+        _excess_note = f" ${excess:,.0f} off baseline." if excess > 0 else ""
         # N10: a spend COLLAPSE (z << 0) is usually a stalled loader / dead
         # pipeline — a real outage signal — not the same thing as a spend SPIKE.
         # Give it a distinct identity so a DBA doesn't triage it like an overspend.
@@ -135,13 +247,16 @@ def triage_queue(
             kind = "Spend collapse"
             title = f"{label} daily spend collapsed z={z:+.1f}"
             detail = (f"Daily spend ${value:,.0f} far below robust baseline — "
-                      "possible stalled workload / dead pipeline.")
+                      "possible stalled workload / dead pipeline." + _excess_note)
         else:
             kind = "Spend anomaly"
             title = f"{label} daily spend z={z:+.1f}"
-            detail = f"Daily spend ${value:,.0f} vs robust baseline."
+            detail = f"Daily spend ${value:,.0f} vs robust baseline." + _excess_note
         rows.append({
-            "SEVERITY": "HIGH" if abs(z) >= 5 else "MEDIUM",
+            # D6/C2: shape OR money. A z-score alone is $-blind — z=8 on a $12/day
+            # sandbox warehouse outranked z=4 on a $9k/day production one. See
+            # ANOMALY_HIGH_Z / ANOMALY_HIGH_EXCESS_USD for why the z gate moved 5 -> 7.
+            "SEVERITY": "HIGH" if (abs(z) >= ANOMALY_HIGH_Z or excess >= high_excess_usd) else "MEDIUM",
             "KIND": kind,
             "DATABASE": "",
             "TITLE": title,
@@ -152,6 +267,7 @@ def triage_queue(
             "RAISED_AT": a.get("day"),
             "EVENT_ID": "",
             "RULE_ID": "",
+            "_USD": excess,
         })
     if not rows:
         return pd.DataFrame()
@@ -162,5 +278,11 @@ def triage_queue(
         lambda v: "" if v is None or pd.isna(v) else str(v)
     )
     queue["_SEV"] = queue["SEVERITY"].map(SEVERITY_RANK).fillna(9)
-    queue = queue.sort_values(["_SEV", "KIND"]).drop(columns=["_SEV"]).reset_index(drop=True)
+    # D6: within a severity band, rank by DOLLARS at risk — the old tiebreak was
+    # alphabetical on KIND, so "Alert" always beat "Spend anomaly" and a $9k/day
+    # spend break sat below a cosmetic alert purely because 'A' sorts before 'S'.
+    # Unpriced rows carry 0.0 and keep KIND as the final, stable tiebreak so the
+    # order is deterministic across reruns.
+    queue = (queue.sort_values(["_SEV", "_USD", "KIND"], ascending=[True, False, True])
+             .drop(columns=["_SEV", "_USD"]).reset_index(drop=True))
     return queue

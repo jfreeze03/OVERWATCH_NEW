@@ -52,7 +52,11 @@ def test_unit_costs_reads_ai_fact_before_paying_the_live_scan():
 def test_admin_tuning_drill_uses_positional_index_and_never_passes_silently():
     assert '_tt.iloc[int(_sel)]["PAGE"]' in _ADM
     assert '_sel["PAGE"]' not in _ADM                   # the flash-and-nothing bug
-    drill = _ADM.split('key="adm_tt_sel"', 1)[1][:2000]
+    # window widened 2000 -> 3500 (2026-07-31): the C6 fix added the honest
+    # "slow keys fell outside the top-40 fleet list" branch + the D5 pain caption
+    # between the selector and the handler, pushing the except to ~offset 2270.
+    # Both safety strings below are what this test actually guards.
+    drill = _ADM.split('key="adm_tt_sel"', 1)[1][:3500]
     assert "except (KeyError, TypeError, ValueError) as exc:" in drill
     assert "Tuning-target drill unavailable" in drill   # failure is visible
 

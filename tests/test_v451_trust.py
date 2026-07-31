@@ -54,9 +54,14 @@ _REACHABLE = {
         "CORTEX_FUNCTIONS_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "SERVERLESS_TASK_HISTORY", "TASK_HISTORY"),
     "app/ui/pages/cost_parts/compare.py": (),
+    # +TABLES (2026-07-31, audit B4): the storage retention-fix estimate counted the whole
+    # time-travel + failsafe pile as recoverable, which is systematically high — failsafe
+    # drains in 7d regardless of RETENTION_TIME. ACCOUNT_USAGE.TABLES carries the per-table
+    # retention the estimate has to scale by, so this is a DELIBERATE scan-surface change
+    # buying a correct dollar figure (metadata view; no history scan).
     "app/ui/pages/cost_parts/optimize.py": (
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
-        "QUERY_HISTORY", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
+        "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
         "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/operations.py": (
         "COPY_HISTORY", "DYNAMIC_TABLE_REFRESH_HISTORY", "LOCK_WAIT_HISTORY",

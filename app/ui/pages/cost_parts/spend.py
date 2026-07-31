@@ -26,6 +26,7 @@ from app.ui.components import (
     kpi_row,
     result_caption,
     run_mart_first,
+    served_days,
     styled_table,
     user_display_map,
     with_user_names,
@@ -161,13 +162,29 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
                 styled_table(comp.df)
                 result_caption(comp)
             st.markdown("**Cloud-services credits by statement type**")
-            cs_types = run(cost_sql.cs_by_query_type(days, company), page=_PAGE,
-                           key=f"cs_types_{company}_{days}", tier="historical",
-                           source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE)")
+            # P7: this panel only renders when a warehouse is ELEVATED — precisely the
+            # accounts whose QUERY_HISTORY is heaviest, where the live scan measured ~25s.
+            # MART_CLOUD_SVC_DAILY already carries per-query cloud-services credits, so
+            # read the mart first (K2 contract with Group A: cs_by_query_type_mart emits
+            # the same columns as cost_sql.cs_by_query_type) and keep the live scan as the
+            # labeled fallback for accounts where V055 isn't deployed/loaded yet.
+            cs_types = run_mart_first(
+                mart_sql.cs_by_query_type_mart(days, company),
+                cost_sql.cs_by_query_type(days, company),
+                page=_PAGE, key=f"cs_types_{company}_{days}",
+                mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
+                live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
             if guard(cs_types, "No cloud-services credits recorded on queries in this window."):
                 styled_table(cs_types.df, height=220)
+                result_caption(cs_types)
+                # K1: the live builder clamps to MAX_LIVE_WINDOW_DAYS, so on a long page
+                # window the fallback answers a SHORTER window than the header implies.
+                # served_days() reports what actually got scanned; never re-derive it here.
+                _cs_days = served_days(cs_types, days)
                 st.caption("Metadata storms show up here — SHOW/DESCRIBE floods bill "
-                           "cloud services without ever touching a warehouse.")
+                           "cloud services without ever touching a warehouse."
+                           + (f" Scanned {_cs_days}d of the {days}d window (the live "
+                              "fallback caps its scan)." if _cs_days != days else ""))
 
     # V055: shape/user drill-down from MART_CLOUD_SVC_DAILY — for ANY warehouse
     # (not only ELEVATED), no live QUERY_HISTORY scan. Names the exact query

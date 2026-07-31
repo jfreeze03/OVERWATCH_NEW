@@ -17,6 +17,16 @@ IDLE_MIN_CREDITS = 1.0   # and at least 1 idle credit in the window
 # "e.g. 60s" wording did exactly that to a 30s warehouse).
 IDLE_TARGET_SUSPEND_SEC = 60
 
+# B3 (audit 2026-07-31): idle credits are NOT 100% recoverable. Snowflake bills a
+# 60-second minimum on every resume, and a warehouse tuned to AUTO_SUSPEND=60s
+# still burns the suspend timer itself after the last query of each active hour.
+# The ledger used to book the whole idle number as savings, which is a promise the
+# change cannot keep. The haircut charges back one target-suspend tail per ACTIVE
+# metered hour at the warehouse's own credits/hour, leaving the portion a tighter
+# timer can genuinely reclaim. Deliberately an estimate on the conservative side:
+# a warehouse resuming many times inside one hour pays more tails than this.
+IDLE_RESUME_TAIL_SEC = IDLE_TARGET_SUSPEND_SEC
+
 
 def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> pd.DataFrame:
     """Add idle %, idle $, projected monthly waste, and a recommendation."""
@@ -32,6 +42,23 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
     out["IDLE_USD"] = (out["IDLE_CREDITS"] * rate).round(2)
     out["PROJECTED_MONTHLY_IDLE_USD"] = (out["IDLE_USD"] / days * 30).round(2)
     out["FLAGGED"] = (out["IDLE_PCT"] >= IDLE_PCT_FLAG) & (out["IDLE_CREDITS"] >= IDLE_MIN_CREDITS)
+
+    # B3: what a tighter AUTO_SUSPEND can actually reclaim = idle minus the
+    # resume/suspend tail it cannot avoid (one IDLE_RESUME_TAIL_SEC per ACTIVE
+    # metered hour, priced at this warehouse's own credits/hour). Never negative,
+    # never above the idle itself. Both readers (live builder and efficiency
+    # mart) supply METERED_HOURS/IDLE_HOURS; without them there is no basis for a
+    # haircut and the recoverable figure degrades to the full idle number.
+    if {"METERED_HOURS", "IDLE_HOURS"}.issubset(out.columns):
+        metered = out["METERED_HOURS"].clip(lower=0)
+        active_hours = (metered - out["IDLE_HOURS"]).clip(lower=0)
+        credits_per_hour = (out["TOTAL_CREDITS"] / metered.replace(0, pd.NA)).fillna(0.0)
+        tail_credits = active_hours * (IDLE_RESUME_TAIL_SEC / 3600.0) * credits_per_hour
+        recoverable = (out["IDLE_CREDITS"] - tail_credits).clip(lower=0.0)
+    else:
+        recoverable = out["IDLE_CREDITS"]
+    out["RECOVERABLE_IDLE_USD"] = (recoverable * rate).round(2)
+    out["RECOVERABLE_MONTHLY_USD"] = (out["RECOVERABLE_IDLE_USD"] / days * 30).round(2)
 
     # A3 (audit 2026-07-31): the advice must respect the warehouse's CURRENT
     # AUTO_SUSPEND. The old text hardcoded "e.g. 60s" for everything, so a
@@ -81,40 +108,71 @@ def idle_suspend_sql(warehouse: str, seconds: int = 60) -> str:
 
 # ---- 2. Repeat-query candidates ---------------------------------------------
 
-REPEAT_MIN_ELAPSED_HOURS = 0.5
+# D3: the gate is "half an hour of compute PER 30 DAYS", not "half an hour in
+# whatever window happens to be selected". The old absolute threshold made the
+# same fingerprint a candidate at 365d and invisible at 7d — the recommendation
+# moved with the window picker instead of with the workload. The constant keeps
+# its calibrated value; window_days normalizes to it.
+REPEAT_MIN_ELAPSED_HOURS = 0.5      # per REPEAT_GATE_BASE_DAYS
+REPEAT_GATE_BASE_DAYS = 30
 REPEAT_LOW_CACHE_PCT = 25.0
 
 
-def flag_repeat_candidates(df: pd.DataFrame) -> pd.DataFrame:
-    """Flag fingerprints worth materializing/caching: heavy + cache-poor."""
+def flag_repeat_candidates(df: pd.DataFrame, window_days: int = REPEAT_GATE_BASE_DAYS) -> pd.DataFrame:
+    """Flag fingerprints worth materializing/caching: heavy + cache-poor.
+
+    Ranked by the money at stake x the cache-MISS share when the reader supplies
+    EST_CREDITS (D3): wall-clock hours rank an X-Small hour equal to a 4X-Large
+    hour, and a family that is already 95% cached has nothing left to reclaim
+    however many hours it burns. The efficiency mart has no per-size column, so
+    that path keeps the hours ordering — labeled by the caller.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
-    for col in ("RUNS", "TOTAL_ELAPSED_HOURS", "AVG_CACHE_PCT", "TOTAL_TB_SCANNED"):
+    for col in ("RUNS", "TOTAL_ELAPSED_HOURS", "AVG_CACHE_PCT", "TOTAL_TB_SCANNED", "EST_CREDITS"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
+    days = max(int(window_days or REPEAT_GATE_BASE_DAYS), 1)
+    out["HOURS_PER_30D"] = (out["TOTAL_ELAPSED_HOURS"] / days * REPEAT_GATE_BASE_DAYS).round(2)
     out["CANDIDATE"] = (
-        (out["TOTAL_ELAPSED_HOURS"] >= REPEAT_MIN_ELAPSED_HOURS)
+        (out["HOURS_PER_30D"] >= REPEAT_MIN_ELAPSED_HOURS)
         & (out["AVG_CACHE_PCT"] <= REPEAT_LOW_CACHE_PCT)
     )
     out["WHY"] = out.apply(
         lambda r: (
-            f"{int(r['RUNS'])} runs, {r['TOTAL_ELAPSED_HOURS']:.1f}h compute, "
+            f"{int(r['RUNS'])} runs, {r['HOURS_PER_30D']:.1f}h compute/30d, "
             f"{r['AVG_CACHE_PCT']:.0f}% cache — consider a materialized/refreshed table or schedule change."
         ) if r["CANDIDATE"] else "",
         axis=1,
     )
+    if "EST_CREDITS" in out.columns:
+        out["_RANK"] = out["EST_CREDITS"] * (1 - out["AVG_CACHE_PCT"].clip(0, 100) / 100)
+        out = out.sort_values("_RANK", ascending=False).drop(columns=["_RANK"]).reset_index(drop=True)
     return out
 
 
 # ---- 3. Storage growth movers ------------------------------------------------
 
+MOVERS_MIN_CONFIDENT_DAYS = 7   # below this a slope is noise, not a trend
+
+
 def storage_movers(df: pd.DataFrame, usd_per_tb_month: float) -> pd.DataFrame:
-    """Growth per database with projected monthly $ delta."""
+    """Growth per database with projected monthly $ delta.
+
+    D4 (audit 2026-07-31): the 30-day projection prefers the least-squares slope
+    over every observed day (SLOPE_BYTES_PER_DAY) instead of the endpoint diff —
+    one reload or purge on the first/last day used to become the whole trend, and
+    x30 multiplied it. Series shorter than MOVERS_MIN_CONFIDENT_DAYS are marked
+    LOW_CONFIDENCE rather than silently projected; the caller says so on screen.
+    Rows are ordered by projected DOLLARS, because that is what the chart and the
+    top-10 cut are about (a 3 TB database growing slowly is not the mover).
+    """
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
-    for col in ("FIRST_BYTES", "LAST_BYTES", "FAILSAFE_BYTES", "SPAN_DAYS"):
+    for col in ("FIRST_BYTES", "LAST_BYTES", "FAILSAFE_BYTES", "SPAN_DAYS",
+                "DAYS_OBSERVED", "SLOPE_BYTES_PER_DAY"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
     tb = 1024.0**4
@@ -122,12 +180,29 @@ def storage_movers(df: pd.DataFrame, usd_per_tb_month: float) -> pd.DataFrame:
     out["CURRENT_TB"] = (out["LAST_BYTES"] / tb).round(3)
     out["GROWTH_TB"] = ((out["LAST_BYTES"] - out["FIRST_BYTES"]) / tb).round(3)
     span = out["SPAN_DAYS"].clip(lower=1)
-    out["GROWTH_TB_30D"] = (out["GROWTH_TB"] / span * 30).round(3)
+    endpoint_30d = out["GROWTH_TB"] / span * 30
+    if "SLOPE_BYTES_PER_DAY" in out.columns:
+        slope_30d = out["SLOPE_BYTES_PER_DAY"] / tb * 30
+        # A regression needs points; fall back to the endpoint diff when the
+        # reader (or an older mart) gave us none.
+        usable = out["SLOPE_BYTES_PER_DAY"].notna() & (out.get(
+            "DAYS_OBSERVED", pd.Series(0, index=out.index)) >= 2)
+        out["GROWTH_TB_30D"] = slope_30d.where(usable, endpoint_30d).round(3)
+        out["TREND_BASIS"] = usable.map({True: "regression", False: "endpoints"})
+    else:
+        out["GROWTH_TB_30D"] = endpoint_30d.round(3)
+        out["TREND_BASIS"] = "endpoints"
+    observed = out["DAYS_OBSERVED"] if "DAYS_OBSERVED" in out.columns else span
+    out["LOW_CONFIDENCE"] = (span < MOVERS_MIN_CONFIDENT_DAYS) | (observed < MOVERS_MIN_CONFIDENT_DAYS)
     out["GROWTH_USD_30D"] = (out["GROWTH_TB_30D"] * rate).round(2)
+    # E6: AVERAGE_FAILSAFE_BYTES is reported ALONGSIDE AVERAGE_DATABASE_BYTES,
+    # not inside it, so failsafe / database could (and did) exceed 100%. Share of
+    # the database's TOTAL billed bytes is the number the label promises.
+    total_bytes = (out["LAST_BYTES"] + out["FAILSAFE_BYTES"]).replace(0, pd.NA)
     out["FAILSAFE_SHARE_PCT"] = (
-        out["FAILSAFE_BYTES"] / out["LAST_BYTES"].replace(0, pd.NA) * 100
-    ).fillna(0.0).round(1)
-    return out.sort_values("GROWTH_TB", ascending=False).reset_index(drop=True)
+        out["FAILSAFE_BYTES"] / total_bytes * 100
+    ).fillna(0.0).clip(0, 100).round(1)
+    return out.sort_values("GROWTH_USD_30D", ascending=False).reset_index(drop=True)
 
 
 # ---- 4. Release compare --------------------------------------------------------

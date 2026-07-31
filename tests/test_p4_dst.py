@@ -227,25 +227,29 @@ def test_account_today_delegates_to_account_now(monkeypatch):
 
 
 def test_overdue_is_judged_in_account_time_not_server_time(monkeypatch):
-    """An action due later tonight (account time) is not overdue yet.
+    """An action due TODAY (account time) is not overdue yet.
 
-    Constructed so a server clock cannot pass it. Frozen account-now is
-    23:00 on 6/14; 'not-yet' is due at 23:30, so only 'past-due' is overdue and
-    it must rank first. A wall-clock now() is far past both due dates, marks
-    BOTH overdue, and then the tiebreak falls to age — which 'not-yet' wins by
-    two weeks, inverting the order. Same rows, opposite answer.
+    D1 (2026-07-31): overdue is now a DAY comparison, because ACTION_QUEUE.DUE_DATE
+    is a DATE column (V005) — it can only ever land at midnight, so the old
+    instant comparison called every action due today overdue from 00:00:01 of the
+    day the owner was given. This test keeps its original point at day grain:
+    frozen account-now is 23:00 on 6/14, so 'due-today' (6/14) is not overdue and
+    only 'past-due' (6/13) is, putting past-due first. The wall-clock server is
+    already on 6/15, which would mark BOTH overdue and drop the tiebreak to age —
+    'due-today' wins that by two weeks, inverting the order. Same rows, opposite
+    answer, which is exactly what the account-time clock exists to prevent.
     """
     monkeypatch.setattr(
         formulas, "datetime",
         _FrozenClock(datetime(2026, 6, 15, 4, 0, tzinfo=_UTC)))  # 23:00 Chicago, 6/14
     df = pd.DataFrame({
-        "ID": ["past-due", "not-yet"],
+        "ID": ["past-due", "due-today"],
         "STATUS": ["OPEN", "OPEN"],
         "SEVERITY": ["HIGH", "HIGH"],
-        "DUE_DATE": [datetime(2026, 6, 14, 22, 0),    # before account-now -> overdue
-                     datetime(2026, 6, 14, 23, 30)],  # after  account-now -> not yet
+        "DUE_DATE": [datetime(2026, 6, 13),           # yesterday (account) -> overdue
+                     datetime(2026, 6, 14)],          # today (account)     -> not yet
         "CREATED_AT": [datetime(2026, 6, 14, 20, 0),  # 3 hours old
                        datetime(2026, 6, 1, 9, 0)],   # two weeks old
     })
     ranked = actions.rank_actions(df, limit=10)
-    assert list(ranked["ID"]) == ["past-due", "not-yet"]
+    assert list(ranked["ID"]) == ["past-due", "due-today"]
