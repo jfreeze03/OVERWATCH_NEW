@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.106.0 — Bug round 5: Overview rerun loop + two attribution/table fidelity fixes (app-only) (2026-07-31)
+
+A find → adversarially-verify → rank pass returned five confirmed findings; the three
+app-only ones are fixed here (the two migration-proc findings are tracked for the next
+owner migration). **Three of the five were regressions from the recent design waves —
+the adversarial pass earning its keep.**
+
+- **Rank 1 (HIGH) — Overview "Top actions" infinite rerun for EXECUTIVE.** The rec 10
+  clickable Top-actions table fired `request_navigation("Control Room")` on *any*
+  selection. For an EXECUTIVE (no Control Room page) the jump clamped back to Overview
+  and reran; `st.dataframe`'s selection is **sticky** and re-emitted every rerun, so it
+  re-fired forever — the page spun. Fixed at two layers: (1) `request_navigation` now
+  **clamps the target to the viewer's profile and no-ops a self-jump** (same page, no
+  section/filters) instead of queuing a rerun; (2) the Overview handler acts only on a
+  **new** selection (`_ov_actions_last`), so a sticky value can't re-fire on unrelated
+  reruns.
+- **Rank 4 (LOW) — allocation caption vs. pool mismatch.** The "By user and database"
+  intro caption stated the **full-window** pool, but a **cold allocation mart on a
+  >90-day window** serves the dims **live** (a 90-day pool). The two dims now **pre-fetch**
+  (cached, not doubled) so the caption reads the pool off the path that actually served —
+  the stated dollars always match the bars.
+- **Rank 5 (LOW) — wide-table identity column lost its pin.** The rec 13 header
+  prettifier occupied the first column's config slot, so `_auto_pin` saw it as
+  caller-configured and **skipped pinning** on ≥8-column tables. The pin and the pretty
+  label are now built into the **same** `Column`, so a wide table keeps both.
+
+Gates green: ruff, mypy, tests.
+
 ## 4.105.0 — Fix: sidebar nav multi-select / stuck navigation (app-only) (2026-07-31)
 
 The grouped sidebar nav (Watch/Analyze/Govern) could show **two groups selected at

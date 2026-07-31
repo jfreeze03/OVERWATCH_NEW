@@ -84,6 +84,19 @@ def apply_filters(**kwargs) -> None:
 def request_navigation(page: str, section: str = "", filters: dict | None = None) -> None:
     """Queue a cross-page jump; consumed at the top of the NEXT run, before
     any widget instantiates (Streamlit forbids touching a live widget's key)."""
+    # Clamp off-profile targets HERE (B8 also clamps on consume), then NO-OP a jump
+    # that resolves to the current page with no section change. A sticky st.dataframe
+    # selection re-fires request_navigation every rerun; without this, an EXECUTIVE
+    # clicking a Top-action row (whose Control Room jump clamps back to Overview) spun
+    # forever — request_navigation -> rerun -> selection re-emits -> request_navigation.
+    if page:
+        from app.config import PAGES_BY_PROFILE, resolve_role_profile
+        from app.core.session import current_role
+        allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+        if allowed and page not in allowed:
+            page = "Overview"  # offered by every profile
+    if page == st.session_state.get("_ow_page") and not section and not filters:
+        return
     st.session_state["_ow_nav_pending"] = {
         "page": page, "section": section, "filters": dict(filters or {}),
     }

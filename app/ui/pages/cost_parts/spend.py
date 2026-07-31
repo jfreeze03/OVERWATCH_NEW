@@ -263,14 +263,37 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     if _wp.usable() else window_usd)
             return _live_pool[0]
 
-        # a schema filter forces BOTH dims live, so the intro caption shows the matched
-        # window then; otherwise the full-window pool.
-        _intro_pool = _alloc_pool("QUERY_HISTORY") if schema_contains else window_usd
         result_caption(wh, note="Equal-length windows excluding the current partial day for "
                                 "completeness. Exact USAGE, not billed: totals include each "
                                 "warehouse's idle time and its unadjusted cloud-services credits "
                                 "— the account-level rebate lives on the Spend panel. "
                                 "Company-wide: the database/schema filters don't narrow this table.")
+
+        # Pre-fetch both allocation dims so the intro caption states the SAME pool the bars
+        # use. r5-bug: both dims read the same mart over the same window, so their serving is
+        # identical — but a cold mart on a >90d window serves them live (90d pool) while the
+        # caption used to guess the full-window pool. Resolve the served pool from the actual
+        # path. Keys match the render pass below, so these reads are cached, not doubled.
+        def _fetch_alloc(dim: str):
+            _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains)
+            if schema_contains:
+                # no allocation mart carries a schema grain — live only
+                return run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                           tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
+            # P0-1/P0-2 (Codex 2026-07-14): BOTH unfiltered and database-filtered attribution
+            # read FACT_COST_ALLOC_XDIM_DAILY so company scope is warehouse-based on every
+            # path. The owner-scoped MART_COST_ALLOCATION_DAILY made the same user/DB total
+            # shift when a database filter was toggled. `database` is "" unfiltered.
+            return run_mart_first(
+                mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database),
+                _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                mart_source="FACT_COST_ALLOC_XDIM_DAILY (mart — warehouse-hour credit share)",
+                live_source="QUERY_HISTORY (elapsed share, live fallback)")
+
+        _dim_res = {dim: _fetch_alloc(dim) for dim in ("USER_NAME", "DATABASE_NAME")}
+        # both dims share serving; read the pool off the path that answered.
+        _served = _dim_res["USER_NAME"] if _dim_res["USER_NAME"].usable() else _dim_res["DATABASE_NAME"]
+        _intro_pool = _alloc_pool(_served.source)
 
         st.markdown("**By user and database (allocated — estimate)**")
         st.caption(
@@ -288,22 +311,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
             with col:
-                _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains)
-                if schema_contains:
-                    # no allocation mart carries a schema grain — live only
-                    res = run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
-                              tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
-                else:
-                    # P0-1/P0-2 (Codex 2026-07-14): BOTH unfiltered and database-
-                    # filtered attribution read FACT_COST_ALLOC_XDIM_DAILY so company
-                    # scope is warehouse-based on every path. The owner-scoped
-                    # MART_COST_ALLOCATION_DAILY made the same user/DB total shift
-                    # when a database filter was toggled. `database` is "" unfiltered.
-                    res = run_mart_first(
-                        mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database),
-                        _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
-                        mart_source="FACT_COST_ALLOC_XDIM_DAILY (mart — warehouse-hour credit share)",
-                        live_source="QUERY_HISTORY (elapsed share, live fallback)")
+                res = _dim_res[dim]
                 if guard(res, f"No query history to allocate by {label}."):
                     alloc = res.df.copy()
                     # r4: multiply by the pool over the SAME window the share was

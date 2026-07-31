@@ -489,7 +489,12 @@ def render() -> None:
                     ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
                     key="ov_actions_sel", slug="top-actions",
                     column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f")})
-                if _sel is not None:
+                # Act only on a NEW selection: st.dataframe's selection is sticky and
+                # re-emits on every rerun, so firing navigation unconditionally re-ran
+                # each time (request_navigation now no-ops a self-jump, but this also
+                # spares the churn on unrelated reruns).
+                if _sel is not None and _sel != st.session_state.get("_ov_actions_last"):
+                    st.session_state["_ov_actions_last"] = _sel
                     request_navigation("Control Room")
                 st.caption("Click a row to open it in the Control Room queue.")
                 result_caption(actions_res)

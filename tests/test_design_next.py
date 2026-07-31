@@ -64,7 +64,12 @@ def test_rec13_prettify_header():
     assert _prettify_header("CREDITS_USD") == "Credits USD"    # USD token preserved
     assert _prettify_header("USD") == "USD"                    # short all-caps left alone
     assert _prettify_header("Already Human") == "Already Human"
-    assert 'st.column_config.Column(_pretty)' in _src("app/ui/components.py")
+    comp = _src("app/ui/components.py")
+    assert "st.column_config.Column(_label)" in comp                      # relabel-only path
+    # r5-bug: the pin and the pretty label go into the SAME Column so a wide table's
+    # first column keeps both (the old code let the prettifier defeat _auto_pin).
+    assert "st.column_config.Column(_label, pinned=True)" in comp
+    assert "def _auto_pin" not in comp                                    # inlined away
 
 
 # rec6 — Control Room top-level sections use section_header

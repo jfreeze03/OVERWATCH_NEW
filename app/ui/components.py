@@ -663,23 +663,6 @@ def timestampish_columns(columns) -> list[str]:
     return out
 
 
-def _auto_pin(df, column_config: dict | None) -> dict | None:
-    """Pin the first column on wide tables so horizontal scroll keeps the
-    row's identity. No-op when the caller configured that column, when the
-    table is narrow, or on runtimes without pinning support."""
-    if len(df.columns) < 8:
-        return column_config
-    first = df.columns[0]
-    cfg = dict(column_config or {})
-    if first in cfg:
-        return column_config
-    try:
-        cfg[first] = st.column_config.Column(pinned=True)
-    except TypeError:  # runtime predates pinned=
-        return column_config
-    return cfg
-
-
 def _slugify(text: object, fallback: str = "table") -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") or fallback
 
@@ -754,20 +737,33 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     break
         column_config = cfg
     # rec13: human-readable headers for SQL-shaped UPPER_SNAKE columns (display only —
-    # the CSV keeps raw names). Columns with an explicit column_config (units, custom
-    # labels) or that get a printf NumberColumn on the large-frame path are left as-is.
+    # the CSV keeps raw names). Columns with an explicit CALLER column_config (units,
+    # custom labels) or a large-frame printf NumberColumn are left as-is.
+    #
+    # The first column of a wide (>=8-col) table is ALSO pinned so horizontal scroll
+    # keeps the row's identity. r5-bug: pinning used to run AFTER the prettifier had put
+    # the first column in the config, so it saw `first in cfg` and bailed — the identity
+    # column silently un-pinned. Now the pin and the pretty label go into the SAME Column
+    # (built off the CALLER config, not the prettifier's, so a caller override still wins).
+    caller_cfg = set(column_config or {})
     _cfg = dict(column_config or {})
+    _pin_col = df.columns[0] if len(df.columns) >= 8 and df.columns[0] not in caller_cfg else None
     for _col in df.columns:
-        if _col in _cfg:
+        if _col in caller_cfg:
             continue
         _pretty = _prettify_header(_col)
-        if _pretty != str(_col):
-            try:
-                _cfg[_col] = st.column_config.Column(_pretty)
-            except Exception:  # noqa: BLE001 - relabel is cosmetic, never break the table
-                pass
+        _label = _pretty if _pretty != str(_col) else None
+        if _label is None and _col != _pin_col:
+            continue
+        try:
+            _cfg[_col] = st.column_config.Column(_label, pinned=True) if _col == _pin_col \
+                else st.column_config.Column(_label)
+        except TypeError:  # runtime predates pinned= : keep the relabel, drop the pin
+            if _label is not None:
+                _cfg[_col] = st.column_config.Column(_label)
+        except Exception:  # noqa: BLE001 - relabel/pin is cosmetic, never break the table
+            pass
     column_config = _cfg or None
-    column_config = _auto_pin(df, column_config)
     if height is None and len(df) > 10:
         height = 380
     kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
