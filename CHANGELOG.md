@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.108.0 — Bug round 6: 10 app-only correctness fixes (2026-07-31)
+
+A find → adversarially-verify → rank pass across six domains returned 15 confirmed
+findings (0 dropped). The 10 app-only ones ship here; the 5 migration-proc findings ship
+in V066. Several were fresh instances of patterns caught in earlier rounds (sticky
+selection, window-mismatched allocation pools, missing `delta_color`).
+
+- **#4 (MED) — health/pulse bar no longer vanishes on a read error.** `_health_values`
+  conflated a failed read with an empty one (both → `{}`), so a transient error blanked the
+  sidebar pulse and status bar entirely — an operator could read "nothing red" while
+  criticals were open. It now returns `None` on error (distinct from `{}`), and the callers
+  render a muted "Health check unavailable" instead of blank chrome.
+- **#5 (MED) — stale spend anomalies age out.** The MAD-based anomaly keeps a one-off spike
+  at high |z| for the whole trailing-30-day frame, and the triage row hardcoded
+  `RAISED_AT=None` — so the same 30-day-old spike re-fired as an undismissable, dateless
+  HIGH every morning. `anomaly_summary` now carries each hit's day, the triage row stamps it,
+  and the Control Room feed keeps only the most recent complete day's anomalies.
+- **#7 (MED) — spend-trend "pace vs prior week" excludes the partial day.** The trailing-7
+  mean included today's `PROVISIONAL` (partial) bar the chart itself dims, printing a
+  phantom negative pace on flat spend. It now compares the last two complete 7-day windows.
+- **#8 / #12 (MED/LOW) — chargeback role allocation.** On the live fallback (cold role mart)
+  a ≤90-day share was multiplied by an up-to-365-day pool; the pool is now rebuilt over the
+  share's clamped window (mirrors the Spend `_alloc_pool` fix). And `wh_usd` now aggregates
+  to warehouse grain (`groupby.sum`) instead of collapsing multi-company rows to the last.
+- **#9 (MED) — jump-to a cross-company database keeps its filter.** Picking a Trexis DB while
+  scoped to ALFA was silently dropped by the company guard; the jump now carries the DB's
+  owning company (derived from the same sets that populate the box).
+- **#10 (MED) — Operations query drill acts only on a new row selection.** The sticky
+  `st.dataframe` selection overwrote the manual/picked query-ID every rerun and silently
+  repointed the detail after a table reload; guarded with `_ops_top_sel_last` (as Overview).
+- **#13 (LOW) — failed-login reasons share the 30-day cap** of the failed-logins table above
+  them, so the two panels reconcile under one window scope.
+- **#14 / #15 (LOW) — neutral `delta_color` on cost cards.** The Contract "Consumed" (95%
+  near-exhaustion) and Storage-MTD cards rendered a reassuring green up-arrow on a rising
+  cost; both now route through the neutral token like their siblings.
+
+Gates green: ruff, mypy (pure layers), pytest 1642 passed / 1 skipped (+13 new locks).
+
 ## 4.107.0 — V065 owner migration: alert run-rate window fixes (bug round 5, ranks 2–3) (2026-07-31)
 
 The two migration-proc findings from bug round 5, shipped as a new owner migration

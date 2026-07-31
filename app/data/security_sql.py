@@ -215,7 +215,10 @@ LIMIT 300
 def failed_login_reasons(days: int, company: str = "ALL") -> str:
     """Failed logins grouped by reason — network-policy blocks surface
     separately from bad credentials."""
-    days = bounded_days(days)
+    # r6-bug13: match failed_logins()' 30d cap. This breakdown is presented as the
+    # decomposition of the failed-logins table directly above it; a wider (90d) window
+    # here made the two panels disagree under one "90 days" scope and never reconcile.
+    days = bounded_days(days, maximum=30)
     where = and_where(
         f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "IS_SUCCESS = 'NO'",

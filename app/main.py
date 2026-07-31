@@ -368,7 +368,14 @@ def _global_jump(pages: tuple) -> None:
     elif kind == "Page":
         request_navigation(name)
     elif kind == "DB":
-        request_navigation("Operations", "Queries", {"database": name})
+        # r6-bug9: carry the DB's owning company. The jump list offers databases from BOTH
+        # tenants, so picking a Trexis DB while the company filter sits at ALFA used to be
+        # silently dropped by init_filters' company guard (DB classified Trexis != ALFA ->
+        # reset to ALL databases). Derive the company from the SAME sets that built the
+        # option so it always matches; fall back to no company if somehow unknown.
+        _co = "Trexis" if name in TREXIS_DATABASES else ("ALFA" if name in ALFA_DATABASES else "")
+        _dbf = {"company": _co, "database": name} if _co else {"database": name}
+        request_navigation("Operations", "Queries", _dbf)
     elif kind == "WH":
         request_navigation("Operations", "Warehouses", {"warehouse_contains": name})
     elif kind == "Rule":
@@ -395,21 +402,34 @@ def _strip_line(state: str, text: str) -> None:
     )
 
 
-def _health_values() -> dict[str, tuple[str, str]]:
+# r6-bug4: a sentinel that lets the health-strip callers tell "not passed" (fetch it
+# yourself) apart from None. None now means the health read ERRORED — distinct from {} (a
+# healthy/undeployed account with no rows) — so a failed safety read never renders as a
+# blank/green "all clear" bar while criticals are actually open.
+_UNSET: object = object()
+
+
+def _health_values() -> dict[str, tuple[str, str]] | None:
     """One fetch+parse of the health-strip mart, shared by the sidebar strip,
     the persistent status bar, and the top bar (they used to parse it thrice
-    with three different source labels)."""
+    with three different source labels). Returns None on a read ERROR, {} on a
+    successful-but-empty read (see _UNSET note)."""
     res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
               source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
-    if not res.ok or res.empty:
+    if not res.ok:
+        return None
+    if res.empty:
         return {}
     return {str(r["METRIC"]): (str(r["VALUE"]), str(r["STATE"])) for _, r in res.df.iterrows()}
 
 
-def _health_strip(vals: dict | None = None) -> None:
+def _health_strip(vals: object = _UNSET) -> None:
     """Always-visible pulse: criticals, telemetry freshness, MTD credits.
     You should not have to visit Overview to know something is red."""
-    vals = _health_values() if vals is None else vals
+    vals = _health_values() if vals is _UNSET else vals
+    if vals is None:   # r6-bug4: a FAILED read must not render as blank chrome
+        _strip_line("MUTED", "Health check unavailable")
+        return
     if not vals:
         return
     crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
@@ -438,10 +458,13 @@ def _health_strip(vals: dict | None = None) -> None:
         _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
 
 
-def _persistent_status_bar(vals: dict | None = None) -> None:
+def _persistent_status_bar(vals: object = _UNSET) -> None:
     """The 3-4 numbers that matter, on every page (CoCo high item)."""
     from app.ui.components import status_bar
-    vals = _health_values() if vals is None else vals
+    vals = _health_values() if vals is _UNSET else vals
+    if vals is None:   # r6-bug4: keep the bar chrome + say the read failed, never vanish
+        status_bar([{"k": "Health", "v": "unavailable", "icon": "alerts", "sev": "warn"}])
+        return
     if not vals:
         return
     crit, _ = vals.get("OPEN_CRITICAL", ("0", "OK"))

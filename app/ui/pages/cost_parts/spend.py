@@ -497,6 +497,9 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         kpi_row([
             {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
              "delta": f"~{format_usd(mtd_tib * rate_tb)}/mo",
+             # r6-bug15: a monthly cost estimate is not a favorable move — neutral, like
+             # the "Prior full month" sibling below (else a rising cost shows green up).
+             "delta_color": "off",
              "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
                      f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
                      "basis (binary TiB). Estimate; the org rate-card panel on Contract & Forecast is billing truth."},

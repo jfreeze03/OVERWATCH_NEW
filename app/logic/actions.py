@@ -147,7 +147,9 @@ def triage_queue(
             "TITLE": title,
             "DETAIL": detail,
             "SOURCE": "FACT_WAREHOUSE_DAILY",
-            "RAISED_AT": None,
+            # r6-bug5: stamp the anomaly's own day (was hardcoded None -> a dateless HIGH
+            # indistinguishable from an overnight break). Normalized to text below.
+            "RAISED_AT": a.get("day"),
             "EVENT_ID": "",
             "RULE_ID": "",
         })

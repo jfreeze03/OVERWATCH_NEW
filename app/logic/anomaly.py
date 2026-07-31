@@ -81,19 +81,26 @@ def flag_anomalies(
     return out
 
 
-def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str) -> list[dict]:
-    """Compact anomaly rows for KPI/alert surfaces, strongest first."""
+def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
+                    day_col: str = "DAY") -> list[dict]:
+    """Compact anomaly rows for KPI/alert surfaces, strongest first.
+
+    Each row carries its ``day`` (the value of ``day_col``, or None when the frame
+    has no such column) so callers can age one-off spikes out instead of re-firing a
+    stale, dateless anomaly every rerun (r6-bug5)."""
     if df.empty or "IS_ANOMALY" not in df.columns:
         return []
     hits = df[df["IS_ANOMALY"]].copy()
     if hits.empty:
         return []
     hits = hits.reindex(hits["Z_SCORE"].abs().sort_values(ascending=False).index)
+    _has_day = day_col in hits.columns
     return [
         {
             "label": str(row.get(label_col, "")),
             "value": float(row.get(value_col, 0.0) or 0.0),
             "z": round(float(row.get("Z_SCORE", 0.0) or 0.0), 1),
+            "day": row.get(day_col) if _has_day else None,
         }
         for _, row in hits.head(10).iterrows()
     ]

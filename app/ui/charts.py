@@ -133,9 +133,14 @@ def spend_trend(
     st.altair_chart(alt.layer(*layers), use_container_width=True)
     total = float(data["USD"].sum())
     note = f"Bars = each day's spend (window total ${total:,.0f}); line = 7-day average"
-    if len(data) >= 14:
-        last7 = float(data["USD"].tail(7).mean())
-        prior7 = float(data["USD"].iloc[-14:-7].mean())
+    # r6-bug7: pace over COMPLETE days only. The newest day is PROVISIONAL (metering lags
+    # up to 24h; the chart dims it and the caption disclaims it), so including it in the
+    # trailing-7 mean understated the recent week and printed a phantom negative "pace"
+    # on flat spend. Compare the last two COMPLETE 7-day windows instead.
+    complete = data[~data["PROVISIONAL"]]
+    if len(complete) >= 14:
+        last7 = float(complete["USD"].tail(7).mean())
+        prior7 = float(complete["USD"].iloc[-14:-7].mean())
         if prior7 > 0:
             note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
     st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")

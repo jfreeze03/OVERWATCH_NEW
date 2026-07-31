@@ -167,7 +167,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         candidate_ids = [str(q) for q in top.df["QUERY_ID"].dropna().head(50)]
     clicked_qid = ""
     try:
-        if top.usable() and sel_q is not None:
+        # r6-bug10: act only on a NEW row selection. st.dataframe's selection is sticky and
+        # re-emitted every rerun; overwriting _ops_drill_target unconditionally undid a
+        # manual paste/pick, and after the table reloaded (e.g. a Window change) the stale
+        # index silently repointed the detail to whatever query now sits at that row.
+        if (top.usable() and sel_q is not None
+                and sel_q != st.session_state.get("_ops_top_sel_last")):
+            st.session_state["_ops_top_sel_last"] = sel_q
             clicked_qid = str(top.df.iloc[int(sel_q)]["QUERY_ID"])
             st.session_state["_ops_drill_target"] = clicked_qid
     except (KeyError, IndexError, ValueError, TypeError):

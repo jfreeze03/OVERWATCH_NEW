@@ -427,12 +427,18 @@ def render() -> None:
                    key=f"cr_wh_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
     anomalies: list[dict] = []
     if wh_daily.usable():
-        flagged = flag_anomalies(
-            complete_days_only(wh_daily.df)  # B4: don't score today's partial row
-            .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))),
-            "USD", group_col="WAREHOUSE_NAME",
-        )
+        _wh_complete = (complete_days_only(wh_daily.df)  # B4: don't score today's partial row
+                        .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))))
+        flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME")
         anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
+        # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
+        # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
+        # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
+        # every morning, indistinguishable from an overnight break. anomaly_summary now
+        # carries each hit's day, so the triage feed can age stale spikes out.
+        if anomalies and "DAY" in _wh_complete.columns and not _wh_complete.empty:
+            _latest = str(_wh_complete["DAY"].max())
+            anomalies = [a for a in anomalies if str(a.get("day") or "") == _latest]
 
     queue = triage_queue(
         alerts.df if alerts.usable() else None,

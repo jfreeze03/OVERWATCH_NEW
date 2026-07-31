@@ -345,6 +345,9 @@ def _contract_tab(settings: dict) -> None:
     kpi_row([
         {"label": "Consumed", "value": f"{consumed:,.0f} cr",
          "delta": f"{pace['consumed_share']:.1f}% of contract",
+         # r6-bug14: share-of-contract is informational, not a good/bad move — a
+         # near-exhaustion 95% must NOT render as a reassuring green up-arrow.
+         "delta_color": "off",
          "help": f"Billed credits since contract start.{_floor}"},
         {"label": "Contract clock", "value": f"{pace['time_share']:.1f}%", "help": f"{pace['days_remaining']} days remaining."},
         {"label": "Pace", "value": f"{pace['pace_ratio']:.2f}x",

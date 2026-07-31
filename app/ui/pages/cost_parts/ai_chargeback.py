@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import core_object
+from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
 from app.core.sqlsafe import sql_literal, sql_number
@@ -285,7 +285,24 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         mart_source="FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)",
         live_source="QUERY_HISTORY (elapsed share per warehouse, live fallback)")
     if share_res.usable():
-        wh_usd = df.set_index("WAREHOUSE_NAME")["USD"].to_dict()
+        # r6-bug8: match the pool window to the share window. When the role mart is cold,
+        # the live share leg (role_share_within_warehouse) clamps to <=90d while the pool
+        # (department_window_credits) spans up to 365d — a 90d share x a 365d pool
+        # over-attributes recent-only roles. If a >90d request is served LIVE, rebuild the
+        # per-warehouse pool over the same clamped window (mirrors spend.py _alloc_pool).
+        _pool_df = df
+        if "QUERY_HISTORY" in str(share_res.source) and days > MAX_LIVE_WINDOW_DAYS:
+            _pr = run(chargeback_sql.department_window_credits(MAX_LIVE_WINDOW_DAYS, company),
+                      page=_PAGE, key=f"cb_dept_{company}_{MAX_LIVE_WINDOW_DAYS}", tier="historical",
+                      source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP (share-matched window)")
+            if _pr.usable():
+                _pool_df = _pr.df.copy()
+                _pool_df["USD"] = _pool_df["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
+        # r6-bug12: aggregate to warehouse grain BEFORE mapping. _pool_df is grouped by
+        # (DEPARTMENT, WAREHOUSE_NAME, COMPANY); set_index(WAREHOUSE_NAME).to_dict() keeps
+        # only the LAST row when a warehouse spans multiple companies/departments, so every
+        # role's allocation on that warehouse scaled by a fraction of the true pool.
+        wh_usd = _pool_df.groupby("WAREHOUSE_NAME")["USD"].sum().to_dict()
         share = share_res.df.copy()
         # vectorized (r18 #16) — same math, Series-wise instead of per-row
         share["ALLOCATED_USD"] = (
