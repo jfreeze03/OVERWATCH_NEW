@@ -83,12 +83,17 @@ def test_c2n5_required_source_repointed_and_wired_failclosed():
 
 
 # ---------------------------------------------------------------------------
-# C11 / N7 — account-wide badges + storage/transfer exclusion disclosure
+# C11 / N7 — account-wide scope tokens + storage/transfer exclusion disclosure
 # ---------------------------------------------------------------------------
 def test_c11_account_wide_badges_on_metering_kpis():
     ov = _src("app/ui/pages/overview.py")
-    # 3 MTD returns in _mtd_pace_kpi + the MTD fallback + Projected month-end
-    assert ov.count('"badge": "account-wide"') >= 5
+    # Wave B / rec 13 split the single "badge" slot into distinct trust tokens:
+    # freshness (mart|live|stale) stays on `badge`, provenance moves to
+    # method (billed|metering) + scope (account-wide|company). The account-wide
+    # billed figures (3 MTD returns in _mtd_pace_kpi + the MTD fallback +
+    # Projected month-end) now carry scope, not badge.
+    assert ov.count('"scope": "account-wide"') >= 5
+    assert ov.count('"method": "billed"') >= 5   # the same billed KPIs name their method
 
 
 def test_n7_storage_transfer_disclosure_on_overview_and_brief():

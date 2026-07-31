@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.95.0 — Codex R2 NEXT wave B: distinct card trust tokens + section scope (rec 13/11, app-only) (2026-07-30)
+
+- **rec 13 (MEDIUM)** — the KPI card had ONE chip slot, so scope and freshness competed
+  for it: C11 crammed `account-wide` into the freshness `badge`, and a card could show
+  scope OR freshness, never both. The card now renders **three distinct trust tokens** —
+  freshness (`badge`: mart|live|stale), method (`billed`|`metering`), and scope
+  (`account-wide`|`company`) — each as its own chip with its own color. The Overview
+  billed MTD/Projected cards carry `method: billed` + `scope: account-wide`; the company
+  window-spend card carries `method: metering` + `scope: company`. New theme styles for
+  the `--method` / `--scope` chips.
+- **rec 11 (MEDIUM)** — the Overview headline KPIs are account-/company-scoped and do NOT
+  honor the warehouse/schema/user/database dimension chips (those bite on the detail
+  pages). New `section_scope_note(filters)` surfaces a single honest line naming the
+  active dimension chips a section ignores — but **only when one is set**, so there is
+  zero clutter on the common no-filter path. Shares the rec 13 scope vocabulary
+  (`_SCOPE_DIM_LABELS`) as one source of truth.
+
+Gates green: ruff, mypy, tests (+5 wave-B locks).
+
 ## 4.94.0 — Codex R2 NEXT wave A: score-read batching + single allocation chart (app-only) (2026-07-30)
 
 - **rec 9 (MEDIUM)** — finish the Overview first-paint batching for the score path.

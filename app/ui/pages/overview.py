@@ -38,6 +38,7 @@ from app.ui.components import (
     page_header,
     result_caption,
     run_mart_first,
+    section_scope_note,
     styled_table,
 )
 
@@ -161,7 +162,7 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     # C11: metering-daily has no company grain, so MTD is account-wide even under
     # a company filter — the badge says so on the card (the help already did).
     if not hist.usable():
-        return {"label": "MTD spend", "value": format_usd(mtd_spend), "badge": "account-wide",
+        return {"label": "MTD spend", "value": format_usd(mtd_spend), "method": "billed", "scope": "account-wide",
                 "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
     frame = hist.df.copy()
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
@@ -169,11 +170,11 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
     if pct is None:
-        return {"label": "MTD spend", "value": format_usd(mtd), "badge": "account-wide",
+        return {"label": "MTD spend", "value": format_usd(mtd), "method": "billed", "scope": "account-wide",
                 "help": "Pace vs last month appears once the prior month has "
                         "daily facts (backfill_365.sql loads the year)." + budget_note}
     return {"label": "MTD vs last month (same days)",
-            "value": format_usd(mtd), "badge": "account-wide",
+            "value": format_usd(mtd), "method": "billed", "scope": "account-wide",
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
             "help": "Billed credits, account-wide, at today's rate. The value is "
@@ -401,6 +402,7 @@ def render() -> None:
         {
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
+            "method": "metering", "scope": "company",  # rec 13: warehouse metering, company-scoped
             "spark": _spend_spark,
             "help": "Warehouse metering credits x "
                     f"${rate:.2f}/credit ({settings.get('_source')}) — the "
@@ -411,13 +413,13 @@ def render() -> None:
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
-            "badge": "account-wide",
+            "method": "billed", "scope": "account-wide",
             "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",
         },
         {
             "label": "Projected month-end",
             "value": format_usd(forecast.projected_usd) if forecast.ok else "Needs history",
-            "badge": "account-wide",
+            "method": "billed", "scope": "account-wide",
             "help": (f"{forecast.basis} Range {format_usd(forecast.low_usd)}-{format_usd(forecast.high_usd)}."
                      if forecast.ok else forecast.basis),
         },
@@ -454,6 +456,14 @@ def render() -> None:
     # the whole bill. Not folded in: that would break the credits x rate contract.
     st.caption("MTD & Projected cover credit-billed services (compute, serverless, AI). "
                "Storage and data-transfer bill separately — see Cost & Contract → org rate card.")
+    # rec 11: these headline KPIs are account-/company-scoped and do NOT honor the
+    # warehouse/schema/user/database dimension chips. Surface that ONLY when such a
+    # chip is actually set, so a user who narrowed by warehouse upstream isn't misled
+    # into reading these numbers as filtered. (window-spend is company-scoped -> the
+    # 'company' key is honored implicitly; the dimension chips are the misleading ones.)
+    _scope_note = section_scope_note(f)
+    if _scope_note:
+        st.caption(_scope_note)
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
     st.subheader("Monthly spend by warehouse")

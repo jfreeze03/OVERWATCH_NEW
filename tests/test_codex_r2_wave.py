@@ -205,3 +205,55 @@ def test_rec12_single_allocation_bar_with_other_row():
     assert "charts.waterfall_usd(alloc" not in sp   # the duplicate cumulative waterfall is gone
     assert '"Other / not shown"' in sp              # explicit remainder row so the bar sums to 100%
     assert "top_n=11" in sp
+
+
+# ---------------------------------------------------------------------------
+# NEXT tier wave B — rec 13 (distinct card trust tokens) + rec 11 (section scope)
+# ---------------------------------------------------------------------------
+def test_rec13_card_renders_three_distinct_trust_tokens():
+    from app.ui.components import metric_card_html
+    # freshness, method and scope each render as their OWN chip — no single slot
+    # where scope and freshness compete (the C11 collision this fixes).
+    h = metric_card_html({"label": "MTD spend", "value": "$1",
+                          "badge": "mart", "method": "billed", "scope": "account-wide"})
+    assert "ow-src-badge--mart" in h        # freshness token
+    assert "ow-src-badge--method" in h      # provenance token
+    assert "ow-src-badge--scope" in h       # scope token
+    assert h.count("ow-src-badge--") == 3   # exactly three chips, side by side
+    # an unknown freshness value degrades to 'other', method/scope are free text
+    h2 = metric_card_html({"label": "x", "value": "1", "badge": "weird", "scope": "company"})
+    assert "ow-src-badge--other" in h2 and "ow-src-badge--scope" in h2
+
+
+def test_rec13_theme_defines_method_and_scope_chip_styles():
+    theme = _src("app/theme.py")
+    assert ".ow-src-badge--method" in theme
+    assert ".ow-src-badge--scope" in theme
+
+
+def test_rec13_overview_billed_kpis_carry_method_and_scope():
+    ov = _src("app/ui/pages/overview.py")
+    # account-wide billed KPIs name BOTH how (billed) and scope (account-wide);
+    # the company window-spend names metering + company. Distinct, never colliding.
+    assert ov.count('"scope": "account-wide"') >= 5
+    assert ov.count('"method": "billed"') >= 5
+    assert '"method": "metering", "scope": "company"' in ov
+
+
+def test_rec11_section_scope_note_only_fires_on_ignored_filters():
+    from app.ui.components import section_scope_note
+    # no dimension chip set -> no note (zero clutter on the common path)
+    assert section_scope_note({"company": "ALFA", "days": 30}) == ""
+    # an active warehouse chip the section ignores -> honest one-liner naming it
+    note = section_scope_note({"warehouse_contains": "WH_ALFA_ADMIN"})
+    assert "warehouse" in note and "ignore" in note.lower()
+    # a chip the section DOES honor is not reported as ignored
+    assert section_scope_note({"warehouse_contains": "x"}, honored=("warehouse_contains",)) == ""
+    # multiple ignored chips are pluralized
+    multi = section_scope_note({"warehouse_contains": "a", "user_contains": "b"})
+    assert "filters" in multi and "warehouse" in multi and "user" in multi
+
+
+def test_rec11_overview_renders_section_scope_note():
+    ov = _src("app/ui/pages/overview.py")
+    assert "section_scope_note(f)" in ov   # wired on the Overview headline KPIs

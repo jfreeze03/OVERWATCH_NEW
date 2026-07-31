@@ -75,6 +75,8 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-src-badge--live { color:#38bdf8; border-color:rgba(56,189,248,0.3); }
 .ow-src-badge--stale { color:#fbbf24; border-color:rgba(251,191,36,0.3); }
 .ow-src-badge--other { color:#8b98ad; border-color:rgba(139,152,173,0.3); }
+.ow-src-badge--method { color:#c084fc; border-color:rgba(192,132,252,0.35); }  /* rec 13: how derived */
+.ow-src-badge--scope { color:#a5b4cf; border-color:rgba(165,180,207,0.4); }    /* rec 13: account-wide / company */
 .ow-card__title { font-size:0.70rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
 .ow-card__value { font-size:1.55rem; font-weight:720; color:var(--ow-ink); margin-top:3px; font-variant-numeric:tabular-nums; }
 .ow-card__meta { font-size:0.78rem; color:var(--ow-ink-soft); margin-top:2px; }

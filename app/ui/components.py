@@ -214,16 +214,58 @@ def metric_card_html(item: dict) -> str:
                  + spark_svg(item["spark"], color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
     delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
     title_attr = f' title="{help_t}"' if help_t else ""
-    # Codex r7 #12: a tiny source badge INSIDE the card — the trust caption
-    # was honest but below the fold. Free text; convention: mart|live|stale.
+    # Codex r7 #12 + rec 13: tiny trust chips INSIDE the card. THREE distinct tokens
+    # so scope and freshness no longer compete for one slot (C11 crammed 'account-wide'
+    # into the freshness badge, so a card could show scope OR freshness, never both):
+    #   badge  = data FRESHNESS (mart|live|stale)
+    #   method = how the number was derived (allocated|billed|metering|...)
+    #   scope  = account-wide|company
+    # Each renders as its own small chip. Free text; unknown badge values -> 'other'.
     badge = ""
     _b = str(item.get("badge", "") or "")
     if _b:
         _bk = _b.lower() if _b.lower() in ("mart", "live", "stale") else "other"
         badge = f'<span class="ow-src-badge ow-src-badge--{_bk}">{html.escape(_b)}</span>'
+    for _kind in ("method", "scope"):
+        _v = str(item.get(_kind, "") or "")
+        if _v:
+            badge += f'<span class="ow-src-badge ow-src-badge--{_kind}">{html.escape(_v)}</span>'
     return (f'<div class="{cls}" style="min-height:96px"{title_attr}>'
             f'<div class="ow-card__title">{label}{badge}</div>'
             f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
+
+
+# Global dimension chips a MIXED-scope panel may or may not honor. Kept in one
+# place (rec 11/13 single source) so the per-card scope tokens above and the
+# section-level "what this panel ignores" line below never drift apart.
+_SCOPE_DIM_LABELS = {
+    "warehouse_contains": "warehouse",
+    "schema_contains": "schema",
+    "user_contains": "user",
+    "database": "database",
+}
+
+
+def section_scope_note(filters: dict, *, honored: tuple[str, ...] = ()) -> str:
+    """rec 11: one honest line naming which ACTIVE global filters a section does
+    NOT apply. The Overview headline KPIs are account-/company-scoped and
+    deliberately ignore the warehouse/schema/user/database dimension chips (those
+    bite on the Operations/Cost detail pages). A user who set one of those chips
+    should be told it is inert here, not left to assume the number narrowed.
+    Returns '' when nothing active is ignored, so the caller renders NOTHING on
+    the common no-filter path — the note only appears when it prevents a
+    misread. `honored` names the filter keys this particular section DOES apply."""
+    ignored = [
+        lbl
+        for key, lbl in _SCOPE_DIM_LABELS.items()
+        if key not in honored and str(filters.get(key, "") or "").strip()
+    ]
+    if not ignored:
+        return ""
+    joined = ", ".join(ignored)
+    plural = "filters" if len(ignored) > 1 else "filter"
+    return (f"Scope: account-/company-wide. These figures ignore the active "
+            f"{joined} {plural} — those apply on the Operations and Cost detail pages.")
 
 
 def kpi_row(items: list[dict], columns: int | None = None) -> None:
