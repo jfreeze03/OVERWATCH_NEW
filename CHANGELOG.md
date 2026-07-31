@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.107.0 — V065 owner migration: alert run-rate window fixes (bug round 5, ranks 2–3) (2026-07-31)
+
+The two migration-proc findings from bug round 5, shipped as a new owner migration
+(`V065__alert_run_rate_windows.sql`) rather than a hand-edit of the pending V064. Both
+are **pre-existing** bugs (not V064 regressions) in `SP_ALERT_SCAN_DAILY`, re-derived
+from V064's definition via `outputs/gen_v065.py` + count-asserted needle edits.
+
+- **Rank 2 (MEDIUM) — budget-breach forecast under-projected.** `COST_FORECAST_BREACH`
+  computed its daily run-rate as `MTD$ / DAY(CURRENT_DATE())` — month-to-date dollars,
+  which include **today's partial day**, divided by the full day-of-month count. That
+  **understates** the rate → understates the month-end projection → the alert could
+  **fail to fire** on a real budget breach. Now a **complete-days-only** rate:
+  `SUM(billed WHERE DAY < today) / COUNT(DISTINCT complete DAY)`, with `MTD_USD` (today's
+  partial included) kept as the additive base. The identical dead-column rate in the
+  `COST_BUDGET_PACE` CTE is fixed too, for consistency. (On day 1 of a month there's no
+  complete day yet → NULL rate → no forecast alert that day, which is safer than
+  projecting off a single partial day. The on-screen Overview forecast was already
+  correct — this repairs the automated alert backstop.)
+- **Rank 3 (LOW) — AI week-over-week inflated.** `COST_AI_CREEP` compared `THIS_WK`
+  (`DAY >= today-7`, which **includes today** → 8 days) against `PRIOR_WK` (7 days). The
+  scan window now excludes today (`AND DAY < CURRENT_DATE()`), so both weeks are equal,
+  today-excluded **7-complete-day** windows.
+
+No new objects, no data heal, no app runtime change — deterministic alert logic,
+byte-verified by `tests/test_v065_alert_windows.py` (no owner smoke test). **Owner applies
+V065 in Snowsight after V062 → V063 → V064.** Lockstep: `validate.sql` floor → 65, admin
+`_EXPECTED_MIGRATIONS[65]`, rebuild bundle `V001_V065`, DEPLOYMENT.md + README run-lists.
+
 ## 4.106.0 — Bug round 5: Overview rerun loop + two attribution/table fidelity fixes (app-only) (2026-07-31)
 
 A find → adversarially-verify → rank pass returned five confirmed findings; the three

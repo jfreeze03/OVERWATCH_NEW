@@ -70,6 +70,7 @@ snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql
 snowflake/migrations/V062__loader_robustness_alert_split_webhook.sql
 snowflake/migrations/V063__webhook_capture_once_daily_facts_failguard.sql
 snowflake/migrations/V064__webhook_drain_watermarks_alert_burn_telemetry.sql
+snowflake/migrations/V065__alert_run_rate_windows.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -116,6 +117,14 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > - **rec20-alert / rec18** (byte-verifiable): `COST_CONTRACT_BREACH` burns over
 >   trailing-30-complete-days; `APP_QUERY_TELEMETRY` gains `SAMPLE_PROB` + `QUERY_ID`
 >   (additive; existing rows read NULL). No new objects.
+
+> **V065 verify (alert run-rate windows — no smoke test):** pure, deterministic alert
+> logic in `SP_ALERT_SCAN_DAILY`, byte-verified by `tests/test_v065_alert_windows.py`.
+> No new objects, no data heal, no app runtime change (the on-screen forecast was already
+> fixed). Optional clone check: `CALL SP_ALERT_SCAN_DAILY();` runs clean and the
+> `COST_FORECAST_BREACH` projection now uses a **complete-days-only** run-rate (early on
+> day 1 of a month it does not fire — no complete day to rate yet), and `COST_AI_CREEP`
+> compares two equal, today-excluded 7-day windows.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

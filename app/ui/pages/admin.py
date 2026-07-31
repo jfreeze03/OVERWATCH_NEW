@@ -128,8 +128,13 @@ _EXPECTED_MIGRATIONS = {
         "window (rec8, owner smoke test); SP_LOAD_DAILY_FACTS + SP_NIGHTLY_RECONCILE "
         "keep per-source watermarks so one table's failure holds only its own mark "
         "(rec7); COST_CONTRACT_BREACH burns over trailing-30-complete-days not /30 "
-        "(rec20-alert); APP_QUERY_TELEMETRY gains SAMPLE_PROB + QUERY_ID (rec18). "
-        "T3 perf loader (deferred) becomes V065",
+        "(rec20-alert); APP_QUERY_TELEMETRY gains SAMPLE_PROB + QUERY_ID (rec18)",
+    65: "alert run-rate window fixes (bug round 5): SP_ALERT_SCAN_DAILY re-derived so "
+        "COST_FORECAST_BREACH (and the dead-column pace CTE) projects from a "
+        "COMPLETE-days-only run-rate (was MTD$/day-of-month over a partial today -> "
+        "under-projected -> suppressed the budget-breach alert; rank2), and COST_AI_CREEP "
+        "compares equal today-excluded 7-complete-day windows (was THIS_WK 8d incl today "
+        "vs PRIOR_WK 7d -> inflated WoW; rank3). No new objects. T3 perf loader still deferred",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

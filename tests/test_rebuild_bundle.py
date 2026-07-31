@@ -34,8 +34,9 @@ def test_bundle_copies_are_byte_identical_to_their_sources():
 
 def test_bundle_migrations_are_the_ordered_byte_concatenation():
     migs = sorted((_SF / "migrations").glob("V0*.sql"))
-    assert len(migs) == 64
-    text = (_RB / "02_migrations_V001_V064.sql").read_text(encoding="utf-8")
+    # contiguous 1..N (validate.sql enforces), so the bundle is named for the tip.
+    maxv = max(int(re.match(r"V(\d+)", m.name).group(1)) for m in migs)
+    text = (_RB / f"02_migrations_V001_V{maxv:03d}.sql").read_text(encoding="utf-8")
     # every file present, in order, byte-identical between its banners
     positions = []
     for m in migs:
