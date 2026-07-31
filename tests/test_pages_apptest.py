@@ -67,13 +67,23 @@ def test_app_boots_without_exceptions():
     assert not at.exception, at.exception
 
 
+def _nav_to(at, page: str) -> None:
+    """Select a page through the rec14 workflow-grouped nav (the target sits in one
+    of the _ow_nav_Watch/Analyze/Govern/More radios); setting it fires the
+    _nav_pick callback that updates _ow_page and clears the sibling groups."""
+    for r in at.radio:
+        if str(getattr(r, "key", "") or "").startswith("_ow_nav_") and page in list(r.options):
+            r.set_value(page)
+            return
+    raise AssertionError(f"page {page!r} not offered in any nav group")
+
+
 @pytest.mark.parametrize("page", _PAGES)
 def test_each_page_renders(page):
     at = AppTest.from_function(_entry, default_timeout=15)
     at.run()
     assert not at.exception
-    nav = at.radio(key="_ow_nav_radio")
-    nav.set_value(page)
+    _nav_to(at, page)
     at.run()
     assert not at.exception, f"{page}: {at.exception}"
     # honest-empty pattern: the page produced *some* content, not a blank body

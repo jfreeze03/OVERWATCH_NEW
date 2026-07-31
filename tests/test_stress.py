@@ -166,9 +166,14 @@ def _entry():
 def _render_page(page: str) -> AppTest:
     at = AppTest.from_function(_entry, default_timeout=60)
     at.run()
-    if page != at.radio(key="_ow_nav_radio").value:
-        at.radio(key="_ow_nav_radio").set_value(page)
-        at.run()
+    # rec14: navigate through the workflow-grouped nav (target sits in one group
+    # radio; set_value fires the _nav_pick callback that updates _ow_page).
+    if at.session_state.get("_ow_page") != page:
+        for r in at.radio:
+            if str(getattr(r, "key", "") or "").startswith("_ow_nav_") and page in list(r.options):
+                r.set_value(page)
+                at.run()
+                break
     return at
 
 

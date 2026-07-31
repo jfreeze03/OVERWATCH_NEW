@@ -14,6 +14,16 @@ from streamlit.testing.v1 import AppTest  # noqa: E402
 from app.core.result import QueryResult  # noqa: E402
 
 
+def _nav_options(at) -> list[str]:
+    """Union the visible page options across the rec14 workflow-grouped nav radios
+    (_ow_nav_Watch / _ow_nav_Analyze / _ow_nav_Govern / _ow_nav_More)."""
+    opts: list[str] = []
+    for r in at.radio:
+        if str(getattr(r, "key", "") or "").startswith("_ow_nav_"):
+            opts.extend(list(r.options))
+    return opts
+
+
 def test_only_dba_profile_operates():
     assert OPERATOR_PROFILES == ("DBA",)
     assert "Admin" not in PAGES_BY_PROFILE["ANALYST"]
@@ -67,7 +77,7 @@ def test_analyst_never_sees_admin_in_nav(_stub):
     at = AppTest.from_function(_entry, default_timeout=15)
     at.run()
     assert not at.exception
-    options = list(at.radio(key="_ow_nav_radio").options)
+    options = _nav_options(at)
     assert "Admin" not in options
     assert "Operations" in options
 
@@ -77,7 +87,7 @@ def test_executive_nav_is_read_only_surface(_stub):
     at = AppTest.from_function(_entry, default_timeout=15)
     at.run()
     assert not at.exception
-    options = list(at.radio(key="_ow_nav_radio").options)
+    options = _nav_options(at)
     assert "Admin" not in options and "Operations" not in options
 
 
@@ -86,4 +96,4 @@ def test_dba_gets_admin(_stub):
     at = AppTest.from_function(_entry, default_timeout=15)
     at.run()
     assert not at.exception
-    assert "Admin" in list(at.radio(key="_ow_nav_radio").options)
+    assert "Admin" in _nav_options(at)

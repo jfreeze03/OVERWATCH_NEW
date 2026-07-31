@@ -369,3 +369,34 @@ def test_rec19_alerts_renders_backlog_and_expired():
     assert "mart_sql.route_backlog()" in al
     assert "Route backlog" in al
     assert "EXPIRED_UNDELIVERED" in al
+
+
+# ---------------------------------------------------------------------------
+# rec 14 — workflow-grouped sidebar (Watch / Analyze / Govern), role-preserving
+# ---------------------------------------------------------------------------
+def test_rec14_nav_groups_partition_and_preserve_role_scope():
+    from app.config import PAGES_BY_PROFILE, nav_groups_for
+    # DBA sees everything -> all three groups in order, nothing left over
+    dba = nav_groups_for(PAGES_BY_PROFILE["DBA"])
+    assert [g for g, _ in dba] == ["Watch", "Analyze", "Govern"]
+    assert dict(dba)["Watch"] == ["Brief", "Overview", "Alerts"]
+    assert dict(dba)["Govern"] == ["Security", "Admin"]
+    # EXECUTIVE cannot see Operations/Control Room/Security/Admin -> no Govern group,
+    # and only the allowed Analyze member (Cost & Contract) appears
+    exe = dict(nav_groups_for(PAGES_BY_PROFILE["EXECUTIVE"]))
+    assert "Govern" not in exe
+    assert exe["Analyze"] == ["Cost & Contract"]
+    assert exe["Watch"] == ["Brief", "Overview", "Alerts"]
+    # a page in no group is never dropped -- it trails under "More"
+    got = dict(nav_groups_for(("Brief", "Mystery")))
+    assert got["More"] == ["Mystery"]
+
+
+def test_rec14_sidebar_renders_grouped_single_select():
+    m = _src("app/main.py")
+    assert "nav_groups_for(pages)" in m
+    # each group is its own radio keyed per-group; a pick clears the siblings so
+    # exactly one page highlights across groups
+    assert 'f"_ow_nav_{group}"' in m
+    assert "on_change=_nav_pick" in m
+    assert "st.session_state.pop(_k, None)" in m

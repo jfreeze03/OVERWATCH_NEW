@@ -103,9 +103,8 @@ def consume_pending_navigation() -> None:
     from app.logic.navigate import PAGE_SECTION_KEYS
 
     page = str(pending.get("page") or "")
-    # B8: never route a viewer to a page their profile does not offer — writing an
-    # off-profile value to _ow_nav_radio crashes the radio (its options are the
-    # profile's pages) or lands on a dead page. Clamp to the viewer's pages.
+    # B8: never route a viewer to a page their profile does not offer — landing on
+    # a dead page or forcing an off-profile selection. Clamp to the viewer's pages.
     if page:
         from app.config import PAGES_BY_PROFILE, resolve_role_profile
         from app.core.session import current_role
@@ -113,8 +112,12 @@ def consume_pending_navigation() -> None:
         if allowed and page not in allowed:
             page = "Overview"  # offered by every profile
     if page:
-        st.session_state["_ow_nav_radio"] = page
         st.session_state["_ow_page"] = page
+        # rec14: the grouped-nav radios re-derive their selection from _ow_page, so
+        # clear their per-group widget keys (this runs before the sidebar renders)
+        # or a stale group selection would override the forced navigation.
+        for _k in [k for k in st.session_state if str(k).startswith("_ow_nav_")]:
+            st.session_state.pop(_k, None)
     section = str(pending.get("section") or "")
     section_key = PAGE_SECTION_KEYS.get(page)
     if section and section_key:

@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.99.0 — Codex R2 backlog: workflow-grouped sidebar (rec 14, app-only) (2026-07-30)
+
+- **rec 14 (Watch / Analyze / Govern nav)** — the sidebar was a flat page list. It now
+  groups pages by operator workflow: **Watch** (Brief, Overview, Alerts) · **Analyze**
+  (Control Room, Cost & Contract, Operations) · **Govern** (Security, Admin). `st.radio`
+  has no native section headers, so each group is its own single-select radio under a
+  caption header; a pick in one group clears the others (the `on_change` pops the sibling
+  widget keys) so exactly one page highlights across the three. `NAV_GROUPS` is
+  ordering-only — role visibility is still `PAGES_BY_PROFILE`, and any allowed page not
+  listed in a group trails under "More" so a new page is never hidden by omission. The
+  off-profile navigation guard and the AppTest nav suite were updated to the grouped
+  structure (they exercise the callback at runtime).
+
+Gates green: ruff, mypy, tests (+2 rec 14 locks; the nav AppTest suite validates the
+grouped runtime).
+
 ## 4.98.0 — Codex R2 NEXT: telemetry re-weighting + route-backlog observability (rec 18/19, app-only) (2026-07-30)
 
 The app-side payoff of the V064 telemetry columns, plus the webhook backlog view —

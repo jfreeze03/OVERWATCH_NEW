@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.98.0"
+APP_VERSION = "4.99.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -120,6 +120,36 @@ PAGES_BY_PROFILE = {
     "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security", "Admin"),
 }
 DEFAULT_PROFILE = "ANALYST"
+
+# rec14: group the sidebar by operator WORKFLOW, not a flat list. Watch = the
+# always-on morning surfaces; Analyze = drill/investigate; Govern = security +
+# admin. Ordering only — role visibility is still PAGES_BY_PROFILE, and any page a
+# profile can see that is not listed here trails under "More" (so a new page is
+# never hidden by omission).
+NAV_GROUPS = {
+    "Watch": ("Brief", "Overview", "Alerts"),
+    "Analyze": ("Control Room", "Cost & Contract", "Operations"),
+    "Govern": ("Security", "Admin"),
+}
+
+
+def nav_groups_for(pages: tuple[str, ...] | list[str]) -> list[tuple[str, list[str]]]:
+    """Partition an ORDERED page list into [(group, [pages])] by NAV_GROUPS,
+    intersected with what the profile actually allows. Pages not in any group
+    trail under 'More' so nothing is dropped. Empty groups are omitted."""
+    allowed = list(pages)
+    out: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for group, group_pages in NAV_GROUPS.items():
+        members = [p for p in allowed if p in group_pages]
+        if members:
+            out.append((group, members))
+            seen.update(members)
+    leftover = [p for p in allowed if p not in seen]
+    if leftover:
+        out.append(("More", leftover))
+    return out
+
 
 OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL in-app
 

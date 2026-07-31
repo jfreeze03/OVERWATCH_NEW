@@ -19,6 +19,7 @@ from app.config import (  # noqa: E402
     DAY_WINDOW_OPTIONS,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
+    nav_groups_for,
     resolve_role_profile,
 )
 from app.core.identity import identity_sql  # noqa: E402
@@ -93,9 +94,31 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
         default_page = requested_page(pages) or st.session_state.get("_ow_page") or pages[0]
         if default_page not in pages:
             default_page = pages[0]
-        st.caption("Navigate")
-        page = st.radio("Navigate", pages, index=pages.index(default_page),
-                        key="_ow_nav_radio", label_visibility="collapsed")
+        # rec14: workflow-grouped nav. st.radio has no native section headers, so
+        # each group is its own single-select radio with a caption header; the
+        # chosen page lives in _ow_page. A click in one group clears the others'
+        # selections (the on_change pops the sibling widget keys) so exactly one
+        # page is ever highlighted across the three groups.
+        groups = nav_groups_for(pages)
+
+        def _nav_pick(changed_key: str) -> None:
+            chosen = st.session_state.get(changed_key)
+            if chosen:
+                st.session_state["_ow_page"] = chosen
+                for _g, _ in groups:
+                    _k = f"_ow_nav_{_g}"
+                    if _k != changed_key:
+                        st.session_state.pop(_k, None)
+
+        for group, members in groups:
+            gkey = f"_ow_nav_{group}"
+            st.caption(group)
+            idx = members.index(default_page) if default_page in members else None
+            st.radio(group, members, index=idx, key=gkey,
+                     label_visibility="collapsed", on_change=_nav_pick, args=(gkey,))
+        page = st.session_state.get("_ow_page", default_page)
+        if page not in pages:
+            page = default_page
         st.session_state["_ow_page"] = page
         remember_page(page)
 
