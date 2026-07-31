@@ -72,6 +72,7 @@ snowflake/migrations/V063__webhook_capture_once_daily_facts_failguard.sql
 snowflake/migrations/V064__webhook_drain_watermarks_alert_burn_telemetry.sql
 snowflake/migrations/V065__alert_run_rate_windows.sql
 snowflake/migrations/V066__alert_escalation_serverless_window_timeline_atomicity.sql
+snowflake/migrations/V067__alert_attribution_onset_supersede_objectcost.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -136,6 +137,15 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > inside `BEGIN TRANSACTION … COMMIT` — induce a failure in its INSERT (e.g. temporarily
 > rename a source) and confirm the trailing-48h rows survive (ROLLBACK), rather than the
 > timeline going blank until the next hourly `SP_LOAD_MARTS_V27('HOURLY')`.
+
+> **V067 verify (alert attribution + onset + supersede + object-cost — no smoke test):**
+> re-derives `SP_ALERT_SCAN` + `SP_LOAD_OBJECT_COST`; byte-verified by
+> `tests/test_v067_alert_attribution.py`. No new objects. Deterministic edits:
+> `COMPANY_FOR_DATABASE` in two rules (#22), a 999 serverless-creep onset sentinel (#20), a
+> post-scan escalation-supersede sweep (`RESOLUTION_KIND='SUPERSEDED'`, excluded from the
+> precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
+> check: `CALL SP_ALERT_SCAN();` runs clean; after a HIGH→CRITICAL crossing, the earlier
+> lower-band `ALERT_EVENTS` row flips to `RESOLVED`/`SUPERSEDED` while the CRITICAL stays OPEN.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

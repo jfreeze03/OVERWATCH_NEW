@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.111.0 — V067 owner migration: alert attribution + serverless onset + escalation supersede + object-cost honesty (Codex review) (2026-07-31)
+
+The behavioral proc fixes from the Codex 50-rec review, shipped as a new owner migration
+(`V067`) re-deriving `SP_ALERT_SCAN` (from V066) and `SP_LOAD_OBJECT_COST` (from V062) via
+`outputs/gen_v067.py` + count-asserted needle edits.
+
+- **#22 — alerts attribute unknown databases correctly.** `COST_STORAGE_SURGE` and
+  `PIPE_COPY_FAILURES` classified company with a raw `IFF(name LIKE 'TRXS%', 'Trexis',
+  'ALFA')` (an unknown DB → ALFA). Both now use the canonical `COMPANY_FOR_DATABASE` UDF,
+  which honors `DEPARTMENT_MAP` overrides and returns UNKNOWN like the rest of the app.
+- **#20 — new serverless services trigger the creep alert.** `COST_SERVERLESS_CREEP`
+  divided by `NULLIF(prior_week, 0)`, so a service with zero prior spend produced `NULL`
+  growth and the row silently dropped. It now emits the finite **999%** onset sentinel
+  (the same pattern V061 gave `COST_AI_CREEP`), so a brand-new serverless workload fires.
+- **#40 — severity escalation no longer leaves a duplicate open alert** (the V066
+  follow-on). A global post-scan sweep in `SP_ALERT_SCAN` resolves a WARN/MED event when
+  its CRIT/HIGH sibling — the same dedupe key with only the band token swapped — is also
+  open, tagging it `RESOLUTION_KIND='SUPERSEDED'` (which the per-rule precision score, that
+  counts only ACTIONED/NOISE, ignores). The band tokens occur only in the three banded
+  keys, so it's a no-op for every other rule.
+- **#10 — object-cost load failures are honest.** `SP_LOAD_OBJECT_COST` rolled back + logged
+  on failure, then refreshed the freshness snapshot and returned `'OK'`. It now returns a
+  **non-OK** string after a rollback, so the failure is observable in the proc/task output.
+- **#40 companion (app-side, from the adversarial review):** the sweep sets `RESOLVED_AT` on
+  the superseded event, so the operator **MTTR panel** (`alert_mttr`) and the rule-precision
+  **resolved count** now exclude `RESOLUTION_KIND='SUPERSEDED'` — a machine dedupe close is
+  not a human resolution and must not pollute MTTR or the resolved tally.
+
+No new objects, no data heal, no app runtime change — deterministic alert logic + a proc
+return-string change, byte-verified by `tests/test_v067_alert_attribution.py` (no owner
+smoke test). **Owner applies V067 in Snowsight after V062 → … → V066.** Lockstep:
+`validate.sql` floor → 67, admin `_EXPECTED_MIGRATIONS[67]`, rebuild bundle `V001_V067`,
+DEPLOYMENT.md + README run-lists.
+
+*Deferred to a later migration (each more involved): the alert forecast/pace partial-day
+parity (#16-mirror/#19), task return-value gating (#5), AI-predicate centralization (#21),
+a new `SP_INCIDENT_DECLARE` proc (#43), and per-target transactions in `SP_NIGHTLY_RECONCILE`
+(#4).*
+
 ## 4.110.0 — Codex 50-rec review: app-first correctness batch (2026-07-31)
 
 An external (Codex) 50-item review was adjudicated against the real code (26 CONFIRMED,

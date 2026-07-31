@@ -142,6 +142,12 @@ _EXPECTED_MIGRATIONS = {
         "complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a "
         "severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT "
         "wrapped in one transaction so a failed rebuild can't blank the trailing 48h (#3)",
+    67: "alert attribution + serverless onset + escalation supersede + object-cost honesty "
+        "(Codex review): SP_ALERT_SCAN COST_STORAGE_SURGE/PIPE_COPY_FAILURES use "
+        "COMPANY_FOR_DATABASE not a raw TRXS%/ALFA guess (#22); COST_SERVERLESS_CREEP emits a "
+        "999 onset sentinel when the prior week is 0 (#20); a post-scan sweep supersedes the "
+        "lower-band OPEN alert when its higher-band sibling is open (#40, the V066 escalation "
+        "follow-on); SP_LOAD_OBJECT_COST returns non-OK after a rolled-back load (#10)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

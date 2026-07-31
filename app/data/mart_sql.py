@@ -403,9 +403,13 @@ SELECT
     DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
     COUNT(*) AS EVENTS,
     SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
-    SUM(IFF(RESOLVED_AT IS NOT NULL, 1, 0)) AS RESOLVED,
+    -- codex#40 companion: a machine SUPERSEDED close (V067's escalation sweep sets
+    -- RESOLVED_AT on the lower-band event) is NOT a human resolution — exclude it from
+    -- the RESOLVED count and MTTR so dedupe timings don't pollute the operator panel.
+    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED', 1, 0)) AS RESOLVED,
     ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,
-    ROUND(AVG(DATEDIFF('minute', RAISED_AT, RESOLVED_AT)), 1) AS MTTR_MIN
+    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED',
+                  DATEDIFF('minute', RAISED_AT, RESOLVED_AT), NULL)), 1) AS MTTR_MIN
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
 GROUP BY 1
@@ -806,7 +810,9 @@ def rule_precision(days: int = 90) -> str:
     return f"""
 SELECT
     RULE_ID,
-    COUNT(*)                                          AS RESOLVED_EVENTS,
+    -- codex#40 companion: exclude machine SUPERSEDED closes so RESOLVED_EVENTS ties to the
+    -- ACTIONED+NOISE+EXPECTED+UNTAGGED buckets (PRECISION_PCT was already unaffected).
+    COUNT_IF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED') AS RESOLVED_EVENTS,
     COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,
