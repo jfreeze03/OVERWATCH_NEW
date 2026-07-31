@@ -314,3 +314,58 @@ def test_rec15_help_tooltip_fires_on_focus_in_theme():
     theme = _src("app/theme.py")
     assert ".ow-help" in theme
     assert ".ow-help:focus::after" in theme or ".ow-help:focus-visible::after" in theme
+
+
+# ---------------------------------------------------------------------------
+# rec 18 (app-side) — telemetry re-weightability (SAMPLE_PROB) + QUERY_ID join
+# ---------------------------------------------------------------------------
+def test_rec18_persist_writes_sample_prob_and_query_id():
+    q = _src("app/core/query.py")
+    # the 12-col shape carries the two new columns...
+    assert "SAMPLE_PROB, QUERY_ID)" in q
+    # ...prob is 1.0 for must-persist (failed/slow), the sample rate otherwise
+    assert "sample_prob = (1.0 if ((not ok) or float(elapsed_ms) >= TELEMETRY_PERSIST_MS)" in q
+    assert "_TELEMETRY_SAMPLE_RATE)" in q
+    # query_id is forwarded from _telemetry into the persist path
+    assert "truncated=truncated, query_id=query_id)" in q
+    # a 3-level shape downgrade degrades cleanly against an older schema
+    assert '"_ow_qtel_prev64shape"' in q
+
+
+def test_rec18_view_reweights_volume_and_exposes_query_id():
+    from app.data import mart_sql
+    tbp = mart_sql.telemetry_by_page(7)
+    # de-biased fleet volume: each row re-weighted by 1/SAMPLE_PROB (NULL -> 1)
+    assert "SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))" in tbp and "AS EST_TRUE_FETCHES" in tbp
+    fqs = mart_sql.fleet_query_stats(7)
+    # the slowest fetch's QUERY_ID, for a Query-History deep link
+    assert "MAX_BY(QUERY_ID, ELAPSED_MS)" in fqs and "SLOWEST_QUERY_ID" in fqs
+
+
+# ---------------------------------------------------------------------------
+# rec 19 — route-backlog observability (shares the send-eligibility predicate)
+# ---------------------------------------------------------------------------
+def test_rec19_route_backlog_mirrors_send_eligibility():
+    from app.data import mart_sql
+    bl = mart_sql.route_backlog()
+    # the SAME eligibility the drainer uses: 24h window, family/company/severity
+    # match, and NOT-yet-delivered-to-THIS-route
+    assert "DATEADD('hour', -24, CURRENT_TIMESTAMP())" in bl
+    assert "r.FAMILY = 'ALL' OR ev.FAMILY = r.FAMILY" in bl
+    assert "ev.COMPANY = r.COMPANY_FILTER" in bl
+    assert "NOT EXISTS (SELECT 1 FROM" in bl and "ALERT_DELIVERIES" in bl
+    assert "BACKLOG" in bl and "OLDEST_MIN" in bl
+
+
+def test_rec19_slo_surfaces_proc_expired_signal():
+    from app.data import mart_sql
+    slo = mart_sql.delivery_slo_summary(30)
+    # the proc-emitted undelivered_expired signal is read, not just the app's own count
+    assert "ERROR_TYPE = 'undelivered_expired'" in slo and "EXPIRED_UNDELIVERED" in slo
+
+
+def test_rec19_alerts_renders_backlog_and_expired():
+    al = _src("app/ui/pages/alerts.py")
+    assert "mart_sql.route_backlog()" in al
+    assert "Route backlog" in al
+    assert "EXPIRED_UNDELIVERED" in al

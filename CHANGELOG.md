@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.98.0 — Codex R2 NEXT: telemetry re-weighting + route-backlog observability (rec 18/19, app-only) (2026-07-30)
+
+The app-side payoff of the V064 telemetry columns, plus the webhook backlog view —
+completing the Codex-R2 NEXT tier.
+
+- **rec 18 (telemetry re-weightability)** — `telemetry_by_page` now reports
+  `EST_TRUE_FETCHES` = `SUM(1/SAMPLE_PROB)`, restoring the healthy baseline the ~2%
+  sampler undercounts ~50× (persisted `FETCHES` is not a census). `fleet_query_stats`
+  exposes `SLOWEST_QUERY_ID` (`MAX_BY(QUERY_ID, ELAPSED_MS)`) so a slow row deep-links
+  to `ACCOUNT_USAGE.QUERY_HISTORY`. Pre-V064 rows read `SAMPLE_PROB` NULL → weight 1.
+- **rec 19 (route-backlog observability)** — new `route_backlog()` surfaces, per
+  enabled route, the count of OPEN eligible-but-undelivered events and the age of the
+  oldest, using the **same send-eligibility predicate** as `SP_NOTIFY_WEBHOOK` (so the
+  panel and the drainer agree on "what's pending"). `delivery_slo_summary` now reads the
+  proc's own `undelivered_expired` signal (`EXPIRED_UNDELIVERED`) instead of only the
+  app's re-derived 30-min count. Both render in the Alerts → Native delivery section; a
+  rising oldest-backlog age while the notify task runs is the starvation signal rec 8's
+  oldest-first drain fixes.
+
+Gates green: ruff, mypy, tests (+5 rec 18/19 locks). Requires V064 applied for the new
+columns; the persist path and views degrade cleanly (NULL → weight 1) until then.
+
 ## 4.97.0 — V064 owner-migration + telemetry persist (Codex R2 rec 7/8/20-alert/18) (2026-07-30)
 
 The Codex-R2 NEXT-tier owner-migration bundle (`snowflake/migrations/V064__…`),

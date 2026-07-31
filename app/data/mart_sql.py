@@ -879,7 +879,11 @@ SELECT
     ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.5))  AS P50_MS,
     ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95)) AS P95_MS,
     COUNT(DISTINCT ROLE_NAME)                  AS ROLES_AFFECTED,
-    MAX(AT)                                    AS NEWEST
+    MAX(AT)                                    AS NEWEST,
+    -- rec18 (V064): the slowest fetch's QUERY_ID, to deep-link the row to
+    -- ACCOUNT_USAGE.QUERY_HISTORY (scan/spill/queue/compile). NULL for pre-V064
+    -- rows and cache hits (no server query ran).
+    MAX_BY(QUERY_ID, ELAPSED_MS)               AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY PAGE, QUERY_KEY
@@ -1144,7 +1148,51 @@ SELECT
         AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())) AS UNDELIVERED_CRITICALS_30M,
     (SELECT COUNT(*) FROM {core_object("APP_ERROR_LOG")}
       WHERE ERROR_TYPE = 'route_send_failed'
-        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES
+        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES,
+    -- rec19 (V064): the loud signal SP_NOTIFY_WEBHOOK itself raises when an OPEN
+    -- eligible event ages past the 24h delivery window with no successful send.
+    -- The app previously ignored this proc-emitted row and re-derived only its own
+    -- 30-min critical count; surfacing it closes the loop with the drainer.
+    (SELECT COUNT(*) FROM {core_object("APP_ERROR_LOG")}
+      WHERE ERROR_TYPE = 'undelivered_expired'
+        AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS EXPIRED_UNDELIVERED
+"""
+
+
+def route_backlog() -> str:
+    """rec19 (V064): per enabled route, how many OPEN events are eligible-but-
+    UNDELIVERED right now (the backlog SP_NOTIFY_WEBHOOK will drain next) and the
+    age of the oldest one. Eligibility mirrors the proc's SEND predicate exactly
+    (open, within 24h, family+company+severity match, not yet delivered to THIS
+    route) so the panel and the drainer agree on 'what's pending'. A high
+    OLDEST_MIN with the drain running is the starvation signal rec8 fixes."""
+    return f"""
+WITH ev AS (
+    SELECT e.EVENT_ID, e.RAISED_AT, e.COMPANY, c.FAMILY,
+           CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                           WHEN 'MEDIUM' THEN 2 ELSE 1 END AS SEV_RANK
+    FROM {core_object("ALERT_EVENTS")} e
+    JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
+    WHERE e.STATUS = 'OPEN'
+      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+)
+SELECT r.ROUTE_ID, r.INTEGRATION_NAME,
+       COUNT(ev.EVENT_ID) AS BACKLOG,
+       IFF(COUNT(ev.EVENT_ID) = 0, NULL,
+           ROUND(DATEDIFF('second', MIN(ev.RAISED_AT), CURRENT_TIMESTAMP()) / 60.0, 1)) AS OLDEST_MIN
+FROM {core_object("ALERT_ROUTES")} r
+LEFT JOIN ev ON
+        (r.FAMILY = 'ALL' OR ev.FAMILY = r.FAMILY)
+    AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+         OR ev.COMPANY = r.COMPANY_FILTER OR UPPER(ev.COMPANY) = 'ALL')
+    AND ev.SEV_RANK >= CASE r.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                                           WHEN 'MEDIUM' THEN 2 ELSE 1 END
+    AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
+                    WHERE d.EVENT_ID = ev.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID)
+WHERE r.ENABLED
+GROUP BY r.ROUTE_ID, r.INTEGRATION_NAME
+ORDER BY BACKLOG DESC, OLDEST_MIN DESC NULLS LAST
+LIMIT 50
 """
 
 
@@ -1215,13 +1263,17 @@ SELECT
 
 
 def telemetry_by_page(days: int = 7) -> str:
-    """Per-page fetch health from the V027 telemetry rider. Cache-hit % is
-    computed over rows where CACHE_HIT is known (pre-V027 rows excluded) —
-    and it measures PERSISTED fetches (slow/failed + 2% sample), a floor."""
+    """Per-page fetch health from the V027 telemetry rider. Only slow/failed +
+    a ~2% healthy sample are persisted, so FETCHES is a PERSISTED count, not a
+    census; EST_TRUE_FETCHES re-weights each row by 1/SAMPLE_PROB (rec18, V064) so
+    the healthy baseline the sampler undercounts ~50x is restored. P95_S/SLOW_2S
+    are tail-complete (all >=2s rows persist at prob 1.0); CACHE_HIT_PCT is over
+    the persisted set. Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe)."""
     days = bounded_days(days, 90)
     return f"""
 SELECT PAGE,
        COUNT(*) AS FETCHES,
+       ROUND(SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))) AS EST_TRUE_FETCHES,
        ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
        ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
        COUNT_IF(NOT OK) AS FAILED,
@@ -1231,7 +1283,7 @@ SELECT PAGE,
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY PAGE
-ORDER BY FETCHES DESC
+ORDER BY EST_TRUE_FETCHES DESC
 LIMIT 50
 """
 

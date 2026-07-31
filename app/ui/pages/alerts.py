@@ -637,6 +637,7 @@ def render() -> None:
         if slo.usable():
             row0 = slo.df.iloc[0]
             _und = int(safe_float(row0.get("UNDELIVERED_CRITICALS_30M")))
+            _exp = int(safe_float(row0.get("EXPIRED_UNDELIVERED")))
             kpi_row([
                 {"label": "Events delivered (30d)",
                  "value": f"{safe_float(row0.get('EVENTS_DELIVERED')):,.0f} / {safe_float(row0.get('EVENTS_RAISED')):,.0f}",
@@ -651,11 +652,32 @@ def render() -> None:
                 {"label": "Route failures (30d)",
                  "value": f"{safe_float(row0.get('ROUTE_FAILURES')):,.0f}",
                  "help": "route_send_failed rows in APP_ERROR_LOG — RUNBOOK section 19 has the Teams debugging path."},
+                # rec19: the webhook itself flags an OPEN event that aged past the
+                # 24h delivery window with no send — surfaced here, not just in logs.
+                {"label": "Expired-undelivered (30d)", "value": f"{_exp}",
+                 "severity": "bad" if _exp else "ok",
+                 "delta_color": "inverse" if _exp else "off",
+                 "help": "undelivered_expired rows SP_NOTIFY_WEBHOOK raises when an eligible "
+                         "event crosses 24h unsent — a persistent integration outage, not lag."},
             ])
             rt = run(mart_sql.delivery_by_route(30), page=_PAGE, key="delivery_routes",
                      tier="recent", source="ALERT_DELIVERIES by route")
             if rt.usable():
                 styled_table(rt.df, height=170)
+            # rec19: per-route BACKLOG — what SP_NOTIFY_WEBHOOK will drain next and
+            # the age of the oldest pending event (the starvation signal rec8 fixes).
+            # Same send-eligibility predicate as the drainer, so the two agree.
+            st.markdown("**Route backlog** — open eligible events not yet delivered, oldest first.")
+            bl = run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
+                     tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
+            if bl.usable() and not bl.df.empty:
+                styled_table(bl.df, height=170, column_config={
+                    "OLDEST_MIN": st.column_config.NumberColumn("Oldest (min)", format="%.0f"),
+                })
+                st.caption("A rising OLDEST while the notify task runs means a route is starved — "
+                           "check its integration. The oldest-first drain (V064) clears the tail first.")
+            else:
+                st.caption("No route has an undelivered backlog right now.")
         else:
             st.caption("Delivery SLOs appear once the per-route ledger has rows.")
 
