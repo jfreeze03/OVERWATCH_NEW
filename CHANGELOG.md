@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.102.0 — Allocated-attribution window alignment (r4 deferral resolved, app-only) (2026-07-31)
+
+- **allocated share × pool window mismatch** (`cost_parts/spend.py`) — the r4 review's
+  one deferred finding. The live-share fallback scans only ≤90 days of `QUERY_HISTORY`
+  (`MAX_LIVE_WINDOW_DAYS`, a deliberate cost guardrail we **keep**), so on a >90-day
+  window its shares are 90-day-scoped — yet they were multiplied by the full 182-day
+  warehouse pool, zeroing entities active only in the older half of the window while
+  their dollars stayed in the pool. A **live-served** dimension now gets a pool matched
+  to its own clamped window (a cheap mart read, fetched once and only when a live dim
+  needs it); mart-served dimensions keep the full-window pool (already aligned). The
+  90-day live-scan cap is unchanged — the fix aligns the *pool* to the share, not the
+  other way. The section and per-dimension coverage captions use the matched pool.
+
+Gates green: ruff, mypy, tests (+1 lock; 1599 passed).
+
 ## 4.101.0 — Bug + design review round 4 (app-only) (2026-07-30)
 
 Found by a find → adversarially-verify → synthesize workflow (13 confirmed, none

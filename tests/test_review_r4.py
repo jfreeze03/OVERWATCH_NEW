@@ -133,6 +133,27 @@ def test_design5_change_impact_table_cleaned():
 
 
 # ---------------------------------------------------------------------------
+# BUG 2 — allocated share is multiplied by a pool over its OWN window
+# ---------------------------------------------------------------------------
+def test_bug2_alloc_pool_matches_live_share_window():
+    from app.config import MAX_LIVE_WINDOW_DAYS
+    from app.data.common import resolve_effective_window
+    # the live-share fallback (cost_sql.allocated_attribution) and the r4 matched pool
+    # clamp to the SAME window, so a >90d allocation multiplies a 90d share by a 90d
+    # pool instead of the full 182d pool (which zeroed older-half entities).
+    share_eff, _ = resolve_effective_window(365, "START_TIME", max_days=MAX_LIVE_WINDOW_DAYS)
+    pool_eff, _ = resolve_effective_window(365, max_days=MAX_LIVE_WINDOW_DAYS)
+    assert share_eff == pool_eff and share_eff <= MAX_LIVE_WINDOW_DAYS
+    sp = _src("app/ui/pages/cost_parts/spend.py")
+    # a live-served dim uses the matched pool; the 90-day live-scan cap is UNCHANGED
+    assert "_pool = _alloc_pool(res.source)" in sp
+    assert "* _pool" in sp and "_pool - float" in sp
+    assert 'resolve_effective_window(days, max_days=MAX_LIVE_WINDOW_DAYS)' in sp
+    live = _src("app/data/cost_sql.py")   # the guardrail is preserved, not lifted
+    assert 'resolve_effective_window(days, "START_TIME", max_days=90)' in live
+
+
+# ---------------------------------------------------------------------------
 # DESIGN 7 — registry validate() catches a window/partial-day contradiction
 # ---------------------------------------------------------------------------
 def test_design7_registry_partial_day_consistency():

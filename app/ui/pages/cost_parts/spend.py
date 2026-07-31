@@ -13,8 +13,10 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
+from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run
 from app.data import cost_sql, mart27_sql, mart_sql
+from app.data.common import resolve_effective_window
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
 from app.logic.directory import resolve_display
 from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
@@ -236,6 +238,34 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             },
         )
         window_usd = float(view["USD_CURRENT"].sum())
+        # r4: settle the allocated-share vs pool WINDOW mismatch. The live-share
+        # fallback scans only <= MAX_LIVE_WINDOW_DAYS of QUERY_HISTORY (a deliberate
+        # cost guardrail we KEEP), so for a >90d window its shares are 90d-scoped;
+        # multiplying them by the full-window pool mis-attributed older-half spend (an
+        # entity active only 91-182d ago got $0 while its dollars stayed in the pool).
+        # A LIVE-served dimension now gets a pool matched to the same clamped window —
+        # a cheap mart read, fetched once and only when a live dim needs it.
+        _pool_eff, _ = resolve_effective_window(days)
+        _live_eff, _ = resolve_effective_window(days, max_days=MAX_LIVE_WINDOW_DAYS)
+        _live_pool: list[float] = []
+
+        def _alloc_pool(res_source: str) -> float:
+            if _live_eff >= _pool_eff or "QUERY_HISTORY" not in str(res_source):
+                return window_usd            # mart-served, or the windows already match
+            if not _live_pool:
+                _wp = run_mart_first(
+                    mart_sql.fact_warehouse_window_vs_prior(_live_eff, company),
+                    cost_sql.warehouse_window_vs_prior(_live_eff, company),
+                    page=_PAGE, key=f"alloc_pool_live_{company}_{_live_eff}",
+                    mart_source="pool", live_source="pool")
+                _live_pool.append(
+                    float(_wp.df["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate)).sum())
+                    if _wp.usable() else window_usd)
+            return _live_pool[0]
+
+        # a schema filter forces BOTH dims live, so the intro caption shows the matched
+        # window then; otherwise the full-window pool.
+        _intro_pool = _alloc_pool("QUERY_HISTORY") if schema_contains else window_usd
         result_caption(wh, note="Equal-length windows excluding the current partial day for "
                                 "completeness. Exact USAGE, not billed: totals include each "
                                 "warehouse's idle time and its unadjusted cloud-services credits "
@@ -245,7 +275,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         st.markdown("**By user and database (allocated — estimate)**")
         st.caption(
             "Snowflake bills at warehouse grain. These split the scoped warehouse spend "
-            f"({format_usd(window_usd)}) by query elapsed-time share; treat as directionally "
+            f"({format_usd(_intro_pool)}) by query elapsed-time share; treat as directionally "
             "correct. Shares stay global, so a database/schema filter shows that slice of "
             "the total — never 100% of it. NONE = queries with no database context; "
             "USER$ personal databases attribute to their owner's company. "
@@ -276,11 +306,14 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                         live_source="QUERY_HISTORY (elapsed share, live fallback)")
                 if guard(res, f"No query history to allocate by {label}."):
                     alloc = res.df.copy()
+                    # r4: multiply by the pool over the SAME window the share was
+                    # computed on (full for a mart-served dim, <=90d for a live one).
+                    _pool = _alloc_pool(res.source)
                     # ONE formula on every path (live math fix 2026-07-11):
                     # share x the window total the caption states. Direct
                     # dollarization of mart credits used a different window
                     # and included idle — SYSTEM alone exceeded the caption.
-                    alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd
+                    alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * _pool
                     if dim == "USER_NAME":   # show people, not logins (leave DB names as-is)
                         _nm = user_display_map(_PAGE)
                         alloc["DIMENSION"] = [resolve_display(u, _nm) for u in alloc["DIMENSION"]]
@@ -292,14 +325,14 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     shown = float(alloc["ELAPSED_SHARE"].map(safe_float).sum())
                     _top = (alloc.sort_values("ALLOCATED_USD", ascending=False)
                             .head(10)[["DIMENSION", "ALLOCATED_USD"]])
-                    _other = max(0.0, window_usd - float(_top["ALLOCATED_USD"].map(safe_float).sum()))
+                    _other = max(0.0, _pool - float(_top["ALLOCATED_USD"].map(safe_float).sum()))
                     _bar = (pd.concat([_top, pd.DataFrame(
                         [{"DIMENSION": "Other / not shown", "ALLOCATED_USD": _other}])],
                         ignore_index=True) if _other > 0 else _top)
                     charts.bar_usd(_bar, "DIMENSION", "ALLOCATED_USD",
                                    title=f"Allocated $ by {label}", top_n=11)
                     st.caption(f"Named rows cover {shown:.0%} of scoped spend "
-                               f"({format_usd(shown * window_usd)} of {format_usd(window_usd)}); "
+                               f"({format_usd(shown * _pool)} of {format_usd(_pool)}); "
                                "'Other / not shown' is the remainder of the pool.")
 
         # rec17: one read-only "coverage ladder" — the per-grain residuals/coverage

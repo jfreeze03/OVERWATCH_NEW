@@ -132,10 +132,11 @@ def test_spend_adopts_family_and_allocation_marts():
     assert "if schema_contains:" in _SPEND                         # no mart carries schema grain
     assert "company, database)" in _SPEND                           # P0-1: unfiltered + db-filtered both -> xdim (warehouse-scoped)
     assert "mart27_sql.alloc_xdim_attribution" in _SPEND
-    # v4.33.1: ONE dollarization formula on every path — global share x the
-    # window total the caption states. The mart credits x rate branch used a
-    # different window and included idle (SYSTEM alone exceeded the caption).
-    assert 'alloc["ELAPSED_SHARE"].map(safe_float) * window_usd' in _SPEND
+    # v4.33.1: ONE dollarization formula on every path — global share x the pool
+    # total the caption states. The mart credits x rate branch used a different
+    # window and included idle (SYSTEM alone exceeded the caption). r4: the pool is
+    # the window-MATCHED _pool (full for a mart dim, <=90d for a live-served one).
+    assert 'alloc["ELAPSED_SHARE"].map(safe_float) * _pool' in _SPEND
     assert 'alloc["ALLOC_CREDITS"].map(safe_float) * rate' not in _SPEND
 
 

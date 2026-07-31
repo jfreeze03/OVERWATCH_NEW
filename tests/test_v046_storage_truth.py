@@ -121,8 +121,9 @@ def test_per_db_storage_is_windowed_average_not_snapshot():
 def test_allocation_caveat_and_size_note():
     sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     assert "warehouse-size-blind" in sp and "size-aware" in sp
-    # the locked global-share law + one-formula contract still hold
-    assert 'alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * window_usd' in sp
+    # the locked global-share law + one-formula contract still hold (r4: the pool is
+    # now the window-matched _pool — full for a mart dim, <=90d for a live one)
+    assert 'alloc["ALLOCATED_USD"] = alloc["ELAPSED_SHARE"].map(safe_float) * _pool' in sp
     cs = (_ROOT / "app" / "data" / "cost_sql.py").read_text(encoding="utf-8")
     assert "mart27_sql.alloc_attribution" in cs and "warehouse-size-blind" in cs
     # live builder keeps the tested global elapsed-share law (unchanged)
