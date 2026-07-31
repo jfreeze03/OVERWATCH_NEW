@@ -91,10 +91,9 @@ def test_v065_preserves_v064_contract_burn():
     assert "COST_CONTRACT_BREACH" in scan
 
 
-def test_v065_lockstep_floor_and_registry():
-    # validate.sql floor and the admin contract both moved to 65 (generic floor test in
-    # test_v451_trust / test_perf_budgets also guards this; this pins the intent here).
-    v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V065 applied" in v and "BETWEEN 1 AND 65) = 65" in v
+def test_v065_in_migration_registry():
+    # V065 is registered in the admin contract. (The validate.sql floor is the MOVING tip,
+    # guarded generically by test_v451_trust — a per-migration test must not pin it, or it
+    # breaks the moment the next migration lands.)
     from app.ui.pages.admin import _EXPECTED_MIGRATIONS
     assert 65 in _EXPECTED_MIGRATIONS

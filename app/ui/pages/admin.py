@@ -135,6 +135,13 @@ _EXPECTED_MIGRATIONS = {
         "under-projected -> suppressed the budget-breach alert; rank2), and COST_AI_CREEP "
         "compares equal today-excluded 7-complete-day windows (was THIS_WK 8d incl today "
         "vs PRIOR_WK 7d -> inflated WoW; rank3). No new objects. T3 perf loader still deferred",
+    66: "alert escalation + serverless window + timeline atomicity (bug round 6): "
+        "SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE "
+        "(#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH "
+        "crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 "
+        "complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a "
+        "severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT "
+        "wrapped in one transaction so a failed rebuild can't blank the trailing 48h (#3)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

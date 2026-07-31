@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.109.0 — V066 owner migration: alert escalation + serverless window + timeline atomicity (bug round 6) (2026-07-31)
+
+The 5 migration-proc findings from bug round 6, shipped as a new owner migration
+(`V066__alert_escalation_serverless_window_timeline_atomicity.sql`) re-deriving three procs
+from their latest defs (`SP_ALERT_SCAN` + `SP_LOAD_MARTS_V27` from V062, `SP_ALERT_SCAN_DAILY`
+from V065) via `outputs/gen_v066.py` + count-asserted needle edits.
+
+- **#1 / #11 / #2 — alert escalation restored.** Three rules computed a CRITICAL/HIGH
+  severity but keyed their dedupe on `RULE_ID | scope | date-bucket` with **no severity
+  band** — so once the day's (or week's) lower-severity event existed, the SAME row crossing
+  the escalation threshold was blocked by `NOT EXISTS` and never re-paged at the higher
+  urgency until the bucket rolled. Each dedupe key now carries a band that flips on the
+  rule's own threshold: `PIPE_COPY_FAILURES` (#1, ≥10 files → CRIT), `COST_DEPT_BUDGET_PACE`
+  (#11, ≥3× over pace → HIGH), `COST_CONTRACT_BREACH` (#2, ≤14 days left → CRIT). Mirrors the
+  `SEC_CRED_EXPIRY` EXPIRED/EXPIRING discriminator. (`COST_AI_CREEP` shares the bare weekly
+  key but has no within-bucket escalation, so it's left untouched.)
+- **#6 — `COST_SERVERLESS_CREEP` week-over-week no longer inflated.** `THIS_WK` spanned 8
+  days (`USAGE_DATE >= today-7` **includes today's** partial metering row) vs `PRIOR_WK` 7;
+  the scan window now excludes today, matching what V065 did for `COST_AI_CREEP`.
+- **#3 — incident timeline can't blank mid-incident.** `MART_INCIDENT_TIMELINE` arm [8] ran
+  a 48h-window `DELETE` then a 4-way `UNION` `INSERT` under AUTOCOMMIT — a transient INSERT
+  failure left the trailing 48h **empty** until the next hourly rebuild. The pair now runs
+  inside one `BEGIN TRANSACTION … COMMIT` with `ROLLBACK` on error (the B34 wrap pattern
+  already in this file).
+
+No new objects, no data heal, no app runtime change — deterministic alert logic + one
+atomicity wrap, byte-verified by `tests/test_v066_alert_escalation.py` (no owner smoke test).
+**Owner applies V066 in Snowsight after V062 → … → V065.** Lockstep: `validate.sql` floor →
+66, admin `_EXPECTED_MIGRATIONS[66]`, rebuild bundle `V001_V066`, DEPLOYMENT.md + README run-lists.
+
 ## 4.108.0 — Bug round 6: 10 app-only correctness fixes (2026-07-31)
 
 A find → adversarially-verify → rank pass across six domains returned 15 confirmed

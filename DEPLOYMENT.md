@@ -71,6 +71,7 @@ snowflake/migrations/V062__loader_robustness_alert_split_webhook.sql
 snowflake/migrations/V063__webhook_capture_once_daily_facts_failguard.sql
 snowflake/migrations/V064__webhook_drain_watermarks_alert_burn_telemetry.sql
 snowflake/migrations/V065__alert_run_rate_windows.sql
+snowflake/migrations/V066__alert_escalation_serverless_window_timeline_atomicity.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -125,6 +126,16 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > `COST_FORECAST_BREACH` projection now uses a **complete-days-only** run-rate (early on
 > day 1 of a month it does not fire — no complete day to rate yet), and `COST_AI_CREEP`
 > compares two equal, today-excluded 7-day windows.
+
+> **V066 verify (alert escalation + serverless window + timeline atomicity — no smoke
+> test):** re-derives `SP_ALERT_SCAN`, `SP_ALERT_SCAN_DAILY`, and `SP_LOAD_MARTS_V27`;
+> byte-verified by `tests/test_v066_alert_escalation.py`. No new objects. Deterministic
+> alert-logic edits (severity bands on three dedupe keys so a HIGH→CRITICAL / MEDIUM→HIGH
+> crossing re-pages; `COST_SERVERLESS_CREEP` today-exclusion) plus one atomicity wrap.
+> Optional clone check for **#3**: the `MART_INCIDENT_TIMELINE` arm [8] rebuild now runs
+> inside `BEGIN TRANSACTION … COMMIT` — induce a failure in its INSERT (e.g. temporarily
+> rename a source) and confirm the trailing-48h rows survive (ROLLBACK), rather than the
+> timeline going blank until the next hourly `SP_LOAD_MARTS_V27('HOURLY')`.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
