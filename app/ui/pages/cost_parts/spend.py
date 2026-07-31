@@ -19,7 +19,7 @@ from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
 from app.logic.directory import resolve_display
-from app.logic.formulas import account_today, credits_to_usd, format_usd, pct_delta, safe_float
+from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -110,7 +110,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
         cat_usd = df.groupby("CATEGORY")["USD"].sum().to_dict()
         wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
         other_usd = float(sum(cat_usd.values())) - wh_usd
-        st.markdown(
+        st.markdown(md_dollars(  # $-escape: three dollar amounts in one markdown body
             f"- **This page — billed spend ({days}d): {format_usd(billed_usd)}.** Account-wide, "
             "every compute service, cloud-services rebate applied. The number that ties to the bill.\n"
             f"- **Warehouse portion of that billed spend: {format_usd(wh_usd)}** — account-wide, "
@@ -127,7 +127,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
             "rate — this page and the Overview/Brief/Contract/Compare dollar figures all split "
             "the two, as do the seeded budget alerts (pace, forecast) since V061.\n"
             "- Same telemetry, different lenses — each number is exact for its own question."
-        )
+        ))
     result_caption(res)
 
     st.markdown("**Cloud-services health by warehouse**")
@@ -294,7 +294,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         _intro_pool = _alloc_pool(_served.source)
 
         st.markdown("**By user and database (allocated — estimate)**")
-        st.caption(
+        # $-escape (screenshot bug 2026-07-31): format_usd's '$' paired with 'USER$' below
+        # into a LaTeX math span — half this caption rendered in serif-italic math font.
+        st.caption(md_dollars(
             "Snowflake bills at warehouse grain. These split the scoped warehouse spend "
             f"({format_usd(_intro_pool)}) by query elapsed-time share; treat as directionally "
             "correct. Shares stay global, so a database/schema filter shows that slice of "
@@ -305,7 +307,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             "schema filter is set) uses elapsed-time share, which is warehouse-size-blind "
             "— a coarser estimate when one entity concentrates on unusually large or small "
             "warehouses."
-        )
+        ))
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
             with col:
@@ -342,9 +344,10 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                         ignore_index=True) if _other > 0 else _top)
                     charts.bar_usd(_bar, "DIMENSION", "ALLOCATED_USD",
                                    title=f"Allocated $ by {label}", top_n=11)
-                    st.caption(f"Top rows cover {shown:.0%} of scoped spend "
+                    # $-escape: two dollar amounts in one caption pair into a math span
+                    st.caption(md_dollars(f"Top rows cover {shown:.0%} of scoped spend "
                                f"({format_usd(_top_usd)} of {format_usd(_pool)}); "
-                               "'Other / not shown' is the remainder of the pool.")
+                               "'Other / not shown' is the remainder of the pool."))
 
         # rec17: one read-only "coverage ladder" — the per-grain residuals/coverage
         # already exist scattered across surfaces; this consolidates the MAP (which

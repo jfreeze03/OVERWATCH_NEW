@@ -27,6 +27,7 @@ from app.logic.formulas import (
     blended_billed_usd,
     exec_summary_html,
     format_usd,
+    md_dollars,
     month_days,
     safe_float,
 )
@@ -544,14 +545,13 @@ def render() -> None:
         _full = _tot[_tot.index < _cur]
         if len(_full) >= 2:
             _mom = (_full.iloc[-1] - _full.iloc[-2]) / max(_full.iloc[-2], 0.01) * 100
-            # Escaped dollars: two bare $ in one st.caption pair into a LaTeX
-            # math span (live render bug 2026-07-11 — half the caption went
-            # monospace and the $ vanished).
-            st.caption(f"Last full month {_full.index[-1]}: "
-                       f"{format_usd(_full.iloc[-1]).replace('$', chr(92) + '$')} "
+            # $-escape via the house helper (was an ad-hoc chr(92) patch, 2026-07-11):
+            # two bare $ in one st.caption pair into a LaTeX math span.
+            st.caption(md_dollars(f"Last full month {_full.index[-1]}: "
+                       f"{format_usd(_full.iloc[-1])} "
                        f"({_mom:+.1f}% vs prior). "
                        "Current month is dimmed — partial, not a drop. "
-                       f"Dollars at today's {chr(92)}${rate:.2f}/credit.")
+                       f"Dollars at today's ${rate:.2f}/credit."))
             # rec16: 'who moved' beats eyeballing stacked segments — the warehouses
             # with the largest absolute MoM change (last full month vs the prior).
             _last_m, _prev_m = _full.index[-1], _full.index[-2]

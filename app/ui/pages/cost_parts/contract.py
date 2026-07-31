@@ -22,6 +22,7 @@ from app.logic.formulas import (
     blended_billed_usd,
     blended_credit_rate,
     format_usd,
+    md_dollars,
     safe_float,
 )
 from app.logic.insights import idle_advisor
@@ -476,9 +477,11 @@ def _contract_tab(settings: dict) -> None:
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),
                          "DAILY_BURN_USD": st.column_config.NumberColumn("Daily burn", format="$%.2f"),
                      })
-        st.caption(f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${eff_rate:,.2f}/credit "
+        # $-escape: 4-5 dollar figures in one caption pair into LaTeX math spans
+        st.caption(md_dollars(
+                   f"Basis: ${daily_usd:,.0f}/day observed over 30d at ${eff_rate:,.2f}/credit "
                    f"blended (compute ${rate_now}, AI ${ai_rate})"
                    + (f" + ${float(extra_credits) * eff_rate:,.0f}/day hypothetical load"
                       if extra_credits else "") + ". "
                    "Exhaustion applies to the current contract's remaining "
-                   f"{contract_credits - consumed:,.0f} credits.")
+                   f"{contract_credits - consumed:,.0f} credits."))

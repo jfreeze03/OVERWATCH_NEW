@@ -84,8 +84,9 @@ def localize_timestamps(df, columns: list[str]):
 
 def panel_help(text: str) -> None:
     """Per-panel 'what is this / when red do X' popover (help mode)."""
+    from app.logic.formulas import md_dollars
     with st.popover("ⓘ about this panel", use_container_width=False):
-        st.markdown(text)
+        st.markdown(md_dollars(text))  # two $'s in help prose must not go LaTeX-math
 
 
 def lazy_sections(labels: list[str], key: str) -> str:
@@ -366,7 +367,10 @@ def result_caption(result: QueryResult, note: str = "") -> None:
     if note:
         bits.append(note)
     if bits:
-        st.caption(" · ".join(bits))
+        from app.logic.formulas import md_dollars
+        # $-escape at the sink: a note carrying two dollar amounts (or one amount +
+        # a USER$-style literal) would otherwise render as a LaTeX math span.
+        st.caption(md_dollars(" · ".join(bits)))
 
 
 

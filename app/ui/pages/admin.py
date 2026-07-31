@@ -23,7 +23,7 @@ from app.core.query import bump_refresh_salt, execute_statement, query_telemetry
 from app.core.session import current_role
 from app.core.sqlsafe import sql_literal
 from app.data import cost_sql, mart_sql
-from app.logic.formulas import safe_float
+from app.logic.formulas import md_dollars, safe_float
 from app.ui.components import (
     guard,
     kpi_row,
@@ -148,6 +148,11 @@ _EXPECTED_MIGRATIONS = {
         "999 onset sentinel when the prior week is 0 (#20); a post-scan sweep supersedes the "
         "lower-band OPEN alert when its higher-band sibling is open (#40, the V066 escalation "
         "follow-on); SP_LOAD_OBJECT_COST returns non-OK after a rolled-back load (#10)",
+    68: "standalone-mart freshness stamps (screenshot finding): SP_LOAD_LOCK_WAIT_MART + "
+        "SP_LOAD_PATTERN_COST gain the V041-R6 loader-owned SOURCE_FRESHNESS_STATE stamp "
+        "they were never given when V041 retired the snapshot sweep (their rows froze at "
+        "apply time; the Brief card showed MART_LOCK_WAIT_DAILY 448h stale). Stamped as a "
+        "RUN timestamp so zero-event windows read fresh; migration tail heals both rows",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -174,7 +179,8 @@ def _context_section() -> None:
 
 def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
-    st.caption(f"Values from: {settings.get('_source')}. Rates confirmed 2026-07: $3.68 compute / $2.20 Cortex.")
+    # $-escape: the two literal rates would pair into a LaTeX math span
+    st.caption(md_dollars(f"Values from: {settings.get('_source')}. Rates confirmed 2026-07: $3.68 compute / $2.20 Cortex."))
     # Deliberately live (audit rule, r24 #8): SETTINGS is an operator-edit surface, so
     # a concurrent admin's change must surface within 30s, not one cache cycle. The
     # perf T1.11 retier was declined here to keep that guarantee — see test_codex_r24.
@@ -229,7 +235,9 @@ def _migrations_tab() -> None:
         styled_table(res.df)
     missing = [f"V{n:03d} ({name})" for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
-        st.warning("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md).")
+        # $-escape: migration descriptions carry '$' (V036 "measured $", V065 "MTD$/...") —
+        # joined into one warning they pair into a math span on exactly the fresh-install path
+        st.warning(md_dollars("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md)."))
     else:
         st.success(f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
 

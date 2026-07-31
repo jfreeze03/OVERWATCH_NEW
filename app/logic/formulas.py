@@ -187,6 +187,20 @@ def format_usd(value: float) -> str:
     return f"${amount:,.2f}"
 
 
+def md_dollars(text: object) -> str:
+    """Escape '$' for Streamlit MARKDOWN sinks (st.caption/markdown/info/...).
+
+    Streamlit's markdown treats a bare '$'...'$' pair as a LaTeX math span, so any
+    caption holding two dollar amounts — or one amount plus a literal like USER$ —
+    renders everything between them in serif-italic math (live render bug,
+    screenshots 2026-07-11 and 2026-07-31). Wrap the WHOLE rendered string at the
+    sink. Do NOT bake this into format_usd: its output also feeds non-markdown
+    surfaces (metric cards, chart data, CSV/ZIP exports) where a literal backslash
+    would display.
+    """
+    return str(text).replace("$", "\\$")
+
+
 def format_credits(credits: float) -> str:
     """Credit formatting consistent with old-app conventions."""
     value = safe_float(credits)

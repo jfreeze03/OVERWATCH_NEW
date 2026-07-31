@@ -73,6 +73,7 @@ snowflake/migrations/V064__webhook_drain_watermarks_alert_burn_telemetry.sql
 snowflake/migrations/V065__alert_run_rate_windows.sql
 snowflake/migrations/V066__alert_escalation_serverless_window_timeline_atomicity.sql
 snowflake/migrations/V067__alert_attribution_onset_supersede_objectcost.sql
+snowflake/migrations/V068__standalone_mart_freshness_stamps.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -146,6 +147,15 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
 > check: `CALL SP_ALERT_SCAN();` runs clean; after a HIGH→CRITICAL crossing, the earlier
 > lower-band `ALERT_EVENTS` row flips to `RESOLVED`/`SUPERSEDED` while the CRITICAL stays OPEN.
+
+> **V068 verify (standalone-mart freshness stamps — no smoke test):** re-derives
+> `SP_LOAD_LOCK_WAIT_MART` + `SP_LOAD_PATTERN_COST`; byte-verified by
+> `tests/test_v068_freshness_stamps.py`. The migration tail CALLs both procs, so verify is
+> immediate: `SELECT SOURCE_NAME, LAST_LOAD_TS, SNAPSHOT_TS FROM
+> DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME IN
+> ('MART_LOCK_WAIT_DAILY','MART_PATTERN_COST_DAILY');` — both rows should show a
+> just-now timestamp (they had been frozen at apply time, ~2026-07-09), and the Brief
+> "stalest telemetry" card stops naming MART_LOCK_WAIT_DAILY on the next app refresh.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

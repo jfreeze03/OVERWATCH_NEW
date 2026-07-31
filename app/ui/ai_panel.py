@@ -32,7 +32,10 @@ def ai_evaluation_panel(*, key: str, prompt: str, settings: dict, page: str,
         if stored:
             ok, answer = stored
             if ok:
-                st.markdown(answer)
+                from app.logic.formulas import md_dollars
+                # $-escape: LLM cost answers routinely contain multiple $ amounts,
+                # which pair into LaTeX math spans and garble the narrative.
+                st.markdown(md_dollars(answer))
                 st.caption(f"Model: {model} · grounded in the on-screen evidence only · verify before acting.")
                 download_text_button("Download evaluation (.txt)", answer, f"overwatch_ai_{key}.txt")
             else:

@@ -14,7 +14,7 @@ from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
 from app.logic.actions import rank_actions
-from app.logic.formulas import blended_billed_usd, format_usd, safe_float
+from app.logic.formulas import blended_billed_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import kpi_row, load_settings, page_header, styled_table
 
@@ -209,9 +209,10 @@ def render() -> None:
         else:
             for _, a in ranked.iterrows():
                 est = safe_float(a.get("ESTIMATED_USD"))
-                st.markdown(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
+                # $-escape: TITLE is data — a '$' in it pairs with format_usd's '$'
+                st.markdown(md_dollars(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
                             f"{a.get('OWNER') or 'unassigned'}"
-                            + (f" · ~{format_usd(est)}" if est > 0 else ""))
+                            + (f" · ~{format_usd(est)}" if est > 0 else "")))
     else:
         st.success("Action queue is empty." if actions.ok else "Action queue not installed yet.")
 

@@ -22,7 +22,7 @@ from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql, recheck_sql
 from app.logic import remediation, tuning
 from app.logic.ai_prompts import anomaly_explain_prompt
-from app.logic.formulas import safe_float
+from app.logic.formulas import md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
@@ -282,7 +282,8 @@ def _open_events_section(events, is_operator: bool) -> None:
                                     usd_s = f"${float(usd):,.0f}"
                                 except (TypeError, ValueError):
                                     usd_s = "n/a"
-                                st.markdown(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})")
+                                # $-escape: DESCRIPTION is data — a '$' in it pairs with usd_s
+                                st.markdown(md_dollars(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})"))
                             st.caption("VERIFIED comes from a manual proof-backed verify on the "
                                        "Savings ledger; the change scan (V038) additionally books "
                                        "and settles its own measured row for warehouse-setting "

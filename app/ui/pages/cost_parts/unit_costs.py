@@ -19,7 +19,7 @@ from app.core.query import run, run_batch
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.directory import resolve_display
-from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.logic.formulas import credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -162,7 +162,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         st.info("Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "
                 "an admin can apply the pending schema update on Admin → Migrations & freshness.")
 
-    with st.expander("Trend one procedure — total $ and $/call over time"):
+    # $-escape: expander LABELS render markdown+LaTeX too — "total $ and $/call" paired
+    with st.expander(md_dollars("Trend one procedure — total $ and $/call over time")):
         st.caption(
             "Type a procedure name (bare or db.schema-qualified — paste PROC_NAME "
             "from the leaderboard above). Same measured rollup as the leaderboard "
@@ -261,13 +262,14 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
 
     st.divider()
     st.markdown("**ETL unit costs (tagged pipelines)**")
-    st.caption(
+    # $-escape: four $/unit tokens in one caption pair into LaTeX math spans
+    st.caption(md_dollars(
         "Cost governance for pipelines that set a JSON QUERY_TAG "
         "(pipeline / run_id / target_object / environment / cost_center — see "
         "docs/design/ETL_COST_TAGS.md). MEASURED attribution credits per pipeline: "
         "$/run, $/M rows written, $/TiB scanned, and failed-run waste. Untagged queries "
         "fall out — coverage says how much; $/run divides only run_id-tagged spend."
-    )
+    ))
     if st.toggle("Run ETL unit-cost scan", key="etl_unit_toggle",
                  help="Scans the window's QUERY_HISTORY for JSON pipeline tags joined to "
                       "measured attribution credits. Off by default (keeps first paint fast)."):

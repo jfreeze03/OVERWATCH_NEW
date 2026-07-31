@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.112.0 — Live-screenshot fixes: $-in-markdown math-font bug (house-wide) + V068 freshness stamps (2026-07-31)
+
+Two defects the owner spotted in the deployed app (screenshots, v4.111.0):
+
+- **The serif-italic "weird font" in captions is a `$`-pairing LaTeX bug — fixed
+  house-wide.** Streamlit's markdown treats a bare `$…$` pair as a math span, so any
+  caption holding two dollar tokens (two `format_usd()` amounts, an amount + `USER$`, two
+  literal rates) rendered the text between them as math. A sweep found **9 always-live
+  sites** (the two screenshotted Spend & Attribution captions, the "Why totals differ"
+  expander, the Admin rates caption + missing-migrations banner, the Contract renewal
+  basis line, the Optimize pattern caption, the ETL unit-costs intro, and an expander
+  *label*), 3 data-dependent ones (AI narrative, Brief action titles, ledger
+  descriptions), and an ad-hoc `chr(92)` patch from July 11 proving the class regresses.
+  Fix: one `formulas.md_dollars()` escape helper applied at every live site and inside
+  the house sinks (`result_caption`, `panel_help`, the AI panel), the ad-hoc patch
+  retired, and an **AST-based CI lock** (`tests/test_md_dollars.py`) that fails any new
+  markdown-sink call carrying 2+ unescaped `$` tokens — the bug class cannot silently return.
+- **`MART_LOCK_WAIT_DAILY` 448.5h stale → V068 owner migration.** The loader chain is
+  fine; the freshness **stamp** was orphaned: when V041 retired the 10-minute
+  `SP_SNAPSHOT_FRESHNESS` sweep and moved stamping into each loader, the two marts with
+  their own standalone tasks (`SP_LOAD_LOCK_WAIT_MART`, `SP_LOAD_PATTERN_COST`) never got
+  one — their `SOURCE_FRESHNESS_STATE` rows froze at apply time (~Jul 9, exactly 448.5h
+  before the screenshot; pattern-cost equally frozen, just hidden behind the worst-source
+  card). `V068__standalone_mart_freshness_stamps.sql` re-derives both loaders with the
+  standard V041-R6 freshness MERGE, stamping `LAST_LOAD_TS = CURRENT_TIMESTAMP()` (a
+  **run** stamp, not `MAX(LOAD_TS)` of the mart) so an account with **zero lock waits
+  reads fresh, not stale-forever** — and the migration tail CALLs both procs so the rows
+  heal immediately. **Owner applies V068 in Snowsight after V062 → … → V067.** Lockstep:
+  `validate.sql` floor → 68, admin `_EXPECTED_MIGRATIONS[68]`, rebuild bundle
+  `V001_V068`, DEPLOYMENT.md + README run-lists.
+
 ## 4.111.0 — V067 owner migration: alert attribution + serverless onset + escalation supersede + object-cost honesty (Codex review) (2026-07-31)
 
 The behavioral proc fixes from the Codex 50-rec review, shipped as a new owner migration

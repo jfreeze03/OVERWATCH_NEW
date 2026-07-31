@@ -20,7 +20,7 @@ from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, secu
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
-from app.logic.formulas import format_usd, safe_float
+from app.logic.formulas import format_usd, md_dollars, safe_float
 from app.logic.insights import flag_repeat_candidates, idle_advisor, idle_suspend_sql, storage_movers
 from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
@@ -290,8 +290,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
     st.markdown("**Recurring cost patterns (same query, run all day)**")
-    st.caption("Grouped by parameterized fingerprint: a $9 query run 400x outranks one $300 "
-               "outlier — this is where caching/materialization actually pays.")
+    # $-escape: the $9/$300 pair would render " query run 400x outranks one " as math
+    st.caption(md_dollars("Grouped by parameterized fingerprint: a $9 query run 400x outranks "
+                          "one $300 outlier — this is where caching/materialization actually pays."))
     st.caption(toggle_cost_hint("exppat_"))
     if st.toggle("Run recurring-pattern scan (hour-share allocation by fingerprint)",
                  key="cost_exppat_toggle",
