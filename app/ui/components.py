@@ -4,13 +4,14 @@ labeled empties, visible truncation. No synthetic fallbacks — ever."""
 from __future__ import annotations
 
 import html
+import re
 
 import streamlit as st
 
 from app.config import ACCOUNT_USAGE_LAG_NOTE, DEFAULT_SETTINGS
 from app.core.result import QueryResult
 from app.data import mart_sql
-from app.logic.formulas import ACCOUNT_TIMEZONE, format_usd, safe_float
+from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
 from app.theme import chip
 from app.ui.icons import icon
 from app.ui.status_colors import status_columns_in, status_css
@@ -671,8 +672,28 @@ def _auto_pin(df, column_config: dict | None) -> dict | None:
     return cfg
 
 
+def _slugify(text: object, fallback: str = "table") -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") or fallback
+
+
+def _export_filename(seq: int, slug: str | None) -> str:
+    """rec14: a self-identifying CSV name — `overwatch-{page}-{table}-{YYYYMMDD}.csv` —
+    so a folder of downloads is readable instead of overwatch_table_1/2/3.csv. The
+    page comes from the same _ow_dl_page identity the prep-slot uses; the date is
+    account-time to match the CSV contents."""
+    page = _slugify(st.session_state.get("_ow_dl_page", ""), "overwatch")
+    name = _slugify(slug) if slug else f"table-{seq}"
+    try:
+        day = account_today().strftime("%Y%m%d")
+    except Exception:  # noqa: BLE001 - a missing session date just drops the suffix
+        day = ""
+    parts = ["overwatch", page, name, day]
+    return "-".join(p for p in parts if p) + ".csv"
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
-                  key: str | None = None, selectable: bool = False) -> int | None:
+                  key: str | None = None, selectable: bool = False,
+                  slug: str | None = None) -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
         return None
@@ -751,7 +772,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     _cache[_dlk] = {"fp": _fp, "bytes": _csv}
                 # Downloads are frontend-only, no rerun (r19 #20).
                 st.download_button("⬇", _csv,
-                                   file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                                   file_name=_export_filename(seq, slug), mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                    on_click="ignore",
                                    help="Download this table as CSV (account time).")
@@ -771,7 +792,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                           and isinstance(_slot.get("bytes"), (bytes, bytearray)))
                 if _ready:
                     st.download_button("⬇ CSV ready", bytes(_slot["bytes"]),
-                                       file_name=f"overwatch_table_{seq}.csv", mime="text/csv",
+                                       file_name=_export_filename(seq, slug), mime="text/csv",
                                        key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                        on_click="ignore")
                 elif st.button("⬇", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
@@ -800,18 +821,20 @@ def _download_fingerprint(df) -> str:
     return hashlib.md5(f"{base}|{content}".encode()).hexdigest()[:16]
 
 
-def styled_table(df, *, height: int | None = None, column_config: dict | None = None) -> None:
+def styled_table(df, *, height: int | None = None, column_config: dict | None = None,
+                 slug: str | None = None) -> None:
     """st.dataframe with semantic status colors, convention-based number
-    formats, a height cap, and a CSV download."""
-    _render_table(df, height=height, column_config=column_config)
+    formats, a height cap, and a CSV download. ``slug`` names the export file
+    (rec14): overwatch-{page}-{slug}-{date}.csv."""
+    _render_table(df, height=height, column_config=column_config, slug=slug)
 
 
 def selectable_table(df, key: str, *, height: int | None = None,
-                     column_config: dict | None = None) -> int | None:
+                     column_config: dict | None = None, slug: str | None = None) -> int | None:
     """styled_table + single-row click selection; returns the positional row
     index or None. Degrades to a plain table on runtimes without selections."""
     return _render_table(df, height=height, column_config=column_config,
-                         key=key, selectable=True)
+                         key=key, selectable=True, slug=slug)
 
 
 def blast_radius(warehouse: str, page: str) -> None:

@@ -40,6 +40,7 @@ from app.ui.components import (
     run_mart_first,
     section_header,
     section_scope_note,
+    selectable_table,
     styled_table,
 )
 
@@ -466,6 +467,48 @@ def render() -> None:
     if _scope_note:
         st.caption(_scope_note)
 
+    # ---- The work + the drivers (rec4: above the charts, not buried below) ----
+    # An executive landing page leads with what needs an owner, not two charts.
+    action_lines: list[str] = []
+    left, right = st.columns([1.15, 1.0])
+    with left:
+        section_header("Top actions")
+        # actions_res loaded above the score (triage #3) — reused here.
+        if not actions_res.ok:
+            st.info("Action queue isn't installed yet — no placeholder rows.")
+        elif actions_res.empty:
+            st.success("Action queue is empty — nothing is waiting on an owner.")
+        else:
+            ranked = rank_actions(actions_res.df, limit=5)
+            if ranked.empty:
+                st.success("No OPEN actions — everything in the queue is done or dropped.")
+            else:
+                # rec10: a clickable surface, not a dead read-only wall — a row click
+                # jumps to the Control Room where the queue is triaged (matching CR).
+                _sel = selectable_table(
+                    ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
+                    key="ov_actions_sel", slug="top-actions",
+                    column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f")})
+                if _sel is not None:
+                    request_navigation("Control Room")
+                st.caption("Click a row to open it in the Control Room queue.")
+                result_caption(actions_res)
+                action_lines = [
+                    f"[{a['SEVERITY']}] {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"
+                    for _, a in ranked.iterrows()
+                ]
+    with right:
+        section_header("Top cost drivers")
+        drivers = _board_panel(board, "COST_DRIVER")
+        if not drivers.empty:
+            view = (drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
+                    .sort_values("VALUE_USD", ascending=False))
+            charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
+        elif not using_mart and not daily.empty:
+            st.caption("Driver ranking appears once the exec board mart is installed.")
+        else:
+            st.info("No cost-driver rows for this scope/window.")
+
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
     section_header("Monthly spend by warehouse")
     _mres = run_mart_first(
@@ -495,6 +538,27 @@ def render() -> None:
                        f"({_mom:+.1f}% vs prior). "
                        "Current month is dimmed — partial, not a drop. "
                        f"Dollars at today's {chr(92)}${rate:.2f}/credit.")
+            # rec16: 'who moved' beats eyeballing stacked segments — the warehouses
+            # with the largest absolute MoM change (last full month vs the prior).
+            _last_m, _prev_m = _full.index[-1], _full.index[-2]
+            _piv = (_md[_md["MONTH"].isin([_last_m, _prev_m])]
+                    .pivot_table(index="WAREHOUSE_NAME", columns="MONTH", values="USD",
+                                 aggfunc="sum").fillna(0.0))
+            if _prev_m in _piv.columns and _last_m in _piv.columns:
+                _mv = pd.DataFrame({"WAREHOUSE": _piv.index,
+                                    "PRIOR_USD": _piv[_prev_m].to_numpy(),
+                                    "LATEST_USD": _piv[_last_m].to_numpy()})
+                _mv["DELTA_USD"] = _mv["LATEST_USD"] - _mv["PRIOR_USD"]
+                _mv["DELTA_PCT"] = [(d / p * 100.0) if p > 0 else 0.0
+                                    for d, p in zip(_mv["DELTA_USD"], _mv["PRIOR_USD"], strict=True)]
+                _mv = _mv.iloc[_mv["DELTA_USD"].abs().argsort()[::-1]].head(6)
+                st.caption(f"Top movers — {_last_m} vs {_prev_m}")
+                styled_table(_mv, height=240, slug="warehouse-movers", column_config={
+                    "PRIOR_USD": st.column_config.NumberColumn("Prior $", format="$%.0f"),
+                    "LATEST_USD": st.column_config.NumberColumn("Latest $", format="$%.0f"),
+                    "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),
+                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%+.1f%%"),
+                })
         result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
@@ -576,41 +640,6 @@ def render() -> None:
                 "alerts, telemetry and owner-queue signals, so its level can differ."
             )
 
-    # ---- Two-column: actions + cost drivers ---------------------------------
-    action_lines: list[str] = []
-    left, right = st.columns([1.15, 1.0])
-
-    with left:
-        st.subheader("Top actions")
-        # actions_res loaded above the score (triage #3) — reused here.
-        if not actions_res.ok:
-            st.info("Action queue isn't installed yet — no placeholder rows.")
-        elif actions_res.empty:
-            st.success("Action queue is empty — nothing is waiting on an owner.")
-        else:
-            ranked = rank_actions(actions_res.df, limit=5)
-            if ranked.empty:
-                st.success("No OPEN actions — everything in the queue is done or dropped.")
-            else:
-                styled_table(ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]])
-                result_caption(actions_res)
-                action_lines = [
-                    f"[{a['SEVERITY']}] {a['TITLE']} — owner {a.get('OWNER') or 'unassigned'}"
-                    for _, a in ranked.iterrows()
-                ]
-
-    with right:
-        st.subheader("Top cost drivers")
-        drivers = _board_panel(board, "COST_DRIVER")
-        if not drivers.empty:
-            view = (drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
-                    .sort_values("VALUE_USD", ascending=False))
-            charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
-        elif not using_mart and not daily.empty:
-            st.caption("Driver ranking appears once the exec board mart is installed.")
-        else:
-            st.info("No cost-driver rows for this scope/window.")
-
     # ---- Daily AI digest ------------------------------------------------------
     digest = run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="hourly",
                  source="DAILY_DIGEST (Cortex, grounded in the exec board)")
@@ -644,6 +673,14 @@ def render() -> None:
         f"Platform score: {_score_export}"
         + ("".join(f"\n  - {d.driver}: -{d.penalty:.1f} pts ({d.evidence})" for d in score.drivers) if score.drivers else "")
     )
+    # rec20: hand the export the daily spend series so it renders a trend sparkline
+    # (defensive — daily/usd_col may be absent when spend history hasn't loaded).
+    _export_spark = None
+    if not daily.empty:
+        _uc = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
+                   daily.columns[-1] if len(daily.columns) else None)
+        if _uc is not None:
+            _export_spark = [safe_float(v) for v in daily[_uc].tail(30).tolist()]
     html = exec_summary_html(
         company=company, days=days, generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
         window_spend=f"{format_usd(window_spend)} · {company}, metering",
@@ -653,6 +690,7 @@ def render() -> None:
         score_line=_score_export,
         drivers=[(d.driver, f"{d.penalty:.1f}", d.evidence) for d in score.drivers],
         actions=action_lines,
+        spend_series=_export_spark,
     )
     c_html, c_txt = st.columns(2)
     with c_html:

@@ -197,18 +197,39 @@ def format_credits(credits: float) -> str:
     return f"{value:,.4f}"
 
 
+def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0891b2") -> str:
+    """rec20: a self-contained inline-SVG sparkline for the HTML export — pure, no
+    Streamlit dependency, so `exec_summary_html` stays in the logic layer and the
+    downloaded file needs no external assets."""
+    pts = [safe_float(v) for v in (values or []) if v is not None]
+    if len(pts) < 2:
+        return ""
+    lo, hi = min(pts), max(pts)
+    span = (hi - lo) or 1.0
+    n = len(pts)
+    coords = " ".join(
+        f"{i / (n - 1) * (width - 4) + 2:.1f},{height - 2 - (v - lo) / span * (height - 4):.1f}"
+        for i, v in enumerate(pts))
+    return (f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+            f'style="display:block;margin-top:8px" aria-label="spend trend">'
+            f'<polyline fill="none" stroke="{color}" stroke-width="1.6" points="{coords}"/></svg>')
+
+
 def exec_summary_html(*, company: str, days: int, generated: str, window_spend: str,
                       mtd_line: str, forecast_line: str, alerts_line: str,
                       score_line: str, drivers: list[tuple[str, str, str]],
-                      actions: list[str]) -> str:
+                      actions: list[str], spend_series: list | None = None) -> str:
     """Styled, self-contained HTML executive summary (the .txt looked amateur).
 
     Pure string builder — inputs arrive pre-formatted so this stays testable
     and the page keeps owning data honesty. Every interpolated field is
     HTML-escaped HERE, in the one tested place, so an object name carrying
     '<', '&', or a stray tag can never break (or script) the exported file.
+    ``spend_series`` (optional daily USD) adds a trend sparkline and the export
+    carries a print stylesheet so it prints as a clean one-pager (rec20).
     """
     esc = _html.escape
+    spark = _spark_polyline(spend_series)
     company = esc(str(company))
     generated = esc(str(generated))
     window_spend = esc(str(window_spend))
@@ -221,6 +242,8 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
         for d, p, e in drivers
     ) or "<tr><td colspan='3'>No deductions — clean window.</td></tr>"
     action_items = "".join(f"<li>{esc(str(a))}</li>" for a in actions) or "<li>No open actions.</li>"
+    trend_block = (f'<div class="trend"><div class="label">Spend trend '
+                   f'(last {int(days)}d)</div>{spark}</div>') if spark else ""
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>OVERWATCH executive summary</title>
 <style>
@@ -237,6 +260,13 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
  th {{ color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }}
  h2 {{ font-size: 14px; margin: 22px 0 8px 0; }}
  .foot {{ margin-top: 26px; color: #94a3b8; font-size: 11px; }}
+ .trend {{ margin: 6px 0 18px 0; }}
+ .trend .label {{ font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }}
+ @media print {{
+   @page {{ margin: 14mm; }}
+   body {{ margin: 0; }}
+   .card, tr, ul, table, svg, .trend {{ break-inside: avoid; }}
+ }}
 </style></head><body>
 <div class="kicker">OVERWATCH</div>
 <h1>Executive summary — {company}</h1>
@@ -248,6 +278,7 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
  <div class="card"><div class="label">Open alerts</div><div class="value">{alerts_line}</div></div>
  <div class="card"><div class="label">Platform score</div><div class="value">{score_line}</div></div>
 </div>
+{trend_block}
 <h2>Score deductions</h2>
 <table><tr><th>Driver</th><th>Points</th><th>Evidence</th></tr>{driver_rows}</table>
 <h2>Top actions</h2>

@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.103.0 — Design "scannability wave" — Codex visual-review DO-FIRST (app-only) (2026-07-31)
+
+The DO-FIRST items from the Codex visual/design review assessment
+(`docs/reviews/DESIGN_REVIEW_2026-07-31.md`; 7 CONFIRM / 7 PARTIAL / 6 DECLINE). All
+app-only, no migration.
+
+- **rec 14 — self-identifying CSV exports.** `_render_table` now names downloads
+  `overwatch-{page}-{table}-{YYYYMMDD}.csv` (was `overwatch_table_3.csv`); `styled_table`
+  / `selectable_table` take an optional `slug`. A folder of downloads is finally readable.
+- **rec 2 — Brief order.** The AI morning narrative moved below the numbers/fires/asks and
+  is collapsed by default, restoring the page's own "numbers first, fires second" contract.
+- **rec 18 — micro-label floor.** Metric/card/stat labels bumped (0.66–0.72 → 0.72–0.76rem);
+  tracking and the a11y-audited `.ow-help`/contrast (v4.96) left as-is.
+- **A1 — one traffic-light palette** (Codex missed this). The sidebar health strip and two
+  charts drifted (`#22c55e`/`#ef4444`/`#f97316`/`#f87171`); they now read the same
+  `#34d399`/`#fb7185`/`#fbbf24` / `SEV_COLORS` as every other surface, so a state is one hue.
+- **rec 10 — clickable action surface.** Overview "Top actions" is now a `selectable_table`;
+  a row click jumps to the Control Room queue (was a dead read-only wall).
+- **rec 4 — Top actions hoisted** above the boss chart / spend trend — an executive landing
+  page leads with the work that needs an owner, not two charts.
+- **rec 16 — readable boss chart.** `monthly_stacked_usd` default `top_n` 8→5 (≤6 colors),
+  plus a companion "top movers MoM" table (Δ$ / Δ% per warehouse) that answers "who moved."
+- **rec 20 — executive export.** `exec_summary_html` now embeds a self-contained trend
+  sparkline (pure inline SVG) and a `@media print` stylesheet, so the downloaded summary
+  prints as a clean one-pager.
+
+Deferred/declined per the assessment (rec 3/8/9/12/17/19 undo deliberate recent work or
+over-engineer a desktop-first SiS tool); NEXT items (1, 5, 6, 7, 11, 13, 15; A2/A3/A5)
+remain queued.
+
+Gates green: ruff, mypy, tests (+9 wave locks; 1608 passed).
+
 ## 4.102.0 — Allocated-attribution window alignment (r4 deferral resolved, app-only) (2026-07-31)
 
 - **allocated share × pool window mismatch** (`cost_parts/spend.py`) — the r4 review's

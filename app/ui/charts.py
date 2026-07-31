@@ -120,13 +120,13 @@ def spend_trend(
         rule_df = pd.DataFrame({"y": [daily_budget_usd]})
         layers.append(
             alt.Chart(rule_df)
-            .mark_rule(strokeDash=[6, 4], color="#f87171")
+            .mark_rule(strokeDash=[6, 4], color=SEV_COLORS["CRITICAL"])
             .encode(y="y:Q", tooltip=alt.value(f"Daily budget rate ${daily_budget_usd:,.0f}"))
         )
         # Visible without hover (screenshots, phones) — Codex r4 #17.
         layers.append(
             alt.Chart(rule_df)
-            .mark_text(align="left", dx=6, dy=-7, fontSize=11, color="#f87171",  # C15: >=11px floor
+            .mark_text(align="left", dx=6, dy=-7, fontSize=11, color=SEV_COLORS["CRITICAL"],  # A1 palette; C15 >=11px floor
                        text=f"budget ${daily_budget_usd:,.0f}/day")
             .encode(y="y:Q", x=alt.value(6))
         )
@@ -399,8 +399,11 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
             color=alt.Color(
                 "Severity:N",
                 scale=alt.Scale(
+                    # A1: read the ONE shared severity palette, not a divergent copy
+                    # (was a hardcoded red+orange a shade off from every other surface)
                     domain=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-                    range=["#ef4444", "#f97316", "#eab308", "#64748b"],
+                    range=[SEV_COLORS["CRITICAL"], SEV_COLORS["HIGH"],
+                           SEV_COLORS["MEDIUM"], SEV_COLORS["LOW"]],
                 ),
                 legend=alt.Legend(orient="bottom", title=None),
             ),
@@ -411,7 +414,7 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                         usd_col: str, partial_month: str = "",
-                        top_n: int = 8) -> None:
+                        top_n: int = 5) -> None:
     """The boss chart: monthly spend stacked by warehouse. The in-flight
     month renders dimmed (partial, not a drop) — same honesty rule as the
     daily spend trend. Top-N categories + "Other" (owner report 2026-07-11:

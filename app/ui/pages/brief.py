@@ -174,13 +174,6 @@ def render() -> None:
     if spend.ok and not spend.empty:
         charts.sparkline_row([("Spend, 14 days", spend.df, "DAY", "CREDITS_BILLED")])
 
-    digest = _b_rec.get("digest") or run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
-                 source="DAILY_DIGEST (Cortex, grounded)")
-    if digest.usable():
-        drow = digest.df.iloc[0]
-        with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=True):
-            st.markdown(str(drow.get("BODY") or ""))
-
     # N2: a critical that paged nobody hides behind a green board — call it out
     # on the one surface a half-awake on-call actually reads.
     _und = int(safe_float(vals.get("UNDELIVERED_CRITICAL", "0"))) if strip_up else 0
@@ -221,6 +214,16 @@ def render() -> None:
                             + (f" · ~{format_usd(est)}" if est > 0 else ""))
     else:
         st.success("Action queue is empty." if actions.ok else "Action queue not installed yet.")
+
+    # rec2: the AI narrative is context, not the headline — it sits BELOW the numbers,
+    # fires, and asks (the page's "numbers first, fires second, asks third" contract)
+    # and is collapsed by default so open fires stay above the fold.
+    digest = _b_rec.get("digest") or run(mart_sql.latest_digest(), page=_PAGE, key="daily_digest", tier="recent",
+                 source="DAILY_DIGEST (Cortex, grounded)")
+    if digest.usable():
+        drow = digest.df.iloc[0]
+        with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=False):
+            st.markdown(str(drow.get("BODY") or ""))
 
     st.caption(pd.Timestamp.now().strftime("Generated %Y-%m-%d %H:%M") +
                " · full detail lives on Overview and Control Room.")

@@ -370,7 +370,10 @@ def _global_jump(pages: tuple) -> None:
         request_navigation("Alerts", "Rules")
 
 
-_STRIP_COLORS = {"OK": "#22c55e", "WARN": "#f59e0b", "BAD": "#ef4444",
+# A1: the sidebar health strip reads the SAME hues as the theme --ow-* tokens,
+# SEV_COLORS, and the KPI stripes — was #22c55e/#f59e0b/#ef4444, a green/amber/red
+# a shade off from every other surface, so "healthy" looked different in the rail.
+_STRIP_COLORS = {"OK": "#34d399", "WARN": "#fbbf24", "BAD": "#fb7185",
                  "INFO": "#38bdf8", "MUTED": "#94a3b8"}
 
 
