@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.115.0 — "Last alert delivery" card + the integration probe that showed a false red (2026-07-31)
+
+From a live incident: the owner saw no Teams alerts for a day and **had no way to tell a
+healthy quiet stretch from a dead pipe**. The app owned both facts and surfaced neither
+usefully. Two fixes, one principle — *silence is not a fault signal*.
+
+- **New card on Alerts: Last alert delivery / Eligible to send now / Send failures (24h).**
+  The sender is a 24h-windowed, per-key digest — alert scanning dedupes on keys that mostly
+  carry the day, so a chronic condition raises **once** and quiet days are legitimately
+  empty. Silence therefore proves nothing on its own. What separates quiet from broken is
+  whether anything is **waiting**, so `mart_sql.last_delivery_health()` reports the last
+  confirmed send (from `ALERT_DELIVERIES` — a send Snowflake accepted, not a raise) beside a
+  count that **mirrors the sender's own eligibility predicate** (open, inside the 24h window,
+  config-joined, matching an enabled route's family/company/severity, absent from that
+  route's ledger). The card states the verdict outright: *nothing waiting* → "no news really
+  is no news"; *waiting but nothing sent* → "delivery looks stuck"; *send failures present* →
+  "the endpoint is refusing — check the integration, not the alert rules".
+- **Fixed a banner that lied.** `_delivery_status` probed a hardcoded
+  `LIKE 'OVERWATCH_WEBHOOK'` — the **Slack placeholder** from `webhook_delivery.sql`. On a
+  Teams-only account that integration never exists, so the page rendered a red *"No webhook
+  integration — alerts stay in-app only"* while Teams was delivering normally. It now
+  resolves the integrations the **enabled routes actually name** and checks for any of them.
+  As a bonus it now calls out routes pointing at a missing integration — which fail on every
+  run and bury real errors in the log (exactly the dead V012 Slack route on this account).
+
+Gates green: ruff, mypy (pure layers), **pytest 1781 passed / 1 skipped** (+7 locks).
+
 ## 4.114.0 — Perf round 3 (live telemetry) + recommendation engines Tiers B–E + V069 (2026-07-31)
 
 The full plan from the owner's live Admin→Performance screenshots and the 14-engine

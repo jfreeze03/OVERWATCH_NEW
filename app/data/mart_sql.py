@@ -1257,6 +1257,69 @@ LIMIT 60
 # All read OVERWATCH-owned tables — no ACCOUNT_USAGE.
 # ---------------------------------------------------------------------------
 
+def last_delivery_health() -> str:
+    """One row answering the question the owner could NOT answer on 2026-07-31:
+    'no alerts today — is it QUIET, or is delivery BROKEN?'
+
+    Those are different states and the app never separated them. The sender is a
+    per-route DIGEST bounded to a 24h window, and alert scanning dedupes on keys that
+    mostly carry the day — so a chronic condition raises ONCE and a genuinely quiet
+    stretch produces zero messages. Silence alone proves nothing.
+
+    What separates them is whether anything is WAITING. ELIGIBLE_NOW mirrors the
+    sender's own eligibility predicate (open, inside its 24h window, config-joined,
+    matching an enabled route's family/company/severity, not already in the ledger for
+    that route), so:
+        last send recent                      -> working
+        old last send + ELIGIBLE_NOW = 0      -> quiet, and correctly so
+        old last send + ELIGIBLE_NOW > 0      -> events are waiting and not going out
+        ROUTE_FAILS_24H > 0                   -> the endpoint itself is refusing
+    Reads only OVERWATCH-owned tables; no ACCOUNT_USAGE."""
+    return f"""
+WITH sent AS (
+    SELECT MAX(SENT_AT) AS LAST_SENT_AT FROM {core_object("ALERT_DELIVERIES")}
+),
+eligible AS (
+    SELECT COUNT(DISTINCT e.EVENT_ID) AS N
+    FROM {core_object("ALERT_EVENTS")} e
+    JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
+    JOIN {core_object("ALERT_ROUTES")} r
+      ON r.ENABLED
+     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
+     AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+          OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
+     AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                         WHEN 'MEDIUM' THEN 2 ELSE 1 END
+         >= CASE r.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                                WHEN 'MEDIUM' THEN 2 ELSE 1 END
+    WHERE e.STATUS = 'OPEN'
+      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
+                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID)
+),
+fails AS (
+    SELECT COUNT(*) AS N,
+           MAX(LEFT(ERROR_MESSAGE, 200)) AS SAMPLE
+    FROM {core_object("APP_ERROR_LOG")}
+    WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE = 'route_send_failed'
+      AND LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+),
+routes AS (
+    SELECT COUNT(*) AS ENABLED_N,
+           LISTAGG(DISTINCT INTEGRATION_NAME, ', ') AS INTEGRATIONS
+    FROM {core_object("ALERT_ROUTES")} WHERE ENABLED
+)
+SELECT s.LAST_SENT_AT,
+       DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) AS MINUTES_SINCE,
+       e.N  AS ELIGIBLE_NOW,
+       f.N  AS ROUTE_FAILS_24H,
+       f.SAMPLE AS LAST_FAILURE,
+       r.ENABLED_N AS ENABLED_ROUTES,
+       r.INTEGRATIONS
+FROM sent s, eligible e, fails f, routes r
+"""
+
+
 def delivery_slo_summary(days: int = 30) -> str:
     """One row: did alerts leave the building, how fast, which criticals
     never did (30+ min old, zero delivery rows), and route failures."""

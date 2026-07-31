@@ -132,15 +132,105 @@ def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str 
     return update, audit
 
 
+def _last_delivery_card() -> None:
+    """'No alerts today — quiet, or broken?' answered in one card.
+
+    The owner hit exactly this on 2026-07-31: a full day of Teams silence with no way
+    to tell a healthy quiet stretch from a dead pipe (the app HAD the timestamp, buried
+    as a suffix on a banner). Silence is not evidence either way — the sender is a
+    per-key 24h digest, so a chronic condition raises once and quiet days are legitimately
+    empty. What decides it is whether anything is WAITING, so the card reports both.
+    """
+    res = run(mart_sql.last_delivery_health(), page=_PAGE, key="last_delivery_health",
+              tier="live", source="ALERT_DELIVERIES + ALERT_EVENTS/ROUTES + APP_ERROR_LOG")
+    if not res.usable():
+        return
+    row = res.df.iloc[0]
+    last_at = row.get("LAST_SENT_AT")
+    mins = safe_float(row.get("MINUTES_SINCE"), -1)
+    waiting = int(safe_float(row.get("ELIGIBLE_NOW")))
+    fails = int(safe_float(row.get("ROUTE_FAILS_24H")))
+    routes_n = int(safe_float(row.get("ENABLED_ROUTES")))
+    never = last_at is None or str(last_at) in ("NaT", "None", "")
+
+    if never:
+        value, sev = "never", "bad"
+    elif mins < 90:
+        value, sev = f"{mins:,.0f} min ago", "ok"
+    elif mins < 60 * 48:
+        value, sev = f"{mins / 60:,.1f} h ago", "ok"
+    else:
+        value, sev = f"{mins / 1440:,.1f} d ago", "warn"
+
+    # The verdict line — this is the part that separates quiet from broken.
+    if routes_n == 0:
+        verdict, sev = "No enabled route — nothing can be delivered.", "bad"
+    elif fails > 0:
+        verdict = (f"{fails} send failure(s) in 24h — the endpoint is refusing. "
+                   "Check the integration, not the alert rules.")
+        sev = "bad"
+    elif waiting > 0 and mins >= 90:
+        verdict = (f"{waiting} event(s) eligible right now but nothing has gone out — "
+                   "delivery looks stuck.")
+        sev = "bad"
+    elif waiting > 0:
+        verdict = f"{waiting} event(s) queued for the next run."
+    else:
+        verdict = ("Quiet: nothing is waiting. Alerts are a per-key digest, so a chronic "
+                   "condition raises once — no news here really is no news.")
+
+    kpi_row([
+        {"label": "Last alert delivery", "value": value, "severity": sev,
+         "delta": (str(last_at)[:16] if not never else "no successful send on record"),
+         "delta_color": "off",
+         "help": "Newest row in ALERT_DELIVERIES — a send Snowflake confirmed, not a raise. "
+                 "Silence alone is not a fault signal: the sender is a 24h-windowed digest "
+                 "and dedupes per key, so a steady account is legitimately quiet. The verdict "
+                 "below compares it against what is actually eligible to send right now."},
+        {"label": "Eligible to send now", "value": f"{waiting}",
+         "severity": "warn" if (waiting > 0 and mins >= 90) else "",
+         "help": "Open events inside the sender's 24h window that match an enabled route "
+                 "and are not yet in the delivery ledger — mirrors the sender's own predicate."},
+        {"label": "Send failures (24h)", "value": f"{fails}",
+         "severity": "bad" if fails else "ok",
+         "help": "route_send_failed rows: the integration raised. A dead or unauthorized "
+                 "webhook shows up here, never as silence."},
+    ])
+    st.caption(md_dollars(verdict))
+    if fails and str(row.get("LAST_FAILURE") or "").strip():
+        with st.expander("Last send failure"):
+            st.code(str(row.get("LAST_FAILURE"))[:400])
+
+
 def _delivery_status() -> None:
     """Answers 'who gets paged at 2am?' in green or red, right on the page."""
-    integ = run("SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH_WEBHOOK'", page=_PAGE,
+    # FIX (2026-07-31): this probed the hardcoded 'OVERWATCH_WEBHOOK' — the Slack
+    # placeholder from webhook_delivery.sql. On a Teams-only account that integration
+    # never exists, so the banner claimed "No webhook integration — alerts stay in-app
+    # only" while Teams was delivering fine. Resolve the integrations the ENABLED ROUTES
+    # actually name, and check for ANY of them.
+    integ = run("SHOW NOTIFICATION INTEGRATIONS", page=_PAGE,
                 key="delivery_integ", tier="metadata", source="SHOW INTEGRATIONS", max_rows=0)
     task = run("SHOW TASKS LIKE 'TASK_ALERT_NOTIFY' IN SCHEMA DBA_MAINT_DB.OVERWATCH",
                page=_PAGE, key="delivery_task", tier="metadata", source="SHOW TASKS", max_rows=0)
     last = run(f"SELECT MAX(NOTIFIED_AT) AS LAST_SEND FROM {core_object('ALERT_EVENTS')}",
                page=_PAGE, key="delivery_last", tier="live", source="ALERT_EVENTS")
-    has_integ = integ.ok and not integ.empty
+    # Which integrations do the ENABLED routes actually name? That is the set that has
+    # to exist — not a hardcoded one. A route pointing at a missing integration is its
+    # own (louder) problem, surfaced by the send-failure count on the card above.
+    wanted = run(f"SELECT DISTINCT UPPER(INTEGRATION_NAME) AS N FROM {core_object('ALERT_ROUTES')} "
+                 "WHERE ENABLED", page=_PAGE, key="delivery_routes_integ", tier="recent",
+                 source="ALERT_ROUTES")
+    want = ({str(v) for v in wanted.df["N"].dropna()} if wanted.usable() else set())
+    have: set[str] = set()
+    if integ.ok and not integ.empty:
+        _idf = integ.df.copy()
+        _idf.columns = [str(c).lower() for c in _idf.columns]
+        if "name" in _idf.columns:
+            have = {str(v).upper() for v in _idf["name"].dropna()}
+    # No routes configured yet -> fall back to "is there ANY integration at all".
+    has_integ = bool(want & have) if want else bool(have)
+    missing = sorted(want - have)
     task_state = ""
     if task.ok and not task.empty:
         tdf = task.df.copy()
@@ -154,6 +244,13 @@ def _delivery_status() -> None:
     if has_integ and task_state == "started":
         st.success("Delivery LIVE — webhook integration up, notify task chained after the scan"
                    + (f" · last send {last_send}" if last_send else " · no sends yet"))
+        if missing:
+            # A dead route does not stop its siblings (the sender isolates per route),
+            # but it fails on every run and buries real errors in the log.
+            st.caption(f"Note: {len(missing)} enabled route(s) point at an integration that "
+                       f"does not exist ({', '.join(missing)}) — every run logs a failure "
+                       "for it, burying real errors. Disable those routes in ALERT_ROUTES "
+                       "or create the integration.")
     elif has_integ:
         st.warning("Integration exists but the notify task is suspended — an admin can "
                    "resume TASK_ALERT_NOTIFY (one statement, see the runbook's delivery "
@@ -520,6 +617,10 @@ def render() -> None:
         ])
 
     _delivery_status()
+    # Directly under the who-gets-paged banner: WHEN did a page last actually land, and
+    # is anything waiting. The banner answers "is the pipe configured"; this answers
+    # "is it moving" — the question that had no answer on 2026-07-31.
+    _last_delivery_card()
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
                             key="alerts_section")
 
