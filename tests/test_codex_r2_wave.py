@@ -395,11 +395,12 @@ def test_rec14_nav_groups_partition_and_preserve_role_scope():
 def test_rec14_sidebar_renders_grouped_single_select():
     m = _src("app/main.py")
     assert "nav_groups_for(pages)" in m
-    # each group is its own radio keyed per-group; a pick clears the siblings so
-    # exactly one page highlights across groups
-    assert 'f"_ow_nav_{group}"' in m
+    # multi-select fix: each group's radio key is scoped to the CURRENT page, so when
+    # the page changes the keys change and every radio re-seeds from `index` (no stale
+    # sibling key overriding it, no fragile pop). _ow_page is the one source of truth.
+    assert 'f"_ow_nav_{group}_{current}"' in m
     assert "on_change=_nav_pick" in m
-    assert "st.session_state.pop(_k, None)" in m
+    assert "st.session_state.pop(_k, None)" not in m   # the unreliable sibling-pop is gone
 
 
 # ---------------------------------------------------------------------------

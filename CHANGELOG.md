@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.105.0 — Fix: sidebar nav multi-select / stuck navigation (app-only) (2026-07-31)
+
+The grouped sidebar nav (Watch/Analyze/Govern) could show **two groups selected at
+once** and refuse to navigate — clicking e.g. Cost & Contract wouldn't take because a
+stale selection in another group blocked it.
+
+- **Root cause.** Each group's `st.radio` used a **persistent** key (`_ow_nav_{group}`),
+  so the widget remembered its own selection and **ignored the `index`**; the sibling
+  group kept its stale highlight, and the `_nav_pick` callback's attempt to *pop* the
+  sibling widget keys was unreliable (a failed pop left the nav stuck).
+- **Fix.** Each group's radio key is now **scoped to the current page**
+  (`_ow_nav_{group}_{current}`): when the page changes the keys change, so every radio
+  re-seeds cleanly from `index` (derived from the single source of truth `_ow_page`) —
+  exactly one page is ever highlighted, no popping, no stale keys.
+- Also restored the `_ow_page` write + marked the remembered `?page=` as "seen", so the
+  stale query-param echo can't clobber a fresh click one rerun later.
+- Regression-tested via AppTest: a Watch→Analyze→Govern hop navigates and leaves exactly
+  one group selected.
+
+Gates green: ruff, mypy, tests (+1 nav regression lock; 1618 passed).
+
 ## 4.104.0 — Design scannability wave — Codex visual-review NEXT (app-only) (2026-07-31)
 
 The NEXT items from the design assessment (`docs/reviews/DESIGN_REVIEW_2026-07-31.md`),

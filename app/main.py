@@ -91,17 +91,20 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
                 f'{icon("refresh", 11)} {last_refreshed_note()}</div>', unsafe_allow_html=True)
         st.divider()
 
-        # rec14: workflow-grouped nav. st.radio has no native section headers, so
-        # each group is its own single-select radio with a caption header; the
-        # chosen page lives in _ow_page. A click in one group clears the others'
-        # selections (the on_change pops the sibling widget keys) so exactly one
-        # page is ever highlighted across the three groups.
+        # rec14: workflow-grouped nav. st.radio has no native section headers, so each
+        # group is its own single-select radio under a caption; the chosen page lives
+        # in _ow_page (the ONE source of truth).
         #
-        # r4 desync fix: _ow_page (written by the nav callback AND pending-navigation)
-        # is the AUTHORITATIVE highlight source. A ?page= deep link overrides it ONLY
-        # when it actually changes — otherwise the query param lags a cross-group
-        # click by one rerun (remember_page writes it at end of render), and seeding
-        # the sibling groups off that stale value re-highlights the old group.
+        # multi-select bug fix: a persistent per-group key made st.radio remember its
+        # OWN selection and IGNORE `index`, so a sibling group kept its stale highlight
+        # (two groups selected) and the earlier callback-pop of sibling keys was
+        # unreliable — a failed pop left the nav stuck. Now each group's key is scoped
+        # to the CURRENT page (`_ow_nav_{group}_{current}`): when the page changes the
+        # keys change too, so every radio re-seeds cleanly from `index` (derived from
+        # _ow_page) and exactly one page is ever highlighted. No popping, no stale keys.
+        #
+        # r4 desync note: _ow_page is authoritative; a ?page= deep link overrides it
+        # only when it CHANGES (the query param lags a click by one rerun).
         _req = requested_page(pages)
         if _req and _req != st.session_state.get("_ow_req_seen"):
             st.session_state["_ow_page"] = _req
@@ -114,21 +117,23 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
         def _nav_pick(changed_key: str) -> None:
             chosen = st.session_state.get(changed_key)
             if chosen:
-                st.session_state["_ow_page"] = chosen
-                for _g, _ in groups:
-                    _k = f"_ow_nav_{_g}"
-                    if _k != changed_key:
-                        st.session_state.pop(_k, None)
+                st.session_state["_ow_page"] = chosen   # Streamlit auto-reruns; keys re-scope
 
         for group, members in groups:
-            gkey = f"_ow_nav_{group}"
+            gkey = f"_ow_nav_{group}_{current}"          # key varies with the page -> no stale state
             st.caption(group)
             idx = members.index(current) if current in members else None
             st.radio(group, members, index=idx, key=gkey,
                      label_visibility="collapsed", on_change=_nav_pick, args=(gkey,))
-        page = current
+        page = st.session_state.get("_ow_page") or current
+        if page not in pages:
+            page = current
         st.session_state["_ow_page"] = page
         remember_page(page)
+        # the ?page= we just wrote is NOT a new deep-link request — record it as seen so
+        # its stale echo next rerun can't override a fresh nav click (the _req reconcile
+        # above runs after the click callback, so an un-seeded seen clobbered the click).
+        st.session_state["_ow_req_seen"] = page
 
         st.divider()
         _global_jump(pages)

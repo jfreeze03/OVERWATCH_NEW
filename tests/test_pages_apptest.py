@@ -78,6 +78,44 @@ def _nav_to(at, page: str) -> None:
     raise AssertionError(f"page {page!r} not offered in any nav group")
 
 
+def _ss(at, key):
+    # AppTest's session_state proxy has no .get (attribute access maps to key access),
+    # so item-access + `in` is required here — not the SIM401-suggested .get().
+    return at.session_state[key] if key in at.session_state else None  # noqa: SIM401
+
+
+def _selected_pages(at, current: str) -> set:
+    """The live per-group radios are keyed `_ow_nav_{group}_{current}`; exactly one
+    should hold a page. (Reading session_state sidesteps AppTest's KeyError on
+    `.value` for dynamically-keyed widgets; AppTest's session_state has no `.get`.)"""
+    from app.config import PAGES_BY_PROFILE, nav_groups_for
+    sel = set()
+    for group, _ in nav_groups_for(PAGES_BY_PROFILE["DBA"]):
+        v = _ss(at, f"_ow_nav_{group}_{current}")
+        if v:
+            sel.add(v)
+    return sel
+
+
+def test_nav_single_select_across_groups():
+    # multi-select bug: clicking a page in a DIFFERENT group (Analyze) than the current
+    # one (Watch) must navigate AND leave exactly ONE group highlighted — the old
+    # stale-sibling-key path left two selected and could get stuck.
+    at = AppTest.from_function(_entry, default_timeout=20)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Cost & Contract")          # Watch -> Analyze
+    at.run()
+    assert not at.exception
+    assert _ss(at, "_ow_page") == "Cost & Contract"
+    assert _selected_pages(at, "Cost & Contract") == {"Cost & Contract"}
+    _nav_to(at, "Admin")                    # Analyze -> Govern
+    at.run()
+    assert not at.exception
+    assert _ss(at, "_ow_page") == "Admin"
+    assert _selected_pages(at, "Admin") == {"Admin"}
+
+
 @pytest.mark.parametrize("page", _PAGES)
 def test_each_page_renders(page):
     at = AppTest.from_function(_entry, default_timeout=15)
