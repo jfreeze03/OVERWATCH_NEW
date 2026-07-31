@@ -1,7 +1,7 @@
 # Local/dev + Community Cloud (dev-only) dependencies.
 # Streamlit-in-Snowflake uses environment.yml (Snowflake conda channel) instead.
 # Compatible-release pins: tested floor, no surprise major upgrades.
-streamlit~=1.45
+streamlit~=1.59
 pandas~=2.2
 altair~=5.4
 snowflake-snowpark-python~=1.30
