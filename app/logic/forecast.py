@@ -47,6 +47,11 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
 
     month_start = today.replace(day=1)
     mtd = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] <= today)]["USD"].sum())
+    # codex#16: project from COMPLETE-day actuals and count TODAY as a projected (still
+    # incomplete) day. `mtd` already includes today's PARTIAL actual, but the projection
+    # only added days AFTER today — so today's remaining hours were never estimated and the
+    # month-end number ran low all day. `mtd` stays the displayed spend-so-far.
+    mtd_complete = float(frame[(frame["DAY"] >= month_start) & (frame["DAY"] < today)]["USD"].sum())
 
     # N1: today is a PARTIAL day — averaging it into the daily rate biases every
     # projection low (same class as the pace/anomaly partial-day fixes). MTD above
@@ -62,6 +67,7 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     daily_rate = float(baseline["USD"].mean())
     daily_std = float(baseline["USD"].std(ddof=0))
     _, _, remaining = month_days(today)
+    project_days = remaining + 1   # codex#16: today (incomplete) + every day after it
 
     if engine == "seasonal" and len(baseline) >= 14:
         # Day-of-week means over the baseline; each remaining calendar day is
@@ -74,24 +80,24 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         dow_mean = frame_b.groupby("DOW")["USD"].mean()
         resid = frame_b["USD"] - frame_b["DOW"].map(dow_mean)
         resid_std = float(resid.std(ddof=0))
-        future = [today + timedelta(days=i) for i in range(1, remaining + 1)]
+        future = [today + timedelta(days=i) for i in range(remaining + 1)]  # codex#16: incl TODAY
         add = sum(float(dow_mean.get(d.weekday(), daily_rate)) for d in future)
-        projected = mtd + add
-        spread = resid_std * (remaining**0.5)
+        projected = mtd_complete + add
+        spread = resid_std * (project_days**0.5)
         return MonthEndForecast(
             ok=True,
             mtd_usd=round(mtd, 2),
             projected_usd=round(projected, 2),
             low_usd=round(max(mtd, projected - spread), 2),
             high_usd=round(projected + spread, 2),
-            daily_rate_usd=round(add / remaining, 2) if remaining else 0.0,
+            daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
             days_remaining=remaining,
             basis=f"Seasonal engine: day-of-week means over {len(baseline)}d, "
-                  f"{remaining} remaining days projected per weekday.",
+                  f"today + {remaining} remaining days projected per weekday.",
         )
 
-    projected = mtd + daily_rate * remaining
-    spread = daily_std * (remaining**0.5)
+    projected = mtd_complete + daily_rate * project_days
+    spread = daily_std * (project_days**0.5)
     return MonthEndForecast(
         ok=True,
         mtd_usd=round(mtd, 2),
@@ -100,7 +106,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
         high_usd=round(projected + spread, 2),
         daily_rate_usd=round(daily_rate, 2),
         days_remaining=remaining,
-        basis=f"Linear engine: MTD actual + {_BASELINE_DAYS}d avg daily rate x {remaining} remaining days.",
+        basis=f"Linear engine: complete-day MTD + {_BASELINE_DAYS}d avg daily rate x "
+              f"(today + {remaining} remaining) days.",
     )
 
 

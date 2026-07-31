@@ -7,6 +7,7 @@ Pure module: no Streamlit.
 
 from __future__ import annotations
 
+import math
 import re
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,254}$")
@@ -27,11 +28,18 @@ def sql_literal(value: object, max_len: int = 8000) -> str:
 
 
 def sql_number(value: object, default: float = 0.0) -> str:
-    """Render a numeric literal; never interpolates raw text."""
+    """Render a FINITE numeric literal; never interpolates raw text.
+
+    codex#27: NaN and +/-inf are NOT valid Snowflake numeric literals (repr() emits
+    'nan'/'inf', which error when interpolated). A non-finite value — or default — falls
+    back to a finite value so the generated SQL always parses."""
     try:
-        return repr(float(value))  # type: ignore[arg-type]
+        f = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return repr(float(default))
+        f = float(default)
+    if not math.isfinite(f):
+        f = float(default) if math.isfinite(float(default)) else 0.0
+    return repr(f)
 
 
 def safe_identifier(value: str, allow_qualified: bool = False) -> str:

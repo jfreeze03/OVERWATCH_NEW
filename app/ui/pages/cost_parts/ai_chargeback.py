@@ -146,11 +146,18 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 title = f"Cortex {r['SIGNAL']}: {r['USER_NAME']} ({r['SOURCE']})"
                 detail = (f"{int(r['TOTAL_REQUESTS'])} requests, projected 30d "
                           f"{format_usd(r['PROJECTED_30D_USD'])}, cr/request {r['CREDITS_PER_REQUEST']:.4f}.")
+                # codex#39: idempotent insert. Keyed on COMPANY + TITLE (TITLE already encodes
+                # signal+user+source) + this month + open status, so a double-click or a
+                # partial-failure retry is a no-op instead of duplicating the action row.
                 statements.append(
                     f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD)\n"
-                    f"VALUES ({sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
+                    f"SELECT {sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
                     f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
-                    f"{sql_number(r['PROJECTED_30D_USD'])});"
+                    f"{sql_number(r['PROJECTED_30D_USD'])}\n"
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
+                    f"WHERE q.COMPANY = {sql_literal(company)} AND q.TITLE = {sql_literal(title)} "
+                    f"AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS') "
+                    f"AND q.CREATED_AT >= DATE_TRUNC('month', CURRENT_DATE()));"
                 )
             script = "\n".join(statements)
             st.code(script, language="sql")

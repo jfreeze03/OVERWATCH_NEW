@@ -766,7 +766,10 @@ def _savings_tab() -> None:
                     f"UPDATE {core_object('SAVINGS_LEDGER')}\n"
                     f"SET STATE = 'VERIFIED', VERIFIED_USD = {sql_number(verified_usd)}, "
                     f"VERIFIED_AT = CURRENT_TIMESTAMP(), VERIFIED_BY = {identity_sql()}\n"
-                    f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])};"
+                    # codex#26: guard on STATE so a stale/concurrent page (the row was already
+                    # VERIFIED or REJECTED after this page rendered) no-ops instead of
+                    # overwriting a settled amount. Verification is now conditional/idempotent.
+                    f"WHERE ITEM_ID = {sql_literal(row['ITEM_ID'])} AND STATE = 'ESTIMATED';"
                 )
                 st.code(update_sql, language="sql")
                 if not allowed:

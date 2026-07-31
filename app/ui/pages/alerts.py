@@ -49,7 +49,16 @@ RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
 
 
 def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
-    """ACK/RESOLVE update + audit insert, executed as one script.
+    """Joined display form of _lifecycle_stmts (kept for the SQL preview + tests)."""
+    return "\n".join(_lifecycle_stmts(event_id, action, note, kind))
+
+
+def _lifecycle_stmts(event_id: str, action: str, note: str, kind: str = "") -> list[str]:
+    """ACK/RESOLVE update + audit insert as a STRUCTURED statement list.
+
+    codex#9: the legacy fallback must consume this list directly — NEVER re-split a joined
+    SQL string on ';', because a semicolon inside the note literal would fracture the audit
+    INSERT into malformed fragments.
 
     ``kind`` (RESOLVE only, V021): ACTIONED = a real fix followed; NOISE =
     threshold cried wolf; EXPECTED = known/maintenance. Powers the per-rule
@@ -82,7 +91,7 @@ def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str
         f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
         f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)}, {identity_sql()});"
     )
-    return update + "\n" + audit
+    return [update, audit]
 
 
 def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str = "") -> tuple[str, str]:
@@ -403,9 +412,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                     help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
                          "on the Rules section.")
-            sql_script = _lifecycle_sql(event_id, action, note, kind)
+            stmts = _lifecycle_stmts(event_id, action, note, kind)
             with st.expander("SQL that will run"):
-                st.code(sql_script, language="sql")
+                st.code("\n".join(stmts), language="sql")
             if is_operator:
                 confirm = st.text_input(f"Type {action} to confirm execution", key=f"alert_confirm_{event_id[:8]}")
                 if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
@@ -415,8 +424,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                             f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
                             f"{sql_literal(kind)}, {identity_sql()}, "
                             f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
-                    legacy = [s + ";" for s in sql_script.split(";") if s.strip()]
-                    ok, msg = execute_action(call, legacy, page=_PAGE)
+                    # codex#9: pass the structured statement list straight through — a ';'
+                    # inside the note no longer fractures the legacy fallback.
+                    ok, msg = execute_action(call, stmts, page=_PAGE)
                     notify(ok, msg)
                     if ok:
                         from app.ui.components import log_ui_event

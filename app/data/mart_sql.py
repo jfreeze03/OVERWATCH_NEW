@@ -425,14 +425,20 @@ def action_queue(limit: int = 200) -> str:
     """Newest OPEN actions (r19 #5): status filters in SQL so an old open
     critical can never age out of the newest-N fetch window. Ranking stays
     in logic.rank_actions — one place; the literals here mirror
-    logic.actions.OPEN_STATUSES (cross-locked in tests)."""
+    logic.actions.OPEN_STATUSES (cross-locked in tests).
+
+    codex#23: order by SEVERITY before the LIMIT so the cap keeps the top-severity
+    open actions. The old CREATED_AT-only sort could truncate an old open CRITICAL out
+    of the newest-N window when >N actions are open; rank_actions re-ranks the fetched
+    set, but only over rows that survive this cap."""
     limit = max(1, min(int(limit), 1000))
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, DUE_DATE,
        SOURCE, PROOF_SQL, ESTIMATED_USD, UPDATED_AT
 FROM {core_object("ACTION_QUEUE")}
 WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS')
-ORDER BY CREATED_AT DESC
+ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+              WHEN 'MEDIUM' THEN 2 ELSE 3 END, CREATED_AT DESC
 LIMIT {limit}
 """
 

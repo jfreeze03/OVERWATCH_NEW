@@ -147,7 +147,7 @@ def test_bug2_alloc_pool_matches_live_share_window():
     sp = _src("app/ui/pages/cost_parts/spend.py")
     # a live-served dim uses the matched pool; the 90-day live-scan cap is UNCHANGED
     assert "_pool = _alloc_pool(res.source)" in sp
-    assert "* _pool" in sp and "_pool - float" in sp
+    assert "* _pool" in sp and "_pool - _top_usd" in sp   # codex#32: _other from the shown top-10
     assert 'resolve_effective_window(days, max_days=MAX_LIVE_WINDOW_DAYS)' in sp
     live = _src("app/data/cost_sql.py")   # the guardrail is preserved, not lifted
     assert 'resolve_effective_window(days, "START_TIME", max_days=90)' in live

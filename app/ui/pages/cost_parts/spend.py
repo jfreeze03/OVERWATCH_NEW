@@ -125,9 +125,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
             "MTD window follows calendar-month boundaries in account time.\n"
             "- **Rate axis:** AI/Cortex credits bill at the configured AI rate, not the compute "
             "rate — this page and the Overview/Brief/Contract/Compare dollar figures all split "
-            "the two. The two seeded budget alerts (pace, forecast) still price the mixed total "
-            "at the compute rate and read slightly high on AI-heavy months until their next "
-            "server-side rebuild.\n"
+            "the two, as do the seeded budget alerts (pace, forecast) since V061.\n"
             "- Same telemetry, different lenses — each number is exact for its own question."
         )
     result_caption(res)
@@ -330,17 +328,22 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     # implied full reconciliation. Append an explicit "Other / not shown" row
                     # (= the scoped pool minus the shown contributors) so the chart accounts
                     # for 100% of the pool, not just the top rows.
-                    shown = float(alloc["ELAPSED_SHARE"].map(safe_float).sum())
                     _top = (alloc.sort_values("ALLOCATED_USD", ascending=False)
                             .head(10)[["DIMENSION", "ALLOCATED_USD"]])
-                    _other = max(0.0, _pool - float(_top["ALLOCATED_USD"].map(safe_float).sum()))
+                    _top_usd = float(_top["ALLOCATED_USD"].map(safe_float).sum())
+                    _other = max(0.0, _pool - _top_usd)
+                    # codex#32: the coverage caption is computed from the SAME top-10 the chart
+                    # draws (and its 'Other' bar), so "Named rows cover X%" reconciles with the
+                    # chart. The old `shown` summed ELAPSED_SHARE over ALL ~100 rows while
+                    # 'Other' used only the top-10 pool remainder — the two disagreed.
+                    shown = (_top_usd / _pool) if _pool else 0.0
                     _bar = (pd.concat([_top, pd.DataFrame(
                         [{"DIMENSION": "Other / not shown", "ALLOCATED_USD": _other}])],
                         ignore_index=True) if _other > 0 else _top)
                     charts.bar_usd(_bar, "DIMENSION", "ALLOCATED_USD",
                                    title=f"Allocated $ by {label}", top_n=11)
-                    st.caption(f"Named rows cover {shown:.0%} of scoped spend "
-                               f"({format_usd(shown * _pool)} of {format_usd(_pool)}); "
+                    st.caption(f"Top rows cover {shown:.0%} of scoped spend "
+                               f"({format_usd(_top_usd)} of {format_usd(_pool)}); "
                                "'Other / not shown' is the remainder of the pool.")
 
         # rec17: one read-only "coverage ladder" — the per-grain residuals/coverage

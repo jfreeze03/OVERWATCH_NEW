@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.110.0 — Codex 50-rec review: app-first correctness batch (2026-07-31)
+
+An external (Codex) 50-item review was adjudicated against the real code (26 CONFIRMED,
+21 PARTIAL, 3 DECLINE; every claimed P0 downgraded once judged against the SiS
+owner's-rights + two-role USAGE deployment — no reproducible privilege escalation). This
+ships the app-only confirmed fixes; the behavioral alert/proc fixes go in V067, and the
+`GRANT USAGE ON STREAMLIT` codification (#3) is an owner deploy-script change.
+
+- **#23 / #24 — open CRITICALs can no longer hide from the score.** `action_queue` now
+  orders by **severity before** its newest-N cap (an old open CRITICAL could be truncated
+  out), and the platform-score owner-queue penalty counts **CRITICAL** as well as HIGH (an
+  open CRITICAL action was scoring zero).
+- **#26 — savings-verify is conditional.** The ledger verify `UPDATE` gained
+  `AND STATE = 'ESTIMATED'`, so a stale/concurrent page can't overwrite a settled amount.
+- **#6 / #7 / #8 — the operator-action seam is stricter.** `execute_action` only treats an
+  error as "proc not deployed" when it **names the CALLed proc** (a generic in-proc identifier
+  error no longer silently runs legacy DML), success is an **allowlist** (`OK`/`VERIFIED`/
+  `DUPLICATE`, not "anything but BLOCKED"), and the legacy fallback **stops at the first
+  failure** instead of running a later mutation or the audit row after an error.
+- **#9 — alert-note lifecycle SQL is a structured list**, so a `;` inside a note can't
+  fracture the legacy statements.
+- **#39 — AI-exception queueing is idempotent** (`INSERT … WHERE NOT EXISTS` on the natural
+  key), so a re-click / partial-retry no longer duplicates action rows.
+- **#16 — the month-end forecast estimates today's remainder** (projects from complete-day
+  actuals over *today + remaining* days), instead of counting today's partial and never
+  filling the rest of today — it no longer reads low all day.
+- **#32 — allocation coverage caption reconciles with its chart** (both from the shown top-10).
+- **#27 / #33 / #35 / #36 / #45 — hardening.** `sql_number` rejects NaN/inf; a raising mart
+  coverage-probe **fails to live** instead of silently accepting the mart; timestamp
+  localization converts already-aware columns instead of skipping them; the sparkline
+  normalizer rejects infinities; and the cache-domain token uses the real `DEPARTMENT_MAP`
+  name (was `DEPT_MAPPING`, matching nothing → every mapping write bumped the global cache).
+- **#47 — corrected a stale caption** that claimed the budget alerts still price all credits
+  at the compute rate (V061 split AI pricing).
+
+**Declined:** #28 (manual verify is human attestation by design), #13 (documented day-grain
+convention; today's partial lowers the bar, never inflates the KPI), #38 (cost-tool "up =
+worse" is intentional; the cited column doesn't exist).
+
+Gates green: ruff, mypy (pure layers), pytest 1663 passed / 1 skipped (+11 new locks).
+
 ## 4.109.0 — V066 owner migration: alert escalation + serverless window + timeline atomicity (bug round 6) (2026-07-31)
 
 The 5 migration-proc findings from bug round 6, shipped as a new owner migration

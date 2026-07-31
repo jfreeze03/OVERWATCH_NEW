@@ -179,10 +179,13 @@ def test_mart_accept_keeps_mart_when_live_cannot_answer(monkeypatch):
 def test_mart_accept_predicate_errors_never_break_the_page(monkeypatch):
     from app.ui.components import run_mart_first
     thin = QueryResult(df=pd.DataFrame({"MONTH": ["2026-07"]}), ok=True)
-    monkeypatch.setattr(q, "run", _mk_run({"MARTQ": thin}))
+    live = QueryResult(df=pd.DataFrame({"MONTH": [f"2025-{m:02d}" for m in range(1, 13)]}), ok=True)
+    monkeypatch.setattr(q, "run", _mk_run({"MARTQ": thin, "LIVEQ": live}))
+    # codex#33: a RAISING coverage probe (here the lambda hits a missing column) must NOT
+    # silently accept the mart — it falls to the live path and never crashes the page.
     res = run_mart_first("MARTQ", "LIVEQ", page="T", key="k", mart_source="m",
                          live_source="l", mart_accept=lambda df: df["NOPE"].nunique() >= 12)
-    assert res.ok and len(res.df) == 1         # broken probe == accept mart
+    assert res.ok and len(res.df) == 12        # broken probe -> live, not the thin mart
 
 
 def test_overview_gates_the_boss_chart_on_month_coverage():

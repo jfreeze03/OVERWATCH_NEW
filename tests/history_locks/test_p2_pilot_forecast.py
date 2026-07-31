@@ -30,8 +30,9 @@ def test_seasonal_engine_projects_per_weekday():
     assert "Linear engine" in linear.basis and "Seasonal engine" in seasonal.basis
     # weekday/weekend split: seasonal projection differs from flat average
     assert seasonal.projected_usd != linear.projected_usd
-    # July 16-31 2026: 12 weekdays x100 + 4 weekend x20 = 1280
-    assert abs(seasonal.projected_usd - seasonal.mtd_usd - 1280) < 1
+    # codex#16: the projection now also estimates TODAY (July 15 2026 = Wed, +100).
+    # July 15-31 2026: 13 weekdays x100 + 4 weekend x20 = 1380 (was 1280 for 16-31 only).
+    assert abs(seasonal.projected_usd - seasonal.mtd_usd - 1380) < 1
     # tight residuals -> tight band
     assert seasonal.high_usd - seasonal.low_usd < linear.high_usd - linear.low_usd
 

@@ -248,7 +248,7 @@ _DOMAIN_TOKENS = {
     "queue": ("ACTION_QUEUE",),
     "remediation": ("REMEDIATION_LOG",),
     "incidents": ("OVERWATCH.INCIDENTS", "INCIDENT_MEMBERS"),
-    "mappings": ("DEPT_MAPPING",),
+    "mappings": ("DEPARTMENT_MAP",),   # codex#45: the table is DEPARTMENT_MAP (was 'DEPT_MAPPING', which matched nothing -> every mapping write fell through to a global cache bump)
 }
 
 
@@ -760,20 +760,42 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
         return False, format_snowflake_error(exc)
 
 
-_PROC_MISSING = ("does not exist", "unknown function", "invalid identifier",
-                 "unknown user-defined function")
+# codex#6: 'invalid identifier' removed — a missing PROCEDURE raises "unknown user-defined
+# function"/"does not exist", whereas "invalid identifier" is almost always a column/table
+# error from INSIDE a deployed proc, which must NOT route to the legacy path.
+_PROC_MISSING = ("does not exist", "unknown function", "unknown user-defined function")
+
+_CALL_NAME_RE = re.compile(r"\bCALL\s+([A-Za-z0-9_.\"]+)\s*\(", re.IGNORECASE)
+
+
+def _looks_like_missing_proc(err: str, call_sql: str) -> bool:
+    """codex#6: treat an error as 'procedure not deployed' (-> legacy fallback) ONLY when it
+    both carries a missing-object phrase AND names the CALLed procedure. This stops a generic
+    identifier error from a bug inside a DEPLOYED proc from silently running legacy DML."""
+    low = err.lower()
+    if not any(m in low for m in _PROC_MISSING):
+        return False
+    m = _CALL_NAME_RE.search(call_sql or "")
+    if not m:
+        return False
+    proc = m.group(1).split(".")[-1].strip('"').lower()
+    return bool(proc) and proc in low
 
 
 def _legacy_action(fallback: list[str], *, page: str) -> tuple[bool, str]:
-    results, all_ok = [], True
+    results: list[str] = []
     for stmt in fallback:
         s = stmt.strip()
         if not s:
             continue
         o, m = execute_statement(s if s.endswith(";") else s + ";", page=page)
-        all_ok = all_ok and o
         results.append(m)
-    return all_ok, "(pre-V051 legacy path) " + " / ".join(results)
+        if not o:
+            # codex#8: STOP at the first failure. The legacy path is non-transactional, so a
+            # later mutation (or the audit row) must not run after an earlier statement failed
+            # — that would half-apply the change or record a success that never happened.
+            return False, "(pre-V051 legacy path, stopped at failure) " + " / ".join(results)
+    return True, "(pre-V051 legacy path) " + " / ".join(results)
 
 
 def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bool, str]:
@@ -793,14 +815,17 @@ def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bo
         session = get_session()
         apply_query_tag(session, build_query_tag(page=page, tier="write"))
         rows = session.sql(call_sql).collect()
-        verdict = str(rows[0][0]) if rows and rows[0] else "OK"
+        verdict = str(rows[0][0]) if rows and rows[0] else ""
         _bump_refresh(call_sql)
-        if verdict.startswith("BLOCKED"):
-            return False, verdict
-        # DUPLICATE = the idempotency key already ran = the action is done.
-        return True, verdict
+        # codex#7: ALLOWLIST explicit success verdicts. Only OK / VERIFIED / DUPLICATE
+        # (already-done idempotency) pass — a proc returning FAILED/ERROR, an unknown future
+        # verdict, or NO row must not read as a silent success (the old code failed only on
+        # BLOCKED, so everything else — including FAILED — returned True).
+        if verdict.strip().upper().startswith(("OK", "VERIFIED", "DUPLICATE")):
+            return True, verdict
+        return False, verdict or "Procedure returned no verdict."
     except Exception as exc:
-        if any(m in format_snowflake_error(exc).lower() for m in _PROC_MISSING):
+        if _looks_like_missing_proc(format_snowflake_error(exc), call_sql):
             return _legacy_action(fallback, page=page)   # pre-V051 deployment
         record_error(page, exc, context=f"execute_action: {call_sql[:200]}")
         return False, format_snowflake_error(exc)

@@ -63,8 +63,14 @@ def localize_timestamps(df, columns: list[str]):
             continue
         try:
             series = pd.to_datetime(out[col], errors="coerce")
-            out[col] = (series.dt.tz_localize(_ACCOUNT_TZ, ambiguous="NaT", nonexistent="NaT")
-                        .dt.tz_convert(tz).dt.tz_localize(None))
+            # codex#35: an already-tz-aware column must be CONVERTED, not localized again —
+            # tz_localize raises on aware input, and the old except-continue then silently
+            # skipped conversion, leaving aware timestamps shown in the wrong zone.
+            if getattr(series.dt, "tz", None) is not None:
+                out[col] = series.dt.tz_convert(tz).dt.tz_localize(None)
+            else:
+                out[col] = (series.dt.tz_localize(_ACCOUNT_TZ, ambiguous="NaT", nonexistent="NaT")
+                            .dt.tz_convert(tz).dt.tz_localize(None))
             converted = True
         except (TypeError, ValueError):
             continue
@@ -158,14 +164,17 @@ def spark_svg(values, width: int = 84, height: int = 24, color: str = "#38bdf8",
     A number without direction is half a number; this puts the direction on
     the card. Returns '' for fewer than 2 finite points.
     """
+    import math
     nums = []
     for v in (values or []):
-        f = safe_float(v, None) if v is not None else None
+        # codex#36: one finite normalizer. The old code reassigned f = float(v) (dropping the
+        # safe_float result) and then filtered only NaN via `f == f`, so +/-inf slipped through
+        # and broke the min/max scaling below. isfinite() rejects NaN AND infinities.
         try:
             f = float(v)
         except (TypeError, ValueError):
-            f = None
-        if f is not None and f == f:  # not NaN
+            continue
+        if math.isfinite(f):
             nums.append(f)
     if len(nums) < 2:
         return ""
@@ -418,8 +427,16 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     if res.usable():
         try:
             accepted = mart_accept is None or bool(mart_accept(res.df))
-        except Exception:  # noqa: BLE001 — a coverage probe must never break a page
-            accepted = True
+        except Exception as _acc_exc:  # noqa: BLE001 — a coverage probe must never break a page
+            # codex#33: a RAISING coverage check must NOT silently accept the mart (that
+            # defeats the gate and can serve a mart that doesn't cover the window). Log it
+            # and fall through to the live path.
+            accepted = False
+            try:
+                from app.core.query import record_error
+                record_error(page, _acc_exc, context="run_mart_first: mart_accept probe raised")
+            except Exception:  # noqa: BLE001
+                pass
         if accepted:
             return res
         # r11 #2: the mart answered but does not cover enough of the asked

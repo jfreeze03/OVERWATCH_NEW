@@ -361,8 +361,11 @@ def render() -> None:
     open_high_actions = 0
     if actions_res.ok and not actions_res.empty:
         _adf = actions_res.df
+        # codex#24: count CRITICAL as well as HIGH — an open CRITICAL action was scoring
+        # ZERO penalty. The action_queue fetch now orders by severity before its cap
+        # (codex#23), so every open HIGH/CRITICAL survives into this frame.
         open_high_actions = int(((_adf["STATUS"].astype(str).str.upper() == "OPEN")
-                                 & (_adf["SEVERITY"].astype(str).str.upper() == "HIGH")).sum())
+                                 & (_adf["SEVERITY"].astype(str).str.upper().isin(("HIGH", "CRITICAL")))).sum())
     # C1: tell the score which health-bearing sources actually LOADED. If the
     # throughput read or the alerts read failed, their signals are silently 0 (an
     # outage would otherwise raise the score) — the score reports Incomplete instead

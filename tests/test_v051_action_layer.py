@@ -78,11 +78,12 @@ def test_v051_app_wiring_is_proc_first_with_fallback():
     q = _read("app/core/query.py")
     assert "def execute_action(call_sql: str, fallback: list[str]" in q
     assert "_legacy_action(fallback, page=page)" in q
-    assert 'verdict.startswith("BLOCKED")' in q
+    # codex#7: success is now an ALLOWLIST (OK/VERIFIED/DUPLICATE), not "anything but BLOCKED"
+    assert 'verdict.strip().upper().startswith(("OK", "VERIFIED", "DUPLICATE"))' in q
     ident = _read("app/core/identity.py")
     assert "def idempotency_key(" in ident and "account_now()" in ident
     alerts = _read("app/ui/pages/alerts.py")
-    assert "execute_action(call, legacy, page=_PAGE)" in alerts        # single
+    assert "execute_action(call, stmts, page=_PAGE)" in alerts         # single (codex#9: structured list)
     assert "execute_action(call, [upd, aud], page=_PAGE)" in alerts    # bulk
 
 
