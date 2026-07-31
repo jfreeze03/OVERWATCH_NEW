@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.115.1 — Scrub the committed webhook credential + CI guard; rotation/route runbooks (2026-07-31)
+
+`snowflake/webhook_delivery.sql` carried a **real Power Automate trigger URL — including its
+`sig=` bearer token** — tracked in git and pushed to GitHub from 2026-07-08 to 2026-07-31.
+Anyone with read access to the repo could post into the Teams channel. The file's own header
+had always said the secret "cannot ship in git"; nothing enforced it.
+
+- **Scrubbed** to placeholders, with the split explained (`WEBHOOK_URL` prefix vs
+  `SECRET_STRING` suffix) and a note that current Power Automate URLs carry a
+  `/direct/cu/NN/workflows/` cluster segment the prefix must keep, or every send 404s.
+- **`tests/test_no_committed_secrets.py`** fails the build if a credential *shape* returns —
+  Power Automate `sig=`, Slack incoming-webhook, AWS key id, private-key block, GitHub PAT.
+  It reports the shape and location, never the value, and keeps a deliberately short
+  placeholder allowlist (every entry is a hole in the check).
+- **Two owner runbooks in the file:** the rotation sequence — including the step people miss,
+  that `CREATE OR REPLACE` on an integration **destroys its grants**, and `SP_NOTIFY_WEBHOOK`
+  runs `EXECUTE AS OWNER`, so a missing `USAGE` silences Teams with only `route_send_failed`
+  rows to show for it — and the one-statement retirement of the dead V012 Slack route.
+
+**Rotation itself remains the owner's to perform**: it needs the Power Automate UI plus a
+credential write in Snowflake. Deleting the line here does not undo the exposure — the value
+is in git history — so invalidating the old URL at the provider is the only real remedy.
+
 ## 4.115.0 — "Last alert delivery" card + the integration probe that showed a false red (2026-07-31)
 
 From a live incident: the owner saw no Teams alerts for a day and **had no way to tell a

@@ -49,14 +49,27 @@
 -- Teams WORKFLOWS URLs (prod-XX.*.logic.azure.com/...) do NOT — the flow's
 -- "Send each adaptive card" action rejects it (the "text card" error).
 -- Setup: Teams channel -> Workflows -> "Post to a channel when a webhook
--- request is received", copy the HTTP URL, then:
---https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/26/workflows/8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs
+-- request is received", copy the HTTP URL.
+--
+-- !! NEVER PASTE THE REAL URL INTO THIS FILE !!
+-- It is TRACKED IN GIT. A live Power Automate trigger URL carries its own bearer
+-- credential in the `sig=` query parameter — anyone who can read the repo can post
+-- into the channel. A real one WAS committed here (through 2026-07-31) and had to be
+-- rotated; tests/test_no_committed_secrets.py now fails the build if one returns.
+-- Keep the placeholders below and run the two statements from a Snowsight worksheet
+-- with the real values pasted there, where nothing is version-controlled.
+--
+-- The trigger URL splits into two parts:
+--   WEBHOOK_URL    = everything up to /workflows/, then the literal SNOWFLAKE_WEBHOOK_SECRET
+--   SECRET_STRING  = everything after /workflows/  (the flow id + ?api-version...&sig=...)
+-- NOTE the cluster segment: current Power Automate URLs include /direct/cu/NN/workflows/.
+-- If yours has it, WEBHOOK_URL must keep it too, or every send 404s.
  CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
     TYPE = GENERIC_STRING
-     SECRET_STRING = '8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs';
+     SECRET_STRING = '<flow-id>/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=<REDACTED-PASTE-IN-SNOWSIGHT>';
  CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
      TYPE = WEBHOOK ENABLED = TRUE
-     WEBHOOK_URL = 'https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/SNOWFLAKE_WEBHOOK_SECRET'
+     WEBHOOK_URL = 'https://<your-env>.environment.api.powerplatform.com/powerautomate/automations/direct/cu/<NN>/workflows/SNOWFLAKE_WEBHOOK_SECRET'
      WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
      WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
      WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
@@ -78,6 +91,47 @@
 -- V026's sender JSON-escapes the message (quotes, newlines, tabs), so
 -- multi-alert digests render as line breaks in the card instead of
 -- breaking the flow. Workflows replies 202 Accepted on success.
+
+-- ---------------------------------------------------------------------------
+-- ROTATION RUNBOOK (do this in Snowsight; nothing here is version-controlled)
+--
+-- WHY: a live trigger URL was committed to this repo through 2026-07-31. Deleting
+-- it from the file does NOT undo that — it is in git history and was pushed. The
+-- only real remedy is to invalidate the old URL at the provider.
+--
+-- 1. Power Automate -> your flow -> the "When a Teams webhook request is received"
+--    trigger. Regenerate the URL (or delete + recreate the trigger). The moment the
+--    new URL exists, the leaked one is dead. Copy the new URL.
+-- 2. In a Snowsight worksheet, split it as described above and run:
+--       CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+--           TYPE = GENERIC_STRING SECRET_STRING = '<everything after /workflows/>';
+--       CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS ...
+--           (the form above, with your real WEBHOOK_URL prefix)
+-- 3. CREATE OR REPLACE on an integration DESTROYS ITS GRANTS. Re-check and re-grant:
+--       SHOW GRANTS ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS;
+--       -- GRANT USAGE ON INTEGRATION OVERWATCH_WEBHOOK_TEAMS TO ROLE <owner-role>;
+--    SP_NOTIFY_WEBHOOK runs EXECUTE AS OWNER; without USAGE every send throws
+--    "insufficient privileges" and Teams goes silent with only route_send_failed rows.
+-- 4. Prove it end to end (sends one real card):
+--       CALL SYSTEM$SEND_SNOWFLAKE_NOTIFICATION(
+--         SNOWFLAKE.NOTIFICATION.TEXT_PLAIN('OVERWATCH rotation test ' || CURRENT_TIMESTAMP()),
+--         SNOWFLAKE.NOTIFICATION.INTEGRATION('OVERWATCH_WEBHOOK_TEAMS'));
+--
+-- ---------------------------------------------------------------------------
+-- RETIRE THE DEAD SLACK ROUTE (one statement, safe, reversible)
+--
+-- V012 seeds a default route to 'OVERWATCH_WEBHOOK'. On a Teams-only account that
+-- integration does not exist, so every SP_NOTIFY_WEBHOOK run attempts a send that can
+-- only fail. Per-route isolation means it does NOT block Teams — but it writes a
+-- route_send_failed row every run, which buries real delivery errors in the log.
+--       UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+--          SET ENABLED = FALSE
+--        WHERE INTEGRATION_NAME = 'OVERWATCH_WEBHOOK';
+-- Verify (expect the Teams route ENABLED, the Slack one not):
+--       SELECT ROUTE_ID, FAMILY, MIN_SEVERITY, INTEGRATION_NAME, ENABLED
+--         FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES ORDER BY ENABLED DESC;
+-- Reversible: set ENABLED = TRUE to restore. The Alerts page's delivery banner now
+-- flags any enabled route naming an integration that does not exist.
 
 -- ---------------------------------------------------------------------------
 -- Severity-based multi-channel routing (the sender already walks
