@@ -354,11 +354,20 @@ def event_timeline(df: pd.DataFrame) -> None:
     rng = [SEV_COLORS[s] for s in dom]
     color = alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng),
                       legend=alt.Legend(orient="top", title=None))
+    # A2: a redundant SHAPE per severity so the dots stay distinguishable without
+    # relying on the red->amber hue axis that red-green color-blindness compresses.
+    # Same field + title as the color legend, so Altair merges them into ONE legend
+    # showing each severity's shape AND color.
+    shape = alt.Shape("SEVERITY:N",
+                      scale=alt.Scale(domain=dom,
+                                      range=["circle", "diamond", "triangle-up", "square", "cross"]),
+                      legend=alt.Legend(orient="top", title=None))
     common = {"x": alt.X("AT:T", title=None), "y": alt.Y("EVENT_TYPE:N", title=None),
               "tooltip": ["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"]}
-    glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(color=color, **common)
-    dots = alt.Chart().mark_circle(size=90, opacity=0.95,
-                stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, **common)
+    glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(
+        color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng), legend=None), **common)
+    dots = alt.Chart().mark_point(size=110, opacity=0.95, filled=True,
+                stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, shape=shape, **common)
     st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
                     use_container_width=True)
 
@@ -435,7 +444,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
     d["_RANK"] = d[category_col].map({c: i for i, c in enumerate(order)}).fillna(len(order))
     bars = (_base(d, 280).mark_bar().encode(
         x=alt.X(f"{month_col}:O", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y(f"{usd_col}:Q", title="USD", stack="zero"),
+        y=alt.Y(f"{usd_col}:Q", title="Spend (USD)", stack="zero"),  # A5: one dollar-axis spelling
         color=_stable_color(category_col, d[category_col],
                             legend=alt.Legend(orient="bottom", title=None,
                                               columns=4, symbolLimit=top_n + 1,

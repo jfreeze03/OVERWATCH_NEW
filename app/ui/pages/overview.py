@@ -504,6 +504,12 @@ def render() -> None:
             view = (drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
                     .sort_values("VALUE_USD", ascending=False))
             charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
+            # rec15: lead with the conclusion — which driver dominates, and by how much.
+            _dtot = float(view["VALUE_USD"].map(safe_float).sum())
+            if _dtot > 0 and len(view):
+                _d0 = view.iloc[0]
+                st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
+                           f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of tracked drivers).")
         elif not using_mart and not daily.empty:
             st.caption("Driver ranking appears once the exec board mart is installed.")
         else:

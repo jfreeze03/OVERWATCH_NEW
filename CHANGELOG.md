@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.104.0 — Design scannability wave — Codex visual-review NEXT (app-only) (2026-07-31)
+
+The NEXT items from the design assessment (`docs/reviews/DESIGN_REVIEW_2026-07-31.md`),
+led by the two added recs the Codex review missed.
+
+- **A3 — color the Δ columns** (the primary scan target of a cost command center). Any
+  `DELTA_*` / `D_*` / `Δ` column now renders sign-colored in every table (increase =
+  red/worse, decrease = green/better) — a +$40k and −$40k no longer differ only by a
+  minus sign. Text-color only, so a table of deltas stays scannable.
+- **A2 — colorblind-safe severity.** The event-timeline dots (the one hue-only severity
+  surface) carry a redundant **shape** per severity (circle/diamond/triangle/square/cross)
+  merged into one legend, so severity survives red-green color-blindness.
+- **rec 11 — provenance de-noised.** The `ACCOUNT_USAGE` lag note printed verbatim under all
+  ~76 panels; it now shows **once per page** in the header. `Source:`/`fetched` stay per panel.
+- **rec 1 + rec 5 — header decluttered.** Scope no longer prints twice (caption + chips —
+  the chips are now the single in-header scope statement); the per-page "OVERWATCH" kicker
+  is gone (the sidebar brand + browser tab are the anchor).
+- **rec 13 — human table headers.** SQL-shaped `UPPER_SNAKE` columns display as Title Case
+  (`WAREHOUSE_NAME` → "Warehouse Name"); unit tokens (USD, TiB, p95) preserved; the CSV keeps
+  raw names.
+- **rec 6 — heading consistency.** Control Room's six top-level sections use the
+  `section_header` stripe, matching Overview and Cost.
+- **rec 15 / A5 — chart polish.** The Overview cost-drivers bar leads with its conclusion
+  (top driver + its share); the boss chart's dollar axis matches the shared "Spend (USD)"
+  spelling.
+
+Deferred: **rec 7** (hide the sidebar radio dot) — DOM-fragile; a wrong selector could hide
+nav labels, so it needs live-DOM verification, not a blind CSS guess.
+
+Gates green: ruff, mypy, tests (+18 wave locks; 1617 passed).
+
 ## 4.103.0 — Design "scannability wave" — Codex visual-review DO-FIRST (app-only) (2026-07-31)
 
 The DO-FIRST items from the Codex visual/design review assessment

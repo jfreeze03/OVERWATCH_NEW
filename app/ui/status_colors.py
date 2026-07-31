@@ -7,6 +7,8 @@ contrast stays readable on the dark theme.
 
 from __future__ import annotations
 
+import re
+
 # value (upper) -> (background, text)
 _BAD = ("#7f1d1d", "#fecaca")     # deep red bg, light red text
 _HIGH = ("#7c2d12", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL red (r4)
@@ -101,3 +103,32 @@ def status_css(column: str, value: object) -> str:
 def status_columns_in(columns: list[str] | tuple[str, ...]) -> list[str]:
     upper = {str(c).upper(): c for c in columns}
     return [upper[c] for c in STATUS_COLUMNS if c in upper]
+
+
+# A3: movement/delta columns — the primary scan target of a cost command center.
+# A column whose sign carries meaning (DELTA_*, D_*, Δ ...). Deliberately narrow so a
+# timestamp like CHANGE_SEEN_AT is never mistaken for a movement (it'd no-op anyway,
+# but the wasted styler pass is avoided).
+_DELTA_RE = re.compile(r"(?:^|_)delta(?:_|$)|Δ|^d_", re.IGNORECASE)
+
+
+def is_delta_column(name: object) -> bool:
+    return bool(_DELTA_RE.search(str(name or "")))
+
+
+def delta_css(value: object) -> str:
+    """Sign color for a movement/delta cell — the cost-tool convention: an INCREASE
+    in cost/latency/failures is worse (red), a DECREASE is better (green). Text color
+    only (no fill) so a table of deltas stays scannable, not a wall of blocks. A ±0
+    or non-numeric value gets no color."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0:
+        col = "#b91c1c" if _theme_is_light() else "#fb7185"     # up = worse
+    elif v < 0:
+        col = "#15803d" if _theme_is_light() else "#34d399"     # down = better
+    else:
+        return ""
+    return f"color: {col}; font-weight: 600;"

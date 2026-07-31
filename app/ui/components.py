@@ -14,7 +14,7 @@ from app.data import mart_sql
 from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
 from app.theme import chip
 from app.ui.icons import icon
-from app.ui.status_colors import status_columns_in, status_css
+from app.ui.status_colors import delta_css, is_delta_column, status_columns_in, status_css
 
 
 def _scope_chip_html() -> str:
@@ -125,7 +125,8 @@ def _section_slug(label: str) -> str:
 def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str = "") -> None:
     st.session_state["_ow_dl_seq"] = 0
     st.session_state["_ow_dl_page"] = str(title)   # T1.6: page identity for the CSV-prep slot
-    st.markdown('<div class="ow-kicker">OVERWATCH</div>', unsafe_allow_html=True)
+    # rec5: no per-page OVERWATCH kicker — the sidebar brand + browser tab are the one
+    # brand anchor; repeating it above every header was orientation noise, not signal.
     if icon_name:
         st.markdown(
             f'<div style="display:flex;align-items:center;gap:11px;margin:-2px 0 2px 0">'
@@ -134,11 +135,16 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
             f'color:var(--ow-ink)">{title}</span></div>', unsafe_allow_html=True)
     else:
         st.title(title)
-    caption = subtitle if not scope_note else f"{subtitle} · {scope_note}"
-    st.caption(caption)
     chips = _scope_chip_html()
+    # rec1: when the scope CHIPS render they ARE the in-header scope statement, so the
+    # caption is the subtitle only — scope used to print twice (caption + chips).
+    caption = subtitle if (chips or not scope_note) else f"{subtitle} · {scope_note}"
+    st.caption(caption)
     if chips:
         st.markdown(f'<div class="ow-scope-row">{chips}</div>', unsafe_allow_html=True)
+    # rec11: the ACCOUNT_USAGE lag note lives ONCE per page here, not appended verbatim
+    # to every panel's result_caption (it was on all ~76 of them).
+    st.caption(ACCOUNT_USAGE_LAG_NOTE)
 
 
 _SEV_HEX = {"ok": "#34d399", "warn": "#fbbf24", "bad": "#fb7185",
@@ -340,16 +346,18 @@ def status_bar(stats: list[dict]) -> None:
 
 
 def result_caption(result: QueryResult, note: str = "") -> None:
-    """Source + freshness line under any data panel."""
+    """Source + freshness line under any data panel. rec11: the ACCOUNT_USAGE lag
+    note is NOT appended here — it printed verbatim under all ~76 panels; it now
+    shows once per page in page_header. Source/fetched legitimately vary per panel."""
     bits = []
     if result.source:
         bits.append(f"Source: {result.source}")
     if result.fetched_at:
         bits.append(f"fetched {result.fetched_at.strftime('%H:%M:%S')}")
-    bits.append(ACCOUNT_USAGE_LAG_NOTE)
     if note:
         bits.append(note)
-    st.caption(" · ".join(bits))
+    if bits:
+        st.caption(" · ".join(bits))
 
 
 
@@ -676,6 +684,18 @@ def _slugify(text: object, fallback: str = "table") -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") or fallback
 
 
+def _prettify_header(col: object) -> str:
+    """rec13: SQL-shaped UPPER_SNAKE -> Title Case for DISPLAY only (df.to_csv keeps
+    the raw name). Leaves already-human headers (mixed case, or containing a space)
+    and short all-caps tokens (USD, MB, TB, ID, AI, p95) alone."""
+    s = str(col)
+    if s != s.upper() or " " in s:            # already human
+        return s
+    _keep = {"USD", "AI", "ID", "MB", "GB", "TB", "TIB", "MS", "SEC", "PCT", "P95", "P50", "SLA", "CS", "QAS"}
+    words = [w if w in _keep else w.capitalize() for w in s.split("_")]
+    return " ".join(words)
+
+
 def _export_filename(seq: int, slug: str | None) -> str:
     """rec14: a self-identifying CSV name — `overwatch-{page}-{table}-{YYYYMMDD}.csv` —
     so a folder of downloads is readable instead of overwatch_table_1/2/3.csv. The
@@ -713,6 +733,10 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             styler = display_df.style
             for col in status_columns_in(list(df.columns)):
                 styler = styler.map(lambda v, _c=col: status_css(_c, v), subset=[col])
+            # A3: sign-color movement columns (Δ up = red/worse, down = green/better)
+            for col in df.columns:
+                if is_delta_column(col):
+                    styler = styler.map(lambda v: delta_css(v), subset=[col])
             if fmts:
                 styler = styler.format(fmts, na_rep="–")
             data = styler
@@ -729,6 +753,20 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 except Exception:  # noqa: BLE001
                     break
         column_config = cfg
+    # rec13: human-readable headers for SQL-shaped UPPER_SNAKE columns (display only —
+    # the CSV keeps raw names). Columns with an explicit column_config (units, custom
+    # labels) or that get a printf NumberColumn on the large-frame path are left as-is.
+    _cfg = dict(column_config or {})
+    for _col in df.columns:
+        if _col in _cfg:
+            continue
+        _pretty = _prettify_header(_col)
+        if _pretty != str(_col):
+            try:
+                _cfg[_col] = st.column_config.Column(_pretty)
+            except Exception:  # noqa: BLE001 - relabel is cosmetic, never break the table
+                pass
+    column_config = _cfg or None
     column_config = _auto_pin(df, column_config)
     if height is None and len(df) > 10:
         height = 380

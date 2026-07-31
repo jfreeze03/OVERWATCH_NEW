@@ -28,6 +28,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
     selectable_table,
     styled_table,
     with_user_names,
@@ -94,7 +95,7 @@ def _day_replay() -> None:
     from app.logic.formulas import account_today
     from app.logic.replay import replay_headlines
 
-    st.subheader("Day replay — what changed?")
+    section_header("Day replay — what changed?")
     pick = st.date_input("Day", value=account_today() - timedelta(days=1),
                          min_value=account_today() - timedelta(days=120),
                          max_value=account_today(), key="cr_replay_day")
@@ -198,7 +199,7 @@ def _freshness_board() -> None:
         mart_source="SOURCE_FRESHNESS_STATE (10-min snapshot)",
         live_source="MART_SOURCE_FRESHNESS (aggregate view, pre-V040 fallback)",
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
-    st.subheader("Telemetry freshness")
+    section_header("Telemetry freshness")
     if not res.ok:
         st.info("Freshness board is not installed yet; the live fallbacks on this page still work.")
         return
@@ -312,7 +313,7 @@ def render() -> None:
 
 
     # ---- Incidents (V032) ------------------------------------------------------
-    st.subheader("Incidents")
+    section_header("Incidents")
     from app.config import OPERATOR_PROFILES, resolve_role_profile
     from app.core.query import execute_statement, run_batch
     from app.core.session import current_role
@@ -410,7 +411,7 @@ def render() -> None:
                "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")
 
     # ---- Triage queue ----------------------------------------------------------
-    st.subheader("Triage queue")
+    section_header("Triage queue")
     alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
                  key=f"cr_alerts_{company}", tier="live",
                  source="ALERT_EVENTS" if company == "ALL"
@@ -469,7 +470,7 @@ def render() -> None:
             request_navigation(_dest[0], _dest[1])
 
     # ---- Incident correlation timeline -----------------------------------------
-    st.subheader("Incident correlation timeline")
+    section_header("Incident correlation timeline")
     panel_help(
         "Alerts, task failures, and DDL changes on one time axis (48h or 7d). Click a row "
         "below the chart to see everything else that happened within ±30 minutes — the "
@@ -526,7 +527,7 @@ def render() -> None:
         st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
                    "Warehouses section has the full table and history.")
 
-    st.subheader("Spend movers (window vs prior)")
+    section_header("Spend movers (window vs prior)")
     if f["database"]:
         st.caption("Warehouse grain — the database filter doesn't narrow this.")
     movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
