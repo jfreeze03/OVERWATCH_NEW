@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.97.0 — V064 owner-migration + telemetry persist (Codex R2 rec 7/8/20-alert/18) (2026-07-30)
+
+The Codex-R2 NEXT-tier owner-migration bundle (`snowflake/migrations/V064__…`),
+authored via `outputs/gen_v064.py` under the derivation law and gated by an
+adversarial-review workflow (1 major + 3 minor findings, all resolved).
+
+- **NUMBERING** — this ships as **V064**, not V065. The contiguity invariant
+  (`validate.sql` requires `COUNT(DISTINCT VERSION) BETWEEN 1 AND N = N`) forbids
+  skipping the unbuilt T3-perf slot, so the deferred T3 work becomes V065.
+- **rec 8 (webhook oldest-first bounded drain)** — `SP_NOTIFY_WEBHOOK` was a
+  newest-first single shot per route/run, so under sustained volume the oldest
+  alerts never fit the 3000-char message and eventually crossed the 24h window
+  `undelivered_expired` — backwards from urgency. Now each route drains in batches
+  **oldest-first** (bounded at 6/run; capture-once per batch preserves B9), so the
+  backlog clears forward and the oldest never starve. The expired-detection now
+  shares the send eligibility (family+company+severity). **Owner smoke test.**
+- **rec 7 (per-source daily watermarks)** — `SP_LOAD_DAILY_FACTS` held one shared
+  `DAILY_FACTS` mark, so any one table's failure re-read all four sources next run.
+  Now each source keeps its own mark (metering advances after its MERGE — guarded so
+  a watermark lock can't starve siblings; task/login/storage advance atomically
+  inside their transaction). `SP_NIGHTLY_RECONCILE` rewinds the four new keys in
+  lockstep. A review-found **cold-start seed** inherits each new key from the
+  retained `DAILY_FACTS` position so a cutover during an outage re-covers the held
+  backlog instead of dropping it. **Owner smoke test.**
+- **rec 20-alert (contract-breach burn)** — the `COST_CONTRACT_BREACH` block in
+  `SP_ALERT_SCAN_DAILY` burned `SUM(CREDITS_BILLED)/30` over a partial-current-day
+  span, biasing burn low → overstating days-left → could **suppress** the breach.
+  Now trailing-30-**complete**-days (`DAY BETWEEN today-30 AND today-1`, divided by
+  the actual complete-day count) — the same canonical burn the app mart and
+  `contract.py` already use.
+- **rec 18 (telemetry re-weightability)** — `APP_QUERY_TELEMETRY` gains
+  `SAMPLE_PROB` + `QUERY_ID` (additive, idempotent). The app persist path now writes
+  both (1.0 for the must-persist stream, the sample rate for the healthy stream) via
+  a 3-level shape downgrade so it degrades cleanly against an older schema. The
+  weighted-percentile Admin view + rec 19 route-backlog observability follow.
+
+Lockstep: `validate.sql` floor, admin `_EXPECTED_MIGRATIONS[64]`, rebuild bundle
+`02_migrations_V001_V064.sql`, `DEPLOYMENT.md` + `README.md` run-lists and V064
+smoke-test runbook. Gates green: ruff, mypy, tests (+14 V064 locks).
+
 ## 4.96.0 — Codex R2 NEXT wave C: accessibility floor (rec 15, app-only) (2026-07-30)
 
 **rec 15 (MEDIUM)** — a11y polish on the dense KPI/status surfaces:

@@ -47,6 +47,7 @@ _TAIL_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\s*;?\s*$", re.IGNORECASE)
 # INSERT per query. Fire-and-forget; first failure disables for the session.
 TELEMETRY_PERSIST_MS = 2000.0
 _TELEMETRY_PERSIST_CAP = 60  # rows per session: a broken page can't spam
+_TELEMETRY_SAMPLE_RATE = 0.02  # rec18: the healthy-baseline sample; persisted as SAMPLE_PROB so Admin can re-weight
 
 
 def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
@@ -70,7 +71,7 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
                        rows: int, ok: bool, cache_hit: bool | None = None,
                        sql_hash: str | None = None, batch_size: int | None = None,
-                       truncated: bool | None = None) -> None:
+                       truncated: bool | None = None, query_id: str | None = None) -> None:
     def _b(v):
         return "NULL" if v is None else ("TRUE" if v else "FALSE")
 
@@ -79,7 +80,8 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
             return
         done = int(st.session_state.get("_ow_qtel_n", 0))
         import random as _random
-        if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random()):
+        if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random(),
+                                        sample_rate=_TELEMETRY_SAMPLE_RATE):
             return
         st.session_state["_ow_qtel_n"] = done + 1
         base = (
@@ -87,21 +89,35 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
             f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
             f"{int(rows)}, {'TRUE' if ok else 'FALSE'}"
         )
-        # N12: enqueue instead of one INSERT round trip per row. VALUES -> SELECT so
-        # the buffered flush is a single multi-row INSERT ... SELECT ... UNION ALL.
-        # A flush failure of the V027 shape downgrades to the 6-col shape next call.
+        v27 = (f", {_b(cache_hit)}, "
+               f"{sql_literal(str(sql_hash)[:64]) if sql_hash else 'NULL'}, "
+               f"{int(batch_size) if batch_size is not None else 'NULL'}, {_b(truncated)}")
+        # rec18: this row's SAMPLE_PROB is the probability it was persisted -- 1.0 for
+        # the must-persist stream (failed OR slow), the sample rate for the healthy
+        # stream -- so Admin > Performance can re-weight healthy rows (1/prob) and read
+        # an UNBIASED fleet p50/p95. QUERY_ID joins the row to ACCOUNT_USAGE.QUERY_HISTORY.
+        sample_prob = (1.0 if ((not ok) or float(elapsed_ms) >= TELEMETRY_PERSIST_MS)
+                       else _TELEMETRY_SAMPLE_RATE)
+        qid = sql_literal(str(query_id)[:64]) if query_id else "NULL"
+        col = f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+        # N12: enqueue, not one INSERT round trip per row; the buffered flush is a
+        # single multi-row INSERT ... SELECT ... UNION ALL. THREE-level downgrade so
+        # the app degrades cleanly against an older schema: V064 (12-col) -> V027
+        # (10-col, pre-SAMPLE_PROB/QUERY_ID) -> legacy (6-col, pre-V027). Each flush
+        # shape-mismatch sets the next-lower flag for the following call.
         if st.session_state.get("_ow_qtel_oldshape"):
-            prefix = (f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
-                      "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) ")
-            row = "SELECT " + base
-        else:
-            prefix = (f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
-                      "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
+            prefix = col + "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) "
+            _buffer_write(prefix, "SELECT " + base, off_flag="_ow_qtel_off")
+        elif st.session_state.get("_ow_qtel_prev64shape"):
+            prefix = (col + "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
                       "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED) ")
-            row = ("SELECT " + base + f", {_b(cache_hit)}, "
-                   f"{sql_literal(str(sql_hash)[:64]) if sql_hash else 'NULL'}, "
-                   f"{int(batch_size) if batch_size is not None else 'NULL'}, {_b(truncated)}")
-        _buffer_write(prefix, row, off_flag="_ow_qtel_off", downgrade_flag="_ow_qtel_oldshape")
+            _buffer_write(prefix, "SELECT " + base + v27,
+                          off_flag="_ow_qtel_off", downgrade_flag="_ow_qtel_oldshape")
+        else:
+            prefix = (col + "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK, "
+                      "CACHE_HIT, SQL_HASH, BATCH_SIZE, TRUNCATED, SAMPLE_PROB, QUERY_ID) ")
+            _buffer_write(prefix, "SELECT " + base + v27 + f", {sample_prob}, {qid}",
+                          off_flag="_ow_qtel_off", downgrade_flag="_ow_qtel_prev64shape")
     except Exception:
         # Table missing (pre-V021) or no INSERT grant: stop trying this session.
         st.session_state["_ow_qtel_off"] = True
@@ -348,7 +364,7 @@ def _telemetry(page: str, tier: str, key: str, elapsed_ms: float, rows: int, ok:
         pass
     _persist_telemetry(page, tier, key, elapsed_ms, rows, ok,
                        cache_hit=cache_hit, sql_hash=sql_hash,
-                       batch_size=batch_size, truncated=truncated)
+                       batch_size=batch_size, truncated=truncated, query_id=query_id)
 
 
 def query_telemetry() -> pd.DataFrame:

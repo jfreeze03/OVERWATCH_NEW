@@ -69,6 +69,7 @@ snowflake/migrations/V060__family_elapsed_queued_alert_guard.sql
 snowflake/migrations/V061__ai_loader_alert_score_purge_fixes.sql
 snowflake/migrations/V062__loader_robustness_alert_split_webhook.sql
 snowflake/migrations/V063__webhook_capture_once_daily_facts_failguard.sql
+snowflake/migrations/V064__webhook_drain_watermarks_alert_burn_telemetry.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -89,6 +90,32 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >   wraps (e.g. rename a target column) leaves the `DAILY_FACTS` watermark **unchanged**,
 >   returns a non-success string, and that the **next** run re-covers the missed day.
 > - No new objects and no data heal — both are forward-healing proc swaps.
+
+> **V064 verify (webhook oldest-first drain + per-source watermarks + burn + telemetry):**
+> - **⚠ rec8 webhook — OWNER SMOKE TEST REQUIRED (`SYSTEM$SEND` + `ARRAY` binding + the
+>   drain LOOP are runtime-only).** In a non-prod clone: pick an enabled route, insert
+>   ~40 OPEN `ALERT_EVENTS` (same company/family/severity, each `TITLE` ~140 chars,
+>   staggered `RAISED_AT` over the last few hours) so the backlog spans **several**
+>   3000-char batches; `CALL SP_NOTIFY_WEBHOOK();` and confirm (a) the **oldest** events
+>   are delivered **first**, (b) multiple message batches send in one call (bounded at 6),
+>   (c) the loop **terminates** (does not spin), (d) each delivered event gets exactly one
+>   `ALERT_DELIVERIES` row + `NOTIFIED_AT`, and (e) a second immediate `CALL` sends only
+>   the remaining backlog (no re-send of delivered events). If the oldest starve or an
+>   event double-sends, revert `SP_NOTIFY_WEBHOOK` to the V063 body and report back.
+>   **Do not manually `CALL SP_NOTIFY_WEBHOOK()` while `TASK_ALERT_NOTIFY` may fire** —
+>   the send precedes the ledger write, so two overlapping runs can double-send a batch.
+>   The single scheduled task self-serializes, so scheduled delivery is unaffected; this
+>   only bites a manual call racing the task.
+> - **⚠ rec7 per-source watermarks — SMOKE TEST.** In a clone, induce a failure in one
+>   per-table wrap (e.g. rename a `FACT_TASK_DAILY` column) and confirm only the
+>   `FACT_TASK_DAILY` watermark is held while `FACT_METERING/LOGIN/STORAGE_DAILY` advance,
+>   and the **next** run re-covers only the failed source. On the first post-V064 run the
+>   four new `OW_LOAD_WATERMARKS` rows are created from the default window (the orphaned
+>   `DAILY_FACTS` row is harmless). Confirm `SP_NIGHTLY_RECONCILE` still re-covers daily
+>   facts (it now rewinds the four new keys).
+> - **rec20-alert / rec18** (byte-verifiable): `COST_CONTRACT_BREACH` burns over
+>   trailing-30-complete-days; `APP_QUERY_TELEMETRY` gains `SAMPLE_PROB` + `QUERY_ID`
+>   (additive; existing rows read NULL). No new objects.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old

@@ -122,6 +122,14 @@ _EXPECTED_MIGRATIONS = {
         "and NOTIFIED_AT can't diverge (B9, no send-vs-ledger race; owner smoke "
         "test); SP_LOAD_DAILY_FACTS holds the watermark + returns non-success on a "
         "per-table failure instead of a false success (B34). Perf loader (T3) in V064",
+    64: "webhook oldest-first bounded drain + per-source daily watermarks + "
+        "contract-burn accuracy + telemetry columns: SP_NOTIFY_WEBHOOK drains the "
+        "backlog in batches oldest-first so old alerts stop starving past the 24h "
+        "window (rec8, owner smoke test); SP_LOAD_DAILY_FACTS + SP_NIGHTLY_RECONCILE "
+        "keep per-source watermarks so one table's failure holds only its own mark "
+        "(rec7); COST_CONTRACT_BREACH burns over trailing-30-complete-days not /30 "
+        "(rec20-alert); APP_QUERY_TELEMETRY gains SAMPLE_PROB + QUERY_ID (rec18). "
+        "T3 perf loader (deferred) becomes V065",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
