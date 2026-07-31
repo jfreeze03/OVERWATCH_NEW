@@ -425,13 +425,19 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
         d = d.groupby([month_col, category_col], as_index=False)[usd_col].sum()
     d["_PARTIAL"] = d[month_col].astype(str) == str(partial_month)
     order = list(totals.head(top_n).index) + (["Other"] if len(totals) > top_n else [])
+    # C15 contract: color by ENTITY identity (crc32-stable), so a warehouse keeps its
+    # color as top-8 membership shifts month to month — the sibling stacked charts
+    # already do this. Stack order stays by total (biggest at the base) via an explicit
+    # _RANK order, which the color sort used to carry.
+    d["_RANK"] = d[category_col].map({c: i for i, c in enumerate(order)}).fillna(len(order))
     bars = (_base(d, 280).mark_bar().encode(
         x=alt.X(f"{month_col}:O", title=None, axis=alt.Axis(labelAngle=0)),
         y=alt.Y(f"{usd_col}:Q", title="USD", stack="zero"),
-        color=alt.Color(f"{category_col}:N", sort=order,
-                        legend=alt.Legend(orient="bottom", title=None,
-                                          columns=4, symbolLimit=top_n + 1,
-                                          labelLimit=160)),
+        color=_stable_color(category_col, d[category_col],
+                            legend=alt.Legend(orient="bottom", title=None,
+                                              columns=4, symbolLimit=top_n + 1,
+                                              labelLimit=160)),
+        order=alt.Order("_RANK:Q"),
         opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
         tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],

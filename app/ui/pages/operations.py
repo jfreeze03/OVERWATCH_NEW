@@ -730,12 +730,37 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
              "help": "Fewer than 5 post-change runs so far — no verdict yet."},
         ])
         _ci = with_user_names(df, _PAGE, user_col="CHANGED_BY", display_col="Changed by")
+        # r4: a readable, laptop-fittable change table. with_user_names already added the
+        # resolved "Changed by", so the raw CHANGED_BY was a duplicate identity column;
+        # drop it, collapse each baseline/after pair into ONE signed delta (what you scan),
+        # move the long VERDICT_DETAIL into the row drill below, and label/format columns.
+        # Absolutes stay one click away in the run-history drill.
+        import pandas as pd
+
+        def _chg_delta(after: str, base: str):
+            return (pd.to_numeric(_ci.get(after), errors="coerce")
+                    - pd.to_numeric(_ci.get(base), errors="coerce"))
+
+        _ci = _ci.assign(
+            D_CALLS=_chg_delta("AFTER_CALLS", "BASELINE_CALLS"),
+            D_P95_S=_chg_delta("AFTER_P95_S", "BASELINE_P95_S"),
+            D_CPC=_chg_delta("AFTER_CREDITS_PER_CALL", "BASELINE_CREDITS_PER_CALL"),
+        )
         show_cols = ["VERDICT", "OBJECT_TYPE", "DATABASE_NAME", "SCHEMA_NAME", "OBJECT_NAME",
-                     "CHANGE_SEEN_AT", "Changed by", "CHANGED_BY", "BASELINE_CALLS", "AFTER_CALLS",
-                     "BASELINE_P95_S", "AFTER_P95_S",
-                     "BASELINE_CREDITS_PER_CALL", "AFTER_CREDITS_PER_CALL", "VERDICT_DETAIL"]
-        sel_ci = selectable_table(_ci[[c for c in show_cols if c in _ci.columns]],
-                                  key="chg_sel", height=320)
+                     "CHANGE_SEEN_AT", "Changed by", "AFTER_CALLS", "D_CALLS", "D_P95_S", "D_CPC"]
+        sel_ci = selectable_table(
+            _ci[[c for c in show_cols if c in _ci.columns]], key="chg_sel", height=320,
+            column_config={
+                "OBJECT_TYPE": st.column_config.TextColumn("Type"),
+                "DATABASE_NAME": st.column_config.TextColumn("Database"),
+                "SCHEMA_NAME": st.column_config.TextColumn("Schema"),
+                "OBJECT_NAME": st.column_config.TextColumn("Object"),
+                "CHANGE_SEEN_AT": st.column_config.TextColumn("Changed"),
+                "AFTER_CALLS": st.column_config.NumberColumn("Calls (after)", format="%d"),
+                "D_CALLS": st.column_config.NumberColumn("Δ calls", format="%+d"),
+                "D_P95_S": st.column_config.NumberColumn("Δ p95 (s)", format="%+.2f"),
+                "D_CPC": st.column_config.NumberColumn("Δ cr/call", format="%+.4f"),
+            })
         result_caption(res)
 
         st.markdown("**Run history around one change**")
@@ -744,6 +769,10 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
         if sel_ci is not None:
             crow = df.iloc[int(sel_ci)]
             clicked_obj = f"{crow['OBJECT_TYPE']} {crow['OBJECT_NAME']}"
+            # r4: the full verdict rationale lives here now (was a wide table column)
+            _vd = str(crow.get("VERDICT_DETAIL") or "").strip()
+            if _vd:
+                st.caption(f"**{crow.get('VERDICT')}** — {_vd}")
         pick = clicked_obj or st.selectbox("Object (or click a row above)", picks, key="chg_pick")
         # T1.4: the 28d QUERY/TASK_HISTORY scan used to run every render on the
         # auto-selected first object. A row click loads it immediately; otherwise it

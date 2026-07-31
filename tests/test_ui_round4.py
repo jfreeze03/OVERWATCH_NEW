@@ -32,7 +32,10 @@ def test_kpi_rows_wrap_at_four():
     src = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     body = src.split("def kpi_row", 1)[1].split("\ndef ", 1)[0]
     assert "min(columns or 4, 4" in body
-    assert "range(0, len(items), width)" in body                   # overflow wraps
+    # r4: overflow REBALANCES evenly across rows (5 -> 3+2) and fills each row so no
+    # card is orphaned at quarter width; the final row is st.columns(len(chunk)).
+    assert "divmod(len(items), rows)" in body
+    assert "st.columns(len(chunk))" in body
 
 
 def test_alerts_kpis_carry_severity():

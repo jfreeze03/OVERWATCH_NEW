@@ -93,7 +93,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if p_res.usable():
         top_p = p_res.df.iloc[0]
         kpis.append({"label": "Priciest procedure (per call)",
-                     "value": format_usd(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate)),
+                     "value": format_usd(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate, round_cents=False)),
                      "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
@@ -121,7 +121,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # Click a row -> the trend panel below prefills with that proc
         # (Codex r7 #5: the trend was findable only by typing).
         pdf["USD_TOTAL"] = pdf["TOTAL_CREDITS"].map(lambda c: credits_to_usd(c, rate))
-        pdf["USD_PER_CALL"] = pdf["CREDITS_PER_CALL"].map(lambda c: credits_to_usd(c, rate))
+        pdf["USD_PER_CALL"] = pdf["CREDITS_PER_CALL"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
         from app.ui.components import selectable_table
         _psel = selectable_table(pdf, key="uc_proc_sel", height=280, column_config={
             "USD_TOTAL": st.column_config.NumberColumn("$ (window)", format="$%.2f"),
@@ -293,9 +293,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                       "adopt the JSON QUERY_TAG (docs/design/ETL_COST_TAGS.md)."):
             edf = etl.df.copy()
             edf["USD"] = edf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
-            edf["USD_PER_RUN"] = edf["CREDITS_PER_RUN"].map(lambda c: credits_to_usd(c, rate))
-            edf["USD_PER_M_ROWS"] = edf["CREDITS_PER_M_ROWS"].map(lambda c: credits_to_usd(c, rate))
-            edf["USD_PER_TIB"] = edf["CREDITS_PER_TIB"].map(lambda c: credits_to_usd(c, rate))
+            edf["USD_PER_RUN"] = edf["CREDITS_PER_RUN"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
+            edf["USD_PER_M_ROWS"] = edf["CREDITS_PER_M_ROWS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
+            edf["USD_PER_TIB"] = edf["CREDITS_PER_TIB"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
             edf["WASTE_USD"] = edf["RETRY_WASTE_CREDITS"].map(lambda c: credits_to_usd(c, rate))
             styled_table(
                 edf[["PIPELINE", "RUNS", "USD", "USD_PER_RUN", "RUN_ID_CREDIT_PCT",

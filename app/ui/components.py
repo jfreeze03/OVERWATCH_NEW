@@ -189,7 +189,9 @@ def _delta_html(delta, delta_color: str) -> str:
     text = html.escape(str(delta))
     down = str(delta).strip().startswith("-")
     if delta_color == "off":
-        col, arrow = "#6b7a90", "flat"
+        # route the neutral delta through the WCAG-AA muted token (rec15), not the
+        # retired pre-a11y #6b7a90 (~3.9:1) — this is inline style=, so the var resolves
+        col, arrow = "var(--ow-ink-mute)", "flat"
     else:
         good = down if delta_color == "inverse" else (not down)
         col = "#34d399" if good else "#fb7185"
@@ -237,8 +239,11 @@ def metric_card_html(item: dict) -> str:
         _v = str(item.get(_kind, "") or "")
         if _v:
             badge += f'<span class="ow-src-badge ow-src-badge--{_kind}">{html.escape(_v)}</span>'
+    # the freshness/method/scope chips ride in a right-aligned group that wraps to
+    # its own line on a long two-chip $ card instead of shrinking the label.
+    chips = f'<span class="ow-card__chips">{badge}</span>' if badge else ""
     return (f'<div class="{cls}" style="min-height:96px">'
-            f'<div class="ow-card__title">{label}{help_html}{badge}</div>'
+            f'<div class="ow-card__title">{label}{help_html}{chips}</div>'
             f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
 
 
@@ -283,11 +288,18 @@ def kpi_row(items: list[dict], columns: int | None = None) -> None:
     if not items:
         return
     # Cap rows at four cards (Codex r4 #3): five-plus equal columns cramp on
-    # laptops and squish on tablets; overflow wraps to the next row instead.
+    # laptops. Overflow wraps to the next row — but REBALANCE evenly across rows
+    # so a 5th card is not marooned in one quarter-width column beside three empty
+    # ones (Overview's flagship 'Platform score' was the orphan). 5 -> 3+2, 7 -> 4+3.
     width = max(1, min(columns or 4, 4, len(items)))
-    for start in range(0, len(items), width):
-        chunk = items[start:start + width]
-        cols = st.columns(width)
+    rows = (len(items) + width - 1) // width          # number of rows (ceil)
+    base, extra = divmod(len(items), rows)            # spread items ~evenly
+    start = 0
+    for r in range(rows):
+        size = base + (1 if r < extra else 0)
+        chunk = items[start:start + size]
+        start += size
+        cols = st.columns(len(chunk))                 # fill the row, never orphan
         for idx, item in enumerate(chunk):
             with cols[idx]:
                 st.markdown(metric_card_html(item), unsafe_allow_html=True)

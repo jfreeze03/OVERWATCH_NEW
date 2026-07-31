@@ -1,5 +1,53 @@
 # Changelog
 
+## 4.101.0 — Bug + design review round 4 (app-only) (2026-07-30)
+
+Found by a find → adversarially-verify → synthesize workflow (13 confirmed, none
+dropped); the high-ROI ones implemented. Bugs:
+
+- **credits_to_usd cent-rounding** (`formulas.py`) — added `round_cents=False`. The
+  per-day-per-pipeline USD series is now summed at full precision, so a sub-cent
+  pipeline reads its real ~$0.54 instead of $0.00; the sub-cent unit costs ($/call,
+  $/run, $/M-rows, $/TiB) no longer fake 4-decimal precision they'd already destroyed.
+- **contract runway understated** (`contract_planner.py`) — burn averaged over
+  drop-days only, excluding idle/weekend days and inflating burn. Now draw-down ÷
+  non-top-up days (idle 0-days counted, only genuine renewal rises excluded), aligning
+  with the canonical `metric_registry.contract_runway`.
+- **neutral KPI delta contrast** (`components.py`) — the "off" delta hardcoded the
+  retired pre-a11y `#6b7a90` (~3.9:1); routed through the WCAG-AA `--ow-ink-mute` token.
+- **grouped-nav highlight desync** (`main.py`, r14 regression) — the radio index seeded
+  off the lagging `?page=` query param, so a cross-group click could light two groups.
+  `_ow_page` is now the authoritative highlight source; a deep link overrides only when
+  it changes.
+- **telemetry transient-error cascade** (`query.py`) — a single network blip latched the
+  shape downgrade (dropping `SAMPLE_PROB`); now requires two consecutive flush failures.
+
+Design:
+
+- **5-KPI orphan** (`components.py`) — a 5th card (Overview's flagship Platform score)
+  was marooned in one quarter-width column. Rows now rebalance evenly (5→3+2) and fill.
+- **severity color** (`status_colors.py`) — HIGH was pixel-identical to CRITICAL in every
+  table; HIGH is now a distinct orange (red→orange→amber→slate ramp).
+- **KPI trust chips** (`theme.py`/`components.py`, r13 regression) — `float:right` was dead
+  on a flex child, cramping long $ labels; chips now ride a wrapping right-aligned group.
+- **boss chart colors** (`charts.py`) — monthly-spend-by-warehouse now colors by stable
+  entity identity (the C15 contract) so a warehouse keeps its color month to month;
+  size-ordered stacking preserved via an explicit order.
+- **section headings** (`overview.py`) — the two top-level Overview sections use the
+  `section_header` stripe, matching Cost.
+- **change-impact table** (`operations.py`) — dropped the duplicate raw id column,
+  collapsed baseline/after pairs into signed deltas, moved the long verdict rationale to
+  the row drill, and labelled/formatted columns.
+- **registry partial-day** (`metric_registry.py`, r16 gap) — `department_chargeback`
+  declared `rolling-daily` + `excluded` (a contradiction); fixed, and `validate()` now
+  catches window↔partial-day contradictions.
+
+Deferred: the allocated-share vs pool window mismatch (live 90d × pool 182d) — the 90-day
+cap deliberately bounds a live QUERY_HISTORY scan, so the correct fix is a perf/cost call
+best made deliberately, not force-fixed here.
+
+Gates green: ruff, mypy, tests (+13 r4 locks; 1598 passed).
+
 ## 4.100.0 — Codex R2 backlog: executable metric registry + cost coverage ladder (rec 16/17, app-only) (2026-07-30)
 
 Completes the Codex-R2 backlog (and the whole review).

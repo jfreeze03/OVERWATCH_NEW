@@ -38,8 +38,16 @@ def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> d
                            errors="coerce").fillna(0)
         on_demand = float(od.sum())
     deltas = daily.diff().dropna().tail(max(1, int(burn_window_days)))
+    # burn = total draw-down / the count of NON-top-up days. Idle 0-consumption days
+    # (weekends) STAY in the denominator — averaging only over drop-days (the old
+    # drops.mean()) excluded them, inflating burn and understating runway (~13d vs a
+    # true ~26d). Only genuine renewal RISES are excluded from both numerator and
+    # denominator (a top-up day's own consumption is unknown, so counting it as a
+    # 0-burn day would understate a steady burn). Aligns with the canonical
+    # trailing-complete-days burn in metric_registry.contract_runway.
     drops = -deltas[deltas < 0]
-    burn = float(drops.mean()) if len(drops) else 0.0
+    non_topup_days = int((deltas <= 0).sum())
+    burn = float(drops.sum()) / non_topup_days if non_topup_days else 0.0
     runway = (remaining / burn) if burn > 0 and remaining > 0 else None
     return {
         "ok": True,

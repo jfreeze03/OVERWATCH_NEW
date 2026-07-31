@@ -9,6 +9,7 @@ from __future__ import annotations
 
 # value (upper) -> (background, text)
 _BAD = ("#7f1d1d", "#fecaca")     # deep red bg, light red text
+_HIGH = ("#7c2d12", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL red (r4)
 _WARN = ("#78350f", "#fde68a")    # amber
 _OK = ("#14532d", "#bbf7d0")      # green
 _INFO = ("#0c4a6e", "#bae6fd")    # sky
@@ -19,6 +20,7 @@ _MUTED = ("#1e293b", "#94a3b8")   # slate
 # pairs so a failed lookup never changes today's look.
 _LIGHT_EQUIV = {
     ("#7f1d1d", "#fecaca"): ("#fee2e2", "#991b1b"),
+    ("#7c2d12", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
     ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
     ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
     ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
@@ -39,7 +41,7 @@ def _theme_is_light() -> bool:
 
 STATUS_COLOR_MAP = {
     # severities
-    "CRITICAL": _BAD, "HIGH": _BAD, "MEDIUM": _WARN, "LOW": _MUTED, "INFO": _MUTED,
+    "CRITICAL": _BAD, "HIGH": _HIGH, "MEDIUM": _WARN, "LOW": _MUTED, "INFO": _MUTED,
     # lifecycle states
     "OPEN": _WARN, "ACK": _INFO, "IN_PROGRESS": _INFO, "RESOLVED": _OK,
     "DONE": _OK, "DROPPED": _MUTED,

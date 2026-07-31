@@ -91,14 +91,24 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
                 f'{icon("refresh", 11)} {last_refreshed_note()}</div>', unsafe_allow_html=True)
         st.divider()
 
-        default_page = requested_page(pages) or st.session_state.get("_ow_page") or pages[0]
-        if default_page not in pages:
-            default_page = pages[0]
         # rec14: workflow-grouped nav. st.radio has no native section headers, so
         # each group is its own single-select radio with a caption header; the
         # chosen page lives in _ow_page. A click in one group clears the others'
         # selections (the on_change pops the sibling widget keys) so exactly one
         # page is ever highlighted across the three groups.
+        #
+        # r4 desync fix: _ow_page (written by the nav callback AND pending-navigation)
+        # is the AUTHORITATIVE highlight source. A ?page= deep link overrides it ONLY
+        # when it actually changes — otherwise the query param lags a cross-group
+        # click by one rerun (remember_page writes it at end of render), and seeding
+        # the sibling groups off that stale value re-highlights the old group.
+        _req = requested_page(pages)
+        if _req and _req != st.session_state.get("_ow_req_seen"):
+            st.session_state["_ow_page"] = _req
+            st.session_state["_ow_req_seen"] = _req
+        current = st.session_state.get("_ow_page") or pages[0]
+        if current not in pages:
+            current = pages[0]
         groups = nav_groups_for(pages)
 
         def _nav_pick(changed_key: str) -> None:
@@ -113,12 +123,10 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
         for group, members in groups:
             gkey = f"_ow_nav_{group}"
             st.caption(group)
-            idx = members.index(default_page) if default_page in members else None
+            idx = members.index(current) if current in members else None
             st.radio(group, members, index=idx, key=gkey,
                      label_visibility="collapsed", on_change=_nav_pick, args=(gkey,))
-        page = st.session_state.get("_ow_page", default_page)
-        if page not in pages:
-            page = default_page
+        page = current
         st.session_state["_ow_page"] = page
         remember_page(page)
 

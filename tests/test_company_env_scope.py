@@ -135,11 +135,23 @@ def test_summary_steady_burn():
 
 
 def test_summary_ignores_renewal_topups():
-    # +2000 top-up on day 3 must not average into burn as negative spend.
+    # +2000 top-up on day 3 must not average into burn as negative spend. The top-up
+    # day (a rise) is excluded from BOTH numerator and denominator, so the steady
+    # 10/day burn is preserved (r4: not diluted to 7.5 by counting it as a 0-burn day).
     out = remaining_balance_summary(_frame([1000, 990, 2990, 2980, 2970]))
     assert out["ok"]
     assert out["burn_per_day_usd"] == 10
     assert out["remaining_usd"] == 2970
+
+
+def test_summary_counts_idle_days_in_burn():
+    # r4: weekend/idle 0-consumption days STAY in the denominator, so a sparse account's
+    # burn is not inflated and its runway not understated (the old drops.mean() excluded
+    # them). 30 drawn down over 5 non-top-up intervals = 6/day, not 10 (= over 3 drops).
+    out = remaining_balance_summary(_frame([1000, 990, 990, 990, 980, 970]))
+    assert out["ok"]
+    assert out["burn_per_day_usd"] == 6
+    assert out["runway_days"] == round(970 / 6, 0)
 
 
 def test_summary_flat_balance_has_no_runway():

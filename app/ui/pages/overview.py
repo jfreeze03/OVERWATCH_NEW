@@ -38,6 +38,7 @@ from app.ui.components import (
     page_header,
     result_caption,
     run_mart_first,
+    section_header,
     section_scope_note,
     styled_table,
 )
@@ -466,7 +467,7 @@ def render() -> None:
         st.caption(_scope_note)
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
-    st.subheader("Monthly spend by warehouse")
+    section_header("Monthly spend by warehouse")
     _mres = run_mart_first(
         mart27_sql.monthly_spend_by_warehouse(12, company),
         mart27_sql.fact_monthly_spend_by_warehouse(12, company),
@@ -497,7 +498,7 @@ def render() -> None:
         result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
-    st.subheader("Spend trend")
+    section_header("Spend trend")
     if daily.empty:
         if not trend_source.ok:
             st.error(f"Spend history unavailable: {trend_source.error}")

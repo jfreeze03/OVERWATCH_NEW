@@ -23,7 +23,9 @@ def enrich_graph_daily(df: pd.DataFrame, rate_usd: float) -> pd.DataFrame:
     credits = pd.to_numeric(out["WH_CREDITS"], errors="coerce").fillna(0.0)
     runs = pd.to_numeric(out["GRAPH_RUNS"], errors="coerce").fillna(0.0)
     fails = pd.to_numeric(out["RUNS_WITH_FAILURES"], errors="coerce").fillna(0.0)
-    out["USD"] = credits.map(lambda c: credits_to_usd(c, rate_usd))
+    # full precision: this per-day-per-pipeline series is SUMMED in
+    # pipeline_summary; cent-rounding each day first zeroes sub-cent pipelines.
+    out["USD"] = credits.map(lambda c: credits_to_usd(c, rate_usd, round_cents=False))
     out["USD_PER_RUN"] = [
         round(safe_div(u, r), 4) for u, r in zip(out["USD"], runs, strict=True)]
     out["SUCCESS_PCT"] = [

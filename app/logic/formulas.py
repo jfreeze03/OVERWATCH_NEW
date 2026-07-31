@@ -75,9 +75,15 @@ def safe_div(numerator: float, denominator: float, default: float = 0.0) -> floa
     return safe_float(numerator) / den
 
 
-def credits_to_usd(credits: float, rate_usd: float = DEFAULT_CREDIT_PRICE_USD) -> float:
-    """Convert credits to dollars at the configured rate, rounded to cents."""
-    return round(safe_float(credits) * safe_float(rate_usd, DEFAULT_CREDIT_PRICE_USD), 2)
+def credits_to_usd(credits: float, rate_usd: float = DEFAULT_CREDIT_PRICE_USD,
+                   round_cents: bool = True) -> float:
+    """Convert credits to dollars at the configured rate. Rounds to cents by
+    default (display). Pass ``round_cents=False`` for sub-cent unit costs
+    ($/call, $/run) and — critically — BEFORE summing a day-grain series:
+    rounding each day to cents first zeroes small per-day spend (a pipeline at
+    ~$0.003/day reads $0.00 across a 180-day window instead of ~$0.54)."""
+    usd = safe_float(credits) * safe_float(rate_usd, DEFAULT_CREDIT_PRICE_USD)
+    return round(usd, 2) if round_cents else usd
 
 
 def blended_billed_usd(credits_other: float, credits_ai: float,

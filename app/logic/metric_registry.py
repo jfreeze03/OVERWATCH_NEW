@@ -92,7 +92,7 @@ METRICS: tuple[Metric, ...] = (
            "department / warehouse / day", "FACT_WAREHOUSE_DAILY + DEPARTMENT_MAP",
            ACCOUNT_TZ, "hourly load (~1h)", "v4.34",
            "Exact warehouse usage per department; a department owns its warehouse idle.",
-           window="rolling-daily", partial_day="excluded", unit="USD", filters=("company",),
+           window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
            required_sources=("FACT_WAREHOUSE_DAILY", "DEPARTMENT_MAP"),
            coverage="exact warehouse usage per department", owner="finops"),
     Metric("measured_query_cost", "Measured query / CALL cost", MEASURED,
@@ -237,6 +237,14 @@ def validate() -> list[str]:
         # a windowed dollar/credit/day metric must state whether today's partial is in
         if m.window in ("trailing-complete-days", "vs-prior-half-window") and m.partial_day == "n/a":
             problems.append(f"{m.key}: windowed metric must declare partial_day")
+        # window and partial_day must not CONTRADICT: the complete-day / vs-prior
+        # windows exclude today by definition; rolling-daily includes it. (Caught
+        # department_chargeback declaring rolling-daily + excluded, r4.)
+        _excludes = {"trailing-complete-days", "vs-prior-half-window"}
+        if m.window in _excludes and m.partial_day == "included":
+            problems.append(f"{m.key}: window {m.window!r} excludes today but partial_day='included'")
+        if m.window == "rolling-daily" and m.partial_day == "excluded":
+            problems.append(f"{m.key}: rolling-daily includes today but partial_day='excluded'")
     return problems
 
 

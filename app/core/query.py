@@ -667,12 +667,20 @@ def _flush_group(prefix: str) -> None:
         if not group or not group.get("rows"):
             return
         stmt = prefix + " UNION ALL ".join(group["rows"])
-        if not execute_statement_async(stmt, page="Telemetry"):
-            # a shape mismatch downgrades the producer to its old shape next time;
-            # a hard failure (missing table / no grant) turns it off. The failed
-            # batch is dropped either way — telemetry is best-effort.
-            flag = group.get("downgrade") or group.get("off")
-            if flag:
+        flag = group.get("downgrade") or group.get("off")
+        _fk = f"_ow_qtel_fail:{flag}" if flag else ""
+        if execute_statement_async(stmt, page="Telemetry"):
+            if _fk:
+                st.session_state.pop(_fk, None)      # success clears the transient counter
+        elif flag:
+            # r4: require TWO consecutive failures before stepping DOWN the shape ladder
+            # (12->10->6->off). execute_statement_async returns False on ANY error, so a
+            # single transient blip (network/session) would otherwise latch the downgrade
+            # and permanently drop SAMPLE_PROB for the session; a real shape mismatch fails
+            # every flush and trips on the 2nd. The failed batch is dropped either way.
+            n = int(st.session_state.get(_fk, 0)) + 1
+            st.session_state[_fk] = n
+            if n >= 2:
                 st.session_state[flag] = True
     except Exception:
         pass
