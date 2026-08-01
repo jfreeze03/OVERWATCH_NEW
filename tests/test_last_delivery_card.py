@@ -136,7 +136,15 @@ def test_card_aggregates_worst_route_and_names_it():
     banner = _ALERTS.split("def _delivery_status", 1)[1].split("\ndef ", 1)[0]
     assert "core_object('ALERT_ROUTES')" in banner                # resolve from the routes
     assert "WHERE ENABLED" in banner
-    assert "has_integ = bool(want & have) if want else bool(have)" in banner
-    # a route naming a missing integration is surfaced, not silently ignored
+    # #32 (updated): LIVE requires an actual delivery PATH — >=1 ENABLED route whose
+    # integration is present. The old `... if want else bool(have)` fell back to "any
+    # integration exists" when NO route was enabled, showing a false LIVE; that is gone.
+    assert "has_integ = bool(want & have)" in banner
+    assert "if want else bool(have)" not in banner                # no more no-route fallback
+    assert "if not want:" in banner                               # no enabled route -> not LIVE
+    # #32: a FAILED probe is "unable to verify", not "missing" — absence needs a successful read
+    assert "if not integ.ok or not wanted.ok:" in banner
+    assert "unable to verify" in banner
+    # a route naming a missing integration is still surfaced, not silently ignored
     assert "missing = sorted(want - have)" in banner
     assert "does not exist" in banner

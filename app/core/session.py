@@ -45,6 +45,10 @@ def _connect():
         # SiS executes inside an owner's-rights procedure where ALTER SESSION
         # raises "Unsupported statement type 'ALTER_SESSION'". Mark it up
         # front so we never spray failed statements into QUERY_HISTORY.
+        # Consequence (#31): the per-tier STATEMENT_TIMEOUT the app tries to set
+        # via apply_statement_timeout() cannot take effect here — the warehouse/
+        # account STATEMENT_TIMEOUT_IN_SECONDS (300s default) is the only ceiling
+        # in production. See apply_statement_timeout() for the owner action.
         setattr(session, _SIS_ATTR, True)
         setattr(session, _ALTER_SUPPORT_ATTR, False)
         return session
@@ -145,7 +149,18 @@ def apply_query_tag(session, tag: str) -> None:
 
 
 def apply_statement_timeout(session, seconds: int) -> None:
-    """Session statement timeout; no-op in SiS (warehouse timeout is the backstop)."""
+    """Per-tier session statement timeout — INEFFECTIVE on the owner's-rights SiS path.
+
+    #31: ALTER SESSION is rejected under owner's-rights SiS, so the app's per-tier
+    timeouts (30/120/180s) never actually apply there. Every app query is instead
+    governed by the warehouse/account STATEMENT_TIMEOUT_IN_SECONDS — 300s by
+    default — which is the REAL contract in production, not the values passed here.
+    To enforce a tighter ceiling the OWNER must SET STATEMENT_TIMEOUT_IN_SECONDS on
+    the app warehouse (or account). Follow-up: a QUERY_HISTORY monitor on long
+    app-tagged queries (the APP_QUERY_TAG_PREFIX QUERY_TAG) to catch anything
+    approaching that 300s wall. This call still does real work OFF-SiS (local dev,
+    tests) where ALTER SESSION is accepted.
+    """
     if not alter_session_supported(session):
         return
     seconds = max(10, min(int(seconds), 900))
@@ -187,9 +202,19 @@ def is_operator() -> bool:
     ``resolve_role_profile(current_role()) in OPERATOR_PROFILES`` never
     differentiates people — one accidental app grant would expose DBA actions to
     any viewer. Entitle from st.user (the actual viewer) checked against the
-    explicit config.OPERATOR_USERS allowlist instead. Snowflake RBAC remains the
-    REAL boundary — a non-privileged role's write still fails server-side; this
-    only decides what the app OFFERS.
+    explicit config.OPERATOR_USERS allowlist instead.
+
+    Snowflake RBAC is NOT a backstop here: because every viewer executes with the
+    app OWNER's privileges, an operator write does NOT fail server-side for an
+    under-privileged viewer — it runs as the owner. OPERATOR_USERS is therefore
+    the SOLE application authorization boundary for in-app operator actions, not
+    merely "what the app offers". Guard it accordingly.
+
+    TODO(L, tracked): the real hardening is an audited entitlements table (or a
+    restricted CALLER'S-RIGHTS stored proc that re-checks the viewer identity
+    server-side) so authorization does not rest on an in-app allowlist alone. Until
+    that lands, OPERATOR_USERS + this check are the only thing standing between a
+    viewer and an owner-privileged write.
 
     Off-SiS (local dev, tests, older runtimes) st.user is absent so
     viewer_name() == "": fall back to the role->profile check there, so local

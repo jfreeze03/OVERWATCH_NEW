@@ -46,7 +46,10 @@ _TAIL_LIMIT_RE = re.compile(r"\bLIMIT\s+\d+\s*;?\s*$", re.IGNORECASE)
 # failed fetches — so viewers' sessions feed Admin > Performance without an
 # INSERT per query. Fire-and-forget; first failure disables for the session.
 TELEMETRY_PERSIST_MS = 2000.0
-_TELEMETRY_PERSIST_CAP = 60  # rows per session: a broken page can't spam
+_TELEMETRY_PERSIST_CAP = 60  # NON-failure rows per session: a broken page can't spam
+_TELEMETRY_FAIL_CAP = 20     # #28: reserved FAILURE budget beyond the row cap — failures are
+                             #      the most valuable rows, so chatty healthy/slow traffic must
+                             #      not crowd them out, but a broken page still can't spam forever
 _TELEMETRY_SAMPLE_RATE = 0.02  # rec18: the healthy-baseline sample; persisted as SAMPLE_PROB so Admin can re-weight
 
 
@@ -54,16 +57,26 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
                              threshold_ms: float = TELEMETRY_PERSIST_MS,
                              cap: int = _TELEMETRY_PERSIST_CAP,
                              sample_roll: float | None = None,
-                             sample_rate: float = 0.02) -> bool:
-    """Pure gate: failed always qualifies, slow qualifies, capped per session.
+                             sample_rate: float = 0.02,
+                             failed_persisted: int = 0,
+                             fail_cap: int = _TELEMETRY_FAIL_CAP) -> bool:
+    """Pure gate: failed qualifies (on its own reserved budget), slow qualifies, capped.
 
     ``sample_roll`` (caller passes random()) additionally persists ~2% of ALL
     fetches so the fleet view sees the healthy baseline, not just the tail —
     without it, p50 by page is invisible in APP_QUERY_TELEMETRY (Codex #19).
+
+    #28: a FAILURE is short-circuited AHEAD of the ``cap`` and drawn from its own
+    ``fail_cap`` reserved budget (counted by ``failed_persisted``), so chatty
+    healthy/slow rows that filled ``cap`` early can no longer suppress the very rows
+    an operator most needs — while a broken page still can't spam without bound.
+    ``persisted`` is the NON-failure count and governs only the healthy/slow streams.
     """
+    if not ok:
+        return int(failed_persisted) < int(fail_cap)
     if persisted >= cap:
         return False
-    if (not ok) or float(elapsed_ms) >= float(threshold_ms):
+    if float(elapsed_ms) >= float(threshold_ms):
         return True
     return sample_roll is not None and float(sample_roll) < float(sample_rate)
 
@@ -79,27 +92,32 @@ def _resolve_telemetry_shape() -> None:
     happened) never fired. Reading the real column list is a describe — no data scanned, and
     the result IS observed — so the shape is resolved deterministically on the first persist
     and rows are formatted at the correct shape from the very first one, never mis-shaped.
-    Cached in session_state; runs at most once per session (success or not)."""
+    Cached in session_state; the shape is committed at most once per session, but ONLY
+    after the column list actually resolves — a transient describe failure leaves the
+    resolved flag UNSET so the next persist retries (#27)."""
     if st.session_state.get("_ow_qtel_shape_resolved"):
         return
-    st.session_state["_ow_qtel_shape_resolved"] = True   # once per session, whatever happens
     try:
         session = get_session()
         # .columns triggers a describe (synchronous, observed) without scanning rows.
         cols = {str(c).upper() for c in
                 session.sql(f"SELECT * FROM {core_object('APP_QUERY_TELEMETRY')} LIMIT 0").columns}
-        if not cols:
-            return
-        if {"SAMPLE_PROB", "QUERY_ID"} <= cols:
-            return                                        # newest 12-col shape: no flag
-        if {"CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED"} <= cols:
-            st.session_state["_ow_qtel_prev64shape"] = True   # 10-col (pre-SAMPLE_PROB/QUERY_ID)
-        else:
-            st.session_state["_ow_qtel_oldshape"] = True      # 6-col legacy (pre-V027)
     except Exception:
-        # Table missing / no SELECT grant: don't guess a shape. The lazy flush ladder still
-        # applies as a fallback, and a truly absent table trips _ow_qtel_off on the write.
-        pass
+        # #27: transient describe failure (session blip / momentary no-grant). Do NOT mark
+        # the shape resolved — a guessed shape cached for the whole session silently drops
+        # every telemetry row against an older/mismatched table. Leave the flag unset; the
+        # next persist retries. A truly absent table still trips _ow_qtel_off on the write.
+        return
+    if not cols:
+        return                                            # nothing resolved -> retry next time
+    # The column list resolved for real: NOW commit the shape decision, exactly once.
+    st.session_state["_ow_qtel_shape_resolved"] = True
+    if {"SAMPLE_PROB", "QUERY_ID"} <= cols:
+        return                                            # newest 12-col shape: no flag
+    if {"CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED"} <= cols:
+        st.session_state["_ow_qtel_prev64shape"] = True   # 10-col (pre-SAMPLE_PROB/QUERY_ID)
+    else:
+        st.session_state["_ow_qtel_oldshape"] = True      # 6-col legacy (pre-V027)
 
 
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
@@ -113,11 +131,23 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
         if st.session_state.get("_ow_qtel_off"):
             return
         done = int(st.session_state.get("_ow_qtel_n", 0))
+        fail_done = int(st.session_state.get("_ow_qtel_fail_n", 0))
         import random as _random
         if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random(),
-                                        sample_rate=_TELEMETRY_SAMPLE_RATE):
+                                        sample_rate=_TELEMETRY_SAMPLE_RATE,
+                                        failed_persisted=fail_done):
+            # #28: expose a dropped-rows counter so the fleet view can tell 'quiet' from
+            # 'sampling-capped'. A dropped FAILURE (budget exhausted) is the loudest signal.
+            st.session_state["_ow_qtel_dropped"] = int(st.session_state.get("_ow_qtel_dropped", 0)) + 1
+            if not ok:
+                st.session_state["_ow_qtel_dropped_fail"] = \
+                    int(st.session_state.get("_ow_qtel_dropped_fail", 0)) + 1
             return
-        st.session_state["_ow_qtel_n"] = done + 1
+        # #28: failures draw from their own reserved budget, healthy/slow from the row cap.
+        if ok:
+            st.session_state["_ow_qtel_n"] = done + 1
+        else:
+            st.session_state["_ow_qtel_fail_n"] = fail_done + 1
         base = (
             f"{sql_literal(str(page)[:80])}, {sql_literal(str(tier)[:20])}, "
             f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
@@ -436,6 +466,17 @@ def query_telemetry() -> pd.DataFrame:
     return pd.DataFrame(st.session_state.get(_TELEMETRY_KEY, []))
 
 
+def telemetry_dropped_counts() -> dict:
+    """#28: telemetry rows the per-session budget declined to persist, so a viewer of the
+    fleet board can distinguish a genuinely quiet page from one that is sampling-capped.
+    ``total`` counts every declined row; ``failures`` the subset that were failed fetches
+    (the loudest signal that _TELEMETRY_FAIL_CAP is too tight)."""
+    return {
+        "total": int(st.session_state.get("_ow_qtel_dropped", 0)),
+        "failures": int(st.session_state.get("_ow_qtel_dropped_fail", 0)),
+    }
+
+
 def bump_refresh_salt() -> None:
     """Invalidate OVERWATCH's cached reads (the Refresh button)."""
     st.session_state["_ow_refresh_salt"] = datetime.now().isoformat()
@@ -574,6 +615,21 @@ def _member_qid(idx: int) -> str:
     return str((_BATCH_MEMBER_QID.get() or {}).get(idx, "") or "")
 
 
+def _batch_cache_hit() -> bool:
+    """#29: was the batch answered from st.cache_data, i.e. did NO member run server-side?
+    run_batch clears _BATCH_MEMBER_MS to None before the fetch; _execute_batch (a cache
+    MISS) replaces it with a dict. So a value still None means the cached tuple was replayed
+    — every member is a cache hit. Same sentinel discipline as _member_elapsed/_member_qid."""
+    return _BATCH_MEMBER_MS.get() is None
+
+
+def _sql_hash16(sql: str) -> str:
+    """#29: sha1 prefix of a member's SQL, matching run()'s telemetry sql_hash grain, so
+    batch members join to the same builder identity in APP_QUERY_TELEMETRY."""
+    import hashlib
+    return hashlib.sha1(str(sql).encode()).hexdigest()[:16]
+
+
 def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
     """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
 
@@ -647,9 +703,12 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                 if truncated:
                     df = df.head(caps[idx])
                 member_ms = _member_elapsed(idx, elapsed)
+                # #29: a _BatchPartial means the batch DID run server-side (survivors came
+                # back from real jobs), so these members are cache MISSES, not hits.
                 _telemetry(page, tier, f"batch:{spec['key']}", member_ms,
                            len(df), ok=True, batch_size=len(bspecs), truncated=truncated,
-                           query_id=_member_qid(idx))
+                           query_id=_member_qid(idx),
+                           sql_hash=_sql_hash16(spec["sql"]), cache_hit=False)
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
@@ -680,6 +739,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}
     rows_total = 0
+    cache_hit_batch = _batch_cache_hit()   # #29: whole tuple replayed from cache -> all hits
     for idx, (spec, df, cap) in enumerate(zip(bspecs, frames, caps, strict=True)):
         truncated = bool(cap) and len(df) > cap
         if truncated:
@@ -687,7 +747,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         rows_total += len(df)
         member_ms = _member_elapsed(idx, elapsed)
         _telemetry(page, tier, f"batch:{spec['key']}", member_ms, len(df), ok=True,
-                   batch_size=len(bspecs), truncated=truncated, query_id=_member_qid(idx))
+                   batch_size=len(bspecs), truncated=truncated, query_id=_member_qid(idx),
+                   sql_hash=_sql_hash16(spec["sql"]), cache_hit=cache_hit_batch)
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,

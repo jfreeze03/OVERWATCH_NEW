@@ -36,7 +36,9 @@ _MIG = _ROOT / "snowflake" / "migrations"
 # greppable act that records "the app references this for history only". Verified 2026-08-01.
 RETIRED_ALLOWLIST = frozenset({
     "SEC_BREAK_GLASS_USE",   # config DELETEd V034:181; Security>Changes says "no alert fires"
-    "PIPE_TASK_FAILURES",    # retired V043:2005 (kept as a disabled row for history)
+    # NOT PIPE_TASK_FAILURES: V043 disabled it, but V045 ("task monitoring restored")
+    # re-enabled it and SP_ALERT_SCAN_DAILY (V066:753) raises it — it is LIVE, not retired.
+    # (Wrongly allowlisted on first cut by checking only SP_ALERT_SCAN, not the DAILY scan.)
 })
 
 _RULE = r"(?:PIPE|COST|SEC|OPS|DATA)_[A-Z0-9_]+"        # the alert-rule id namespace

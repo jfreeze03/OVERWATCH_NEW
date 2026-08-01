@@ -58,6 +58,43 @@ def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
     return f"{d:+.{decimals}f}% vs B"
 
 
+def _coverage_warning(df: pd.DataFrame, pair: dict) -> str:
+    """#34: per-side coverage contract. compare_warehouse_credits now returns
+    A_DAYS/B_DAYS (COUNT(DISTINCT DAY)) and A_MAX_DAY/B_MAX_DAY per side. When
+    either side's loaded-day count is short of its window length, a partial
+    backfill is manufacturing false movers / 100% deltas — say so rather than
+    presenting the deltas as real movement. Returns '' when both sides are
+    complete (the normal case: full-month/prior windows are fully loaded)."""
+    from datetime import date
+
+    def _expected(lo: object, hi: object) -> int:
+        try:
+            return (date.fromisoformat(str(hi)) - date.fromisoformat(str(lo))).days
+        except ValueError:
+            return 0
+
+    if df.empty:
+        return ""
+    msgs = []
+    for side, window, label in (("A", pair["a"], pair["label_a"]),
+                                ("B", pair["b"], pair["label_b"])):
+        days_col, max_col = f"{side}_DAYS", f"{side}_MAX_DAY"
+        if days_col not in df.columns:
+            continue
+        got = int(safe_float(df[days_col].iloc[0]))
+        expected = _expected(window[0], window[1])
+        if expected > 0 and got < expected:
+            through = ""
+            if max_col in df.columns and pd.notna(df[max_col].iloc[0]):
+                through = f", through {str(df[max_col].iloc[0])[:10]}"
+            msgs.append(f"{label}: {got} of {expected} days loaded{through}")
+    if not msgs:
+        return ""
+    return ("Incomplete coverage — " + "; ".join(msgs)
+            + ". Movers and Δ% below are provisional until both windows finish "
+              "loading; a side missing days shows false 100% moves.")
+
+
 def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     # #49: Compare is scoped by company + dates only. The sidebar Environment
     # filter is intentionally NOT threaded through here (env-vs-env is Phase 2),
@@ -160,6 +197,11 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     st.markdown("**Warehouse movers — who moved the bill**")
     if guard(wh, "No warehouse credits in either window."):
         view = wh.df.copy()
+        # #34: a partial backfill on either side manufactures false movers — gate
+        # on the per-side coverage the reader now returns before drawing the deltas.
+        _cov_warn = _coverage_warning(view, pair)
+        if _cov_warn:
+            st.warning(_cov_warn)
         view["A_USD"] = view["A_CREDITS"].map(safe_float) * rate
         view["B_USD"] = view["B_CREDITS"].map(safe_float) * rate
         view["DELTA_USD"] = view["A_USD"] - view["B_USD"]

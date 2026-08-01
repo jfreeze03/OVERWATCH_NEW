@@ -142,7 +142,16 @@ SELECT
     ROUND(MEDIAN(ELAPSED_MS) / 1000, 2) AS MEDIAN_S,
     ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
     ROUND(SUM(ELAPSED_MS / 1000.0 / COALESCE(SAMPLE_PROB, 1.0)), 1) AS EST_WAIT_S,
-    ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
+    -- #30: WEIGHTED cache-hit rate (match app_query_fleet_summary ~1573). An unweighted
+    -- AVG over this exception-biased sample collapses toward 0: the must-persist stream is
+    -- almost all cache MISSES (a hit rarely crosses the 2s persist bar), swamping the
+    -- 2%-sampled healthy hits. Weighting each non-null row by 1/SAMPLE_PROB restores the
+    -- true fleet rate. NULL cache_hit rows (pre-rider) drop out of both sums; NULLIF guards
+    -- a page with no such rows. Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe).
+    ROUND(
+        SUM(IFF(CACHE_HIT IS NULL, 0, IFF(CACHE_HIT, 1, 0) / COALESCE(SAMPLE_PROB, 1.0)))
+        / NULLIF(SUM(IFF(CACHE_HIT IS NULL, 0, 1.0 / COALESCE(SAMPLE_PROB, 1.0))), 0)
+        * 100, 1) AS CACHE_HIT_PCT,
     MAX(AT) AS NEWEST
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
@@ -1280,9 +1289,17 @@ def last_delivery_health() -> str:
     Recovery-aware failure state (Codex #42): a route is only FAILING_NOW when its
     LATEST failure is newer than its LATEST success — a later successful send clears the
     red, instead of any failure in the rolling window pinning it red for 24h. CONSEC_FAILS
-    counts failures since the last success. STUCK (Codex #41) fires when the route has an
-    eligible backlog but has NEVER sent, or has not sent in >=90 min — so a route that
-    never delivered anything with events waiting is BROKEN immediately, not "queued".
+    counts failures since the last success. #15: the LATEST-failure signal (LAST_FAILURE_AT/
+    LAST_FAILURE) and CONSEC_FAILS carry NO 24h cutoff, so a route stranded >24h ago (failed,
+    then went quiet) still shows its failure instead of reading 'Quiet'.
+
+    STUCK (Codex #41, refined #14) keys on the age of the OLDEST undelivered event
+    (OLDEST_ELIGIBLE = MIN(RAISED_AT)), NOT last-sent recency: it fires once that age passes
+    one sender cycle + grace (hourly cadence -> 90m). A brand-new event right after a quiet
+    week is young and NOT stuck; an old backlog is stuck even when an unrelated recent send
+    would have reset a last-sent test. EXPIRED_UNDELIVERED (open, route-matching, undelivered
+    events that aged past the sender's 24h window) is folded into OLDEST_ELIGIBLE (#15), so a
+    stranded route reads STUCK rather than 'Quiet'.
 
     Failures are attributed per route from APP_ERROR_LOG.CONTEXT, which the sender writes
     as 'route <route_id> integration <name> - ...' (V064); APP_ERROR_LOG has no route
@@ -1299,36 +1316,49 @@ WITH sent AS (
     GROUP BY ROUTE_ID
 ),
 fails AS (
-    -- per-route send failures in the last 24h; ROUTE_ID parsed from the CONTEXT the
-    -- sender writes ('route <id> integration <name> - ...'). SPLIT_PART token 2 is the id.
+    -- per-route send failures; ROUTE_ID parsed from the CONTEXT the sender writes
+    -- ('route <id> integration <name> - ...'). SPLIT_PART token 2 is the id.
+    -- #15: NO rolling 24h cutoff on the worst-failure SIGNAL — a route stranded/expired
+    -- >24h ago (failed, then went quiet) used to lose its failure entirely and read
+    -- 'Quiet'. LAST_FAILURE_AT/LAST_FAILURE are each route's LATEST failure via MAX/MAX_BY
+    -- regardless of age; ROUTE_FAILS_24H stays the bounded 24h COUNT for the KPI.
     SELECT SPLIT_PART(CONTEXT, ' ', 2) AS ROUTE_ID,
-           COUNT(*) AS ROUTE_FAILS_24H,
+           COUNT_IF(LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())) AS ROUTE_FAILS_24H,
            MAX(LOGGED_AT) AS LAST_FAILURE_AT,
            MAX_BY(LEFT(ERROR_MESSAGE, 200), LOGGED_AT) AS LAST_FAILURE
     FROM {core_object("APP_ERROR_LOG")}
     WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE = 'route_send_failed'
-      AND LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
     GROUP BY 1
 ),
 consec AS (
     -- consecutive failures SINCE the last success (#42): fails newer than this route's
-    -- last confirmed send (all of them when it has never sent).
+    -- last confirmed send (all of them when it has never sent). #15: no 24h cutoff here
+    -- either — a route failing for days with no success must count them all, so the card's
+    -- 'N failure(s) since its last success' matches the un-capped FAILING_NOW signal.
     SELECT SPLIT_PART(a.CONTEXT, ' ', 2) AS ROUTE_ID,
            COUNT(*) AS CONSEC_FAILS
     FROM {core_object("APP_ERROR_LOG")} a
     LEFT JOIN sent s ON s.ROUTE_ID = SPLIT_PART(a.CONTEXT, ' ', 2)
     WHERE a.PAGE = 'NotifyWebhook' AND a.ERROR_TYPE = 'route_send_failed'
-      AND a.LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
       AND a.LOGGED_AT > COALESCE(s.LAST_SENT_AT, '1970-01-01'::TIMESTAMP_NTZ)
     GROUP BY 1
 ),
 eligible AS (
-    -- per-route OPEN + eligible + undelivered count; mirrors the sender predicate
-    SELECT r.ROUTE_ID, COUNT(DISTINCT e.EVENT_ID) AS ELIGIBLE_NOW
+    -- per-route OPEN + undelivered events matching this route's predicate (mirrors the
+    -- sender). #15: split into ELIGIBLE_NOW (inside the sender's 24h window) and
+    -- EXPIRED_UNDELIVERED (aged PAST the window still open + undelivered — a stranded
+    -- backlog ELIGIBLE_NOW alone can't see, which used to make a broken route read
+    -- 'Quiet'). #14: OLDEST_ELIGIBLE = MIN(RAISED_AT) over ALL such events is the age the
+    -- STUCK test keys on, so a young event is never stuck and an old backlog always is.
+    SELECT r.ROUTE_ID,
+           COUNT(DISTINCT CASE WHEN e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                               THEN e.EVENT_ID END) AS ELIGIBLE_NOW,
+           COUNT(DISTINCT CASE WHEN e.RAISED_AT <  DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                               THEN e.EVENT_ID END) AS EXPIRED_UNDELIVERED,
+           MIN(e.RAISED_AT) AS OLDEST_ELIGIBLE
     FROM {core_object("ALERT_ROUTES")} r
     JOIN {core_object("ALERT_EVENTS")} e
       ON e.STATUS = 'OPEN'
-     AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
     JOIN {core_object("ALERT_CONFIG")} c
       ON c.RULE_ID = e.RULE_ID
      AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
@@ -1351,6 +1381,7 @@ SELECT r.ROUTE_ID,
        s.LAST_SENT_AT,
        DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) AS MINUTES_SINCE,
        COALESCE(el.ELIGIBLE_NOW, 0) AS ELIGIBLE_NOW,
+       COALESCE(el.EXPIRED_UNDELIVERED, 0) AS EXPIRED_UNDELIVERED,
        COALESCE(f.ROUTE_FAILS_24H, 0) AS ROUTE_FAILS_24H,
        f.LAST_FAILURE_AT,
        s.LAST_SENT_AT AS LAST_SUCCESS_AT,
@@ -1359,10 +1390,16 @@ SELECT r.ROUTE_ID,
        -- #42: red ONLY when the latest failure is newer than the latest success
        (f.LAST_FAILURE_AT IS NOT NULL
         AND (s.LAST_SENT_AT IS NULL OR f.LAST_FAILURE_AT > s.LAST_SENT_AT)) AS FAILING_NOW,
-       -- #41: backlog waiting AND (never sent OR silent >=90m) -> stuck/broken now
-       (COALESCE(el.ELIGIBLE_NOW, 0) > 0
-        AND (s.LAST_SENT_AT IS NULL
-             OR DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) >= 90)) AS STUCK,
+       -- #14: STUCK keys on the OLDEST undelivered event's age, NOT last-sent recency.
+       -- Sender cadence is hourly (TASK_ALERT_SCAN -> TASK_ALERT_NOTIFY off TASK_LOAD_HOURLY),
+       -- so the bar is one cycle + a 30m grace = 90m. A brand-new event right after a quiet
+       -- week is young -> not stuck (the old last-sent test wrongly reddened it); an old
+       -- backlog is stuck even if an unrelated send just landed (which used to mask it).
+       -- OLDEST_ELIGIBLE spans expired (>24h) undelivered events too (#15), so a stranded
+       -- route is stuck, not 'Quiet'.
+       (el.OLDEST_ELIGIBLE IS NOT NULL
+        AND DATEDIFF('minute', el.OLDEST_ELIGIBLE, CURRENT_TIMESTAMP()) >= 90) AS STUCK,
+       el.OLDEST_ELIGIBLE,
        sm.ENABLED_ROUTES
 FROM {core_object("ALERT_ROUTES")} r
 CROSS JOIN summary sm
@@ -1373,7 +1410,7 @@ LEFT JOIN eligible el ON el.ROUTE_ID = r.ROUTE_ID
 WHERE r.ENABLED
 UNION ALL
 -- no enabled route: one synthetic row so the card can render 'nothing can be delivered'
-SELECT NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, NULL, FALSE, FALSE, sm.ENABLED_ROUTES
+SELECT NULL, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, 0, NULL, FALSE, FALSE, NULL, sm.ENABLED_ROUTES
 FROM summary sm
 WHERE sm.ENABLED_ROUTES = 0
 """

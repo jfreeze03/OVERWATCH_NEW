@@ -11,7 +11,7 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days, lag_offset_start, resolve_effective_window
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 _BILLED = (
     "COALESCE(CREDITS_BILLED, GREATEST(0, COALESCE(CREDITS_USED, 0) "
@@ -61,14 +61,24 @@ ORDER BY DAY, CREDITS_TOTAL DESC
 
 
 def warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
-    """Current vs prior window credits per warehouse, both lag-offset."""
-    days = bounded_days(days)
-    current_start = lag_offset_start(days)
-    prior_start = lag_offset_start(days * 2)
-    horizon = "DATEADD('hour', -24, CURRENT_TIMESTAMP())"
+    """Current vs prior window credits per warehouse on ONE explicit half-open
+    CALENDAR window — the same [start, end) the allocation SHARES use.
+
+    #17: the dollar POOL this builds (CREDITS_CURRENT) is multiplied by the live
+    allocation shares (allocated_attribution), which resolve their window through
+    resolve_effective_window — complete calendar days, today excluded. The old
+    form pooled on a ROLLING 24h-ago timestamp (lag_offset_start), so the pool
+    window and the share window were shifted by up to a day (share = calendar
+    [today-eff, today); pool = [now-24h-eff*24h, now-24h)) and per-entity dollars
+    mis-attributed at the window edges. Both now anchor CURRENT_DATE() through the
+    ONE truth and keep the 90-day live cap. Prior = the immediately preceding
+    equal-length calendar window."""
+    eff, _win = resolve_effective_window(days, "START_TIME", max_days=90)
+    current_start = f"DATEADD('day', -{eff}, CURRENT_DATE())"
+    prior_start = f"DATEADD('day', -{2 * eff}, CURRENT_DATE())"
     where = and_where(
         f"START_TIME >= {prior_start}",
-        f"START_TIME < {horizon}",
+        "START_TIME < CURRENT_DATE()",
         companies.warehouse_clause(company),
     )
     return f"""

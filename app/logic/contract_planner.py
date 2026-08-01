@@ -25,18 +25,34 @@ def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> d
     """
     if df is None or len(df) == 0 or "TOTAL_REMAINING" not in getattr(df, "columns", ()):
         return {"ok": False, "reason": "No balance rows visible."}
-    daily = (df.assign(_v=pd.to_numeric(df["TOTAL_REMAINING"], errors="coerce"))
-               .groupby("DAY")["_v"].sum().dropna().sort_index())
-    if len(daily) == 0:
+    grouped = (df.assign(_v=pd.to_numeric(df["TOTAL_REMAINING"], errors="coerce"))
+                 .groupby("DAY")["_v"].sum().dropna().sort_index())
+    if len(grouped) == 0:
         return {"ok": False, "reason": "No balance rows visible."}
-    remaining = float(daily.iloc[-1])
-    as_of = str(pd.Timestamp(daily.index[-1]).date()) if daily.index[-1] is not None else "n/a"
+    # Keep the NATIVE last-day key (matches df["DAY"]'s dtype) for the balance /
+    # as-of / on-demand lookups below; the burn math uses a datetime-reindexed copy.
+    last_day = grouped.index[-1]
+    remaining = float(grouped.iloc[-1])
+    as_of = str(pd.Timestamp(last_day).date()) if last_day is not None else "n/a"
     on_demand = 0.0
     if "ON_DEMAND_CONSUMPTION_BALANCE" in df.columns:
-        last_day = daily.index[-1]
         od = pd.to_numeric(df.loc[df["DAY"] == last_day, "ON_DEMAND_CONSUMPTION_BALANCE"],
                            errors="coerce").fillna(0)
         on_demand = float(od.sum())
+    # #35: reindex to a CONTIGUOUS daily index before diff(). Without it, diff()
+    # steps between whichever days are PRESENT, so a multi-day observation gap (the
+    # org view didn't refresh) collapses into one diff step — a 3-day, 30-credit
+    # draw-down then reads as a single 30/day burn instead of 10/day, and the gap
+    # days vanish from the denominator, halving the runway. Reindexing forward-fills
+    # the balance across missing days (unchanged until the next observation), so the
+    # whole draw-down is spread across every calendar day it truly spanned and each
+    # gap day counts as the zero-burn day it was.
+    daily = grouped.copy()
+    daily.index = pd.to_datetime(daily.index, errors="coerce")
+    daily = daily[daily.index.notna()].sort_index()
+    if len(daily) >= 2:
+        daily = daily.reindex(
+            pd.date_range(daily.index.min(), daily.index.max(), freq="D")).ffill()
     deltas = daily.diff().dropna().tail(max(1, int(burn_window_days)))
     # burn = total draw-down / the count of NON-top-up days. Idle 0-consumption days
     # (weekends) STAY in the denominator — averaging only over drop-days (the old

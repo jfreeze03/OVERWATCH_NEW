@@ -25,6 +25,7 @@ from app.logic.formulas import (
     account_now,
     account_today,
     blended_billed_usd,
+    credits_to_usd,
     exec_summary_html,
     format_usd,
     md_dollars,
@@ -259,29 +260,50 @@ def render() -> None:
         if mlres.usable():
             mdf = mlres.df.copy()
             today = account_today()
+            now = account_now()
             month_end = (today.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
             mdf["DAY"] = pd.to_datetime(mdf["DAY"]).dt.date
+            # #24: the forecast slice below keeps days STRICTLY AFTER today, so the
+            # rest of TODAY (the hours past the metering already booked into mtd_now)
+            # was dropped entirely — the projection omitted today's remaining spend.
+            # Prorate today's OWN forecast row by the fraction of the account day
+            # still ahead and add it back as an explicit today-remainder term.
+            _secs_elapsed = now.hour * 3600 + now.minute * 60 + now.second
+            _frac_left = max(0.0, min(1.0, 1.0 - _secs_elapsed / 86400.0))
+            today_remainder_cr = float(pd.to_numeric(
+                mdf.loc[mdf["DAY"] == today, "FORECAST_CREDITS"], errors="coerce"
+            ).fillna(0).sum()) * _frac_left
             mdf = mdf[(mdf["DAY"] > today) & (mdf["DAY"] < month_end)]
             if not mdf.empty:
                 # mtd_now rides proj_daily, already AI-split-priced (C1). The
-                # FORECAST_* legs price at the compute rate: FORECAST_ML_DAILY
-                # forecasts one blended-credit number per day with no service
-                # split, so an exact AI-aware forecast needs the mart to model AI
-                # separately (queued for V061). Opt-in engine; 'linear' is default.
+                # FORECAST_* legs price via formulas.credits_to_usd at the compute
+                # rate: FORECAST_ML_DAILY forecasts one blended-credit number per day
+                # with no service split, so an exact AI-aware forecast needs the mart
+                # to model AI separately (queued for V061). The KPI basis string
+                # DISCLOSES this as a compute-rate estimate. Opt-in engine; 'linear'
+                # is default.
                 mtd_now = float(pd.to_numeric(
                     proj_daily[pd.to_datetime(proj_daily.iloc[:, 0]).dt.date >= today.replace(day=1)]
                     .iloc[:, -1], errors="coerce").fillna(0).sum()) if not proj_daily.empty else 0.0
-                add = float(pd.to_numeric(mdf["FORECAST_CREDITS"], errors="coerce").fillna(0).sum()) * rate
-                lo = float(pd.to_numeric(mdf["LOWER_BOUND"], errors="coerce").fillna(0).sum()) * rate
-                hi = float(pd.to_numeric(mdf["UPPER_BOUND"], errors="coerce").fillna(0).sum()) * rate
+                _fut_cr = float(pd.to_numeric(mdf["FORECAST_CREDITS"], errors="coerce").fillna(0).sum())
+                add = credits_to_usd(_fut_cr + today_remainder_cr, rate, round_cents=False)
+                lo = credits_to_usd(
+                    float(pd.to_numeric(mdf["LOWER_BOUND"], errors="coerce").fillna(0).sum())
+                    + today_remainder_cr, rate, round_cents=False)
+                hi = credits_to_usd(
+                    float(pd.to_numeric(mdf["UPPER_BOUND"], errors="coerce").fillna(0).sum())
+                    + today_remainder_cr, rate, round_cents=False)
                 forecast = MonthEndForecast(
                     ok=True, mtd_usd=round(mtd_now, 2),
                     projected_usd=round(mtd_now + add, 2),
                     low_usd=round(max(mtd_now, mtd_now + lo), 2),
                     high_usd=round(mtd_now + hi, 2),
-                    daily_rate_usd=round(add / max(len(mdf), 1), 2),
+                    daily_rate_usd=round(
+                        credits_to_usd(_fut_cr, rate, round_cents=False) / max(len(mdf), 1), 2),
                     days_remaining=len(mdf),
-                    basis="SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY (opt-in script).",
+                    basis="SNOWFLAKE.ML.FORECAST via FORECAST_ML_DAILY (opt-in script); "
+                          "today's remainder prorated in; a disclosed compute-rate "
+                          "estimate (AI/OTHER split queued for V061).",
                 )
         if forecast is None:
             engine = "seasonal"  # honest fallback when the ML view isn't installed

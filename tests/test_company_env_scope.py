@@ -185,3 +185,20 @@ def test_summary_burn_window_is_trailing():
     values = [2000, 1900, 1800, *range(1800, 1660, -10)]  # then 10/day
     out = remaining_balance_summary(_frame(values), burn_window_days=5)
     assert out["burn_per_day_usd"] == 10
+
+
+def test_summary_spreads_burn_across_observation_gap():
+    # #35: a multi-day gap in the org view (it didn't refresh) must NOT collapse a
+    # single draw-down into one huge daily burn. Balance 1000 on Jun-01 then 970 on
+    # Jun-04 (Jun-02/03 missing) is a 30-credit draw-down over 3 calendar days = 10/day,
+    # not the 30/day the old diff-between-present-rows math produced.
+    df = pd.DataFrame({
+        "DAY": pd.to_datetime(["2026-06-01", "2026-06-04"]),
+        "TOTAL_REMAINING": [1000, 970],
+        "ON_DEMAND_CONSUMPTION_BALANCE": [0.0, 0.0],
+    })
+    out = remaining_balance_summary(df)
+    assert out["ok"]
+    assert out["remaining_usd"] == 970
+    assert out["burn_per_day_usd"] == 10          # reindexed to contiguous days
+    assert out["runway_days"] == 97

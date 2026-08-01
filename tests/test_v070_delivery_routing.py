@@ -122,6 +122,40 @@ def test_v070_never_suspends_the_notify_task():
     assert "SUSPEND" not in _V70
 
 
+def test_v070_39_replaces_todays_digest_atomically():
+    # #39: the DELETE+INSERT replace of today's digest is wrapped in ONE explicit
+    # transaction, so an autocommit crash between the two statements can no longer leave
+    # today's digest row blank; on any error it rolls back the prior row and re-raises.
+    assert "BEGIN TRANSACTION;" in _SQL
+    assert _SQL.count("COMMIT;") == 1, "the digest replace commits exactly once"
+    assert "ROLLBACK;\n            RAISE;" in _SQL, "rollback + re-raise, never a blank digest"
+    # both writes still live, now inside the guarded transaction
+    assert "DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();" in _SQL
+    assert _SQL.count("INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST") == 1
+
+
+def test_v070_11_digest_targets_only_digest_eligible_routes():
+    # #11: an additive, backward-compatible column gates digest eligibility; the digest
+    # cursor filters on it so a future non-digest (PagerDuty/tactical) route is never sent
+    # executive prose. Existing routes DEFAULT TRUE, so today's behavior is unchanged.
+    assert "ALTER TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES" in _V70
+    assert "ADD COLUMN IF NOT EXISTS DELIVER_DIGEST BOOLEAN NOT NULL DEFAULT TRUE;" in _V70
+    assert "WHERE r.ENABLED AND r.DELIVER_DIGEST" in _SQL, "digest cursor is DELIVER_DIGEST-gated"
+    # additive only — not a new object (the no-new-objects guard also covers CREATE TABLE)
+    assert "CREATE TABLE" not in _V70 and "CREATE OR REPLACE TABLE" not in _V70
+
+
+def test_v070_12_all_failed_digest_is_loud_not_silent_success():
+    # #12: previously an all-failed run only logged per-route failures and still returned a
+    # bland 'sent 0/M' string. Now, when routes were eligible but NONE delivered, a loud
+    # 'digest_undelivered' row is logged and the return string is marked, so it is observable.
+    assert "'digest_undelivered'" in _SQL
+    assert "IF (routes_total > 0 AND routes_sent = 0) THEN" in _SQL
+    assert _SQL.count("INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG") == 2, \
+        "per-route digest_send_failed + the all-failed digest_undelivered"
+    assert "' [UNDELIVERED]'" in _SQL, "the zero-success case is loud in the return string too"
+
+
 def test_v070_in_migration_registry():
     # V070 is registered in the admin contract. (The validate.sql floor is the MOVING tip,
     # owned by tests/test_v451_trust.py + tests/test_perf_budgets.py — pinning it here would

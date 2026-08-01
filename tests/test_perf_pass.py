@@ -149,9 +149,12 @@ def test_telemetry_samples_the_healthy_baseline():
     # ... but a low sample roll persists it; a high roll does not
     assert should_persist_telemetry(50.0, ok=True, persisted=0, sample_roll=0.01)
     assert not should_persist_telemetry(50.0, ok=True, persisted=0, sample_roll=0.5)
-    # failure and cap semantics unchanged
+    # #28: a failure qualifies regardless of the NON-failure row cap (persisted) — it draws
+    # from its own reserved fail budget, so chatty healthy/slow traffic can't suppress it.
     assert should_persist_telemetry(5.0, ok=False, persisted=0, sample_roll=0.99)
-    assert not should_persist_telemetry(5.0, ok=False, persisted=60, sample_roll=0.01)
+    assert should_persist_telemetry(5.0, ok=False, persisted=60, sample_roll=0.01)
+    # ... but the fail budget itself is bounded, so a broken page still can't spam forever.
+    assert not should_persist_telemetry(5.0, ok=False, persisted=0, failed_persisted=20)
 
 
 def test_cs_ratio_fact_builder_matches_live_contract():

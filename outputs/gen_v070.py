@@ -107,9 +107,30 @@ BEGIN""",
     c_routes CURSOR FOR
         SELECT r.ROUTE_ID, r.INTEGRATION_NAME
         FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
-        WHERE r.ENABLED
+        WHERE r.ENABLED AND r.DELIVER_DIGEST   -- V070 #11: only digest-eligible routes
         ORDER BY r.ROUTE_ID;
 BEGIN""", 1),
+        # ---- 1b. #39: the DELETE+INSERT that replaces today's digest is two autocommitted
+        # statements; a crash between them BLANKS today's row. Wrap them in one explicit
+        # transaction so the replace is all-or-nothing (ROLLBACK + re-raise on any error
+        # leaves the prior row intact rather than a blank).
+        ("""    DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
+    VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));""",
+         """    -- V070 #39: replace today's digest atomically. Under autocommit a crash between
+    -- the DELETE and the INSERT would leave today's digest BLANK; an explicit transaction
+    -- makes it all-or-nothing (on any error ROLLBACK restores the prior row and re-raise).
+    BEGIN TRANSACTION;
+    BEGIN
+        DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
+        VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));
+        COMMIT;
+    EXCEPTION
+        WHEN OTHER THEN
+            ROLLBACK;
+            RAISE;
+    END;""", 1),
         # ---- 2. replace the single hardcoded-integration send (+ blanket WHEN OTHER THEN
         # NULL swallow + false 'delivery attempted' return) with the per-route walk that
         # ledgers each outcome. The DELETE/INSERT into DAILY_DIGEST above is untouched, so
@@ -158,7 +179,21 @@ BEGIN""", 1),
         END;
     END FOR;
 
-    RETURN 'digest written; sent ' || :routes_sent || '/' || :routes_total || ' routes';""", 1),
+    -- V070 #12: without this a fully-failed run is silent — only per-route failures were
+    -- logged and the proc still returned a bland 'sent 0/M' string. Log one loud
+    -- 'digest_undelivered' row when routes were eligible but NONE received the digest, so
+    -- an all-failed run is observable, and mark the zero-success case in the return string.
+    IF (routes_total > 0 AND routes_sent = 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'DailyDigest', 'digest_undelivered',
+               'digest written in-app but delivered to 0 of ' || :routes_total || ' enabled route(s)',
+               'every enabled digest route failed - see digest_send_failed rows for per-route detail',
+               CURRENT_ROLE();
+    END IF;
+
+    RETURN 'digest written; sent ' || :routes_sent || '/' || :routes_total || ' routes'
+           || IFF(:routes_total > 0 AND :routes_sent = 0, ' [UNDELIVERED]', '');""", 1),
     ]),
 }
 
@@ -199,6 +234,30 @@ assert "delivery attempted" not in code, "the false 'delivery attempted' return 
 assert code.count("INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST") == 1, "in-app write preserved"
 assert code.count("SNOWFLAKE.CORTEX.COMPLETE(:model, :prompt)") == 1, "Cortex narrative preserved"
 assert digest.count("CREATE OR REPLACE PROCEDURE") == 1
+# ---- #39: today's digest is replaced atomically (one transaction, not two autocommits) ----
+assert "BEGIN TRANSACTION;" in code, "#39 explicit transaction wraps the digest replace"
+assert code.count("COMMIT;") == 1, "#39 the digest replace commits exactly once"
+assert "ROLLBACK;\n            RAISE;" in code, "#39 rollback + re-raise on any error (no blank digest)"
+# ---- #11: the digest cursor only walks digest-eligible routes ----
+assert "WHERE r.ENABLED AND r.DELIVER_DIGEST" in code, "#11 digest walks only DELIVER_DIGEST routes"
+# ---- #12: a fully-failed digest is loud (ledger row + marked return), never a silent success ----
+assert "'digest_undelivered'" in code, "#12 all-failed run logs a loud ledger row"
+assert "IF (routes_total > 0 AND routes_sent = 0) THEN" in code, "#12 zero-success guard"
+assert "' [UNDELIVERED]'" in code, "#12 the zero-success return string is marked loud"
+
+# ---- #11: additive DELIVER_DIGEST column on ALERT_ROUTES (backward compatible) ----
+_DELIVER_DIGEST_COL = """-- V070 #11 (defect): SP_DAILY_DIGEST walked EVERY enabled ALERT_ROUTES row, ignoring a
+-- route's family/company/severity/purpose, so a future PagerDuty/tactical route would get
+-- executive digest prose. Add an idempotent, additive flag so the digest can target only
+-- digest-eligible routes; existing routes DEFAULT TRUE, so today's behavior is unchanged.
+-- ADD COLUMN IF NOT EXISTS keeps this a safe re-runnable no-op. ALERT_ROUTES is not in the
+-- exec board, so this is lockstep-neutral.
+ALTER TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+    ADD COLUMN IF NOT EXISTS DELIVER_DIGEST BOOLEAN NOT NULL DEFAULT TRUE;"""
+
+assert "ADD COLUMN IF NOT EXISTS DELIVER_DIGEST BOOLEAN" in _DELIVER_DIGEST_COL, "#11 additive col"
+assert "DEFAULT TRUE" in _DELIVER_DIGEST_COL, "#11 backward compatible default"
+assert "CREATE" not in _DELIVER_DIGEST_COL, "#11 is additive, not a new object"
 
 # ---- #25: idempotent route-disable block (a data UPDATE, no new objects) ----
 _ROUTE_DISABLE = """-- V070 #25 (defect): V012 seeded an ENABLED default ALERT_ROUTES row through the
@@ -299,6 +358,9 @@ BEGIN
 END;
 $$;
 
+-- #11: additive digest-eligibility flag so only digest routes receive the digest.
+{_DELIVER_DIGEST_COL}
+
 -- >>> derived:SP_DAILY_DIGEST  (route-walk delivery + per-route ledger; no hardcoded integration)
 {digest}
 -- #25: retire any enabled route whose integration is absent from the account.
@@ -314,6 +376,7 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 """
 
 assert out.count("CREATE OR REPLACE PROCEDURE") == 1, "one proc re-defined"
+assert "ADD COLUMN IF NOT EXISTS DELIVER_DIGEST BOOLEAN" in out, "#11 additive column in migration"
 assert "CREATE TABLE" not in out and "CREATE TASK" not in out, "no new objects"
 assert "CREATE VIEW" not in out and "CREATE STREAM" not in out, "no new objects"
 assert "EXCEPTION (-20070" in out and "IF (v < 69) THEN" in out, "version guard"

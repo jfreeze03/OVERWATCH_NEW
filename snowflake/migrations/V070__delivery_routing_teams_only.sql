@@ -39,6 +39,16 @@ BEGIN
 END;
 $$;
 
+-- #11: additive digest-eligibility flag so only digest routes receive the digest.
+-- V070 #11 (defect): SP_DAILY_DIGEST walked EVERY enabled ALERT_ROUTES row, ignoring a
+-- route's family/company/severity/purpose, so a future PagerDuty/tactical route would get
+-- executive digest prose. Add an idempotent, additive flag so the digest can target only
+-- digest-eligible routes; existing routes DEFAULT TRUE, so today's behavior is unchanged.
+-- ADD COLUMN IF NOT EXISTS keeps this a safe re-runnable no-op. ALERT_ROUTES is not in the
+-- exec board, so this is lockstep-neutral.
+ALTER TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES
+    ADD COLUMN IF NOT EXISTS DELIVER_DIGEST BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- >>> derived:SP_DAILY_DIGEST  (route-walk delivery + per-route ledger; no hardcoded integration)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST()
 RETURNS VARCHAR
@@ -60,7 +70,7 @@ DECLARE
     c_routes CURSOR FOR
         SELECT r.ROUTE_ID, r.INTEGRATION_NAME
         FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r
-        WHERE r.ENABLED
+        WHERE r.ENABLED AND r.DELIVER_DIGEST   -- V070 #11: only digest-eligible routes
         ORDER BY r.ROUTE_ID;
 BEGIN
     SELECT COALESCE(MAX(IFF(KEY = 'CORTEX_MODEL', VALUE, NULL)), 'llama3.1-8b')
@@ -94,9 +104,20 @@ BEGIN
                     || '. Check SNOWFLAKE.CORTEX_USER grant and regional model availability.';
     END;
 
-    DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
-    INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
-    VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));
+    -- V070 #39: replace today's digest atomically. Under autocommit a crash between
+    -- the DELETE and the INSERT would leave today's digest BLANK; an explicit transaction
+    -- makes it all-or-nothing (on any error ROLLBACK restores the prior row and re-raise).
+    BEGIN TRANSACTION;
+    BEGIN
+        DELETE FROM DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST WHERE DIGEST_DATE = CURRENT_DATE();
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.DAILY_DIGEST (DIGEST_DATE, COMPANY, MODEL, BODY)
+        VALUES (CURRENT_DATE(), 'ALL', :model, LEFT(:body, 8000));
+        COMMIT;
+    EXCEPTION
+        WHEN OTHER THEN
+            ROLLBACK;
+            RAISE;
+    END;
 
 
     -- V070 #23: deliver the digest through EVERY enabled ALERT_ROUTES row's own
@@ -129,7 +150,21 @@ BEGIN
         END;
     END FOR;
 
-    RETURN 'digest written; sent ' || :routes_sent || '/' || :routes_total || ' routes';
+    -- V070 #12: without this a fully-failed run is silent — only per-route failures were
+    -- logged and the proc still returned a bland 'sent 0/M' string. Log one loud
+    -- 'digest_undelivered' row when routes were eligible but NONE received the digest, so
+    -- an all-failed run is observable, and mark the zero-success case in the return string.
+    IF (routes_total > 0 AND routes_sent = 0) THEN
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'DailyDigest', 'digest_undelivered',
+               'digest written in-app but delivered to 0 of ' || :routes_total || ' enabled route(s)',
+               'every enabled digest route failed - see digest_send_failed rows for per-route detail',
+               CURRENT_ROLE();
+    END IF;
+
+    RETURN 'digest written; sent ' || :routes_sent || '/' || :routes_total || ' routes'
+           || IFF(:routes_total > 0 AND :routes_sent = 0, ' [UNDELIVERED]', '');
 END;
 $$;
 

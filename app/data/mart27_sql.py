@@ -777,20 +777,52 @@ def _side_windows(a_start: str, a_end: str, b_start: str, b_end: str,
 def compare_warehouse_credits(a_start: str, a_end: str, b_start: str, b_end: str,
                               company: str = "ALL") -> str:
     """Per-warehouse credits for both sides — movers AND the strip's
-    company-scopable spend total (FACT_WAREHOUSE_DAILY, exact usage)."""
+    company-scopable spend total (FACT_WAREHOUSE_DAILY, exact usage).
+
+    #34: each row also carries a per-side COVERAGE contract — A_DAYS/B_DAYS
+    (COUNT(DISTINCT DAY)) and A_MIN_DAY/A_MAX_DAY/B_MIN_DAY/B_MAX_DAY — repeated
+    from a single-row CTE. A partial backfill (one side missing days) otherwise
+    manufactures false movers and 100% deltas: a warehouse present in A but not
+    yet loaded in B reads as +100%. The caller gates/annotates the deltas when
+    either side's day count is short of its window length."""
     in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end)
     comp = ""
     if company and company != "ALL":
         comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
-    return f"""SELECT
-    WAREHOUSE_NAME,
-    SUM(IFF({in_a}, CREDITS_TOTAL, 0)) AS A_CREDITS,
-    SUM(IFF({in_b}, CREDITS_TOTAL, 0)) AS B_CREDITS
-FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
-WHERE {either}
-{comp}GROUP BY WAREHOUSE_NAME
-HAVING SUM(CREDITS_TOTAL) > 0
-ORDER BY ABS(A_CREDITS - B_CREDITS) DESC
+    return f"""WITH movers AS (
+    SELECT
+        WAREHOUSE_NAME,
+        SUM(IFF({in_a}, CREDITS_TOTAL, 0)) AS A_CREDITS,
+        SUM(IFF({in_b}, CREDITS_TOTAL, 0)) AS B_CREDITS
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+    WHERE {either}
+{comp}    GROUP BY WAREHOUSE_NAME
+    HAVING SUM(CREDITS_TOTAL) > 0
+),
+cov AS (
+    SELECT
+        COUNT(DISTINCT CASE WHEN {in_a} THEN DAY END) AS A_DAYS,
+        COUNT(DISTINCT CASE WHEN {in_b} THEN DAY END) AS B_DAYS,
+        MIN(CASE WHEN {in_a} THEN DAY END) AS A_MIN_DAY,
+        MAX(CASE WHEN {in_a} THEN DAY END) AS A_MAX_DAY,
+        MIN(CASE WHEN {in_b} THEN DAY END) AS B_MIN_DAY,
+        MAX(CASE WHEN {in_b} THEN DAY END) AS B_MAX_DAY
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
+    WHERE {either}
+{comp})
+SELECT
+    m.WAREHOUSE_NAME,
+    m.A_CREDITS,
+    m.B_CREDITS,
+    cov.A_DAYS,
+    cov.B_DAYS,
+    cov.A_MIN_DAY,
+    cov.A_MAX_DAY,
+    cov.B_MIN_DAY,
+    cov.B_MAX_DAY
+FROM movers m
+CROSS JOIN cov
+ORDER BY ABS(m.A_CREDITS - m.B_CREDITS) DESC
 LIMIT 100"""
 
 
@@ -928,9 +960,18 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
         companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "x.DATABASE_NAME"),
     )
+    # #18: the old gate ``FIRST_DAY <= today - days + 1`` permitted ONE missing
+    # day, so a 7d answer could be ~14% incomplete (the window's first day absent)
+    # and still pass, silently under-reporting. Require BOTH the exact lower bound
+    # (the fact reaches the window's first day, today - days) AND full interior
+    # coverage (COUNT(DISTINCT DAY) inside the window >= the effective days) so a
+    # gappy backfill yields to the live fallback instead of answering short.
     return f"""
 WITH cov AS (
-    SELECT MIN(DAY) AS FIRST_DAY
+    SELECT MIN(DAY) AS FIRST_DAY,
+           COUNT(DISTINCT CASE
+                   WHEN DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+                    AND DAY < CURRENT_DATE() THEN DAY END) AS WINDOW_DAYS
     FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")} x
     WHERE {cov_scope}
 ),
@@ -946,7 +987,8 @@ SELECT
     ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
 FROM scoped
 WHERE {display}
-  AND (SELECT FIRST_DAY FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
+  AND (SELECT FIRST_DAY FROM cov) <= DATEADD('day', -{days}, CURRENT_DATE())
+  AND (SELECT WINDOW_DAYS FROM cov) >= {days}
 GROUP BY KEY_NAME
 ORDER BY ALLOC_CREDITS DESC
 LIMIT 100

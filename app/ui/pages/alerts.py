@@ -198,10 +198,15 @@ def _last_delivery_card() -> None:
         sev = "bad"
         last_fail_sample = str(r0.get("LAST_FAILURE") or "").strip()
     elif not stuck.empty:
-        r0 = stuck.sort_values("ELIGIBLE_NOW", ascending=False).iloc[0]
+        # #14/#15: rank by TOTAL undelivered backlog (in-window eligible + expired/stranded),
+        # not just the in-window count — a route stuck purely on events that aged past the
+        # sender's 24h window has ELIGIBLE_NOW = 0 yet is the one that is broken.
+        def _backlog(r) -> int:
+            return int(safe_float(r.get("ELIGIBLE_NOW"))) + int(safe_float(r.get("EXPIRED_UNDELIVERED")))
+        r0 = max((r for _, r in stuck.iterrows()), key=_backlog)
         more = f" (+{len(stuck) - 1} more stuck)" if len(stuck) > 1 else ""
-        verdict = (f"Route {_rlabel(r0)} has {int(safe_float(r0.get('ELIGIBLE_NOW')))} event(s) "
-                   "eligible right now but nothing has gone out — delivery looks stuck." + more)
+        verdict = (f"Route {_rlabel(r0)} has {_backlog(r0)} undelivered event(s), the oldest "
+                   "past the sender's cycle, but nothing has gone out — delivery looks stuck." + more)
         sev = "bad"
     elif waiting > 0:
         verdict = f"{waiting} event(s) queued for the next run."
@@ -267,8 +272,24 @@ def _delivery_status() -> None:
         _idf.columns = [str(c).lower() for c in _idf.columns]
         if "name" in _idf.columns:
             have = {str(v).upper() for v in _idf["name"].dropna()}
-    # No routes configured yet -> fall back to "is there ANY integration at all".
-    has_integ = bool(want & have) if want else bool(have)
+    # #32: a FAILED probe is not evidence of absence. If SHOW NOTIFICATION INTEGRATIONS or
+    # the enabled-routes read itself errored, we cannot claim "no integration" — say the
+    # status is unverifiable and stop, rather than rendering a false "missing" red.
+    if not integ.ok or not wanted.ok:
+        which = ", ".join(w for w, ok in (("SHOW NOTIFICATION INTEGRATIONS", integ.ok),
+                                          ("ALERT_ROUTES", wanted.ok)) if not ok)
+        st.warning(f"Delivery status unable to verify — the {which} read failed. This is NOT "
+                   "proof alerts are undelivered; retry, or check the warehouse/grants. Treat "
+                   "delivery as UNKNOWN until it resolves.")
+        return
+    # #32: LIVE needs an actual delivery PATH — >=1 ENABLED route whose integration exists.
+    # An integration that no enabled route points at delivers nothing, so it is not LIVE.
+    if not want:
+        st.warning("No enabled alert route — even with an integration present, nothing routes "
+                   "out. Enable a route in ALERT_ROUTES (family/severity/company) to begin "
+                   "delivering; until then alerts stay in-app only.")
+        return
+    has_integ = bool(want & have)   # an enabled route AND its integration is present
     missing = sorted(want - have)
     task_state = ""
     if task.ok and not task.empty:
@@ -281,7 +302,8 @@ def _delivery_status() -> None:
         val = last.df.iloc[0].get("LAST_SEND")
         last_send = str(val)[:16] if val is not None and str(val) != "NaT" else ""
     if has_integ and task_state == "started":
-        st.success("Delivery LIVE — webhook integration up, notify task chained after the scan"
+        st.success("Delivery LIVE — an enabled route's integration is up, notify task chained "
+                   "after the scan"
                    + (f" · last send {last_send}" if last_send else " · no sends yet"))
         if missing:
             # A dead route does not stop its siblings (the sender isolates per route),
@@ -295,8 +317,10 @@ def _delivery_status() -> None:
                    "resume TASK_ALERT_NOTIFY (one statement, see the runbook's delivery "
                    "section). Until then, 2am alerts wait for someone to look.")
     else:
-        st.error("No webhook integration — alerts stay in-app only. One-time setup: "
-                 "snowflake/webhook_delivery.sql (SNOW_ACCOUNTADMINS pastes the channel URL).")
+        st.error(f"Enabled route(s) point at an integration that does not exist "
+                 f"({', '.join(missing)}) — alerts stay in-app only. One-time setup: "
+                 "snowflake/webhook_delivery.sql (SNOW_ACCOUNTADMINS pastes the channel URL), "
+                 "or repoint the route in ALERT_ROUTES.")
 
 
 @st.fragment

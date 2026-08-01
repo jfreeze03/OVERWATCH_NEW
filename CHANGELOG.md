@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.119.0 — Codex-R2 Wave 1: delivery/telemetry/cost app fixes + V070 digest atomicity (2026-08-01)
+
+A second 50-item review (41 confirmed) — much of it the bill for last round's optimistic ships.
+Wave 1 clears the app-code + digest items; the task-graph and CI themes follow.
+
+- **Delivery card (#32/#14/#15):** the banner no longer reads "Delivery LIVE" when there's no
+  enabled route (or when the integration `SHOW` failed — that now says "unable to verify");
+  "stuck" keys on the **oldest eligible event's** age, not the last send's recency (so a fresh
+  event after a quiet week isn't false-stuck and an old backlog isn't masked by a recent send);
+  and expired-undelivered events + each route's latest failure survive the 24h cutoff, so a
+  stranded route can no longer read "Quiet".
+- **Telemetry (#27/#28/#29/#30):** the write-shape flag is set **only after** the column list
+  resolves (a transient describe failure no longer pins the wrong shape and drops telemetry all
+  session); failures get a reserved persist budget ahead of the 60-row cap (with a dropped-rows
+  counter); batch members carry `sql_hash` + inferred `cache_hit`; and the last unweighted Admin
+  cache-hit metric now weights by `1/SAMPLE_PROB` like the fleet query.
+- **Cost/coverage (#17/#18/#19/#20/#16/#34):** the allocation coverage gate requires the exact
+  lower bound **and** a distinct-day count (a ~14%-incomplete week no longer passes); live shares
+  and their dollar pool use one explicit calendar window; storage freshness reads a loader
+  watermark + active-database inventory (a dropped DB no longer forces live fallback forever);
+  prior-month storage preserves lifecycle zeros (a 1-day DB isn't inflated ~30× to a full month);
+  Compare returns a per-side coverage contract so a partial backfill can't show false 100% moves.
+- **Forecast/contract (#24/#35/#36):** the forecast adds today's remaining spend and discloses its
+  compute-rate basis; contract burn/day divides balance deltas by elapsed calendar days (a 3-day
+  gap is no longer one huge daily burn); a sole partial-today row now yields "insufficient
+  complete history" instead of a projection.
+- **Security docs (#22/#31):** corrected comments that overstated the safety net — under
+  owner's-rights SiS, `OPERATOR_USERS` is the **sole** authorization boundary (Snowflake RBAC is
+  not a server-side backstop), and the per-tier statement timeouts collapse to the warehouse's
+  300s (the owner must set `STATEMENT_TIMEOUT_IN_SECONDS`). No gating logic changed.
+- **V070 digest (#39/#11/#12, before apply):** `SP_DAILY_DIGEST`'s DELETE+INSERT is wrapped in a
+  transaction (a crash can no longer blank today's digest); a new additive
+  `ALERT_ROUTES.DELIVER_DIGEST` flag stops the digest broadcasting to every route (future
+  PagerDuty/tactical routes won't get exec prose); and an all-failed digest is now loud
+  (`digest_undelivered` + `[UNDELIVERED]`) instead of a false success. Adversarially reviewed CLEAN.
+- **#44:** the alert-rule consistency test's allowlist wrongly marked `PIPE_TASK_FAILURES` retired
+  — it's live (raised by `SP_ALERT_SCAN_DAILY`, enabled). Removed; that's twice this session I
+  reached "retired" by checking only one scan proc, which is exactly what the test now guards.
+
+Gates green: ruff, mypy, **pytest 1818 passed / 1 skipped**.
+
 ## 4.118.2 — CORRECTION: PIPE_VOLUME_DROP is LIVE + alert-rule consistency test (2026-08-01)
 
 **v4.118.1 was wrong** and this reverses it. That entry claimed the PIPE_VOLUME_DROP alert was

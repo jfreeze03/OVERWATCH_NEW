@@ -65,15 +65,18 @@ _REALIZABLE_PATTERNS = 0.40
 
 
 def _whole_day_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """N1: drop today's partial metering row before averaging a daily burn.
+    """N1/#36: keep only COMPLETE (pre-today) metering rows for burn averaging.
 
     Today is still filling, so averaging it in drags every burn-derived figure
-    (trailing daily, blended rate, projected term, planner scenarios) low.
-    Today is kept only when it is the sole row we have."""
+    (trailing daily, blended rate, projected term, planner scenarios) low. When
+    the ONLY row available is today's partial one there is no complete-day
+    baseline at all — the old fallback returned that partial row and every burn
+    was then projected from a fraction of a day. Return the EMPTY frame instead
+    and let callers surface "insufficient complete history" and skip the
+    projection."""
     if "DAY" not in df.columns:
         return df
-    whole = df[pd.to_datetime(df["DAY"], errors="coerce").dt.date < account_today()]
-    return whole if not whole.empty else df
+    return df[pd.to_datetime(df["DAY"], errors="coerce").dt.date < account_today()]
 
 
 def _blended_rate(df: pd.DataFrame, rate_now: float, ai_rate: float) -> float:
@@ -396,7 +399,9 @@ def _contract_tab(settings: dict) -> None:
     _burn_df = _whole_day_rows(_burn.df.copy()) if _burn.usable() else None
     eff_rate = _blended_rate(_burn_df, rate_now, ai_rate) if _burn_df is not None else rate_now
     _trailing_daily = None
-    if _burn_df is not None and "CREDITS_BILLED" in _burn_df.columns:
+    # #36: only when a COMPLETE day exists — a mean over an empty whole-day frame
+    # is NaN, and projecting a term from it would be projecting from nothing.
+    if _burn_df is not None and not _burn_df.empty and "CREDITS_BILLED" in _burn_df.columns:
         _trailing_daily = float(pd.to_numeric(_burn_df["CREDITS_BILLED"], errors="coerce").fillna(0).mean())
     pace = contract_pace(consumed, contract_credits, start, end, account_today(),
                          trailing_daily_credits=_trailing_daily)
@@ -534,6 +539,16 @@ def _contract_tab(settings: dict) -> None:
         # the gap and the planner came to disagree in the first place. Same
         # cache key as `_burn`, so this read costs nothing extra.
         bdf = _burn_df if _burn_df is not None else _whole_day_rows(burn_res.df.copy())
+        # #36: if the only metering row is today's partial one, _whole_day_rows
+        # returns empty — there is no complete-day burn baseline, so withhold the
+        # planner instead of projecting a term from a fraction of a day.
+        if bdf is None or bdf.empty:
+            st.info(
+                "Only today's partial metering row is available — that is not a "
+                "complete-day burn baseline, so the renewal planner is withheld "
+                "until at least one whole day of history lands."
+            )
+            return
         daily_usd = float(pd.to_numeric(bdf["CREDITS_BILLED"], errors="coerce").fillna(0).mean()) * eff_rate
         remaining_usd = max(0.0, (contract_credits - consumed) * eff_rate)
         col1, col2, col3 = st.columns(3)

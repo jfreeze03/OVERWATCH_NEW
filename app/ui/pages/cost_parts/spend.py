@@ -24,11 +24,9 @@ from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
-    min_covered_days,
     result_caption,
     run_mart_first,
     served_days,
-    stalest_day,
     styled_table,
     user_display_map,
     with_user_names,
@@ -321,11 +319,14 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             "correct. Shares stay global, so a database/schema filter shows that slice of "
             "the total — never 100% of it. NONE = queries with no database context; "
             "USER$ personal databases attribute to their owner's company. "
-            "The mart path weights each share by that warehouse-hour's credits "
-            "(size-aware); the live fallback (shown while facts load, or whenever a "
-            "schema filter is set) uses elapsed-time share, which is warehouse-size-blind "
-            "— a coarser estimate when one entity concentrates on unusually large or small "
-            "warehouses."
+            "The mart and live estimates diverge on three axes: (1) TIME BASIS — the mart "
+            "shares by EXECUTION time, the live fallback by ELAPSED (wall-clock) time, which "
+            "also counts queuing and compilation; (2) STATUS — the mart includes queries of "
+            "every status, the live fallback only SUCCEEDED ones; (3) WEIGHTING — the mart "
+            "weights each share by that warehouse-hour's credits (size-aware), while the live "
+            "fallback (shown while facts load, or whenever a schema filter is set) uses an "
+            "unweighted elapsed-time share that is warehouse-size-blind — a coarser estimate "
+            "when one entity concentrates on unusually large or small warehouses."
         ))
         col_u, col_d = st.columns(2)
         for col, dim, label in ((col_u, "USER_NAME", "user"), (col_d, "DATABASE_NAME", "database")):
@@ -491,16 +492,18 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
     # C4/#20: coverage guard. The calendar builder divides SUM(bytes) by
     # days-in-period, so a stalled loader (missing recent days) prices those days
     # as zero storage — a silent understatement the old empty-only fallback never
-    # caught. Accept the fact only when its STALEST database's latest day is
-    # within a 2-day lag of yesterday; otherwise read the source live. #20: use
-    # the MIN latest day across databases (stalest_day), not MAX — MAX(LATEST_DAY)
-    # let the one freshest database hide stale/missing peers, so the average read
-    # fresh while half its inputs were behind.
-    def _latest_day(r: object) -> object:
-        if not (getattr(r, "ok", False) and not r.empty):
+    # caught. #20: gate freshness on the loader WATERMARK (the NEWEST LATEST_DAY
+    # across the scoped databases) plus the active-db inventory, NOT MIN(LATEST_DAY)
+    # across ALL historical databases: a DROPPED database's LATEST_DAY is frozen at
+    # its drop date, so the old stalest_day (MIN) read the scope as stale forever and
+    # forced the live fallback on every render. A db is "active" only if it reaches
+    # the watermark; a not-recently-seen db is treated as gone, not as loader loss.
+    def _loader_watermark(r: object) -> object:
+        if not (getattr(r, "ok", False) and not r.empty) or "LATEST_DAY" not in r.df.columns:
             return None
-        return stalest_day(r.df)
-    fact_latest = _latest_day(res)
+        ser = pd.to_datetime(r.df["LATEST_DAY"], errors="coerce").dropna()
+        return ser.max().date() if not ser.empty else None
+    fact_latest = _loader_watermark(res)
     fact_stale = res.ok and not res.empty and (
         fact_latest is None or fact_latest < today - timedelta(days=2))
     if not res.ok or res.empty or fact_stale:
@@ -527,7 +530,7 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         pri = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
                   key=f"storage_prior_{company}", tier="historical",
                   source="FACT_STORAGE_DAILY (prior full month daily-average)", probe=True)
-        pri_latest = _latest_day(pri)
+        pri_latest = _loader_watermark(pri)
         pri_stale = pri.ok and not pri.empty and (
             pri_latest is None or pri_latest < last_prior - timedelta(days=2))
         if not pri.ok or pri.empty or pri_stale:
@@ -538,14 +541,24 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         if pri.ok and not pri.empty:
             pdf = pri.df
             avg_bytes = pdf["DB_BYTES"].map(safe_float) + pdf["FAILSAFE_BYTES"].map(safe_float)
-            # The builder already divided bytes by the calendar period; rescale
-            # to an average over the days actually OBSERVED so a partial source
-            # reads as a true daily average, not a full-month understatement.
-            if "DAYS_AVERAGED" in pdf.columns:
-                scale = pdf["DAYS_AVERAGED"].map(
-                    lambda o: (period_days_prior / o) if safe_float(o) > 0 else 1.0)
-                avg_bytes = avg_bytes * scale
+            # #19: the builder already divided each db's bytes by the prior month's
+            # CALENDAR length — the lifecycle-correct billing basis: a database that
+            # existed only part of the month contributes 0 on its absent days, exactly
+            # how Snowflake bills the monthly average of daily on-disk bytes. The old
+            # code then RESCALED each db by period/observed-days, which assumed every
+            # missing day was loader loss and inflated a short-lived (created/dropped
+            # mid-month) db ~30x toward a full-month average. Preserve lifecycle zeros:
+            # keep the builder's per-db value, and backfill ONLY at the ACCOUNT level
+            # when the loader WATERMARK proves the whole month is under-LOADED (the
+            # loader never reached the month's end — a uniform tail-day loss across
+            # every db, not a lifecycle gap in one).
             prior_tib = float((avg_bytes / (1024**4)).sum())
+            first_prior = last_prior.replace(day=1)
+            pri_watermark = _loader_watermark(pri)
+            if pri_watermark is not None and pri_watermark < last_prior:
+                loaded_days = (pri_watermark - first_prior).days + 1
+                if loaded_days > 0:
+                    prior_tib *= period_days_prior / loaded_days
         mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib > 0 else None
         kpi_row([
             {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
@@ -566,11 +579,11 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         # C4: expose coverage so a short month reads as short, not as low spend.
         # Expected complete days = day-of-month minus today's excluded partial day.
         expected_days = max(today.day - 1, 0)
-        # #20: the LEAST-covered database sets the coverage number — MAX let a
-        # single fully-loaded database report full coverage while stale peers
-        # dragged the average down unseen.
-        covered = min_covered_days(df)
-        latest = _latest_day(res)
+        # #20: coverage from the loader WATERMARK (newest loaded day this month),
+        # not MIN(DAYS_AVERAGED) across all dbs — a short-lived or dropped database
+        # legitimately covers fewer days and must not read as "the loader is behind".
+        latest = _loader_watermark(res)
+        covered = ((latest - first_this).days + 1) if latest else 0
         latest_txt = latest.isoformat() if latest else "n/a"
         if expected_days > 0 and covered < expected_days - 2:
             st.warning(f"Storage MTD covers {covered} of {expected_days} elapsed days "
