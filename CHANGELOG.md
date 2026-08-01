@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.120.0 — Codex-R2 Wave 2a: reconcile/webhook/loader robustness (before-apply) (2026-08-01)
+
+Theme A part 1 — the before-apply generator edits to the built-not-applied V064/V066, all
+adversarially reviewed CLEAN:
+
+- **V064 #9 — lease can't wedge delivery.** `SP_NOTIFY_WEBHOOK` gained an outer
+  `EXCEPTION WHEN OTHER` that does the same `HOLDER = CURRENT_SESSION()`-fenced lease release,
+  logs `webhook_run_failed`, and re-raises — so a mid-proc error fails the task loudly instead
+  of leaving `HELD=TRUE` and wedging delivery until the 1h stale-reclaim.
+- **V064 #6 — reconcile stops blaming unrelated failures.** `APP_ERROR_LOG` has no run-id column,
+  so the reconcile's failure count is now narrowed to `PAGE IN ('ExtractLoader','DailyFacts',
+  'MartLoader')` — exactly the three pages its swallowing children write. The other two children
+  don't swallow (a failure there aborts the proc directly), so no swallowed failure escapes the
+  net; the only residual is a concurrent hourly-extract failure in the same window, which
+  over-reports (safe direction) and points at a real log row.
+- **V064 #10 (slice) — undelivered criticals get 7 days.** The send-eligibility floor is now
+  `CRITICAL → 7d, else 24h`, so an undelivered CRITICAL older than 24h can still be sent (oldest-
+  first drain, per-route dedup, and capture-once all intact). The full dead-letter/replay machine
+  stays deferred.
+- **V064 #7 — reconcile atomicity DEFERRED (correctly).** A reconcile-owned transaction can't wrap
+  the delete+reload: the child loaders own their own `BEGIN TRANSACTION`/DDL, which would commit
+  it early and break the per-source watermark rewind. Documented with a `TODO`; the #9 verdict now
+  makes a mid-reconcile child failure loud so a gap can't pass silently.
+- **V066 #37 — invalid SCOPE fails loudly.** `SP_LOAD_MARTS_V27` raises a declared exception when
+  `SCOPE NOT IN ('HOURLY','DAILY')` instead of silently loading nothing and returning "MARTS OK".
+- **V066 #23 — AI freshness no longer green on a half-load.** The per-source freshness stamp for
+  `FACT_AI_USAGE_DAILY` now uses `HAVING COUNT(*) = COUNT_IF(loaded)`, so it stamps fresh only when
+  **both** AI arms (`ai_code` + `ai_functions`) succeeded — a single-arm success leaves the prior
+  generation standing.
+
+Gates green: ruff, mypy, **pytest 1824 passed / 1 skipped**. Rebuild bundle regenerated. (V071 —
+the live-task re-chaining that pairs with this — follows.)
+
 ## 4.119.0 — Codex-R2 Wave 1: delivery/telemetry/cost app fixes + V070 digest atomicity (2026-08-01)
 
 A second 50-item review (41 confirmed) — much of it the bill for last round's optimistic ships.

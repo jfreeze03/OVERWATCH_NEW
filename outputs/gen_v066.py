@@ -304,6 +304,75 @@ _marts_edits.append((
     "        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);",
     1))
 
+# ---- SP_LOAD_MARTS_V27 #37 VALIDATE SCOPE + #23 AI FRESHNESS PARTIAL ------------------
+# Two more re-derived fixes layered onto the same proc (appended AFTER #10/#11 so their needles
+# resolve against the already-transformed body):
+#   #37 (P2) VALIDATE SCOPE -- SP_LOAD_MARTS_V27(SCOPE) accepted an unrecognized SCOPE as a
+#       successful no-op load: neither the HOURLY nor the DAILY arm matched, nothing loaded, and
+#       the terminal RETURN still reported success ('MARTS OK'). A typo'd scope therefore loaded
+#       NOTHING silently. Declare an exception and add a top-of-proc guard that RAISEs it for any
+#       scope outside ('HOURLY','DAILY'). The outer BEGIN has no EXCEPTION handler and the guard
+#       sits above every inner BEGIN, so the RAISE propagates out of the proc (fails loudly) --
+#       it is not swallowed by any per-arm handler.
+#   #23 (P2) AI FRESHNESS PARTIAL -- the #11 DAILY freshness MERGE maps FACT_AI_USAGE_DAILY's TWO
+#       arms (ai_code + ai_functions) to the ONE physical source, then filtered rows with a
+#       per-token WHERE ARRAY_CONTAINS. That stamped the whole source fresh the moment a SINGLE
+#       arm's token reached :loaded, so if only one AI arm succeeded the source still read
+#       fresh/green. Fix per option (b): stamp a source only when EVERY one of its tokens is in
+#       :loaded (both AI arms, or the lone posture arm) -- replace the per-token WHERE with an
+#       all-tokens-loaded HAVING. A partial AI load leaves the prior stamp standing, so the source
+#       reads as not-loaded-this-run, exactly the treatment #11 gives a failed arm. Only the DAILY
+#       MERGE has a multi-arm source, so this touches DAILY alone (HOURLY is 1 token : 1 source).
+
+# #37a: declare the scope-guard exception (appended after #10b's opt_fail declaration)
+_marts_edits.append((
+    "    opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures",
+    "    opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures\n"
+    "    bad_scope EXCEPTION (-20661,\n"
+    "        'SP_LOAD_MARTS_V27: SCOPE must be HOURLY or DAILY - refusing to run as a silent no-op load.');   -- V066 #37 VALIDATE SCOPE",
+    1))
+
+# #37b: the top-of-proc guard, above both scope arms
+_marts_edits.append((
+    "    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;\n"
+    "\n"
+    "    IF (UPPER(:SCOPE) = 'HOURLY') THEN",
+    "    d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;\n"
+    "\n"
+    "    -- V066 #37 VALIDATE SCOPE: an unrecognized SCOPE matched no arm and the terminal RETURN\n"
+    "    -- still claimed the marts loaded, so a typo'd scope silently loaded nothing. Fail loudly\n"
+    "    -- at the top instead (the outer BEGIN has no handler, so this RAISE aborts the proc).\n"
+    "    IF (UPPER(:SCOPE) NOT IN ('HOURLY', 'DAILY')) THEN\n"
+    "        RAISE bad_scope;\n"
+    "    END IF;\n"
+    "\n"
+    "    IF (UPPER(:SCOPE) = 'HOURLY') THEN",
+    1))
+
+# #23: gate the DAILY freshness stamp on ALL of a source's tokens (both AI arms), not any one.
+# Anchored on the DAILY srcmap's AI rows so it does NOT touch the single-token HOURLY WHERE.
+_marts_edits.append((
+    "                    ('FACT_AI_USAGE_DAILY', 'ai_code'),\n"
+    "                    ('FACT_AI_USAGE_DAILY', 'ai_functions')\n"
+    "                    AS srcmap(SOURCE_NAME, TOKEN)\n"
+    "            ) m ON m.SOURCE_NAME = f.SOURCE_NAME\n"
+    "            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))\n"
+    "            GROUP BY f.SOURCE_NAME",
+    "                    ('FACT_AI_USAGE_DAILY', 'ai_code'),\n"
+    "                    ('FACT_AI_USAGE_DAILY', 'ai_functions')\n"
+    "                    AS srcmap(SOURCE_NAME, TOKEN)\n"
+    "            ) m ON m.SOURCE_NAME = f.SOURCE_NAME\n"
+    "            -- V066 #23 AI FRESHNESS PARTIAL: FACT_AI_USAGE_DAILY has TWO independent arms\n"
+    "            -- (ai_code + ai_functions) mapped to the ONE physical source. The #11 per-token\n"
+    "            -- WHERE ARRAY_CONTAINS stamped the whole source fresh as soon as a SINGLE arm's\n"
+    "            -- token reached :loaded, so a half-loaded AI source read green. Gate the whole\n"
+    "            -- group: stamp a source only when EVERY one of its tokens loaded (both AI arms,\n"
+    "            -- or the lone posture arm). A partial AI load leaves the prior stamp standing, so\n"
+    "            -- the source reads as not-loaded-this-run (same treatment #11 gives a failed arm).\n"
+    "            GROUP BY f.SOURCE_NAME\n"
+    "            HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))",
+    1))
+
 GUARDS = {
     'SP_ALERT_SCAN': [
         "PIPE_COPY_FAILURES", "COST_SERVERLESS_CREEP", "COST_DEPT_BUDGET_PACE",
@@ -325,6 +394,9 @@ GUARDS = {
         "req_fail INT DEFAULT 0;",
         "opt_fail INT DEFAULT 0;",
         "ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))",
+        # #37 scope guard + #23 all-arms freshness gate must survive re-derivation
+        "RAISE bad_scope;",
+        "HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))",
     ],
 }
 
@@ -362,6 +434,19 @@ assert marts.count("LISTAGG(m.TOKEN, ' ') AS STATUS") == 2, "#11 per-source STAT
 assert "STATUS = :loaded" not in marts, "#11 static successful-arm-list STATUS removed"
 assert "WHERE SOURCE_NAME IN ('MART_WAREHOUSE_EFFICIENCY_DAILY'" not in marts, "#11 static HOURLY source list replaced"
 assert "WHERE SOURCE_NAME IN ('MART_SECURITY_POSTURE_DAILY'" not in marts, "#11 static DAILY source list replaced"
+# #37 VALIDATE SCOPE: exception declared + top-of-proc guard RAISEs before either scope arm
+assert "bad_scope EXCEPTION (-20661," in marts, "#37 scope-guard exception declared"
+assert ("IF (UPPER(:SCOPE) NOT IN ('HOURLY', 'DAILY')) THEN\n        RAISE bad_scope;\n    END IF;"
+        in marts), "#37 top-of-proc guard raises on an invalid scope"
+assert "RAISE bad_scope;" in marts.split("IF (UPPER(:SCOPE) = 'HOURLY') THEN", 1)[0], \
+    "#37 guard sits ABOVE both scope arms so a typo can't reach a no-op load"
+# #23 AI FRESHNESS PARTIAL: DAILY stamp requires ALL of a source's tokens (both AI arms) loaded
+assert "HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))" in marts, \
+    "#23 AI source stamped only when EVERY one of its arms loaded"
+assert marts.count("WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))") == 1, \
+    "#23 DAILY per-token WHERE replaced by all-arms HAVING (only HOURLY's single-token WHERE remains)"
+assert marts.count("HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))") == 1, \
+    "#23 the all-arms HAVING gate is on the DAILY (multi-arm) MERGE only"
 
 out = f"""-- V066__alert_escalation_serverless_window_timeline_atomicity.sql
 --
@@ -397,6 +482,14 @@ out = f"""-- V066__alert_escalation_serverless_window_timeline_atomicity.sql
 --         source whose arm just failed still looked freshly loaded. The MERGE is now driven by
 --         the sources that actually loaded (their per-arm token is present in :loaded), so the
 --         stamp advances for successful sources only, with per-source STATUS.
+--     #37 VALIDATE SCOPE -- SP_LOAD_MARTS_V27(SCOPE) accepted an unrecognized SCOPE as a
+--         successful no-op load (no HOURLY/DAILY arm matched, RETURN still claimed success). A
+--         declared exception + a top-of-proc guard (SCOPE NOT IN ('HOURLY','DAILY') -> RAISE) now
+--         make a typo'd scope FAIL loudly instead of silently loading nothing.
+--     #23 AI FRESHNESS PARTIAL -- the DAILY freshness stamp collapsed FACT_AI_USAGE_DAILY's two
+--         arms (ai_code + ai_functions) into one source row and stamped it fresh on a SINGLE arm's
+--         success. The MERGE now stamps a source only when EVERY one of its tokens is in :loaded
+--         (all-arms HAVING), so a single-arm AI success no longer reads the whole source green.
 --
 -- No smoke test required (deterministic alert logic + the B34 transaction-wrap pattern
 -- already used elsewhere in this file). Byte-verified by tests/test_v066_alert_escalation.py.
@@ -418,11 +511,11 @@ $$;
 {alertscan}
 -- >>> derived:SP_ALERT_SCAN_DAILY  (#2 contract-breach severity band on the weekly dedupe key)
 {alertdaily}
--- >>> derived:SP_LOAD_MARTS_V27  (#3 incident-timeline arm [8] atomic rebuild)
+-- >>> derived:SP_LOAD_MARTS_V27  (#3 timeline arm [8] atomic rebuild, #10 verdict, #11 freshness, #37 scope guard, #23 AI all-arms freshness)
 {marts}
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 66 AS VERSION,
-       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), and the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
+       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11), a top-of-proc guard RAISEs on any SCOPE outside HOURLY/DAILY so a typo fails loudly instead of silently loading nothing (#37), and the DAILY freshness stamp requires BOTH FACT_AI_USAGE_DAILY arms (ai_code + ai_functions) loaded before reading the AI source fresh (#23). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 66);
 """
 

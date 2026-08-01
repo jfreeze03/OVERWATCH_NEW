@@ -138,8 +138,9 @@ BEGIN
         -- strictly forward and terminates when no eligible event remains (or at
         -- max_batches). A send failure stops THIS route this run; siblings drain.
         LOOP
-            -- Capture-once: the OLDEST eligible events (open, within 24h, matching
-            -- this route's family/company/severity, not yet delivered to THIS
+            -- Capture-once: the OLDEST eligible events (open, within the send window --
+            -- 24h, or 7d for CRITICAL per #10-slice -- matching this route's
+            -- family/company/severity, not yet delivered to THIS
             -- route) whose cumulative JSON-escaped length (each line + 2 per '\n'
             -- separator) stays <= 3000, frozen into an ARRAY in send order.
             SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.RAISED_AT ASC, f.EVENT_ID)
@@ -158,7 +159,17 @@ BEGIN
                 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                 JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
                 WHERE e.STATUS = 'OPEN'
-                  AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  -- V064 #10-slice: an undelivered CRITICAL must not starve past the 24h
+                  -- send floor while it is still OPEN. Extend the send-eligibility window
+                  -- to 7d for CRITICAL ONLY (still gated STATUS='OPEN' + the per-route
+                  -- NOT EXISTS below, still drained oldest-first); every other severity
+                  -- keeps the 24h floor. This is the CHEAP slice -- no dead-letter/replay
+                  -- state machine. The expiry watchdog + #40 once-per-24h guard are intact
+                  -- below (a CRITICAL delivered in this run's drain gets a ledger row, so
+                  -- the watchdog's per-route NOT EXISTS excludes it that same run).
+                  AND e.RAISED_AT >= CASE WHEN e.SEVERITY = 'CRITICAL'
+                                          THEN DATEADD('day', -7, CURRENT_TIMESTAMP())
+                                          ELSE DATEADD('hour', -24, CURRENT_TIMESTAMP()) END
                   AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
                   AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')
                   AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
@@ -314,6 +325,28 @@ BEGIN
     RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
            ' route(s) in ' || :batches || ' batch(es); ' || :expired ||
            ' newly expired-undelivered (event,route) pair(s) flagged';
+EXCEPTION
+    -- V064 #9 OUTER LEASE HANDLER. The lease is acquired at entry (HELD=TRUE) and
+    -- released on the normal RETURN path above (fenced to CURRENT_SESSION). But any
+    -- UNHANDLED error mid-proc -- a failed capture SELECT, the message LISTAGG, the
+    -- NOTIFIED_AT stamp, the expired-tail INSERT -- would skip that release and leave
+    -- HELD=TRUE, wedging ALL delivery until the 1h stale-reclaim. This handler performs
+    -- the SAME fenced release (a no-op unless we still hold it, so it is safe even if the
+    -- entry acquire itself was what failed), logs the error, and RE-RAISEs so the task
+    -- run FAILs loudly rather than swallowing. The inner per-route send handler is
+    -- unchanged: a route send failure is caught there (send_failed:=TRUE) and does NOT
+    -- reach here, so one integration being down never trips the outer handler.
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        UPDATE DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE
+           SET HELD = FALSE, HOLDER = NULL
+         WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK'
+           AND HOLDER = CURRENT_SESSION();
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'NotifyWebhook', 'webhook_run_failed', :emsg,
+               'unhandled error in SP_NOTIFY_WEBHOOK - fenced sender lease released, run re-raised', CURRENT_ROLE();
+        RAISE;
 END;
 $$;
 
@@ -592,6 +625,25 @@ BEGIN
                       'FACT_METERING_DAILY', 'FACT_TASK_DAILY',
                       'FACT_LOGIN_DAILY', 'FACT_STORAGE_DAILY');
 
+    -- V064 #4-drop ANALYSIS (KEEP -- verified NOT redundant): TASK_LOAD_DAILY runs
+    -- SP_LOAD_DAILY_FACTS first (root, ~1 day back from its live watermark), then
+    -- TASK_NIGHTLY_RECONCILE runs AFTER it, rewinds the four daily marks to -3d, and
+    -- DELETEs FACT_METERING_DAILY D-3 (above). The re-CALL of SP_LOAD_DAILY_FACTS below
+    -- is the RE-COVER step, NOT a duplicate of the root load: it repopulates the metering
+    -- rows this proc just DELETEd AND re-reads the D-2/D-3 window (rewound watermark) for
+    -- late-arriving ACCOUNT_USAGE data the 1-day-back root run cannot see. Dropping it
+    -- would leave a permanent metering gap. Redundant? NO -> kept.
+    --
+    -- TODO(#7 staging-swap): the DELETE(D-2/D-3)-then-reload here is NOT atomic -- a child
+    -- failure between the DELETEs (above) and these CALLs leaves a transient gap until the
+    -- next nightly run re-covers. The robust fix (build-into-staging + atomic SWAP, or one
+    -- transaction per fact family wrapping delete+reload) is DEFERRED: the reloaders are
+    -- separate procs that contain their OWN BEGIN TRANSACTION/COMMIT (SP_LOAD_DAILY_FACTS,
+    -- SP_LOAD_QH_EXTRACT) and DDL that autocommits (SP_LOAD_MARTS_V27 does CREATE OR
+    -- REPLACE TEMPORARY TABLE), so they cannot run inside a single reconcile-owned
+    -- transaction without committing it early or breaking the per-source watermark rewind.
+    -- A correct deferral beats a broken reconcile; the #9 verdict below makes any
+    -- mid-reconcile child failure LOUD so a gap never passes silently.
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
     IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
@@ -615,9 +667,26 @@ BEGIN
     -- return-string check alone would miss 4 of the 5 children. Count what was logged
     -- during THIS run; the per-CALL return check above is a secondary catch for the two
     -- machine-verdict children (SP_LOAD_DAILY_FACTS, SP_LOAD_MARTS_V27).
+    -- V064 #6 RUN SCOPING: count ONLY this reconcile's OWN child-loader failures. The
+    -- prior filter counted every '%_failed%' row account-wide in the run window, so a
+    -- CONCURRENT AlertScan 'rule_block_failed', a NotifyWebhook 'route_send_failed', an
+    -- ObjectCost load, or any app-page error logged in the same minutes was mis-attributed
+    -- to the reconcile and made an OK run report WITH ERRORS. APP_ERROR_LOG has NO
+    -- session/query-tag column to fence on (its columns are LOGGED_AT, PAGE, ERROR_TYPE,
+    -- ERROR_MESSAGE, CONTEXT, ROLE_NAME -- see V001), and the children log without a run
+    -- id, so the tightest CORRECT filter is PAGE. The five children that swallow+log write
+    -- exactly three pages: ExtractLoader (SP_LOAD_QH_EXTRACT + its inner
+    -- SP_LOAD_CLOUD_SVC_MART), DailyFacts (SP_LOAD_DAILY_FACTS), MartLoader
+    -- (SP_LOAD_MARTS_V27). SP_LOAD_HOURLY_FACTS + SP_LOAD_OPS_DIAG do NOT swallow -- a
+    -- failure there aborts THIS proc and FAILs the task run directly. (ExtractLoader can
+    -- also be written by the concurrent hourly extract task; that is still a real loader
+    -- failure in the window, not a cross-subsystem mis-attribution, so counting it is
+    -- acceptable -- the secondary per-CALL verdict check above catches the reconcile's own
+    -- extract call regardless.)
     SELECT COUNT(*) INTO :logged_fails
     FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
     WHERE LOGGED_AT >= :recon_start
+      AND PAGE IN ('ExtractLoader', 'DailyFacts', 'MartLoader')
       AND (ERROR_TYPE ILIKE '%_failed%' OR ERROR_TYPE ILIKE '%WITH ERRORS%');
     IF (fails > 0 OR logged_fails > 0) THEN
         RETURN 'RECONCILE WITH ERRORS: ' || :logged_fails || ' loader failure(s) logged'

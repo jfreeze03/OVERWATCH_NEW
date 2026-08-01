@@ -33016,8 +33016,9 @@ BEGIN
         -- strictly forward and terminates when no eligible event remains (or at
         -- max_batches). A send failure stops THIS route this run; siblings drain.
         LOOP
-            -- Capture-once: the OLDEST eligible events (open, within 24h, matching
-            -- this route's family/company/severity, not yet delivered to THIS
+            -- Capture-once: the OLDEST eligible events (open, within the send window --
+            -- 24h, or 7d for CRITICAL per #10-slice -- matching this route's
+            -- family/company/severity, not yet delivered to THIS
             -- route) whose cumulative JSON-escaped length (each line + 2 per '\n'
             -- separator) stays <= 3000, frozen into an ARRAY in send order.
             SELECT ARRAY_AGG(f.EVENT_ID) WITHIN GROUP (ORDER BY f.RAISED_AT ASC, f.EVENT_ID)
@@ -33036,7 +33037,17 @@ BEGIN
                 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
                 JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
                 WHERE e.STATUS = 'OPEN'
-                  AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+                  -- V064 #10-slice: an undelivered CRITICAL must not starve past the 24h
+                  -- send floor while it is still OPEN. Extend the send-eligibility window
+                  -- to 7d for CRITICAL ONLY (still gated STATUS='OPEN' + the per-route
+                  -- NOT EXISTS below, still drained oldest-first); every other severity
+                  -- keeps the 24h floor. This is the CHEAP slice -- no dead-letter/replay
+                  -- state machine. The expiry watchdog + #40 once-per-24h guard are intact
+                  -- below (a CRITICAL delivered in this run's drain gets a ledger row, so
+                  -- the watchdog's per-route NOT EXISTS excludes it that same run).
+                  AND e.RAISED_AT >= CASE WHEN e.SEVERITY = 'CRITICAL'
+                                          THEN DATEADD('day', -7, CURRENT_TIMESTAMP())
+                                          ELSE DATEADD('hour', -24, CURRENT_TIMESTAMP()) END
                   AND (:r_family = 'ALL' OR c.FAMILY = :r_family)
                   AND (:r_compfilter = 'ALL' OR e.COMPANY = :r_compfilter OR UPPER(e.COMPANY) = 'ALL')
                   AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
@@ -33192,6 +33203,28 @@ BEGIN
     RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
            ' route(s) in ' || :batches || ' batch(es); ' || :expired ||
            ' newly expired-undelivered (event,route) pair(s) flagged';
+EXCEPTION
+    -- V064 #9 OUTER LEASE HANDLER. The lease is acquired at entry (HELD=TRUE) and
+    -- released on the normal RETURN path above (fenced to CURRENT_SESSION). But any
+    -- UNHANDLED error mid-proc -- a failed capture SELECT, the message LISTAGG, the
+    -- NOTIFIED_AT stamp, the expired-tail INSERT -- would skip that release and leave
+    -- HELD=TRUE, wedging ALL delivery until the 1h stale-reclaim. This handler performs
+    -- the SAME fenced release (a no-op unless we still hold it, so it is safe even if the
+    -- entry acquire itself was what failed), logs the error, and RE-RAISEs so the task
+    -- run FAILs loudly rather than swallowing. The inner per-route send handler is
+    -- unchanged: a route send failure is caught there (send_failed:=TRUE) and does NOT
+    -- reach here, so one integration being down never trips the outer handler.
+    WHEN OTHER THEN
+        emsg := SQLERRM;
+        UPDATE DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE
+           SET HELD = FALSE, HOLDER = NULL
+         WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK'
+           AND HOLDER = CURRENT_SESSION();
+        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+        SELECT 'NotifyWebhook', 'webhook_run_failed', :emsg,
+               'unhandled error in SP_NOTIFY_WEBHOOK - fenced sender lease released, run re-raised', CURRENT_ROLE();
+        RAISE;
 END;
 $$;
 
@@ -33470,6 +33503,25 @@ BEGIN
                       'FACT_METERING_DAILY', 'FACT_TASK_DAILY',
                       'FACT_LOGIN_DAILY', 'FACT_STORAGE_DAILY');
 
+    -- V064 #4-drop ANALYSIS (KEEP -- verified NOT redundant): TASK_LOAD_DAILY runs
+    -- SP_LOAD_DAILY_FACTS first (root, ~1 day back from its live watermark), then
+    -- TASK_NIGHTLY_RECONCILE runs AFTER it, rewinds the four daily marks to -3d, and
+    -- DELETEs FACT_METERING_DAILY D-3 (above). The re-CALL of SP_LOAD_DAILY_FACTS below
+    -- is the RE-COVER step, NOT a duplicate of the root load: it repopulates the metering
+    -- rows this proc just DELETEd AND re-reads the D-2/D-3 window (rewound watermark) for
+    -- late-arriving ACCOUNT_USAGE data the 1-day-back root run cannot see. Dropping it
+    -- would leave a permanent metering gap. Redundant? NO -> kept.
+    --
+    -- TODO(#7 staging-swap): the DELETE(D-2/D-3)-then-reload here is NOT atomic -- a child
+    -- failure between the DELETEs (above) and these CALLs leaves a transient gap until the
+    -- next nightly run re-covers. The robust fix (build-into-staging + atomic SWAP, or one
+    -- transaction per fact family wrapping delete+reload) is DEFERRED: the reloaders are
+    -- separate procs that contain their OWN BEGIN TRANSACTION/COMMIT (SP_LOAD_DAILY_FACTS,
+    -- SP_LOAD_QH_EXTRACT) and DDL that autocommits (SP_LOAD_MARTS_V27 does CREATE OR
+    -- REPLACE TEMPORARY TABLE), so they cannot run inside a single reconcile-owned
+    -- transaction without committing it early or breaking the per-source watermark rewind.
+    -- A correct deferral beats a broken reconcile; the #9 verdict below makes any
+    -- mid-reconcile child failure LOUD so a gap never passes silently.
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
     SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
     IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
@@ -33493,9 +33545,26 @@ BEGIN
     -- return-string check alone would miss 4 of the 5 children. Count what was logged
     -- during THIS run; the per-CALL return check above is a secondary catch for the two
     -- machine-verdict children (SP_LOAD_DAILY_FACTS, SP_LOAD_MARTS_V27).
+    -- V064 #6 RUN SCOPING: count ONLY this reconcile's OWN child-loader failures. The
+    -- prior filter counted every '%_failed%' row account-wide in the run window, so a
+    -- CONCURRENT AlertScan 'rule_block_failed', a NotifyWebhook 'route_send_failed', an
+    -- ObjectCost load, or any app-page error logged in the same minutes was mis-attributed
+    -- to the reconcile and made an OK run report WITH ERRORS. APP_ERROR_LOG has NO
+    -- session/query-tag column to fence on (its columns are LOGGED_AT, PAGE, ERROR_TYPE,
+    -- ERROR_MESSAGE, CONTEXT, ROLE_NAME -- see V001), and the children log without a run
+    -- id, so the tightest CORRECT filter is PAGE. The five children that swallow+log write
+    -- exactly three pages: ExtractLoader (SP_LOAD_QH_EXTRACT + its inner
+    -- SP_LOAD_CLOUD_SVC_MART), DailyFacts (SP_LOAD_DAILY_FACTS), MartLoader
+    -- (SP_LOAD_MARTS_V27). SP_LOAD_HOURLY_FACTS + SP_LOAD_OPS_DIAG do NOT swallow -- a
+    -- failure there aborts THIS proc and FAILs the task run directly. (ExtractLoader can
+    -- also be written by the concurrent hourly extract task; that is still a real loader
+    -- failure in the window, not a cross-subsystem mis-attribution, so counting it is
+    -- acceptable -- the secondary per-CALL verdict check above catches the reconcile's own
+    -- extract call regardless.)
     SELECT COUNT(*) INTO :logged_fails
     FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
     WHERE LOGGED_AT >= :recon_start
+      AND PAGE IN ('ExtractLoader', 'DailyFacts', 'MartLoader')
       AND (ERROR_TYPE ILIKE '%_failed%' OR ERROR_TYPE ILIKE '%WITH ERRORS%');
     IF (fails > 0 OR logged_fails > 0) THEN
         RETURN 'RECONCILE WITH ERRORS: ' || :logged_fails || ' loader failure(s) logged'
@@ -34280,6 +34349,14 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --         source whose arm just failed still looked freshly loaded. The MERGE is now driven by
 --         the sources that actually loaded (their per-arm token is present in :loaded), so the
 --         stamp advances for successful sources only, with per-source STATUS.
+--     #37 VALIDATE SCOPE -- SP_LOAD_MARTS_V27(SCOPE) accepted an unrecognized SCOPE as a
+--         successful no-op load (no HOURLY/DAILY arm matched, RETURN still claimed success). A
+--         declared exception + a top-of-proc guard (SCOPE NOT IN ('HOURLY','DAILY') -> RAISE) now
+--         make a typo'd scope FAIL loudly instead of silently loading nothing.
+--     #23 AI FRESHNESS PARTIAL -- the DAILY freshness stamp collapsed FACT_AI_USAGE_DAILY's two
+--         arms (ai_code + ai_functions) into one source row and stamped it fresh on a SINGLE arm's
+--         success. The MERGE now stamps a source only when EVERY one of its tokens is in :loaded
+--         (all-arms HAVING), so a single-arm AI success no longer reads the whole source green.
 --
 -- No smoke test required (deterministic alert logic + the B34 transaction-wrap pattern
 -- already used elsewhere in this file). Byte-verified by tests/test_v066_alert_escalation.py.
@@ -35304,7 +35381,7 @@ BEGIN
 END;
 $$;
 
--- >>> derived:SP_LOAD_MARTS_V27  (#3 incident-timeline arm [8] atomic rebuild)
+-- >>> derived:SP_LOAD_MARTS_V27  (#3 timeline arm [8] atomic rebuild, #10 verdict, #11 freshness, #37 scope guard, #23 AI all-arms freshness)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27(SCOPE VARCHAR, DAYS_BACK FLOAT)
 RETURNS VARCHAR
 LANGUAGE SQL
@@ -35319,8 +35396,17 @@ DECLARE
     ext_lo_hour TIMESTAMP_LTZ;
     req_fail INT DEFAULT 0;   -- V066 #10: REQUIRED-arm (core fact/mart) failures this run
     opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures
+    bad_scope EXCEPTION (-20661,
+        'SP_LOAD_MARTS_V27: SCOPE must be HOURLY or DAILY - refusing to run as a silent no-op load.');   -- V066 #37 VALIDATE SCOPE
 BEGIN
     d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
+
+    -- V066 #37 VALIDATE SCOPE: an unrecognized SCOPE matched no arm and the terminal RETURN
+    -- still claimed the marts loaded, so a typo'd scope silently loaded nothing. Fail loudly
+    -- at the top instead (the outer BEGIN has no handler, so this RAISE aborts the proc).
+    IF (UPPER(:SCOPE) NOT IN ('HOURLY', 'DAILY')) THEN
+        RAISE bad_scope;
+    END IF;
 
     IF (UPPER(:SCOPE) = 'HOURLY') THEN
 
@@ -36048,8 +36134,15 @@ BEGIN
                     ('FACT_AI_USAGE_DAILY', 'ai_functions')
                     AS srcmap(SOURCE_NAME, TOKEN)
             ) m ON m.SOURCE_NAME = f.SOURCE_NAME
-            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            -- V066 #23 AI FRESHNESS PARTIAL: FACT_AI_USAGE_DAILY has TWO independent arms
+            -- (ai_code + ai_functions) mapped to the ONE physical source. The #11 per-token
+            -- WHERE ARRAY_CONTAINS stamped the whole source fresh as soon as a SINGLE arm's
+            -- token reached :loaded, so a half-loaded AI source read green. Gate the whole
+            -- group: stamp a source only when EVERY one of its tokens loaded (both AI arms,
+            -- or the lone posture arm). A partial AI load leaves the prior stamp standing, so
+            -- the source reads as not-loaded-this-run (same treatment #11 gives a failed arm).
             GROUP BY f.SOURCE_NAME
+            HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))
         ) s
         ON t.SOURCE_NAME = s.SOURCE_NAME
         WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
@@ -36074,7 +36167,7 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 66 AS VERSION,
-       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), and the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
+       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11), a top-of-proc guard RAISEs on any SCOPE outside HOURLY/DAILY so a typo fails loudly instead of silently loading nothing (#37), and the DAILY freshness stamp requires BOTH FACT_AI_USAGE_DAILY arms (ai_code + ai_functions) loaded before reading the AI source fresh (#23). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 66);
 -- ===========================================================================
 -- >>> V067__alert_attribution_onset_supersede_objectcost.sql

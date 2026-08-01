@@ -148,8 +148,10 @@ def test_26_single_flight_lease():
     assert "CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE" in _V64
     assert "WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE" in _V64  # idempotent seed
     wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
-    # acquire at entry: UPDATE the sentinel, bail if not acquired
-    assert wh.count("DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE") == 2   # acquire + release
+    # acquire at entry: UPDATE the sentinel, bail if not acquired.
+    # V064 #9 adds the outer-handler fenced release, so there are now THREE lease
+    # references: acquire + normal-path release + outer-handler release.
+    assert wh.count("DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE") == 3   # acquire + 2 releases
     assert "HELD = FALSE OR ACQUIRED_AT < DATEADD('hour', -1, CURRENT_TIMESTAMP())" in wh  # stale reclaim
     assert "IF (SQLROWCOUNT = 0) THEN\n        RETURN 'skipped - another SP_NOTIFY_WEBHOOK run holds the sender lease';" in wh
     # release at exit — FENCED to the holding session (review): an unconditional release
@@ -161,6 +163,73 @@ def test_26_single_flight_lease():
     # ordering is still send-first (the intentional at-least-once paging bias)
     assert wh.index("SYSTEM$SEND_SNOWFLAKE_NOTIFICATION") < wh.index(
         "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES")
+
+
+# ---------------------------------------------------------------------------
+# #9 — OUTER LEASE HANDLER: an unhandled error mid-proc must fenced-release the
+#      sender lease, log the error, and RE-RAISE (not leave HELD=TRUE until the 1h
+#      reclaim, and not swallow). The normal-path release stays (idempotent).
+# ---------------------------------------------------------------------------
+def test_9_outer_lease_handler_releases_and_reraises():
+    wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
+    # the proc body is wrapped by an outer EXCEPTION WHEN OTHER
+    assert "EXCEPTION\n    -- V064 #9 OUTER LEASE HANDLER" in wh
+    assert "WHEN OTHER THEN" in wh
+    # THREE lease references now: acquire + normal release + outer-handler release
+    assert wh.count("DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE") == 3
+    # BOTH releases are fenced to the holding session (no-op unless we still hold it)
+    assert wh.count("HOLDER = CURRENT_SESSION();") == 2
+    # the handler logs the unhandled error and RE-RAISEs so the task run FAILs
+    assert "'NotifyWebhook', 'webhook_run_failed', :emsg," in wh
+    assert wh.count("RAISE;") == 1
+    assert wh.rstrip().endswith("RAISE;\nEND;\n$$;")
+    # the inner per-route send handler is unchanged (send failure caught, not re-raised)
+    assert "send_failed := TRUE;" in wh
+
+
+# ---------------------------------------------------------------------------
+# #10-slice — undelivered CRITICALs get a 7d send window (24h floor for the rest).
+#      Cheap slice only: oldest-first drain + per-route NOT EXISTS + expiry
+#      watchdog all stay intact; no dead-letter/replay machine.
+# ---------------------------------------------------------------------------
+def test_10_critical_seven_day_send_window():
+    wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
+    assert ("AND e.RAISED_AT >= CASE WHEN e.SEVERITY = 'CRITICAL'\n"
+            "                                          THEN DATEADD('day', -7, CURRENT_TIMESTAMP())\n"
+            "                                          ELSE DATEADD('hour', -24, CURRENT_TIMESTAMP()) END") in wh
+    # the drain machinery is untouched
+    assert "LOOP" in wh and "max_batches INT DEFAULT 6" in wh
+    assert wh.count("ARRAY_AGG(f.EVENT_ID)") == 1
+    # the expiry watchdog + its 24h/7d bounds still exist
+    tail = wh.split("Loud, not silent", 1)[1]
+    assert "undelivered_expired" in tail
+    assert "e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in tail
+
+
+# ---------------------------------------------------------------------------
+# #6 — reconcile RUN scoping: the logged-failure count is fenced to the reconcile's
+#      OWN child-loader pages, so a concurrent unrelated failure is not counted.
+# ---------------------------------------------------------------------------
+def test_6_reconcile_failure_count_scoped_to_own_pages():
+    rec = _proc(_V64, "SP_NIGHTLY_RECONCILE")
+    assert "AND PAGE IN ('ExtractLoader', 'DailyFacts', 'MartLoader')" in rec
+    # still scoped by time + the children's failure tokens
+    assert "WHERE LOGGED_AT >= :recon_start" in rec
+    assert "ERROR_TYPE ILIKE '%_failed%'" in rec
+    # unrelated pages that also log '%_failed%' are NOT in the scope
+    assert "'AlertScan'" not in rec.split("SELECT COUNT(*) INTO :logged_fails", 1)[1].split(";", 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# #7 (DEFERRED) + #4-drop (KEEP) — atomicity deferral is flagged in-proc; the
+#      daily re-call is documented as the re-cover mechanism, not a redundant dup.
+# ---------------------------------------------------------------------------
+def test_7_atomicity_deferred_and_4drop_kept():
+    rec = _proc(_V64, "SP_NIGHTLY_RECONCILE")
+    assert "TODO(#7 staging-swap)" in rec
+    assert "V064 #4-drop ANALYSIS (KEEP -- verified NOT redundant)" in rec
+    # the daily loader re-call is STILL present (kept, not dropped)
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();" in rec
 
 
 # ---------------------------------------------------------------------------

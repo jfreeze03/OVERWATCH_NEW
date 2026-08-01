@@ -8,6 +8,8 @@ from V065) via count-asserted needle edits in outputs/gen_v066.py:
   #11 COST_DEPT_BUDGET_PACE  -- daily dedupe key gains a HIGH/MED severity band
   #2  COST_CONTRACT_BREACH   -- weekly dedupe key gains a CRIT/WARN band (AI_CREEP left alone)
   #3  MART_INCIDENT_TIMELINE arm [8] -- DELETE+INSERT wrapped in one transaction
+  #37 VALIDATE SCOPE         -- SP_LOAD_MARTS_V27 RAISEs on a scope outside HOURLY/DAILY
+  #23 AI FRESHNESS PARTIAL   -- DAILY stamp needs BOTH FACT_AI_USAGE_DAILY arms loaded
 
 The generator is the source of truth: the first test regenerates and byte-compares.
 """
@@ -146,6 +148,44 @@ def test_freshness_stamp_advances_only_for_loaded_sources():
     assert "('FACT_AI_USAGE_DAILY', 'ai_functions')" in marts
     # the timeline source is still stamped — its token is appended after the #3 COMMIT
     assert "('MART_INCIDENT_TIMELINE', 'timeline')" in marts
+
+
+# ---------------------------------------------------------------------------
+# #37 VALIDATE SCOPE — an invalid scope RAISEs instead of a silent no-op load
+# ---------------------------------------------------------------------------
+def test_marts_scope_guard_fails_on_invalid_scope():
+    marts = _proc(_V66, "SP_LOAD_MARTS_V27")
+    # the guard exception is declared and RAISEd for any scope outside HOURLY/DAILY
+    assert "bad_scope EXCEPTION (-20661," in marts
+    assert ("IF (UPPER(:SCOPE) NOT IN ('HOURLY', 'DAILY')) THEN\n"
+            "        RAISE bad_scope;\n"
+            "    END IF;") in marts
+    # the guard sits ABOVE both scope arms, so a typo can never reach a no-op load + success RETURN
+    head = marts.split("IF (UPPER(:SCOPE) = 'HOURLY') THEN", 1)[0]
+    assert "RAISE bad_scope;" in head
+    # RAISE is not swallowed: no outer EXCEPTION handler wraps the scope arms (the outer
+    # BEGIN's only END closes the proc), so the raise propagates out and the proc fails loudly
+    assert marts.count("RAISE bad_scope;") == 1
+
+
+# ---------------------------------------------------------------------------
+# #23 AI FRESHNESS PARTIAL — FACT_AI_USAGE_DAILY stamped fresh only when BOTH arms loaded
+# ---------------------------------------------------------------------------
+def test_ai_freshness_requires_both_arms_loaded():
+    marts = _proc(_V66, "SP_LOAD_MARTS_V27")
+    # the DAILY stamp gates on ALL of a source's tokens, not any single one
+    assert "HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))" in marts
+    # the per-token WHERE that stamped on a SINGLE arm is gone from DAILY; only the
+    # single-token HOURLY MERGE keeps a WHERE ARRAY_CONTAINS
+    assert marts.count("WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))") == 1
+    # the all-arms HAVING gate is on the DAILY (multi-arm) MERGE only
+    assert marts.count("HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))") == 1
+    # both AI arms are still mapped to the one physical FACT_AI_USAGE_DAILY source
+    assert "('FACT_AI_USAGE_DAILY', 'ai_code')" in marts
+    assert "('FACT_AI_USAGE_DAILY', 'ai_functions')" in marts
+    # the guard lives in the DAILY freshness MERGE (posture + AI), not the HOURLY one
+    daily_merge = marts.split("MART_SECURITY_POSTURE_DAILY', 'posture'", 1)[1]
+    assert "HAVING COUNT(*) = COUNT_IF(ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' ')))" in daily_merge
 
 
 def test_v066_preserves_v065_run_rate_windows():
