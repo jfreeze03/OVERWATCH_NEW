@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.config import OPERATOR_PROFILES, resolve_role_profile
 from app.core.query import run, run_batch
-from app.core.session import current_role
+from app.core.session import is_operator as _is_operator
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
@@ -58,8 +57,8 @@ def render() -> None:
     page_header("Cost & Contract",
                 "Where the money goes, whether the contract holds, and what savings are proven.",
                 scope_note=f"{f['company']} · last {f['days']} days", icon_name="cost")
-    profile = resolve_role_profile(current_role())
-    is_operator = profile in OPERATOR_PROFILES
+    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    is_operator = _is_operator()
     # Six grouped sections instead of eight pills (CoCo density fix): each
     # group renders its related sub-panels under labeled section headers.
     section = lazy_sections(
@@ -118,12 +117,31 @@ def render() -> None:
         section_header("Query-tag governance", "info", "chargeback")
         st.caption("Chargeback precision is capped by tag coverage — untagged execution "
                    "time can only be allocated, never attributed.")
-        tags_res = run_mart_first(
-            mart27_sql.tag_coverage_daily(f["days"], f["company"]),
-            cost_sql.tag_coverage(f["days"], f["company"]),
-            page=_PAGE, key=f"tagcov_{f['company']}_{f['days']}",
-            mart_source="MART_TAG_COVERAGE_DAILY (mart, loaded hourly)",
-            live_source="QUERY_HISTORY (exec-time-weighted, live fallback)")
+        # #36: MART_TAG_COVERAGE_DAILY is user x day grain and carries no
+        # DATABASE_NAME/SCHEMA_NAME column, so it cannot honor the active
+        # Database/Schema filter — served mart-first, a scoped chargeback screen
+        # silently widened to company-wide. When a db/schema scope is set, read
+        # the db/schema-predicated live QUERY_HISTORY path (which does carry those
+        # columns) instead; with no scope, keep the cheap mart-first read.
+        _tag_db = f["database"]
+        _tag_sc = f["schema_contains"]
+        if str(_tag_db).strip() or str(_tag_sc).strip():
+            tags_res = run(
+                cost_sql.tag_coverage(f["days"], f["company"], database=_tag_db,
+                                      schema_contains=_tag_sc),
+                page=_PAGE, key=f"tagcov_live_{f['company']}_{f['days']}_{_tag_db}_{_tag_sc}",
+                tier="historical",
+                source="QUERY_HISTORY (exec-time-weighted, db/schema-scoped live)")
+            st.caption("Scoped to the active Database/Schema filter via the live "
+                       "QUERY_HISTORY path (the tag-coverage mart is user-grain and carries "
+                       "no object columns); the live window clamps to 90 days.")
+        else:
+            tags_res = run_mart_first(
+                mart27_sql.tag_coverage_daily(f["days"], f["company"]),
+                cost_sql.tag_coverage(f["days"], f["company"]),
+                page=_PAGE, key=f"tagcov_{f['company']}_{f['days']}",
+                mart_source="MART_TAG_COVERAGE_DAILY (mart, loaded hourly)",
+                live_source="QUERY_HISTORY (exec-time-weighted, live fallback)")
         if guard(tags_res, "No workloads above the 60s floor in this window."):
             tdf_g = tags_res.df.copy()
             total_exec = float(tdf_g["EXEC_SEC"].sum())

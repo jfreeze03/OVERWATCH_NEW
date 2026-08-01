@@ -1258,65 +1258,124 @@ LIMIT 60
 # ---------------------------------------------------------------------------
 
 def last_delivery_health() -> str:
-    """One row answering the question the owner could NOT answer on 2026-07-31:
-    'no alerts today — is it QUIET, or is delivery BROKEN?'
+    """ONE ROW PER ENABLED ROUTE answering the question the owner could NOT answer on
+    2026-07-31: 'no alerts today — is it QUIET, or is delivery BROKEN?'
 
     Those are different states and the app never separated them. The sender is a
     per-route DIGEST bounded to a 24h window, and alert scanning dedupes on keys that
     mostly carry the day — so a chronic condition raises ONCE and a genuinely quiet
     stretch produces zero messages. Silence alone proves nothing.
 
-    What separates them is whether anything is WAITING. ELIGIBLE_NOW mirrors the
-    sender's own eligibility predicate (open, inside its 24h window, config-joined,
-    matching an enabled route's family/company/severity, not already in the ledger for
-    that route), so:
-        last send recent                      -> working
-        old last send + ELIGIBLE_NOW = 0      -> quiet, and correctly so
-        old last send + ELIGIBLE_NOW > 0      -> events are waiting and not going out
-        ROUTE_FAILS_24H > 0                   -> the endpoint itself is refusing
+    Per-route, not global (Codex #29): the old builder returned global MAX(SENT_AT) +
+    a global fail count, so ONE healthy route hid a dead sibling (a recent send on Slack
+    masked PagerDuty going days without one) and ONE bad route reddened a card a dozen
+    healthy routes shared. Each enabled route now carries its OWN last send, eligible
+    backlog, and failure history; the card aggregates the WORST state for the headline
+    and names the stuck/failing route.
+
+    ELIGIBLE_NOW mirrors the sender's own eligibility predicate per route (open, inside
+    its 24h window, config-joined, matching THIS route's family/company/severity, not
+    already in the ledger for THIS route).
+
+    Recovery-aware failure state (Codex #42): a route is only FAILING_NOW when its
+    LATEST failure is newer than its LATEST success — a later successful send clears the
+    red, instead of any failure in the rolling window pinning it red for 24h. CONSEC_FAILS
+    counts failures since the last success. STUCK (Codex #41) fires when the route has an
+    eligible backlog but has NEVER sent, or has not sent in >=90 min — so a route that
+    never delivered anything with events waiting is BROKEN immediately, not "queued".
+
+    Failures are attributed per route from APP_ERROR_LOG.CONTEXT, which the sender writes
+    as 'route <route_id> integration <name> - ...' (V064); APP_ERROR_LOG has no route
+    column, so SPLIT_PART on that context is the only per-route key available.
+
+    Always returns >=1 row: when zero routes are enabled, a single synthetic row with
+    ENABLED_ROUTES = 0 lets the card render the 'nothing can be delivered' state.
     Reads only OVERWATCH-owned tables; no ACCOUNT_USAGE."""
     return f"""
 WITH sent AS (
-    SELECT MAX(SENT_AT) AS LAST_SENT_AT FROM {core_object("ALERT_DELIVERIES")}
-),
-eligible AS (
-    SELECT COUNT(DISTINCT e.EVENT_ID) AS N
-    FROM {core_object("ALERT_EVENTS")} e
-    JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
-    JOIN {core_object("ALERT_ROUTES")} r
-      ON r.ENABLED
-     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
-     AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
-          OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
-     AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
-                         WHEN 'MEDIUM' THEN 2 ELSE 1 END
-         >= CASE r.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
-                                WHEN 'MEDIUM' THEN 2 ELSE 1 END
-    WHERE e.STATUS = 'OPEN'
-      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
-                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID)
+    -- per-route last CONFIRMED send = the success signal (#42)
+    SELECT ROUTE_ID, MAX(SENT_AT) AS LAST_SENT_AT
+    FROM {core_object("ALERT_DELIVERIES")}
+    GROUP BY ROUTE_ID
 ),
 fails AS (
-    SELECT COUNT(*) AS N,
-           MAX(LEFT(ERROR_MESSAGE, 200)) AS SAMPLE
+    -- per-route send failures in the last 24h; ROUTE_ID parsed from the CONTEXT the
+    -- sender writes ('route <id> integration <name> - ...'). SPLIT_PART token 2 is the id.
+    SELECT SPLIT_PART(CONTEXT, ' ', 2) AS ROUTE_ID,
+           COUNT(*) AS ROUTE_FAILS_24H,
+           MAX(LOGGED_AT) AS LAST_FAILURE_AT,
+           MAX_BY(LEFT(ERROR_MESSAGE, 200), LOGGED_AT) AS LAST_FAILURE
     FROM {core_object("APP_ERROR_LOG")}
     WHERE PAGE = 'NotifyWebhook' AND ERROR_TYPE = 'route_send_failed'
       AND LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+    GROUP BY 1
 ),
-routes AS (
-    SELECT COUNT(*) AS ENABLED_N,
-           LISTAGG(DISTINCT INTEGRATION_NAME, ', ') AS INTEGRATIONS
-    FROM {core_object("ALERT_ROUTES")} WHERE ENABLED
+consec AS (
+    -- consecutive failures SINCE the last success (#42): fails newer than this route's
+    -- last confirmed send (all of them when it has never sent).
+    SELECT SPLIT_PART(a.CONTEXT, ' ', 2) AS ROUTE_ID,
+           COUNT(*) AS CONSEC_FAILS
+    FROM {core_object("APP_ERROR_LOG")} a
+    LEFT JOIN sent s ON s.ROUTE_ID = SPLIT_PART(a.CONTEXT, ' ', 2)
+    WHERE a.PAGE = 'NotifyWebhook' AND a.ERROR_TYPE = 'route_send_failed'
+      AND a.LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND a.LOGGED_AT > COALESCE(s.LAST_SENT_AT, '1970-01-01'::TIMESTAMP_NTZ)
+    GROUP BY 1
+),
+eligible AS (
+    -- per-route OPEN + eligible + undelivered count; mirrors the sender predicate
+    SELECT r.ROUTE_ID, COUNT(DISTINCT e.EVENT_ID) AS ELIGIBLE_NOW
+    FROM {core_object("ALERT_ROUTES")} r
+    JOIN {core_object("ALERT_EVENTS")} e
+      ON e.STATUS = 'OPEN'
+     AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+    JOIN {core_object("ALERT_CONFIG")} c
+      ON c.RULE_ID = e.RULE_ID
+     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
+    WHERE r.ENABLED
+      AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+           OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
+      AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                          WHEN 'MEDIUM' THEN 2 ELSE 1 END
+          >= CASE r.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                                 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
+                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID)
+    GROUP BY r.ROUTE_ID
+),
+summary AS (
+    SELECT COUNT(*) AS ENABLED_ROUTES FROM {core_object("ALERT_ROUTES")} WHERE ENABLED
 )
-SELECT s.LAST_SENT_AT,
+SELECT r.ROUTE_ID,
+       r.INTEGRATION_NAME,
+       s.LAST_SENT_AT,
        DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) AS MINUTES_SINCE,
-       e.N  AS ELIGIBLE_NOW,
-       f.N  AS ROUTE_FAILS_24H,
-       f.SAMPLE AS LAST_FAILURE,
-       r.ENABLED_N AS ENABLED_ROUTES,
-       r.INTEGRATIONS
-FROM sent s, eligible e, fails f, routes r
+       COALESCE(el.ELIGIBLE_NOW, 0) AS ELIGIBLE_NOW,
+       COALESCE(f.ROUTE_FAILS_24H, 0) AS ROUTE_FAILS_24H,
+       f.LAST_FAILURE_AT,
+       s.LAST_SENT_AT AS LAST_SUCCESS_AT,
+       COALESCE(cf.CONSEC_FAILS, 0) AS CONSEC_FAILS,
+       f.LAST_FAILURE,
+       -- #42: red ONLY when the latest failure is newer than the latest success
+       (f.LAST_FAILURE_AT IS NOT NULL
+        AND (s.LAST_SENT_AT IS NULL OR f.LAST_FAILURE_AT > s.LAST_SENT_AT)) AS FAILING_NOW,
+       -- #41: backlog waiting AND (never sent OR silent >=90m) -> stuck/broken now
+       (COALESCE(el.ELIGIBLE_NOW, 0) > 0
+        AND (s.LAST_SENT_AT IS NULL
+             OR DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) >= 90)) AS STUCK,
+       sm.ENABLED_ROUTES
+FROM {core_object("ALERT_ROUTES")} r
+CROSS JOIN summary sm
+LEFT JOIN sent s      ON s.ROUTE_ID = r.ROUTE_ID
+LEFT JOIN fails f     ON f.ROUTE_ID = r.ROUTE_ID
+LEFT JOIN consec cf   ON cf.ROUTE_ID = r.ROUTE_ID
+LEFT JOIN eligible el ON el.ROUTE_ID = r.ROUTE_ID
+WHERE r.ENABLED
+UNION ALL
+-- no enabled route: one synthetic row so the card can render 'nothing can be delivered'
+SELECT NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, NULL, FALSE, FALSE, sm.ENABLED_ROUTES
+FROM summary sm
+WHERE sm.ENABLED_ROUTES = 0
 """
 
 
@@ -1467,9 +1526,24 @@ def telemetry_by_page(days: int = 7) -> str:
     """Per-page fetch health from the V027 telemetry rider. Only slow/failed +
     a ~2% healthy sample are persisted, so FETCHES is a PERSISTED count, not a
     census; EST_TRUE_FETCHES re-weights each row by 1/SAMPLE_PROB (rec18, V064) so
-    the healthy baseline the sampler undercounts ~50x is restored. P95_S/SLOW_2S
-    are tail-complete (all >=2s rows persist at prob 1.0); CACHE_HIT_PCT is over
-    the persisted set. Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe).
+    the healthy baseline the sampler undercounts ~50x is restored.
+
+    Sampling bias (Codex #44): the persisted set keeps EVERY slow/failed fetch but
+    only ~2% of healthy ones, so any UNWEIGHTED statistic over that set is skewed to
+    the tail. Only some columns are safe to read raw:
+      - SLOW_2S / FAILED are honest COUNTS — every >=2s or failed row persists at
+        prob 1.0, so the count is complete (not a rate over a biased denominator).
+      - P95_S is a TAIL-SAMPLE percentile, NOT the fleet p95: the healthy body is
+        2%-sampled while the whole tail is kept, so the persisted distribution sits
+        far above the real one and this reads HIGH. Keep it only as a "how bad does
+        it get" lens; do not present it as an unbiased fleet quantile. (Weighting a
+        percentile needs per-row frequency expansion APPROX_PERCENTILE can't take,
+        so it stays a tail lens rather than a lie dressed as a fleet number.)
+      - CACHE_HIT_PCT is now WEIGHTED by 1/SAMPLE_PROB. Unweighted it collapsed
+        toward 0: the must-persist stream is almost all cache MISSES (a hit is fast,
+        so it rarely crosses the 2s persist bar), and those swamp the 2%-sampled
+        healthy hits. Weighting each non-null row by 1/prob restores the true rate.
+    Pre-V064 rows read SAMPLE_PROB NULL -> weight 1 (safe).
 
     D5: EST_WAIT_S is the RANKING column for tuning targets — the estimated total
     seconds the fleet actually spent waiting on this page, each row re-weighted by
@@ -1489,8 +1563,17 @@ SELECT PAGE,
        -- kept only for the eyeball view of end-to-end batch cost.
        ROUND(SUM(IFF(STARTSWITH(QUERY_KEY, 'batch_wall:'), 0,
                      ELAPSED_MS / 1000.0 / COALESCE(SAMPLE_PROB, 1.0))), 1) AS EST_WAIT_S,
+       -- #44: tail-sample percentile over the biased persisted set (reads HIGH) —
+       -- kept as a severity lens only, NOT the fleet p95. See the docstring.
        ROUND(APPROX_PERCENTILE(ELAPSED_MS, 0.95) / 1000, 2) AS P95_S,
-       ROUND(AVG(IFF(CACHE_HIT IS NULL, NULL, IFF(CACHE_HIT, 1, 0))) * 100, 1) AS CACHE_HIT_PCT,
+       -- #44: WEIGHTED cache-hit rate. Each non-null CACHE_HIT row counts 1/SAMPLE_PROB
+       -- so the 2%-sampled healthy hits are not drowned by the must-persist (slow=miss)
+       -- stream. NULL cache_hit rows (pre-rider) leave both sums, so the rate is over
+       -- rows that actually carry the flag. NULLIF guards a page with no such rows.
+       ROUND(
+           SUM(IFF(CACHE_HIT IS NULL, 0, IFF(CACHE_HIT, 1, 0) / COALESCE(SAMPLE_PROB, 1.0)))
+           / NULLIF(SUM(IFF(CACHE_HIT IS NULL, 0, 1.0 / COALESCE(SAMPLE_PROB, 1.0))), 0)
+           * 100, 1) AS CACHE_HIT_PCT,
        COUNT_IF(NOT OK) AS FAILED,
        COUNT_IF(ELAPSED_MS >= 2000) AS SLOW_2S,
        ROUND(AVG(COALESCE(BATCH_SIZE, 1)), 1) AS AVG_BATCH,

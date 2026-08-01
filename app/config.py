@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.116.0"
+APP_VERSION = "4.117.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -152,6 +152,32 @@ def nav_groups_for(pages: tuple[str, ...] | list[str]) -> list[tuple[str, list[s
 
 
 OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL in-app
+
+# In-app operator allowlist — the VIEWER usernames (st.user under owner's-rights
+# Streamlit-in-Snowflake) permitted to execute state-changing SQL in the app.
+# WHY (correctness #3): operator gating used to key off SQL CURRENT_ROLE(), but
+# under an owner's-rights SiS app CURRENT_ROLE() is the app OWNER's role for
+# EVERY viewer — so it never differentiates people, and an accidental app grant
+# would expose DBA actions to any viewer. Entitle by the viewer's identity
+# instead (session.is_operator()). Snowflake RBAC stays the REAL boundary (a
+# non-privileged role's write still fails server-side); this only decides what
+# the app OFFERS. Store bare Snowflake usernames; matching is case-insensitive.
+# Empty tuple = no viewer is an in-app operator (secure default); the owner adds
+# the specific usernames who may operate. Off-SiS (local dev/tests) there is no
+# viewer identity, so session.is_operator() falls back to the role->profile check.
+OPERATOR_USERS: tuple[str, ...] = ()  # e.g. ("JSMITH", "ADBA")
+
+
+def is_operator_user(viewer: str) -> bool:
+    """True when a VIEWER username is on the in-app operator allowlist.
+
+    Case-insensitive; a blank viewer is never an operator (the caller falls back
+    to role-based gating for that off-SiS case). Pure so it is unit-testable.
+    """
+    name = str(viewer or "").strip().upper()
+    if not name:
+        return False
+    return name in {str(u).strip().upper() for u in OPERATOR_USERS}
 
 
 def resolve_role_profile(role: str) -> str:

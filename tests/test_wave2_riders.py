@@ -54,7 +54,13 @@ def test_telemetry_by_page_uses_the_v027_rider_null_safely():
     sql = mart_sql.telemetry_by_page(7)
     for col in ("P95_S", "CACHE_HIT_PCT", "AVG_BATCH", "TRUNCATED_N", "SLOW_2S"):
         assert col in sql, col
-    assert "IFF(CACHE_HIT IS NULL, NULL," in sql               # pre-V027 rows excluded from %
+    # Codex #44: CACHE_HIT_PCT is now WEIGHTED by 1/SAMPLE_PROB (was an unweighted
+    # AVG(IFF(CACHE_HIT IS NULL, NULL, ...)) that collapsed toward 0 because the
+    # must-persist stream is nearly all cache misses). NULL cache_hit rows are still
+    # excluded — they contribute 0 to BOTH the weighted numerator and denominator.
+    assert "1.0 / COALESCE(SAMPLE_PROB, 1.0)" in sql           # per-row inverse-prob weight
+    assert "IFF(CACHE_HIT IS NULL, 0, 1.0 / COALESCE(SAMPLE_PROB, 1.0))" in sql  # weighted denom
+    assert "NULLIF(SUM(" in sql                                # divide-by-zero guard
     assert "EVENT_KIND" in mart_sql.usage_event_summary(30)
 
 

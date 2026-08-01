@@ -105,7 +105,10 @@ def test_incident_readers_shapes():
 
 def test_control_room_incidents_section():
     assert 'section_header("Incidents")' in _CR   # rec6: consistent section headers
-    assert "resolve_role_profile(current_role()) in OPERATOR_PROFILES" in _CR
+    # #3 (2026-07-31): operator gating moved from CURRENT_ROLE() (the app owner's role
+    # under owner's-rights SiS, same for every viewer) to session.is_operator(), which
+    # resolves the VIEWER identity against an allowlist. The section is still op-gated.
+    assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
     assert "mart_sql.open_incidents(50, company)" in _CR
     assert "nothing groups silently" in _CR                   # proposals expander says so

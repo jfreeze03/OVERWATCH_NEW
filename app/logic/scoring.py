@@ -216,14 +216,18 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     stale sources and open actions, which facts don't carry per-day — the
     trend is comparable, the absolute value can differ by a few points.
 
-    E3 — first-partial-month artifact: MTD is a cumsum WITHIN each ``_MONTH`` group
-    of the frame it is handed, so when the window opens mid-month (a 30-day call on
-    the 12th starts on the 13th of the prior month) that first month's cumsum
-    restarts at the window edge and understates true month-to-date spend. The
-    budget penalty is therefore too small — the score too HIGH — for the leading
-    partial month, and steps down when the first whole month begins. Read the left
-    edge of the trend as unreliable rather than as an improvement that reversed;
-    it self-corrects at the first month boundary inside the window.
+    E3/#50 — first-partial-month artifact: MTD is a cumsum WITHIN each ``_MONTH``
+    group of the frame it is handed, so when the window opens mid-month (a 30-day
+    call on the 12th starts on the 13th of the prior month) that first month's
+    cumsum restarts at the window edge and understates true month-to-date spend.
+    The budget penalty is therefore too small — the score too HIGH — for the
+    leading partial month, and steps DOWN when the first whole month begins,
+    faking an improvement that then reverses. We cannot back-fill that month's
+    earlier days from here (the caller only hands us the window), so when a budget
+    is configured we OMIT the leading partial month from the retro series rather
+    than publish a budget penalty we know is biased low. With no budget configured
+    the budget penalty is always zero, so the artifact cannot occur and the full
+    series is kept.
     """
     if inputs is None or inputs.empty or "DAY" not in inputs.columns:
         return pd.DataFrame()
@@ -234,6 +238,18 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
                 "FAILED_COUNT", "QUEUED_SEC", "SPILL_GB", "TASK_RUNS", "TASK_FAILED"):
         frame[col] = frame.get(col, 0).map(safe_float) if col in frame.columns else 0.0
     frame["_MONTH"] = frame["DAY"].dt.to_period("M")
+    # #50: when a budget is configured, drop the leading PARTIAL month — its MTD
+    # cumsum restarts at the window edge and understates spend, biasing the budget
+    # penalty low (score too high) until the first whole month begins. The month
+    # is partial when the earliest day in the window is not the 1st. Only the
+    # budget penalty depends on MTD, so with no budget (budget<=0) there is nothing
+    # to correct and the full series is kept.
+    if safe_float(monthly_budget_usd) > 0 and not frame.empty:
+        first_day = frame["DAY"].iloc[0]   # frame is sorted ascending above
+        if first_day.day > 1:
+            frame = frame[frame["_MONTH"] != frame["_MONTH"].iloc[0]]
+        if frame.empty:
+            return pd.DataFrame()
     # C1 (V061): price AI/Cortex credits at the AI rate. MTD_USD = cumulative
     # OTHER credits x rate + cumulative AI credits x ai_rate (CREDITS_BILLED_AI is 0
     # for pre-V061 rows / readers that predate the split, so it degrades to all-compute).

@@ -546,18 +546,27 @@ ORDER BY DAY, GB DESC
 """
 
 
-def unload_activity(days: int = 30, company: str = "ALL") -> str:
+def unload_activity(days: int = 30, company: str = "ALL", database: str = "",
+                    schema_contains: str = "") -> str:
     """r25 #7b (owner pick): who runs COPY INTO <location> (QUERY_TYPE
     'UNLOAD'), per user/day. GB_OUT sums both QUERY_HISTORY byte counters —
     for an unload exactly one of them carries the payload, so the sum is the
     real figure, not an overstatement. SAMPLE_TARGET = newest statement's
-    first 120 chars, so the destination is visible without a drill."""
+    first 120 chars, so the destination is visible without a drill.
+
+    #35: honors the global Database/Schema filter (in addition to the company
+    user classification). QUERY_HISTORY records the session's DATABASE_NAME/
+    SCHEMA_NAME — the context the unload's source table resolves in — so a
+    scoped screen no longer silently widens to company-wide."""
+    from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "QUERY_TYPE = 'UNLOAD'",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.user_clause(company, "USER_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT DATE(START_TIME) AS DAY,

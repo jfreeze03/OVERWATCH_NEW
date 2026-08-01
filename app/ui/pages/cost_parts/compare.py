@@ -9,7 +9,12 @@ Grain honesty (Codex r11 #12): warehouse spend = FACT_WAREHOUSE_DAILY
 FACT_QUERY_HOURLY (company-scoped); account billed = FACT_METERING_DAILY
 (account-wide by construction, labeled so). The current partial month is
 never a compare side by default; the escape hatch pairs equal-length
-windows and says so. Env-vs-env is Phase 2 (docs/design/COMPARE_MODE.md).
+windows and says so.
+
+Scope honesty (#49): Compare receives only COMPANY + DATES — the sidebar
+Environment filter does NOT apply here. Environment-vs-environment comparison
+is not yet built (Phase 2, docs/design/COMPARE_MODE.md); the sidebar copy says
+so, and this tab adds no per-environment lens.
 """
 
 from __future__ import annotations
@@ -54,6 +59,9 @@ def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
 
 
 def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
+    # #49: Compare is scoped by company + dates only. The sidebar Environment
+    # filter is intentionally NOT threaded through here (env-vs-env is Phase 2),
+    # so no env argument is accepted and none is applied to the reads below.
     pick = st.radio("Pairing", list(_PAIRINGS), horizontal=True, key="cmp_kind")
     kind = _PAIRINGS[pick]
     include_partial = False

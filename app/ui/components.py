@@ -445,11 +445,88 @@ def served_days(result, requested_days: int) -> int:
     return int(requested_days)
 
 
+# ---------------------------------------------------------------------------
+# Cluster-3 coverage contract (finding #16). One shared acceptance test for
+# mart-first reads so a stale / short / gappy mart yields to the (correct) live
+# fallback instead of silently answering a long window with incomplete data.
+# The freshness/coverage primitives here read the WORST row of a multi-scope
+# frame — the coverage law that one fresh database must never mask a stale or
+# missing peer (findings #20/#21 use these directly on the storage frames).
+# ---------------------------------------------------------------------------
+
+
+def stalest_day(df, col: str = "LATEST_DAY"):
+    """The MINIMUM (oldest) date across all rows of ``col`` — the honest
+    freshness of a multi-scope frame. Cluster-3 law: freshness is the WORST
+    row, never MAX(), so one fresh database can't hide a stale/missing peer.
+    Returns a ``date`` or None (empty frame / absent column)."""
+    import pandas as pd
+    cols = getattr(df, "columns", [])
+    if df is None or getattr(df, "empty", True) or col not in cols:
+        return None
+    d = pd.to_datetime(df[col], errors="coerce").min()
+    return d.date() if pd.notna(d) else None
+
+
+def min_covered_days(df, col: str = "DAYS_AVERAGED"):
+    """The SMALLEST per-scope covered-day count (worst database), so a short
+    peer reads as short instead of being masked by a fully-covered one. 0 when
+    the column/frame is absent."""
+    cols = getattr(df, "columns", [])
+    if df is None or getattr(df, "empty", True) or col not in cols:
+        return 0
+    vals = [safe_float(v) for v in df[col].tolist()]
+    return int(min(vals)) if vals else 0
+
+
+def coverage_contract(days: int, *, day_col: str = "DAY", freshness_days: int = 2):
+    """A ``run_mart_first`` acceptance predicate enforcing the Cluster-3
+    coverage contract on a DAY-grain mart frame:
+
+      * first observed day <= the requested window start (the mart reaches back
+        far enough to answer the asked window),
+      * latest observed day is fresh (within ``freshness_days`` of yesterday),
+      * no interior day gaps across the observed span.
+
+    Returns a predicate ``df -> bool``. A stale, short, or gappy mart is
+    REJECTED so the caller serves the live fallback. Frames WITHOUT ``day_col``
+    (pre-aggregated readers with no per-day grain) cannot be evaluated here, so
+    the predicate ACCEPTS them — it must never suppress a mart it cannot prove
+    incomplete; those readers gate their coverage in SQL instead (e.g.
+    mart27_sql.alloc_xdim_attribution's scoped ``cov`` CTE)."""
+    from datetime import timedelta
+
+    def _accept(df) -> bool:
+        import pandas as pd
+        if df is None or getattr(df, "empty", True):
+            return False
+        if day_col not in getattr(df, "columns", []):
+            return True
+        d = pd.to_datetime(df[day_col], errors="coerce").dropna()
+        if d.empty:
+            return True
+        present = pd.Index(d.dt.normalize().unique())
+        first = present.min().date()
+        latest = present.max().date()
+        today = account_today()
+        window_start = today - timedelta(days=int(days))
+        if first > window_start:                                # doesn't reach the window start
+            return False
+        if latest < today - timedelta(days=1 + int(freshness_days)):   # stale tail
+            return False
+        span = (latest - first).days + 1                        # interior gaps
+        return len(present) >= span                             # every day in the span is present
+
+    return _accept
+
+
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",
                    max_rows: int | None = None, empty_is_answer: bool = False,
-                   mart_accept=None, preloaded=None, days: int | None = None):
+                   mart_accept=None, preloaded=None, days: int | None = None,
+                   coverage_gate: bool = False, coverage_day_col: str = "DAY",
+                   coverage_freshness_days: int = 2):
     """Fact-first read with the live builder as labeled fallback — the
     Control Room v4.8.2 pattern as one call (wave 2 adoptions). The mart
     result must be usable (ok AND non-empty) or the live path runs under
@@ -463,8 +540,23 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
 
     K1: pass ``days`` (the window the caller ASKED for) and read the window that
     was actually served back with ``served_days(result, days)`` — the live legs
-    clamp to 90 and the marts do not."""
+    clamp to 90 and the marts do not.
+
+    #16: pass ``coverage_gate=True`` (with ``days``) to apply the shared
+    ``coverage_contract`` as the acceptance test when no explicit ``mart_accept``
+    is given — a stale/short/gappy DAY-grain mart then yields to the live
+    fallback. Left OFF by default so existing callers are unchanged. FOLLOW-UP
+    (do not edit here): the day-grain mart-first sites in operations.py,
+    optimize.py, overview.py, security.py, contract.py, ai_chargeback.py,
+    control_room.py, cost.py, unit_costs.py should opt into ``coverage_gate`` in
+    an incremental pass now that the contract exists."""
     from app.core.query import run
+    # #16: the coverage contract is the DEFAULT acceptance test when the caller
+    # opts in and hasn't supplied its own probe. Aggregated readers (no day_col)
+    # accept transparently — they gate coverage in SQL — so this is safe to arm.
+    if mart_accept is None and coverage_gate and days is not None:
+        mart_accept = coverage_contract(
+            days, day_col=coverage_day_col, freshness_days=coverage_freshness_days)
     kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
     res = preloaded if (preloaded is not None and preloaded.ok) else run(
         mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,

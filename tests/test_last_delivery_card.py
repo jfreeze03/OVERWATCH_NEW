@@ -82,7 +82,55 @@ def test_card_separates_quiet_from_broken():
     assert "Silence alone is not a fault signal" in card
 
 
-def test_integration_probe_is_not_hardcoded_to_the_slack_placeholder():
+def test_builder_is_per_route_not_global():
+    """Codex #29: one row per enabled route so a healthy route can't mask a dead sibling
+    and one dead route can't redden the whole card."""
+    from app.data import mart_sql
+    sql = mart_sql.last_delivery_health()
+    sqlglot.parse(sql, dialect="snowflake")
+    # per-route grain columns
+    for col in ("ROUTE_ID", "INTEGRATION_NAME", "FAILING_NOW", "STUCK", "CONSEC_FAILS"):
+        assert col in sql, col
+    # last send is per route (grouped), not one global MAX
+    assert "SELECT ROUTE_ID, MAX(SENT_AT) AS LAST_SENT_AT" in sql
+    assert "GROUP BY ROUTE_ID" in sql
+    # failures are attributed per route from the sender's CONTEXT string
+    assert "SPLIT_PART(CONTEXT, ' ', 2)" in sql
+    # always >=1 row: a synthetic zero-route row keeps the 'nothing can be delivered' state
+    assert "sm.ENABLED_ROUTES = 0" in sql
+
+
+def test_failing_now_is_recovery_aware():
+    """Codex #42: red ONLY when the LATEST failure is newer than the LATEST success —
+    a later success clears the red, so a recovered endpoint does not stay red 24h."""
+    from app.data import mart_sql
+    sql = mart_sql.last_delivery_health()
+    assert "f.LAST_FAILURE_AT IS NOT NULL" in sql
+    assert "f.LAST_FAILURE_AT > s.LAST_SENT_AT" in sql          # latest fail beats latest success
+    assert "AS FAILING_NOW" in sql
+    # consecutive failures are counted only AFTER the last success
+    assert "a.LOGGED_AT > COALESCE(s.LAST_SENT_AT" in sql
+
+
+def test_stuck_fires_on_never_sent_backlog():
+    """Codex #41: a route with an eligible backlog that has NEVER sent (or is silent
+    >=90m) is BROKEN immediately, not 'queued for the next run'."""
+    from app.data import mart_sql
+    sql = mart_sql.last_delivery_health()
+    assert "s.LAST_SENT_AT IS NULL" in sql                      # never-sent arm
+    assert ">= 90) AS STUCK" in sql or "DATEDIFF('minute', s.LAST_SENT_AT, CURRENT_TIMESTAMP()) >= 90" in sql
+
+
+def test_card_aggregates_worst_route_and_names_it():
+    """The card ranks failing > stuck > waiting > quiet and names the offending route."""
+    card = _ALERTS.split("def _last_delivery_card", 1)[1].split("\ndef ", 1)[0]
+    assert "df[df[\"ROUTE_ID\"].notna()]" in card               # per-route rows
+    assert "_flag(rdf[\"FAILING_NOW\"])" in card                # worst-first: failing routes
+    assert "_flag(rdf[\"STUCK\"])" in card                      # then stuck routes
+    assert "_rlabel" in card and "is failing" in card           # names the route
+    # #41: the old "queued for next run" no longer wins over a never-sent backlog —
+    # STUCK is evaluated before the waiting branch
+    assert card.index("not stuck.empty") < card.index("queued for the next run")
     """The bug that showed a false red on a Teams-only account."""
     assert "SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH_WEBHOOK'" not in _ALERTS
     banner = _ALERTS.split("def _delivery_status", 1)[1].split("\ndef ", 1)[0]

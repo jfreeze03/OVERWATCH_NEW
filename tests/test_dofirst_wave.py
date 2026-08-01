@@ -238,6 +238,105 @@ def test_n12_producers_enqueue_not_direct_insert():
 
 
 # ---------------------------------------------------------------------------
+# Codex #30 — a failed flush re-queues its rows (no silent loss on a blip) and
+# only disables after the SECOND consecutive failure; shape is resolved once,
+# synchronously/observed, from the real column list.
+# ---------------------------------------------------------------------------
+def test_codex30_flush_requeues_first_failure_then_disables(monkeypatch):
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+    calls: list[str] = []
+    # every submit "fails" (returns False) — the transient-blip / real-outage shape
+    monkeypatch.setattr(q, "execute_statement_async",
+                        lambda sql, *, page: (calls.append(sql), False)[1])
+    prefix = ("INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY "
+              "(PAGE, TIER, QUERY_KEY, ELAPSED_MS, ROWS_RETURNED, OK) ")
+    q._buffer_write(prefix, "SELECT 'p', 'live', 'k0', 1.0, 1, TRUE", off_flag="_ow_qtel_off")
+
+    q.flush_write_buffer()                       # 1st failure
+    assert len(calls) == 1
+    assert st.session_state["_ow_qtel_fail:_ow_qtel_off"] == 1
+    assert (st.session_state.get(q._WRITE_BUFFER_KEY) or {}).get(prefix)  # rows RE-QUEUED
+    assert not st.session_state.get("_ow_qtel_off")                       # not yet disabled
+
+    q.flush_write_buffer()                       # 2nd failure
+    assert len(calls) == 2
+    assert st.session_state.get("_ow_qtel_off") is True                   # now disabled
+    assert prefix not in (st.session_state.get(q._WRITE_BUFFER_KEY) or {})  # batch dropped
+    st.session_state.clear()
+
+
+def test_codex30_shape_resolved_once_from_real_columns(monkeypatch):
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+
+    class _Cols:
+        columns = ("PAGE", "TIER", "QUERY_KEY", "ELAPSED_MS", "ROWS_RETURNED", "OK",
+                   "CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED")  # the 10-col shape
+
+    class _Sess:
+        def __init__(self):
+            self.n = 0
+
+        def sql(self, _s):
+            self.n += 1
+            return _Cols()
+
+    sess = _Sess()
+    monkeypatch.setattr(q, "get_session", lambda: sess)
+    q._resolve_telemetry_shape()
+    q._resolve_telemetry_shape()                 # cached: no second describe
+    assert sess.n == 1
+    assert st.session_state.get("_ow_qtel_prev64shape") is True   # 10-col -> prev64 downgrade
+    assert not st.session_state.get("_ow_qtel_oldshape")
+    st.session_state.clear()
+
+
+# ---------------------------------------------------------------------------
+# Codex #43 — each async batch member's QUERY_ID is captured off its job handle
+# so member telemetry can later join to ACCOUNT_USAGE.QUERY_HISTORY.
+# ---------------------------------------------------------------------------
+def test_codex43_batch_captures_member_query_ids(monkeypatch):
+    from app.core import query as q
+
+    class _Job:
+        def __init__(self, df, qid):
+            self._df, self.query_id = df, qid
+
+        def result(self):
+            return self._df
+
+    class _Stmt:
+        def __init__(self, job):
+            self._job = job
+
+        def to_pandas(self, block=True):
+            return self._job
+
+    class _Sess:
+        def __init__(self, jobs):
+            self._jobs, self._i = jobs, 0
+
+        def sql(self, _s):
+            job = self._jobs[self._i]
+            self._i += 1
+            return _Stmt(job)
+
+    jobs = [_Job(pd.DataFrame({"A": [1]}), "qid_A"), _Job(pd.DataFrame({"B": [2]}), "qid_B")]
+    monkeypatch.setattr(q, "get_session", lambda: _Sess(jobs))
+    monkeypatch.setattr(q, "apply_query_tag", lambda *a, **k: None)
+    monkeypatch.setattr(q, "apply_statement_timeout", lambda *a, **k: None)
+
+    q._execute_batch(("s0", "s1"), "recent", "T")
+    assert q._member_qid(0) == "qid_A"
+    assert q._member_qid(1) == "qid_B"
+
+
+# ---------------------------------------------------------------------------
 # N11 — contract term projection unified onto trailing-30d burn
 # ---------------------------------------------------------------------------
 def test_n11_contract_pace_trailing_basis():

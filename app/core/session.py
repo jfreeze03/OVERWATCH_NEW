@@ -117,9 +117,17 @@ def _try_alter_session(session, statement: str) -> bool:
 
 def _apply_base_parameters(session) -> None:
     if getattr(session, _TAG_ATTR, None) is None:
+        # correctness #22: set the session TIMEZONE to America/Chicago so a
+        # non-SiS run (local dev, tests, off-SiS deploys) agrees with
+        # formulas.account_today()'s Chicago basis instead of drifting on a UTC
+        # clock. Harmless in SiS — ALTER SESSION is a no-op there (owner's-rights
+        # rejects it), so this changes nothing for the live app. NOTE for the
+        # owner: for the SiS path, set the ACCOUNT default TIMEZONE to
+        # America/Chicago (ALTER ACCOUNT SET TIMEZONE='America/Chicago') — that is
+        # the only lever that moves the SiS session clock.
         applied = _try_alter_session(
             session,
-            f"ALTER SESSION SET QUERY_TAG = '{APP_QUERY_TAG_PREFIX}', TIMEZONE = 'UTC'",
+            f"ALTER SESSION SET QUERY_TAG = '{APP_QUERY_TAG_PREFIX}', TIMEZONE = 'America/Chicago'",
         )
         setattr(session, _TAG_ATTR, APP_QUERY_TAG_PREFIX if applied else "")
 
@@ -169,3 +177,30 @@ def current_role() -> str:
     st.session_state["_ow_current_role"] = role
     st.session_state["_ow_current_user"] = user
     return role
+
+
+def is_operator() -> bool:
+    """In-app operator entitlement, resolved from the VIEWER identity (correctness #3).
+
+    Under owner's-rights Streamlit-in-Snowflake, SQL CURRENT_ROLE() is the app
+    OWNER's role for EVERY viewer, so gating operator UI/actions on
+    ``resolve_role_profile(current_role()) in OPERATOR_PROFILES`` never
+    differentiates people — one accidental app grant would expose DBA actions to
+    any viewer. Entitle from st.user (the actual viewer) checked against the
+    explicit config.OPERATOR_USERS allowlist instead. Snowflake RBAC remains the
+    REAL boundary — a non-privileged role's write still fails server-side; this
+    only decides what the app OFFERS.
+
+    Off-SiS (local dev, tests, older runtimes) st.user is absent so
+    viewer_name() == "": fall back to the role->profile check there, so local
+    development and AppTest keep working exactly as before.
+    """
+    from app.config import OPERATOR_PROFILES, is_operator_user, resolve_role_profile
+    from app.core.identity import viewer_name
+
+    viewer = viewer_name()
+    if viewer:
+        return is_operator_user(viewer)
+    # No viewer identity (off-SiS): the owner's-rights ambiguity does not apply,
+    # so the role-based check is safe and preserves local-dev/test behavior.
+    return resolve_role_profile(current_role()) in OPERATOR_PROFILES

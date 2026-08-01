@@ -11,12 +11,12 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
+from app.config import core_object
 from app.core.ai import cortex_complete
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run
-from app.core.session import current_role
+from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql, recheck_sql
@@ -133,25 +133,43 @@ def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str 
 
 
 def _last_delivery_card() -> None:
-    """'No alerts today — quiet, or broken?' answered in one card.
+    """'No alerts today — quiet, or broken?' answered in one card, PER ROUTE.
 
     The owner hit exactly this on 2026-07-31: a full day of Teams silence with no way
     to tell a healthy quiet stretch from a dead pipe (the app HAD the timestamp, buried
-    as a suffix on a banner). Silence is not evidence either way — the sender is a
+    as a suffix on a banner). Silence alone is not a fault signal — the sender is a
     per-key 24h digest, so a chronic condition raises once and quiet days are legitimately
     empty. What decides it is whether anything is WAITING, so the card reports both.
+
+    The builder now returns one row PER ENABLED ROUTE (Codex #29): a healthy route no
+    longer masks a dead sibling and one dead route no longer reddens the whole card. We
+    aggregate the WORST route state for the headline and name the offender:
+      - FAILING_NOW (#42): latest failure newer than latest success — a later success
+        clears the red, so a recovered endpoint does not stay red for 24h.
+      - STUCK (#41): eligible backlog but never sent (or silent >=90m) -> BROKEN now,
+        instead of the old "queued for next run" when nothing had EVER been delivered.
     """
     res = run(mart_sql.last_delivery_health(), page=_PAGE, key="last_delivery_health",
               tier="live", source="ALERT_DELIVERIES + ALERT_EVENTS/ROUTES + APP_ERROR_LOG")
     if not res.usable():
         return
-    row = res.df.iloc[0]
-    last_at = row.get("LAST_SENT_AT")
-    mins = safe_float(row.get("MINUTES_SINCE"), -1)
-    waiting = int(safe_float(row.get("ELIGIBLE_NOW")))
-    fails = int(safe_float(row.get("ROUTE_FAILS_24H")))
-    routes_n = int(safe_float(row.get("ENABLED_ROUTES")))
-    never = last_at is None or str(last_at) in ("NaT", "None", "")
+    df = res.df
+    routes_n = int(safe_float(df["ENABLED_ROUTES"].iloc[0])) if "ENABLED_ROUTES" in df else 0
+    # Per-route rows only (drop the synthetic zero-route row, whose ROUTE_ID is NULL).
+    rdf = df[df["ROUTE_ID"].notna()].copy() if "ROUTE_ID" in df else df.iloc[0:0]
+
+    def _flag(series):
+        # Snowflake booleans arrive as bool/np.bool_/NaN; normalize to a bool mask.
+        return series.fillna(False).astype(bool)
+
+    # Headline value: newest confirmed send across ANY route (min minutes-since).
+    mins_series = rdf["MINUTES_SINCE"].dropna() if not rdf.empty else rdf.get("MINUTES_SINCE")
+    mins = safe_float(mins_series.min(), -1) if (mins_series is not None and not mins_series.empty) else -1
+    never = rdf.empty or rdf["LAST_SENT_AT"].dropna().empty
+    waiting = int(safe_float(rdf["ELIGIBLE_NOW"].sum())) if not rdf.empty else 0
+    fails = int(safe_float(rdf["ROUTE_FAILS_24H"].sum())) if not rdf.empty else 0
+    failing = rdf[_flag(rdf["FAILING_NOW"])] if not rdf.empty else rdf
+    stuck = rdf[_flag(rdf["STUCK"])] if not rdf.empty else rdf
 
     if never:
         value, sev = "never", "bad"
@@ -162,16 +180,28 @@ def _last_delivery_card() -> None:
     else:
         value, sev = f"{mins / 1440:,.1f} d ago", "warn"
 
-    # The verdict line — this is the part that separates quiet from broken.
+    def _rlabel(r) -> str:
+        integ = str(r.get("INTEGRATION_NAME") or "").strip()
+        rid = str(r.get("ROUTE_ID") or "")[:8]
+        return f"{integ} ({rid})" if integ else rid
+
+    # The verdict line — this is the part that separates quiet from broken, worst first.
+    last_fail_sample = ""
     if routes_n == 0:
         verdict, sev = "No enabled route — nothing can be delivered.", "bad"
-    elif fails > 0:
-        verdict = (f"{fails} send failure(s) in 24h — the endpoint is refusing. "
-                   "Check the integration, not the alert rules.")
+    elif not failing.empty:
+        r0 = failing.sort_values("CONSEC_FAILS", ascending=False).iloc[0]
+        more = f" (+{len(failing) - 1} more route(s) failing)" if len(failing) > 1 else ""
+        verdict = (f"Route {_rlabel(r0)} is failing: {int(safe_float(r0.get('CONSEC_FAILS')))} "
+                   "send failure(s) since its last success — the endpoint is refusing. "
+                   "Check the integration, not the alert rules." + more)
         sev = "bad"
-    elif waiting > 0 and mins >= 90:
-        verdict = (f"{waiting} event(s) eligible right now but nothing has gone out — "
-                   "delivery looks stuck.")
+        last_fail_sample = str(r0.get("LAST_FAILURE") or "").strip()
+    elif not stuck.empty:
+        r0 = stuck.sort_values("ELIGIBLE_NOW", ascending=False).iloc[0]
+        more = f" (+{len(stuck) - 1} more stuck)" if len(stuck) > 1 else ""
+        verdict = (f"Route {_rlabel(r0)} has {int(safe_float(r0.get('ELIGIBLE_NOW')))} event(s) "
+                   "eligible right now but nothing has gone out — delivery looks stuck." + more)
         sev = "bad"
     elif waiting > 0:
         verdict = f"{waiting} event(s) queued for the next run."
@@ -179,27 +209,36 @@ def _last_delivery_card() -> None:
         verdict = ("Quiet: nothing is waiting. Alerts are a per-key digest, so a chronic "
                    "condition raises once — no news here really is no news.")
 
+    # Headline last-send delta: the newest route's timestamp, not a global masked one.
+    last_at = None
+    if not never:
+        _sent = rdf["LAST_SENT_AT"].dropna()
+        last_at = _sent.max() if not _sent.empty else None
+
     kpi_row([
         {"label": "Last alert delivery", "value": value, "severity": sev,
-         "delta": (str(last_at)[:16] if not never else "no successful send on record"),
+         "delta": (str(last_at)[:16] if last_at is not None else "no successful send on record"),
          "delta_color": "off",
-         "help": "Newest row in ALERT_DELIVERIES — a send Snowflake confirmed, not a raise. "
-                 "Silence alone is not a fault signal: the sender is a 24h-windowed digest "
-                 "and dedupes per key, so a steady account is legitimately quiet. The verdict "
-                 "below compares it against what is actually eligible to send right now."},
+         "help": "Newest row in ALERT_DELIVERIES across all routes — a send Snowflake "
+                 "confirmed, not a raise. Silence alone is not a fault signal: the sender "
+                 "is a 24h-windowed digest and dedupes per key, so a steady account is "
+                 "legitimately quiet. The verdict below is the WORST route's state, not a "
+                 "global average — one healthy route can't hide a dead sibling."},
         {"label": "Eligible to send now", "value": f"{waiting}",
-         "severity": "warn" if (waiting > 0 and mins >= 90) else "",
+         "severity": "warn" if not stuck.empty else "",
          "help": "Open events inside the sender's 24h window that match an enabled route "
-                 "and are not yet in the delivery ledger — mirrors the sender's own predicate."},
+                 "and are not yet in that route's delivery ledger — mirrors the sender's "
+                 "own predicate, summed across routes."},
         {"label": "Send failures (24h)", "value": f"{fails}",
-         "severity": "bad" if fails else "ok",
-         "help": "route_send_failed rows: the integration raised. A dead or unauthorized "
-                 "webhook shows up here, never as silence."},
+         "severity": "bad" if not failing.empty else "ok",
+         "help": "route_send_failed rows: the integration raised. Red only when a route's "
+                 "LATEST failure is newer than its latest success (a recovered endpoint "
+                 "clears); a dead or unauthorized webhook shows up here, never as silence."},
     ])
     st.caption(md_dollars(verdict))
-    if fails and str(row.get("LAST_FAILURE") or "").strip():
+    if last_fail_sample:
         with st.expander("Last send failure"):
-            st.code(str(row.get("LAST_FAILURE"))[:400])
+            st.code(last_fail_sample[:400])
 
 
 def _delivery_status() -> None:
@@ -576,8 +615,8 @@ def _open_events_section(events, is_operator: bool) -> None:
 def render() -> None:
     f = filters()
     page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.", icon_name="alerts")
-    profile = resolve_role_profile(current_role())
-    is_operator = profile in OPERATOR_PROFILES
+    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    is_operator = _is_operator()
 
     company = f["company"]
     events = run(mart_sql.open_alert_events(500, company), page=_PAGE,

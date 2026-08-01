@@ -574,7 +574,8 @@ def _topbar_scope_controls() -> None:
         st.selectbox("Environment", ENVIRONMENTS, key="flt_environment",
                      help="Narrows the Database picker only — pick a database to "
                           "scope results. Page queries filter by Company and "
-                          "Database; the per-environment lens ships with Compare.")
+                          "Database. Environment-vs-environment comparison is not "
+                          "yet built (Compare pairs periods by company + dates).")
     with c_days:
         st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
         if int(st.session_state.get("flt_days", 7)) > MAX_LIVE_WINDOW_DAYS:

@@ -11,6 +11,11 @@ import pandas as pd
 # Standard-normal consistency constants (Iglewicz & Hoaglin modified z-scores).
 _MAD_K = 0.6745
 _MEANAD_K = 0.7979
+# #37: FIXED app-side flag threshold. It equals the server SP_ANOMALY_SWEEP's
+# DEFAULT threshold, but the sweep reads the configurable ALERT_CONFIG.THRESHOLD_NUM
+# — this constant does NOT — so once the owner tunes that setting the two diverge
+# and the server's COST_ANOMALY_SWEEP events (on Alerts) are the authoritative
+# escalation. This app-side scorer stays a fixed-default morning-triage twin.
 DEFAULT_THRESHOLD = 3.5
 
 

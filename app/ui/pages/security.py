@@ -199,7 +199,7 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(res)
 
 
-def _egress_tab(company: str, days: int) -> None:
+def _egress_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     """r25 #7 (owner pick): data leaving the account. Two lenses — the
     outbound transfer bill (DATA_TRANSFER_HISTORY) and who unloads to stages
     (QUERY_TYPE='UNLOAD') — because exfiltration and a surprise egress bill
@@ -230,8 +230,10 @@ def _egress_tab(company: str, days: int) -> None:
         "an unload exactly one carries the payload). SAMPLE_TARGET previews the newest "
         "statement so the destination is visible without a drill."
     )
-    unl = run(security_sql.unload_activity(days, company), page=_PAGE,
-              key=f"unload_{company}_{days}", tier="recent",
+    # #35: honor the active Database/Schema filter (QUERY_HISTORY carries both) so the
+    # unload panel doesn't silently revert to company-wide under a scoped view.
+    unl = run(security_sql.unload_activity(days, company, database, schema_contains), page=_PAGE,
+              key=f"unload_{company}_{days}_{database}_{schema_contains}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD only)")
     if unl.ok and unl.empty:
         st.success("No unloads to stages in this window for this scope.")
@@ -581,6 +583,6 @@ def render() -> None:
     elif section == "Clients":
         _clients_tab(f["company"], f["days"])
     elif section == "Egress":
-        _egress_tab(f["company"], f["days"])
+        _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     else:
         _trust_center_tab()

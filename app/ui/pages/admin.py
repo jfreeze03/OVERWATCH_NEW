@@ -13,14 +13,12 @@ import streamlit as st
 from app.config import (
     APP_VERSION,
     DEFAULT_SETTINGS,
-    OPERATOR_PROFILES,
     core_object,
-    resolve_role_profile,
 )
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
-from app.core.session import current_role
+from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.data import cost_sql, mart_sql
 from app.logic.formulas import md_dollars, safe_float
@@ -780,8 +778,10 @@ def _metric_registry_tab() -> None:
 @safe_page(_PAGE)
 def render() -> None:
     page_header("Admin", "Settings, migrations, metrics, self-cost, performance, canary, and telemetry.", icon_name="admin")
-    profile = resolve_role_profile(current_role())
-    is_operator = profile in OPERATOR_PROFILES
+    # #3: operator gating resolves the VIEWER identity against the allowlist, not
+    # CURRENT_ROLE() (which is the app owner's role for every viewer under owner's-rights
+    # SiS). Falls back to the role->profile check off-SiS. `profile` still drives page nav.
+    is_operator = _is_operator()
     _context_section()
     section = lazy_sections(
         ["Settings", "Migrations & freshness", "Metrics", "App self-cost",

@@ -323,16 +323,25 @@ WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 
-def object_cost_by_arm(days: int = 30, company: str = "ALL") -> str:
+def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "") -> str:
     """Object-cost breakdown by cost arm from FACT_OBJECT_COST_DAILY (V048,
     additive; V050 splits query compute by role). QUERY_COMPUTE_WRITE is the
     production share (building the object), QUERY_COMPUTE_READ the consumption
     share — measured compute+QAS split equally across touched objects (legacy
     QUERY_COMPUTE rows predate V050); the rest are direct per-object serverless
-    credits (clustering / MV refresh / serverless task / Snowpipe / search-opt)."""
+    credits (clustering / MV refresh / serverless task / Snowpipe / search-opt).
+
+    #19: honors the global Database filter. FACT_OBJECT_COST_DAILY has no
+    DATABASE_NAME column — the object's database is the FIRST label of
+    OBJECT_FQN (``db.schema.object``), which is exactly what the V048 loader
+    feeds COMPANY_FOR_DATABASE — so we scope on ``SPLIT_PART(OBJECT_FQN, '.', 1)``
+    rather than a column that does not exist."""
     days = bounded_days(days, 400)
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)
+    _db = str(database or "").strip()
+    db_pred = (f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {companies.sql_literal(_db.upper())}"
+               if _db else "")
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred)
     return f"""
 SELECT COST_ARM,
        COUNT(DISTINCT OBJECT_FQN) AS OBJECTS,
@@ -344,17 +353,36 @@ ORDER BY CREDITS DESC
 """
 
 
-def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
+def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25,
+                    database: str = "") -> str:
     """Top objects by total measured + maintenance credits (V048), with the
-    query-compute vs maintenance split per object."""
+    query-compute vs maintenance split per object.
+
+    #19: honors the global Database filter on the object's own database — the
+    first label of OBJECT_FQN (see object_cost_by_arm for why SPLIT_PART).
+
+    #48: the label columns are derived deterministically, not via ANY_VALUE.
+    ANY_VALUE(COMPANY/DOMAIN) under GROUP BY OBJECT_FQN could return an
+    ARBITRARY row's label if the COMPANY_SCOPE mapping (and thus the stored
+    per-day COMPANY) changed within the window. COMPANY is recomputed at query
+    time from the object's database via COMPANY_FOR_DATABASE — one value per
+    FQN, always the CURRENT mapping — and OBJECT_DOMAIN uses MAX() so the same
+    object always shows the same label instead of a nondeterministic pick."""
     days = bounded_days(days, 400)
     lim = max(5, min(int(limit or 25), 200))
     comp = "" if str(company).upper() in ("ALL", "") else f"COMPANY = {companies.sql_literal(company)}"
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp)
+    _db = str(database or "").strip()
+    db_pred = (f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {companies.sql_literal(_db.upper())}"
+               if _db else "")
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred)
+    # COMPANY_FOR_DATABASE on the object's db: deterministic per OBJECT_FQN group
+    # (the arg is a pure function of the grouped column), so MAX() just returns
+    # that single value while keeping the column legal without a GROUP BY entry.
+    _company_expr = companies.database_case_sql("SPLIT_PART(OBJECT_FQN, '.', 1)")
     return f"""
 SELECT OBJECT_FQN,
-       ANY_VALUE(OBJECT_DOMAIN) AS OBJECT_DOMAIN,
-       ANY_VALUE(COMPANY) AS COMPANY,
+       MAX(OBJECT_DOMAIN) AS OBJECT_DOMAIN,
+       MAX({_company_expr}) AS COMPANY,
        ROUND(SUM(IFF(COST_ARM IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_READ', 'QUERY_COMPUTE_WRITE'), CREDITS, 0)), 4) AS QUERY_CREDITS,
        ROUND(SUM(IFF(COST_ARM NOT IN ('QUERY_COMPUTE', 'QUERY_COMPUTE_READ', 'QUERY_COMPUTE_WRITE', 'QUERY_COMPUTE_RESIDUAL'), CREDITS, 0)), 4) AS MAINTENANCE_CREDITS,
        ROUND(SUM(COALESCE(CREDITS, 0)), 4) AS CREDITS
@@ -547,15 +575,25 @@ GROUP BY 1
 ORDER BY 1 DESC
 """
 
-def tag_coverage(days: int, company: str = "ALL") -> str:
+def tag_coverage(days: int, company: str = "ALL", database: str = "",
+                 schema_contains: str = "") -> str:
     """Query-tag governance: execution-time-weighted coverage + the top
-    untagged workloads by user. Chargeback precision is capped by this."""
+    untagged workloads by user. Chargeback precision is capped by this.
+
+    #36: honors the global Database/Schema filter. QUERY_HISTORY carries
+    DATABASE_NAME/SCHEMA_NAME, so a scoped chargeback screen stays scoped on
+    the live path (the user-grain MART_TAG_COVERAGE_DAILY dropped those columns
+    in aggregation, so cost.py routes to this builder whenever a db/schema
+    filter is active)."""
+    from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         companies.warehouse_clause(company),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
 SELECT

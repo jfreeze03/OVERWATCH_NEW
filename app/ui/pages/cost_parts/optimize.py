@@ -19,10 +19,10 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
+from app.config import core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
-from app.core.session import current_role
+from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.data.common import bounded_days
@@ -377,6 +377,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     st.caption(md_dollars("Grouped by parameterized fingerprint: a $9 query run 400x outranks "
                           "one $300 outlier — this is where caching/materialization actually pays."))
     st.caption(toggle_cost_hint("exppat_"))
+    # #33: this panel groups by parameterized fingerprint across warehouses/users
+    # and carries no database/schema grain, so it cannot narrow to the global
+    # Database/Schema filter — labelled company-wide when a scope is active so it
+    # never silently reads as db-scoped like the expensive-queries panel above.
+    if str(st.session_state.get("flt_database", "")).strip() or \
+       str(st.session_state.get("flt_schema_contains", "")).strip():
+        st.caption("Company-wide: this fingerprint rollup is not narrowed by the active "
+                   "Database/Schema filter (it has no object grain).")
     if st.toggle("Run recurring-pattern scan (hour-share allocation by fingerprint)",
                  key="cost_exppat_toggle",
                  help="Its own scan, independent of the expensive-query one above — "
@@ -497,8 +505,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         "serverless task / Snowpipe / search-opt. QUERY_COMPUTE_RESIDUAL = credits "
         "for queries that neither read nor wrote a base object."
     )
-    _oc = run(cost_sql.object_cost_by_arm(days, company), page=_PAGE,
-              key=f"objcost_arm_{company}_{days}", tier="recent",
+    # #19/#33: thread the global Database filter (was silently dropped — the
+    # panel header promises db-scoped attribution). The object's db is the first
+    # label of OBJECT_FQN; cost_sql scopes on it. Included in the cache key so a
+    # db switch re-reads. Schema is not applied here (object-cost is scoped by
+    # database, not the free-text schema filter) — the caption says so.
+    _oc_db = st.session_state.get("flt_database", "")
+    _oc = run(cost_sql.object_cost_by_arm(days, company, database=_oc_db), page=_PAGE,
+              key=f"objcost_arm_{company}_{days}_{_oc_db}", tier="recent",
               source="FACT_OBJECT_COST_DAILY (object-cost ledger)", probe=True)
     if _oc.ok and not _oc.empty:
         _adf = _oc.df.copy()
@@ -506,8 +520,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         kpi_row([{"label": "Object-attributed spend", "value": format_usd(float(_adf["USD"].sum())),
                   "help": "Sum across arms x the configured rate. Additive by construction."}])
         charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD", title="$ by cost arm")
-        _top = run(cost_sql.object_cost_top(days, company, 25), page=_PAGE,
-                   key=f"objcost_top_{company}_{days}", tier="recent",
+        _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db), page=_PAGE,
+                   key=f"objcost_top_{company}_{days}_{_oc_db}", tier="recent",
                    source="FACT_OBJECT_COST_DAILY (top objects)", probe=True)
         if _top.ok and not _top.empty:
             _tdf = _top.df.copy()
@@ -516,8 +530,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _tdf["MAINT_USD"] = _tdf["MAINTENANCE_CREDITS"].map(safe_float) * rate
             styled_table(_tdf[["OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "QUERY_USD", "MAINT_USD", "USD"]],
                          height=300)
-        st.caption("Measured query compute is split equally across a query's base objects "
-                   "(additive); full-query 'influenced cost' is a separate non-additive lens.")
+        st.caption(
+            ("Scoped to the selected database. " if str(_oc_db).strip() else "")
+            + "Measured query compute is split equally across a query's base objects "
+            "(additive); full-query 'influenced cost' is a separate non-additive lens.")
     elif _oc.ok:
         st.success("No object-cost rows yet (loads after V048 + the first daily run).")
     else:
@@ -531,45 +547,55 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  source="DATABASE_STORAGE_USAGE_HISTORY")
     if guard(sg_res, "No storage history for this scope."):
         movers = storage_movers(sg_res.df, safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0))
-        # D4: the chart's top-10 cut is by projected DOLLARS — the database adding
-        # the most TB is not necessarily the one adding the most money, and this
-        # panel's own axis is $/mo.
-        growing = movers[movers["GROWTH_USD_30D"] > 0].sort_values("GROWTH_USD_30D", ascending=False)
-        _shrinking = int((movers["GROWTH_USD_30D"] < 0).sum())
-        kpi_row([
-            {"label": "Current storage", "value": f"{float(movers['CURRENT_TB'].sum()):,.2f} TB"},
-            {"label": f"Growth ({days_storage}d)", "value": f"{float(movers['GROWTH_TB'].sum()):,.2f} TB"},
-            # E6: gainers-only, and it always was — the label now says so instead
-            # of reading like the account's net storage trend.
-            {"label": "Projected growth $/mo (gainers)",
-             "value": format_usd(float(growing["GROWTH_USD_30D"].sum())),
-             "help": f"Growing databases only; the {_shrinking} shrinking one(s) are excluded, so "
-                     "this is not a net trend. Slope extended 30 days x storage rate. Estimate."},
-        ])
-        charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D", title="Projected growth $/mo")
-        _mv_cols = ["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
-                    "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
-        if "LOW_CONFIDENCE" in movers.columns:
-            _mv_cols.append("LOW_CONFIDENCE")
-        st.dataframe(
-            movers[_mv_cols],
-            hide_index=True, use_container_width=True,
-            column_config={
-                "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
-                "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
-                "LOW_CONFIDENCE": st.column_config.CheckboxColumn("Low confidence"),
-            },
-        )
-        result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
-                                     if days < days_storage else f"{days_storage}d window."))
-        _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
-        st.caption(
-            "The projection is a least-squares slope over every observed day, not first-vs-last "
-            "bytes — one reload on an endpoint day used to become the whole trend."
-            + (f" {_low} database(s) have fewer than 7 observed days and are flagged low "
-               "confidence: treat their $/mo as a placeholder, not a forecast." if _low else "")
-            + " Failsafe % is the failsafe share of TOTAL billed bytes (database + failsafe)."
-        )
+        # #33: honor the global Database filter. storage_growth_by_database
+        # (outside this cluster) returns every database in the company scope, so
+        # narrow to the selected database on movers' own DATABASE_NAME grain —
+        # filtering rows keeps every column, so the KPIs/chart stay well-typed.
+        _sg_db = str(st.session_state.get("flt_database", "") or "").strip()
+        if _sg_db and not movers.empty and "DATABASE_NAME" in movers.columns:
+            movers = movers[movers["DATABASE_NAME"].astype(str).str.upper() == _sg_db.upper()]
+        if _sg_db and movers.empty:
+            st.info("No storage history for the selected database in this window.")
+        else:
+            # D4: the chart's top-10 cut is by projected DOLLARS — the database adding
+            # the most TB is not necessarily the one adding the most money, and this
+            # panel's own axis is $/mo.
+            growing = movers[movers["GROWTH_USD_30D"] > 0].sort_values("GROWTH_USD_30D", ascending=False)
+            _shrinking = int((movers["GROWTH_USD_30D"] < 0).sum())
+            kpi_row([
+                {"label": "Current storage", "value": f"{float(movers['CURRENT_TB'].sum()):,.2f} TB"},
+                {"label": f"Growth ({days_storage}d)", "value": f"{float(movers['GROWTH_TB'].sum()):,.2f} TB"},
+                # E6: gainers-only, and it always was — the label now says so instead
+                # of reading like the account's net storage trend.
+                {"label": "Projected growth $/mo (gainers)",
+                 "value": format_usd(float(growing["GROWTH_USD_30D"].sum())),
+                 "help": f"Growing databases only; the {_shrinking} shrinking one(s) are excluded, so "
+                         "this is not a net trend. Slope extended 30 days x storage rate. Estimate."},
+            ])
+            charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D", title="Projected growth $/mo")
+            _mv_cols = ["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
+                        "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
+            if "LOW_CONFIDENCE" in movers.columns:
+                _mv_cols.append("LOW_CONFIDENCE")
+            st.dataframe(
+                movers[_mv_cols],
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
+                    "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
+                    "LOW_CONFIDENCE": st.column_config.CheckboxColumn("Low confidence"),
+                },
+            )
+            result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
+                                         if days < days_storage else f"{days_storage}d window."))
+            _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0
+            st.caption(
+                "The projection is a least-squares slope over every observed day, not first-vs-last "
+                "bytes — one reload on an endpoint day used to become the whole trend."
+                + (f" {_low} database(s) have fewer than 7 observed days and are flagged low "
+                   "confidence: treat their $/mo as a placeholder, not a forecast." if _low else "")
+                + " Failsafe % is the failsafe share of TOTAL billed bytes (database + failsafe)."
+            )
 
     st.divider()
     st.markdown("**Query efficiency (pruning + result cache)**")
@@ -594,8 +620,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     source="ACCOUNT_USAGE.QUERY_HISTORY (BYTES_SCANNED = 0)")
         if guard(cache, "No queries in the window."):
             charts.daily_metric_line(cache.df, "DAY", "HIT_PCT", "zero-scan answers %")
+            # #33: result_cache_daily (outside this cluster) aggregates to day grain
+            # with no database/schema column, so unlike the pruning panel above it
+            # cannot honor the global filter — labelled company-wide so a scoped
+            # screen does not read this line as db-specific.
             st.caption("Share of successful queries answered without scanning (result cache + "
-                       "metadata). A falling line means redundant recomputation.")
+                       "metadata). A falling line means redundant recomputation. "
+                       "Company-wide: not narrowed by the active Database/Schema filter.")
 
     st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
     st.caption(toggle_cost_hint("reclaim_"))
@@ -892,8 +923,8 @@ def _savings_tab() -> None:
                                           "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY")
                              if c in res.df.columns]])
 
-    profile = resolve_role_profile(current_role())
-    is_operator = profile in OPERATOR_PROFILES
+    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    is_operator = _is_operator()
 
     runs = run(mart_sql.savings_verification_runs(), page=_PAGE, key="savings_runs",
                tier="recent", source="SAVINGS_VERIFICATION_RUNS")

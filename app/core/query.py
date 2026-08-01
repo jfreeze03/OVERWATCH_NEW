@@ -68,6 +68,40 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
     return sample_roll is not None and float(sample_roll) < float(sample_rate)
 
 
+def _resolve_telemetry_shape() -> None:
+    """Determine the LIVE APP_QUERY_TELEMETRY column shape ONCE, synchronously and
+    OBSERVED, and cache the result as the same downgrade flags the buffered writer reads.
+
+    Codex #30: the buffered flush submits async (collect_nowait), which returns 'submitted'
+    BEFORE the server validates the statement — so a 12-col INSERT against the live 10-col
+    table failed server-side UNOBSERVED and every telemetry row was silently dropped for the
+    whole session, while the 12->10->6 downgrade (keyed on a SYNCHRONOUS failure that never
+    happened) never fired. Reading the real column list is a describe — no data scanned, and
+    the result IS observed — so the shape is resolved deterministically on the first persist
+    and rows are formatted at the correct shape from the very first one, never mis-shaped.
+    Cached in session_state; runs at most once per session (success or not)."""
+    if st.session_state.get("_ow_qtel_shape_resolved"):
+        return
+    st.session_state["_ow_qtel_shape_resolved"] = True   # once per session, whatever happens
+    try:
+        session = get_session()
+        # .columns triggers a describe (synchronous, observed) without scanning rows.
+        cols = {str(c).upper() for c in
+                session.sql(f"SELECT * FROM {core_object('APP_QUERY_TELEMETRY')} LIMIT 0").columns}
+        if not cols:
+            return
+        if {"SAMPLE_PROB", "QUERY_ID"} <= cols:
+            return                                        # newest 12-col shape: no flag
+        if {"CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED"} <= cols:
+            st.session_state["_ow_qtel_prev64shape"] = True   # 10-col (pre-SAMPLE_PROB/QUERY_ID)
+        else:
+            st.session_state["_ow_qtel_oldshape"] = True      # 6-col legacy (pre-V027)
+    except Exception:
+        # Table missing / no SELECT grant: don't guess a shape. The lazy flush ladder still
+        # applies as a fallback, and a truly absent table trips _ow_qtel_off on the write.
+        pass
+
+
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
                        rows: int, ok: bool, cache_hit: bool | None = None,
                        sql_hash: str | None = None, batch_size: int | None = None,
@@ -100,6 +134,11 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
                        else _TELEMETRY_SAMPLE_RATE)
         qid = sql_literal(str(query_id)[:64]) if query_id else "NULL"
         col = f"INSERT INTO {core_object('APP_QUERY_TELEMETRY')} "
+        # #30: resolve the real column shape ONCE, synchronously/observed, BEFORE formatting
+        # this row — so the buffered async flush (which cannot observe a shape mismatch) never
+        # serializes rows at the wrong shape and silently loses them. Sets the SAME downgrade
+        # flags below; the lazy 2-strikes ladder in _flush_group remains as a secondary net.
+        _resolve_telemetry_shape()
         # N12: enqueue, not one INSERT round trip per row; the buffered flush is a
         # single multi-row INSERT ... SELECT ... UNION ALL. THREE-level downgrade so
         # the app degrades cleanly against an older schema: V064 (12-col) -> V027
@@ -188,6 +227,15 @@ _LAST_QUERY_ID: ContextVar[str] = ContextVar("ow_last_query_id", default="")
 # fills it, run_batch resets it before the fetch and reads it after, and an empty
 # dict (cache hit) means "no server work happened", so wall time stands in.
 _BATCH_MEMBER_MS: ContextVar[dict | None] = ContextVar("ow_batch_member_ms", default=None)
+# #43: per-member Snowflake QUERY_ID for the batch just executed, {member index: qid}.
+# The batch path submits every member async (each job handle carries its own query_id),
+# but the member telemetry never captured it — so the QUERY_HISTORY correction the timing
+# comments promise (batch member gather time is submission-order, not the query's true
+# duration) had nothing to join on. Captured off the job handles here, threaded into the
+# member telemetry in run_batch. Same sentinel discipline as _BATCH_MEMBER_MS: it cannot
+# ride the cached RETURN value (a cache hit would replay a stale run's ids), and an empty
+# dict (cache hit) means no job ran, so the id is honestly blank.
+_BATCH_MEMBER_QID: ContextVar[dict | None] = ContextVar("ow_batch_member_qid", default=None)
 
 
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
@@ -430,6 +478,11 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     # per-query duration lives in ACCOUNT_USAGE via the persisted QUERY_ID.
     member_ms: dict[int, float] = {}
     _BATCH_MEMBER_MS.set(member_ms)
+    # #43: capture each async job's QUERY_ID as it is submitted (the handle carries it
+    # immediately), so member telemetry can later join to QUERY_HISTORY for the true
+    # per-query duration the submission-order gather time cannot give.
+    member_qid: dict[int, str] = {}
+    _BATCH_MEMBER_QID.set(member_qid)
     _mark = time.perf_counter()
 
     def _stamp(idx: int) -> None:
@@ -441,7 +494,11 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     jobs: list = []
     try:
         for sql in sqls:
-            jobs.append(session.sql(sql).to_pandas(block=False))  # noqa: PERF401 — incremental on purpose: a comprehension loses the in-flight handles when submission N fails (r10 #3)
+            # incremental on purpose (r10 #3): a comprehension loses the in-flight handles
+            # when submission N fails, and #43 needs each handle's query_id at submit time.
+            job = session.sql(sql).to_pandas(block=False)
+            member_qid[len(jobs)] = str(getattr(job, "query_id", "") or "")
+            jobs.append(job)
     except Exception as sub_exc:
         frames0: dict = {}        # those queries RUN server-side either way, and
         errors0: dict = {}        # dropping the handles re-paid them in fallback.
@@ -509,6 +566,14 @@ def _member_elapsed(idx: int, wall_ms: float) -> float:
     return float((_BATCH_MEMBER_MS.get() or {}).get(idx, wall_ms))
 
 
+def _member_qid(idx: int) -> str:
+    """This batch member's Snowflake QUERY_ID (#43), captured off the async job handle
+    so a later ACCOUNT_USAGE.QUERY_HISTORY join can recover the query's true duration.
+    '' on a cache hit (no job ran) or a Snowpark build that never exposed the id — the
+    same empty-dict-means-nothing-ran discipline _member_elapsed uses."""
+    return str((_BATCH_MEMBER_QID.get() or {}).get(idx, "") or "")
+
+
 def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | None:
     """Parallel fetch for multi-query sections: [{key, sql, source, max_rows?}].
 
@@ -557,8 +622,10 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         scope = _cache_scope("\n".join(capped))
         # P3: clear first — a stale dict from an EARLIER batch in this same
         # thread context would otherwise be read as this batch's timings when
-        # the fetcher answers from cache (its body never runs).
+        # the fetcher answers from cache (its body never runs). #43: the QUERY_ID
+        # sidecar is cleared for the same reason (a cache hit ran no jobs -> blank).
         _BATCH_MEMBER_MS.set(None)
+        _BATCH_MEMBER_QID.set(None)
         frames = _BATCH_FETCHERS[tier](tuple(capped), scope, page)
     except _BatchPartial as bp:
         elapsed = (time.perf_counter() - started) * 1000
@@ -581,7 +648,8 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                     df = df.head(caps[idx])
                 member_ms = _member_elapsed(idx, elapsed)
                 _telemetry(page, tier, f"batch:{spec['key']}", member_ms,
-                           len(df), ok=True, batch_size=len(bspecs), truncated=truncated)
+                           len(df), ok=True, batch_size=len(bspecs), truncated=truncated,
+                           query_id=_member_qid(idx))
                 out[str(spec["key"])] = QueryResult(
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
@@ -619,7 +687,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         rows_total += len(df)
         member_ms = _member_elapsed(idx, elapsed)
         _telemetry(page, tier, f"batch:{spec['key']}", member_ms, len(df), ok=True,
-                   batch_size=len(bspecs), truncated=truncated)
+                   batch_size=len(bspecs), truncated=truncated, query_id=_member_qid(idx))
         out[str(spec["key"])] = QueryResult(
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
@@ -738,16 +806,37 @@ def _flush_group(prefix: str) -> None:
         if execute_statement_async(stmt, page="Telemetry"):
             if _fk:
                 st.session_state.pop(_fk, None)      # success clears the transient counter
-        elif flag:
+            return
+        if flag:
             # r4: require TWO consecutive failures before stepping DOWN the shape ladder
             # (12->10->6->off). execute_statement_async returns False on ANY error, so a
             # single transient blip (network/session) would otherwise latch the downgrade
             # and permanently drop SAMPLE_PROB for the session; a real shape mismatch fails
-            # every flush and trips on the 2nd. The failed batch is dropped either way.
+            # every flush and trips on the 2nd.
             n = int(st.session_state.get(_fk, 0)) + 1
             st.session_state[_fk] = n
             if n >= 2:
-                st.session_state[flag] = True
+                st.session_state[flag] = True        # give up this shape; drop the batch
+                return
+            # #30: the FIRST strike does NOT drop the rows — a submit failure is
+            # indistinguishable from a transient blip here, so re-queue the popped batch and
+            # let the next flush retry it (bounded: the 2nd consecutive strike drops + steps
+            # down). Without this, one blip silently lost a whole rerun's telemetry.
+            _requeue_group(prefix, group)
+    except Exception:
+        pass
+
+
+def _requeue_group(prefix: str, group: dict) -> None:
+    """Put a failed flush's rows back on the buffer so the next flush retries them (#30).
+    Prepends ahead of anything enqueued since the pop, so ordering within the group holds."""
+    try:
+        buf = st.session_state.setdefault(_WRITE_BUFFER_KEY, {})
+        existing = buf.get(prefix)
+        if existing is None:
+            buf[prefix] = group
+        else:
+            existing["rows"] = list(group.get("rows", [])) + list(existing.get("rows", []))
     except Exception:
         pass
 

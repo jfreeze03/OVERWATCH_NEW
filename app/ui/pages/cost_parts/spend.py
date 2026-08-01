@@ -24,9 +24,11 @@ from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
+    min_covered_days,
     result_caption,
     run_mart_first,
     served_days,
+    stalest_day,
     styled_table,
     user_display_map,
     with_user_names,
@@ -486,16 +488,18 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
     res = run(cost_sql.storage_by_database_calendar(company, _db, prior=False), page=_PAGE,
               key=f"storage_mtd_{company}", tier="historical",
               source="FACT_STORAGE_DAILY (MTD daily-average, billing basis)")
-    # C4: coverage guard. The calendar builder divides SUM(bytes) by days-in-period,
-    # so a stalled loader (missing recent days) prices those days as zero storage —
-    # a silent understatement the old empty-only fallback never caught. Accept the
-    # fact only when its latest day is within a 2-day lag of yesterday; otherwise
-    # read the source live. LATEST_DAY is per-DB; the account view is its max.
+    # C4/#20: coverage guard. The calendar builder divides SUM(bytes) by
+    # days-in-period, so a stalled loader (missing recent days) prices those days
+    # as zero storage — a silent understatement the old empty-only fallback never
+    # caught. Accept the fact only when its STALEST database's latest day is
+    # within a 2-day lag of yesterday; otherwise read the source live. #20: use
+    # the MIN latest day across databases (stalest_day), not MAX — MAX(LATEST_DAY)
+    # let the one freshest database hide stale/missing peers, so the average read
+    # fresh while half its inputs were behind.
     def _latest_day(r: object) -> object:
-        if not (getattr(r, "ok", False) and not r.empty and "LATEST_DAY" in r.df.columns):
+        if not (getattr(r, "ok", False) and not r.empty):
             return None
-        ld = pd.to_datetime(r.df["LATEST_DAY"], errors="coerce").max()
-        return ld.date() if pd.notna(ld) else None
+        return stalest_day(r.df)
     fact_latest = _latest_day(res)
     fact_stale = res.ok and not res.empty and (
         fact_latest is None or fact_latest < today - timedelta(days=2))
@@ -509,13 +513,39 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         df["TiB"] = (df["DB_BYTES"].map(safe_float) + df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
         df["USD_MONTH"] = df["TiB"] * rate_tb
         mtd_tib = float(df["TiB"].sum())
+        # C4/#21: the prior full month gets the SAME coverage contract as MTD —
+        # a completeness guard, a live fallback, and averaging over OBSERVED
+        # days. The old fact-only read had none: it divided a partial fact month
+        # (stalled loader) by the full calendar month, understating the prior
+        # baseline and INFLATING MoM (a smaller denominator makes growth look
+        # larger). For a COMPLETED month every existing database should carry
+        # every day, so a short row is a loader gap — average over the days
+        # actually present, not the calendar length.
+        first_this = today.replace(day=1)
+        last_prior = first_this - timedelta(days=1)      # last day of the prior month
+        period_days_prior = last_prior.day               # calendar length of the prior month
         pri = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
                   key=f"storage_prior_{company}", tier="historical",
                   source="FACT_STORAGE_DAILY (prior full month daily-average)", probe=True)
+        pri_latest = _latest_day(pri)
+        pri_stale = pri.ok and not pri.empty and (
+            pri_latest is None or pri_latest < last_prior - timedelta(days=2))
+        if not pri.ok or pri.empty or pri_stale:
+            pri = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=True), page=_PAGE,
+                      key=f"storage_prior_live_{company}", tier="historical",
+                      source="DATABASE_STORAGE_USAGE_HISTORY (prior full month daily-average, live)")
         prior_tib = 0.0
         if pri.ok and not pri.empty:
-            prior_tib = float(((pri.df["DB_BYTES"].map(safe_float)
-                                + pri.df["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)).sum())
+            pdf = pri.df
+            avg_bytes = pdf["DB_BYTES"].map(safe_float) + pdf["FAILSAFE_BYTES"].map(safe_float)
+            # The builder already divided bytes by the calendar period; rescale
+            # to an average over the days actually OBSERVED so a partial source
+            # reads as a true daily average, not a full-month understatement.
+            if "DAYS_AVERAGED" in pdf.columns:
+                scale = pdf["DAYS_AVERAGED"].map(
+                    lambda o: (period_days_prior / o) if safe_float(o) > 0 else 1.0)
+                avg_bytes = avg_bytes * scale
+            prior_tib = float((avg_bytes / (1024**4)).sum())
         mom = ((mtd_tib - prior_tib) / prior_tib * 100.0) if prior_tib > 0 else None
         kpi_row([
             {"label": "Storage MTD (daily avg)", "value": f"{mtd_tib:,.2f} TiB",
@@ -536,7 +566,10 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         # C4: expose coverage so a short month reads as short, not as low spend.
         # Expected complete days = day-of-month minus today's excluded partial day.
         expected_days = max(today.day - 1, 0)
-        covered = int(df["DAYS_AVERAGED"].map(safe_float).max()) if "DAYS_AVERAGED" in df.columns else 0
+        # #20: the LEAST-covered database sets the coverage number — MAX let a
+        # single fully-loaded database report full coverage while stale peers
+        # dragged the average down unseen.
+        covered = min_covered_days(df)
         latest = _latest_day(res)
         latest_txt = latest.isoformat() if latest else "n/a"
         if expected_days > 0 and covered < expected_days - 2:

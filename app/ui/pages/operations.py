@@ -6,11 +6,12 @@ from datetime import timedelta
 
 import streamlit as st
 
-from app.config import OPERATOR_PROFILES, core_object, resolve_role_profile
+from app import companies
+from app.config import core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import execute_cancel_query, execute_statement, run, run_batch
-from app.core.session import current_role
+from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
@@ -622,18 +623,34 @@ def _contention_tab(company: str, days: int) -> None:
             styled_table(res.df)
     with right:
         st.markdown("**Lock waits**")
+        _lock_db = str(st.session_state.get("flt_database", "") or "").strip()
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
         res = run_mart_first(
             mart27_sql.lock_wait_daily(min(days, 14), company),
             ops_sql.lock_contention(min(days, 14)),
-            page=_PAGE, key=f"c_locks_{company}_{days}",
+            page=_PAGE, key=f"c_locks_{company}_{days}_{_lock_db}",  # #34: scope in the cache key
             mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
             live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)",
             empty_is_answer=True)
         if guard(res, "No lock waits recorded (or the view is not accessible in this edition)."):
-            styled_table(res.df)
-            result_caption(res)
+            # #34: bring both paths to one company + database contract. Neither
+            # builder (both outside this cluster) takes a database predicate, and
+            # the live LOCK_WAIT_HISTORY fallback carries no company scope at all
+            # (COMPANY lives only on the mart) — yet both return DATABASE_NAME. Scope
+            # at the seam on that object grain: the live fallback to the company by
+            # database classification, and the active Database filter to both.
+            _ldf = res.df
+            _served_live = bool(getattr(_ldf, "attrs", {}).get("_ow_served_live"))
+            if _served_live and company not in ("ALL", "") and "DATABASE_NAME" in _ldf.columns:
+                _ldf = _ldf[_ldf["DATABASE_NAME"].map(companies.classify_database) == company]
+            if _lock_db and "DATABASE_NAME" in _ldf.columns:
+                _ldf = _ldf[_ldf["DATABASE_NAME"].astype(str).str.upper() == _lock_db.upper()]
+            if _ldf.empty:
+                st.caption("No lock waits in this company/database scope.")
+            else:
+                styled_table(_ldf)
+                result_caption(res)
 
 
 
@@ -1013,8 +1030,8 @@ def render() -> None:
     f = filters()
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
-    profile = resolve_role_profile(current_role())
-    is_operator = profile in OPERATOR_PROFILES
+    # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
+    is_operator = _is_operator()
     page_header("Operations", "Queries, tasks, warehouses, contention, change impact, releases, pipeline SLAs, and emergency levers.", icon_name="operations",
                 scope_note=f"{f['company']} · last {f['days']} days")
     # Contention folded under Warehouses (CoCo): warehouse health and the

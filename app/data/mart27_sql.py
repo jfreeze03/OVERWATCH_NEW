@@ -917,9 +917,22 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     vis = (companies.user_clause(company, "KEY_NAME") if dim == "USER"
            else companies.database_visibility_clause(company, "KEY_NAME"))
     display = and_where(companies.database_equals_clause(database, "DATABASE_NAME"), vis)
+    # #14: the coverage probe must be measured on the SAME company/database scope
+    # the panel serves. MIN(DAY) over the WHOLE table let one company's year-old
+    # rows satisfy the window gate for a DIFFERENT company that only holds three
+    # weeks — the young scope's short answer then passed as a full-window one and
+    # silently UNDER-REPORTED. Scope cov by the company (warehouse grain, the
+    # denominator's scope) and the selected database so FIRST_DAY reflects how far
+    # back THIS scope actually reaches. ALL/no-filter -> whole table (unchanged).
+    cov_scope = and_where(
+        companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "x.DATABASE_NAME"),
+    )
     return f"""
 WITH cov AS (
-    SELECT MIN(DAY) AS FIRST_DAY FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")}
+    SELECT MIN(DAY) AS FIRST_DAY
+    FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")} x
+    WHERE {cov_scope}
 ),
 scoped AS (
     SELECT {dim_col} AS KEY_NAME, x.DATABASE_NAME, x.EXEC_SEC, x.ALLOC_CREDITS

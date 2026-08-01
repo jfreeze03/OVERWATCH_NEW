@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.117.0 — Codex-R Wave 2: app-code batch (delivery, telemetry, scope, coverage, auth) (2026-07-31)
+
+The 24 confirmed app-code findings, four clusters:
+
+- **Delivery card, per-route (#29/#41/#42):** `last_delivery_health()` returns one row **per
+  enabled route** — a healthy route no longer masks a dead sibling, and one dead route no
+  longer reddens the whole card. `FAILING_NOW` compares latest-failure vs latest-success (a
+  recovered endpoint clears instead of staying red 24h); a never-sent route with an eligible
+  backlog reads BROKEN immediately instead of "queued for next run". The card aggregates the
+  worst route state and names the offender.
+- **Telemetry (#30/#43/#44):** the async write-shape is now resolved **deterministically** (a
+  synchronous observed probe, cached per session) so the 12-col INSERT can't silently fail
+  against the live 10-col table and drop rows; popped rows are re-queued on a failed flush.
+  Batch members now carry each async job's `query_id` for a real `QUERY_HISTORY` correction.
+  Cache-hit% is weighted by `1/SAMPLE_PROB` to undo the tail-sample skew, and the false
+  "tail-complete" docstring is corrected.
+- **Scope threading (#19/#33/#34/#35/#36/#48):** object-cost panels, lock contention, unload
+  activity, and query-tag governance now honor the active Database/Schema filter (or route to
+  the db/schema-predicated live path when the mart can't scope, and say so). Top-object labels
+  are derived deterministically (`COMPANY_FOR_DATABASE`) instead of nondeterministic
+  `ANY_VALUE`.
+- **Coverage gates (#14/#16/#20/#21):** allocation coverage is computed from the **scoped**
+  frame (one company's old data no longer makes another's window look covered); a shared
+  `coverage_contract()` helper lands in components for `run_mart_first` (opt-in, no behavior
+  change for existing callers); storage freshness/coverage take the **stalest/least-covered**
+  database instead of the rosiest peer; prior-month storage gets a completeness guard, live
+  fallback, and observed-day divisor so MoM stops inflating.
+- **Auth & labeling (#3/#50/#37/#22/#49):** operator gating resolves the **viewer** identity
+  against an allowlist (`session.is_operator()`) instead of `CURRENT_ROLE()` — which is the app
+  owner's role for every viewer under owner's-rights SiS — wired across all 7 call sites; the
+  retro score drops its leading partial month; the Control Room anomaly caption stops claiming
+  parity with the configurable server threshold; the session timezone is set to
+  America/Chicago (aligns off-SiS runs; the reviewer's "forced to UTC" mechanism was a no-op in
+  SiS); and the Environment/Compare help no longer promises an env-vs-env lens that isn't built.
+
+Deferred (disclosed already / L-effort follow-up): #15 estimator unification.
+Gates green: ruff, mypy (pure layers), **pytest 1797 passed / 1 skipped**.
+
 ## 4.116.0 — Codex-R Wave 1: fix-before-apply migration generators (V064/V066/V067/V069) (2026-07-31)
 
 A 50-item external review was adjudicated against the real code (44 confirmed, 6 partial, 0

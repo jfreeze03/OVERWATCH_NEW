@@ -319,11 +319,13 @@ def render() -> None:
 
     # ---- Incidents (V032) ------------------------------------------------------
     section_header("Incidents")
-    from app.config import OPERATOR_PROFILES, resolve_role_profile
     from app.core.query import execute_statement, run_batch
-    from app.core.session import current_role
+    from app.core.session import is_operator
     from app.ui.components import log_ui_event, notify
-    _is_op = resolve_role_profile(current_role()) in OPERATOR_PROFILES
+    # correctness #3: entitle operator UI from the VIEWER identity, not
+    # CURRENT_ROLE() — under owner's-rights SiS the latter is the app owner's
+    # role for every viewer, so it never differentiates people.
+    _is_op = is_operator()
     # T2.1: the three live-tier reads this screen makes (open incidents, proposals,
     # triage alerts) are each re-paid every 30s in steady state. Submit them as ONE
     # live run_batch so morning triage makes one round trip, not three. Proposals
@@ -509,9 +511,11 @@ def render() -> None:
             "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
             f"complete days (baseline median {format_usd(_base_median_usd)}/day). Flagged at "
             f"|z| >= {DEFAULT_THRESHOLD}; HIGH at |z| >= {ANOMALY_HIGH_Z:.0f} or "
-            f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — the same escalation "
-            "SP_ANOMALY_SWEEP applies, whose duplicate COST_ANOMALY_SWEEP events are excluded "
-            "here and shown on Alerts instead. A warehouse needs 5+ complete days of history "
+            f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — fixed in-app defaults. "
+            "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
+            "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
+            "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
+            "authoritative. A warehouse needs 5+ complete days of history "
             "to be scored at all"
             + (f" — {_thin_warehouses} currently do not have them and are unscored."
                if _thin_warehouses else ".")))

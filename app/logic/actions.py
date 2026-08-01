@@ -25,9 +25,13 @@ DUPLICATE_ALERT_RULE_IDS = ("COST_ANOMALY_SWEEP",)
 
 #: D6/C2: escalate a spend anomaly to HIGH on SHAPE **or** on MONEY.
 #: The z gate matches SP_ANOMALY_SWEEP's ``IFF(z >= zthr * 2, 'HIGH', 'MEDIUM')``
-#: with its default threshold of 3.5 — the app used to say HIGH from z >= 5, so
-#: the same warehouse-day could arrive as HIGH (app) and MEDIUM (server) in one
-#: list. Raising the z gate alone would DEMOTE real money, so the dollar arm
+#: ONLY at the sweep's DEFAULT threshold of 3.5 (2 x 3.5 = 7) — the app used to
+#: say HIGH from z >= 5, so the same warehouse-day could arrive as HIGH (app) and
+#: MEDIUM (server) in one list. This constant is FIXED, while the sweep reads the
+#: configurable ALERT_CONFIG.THRESHOLD_NUM, so once that threshold is tuned the
+#: two diverge; the server's COST_ANOMALY_SWEEP events (on Alerts) are then the
+#: authoritative escalation and this in-app row is a best-effort morning-triage
+#: twin (#37). Raising the z gate alone would DEMOTE real money, so the dollar arm
 #: escalates any break whose excess over its own baseline clears the floor,
 #: however tame its z. The floor is an uncalibrated starting point: roughly
 #: "a five-figure annualized surprise", tune it against real incidents.
