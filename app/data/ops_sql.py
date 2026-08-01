@@ -347,10 +347,12 @@ LIMIT 300
 
 
 def volume_deltas() -> str:
-    """Yesterday's rows-added vs prior-7d average per moving table — the
-    (informational) volume-drop panel. The PIPE_VOLUME_DROP alert it once fed was
-    retired: its scan arm was dropped from SP_ALERT_SCAN at V043 and no version since
-    raises it (truncate-and-reload batches make it noisy), so this panel pages nothing."""
+    """Yesterday's rows-added vs prior-7d average per moving table — the panel behind
+    the PIPE_VOLUME_DROP alert. That alert is LIVE: SP_ANOMALY_SWEEP (TASK_ANOMALY_SWEEP,
+    06:40 CT daily) raises a HIGH event when a PROD table's rows-added collapses past a 50%
+    drop vs its prior-7-day average, gated on ALERT_CONFIG.ENABLED (so it can be turned off).
+    This panel is the account-wide informational view (all databases + the 30-50% WATCH
+    band), so it intentionally shows rows that do not page."""
     return """
 SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
        Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D,

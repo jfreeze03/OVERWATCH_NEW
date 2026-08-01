@@ -1,6 +1,34 @@
 # Changelog
 
-## 4.118.1 — Volume-drop alert: correct the stale "this alert fires" claim (2026-08-01)
+## 4.118.2 — CORRECTION: PIPE_VOLUME_DROP is LIVE + alert-rule consistency test (2026-08-01)
+
+**v4.118.1 was wrong** and this reverses it. That entry claimed the PIPE_VOLUME_DROP alert was
+"retired (scan arm removed at V043) … pages nothing." It is not retired — it **fires**: the
+literal only ever lived in `SP_ANOMALY_SWEEP` (not `SP_ALERT_SCAN`), whose latest definition
+(V023) still `INSERT`s a HIGH, PROD-scoped, >50%-drop `PIPE_VOLUME_DROP` event into
+`ALERT_EVENTS`, gated on `ALERT_CONFIG.ENABLED`; `TASK_ANOMALY_SWEEP` (06:40 CT daily) is
+resumed and never suspended, and the config row is never disabled by a migration. The v4.118.1
+investigation searched `SP_ALERT_SCAN`, found it absent there, and wrongly concluded "nothing
+raises it" — describing a live HIGH alert as dead, which could lead an operator to dismiss a
+real PROD volume collapse.
+
+- `operations.py` / `ops_sql.py`: the "Volume drops" copy now states the truth — the alert
+  fires past a 50% PROD drop via `SP_ANOMALY_SWEEP`/`TASK_ANOMALY_SWEEP`, is gated on
+  `ALERT_CONFIG.ENABLED` (so it can be turned off), and the panel is the account-wide
+  informational view (non-PROD + the 30-50% WATCH band don't page). The truncate-and-reload
+  caveat is kept, with the correct remedy: **disable the rule in `ALERT_CONFIG`** for a
+  truncate-reload account (the owner `UPDATE … SET ENABLED=FALSE` genuinely works — the arm
+  honors the flag).
+- **New guard `tests/test_alert_rule_consistency.py`** — cross-references three static sets:
+  rule ids the latest alert-raiser procs (`SP_ALERT_SCAN`, `SP_ALERT_SCAN_DAILY`,
+  `SP_ANOMALY_SWEEP`, …) actually raise; rule ids enabled in `ALERT_CONFIG`; and rule ids the
+  app presents as LIVE vs RETIRED. Guard A: a "fires" claim must be backed by a raiser. Guard B:
+  a "retired"/"pages nothing" claim must not name a still-raised, still-enabled rule (this fails
+  on the exact v4.118.1 text — verified). Guard C: no ENABLED config row without a raiser. Plus
+  a non-vacuous self-check so the classifier can't silently stop matching. Neither the migration
+  byte-compare tests nor sqlglot could catch this class; this closes the gap.
+
+## 4.118.1 — Volume-drop alert: correct the stale "this alert fires" claim (2026-08-01)  [SUPERSEDED — see 4.118.2; its claim that the alert was retired is WRONG]
 
 Owner asked to remove the volume-down alert (they truncate-and-reload nightly, which the rule
 reads as a collapse). Investigation found the `PIPE_VOLUME_DROP` alert's scan arm was **removed
