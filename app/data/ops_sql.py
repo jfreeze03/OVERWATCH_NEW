@@ -348,7 +348,9 @@ LIMIT 300
 
 def volume_deltas() -> str:
     """Yesterday's rows-added vs prior-7d average per moving table — the
-    panel behind the PIPE_VOLUME_DROP alert."""
+    (informational) volume-drop panel. The PIPE_VOLUME_DROP alert it once fed was
+    retired: its scan arm was dropped from SP_ALERT_SCAN at V043 and no version since
+    raises it (truncate-and-reload batches make it noisy), so this panel pages nothing."""
     return """
 SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
        Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D,

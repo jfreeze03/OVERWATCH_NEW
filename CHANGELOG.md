@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.118.1 — Volume-drop alert: correct the stale "this alert fires" claim (2026-08-01)
+
+Owner asked to remove the volume-down alert (they truncate-and-reload nightly, which the rule
+reads as a collapse). Investigation found the `PIPE_VOLUME_DROP` alert's scan arm was **removed
+from `SP_ALERT_SCAN` back at V043** (during the PIPE_TASK_FAILURES retirement) and no version
+since — including the live V061 scan and the pending V062–V070 — raises it. So the rule was
+already dormant; what lingered was old open events plus **stale app copy** claiming the alert
+still fires. The Operations "Volume drops" panel and its builder now state plainly that the
+alert was retired, that the panel is informational (pages nothing), and that truncate-and-reload
+tables will always show a large "drop" here by design. (Owner-side: disable the dormant
+`ALERT_CONFIG` row and resolve any old open `PIPE_VOLUME_DROP` events — SQL in the handoff.)
+
 ## 4.118.0 — Codex-R Waves 4 & 3: V070 delivery routing + deploy hardening (2026-07-31)
 
 **V070__delivery_routing_teams_only.sql** — a forward migration (V012/V018 are already applied)

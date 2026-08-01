@@ -421,8 +421,10 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
     st.markdown("**Volume drops (yesterday vs prior-7d average)**")
     panel_help(
         "Rows added per table yesterday vs its prior-7-day average (tables moving "
-        "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past 50% (PROD databases only); this table also "
-        "shows the 30-50% WATCH band so you see decay before it alerts."
+        "≥1,000 rows/day). Informational only — the PIPE_VOLUME_DROP alert was retired "
+        "(its scan arm was removed at V043), so nothing here pages. Note: tables that are "
+        "truncated and reloaded by a nightly batch will always show a large 'drop' here — "
+        "that is the reload pattern, not a real volume loss."
     )
     vd = run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
