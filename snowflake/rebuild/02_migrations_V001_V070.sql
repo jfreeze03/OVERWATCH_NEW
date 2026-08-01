@@ -25,10 +25,20 @@ CREATE SCHEMA IF NOT EXISTS DBA_MAINT_DB.OVERWATCH;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (
     VERSION      NUMBER        NOT NULL,
-    DESCRIPTION  VARCHAR(200)  NOT NULL,
+    -- Widened 200 -> 4000 (2026-08-01): migration notes from V041 on run 200-1100
+    -- chars, which overflowed the original VARCHAR(200) and failed the insert. An
+    -- EXISTING install created this column at 200 and V001 will not re-run there, so
+    -- it must be widened once by hand before applying V041+ (see DEPLOYMENT.md); the
+    -- idempotent ALTER below covers a fresh V001 apply and a re-run.
+    DESCRIPTION  VARCHAR(4000) NOT NULL,
     APPLIED_AT   TIMESTAMP_NTZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
     APPLIED_BY   VARCHAR(200)  NOT NULL DEFAULT CURRENT_USER()
 );
+
+-- Idempotent widen (Snowflake allows growing a VARCHAR in place; no rewrite, no data
+-- loss). Belt-and-suspenders so a partially-created baseline still ends up at 4000.
+ALTER TABLE DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
+    ALTER COLUMN DESCRIPTION SET DATA TYPE VARCHAR(4000);
 
 -- ---------------------------------------------------------------------------
 -- Settings — the authoritative rates/budget/contract store.

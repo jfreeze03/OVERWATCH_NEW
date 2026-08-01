@@ -5,6 +5,16 @@
 Run as **SNOW_ACCOUNTADMINS** (or **SNOW_SYSADMINS** if it can create the
 warehouse and grants) — these are the account's DBA roles:
 
+> **⚠ EXISTING INSTALLS — widen SCHEMA_VERSION.DESCRIPTION once before applying V041+.**
+> The column shipped as `VARCHAR(200)` in the original V001, but migration notes from V041 on
+> run 200–1100 chars, so their `INSERT INTO SCHEMA_VERSION` fails with a string-too-long error.
+> V001 now declares `VARCHAR(4000)` for fresh installs; an account created on the old baseline
+> must widen it once (instant, in-place, no data loss):
+> ```sql
+> ALTER TABLE DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
+>     ALTER COLUMN DESCRIPTION SET DATA TYPE VARCHAR(4000);
+> ```
+
 ```
 snowflake/migrations/V001__core.sql
 snowflake/migrations/V002__facts.sql
