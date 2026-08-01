@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_snowflake_smoke:
+        description: "Run the OPTIONAL Snowflake integration smoke (needs SNOWFLAKE_* repo secrets)."
+        type: boolean
+        default: false
 
 # A newer push to the same branch/PR supersedes the running build.
 concurrency:
@@ -41,9 +47,93 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install FLOOR-pinned runtime + test deps
+      - name: Install FLOOR-pinned runtime + FULL test toolchain
         run: |
+          # Floor-pin the RUNTIME libs, but install the full test toolchain too:
+          # pytest collects the WHOLE suite, and tests/test_migrations_parse.py
+          # imports sqlglot — omitting it made collection error out (every test
+          # in the run reported as a collection failure), masking real floor
+          # regressions. Keep this list in sync with requirements-dev.txt's
+          # test-only deps.
           pip install "streamlit==1.45.0" "pandas==2.2.0" "altair==5.4.0" \
-                      "jinja2==3.1.2" "pytest~=8.3"
+                      "jinja2==3.1.2" "pytest~=8.3" "sqlglot>=25"
       - name: Page smokes + logic tests on the floor pins
         run: pytest -q
+
+  # OPTIONAL Snowflake integration smoke (Wave 3 #32). OPT-IN and NON-BLOCKING:
+  # it runs ONLY on a manual workflow_dispatch with run_snowflake_smoke=true, is
+  # not a required status check, and is continue-on-error, so a red run can never
+  # gate a merge. It exercises the deploy chain end-to-end against a THROWAWAY
+  # zero-copy clone of the database and drops it on exit, so it never mutates
+  # prod objects. Configure SNOWFLAKE_* repo secrets to enable it; without them
+  # the job self-skips cleanly.
+  snowflake-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_snowflake_smoke }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true    # NON-BLOCKING: never gates merge
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_DATABASE: DBA_MAINT_DB
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard — skip cleanly when secrets are absent
+        id: guard
+        run: |
+          if [ -z "$SNOWFLAKE_ACCOUNT" ] || [ -z "$SNOWFLAKE_USER" ] || [ -z "$SNOWFLAKE_PASSWORD" ]; then
+            echo "Snowflake secrets not configured — skipping the optional integration smoke."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.run == 'true'
+        with:
+          python-version: "3.11"
+      - name: Install Snowflake CLI
+        if: steps.guard.outputs.run == 'true'
+        run: pip install "snowflake-cli-labs>=2.5"
+      - name: Migrations + validate + loader + route-ledger on a throwaway clone
+        if: steps.guard.outputs.run == 'true'
+        env:
+          CLONE_DB: OVERWATCH_CI_SMOKE_${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          sql() { snow sql --temporary-connection \
+                    --account "$SNOWFLAKE_ACCOUNT" --user "$SNOWFLAKE_USER" \
+                    --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                    --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                    --database "$CLONE_DB" "$@"; }
+          # Zero-copy clone of the prod DB into a throwaway; always drop it on exit.
+          snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
+                   --user "$SNOWFLAKE_USER" --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                   --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                   -q "CREATE DATABASE $CLONE_DB CLONE $SNOWFLAKE_DATABASE;"
+          cleanup() {
+            snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
+                     --user "$SNOWFLAKE_USER" --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                     --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
+                     -q "DROP DATABASE IF EXISTS $CLONE_DB;" || true
+          }
+          trap cleanup EXIT
+          # 1. Migrations in order (additive; the clone already has prod state,
+          #    so this proves the chain re-applies cleanly / is idempotent).
+          for f in $(ls snowflake/migrations/V*.sql | sort); do
+            echo "== apply $f"; sql -f "$f"
+          done
+          # 2. Structural validation — every row must read OK.
+          sql -f snowflake/validate.sql
+          # 3. Exercise one loader end-to-end (fast, self-contained).
+          sql -q "CALL $CLONE_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();"
+          # 4. Route-ledger check: no ENABLED alert route may name a blank
+          #    integration (a delivery dead-route). Fails the step if any exist.
+          sql -q "SELECT IFF(COUNT(*) = 0, 'ROUTE LEDGER OK', 'FAIL: enabled route with blank integration') AS RESULT
+                  FROM $CLONE_DB.OVERWATCH.ALERT_ROUTES
+                  WHERE ENABLED AND (INTEGRATION_NAME IS NULL OR TRIM(INTEGRATION_NAME) = '');"
+          # NOTE: account-specific bits (role/warehouse names, auth method) may
+          # need tuning for your tenant. The job is opt-in + non-blocking by
+          # design, so a mismatch here can never block a merge.

@@ -64,15 +64,51 @@
 --   SECRET_STRING  = everything after /workflows/  (the flow id + ?api-version...&sig=...)
 -- NOTE the cluster segment: current Power Automate URLs include /direct/cu/NN/workflows/.
 -- If yours has it, WEBHOOK_URL must keep it too, or every send 404s.
- CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+-- ---------------------------------------------------------------------------
+-- PASTE TARGETS — edit these TWO values in a Snowsight worksheet, NOWHERE else.
+-- They carry angle-bracket markers on purpose: the GUARD immediately below
+-- RAISEs while any '<' remains, so a straight copy-paste run of this TRACKED
+-- file aborts here — BEFORE the CREATE OR REPLACE statements can overwrite the
+-- live OVERWATCH_WEBHOOK_TEAMS integration with junk, drop every grant on it,
+-- and silence Teams. Both values feed the CREATE statements below (built via
+-- EXECUTE IMMEDIATE so the URL/secret live in exactly one place, no drift).
+SET teams_webhook_url   = 'https://<your-env>.environment.api.powerplatform.com/powerautomate/automations/direct/cu/<NN>/workflows/SNOWFLAKE_WEBHOOK_SECRET';
+SET teams_secret_string = '<flow-id>/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=<REDACTED-PASTE-IN-SNOWSIGHT>';
+
+-- GUARD (Wave 3 #2): abort while placeholders remain. A less-than marker in
+-- either paste target means the real values were never filled in — so refuse
+-- to run rather than clobber the live integration and its grants.
+EXECUTE IMMEDIATE $$
+DECLARE
+  placeholder_still_present EXCEPTION (-20001,
+    'ABORT: webhook_delivery.sql still holds PLACEHOLDER values (angle-bracket markers remain in the two SET paste targets at the top). Paste the REAL Teams Workflows URL + secret into them FIRST, in a Snowsight worksheet, then re-run. Running as-is would CREATE OR REPLACE the live OVERWATCH_WEBHOOK_TEAMS integration with junk, DROP every grant on it, and kill Teams delivery.');
+BEGIN
+  IF (CONTAINS($teams_webhook_url, '<') OR CONTAINS($teams_secret_string, '<')) THEN
+    RAISE placeholder_still_present;
+  END IF;
+  RETURN 'placeholder guard passed — real values present';
+END;
+$$;
+
+-- Safe now: (re)create the secret + integration from the two vetted values.
+-- REPLACE injects the guarded vars into the DDL, so there is no second copy of
+-- the URL/secret to drift out of sync with what the guard checked.
+SET create_teams_secret = REPLACE($$
+CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
     TYPE = GENERIC_STRING
-     SECRET_STRING = '<flow-id>/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=<REDACTED-PASTE-IN-SNOWSIGHT>';
- CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
-     TYPE = WEBHOOK ENABLED = TRUE
-     WEBHOOK_URL = 'https://<your-env>.environment.api.powerplatform.com/powerautomate/automations/direct/cu/<NN>/workflows/SNOWFLAKE_WEBHOOK_SECRET'
-     WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
-     WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
-     WEBHOOK_HEADERS = ('Content-Type' = 'application/json');
+    SECRET_STRING = 'OW_TEAMS_SECRET_MARKER'
+$$, 'OW_TEAMS_SECRET_MARKER', $teams_secret_string);
+EXECUTE IMMEDIATE $create_teams_secret;
+
+SET create_teams_integration = REPLACE($$
+CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
+    TYPE = WEBHOOK ENABLED = TRUE
+    WEBHOOK_URL = 'OW_TEAMS_URL_MARKER'
+    WEBHOOK_SECRET = DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
+    WEBHOOK_BODY_TEMPLATE = '{"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{"$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4","body":[{"type":"TextBlock","text":"SNOWFLAKE_WEBHOOK_MESSAGE","wrap":true}]}}]}'
+    WEBHOOK_HEADERS = ('Content-Type' = 'application/json')
+$$, 'OW_TEAMS_URL_MARKER', $teams_webhook_url);
+EXECUTE IMMEDIATE $create_teams_integration;
  -- !! RE-RUN HAZARD: this is a bare INSERT, not a MERGE — running this file again
  -- mints a SECOND route row for OVERWATCH_WEBHOOK_TEAMS (duplicate Teams cards).
  -- And CREATE OR REPLACE on the integration above DROPS AND RECREATES it, which
@@ -166,4 +202,23 @@
 -- — one bad channel never blocks the others. Disable a route by flipping
 -- ENABLED, no deploy needed.
 
-ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
+-- GUARDED RESUME (Wave 3 #2): only resume delivery if the Teams integration
+-- actually exists. A bare unconditional RESUME here would re-arm the notify
+-- task even when OVERWATCH_WEBHOOK_TEAMS is absent (e.g. the guard above
+-- aborted the create, or this snippet is run standalone), so every fire would
+-- attempt a send against a missing integration. RESUME is idempotent when the
+-- task is already running, so re-running this is safe.
+EXECUTE IMMEDIATE $$
+DECLARE
+  integration_count INTEGER;
+BEGIN
+  SHOW NOTIFICATION INTEGRATIONS LIKE 'OVERWATCH_WEBHOOK_TEAMS';
+  SELECT COUNT(*) INTO :integration_count
+    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  IF (integration_count > 0) THEN
+    ALTER TASK DBA_MAINT_DB.OVERWATCH.TASK_ALERT_NOTIFY RESUME;
+    RETURN 'TASK_ALERT_NOTIFY resumed — OVERWATCH_WEBHOOK_TEAMS present.';
+  END IF;
+  RETURN 'Skipped RESUME — OVERWATCH_WEBHOOK_TEAMS does not exist; nothing to deliver to.';
+END;
+$$;

@@ -160,6 +160,18 @@ _EXPECTED_MIGRATIONS = {
         "AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD, keeps the same window "
         "semantics and column contract, and labels drivers 'Serverless:'/'AI/Cortex:' so the "
         "app needs no change. Account-level metering lands on the ALL scope only",
+    70: "Teams-only delivery routing (V012/V018 forward fix): SP_DAILY_DIGEST hardcoded the "
+        "retired Slack integration OVERWATCH_WEBHOOK and swallowed its send with WHEN OTHER "
+        "THEN NULL, so the morning digest had NEVER been delivered on this Teams-only account "
+        "while it still returned 'delivery attempted'. Re-derived from V018 to walk the "
+        "enabled ALERT_ROUTES rows and send through each row's INTEGRATION_NAME "
+        "(SP_NOTIFY_WEBHOOK's per-route idiom), ledgering each outcome to APP_ERROR_LOG as "
+        "digest_send_failed instead of discarding it; the in-app write is untouched and the "
+        "return is machine-readable 'sent N/M routes' (#23). Idempotent blocks disable any "
+        "enabled route whose integration is absent so the dead default Slack route stops "
+        "burying real errors (#25), and resume TASK_ALERT_NOTIFY when an enabled route "
+        "resolves to a live integration so a healthy Teams integration satisfies the gate "
+        "(#24). Only SP_DAILY_DIGEST is re-defined; no new objects",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

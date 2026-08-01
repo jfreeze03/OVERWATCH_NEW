@@ -17,13 +17,27 @@ placeholder.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 
-# Scanned trees. Migrations/scripts are where credentials realistically leak in this repo.
-_SCAN_DIRS = ("snowflake", "app", "outputs", "docs")
-_SCAN_SUFFIXES = {".sql", ".py", ".md", ".toml", ".yml", ".yaml", ".json"}
+# TODO(ci): this test scans the CURRENT working tree only. A credential that was
+# committed and later removed still lives in git HISTORY (exactly how the leaked
+# Teams URL escaped). Add a dedicated CI step that scans history — e.g.
+# `gitleaks detect --source . --log-opts=--all` (or trufflehog) as its own job.
+# Do NOT reimplement a git-history scan inside pytest; keep this a working-tree check.
+
+# Security-relevant text suffixes. git ls-files (below) gives us the WHOLE tracked
+# tree; this set just decides which of those files are worth opening and scanning.
+_SCAN_SUFFIXES = {
+    ".sql", ".py", ".md", ".toml", ".yml", ".yaml", ".json",
+    ".env", ".pem", ".key", ".cfg", ".ini", ".sh", ".txt", ".cnf", ".conf",
+}
+
+# Basenames that are security-relevant even without a scanned suffix
+# (dotfiles like `.env`, extensionless key material).
+_SCAN_NAMES = {".env", ".netrc", "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
 
 # Real-credential shapes. Each needs a value that a placeholder would not satisfy.
 _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -48,13 +62,29 @@ _ALLOWED_SUBSTRINGS = (
 
 
 def _files():
-    for d in _SCAN_DIRS:
-        base = _ROOT / d
-        if not base.exists():
+    """Every security-relevant, git-tracked file in the repo (Wave 3 #38).
+
+    Was: rglob over four hand-picked subdirs (snowflake/app/outputs/docs), which
+    left root files, `.github/workflows/*.yml`, and `tests/` entirely unscanned.
+    Enumerating the whole tracked tree via `git ls-files` closes those blind spots
+    and mirrors the repo exactly — it never opens build junk or untracked local
+    files. Falls back to a whole-repo walk when git is unavailable (source tarball).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        rels = [r for r in out.split("\0") if r]
+    except (OSError, subprocess.SubprocessError):
+        rels = [p.relative_to(_ROOT).as_posix()
+                for p in _ROOT.rglob("*") if p.is_file()]
+    for rel in rels:
+        p = _ROOT / rel
+        if "__pycache__" in p.parts:
             continue
-        for p in base.rglob("*"):
-            if p.is_file() and p.suffix.lower() in _SCAN_SUFFIXES and "__pycache__" not in p.parts:
-                yield p
+        if (p.suffix.lower() in _SCAN_SUFFIXES or p.name in _SCAN_NAMES) and p.is_file():
+            yield p
 
 
 def test_no_live_credentials_committed():

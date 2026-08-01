@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.118.0 — Codex-R Waves 4 & 3: V070 delivery routing + deploy hardening (2026-07-31)
+
+**V070__delivery_routing_teams_only.sql** — a forward migration (V012/V018 are already applied)
+fixing the Teams-only delivery defects, adversarially reviewed CLEAN:
+- **#23** `SP_DAILY_DIGEST` was hardcoded to the retired Slack integration and swallowed the send
+  error, so on a Teams-only account the morning digest had **never** been delivered while the
+  proc reported "attempted". Re-derived to walk the enabled `ALERT_ROUTES` and send through each
+  route's integration, ledgering per-route failures to `APP_ERROR_LOG('digest_send_failed')`; the
+  in-app digest write still happens even if every send fails; returns `digest written; sent N/M`.
+- **#25** the V012-seeded dead Slack default route (which failed every sender cycle and buried
+  real errors) is disabled idempotently — any route whose integration isn't in
+  `SHOW NOTIFICATION INTEGRATIONS` is set `ENABLED=FALSE`.
+- **#24** `TASK_ALERT_NOTIFY` auto-resume now keys on *any* enabled route naming a live
+  integration (evaluated after #25), not the literal Slack integration name.
+
+**Deploy hardening (Wave 3):**
+- **#2 (P0)** `webhook_delivery.sql` is no longer self-destructive: a placeholder guard aborts a
+  copy-paste run before `CREATE OR REPLACE` can overwrite the live Teams integration and drop its
+  grants, and the trailing `ALTER TASK RESUME` only fires when the integration actually exists.
+- **#4/#5** `roles.sql` gains explicit Streamlit `USAGE` re-grants (which `CREATE OR REPLACE
+  STREAMLIT` wipes, no `COPY GRANTS`) with a hard-fail grantee check, and future-grant protection
+  + a validation query so recreating an audit table can't silently reopen `UPDATE`/`DELETE`.
+- **#38** the committed-secret guard now enumerates the whole tracked tree via `git ls-files`
+  (root files, `.github/workflows`, `tests/` were previously unscanned) with a `gitleaks`
+  history-scan TODO for CI.
+- **#32** an opt-in, secrets-gated, non-blocking Snowflake integration-smoke CI job (zero-copy
+  clone → migrations → validate → loader → route-ledger → teardown); floor-compat CI now installs
+  `sqlglot` so collection can't fail.
+- **#6** new `snowflake/task_audit.sql` diffs `SHOW TASKS` (state/warehouse/schedule/predecessor)
+  against an expected set, catching a stale `CREATE TASK IF NOT EXISTS` at deploy.
+- **#45** `app/core/query.py` onboarded to mypy (3 errors → a minimal, documented per-module
+  override for two false-positives).
+
+Gates green: ruff, mypy, **pytest 1807 passed / 1 skipped**. Rebuild bundle `V001_V070`. **Owner
+apply order is now V062 → … → V070.** This completes the Codex-R implementation (44 confirmed:
+Wave 1 generators, Wave 2 app, Wave 3 deploy, Wave 4 V070). Deferred by design: #8 staging-swap
+reconcile, #28 dead-letter, #18 dual-company, #15 estimator. **Owner-only: #1 rotate the webhook.**
+
 ## 4.117.0 — Codex-R Wave 2: app-code batch (delivery, telemetry, scope, coverage, auth) (2026-07-31)
 
 The 24 confirmed app-code findings, four clusters:

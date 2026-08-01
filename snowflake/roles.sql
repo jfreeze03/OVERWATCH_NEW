@@ -44,13 +44,83 @@ REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT     FROM ROLE 
 REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG FROM ROLE SNOW_ACCOUNTADMINS;
 REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG FROM ROLE SNOW_SYSADMINS;
 
--- r27 #7: prove the two-role restriction on the app object itself.
--- Replace the app name if yours differs, run, and read the grants:
--- every GRANTEE_NAME should be SNOW_ACCOUNTADMINS or SNOW_SYSADMINS.
-SHOW GRANTS ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
-SELECT "grantee_name" AS GRANTEE, "privilege" AS PRIVILEGE,
-       IFF("grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS'), 'expected', 'REVOKE THIS') AS VERDICT
-FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
-ORDER BY VERDICT DESC, GRANTEE;
+-- Validate the seal (Wave 3 #5). The named REVOKEs above only protect the two
+-- audit tables AS THEY EXIST RIGHT NOW. A restore (CREATE OR REPLACE TABLE ...
+-- CLONE, or UNDROP) re-materializes the table and REAPPLIES the schema's FUTURE
+-- grants — which include UPDATE/DELETE (lines 22-23) — silently reopening the
+-- audit trail. Snowflake future grants are schema-wide (there is NO per-table
+-- future grant), and operator tables in this schema legitimately need
+-- UPDATE/DELETE, so a blanket REVOKE ... ON FUTURE TABLES would break them and
+-- is the wrong tool. Instead, FAIL LOUDLY if either audit table carries an
+-- UPDATE or DELETE grant to any role, so a restore can not silently reopen them.
+-- Remediate by re-running the four REVOKE statements above.
+EXECUTE IMMEDIATE $$
+DECLARE
+  audit_writable EXCEPTION (-20021,
+    'Append-only violation: ALERT_AUDIT and/or REMEDIATION_LOG carries an UPDATE or DELETE grant (a restore reapplied the schema FUTURE grant). Re-run the four REVOKE UPDATE, DELETE statements above to reseal the audit trail.');
+  writable INTEGER DEFAULT 0;
+  c INTEGER;
+BEGIN
+  SHOW GRANTS ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT;
+  SELECT COUNT(*) INTO :c FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+    WHERE "privilege" IN ('UPDATE', 'DELETE');
+  writable := writable + c;
+  SHOW GRANTS ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG;
+  SELECT COUNT(*) INTO :c FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+    WHERE "privilege" IN ('UPDATE', 'DELETE');
+  writable := writable + c;
+  IF (writable > 0) THEN
+    RAISE audit_writable;
+  END IF;
+  RETURN 'Audit tables sealed — no UPDATE/DELETE grants on ALERT_AUDIT or REMEDIATION_LOG.';
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Streamlit USAGE re-grant (Wave 3 #4). The manual deploy path in DEPLOYMENT.md
+-- (§3) uses CREATE OR REPLACE STREAMLIT with NO COPY GRANTS: it drops and
+-- recreates the app object and DESTROYS every grant on it, so USAGE is lost on
+-- every redeploy and any non-owning role gets "does not exist or not
+-- authorized" until this runs. Run this block AFTER each CREATE OR REPLACE
+-- STREAMLIT (or add COPY GRANTS to that statement). DATABASE + SCHEMA USAGE are
+-- restated so the block is self-contained after an app/schema rebuild.
+GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON DATABASE  DBA_MAINT_DB                        TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON SCHEMA    DBA_MAINT_DB.OVERWATCH              TO ROLE SNOW_SYSADMINS;
+GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP TO ROLE SNOW_SYSADMINS;
+
+-- r27 #7 + Wave 3 #4: prove the two-role restriction on the app object — HARD
+-- FAIL. RAISEs if the app has any grantee outside {SNOW_ACCOUNTADMINS,
+-- SNOW_SYSADMINS}, or if it is missing USAGE for either required role. Replace
+-- the app name if yours differs.
+EXECUTE IMMEDIATE $$
+DECLARE
+  unexpected_grantee EXCEPTION (-20011,
+    'Streamlit OVERWATCH_APP has a USAGE grantee outside {SNOW_ACCOUNTADMINS, SNOW_SYSADMINS} — REVOKE it; access is two roles only.');
+  missing_grantee EXCEPTION (-20012,
+    'Streamlit OVERWATCH_APP is missing USAGE for a required admin role (a CREATE OR REPLACE STREAMLIT dropped its grants) — re-run the GRANT USAGE ON STREAMLIT block above.');
+  bad INTEGER;
+  present INTEGER;
+BEGIN
+  SHOW GRANTS ON STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP;
+  SELECT
+    COUNT_IF("privilege" = 'USAGE' AND "granted_to" = 'ROLE'
+             AND "grantee_name" NOT IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')),
+    COUNT(DISTINCT CASE WHEN "privilege" = 'USAGE' AND "granted_to" = 'ROLE'
+             AND "grantee_name" IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')
+             THEN "grantee_name" END)
+    INTO :bad, :present
+    FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  IF (bad > 0) THEN
+    RAISE unexpected_grantee;
+  END IF;
+  IF (present < 2) THEN
+    RAISE missing_grantee;
+  END IF;
+  RETURN 'Streamlit grants OK — both admin roles present, no unexpected grantee.';
+END;
+$$;
 
 SELECT 'roles applied' AS STATUS;

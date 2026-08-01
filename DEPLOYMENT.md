@@ -75,6 +75,7 @@ snowflake/migrations/V066__alert_escalation_serverless_window_timeline_atomicity
 snowflake/migrations/V067__alert_attribution_onset_supersede_objectcost.sql
 snowflake/migrations/V068__standalone_mart_freshness_stamps.sql
 snowflake/migrations/V069__exec_board_serverless_ai_drivers.sql
+snowflake/migrations/V070__delivery_routing_teams_only.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -179,6 +180,23 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > `FACT_METERING_DAILY` is account-level and carries no company dimension, so splitting it
 > across ALFA/Trexis would invent attribution. Overview → "Top cost drivers" then shows the
 > serverless/AI lines alongside the warehouses on the next app refresh.
+
+> **V070 verify (Teams-only delivery routing — no smoke test to apply):** re-derives
+> `SP_DAILY_DIGEST` from V018 (byte-verified by `tests/test_v070_delivery_routing.py`) so
+> the digest walks the enabled `ALERT_ROUTES` rows and sends through each route's own
+> integration instead of the retired hardcoded `OVERWATCH_WEBHOOK`, ledgering failures as
+> `digest_send_failed`; two idempotent blocks disable any enabled route whose integration is
+> absent (#25) and resume `TASK_ALERT_NOTIFY` when an enabled route resolves to a live
+> integration (#24). No new objects. Confirm the routes healed — read-only:
+> ```sql
+> SELECT ROUTE_ID, INTEGRATION_NAME, ENABLED FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES;
+> ```
+> Expect the Slack `OVERWATCH_WEBHOOK` row `ENABLED = FALSE` (its integration does not exist)
+> and the `OVERWATCH_WEBHOOK_TEAMS` row `ENABLED = TRUE`. Delivery is runtime-only, so also
+> prove one real card arrives once: `CALL DBA_MAINT_DB.OVERWATCH.SP_DAILY_DIGEST();` should
+> return `digest written; sent 1/1 routes` and post the morning digest into the Teams channel
+> (a `digest_send_failed` row in `APP_ERROR_LOG` naming the integration means that route's
+> integration is missing a grant — see webhook_delivery.sql's rotation runbook).
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
@@ -370,7 +388,11 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 
 1. `ruff check .` and `pytest -q` green (CI enforces).
 2. New migration file if schema changed (never edit an applied `V00x` file).
-3. Run migrations, then `snowflake/validate.sql` — all rows OK.
+3. Run migrations, then `snowflake/validate.sql` — all rows OK. Then
+   `snowflake/task_audit.sql` — every task reads OK with no `DRIFT` row (diffs
+   live `SHOW TASKS` state/warehouse/schedule/predecessor against the expected
+   set, catching a stale `CREATE TASK IF NOT EXISTS` whose updated definition
+   never re-applied).
 4. `snow streamlit deploy --replace`.
 5. If the deploy happened through SNOWSIGHT instead of the CLI: check app
    settings → runtime = **Run on warehouse** (Snowsight resets it to the
