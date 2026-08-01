@@ -93,6 +93,61 @@ def test_incident_timeline_arm_is_atomic():
     assert "ROLLBACK;   -- V066 #3" in marts                             # undo on a failed rebuild
 
 
+# ---------------------------------------------------------------------------
+# #10 FALSE SUCCESS — SP_LOAD_MARTS_V27 terminal verdict
+# ---------------------------------------------------------------------------
+def test_marts_verdict_replaces_false_success():
+    marts = _proc(_V66, "SP_LOAD_MARTS_V27")
+    assert "req_fail INT DEFAULT 0;" in marts and "opt_fail INT DEFAULT 0;" in marts
+    # the unconditional 'marts loaded' claim is gone; a machine-readable verdict replaces it
+    assert "V27 marts loaded (" not in marts
+    assert "IF (req_fail = 0) THEN" in marts
+    assert "RETURN 'MARTS OK (" in marts
+    assert ("RETURN 'MARTS WITH ERRORS: ' || :req_fail || ' required, ' || :opt_fail "
+            "|| ' optional ('") in marts
+
+
+def test_marts_required_optional_failure_counters():
+    marts = _proc(_V66, "SP_LOAD_MARTS_V27")
+    # 13 arms swallow-and-count: 9 core facts/marts REQUIRED, 4 OPTIONAL
+    # (tag-coverage, per-node timing, AI code + AI functions)
+    assert marts.count("'mart_load_failed'") == 13          # every arm still swallows
+    assert marts.count("req_fail := req_fail + 1;") == 9
+    assert marts.count("opt_fail := opt_fail + 1;") == 4
+    for ctx in ("MART_TAG_COVERAGE_DAILY - other marts unaffected",
+                "MART_TASK_NODE_DAILY - other marts unaffected",
+                "FACT_AI_USAGE_DAILY (code views) - other marts unaffected",
+                "FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected"):
+        seg = marts.split(ctx, 1)[1].split("END;", 1)[0]
+        assert "opt_fail := opt_fail + 1;" in seg, ctx
+    for ctx in ("MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected",
+                "MART_COST_ALLOCATION_DAILY - other marts unaffected",
+                "MART_INCIDENT_TIMELINE - other marts unaffected",
+                "MART_SECURITY_POSTURE_DAILY - other marts unaffected"):
+        seg = marts.split(ctx, 1)[1].split("END;", 1)[0]
+        assert "req_fail := req_fail + 1;" in seg, ctx
+
+
+# ---------------------------------------------------------------------------
+# #11 FRESHNESS ADVANCES ON FAILURE — per-scope stamp gated on actually-loaded sources
+# ---------------------------------------------------------------------------
+def test_freshness_stamp_advances_only_for_loaded_sources():
+    marts = _proc(_V66, "SP_LOAD_MARTS_V27")
+    # both per-scope freshness MERGEs are token-gated off :loaded (the successful-arm set)
+    assert marts.count("ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))") == 2
+    # per-source STATUS from that source's own token(s), never the whole successful-arm list
+    assert marts.count("LISTAGG(m.TOKEN, ' ') AS STATUS") == 2
+    assert "STATUS = :loaded" not in marts
+    # the static source-name IN-lists (which stamped even failed sources) are gone, both scopes
+    assert "WHERE SOURCE_NAME IN ('MART_WAREHOUSE_EFFICIENCY_DAILY'" not in marts
+    assert "WHERE SOURCE_NAME IN ('MART_SECURITY_POSTURE_DAILY'" not in marts
+    # FACT_AI_USAGE_DAILY maps BOTH its arms so its collapsed row matches the MERGE target once
+    assert "('FACT_AI_USAGE_DAILY', 'ai_code')" in marts
+    assert "('FACT_AI_USAGE_DAILY', 'ai_functions')" in marts
+    # the timeline source is still stamped — its token is appended after the #3 COMMIT
+    assert "('MART_INCIDENT_TIMELINE', 'timeline')" in marts
+
+
 def test_v066_preserves_v065_run_rate_windows():
     daily = _proc(_V66, "SP_ALERT_SCAN_DAILY")
     # V065's forecast + AI-creep fixes ride through untouched

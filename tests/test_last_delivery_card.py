@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import sqlglot
+import pytest
+
+# #31 (Codex): the floor-compat CI job does not install sqlglot, but this module
+# imported it at top level — so a clean floor runner failed at COLLECTION, not just
+# on this test. importorskip lets the module load there and skips only the parse
+# assertion; where sqlglot is installed (the main suite) it runs unchanged.
+sqlglot = pytest.importorskip("sqlglot")
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ALERTS = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")

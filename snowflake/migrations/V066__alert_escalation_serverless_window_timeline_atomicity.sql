@@ -22,6 +22,16 @@
 --         transaction (BEGIN TRANSACTION/COMMIT, ROLLBACK on error). Under AUTOCOMMIT the
 --         DELETE committed immediately, so a transient INSERT failure blanked the trailing
 --         48h of the incident timeline until the next hourly rebuild.
+--     #10 FALSE SUCCESS -- every mart arm swallows its own failure (logs to APP_ERROR_LOG and
+--         CONTINUES) but the terminal RETURN always claimed the marts loaded. REQUIRED-arm and
+--         OPTIONAL-arm failure counters (incremented in each arm's own handler) now drive a
+--         machine-readable verdict: 'MARTS OK ...' when zero required failures, else
+--         'MARTS WITH ERRORS: <n> required, <m> optional ...'. Per-arm swallow unchanged.
+--     #11 FRESHNESS ADVANCES ON FAILURE -- the per-scope SOURCE_FRESHNESS_STATE MERGE bumped
+--         GENERATION and wrote the successful-arm STATUS across a static source group, so a
+--         source whose arm just failed still looked freshly loaded. The MERGE is now driven by
+--         the sources that actually loaded (their per-arm token is present in :loaded), so the
+--         stamp advances for successful sources only, with per-source STATUS.
 --
 -- No smoke test required (deterministic alert logic + the B34 transaction-wrap pattern
 -- already used elsewhere in this file). Byte-verified by tests/test_v066_alert_escalation.py.
@@ -1059,6 +1069,8 @@ DECLARE
     d INT;
     ext_lo DATE;
     ext_lo_hour TIMESTAMP_LTZ;
+    req_fail INT DEFAULT 0;   -- V066 #10: REQUIRED-arm (core fact/mart) failures this run
+    opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures
 BEGIN
     d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
 
@@ -1141,6 +1153,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [2] query families (top 2000/day by exec time) --------------------
@@ -1189,6 +1202,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [3] role-hour fact -------------------------------------------------
@@ -1221,6 +1235,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [4] schema-hour fact -----------------------------------------------
@@ -1256,6 +1271,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [4b] tag coverage by user, day grain (v4.14 tuning trio) --------
@@ -1289,6 +1305,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TAG_COVERAGE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [5] cost allocation (exec-time share of each warehouse-hour) -------
@@ -1357,6 +1374,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [5b] cross-dim allocation fact (V041 R2): persist _OW_ALLOC_BASE at
@@ -1385,6 +1403,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_COST_ALLOC_XDIM_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [6] task graphs -----------------------------------------------------
@@ -1444,6 +1463,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [6b] per-node task timing (queue + exec delay) -> MART_TASK_NODE_DAILY
@@ -1495,6 +1515,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_NODE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [8] incident timeline (rolling 48h window rebuild) -----------------
@@ -1542,26 +1563,46 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
 
         -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE: stamp ONLY the sources whose arm actually
+        -- loaded this run. This MERGE used to advance GENERATION and write the successful-arm
+        -- list as STATUS across the whole STATIC group, so a source whose arm just failed
+        -- still looked freshly loaded. Each arm appends its token to :loaded only on its
+        -- success path, so gate the source set on token membership (ARRAY_CONTAINS over
+        -- SPLIT(:loaded)); a failed source is left untouched -- its prior generation/snapshot
+        -- stand, correctly reading as not-loaded-this-run -- and STATUS now carries that
+        -- source's own outcome.
         MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
         USING (
-            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
-            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
-            WHERE SOURCE_NAME IN ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'MART_QUERY_FAMILY_DAILY',
-                                  'FACT_QUERY_ROLE_HOURLY', 'FACT_QUERY_SCHEMA_HOURLY',
-                                  'MART_TAG_COVERAGE_DAILY', 'MART_COST_ALLOCATION_DAILY',
-                                  'FACT_COST_ALLOC_XDIM_DAILY', 'MART_TASK_GRAPH_DAILY',
-                                  'MART_INCIDENT_TIMELINE')
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'wh_eff'),
+                    ('MART_QUERY_FAMILY_DAILY', 'qfam'),
+                    ('FACT_QUERY_ROLE_HOURLY', 'role_hr'),
+                    ('FACT_QUERY_SCHEMA_HOURLY', 'schema_hr'),
+                    ('MART_TAG_COVERAGE_DAILY', 'tagcov'),
+                    ('MART_COST_ALLOCATION_DAILY', 'alloc'),
+                    ('FACT_COST_ALLOC_XDIM_DAILY', 'alloc_xdim'),
+                    ('MART_TASK_GRAPH_DAILY', 'graphs'),
+                    ('MART_INCIDENT_TIMELINE', 'timeline')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            GROUP BY f.SOURCE_NAME
         ) s
         ON t.SOURCE_NAME = s.SOURCE_NAME
         WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
             SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = :loaded
+            STATUS = s.STATUS
         WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
 
     END IF;
 
@@ -1661,6 +1702,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
@@ -1703,6 +1745,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         BEGIN
@@ -1736,30 +1779,52 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
 
         -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE (DAILY scope): same token-gated stamp.
+        -- Only posture / AI sources whose arm loaded advance; FACT_AI_USAGE_DAILY collapses
+        -- its two arms (ai_code, ai_functions) to one row via GROUP BY so the MERGE matches
+        -- its target exactly once.
         MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
         USING (
-            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
-            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
-            WHERE SOURCE_NAME IN ('MART_SECURITY_POSTURE_DAILY', 'FACT_AI_USAGE_DAILY')
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_SECURITY_POSTURE_DAILY', 'posture'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_code'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_functions')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            GROUP BY f.SOURCE_NAME
         ) s
         ON t.SOURCE_NAME = s.SOURCE_NAME
         WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
             SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = :loaded
+            STATUS = s.STATUS
         WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
 
     END IF;
 
-    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+    -- V066 #10 FALSE SUCCESS: the terminal RETURN used to always claim the marts loaded,
+    -- even when an arm's EXCEPTION handler swallowed a failure and continued. Return a
+    -- machine-readable verdict from the REQUIRED / OPTIONAL failure counters instead.
+    IF (req_fail = 0) THEN
+        RETURN 'MARTS OK (' || :SCOPE || ', ' || :d || 'd): ' || :loaded
+               || IFF(:opt_fail > 0, '[' || :opt_fail || ' optional failed]', '');
+    END IF;
+    RETURN 'MARTS WITH ERRORS: ' || :req_fail || ' required, ' || :opt_fail || ' optional ('
+           || :SCOPE || ', ' || :d || 'd): ' || :loaded;
 END;
 $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 66 AS VERSION,
-       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
+       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), and the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 66);

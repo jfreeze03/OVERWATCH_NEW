@@ -226,6 +226,7 @@ DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.SAVINGS_VERIFICATION_RUNS;
 -- DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.DEPARTMENT_MAP;
 DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.APP_QUERY_TELEMETRY;  -- V021 telemetry (rebuildable)
 DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES;  -- V022 delivery ledger
+DROP TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE;  -- V064 webhook single-flight lease (#26)
 
 -- Opt-in script artifacts (2026-07-08 audit: these previously survived a
 -- full teardown — the user's "do we drop email integrations?" catch).

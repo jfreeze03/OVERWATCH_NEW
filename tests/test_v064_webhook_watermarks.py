@@ -46,7 +46,10 @@ def test_v064_guard_and_version():
     # webhook + daily-facts + reconcile + alert-scan
     assert _V64.count("CREATE OR REPLACE PROCEDURE") == 4
     assert _V64.count("$$") == 10                 # 2 (guard) + 8 (four procs)
-    assert "CREATE TABLE" not in _V64 and "CREATE TASK" not in _V64   # no new objects
+    # #26 adds exactly one control table (OW_SENDER_LEASE, the single-flight lease);
+    # no other new objects. A control table is the only robust way to express the guard.
+    assert _V64.count("CREATE TABLE") == 1 and "OW_SENDER_LEASE" in _V64
+    assert "CREATE TASK" not in _V64
 
 
 def test_v064_numbering_note():
@@ -88,14 +91,103 @@ def test_rec8_capture_once_preserved_per_batch():
 
 def test_rec8_expired_shares_send_eligibility():
     wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
-    # the expired-detection now JOINs ALERT_CONFIG and mirrors the send eligibility
-    # (family + company + severity), so "flagged expired" == "was eligible but unsent"
+    # the expired-detection JOINs ALERT_CONFIG + ALERT_ROUTES and mirrors the send
+    # eligibility (family + company + severity), so "flagged expired" == "was eligible
+    # to that route but unsent"
     tail = wh.split("Loud, not silent", 1)[1]
     assert "JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID" in tail
     assert "r2.FAMILY = 'ALL' OR c.FAMILY = r2.FAMILY" in tail
     assert "r2.MIN_SEVERITY" in tail
     assert "undelivered_expired" in wh                # the loud tail survives
     assert "DATEADD('hour', -24, CURRENT_TIMESTAMP())" in wh   # 24h window kept
+
+
+# ---------------------------------------------------------------------------
+# #27 — PER-ROUTE expiry: a pair is expired when past 24h AND undelivered to THAT
+#       route (NOT EXISTS on event+route), not keyed on ALERT_EVENTS.NOTIFIED_AT
+#       (which is stamped after the FIRST route delivers, hiding route-B expiry).
+# ---------------------------------------------------------------------------
+def test_27_per_route_expiry_not_notified_at():
+    wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
+    tail = wh.split("Loud, not silent", 1)[1]
+    # the expired tail no longer keys on the event-level NOTIFIED_AT flag
+    assert "NOTIFIED_AT IS NULL" not in tail
+    # it enumerates the eligible routes and flags a pair with NO delivery for THAT route
+    assert "JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r2\n      ON r2.ENABLED" in tail
+    assert ("NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d\n"
+            "                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r2.ROUTE_ID)") in tail
+    # 24h window + 7d floor preserved
+    assert "e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())" in tail
+    assert "e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in tail
+
+
+# ---------------------------------------------------------------------------
+# #40 — expired-log inflation: each (event,route) episode is logged at most once
+#       per 24h, so a persistent backlog can't make a 30d KPI count RUNS not events.
+# ---------------------------------------------------------------------------
+def test_40_expired_log_once_per_episode():
+    wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
+    tail = wh.split("Loud, not silent", 1)[1]
+    # gated on NOT EXISTS a prior 'undelivered_expired' row with the same event/route
+    # key (CONTEXT) inside a 24h window
+    assert ("NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG a\n"
+            "                      WHERE a.ERROR_TYPE = 'undelivered_expired'") in tail
+    assert "AND a.LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())" in tail
+    # the same (event,route) key is both WRITTEN as CONTEXT and MATCHED in the guard
+    assert tail.count("'event ' || e.EVENT_ID || ' route ' || r2.ROUTE_ID") == 2
+    # per-pair insert, no aggregate single-row count form
+    assert "open event(s) aged past the 24h delivery window with no successful send" not in tail
+
+
+# ---------------------------------------------------------------------------
+# #26 — single-flight guard: acquire a sentinel lease at entry, bail if held,
+#       release at exit. Send-then-ledger ordering is intentionally preserved.
+# ---------------------------------------------------------------------------
+def test_26_single_flight_lease():
+    # the lease control table is created (idempotent) in the migration body
+    assert "CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE" in _V64
+    assert "WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE" in _V64  # idempotent seed
+    wh = _proc(_V64, "SP_NOTIFY_WEBHOOK")
+    # acquire at entry: UPDATE the sentinel, bail if not acquired
+    assert wh.count("DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE") == 2   # acquire + release
+    assert "HELD = FALSE OR ACQUIRED_AT < DATEADD('hour', -1, CURRENT_TIMESTAMP())" in wh  # stale reclaim
+    assert "IF (SQLROWCOUNT = 0) THEN\n        RETURN 'skipped - another SP_NOTIFY_WEBHOOK run holds the sender lease';" in wh
+    # release at exit — FENCED to the holding session (review): an unconditional release
+    # would let a >1h-stalled run clear a successor's reclaimed lease and permit two
+    # concurrent senders. The fence makes release a no-op unless we still hold the lease.
+    assert "SET HELD = FALSE, HOLDER = NULL" in wh
+    assert ("WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK'\n"
+            "       AND HOLDER = CURRENT_SESSION();") in wh
+    # ordering is still send-first (the intentional at-least-once paging bias)
+    assert wh.index("SYSTEM$SEND_SNOWFLAKE_NOTIFICATION") < wh.index(
+        "INSERT INTO DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES")
+
+
+# ---------------------------------------------------------------------------
+# #9 — reconcile captures each child loader's return and reports a verdict.
+# ---------------------------------------------------------------------------
+def test_9_reconcile_reports_child_verdicts():
+    rec = _proc(_V64, "SP_NIGHTLY_RECONCILE")
+    # each of the 5 child CALLs has its return captured (secondary signal)
+    assert rec.count("CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_") == 5
+    assert rec.count("SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));") == 5
+    assert rec.count("fails := fails + 1;") == 5
+    assert "rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%'" in rec
+    # AUTHORITATIVE signal (review): return-string parsing catches only the two
+    # machine-verdict children; the other three SWALLOW arm failures and return benign
+    # 'loaded' strings. So the verdict must count APP_ERROR_LOG '%_failed%' rows written
+    # DURING this run (scoped to recon_start), which every child writes on an arm failure.
+    assert "recon_start := CURRENT_TIMESTAMP();" in rec
+    assert "SELECT COUNT(*) INTO :logged_fails" in rec
+    assert "WHERE LOGGED_AT >= :recon_start" in rec
+    assert "ERROR_TYPE ILIKE '%_failed%'" in rec
+    # either signal (a machine verdict OR a logged failure) flags the run
+    assert "IF (fails > 0 OR logged_fails > 0) THEN" in rec
+    # machine-readable parent verdict: OK vs WITH ERRORS
+    assert "RETURN 'RECONCILE WITH ERRORS: ' || :logged_fails ||" in rec
+    assert "RETURN 'RECONCILE OK" in rec
+    # the DAILY_FACTS child call (the rec7 lockstep guard) survives
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();" in rec
 
 
 # ---------------------------------------------------------------------------

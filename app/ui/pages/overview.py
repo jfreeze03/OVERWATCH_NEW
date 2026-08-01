@@ -536,18 +536,39 @@ def render() -> None:
             _dtot = float(view["VALUE_USD"].map(safe_float).sum())
             if _dtot > 0 and len(view):
                 _d0 = view.iloc[0]
-                # C5: the COST_DRIVER panel is built from warehouse compute only —
-                # serverless (tasks, Snowpipe, materialized views) and AI/Cortex bill
-                # on separate meters that this panel does not read. "% of tracked
-                # drivers" read as "% of spend" and over-claimed; say which pie the
-                # slice is out of until the mart arm covering the other meters ships.
+                # C5: this panel is warehouse compute ONLY — operational credits at the
+                # compute rate, from FACT_WAREHOUSE_DAILY — so it matches the headline
+                # KPIs (also warehouse-only) and the drivers reconcile to the KPI total.
+                # Serverless (tasks, Snowpipe, MV refresh) and AI/Cortex bill on separate
+                # meters and appear in their own panel below (V069 COST_DRIVER_SVC), never
+                # mixed into this "% of warehouse compute spend" denominator.
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
                            f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse "
-                           "compute spend — serverless & AI bill separately).")
+                           "compute spend — serverless & AI shown separately below).")
         elif not using_mart and not daily.empty:
             st.caption("Driver ranking appears once the exec board mart is installed.")
         else:
             st.info("No cost-driver rows for this scope/window.")
+
+        # V069 (audit C5): serverless & AI/Cortex drivers on a DISTINCT board panel
+        # (COST_DRIVER_SVC), rendered as their own small table beneath the warehouse
+        # drivers. Kept separate so the warehouse KPIs/denominator above stay
+        # warehouse-only and keep reconciling; this panel's basis is BILLED $ (AI/Cortex
+        # at the AI rate, the rest at the compute rate), not the warehouse panel's
+        # operational credits — the two bases are never mixed. Account-level metering
+        # carries no company dimension, so the mart emits these on the ALL scope only;
+        # absent under a company pill, which is expected.
+        svc = _board_panel(board, "COST_DRIVER_SVC")
+        if not svc.empty:
+            svc_view = (svc.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
+                        .sort_values("VALUE_USD", ascending=False)
+                        .rename(columns={"DIMENSION": "DRIVER", "VALUE_USD": "BILLED_USD"}))
+            st.caption("Serverless & AI billed spend — separate from the warehouse-compute "
+                       "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
+                       "compute rate).")
+            styled_table(svc_view, height=240, slug="serverless-ai-drivers", column_config={
+                "BILLED_USD": st.column_config.NumberColumn("Billed $", format="$%.0f"),
+            })
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
     section_header("Monthly spend by warehouse")

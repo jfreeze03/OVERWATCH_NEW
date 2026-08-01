@@ -741,12 +741,21 @@ BEGIN
     -- the DELETE and defeat the atomic wrap. The stages read only
     -- ACCOUNT_USAGE, so hoisting them is order-safe.
     CREATE OR REPLACE TEMPORARY TABLE DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE AS
-    SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
-           SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
-    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= :lo
-    GROUP BY QUERY_ID
-    HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;
+    SELECT a.QUERY_ID, MIN(a.START_TIME)::DATE AS DAY,
+           -- V067 #17: carry the executing warehouse so the residual (unattributed-to-object)
+           -- row can resolve its COMPANY from the warehouse instead of being forced to
+           -- 'UNKNOWN'. QUERY_ATTRIBUTION_HISTORY has no WAREHOUSE_NAME, so LEFT JOIN
+           -- QUERY_HISTORY on QUERY_ID (the V036 pattern); LEFT + MAX keeps one row per
+           -- QUERY_ID and never drops a query whose history row is missing.
+           MAX(q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+           SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+      ON q.QUERY_ID = a.QUERY_ID
+     AND q.START_TIME >= :lo
+    WHERE a.START_TIME >= :lo
+    GROUP BY a.QUERY_ID
+    HAVING SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;
 
     -- Read/write role rides the union (V050): write wins when one query both
     -- reads and writes an object, so the object keeps ONE share (additivity)
@@ -849,12 +858,21 @@ BEGIN
     -- VANISHED — V049's obj_q counted it attributed while the split had no
     -- row for it; it now lands here, where unattributable compute belongs.)
     INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
-    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)
+    -- V067 #17: resolve the residual COMPANY from the executing WAREHOUSE_NAME
+    -- (carried through OW_OBJCOST_QA_STAGE) via COMPANY_FOR_WAREHOUSE, so a
+    -- company-filtered object-cost total reconciles when the warehouse identifies the
+    -- company; COMPANY_FOR_WAREHOUSE returns 'UNKNOWN' only when the warehouse does not
+    -- resolve. The company key joins the GROUP BY, so residual credits split by company
+    -- while the per-day total stays additive.
+    -- TODO(#18, deferred): storing BOTH the consumer-company (warehouse) and the
+    -- object-owner-company is a separate dual-lens enhancement, not done here.
+    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(qa.WAREHOUSE_NAME), SUM(qa.CREDITS)
     FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE qa
     LEFT JOIN (SELECT DISTINCT QUERY_ID FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_OBJ_STAGE) obj_q
       ON obj_q.QUERY_ID = qa.QUERY_ID
     WHERE obj_q.QUERY_ID IS NULL
-    GROUP BY 1;
+    GROUP BY 1, 5;
     COMMIT;
     EXCEPTION
         WHEN OTHER THEN

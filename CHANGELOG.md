@@ -1,5 +1,56 @@
 # Changelog
 
+## 4.116.0 — Codex-R Wave 1: fix-before-apply migration generators (V064/V066/V067/V069) (2026-07-31)
+
+A 50-item external review was adjudicated against the real code (44 confirmed, 6 partial, 0
+declined). Wave 1 fixes the defects in migrations that are **built but not yet applied** — done
+in the generators, so they are corrected before the owner's Snowsight apply rather than via a
+forward migration. Every fix went through adversarial review, which caught two more defects in
+the first V064 pass (below).
+
+- **V064 — #27 per-route expiry:** the expiry watchdog keyed on `ALERT_EVENTS.NOTIFIED_AT`
+  (stamped after the *first* route delivers), so an event that reached route A but never route B
+  was never flagged expired for B. Now evaluated per (event,route) via `NOT EXISTS` a delivery
+  for *that* route, on eligibility byte-identical to the send path.
+- **V064 — #40 expired-log inflation:** the aggregate `undelivered_expired` row was re-inserted
+  every sender run while a backlog persisted (a 30d KPI counting runs, not events). Now one row
+  per (event,route) episode, gated on no prior same-key row in 24h.
+- **V064 — #9 reconcile verdict *(review-corrected)*:** `SP_NIGHTLY_RECONCILE` ignored child
+  loader outcomes and always returned success. The first fix parsed child return strings — but
+  adversarial review found 4 of 5 children swallow arm failures and return benign "loaded"
+  strings, so it detected only 1 of 5. Corrected to count `APP_ERROR_LOG` `%_failed%` rows
+  written *during the run* (the signal every child emits), with the return-string check as a
+  secondary catch. Emits `RECONCILE OK` / `RECONCILE WITH ERRORS: n`.
+- **V064 — #26 single-flight lease *(review-corrected)*:** send-before-ledger is kept (the
+  correct at-least-once bias for paging — a claim-before-send outbox would risk a *lost* page),
+  guarded by a new `OW_SENDER_LEASE` sentinel so two runs can't overlap. Review caught that the
+  release was unconditional, letting a >1h-stalled run clear a *successor's* reclaimed lease →
+  concurrent senders; the release is now fenced with `HOLDER = CURRENT_SESSION()`.
+- **V066 — #10 false success:** `SP_LOAD_MARTS_V27` swallowed per-arm failures but always
+  reported loaded. Now tracks required vs optional arm failures and returns
+  `MARTS OK` / `MARTS WITH ERRORS: n required, m optional`.
+- **V066 — #11 freshness on failure:** the per-scope freshness MERGE stamped every source in a
+  group fresh, including a source whose arm just failed. Now stamps only sources whose arm
+  actually succeeded this run (token-gated), so a failed source keeps its prior generation.
+- **V067 — #17 residual company:** unattributed object compute was hardcoded to
+  `COMPANY='UNKNOWN'`, so company-filtered object totals couldn't reconcile. Now resolves the
+  executing warehouse's company via `COMPANY_FOR_WAREHOUSE`, `UNKNOWN` only as fallback.
+- **V069 — #12/#13 driver reconciliation *(this session's own bug)*:** v4.114's exec-board
+  work injected serverless/AI rows into the warehouse `COST_DRIVER` panel, breaking
+  reconciliation with the warehouse headline KPIs and poisoning the "% of warehouse compute
+  spend" denominator. Serverless/AI now emit on a distinct `COST_DRIVER_SVC` panel, rendered as
+  its own table in `overview.py` with a billed-$ basis label; the warehouse panel is
+  warehouse-only again and reconciles.
+
+Also: **#31** (the floor-compat CI job would fail at collection because a new test imported
+`sqlglot` unconditionally — now `importorskip`) and the stray unused `_ACCEPTED_EXPOSURE_FILES`
+in the secret guard, both cleaned. Deferred to a follow-up (L-effort redesigns): #8 staging-swap
+reconcile, #28 dead-letter retry, #18 dual-company object cost.
+
+Gates green: ruff, mypy (pure layers), **pytest 1791 passed / 1 skipped**. Rebuild bundle
+`V001_V069` + teardown updated for `OW_SENDER_LEASE`. **Owner: hold the Snowsight apply of
+V062–V069 until this is pulled — these generator fixes must precede the apply.**
+
 ## 4.115.1 — Scrub the committed webhook credential + CI guard; rotation/route runbooks (2026-07-31)
 
 `snowflake/webhook_delivery.sql` carried a **real Power Automate trigger URL — including its

@@ -29,9 +29,13 @@ fact (SP_LOAD_DAILY_FACTS), never a live ACCOUNT_USAGE scan:
   * Same window semantics as the existing arm: a -365d read horizon aggregated once, then
     the shared `windows` join (7/14/30/60/90/180/365).
   * Column contract unchanged (PANEL/METRIC/DIMENSION/VALUE/VALUE_USD/UNIT/SORT_ORDER), so
-    app/ui/pages/overview.py needs NO change -- it groups COST_DRIVER by DIMENSION and sums
-    VALUE_USD. There is no KIND column and the contract has no room for one, so the kind is
-    carried in the DIMENSION label: 'Serverless: <SERVICE_TYPE>' / 'AI/Cortex: <SERVICE_TYPE>'.
+    the mart reader (app/data/mart_sql.py exec_board) needs NO change -- it selects every
+    panel generically. The rows go under a DISTINCT panel value PANEL='COST_DRIVER_SVC' (#12:
+    NOT 'COST_DRIVER'), so the warehouse COST_DRIVER panel stays warehouse-only and keeps
+    reconciling to the warehouse-only headline KPIs / "% of warehouse compute spend" caption;
+    app/ui/pages/overview.py reads COST_DRIVER_SVC and renders it as a separate table beneath
+    the warehouse drivers. There is no KIND column and the contract has no room for one, so
+    the kind is carried in the DIMENSION label: 'Serverless: <SVC>' / 'AI/Cortex: <SVC>'.
   * FACT_METERING_DAILY carries NO company dimension (account-level metering), so the new
     rows are emitted for the 'ALL' pill only. Fanning them across ALFA/Trexis would invent
     an attribution the source does not carry; parking them in the V044 UNKNOWN pill would
@@ -175,17 +179,22 @@ BEGIN
         # INSERT. Identical column contract, so the app reader needs no change.
         ("    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME;",
          """    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME
-    -- V069 (audit C5): serverless + AI/Cortex cost drivers. The arm above reads
-    -- FACT_WAREHOUSE_DAILY ONLY, so a Cortex or auto-clustering line could be the
-    -- account's fastest-growing cost and never reach the "Top cost drivers" panel, while
-    -- this page's KPI caption promises compute + serverless + AI. Same column contract as
-    -- the warehouse arm (the app groups COST_DRIVER by DIMENSION and sums VALUE_USD); the
-    -- kind rides in the DIMENSION label because the board has no KIND column.
-    -- HOUSE RATE LAW: AI/Cortex credits x :ai_credit_price, everything else x
-    -- :credit_price -- the two-partition dollarization of V064/V065's alert blocks, over
-    -- the canonical AI predicate resolved once as sv_daily.IS_AI.
+    -- V069 (audit C5): serverless + AI/Cortex cost drivers on their OWN panel. The
+    -- warehouse arm above reads FACT_WAREHOUSE_DAILY ONLY, so a Cortex or auto-clustering
+    -- line could be the account's fastest-growing cost and never reach the driver panel,
+    -- while this page's KPI caption promises compute + serverless + AI. These rows go under
+    -- PANEL='COST_DRIVER_SVC' -- a DISTINCT panel from the warehouse 'COST_DRIVER' -- so
+    -- the warehouse drivers keep summing to the warehouse-only headline KPIs and the page's
+    -- "% of warehouse compute spend" caption stays true; the app renders this as a separate
+    -- table beneath the warehouse drivers. Same column contract; the kind rides in the
+    -- DIMENSION label because the board has no KIND column.
+    -- BASIS: this panel is BILLED $ -- CREDITS_BILLED (adjustment applied), AI/Cortex
+    -- credits x :ai_credit_price and everything else x :credit_price (the two-partition
+    -- dollarization of V064/V065's alert blocks, over the canonical AI predicate resolved
+    -- once as sv_daily.IS_AI). The warehouse panel is operational CREDITS_TOTAL at the
+    -- compute rate -- the two panels never mix bases.
     UNION ALL
-    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', DRIVER_LABEL, NULL,
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER_SVC', 'CREDITS', DRIVER_LABEL, NULL,
            SUM(CREDITS),
            ROUND(SUM(CASE WHEN IS_AI THEN 0 ELSE CREDITS END) * :credit_price
                  + SUM(CASE WHEN IS_AI THEN CREDITS ELSE 0 END) * :ai_credit_price, 2),
@@ -237,8 +246,10 @@ assert ("ROUND(SUM(CASE WHEN IS_AI THEN 0 ELSE CREDITS END) * :credit_price\n"
 assert code.count("3.68") == 1 and code.count("2.20") == 1, "rates appear only as the COALESCE seeds"
 assert code.count(":ai_credit_price") == 2, "AI rate: read INTO + applied once"
 assert code.count(":credit_price") == 5, "compute rate: read INTO + KPI + daily spend + 2 driver arms"
-# the existing warehouse driver arm is preserved, and the contract is unchanged
-assert code.count("'COST_DRIVER', 'CREDITS'") == 2, "warehouse arm preserved + serverless/AI arm added"
+# the existing warehouse driver arm is preserved (warehouse-only), and the serverless/AI
+# arm lands on its OWN panel so the warehouse drivers still reconcile to the headline KPIs
+assert code.count("'COST_DRIVER', 'CREDITS'") == 1, "warehouse arm preserved, warehouse-only"
+assert code.count("'COST_DRIVER_SVC', 'CREDITS'") == 1, "serverless/AI arm on its own panel"
 assert "FROM wh GROUP BY 1, 2, WAREHOUSE_NAME\n" in board, "warehouse driver arm intact"
 assert "FROM sv GROUP BY 1, 2, DRIVER_LABEL;" in code, "new arm closes the INSERT"
 assert code.count("(COMPANY, WINDOW_DAYS, PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER)") == 1, \
@@ -278,9 +289,13 @@ out = f"""-- V069__exec_board_serverless_ai_drivers.sql
 --   * CREDITS_BILLED (adjustment applied) is the base -- the same one this page's MTD /
 --     Projected KPIs dollarize, so panel and KPI row agree;
 --   * same window semantics as the existing arm (-365d read horizon, shared windows join);
---   * unchanged column contract, so app/ui/pages/overview.py needs NO change. The board has
---     no KIND column and no room for one, so the kind rides in the DIMENSION label:
---     'Serverless: <SERVICE_TYPE>' / 'AI/Cortex: <SERVICE_TYPE>';
+--   * unchanged column contract, so the mart reader (mart_sql.py exec_board, which selects
+--     every panel generically) needs NO change. The rows land on a DISTINCT panel value
+--     PANEL='COST_DRIVER_SVC' (#12: NOT 'COST_DRIVER'), so the warehouse COST_DRIVER panel
+--     stays warehouse-only and keeps reconciling to the warehouse-only headline KPIs;
+--     overview.py reads COST_DRIVER_SVC and renders it as a separate table beneath the
+--     warehouse drivers. The board has no KIND column, so the kind rides in the DIMENSION
+--     label: 'Serverless: <SERVICE_TYPE>' / 'AI/Cortex: <SERVICE_TYPE>';
 --   * FACT_METERING_DAILY has no company dimension (account-level metering), so the new
 --     rows are emitted for the 'ALL' pill ONLY -- fanning them across ALFA/Trexis would
 --     invent an attribution the source does not carry.
@@ -311,7 +326,7 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 69 AS VERSION,
-       'Exec-board serverless + AI cost drivers (audit C5): SP_REFRESH_EXEC_BOARD built COST_DRIVER rows from FACT_WAREHOUSE_DAILY alone, so serverless (auto-clustering, MV refresh, search optimization, snowpipe, serverless tasks) and AI/Cortex spend could never appear on the Overview driver panel even as the fastest-growing line - while the same page KPIs cover compute + serverless + AI. A second COST_DRIVER arm over FACT_METERING_DAILY (the app fact, not ACCOUNT_USAGE) excludes warehouse metering, prices AI/Cortex credits at AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD (both read from SETTINGS - the proc gains the two-key read), keeps the same -365d/windows semantics and column contract, and labels drivers Serverless:/AI/Cortex: so the panel needs no app change. Account-level metering has no company dimension, so the rows land on the ALL scope only. Re-derived from V054; no new objects.' AS DESCRIPTION
+       'Exec-board serverless + AI cost drivers (audit C5): SP_REFRESH_EXEC_BOARD built COST_DRIVER rows from FACT_WAREHOUSE_DAILY alone, so serverless (auto-clustering, MV refresh, search optimization, snowpipe, serverless tasks) and AI/Cortex spend could never appear on the Overview driver panel even as the fastest-growing line - while the same page KPIs cover compute + serverless + AI. A second driver arm over FACT_METERING_DAILY (the app fact, not ACCOUNT_USAGE) excludes warehouse metering, prices AI/Cortex credits at AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD (both read from SETTINGS - the proc gains the two-key read), keeps the same -365d/windows semantics and column contract, and labels drivers Serverless:/AI/Cortex:. The rows go under a DISTINCT panel PANEL=COST_DRIVER_SVC (not COST_DRIVER) so the warehouse driver panel stays warehouse-only and keeps reconciling to the warehouse-only KPIs; overview.py renders COST_DRIVER_SVC as a separate table. Account-level metering has no company dimension, so the rows land on the ALL scope only. Re-derived from V054; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 69);
 """
 

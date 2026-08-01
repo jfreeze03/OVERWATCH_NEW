@@ -32924,6 +32924,21 @@ FROM (SELECT 'FACT_METERING_DAILY' AS SOURCE UNION ALL SELECT 'FACT_TASK_DAILY'
 WHERE (SELECT MAX(WM_TS) FROM DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS WHERE SOURCE = 'DAILY_FACTS') IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.OW_LOAD_WATERMARKS w WHERE w.SOURCE = s.SOURCE);
 
+-- #26: single-flight lease for SP_NOTIFY_WEBHOOK. A minimal control table (the only
+-- robust way to express a cross-run guard here) holding ONE sentinel row. The sender
+-- UPDATEs it at entry and bails if another live run holds it (see the proc comment for
+-- WHY the send-then-ledger ordering it protects is intentionally send-first). Idempotent:
+-- CREATE IF NOT EXISTS + a NOT EXISTS seed, so re-applying the migration is a no-op.
+CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE (
+    LEASE_NAME  VARCHAR(80)   NOT NULL,
+    HELD        BOOLEAN       NOT NULL DEFAULT FALSE,
+    HOLDER      VARCHAR(200),
+    ACQUIRED_AT TIMESTAMP_NTZ
+);
+INSERT INTO DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE (LEASE_NAME, HELD)
+SELECT 'SP_NOTIFY_WEBHOOK', FALSE
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK');
+
 -- >>> SP_NOTIFY_WEBHOOK  (rec8 oldest-first bounded drain - SMOKE TEST REQUIRED)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_NOTIFY_WEBHOOK()
 RETURNS VARCHAR
@@ -32955,6 +32970,24 @@ DECLARE
         WHERE r.ENABLED
         ORDER BY r.ROUTE_ID;
 BEGIN
+    -- V064 #26: single-flight concurrency guard. The send-then-ledger ordering
+    -- inside the loop is INTENTIONAL for paging -- at-least-once bias: a
+    -- claim-before-send outbox could LOSE a page if the claim commits but the send
+    -- is dropped, which is worse for an alerting system than a rare duplicate page.
+    -- That ordering does leave one race: two OVERLAPPING runs can both read the same
+    -- eligible events before either writes its ledger rows, and re-send. This lease
+    -- closes ONLY that window; it does NOT change the send-first ordering. Acquire a
+    -- single sentinel row at entry; bail if another live run holds it; release at
+    -- exit. A lease older than 1h is treated as abandoned (a crashed run that never
+    -- released) and reclaimed, so the sender can never wedge itself out forever.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE
+       SET HELD = TRUE, HOLDER = CURRENT_SESSION(), ACQUIRED_AT = CURRENT_TIMESTAMP()
+     WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK'
+       AND (HELD = FALSE OR ACQUIRED_AT < DATEADD('hour', -1, CURRENT_TIMESTAMP()));
+    IF (SQLROWCOUNT = 0) THEN
+        RETURN 'skipped - another SP_NOTIFY_WEBHOOK run holds the sender lease';
+    END IF;
+
     FOR rec IN c1 DO
         r_route_id := rec.ROUTE_ID;
         r_family := rec.FAMILY;
@@ -33086,40 +33119,69 @@ BEGIN
         END IF;
     END FOR;
 
-    -- Loud, not silent: open events aging past the 24h window with NO delivery
-    -- anywhere get one error-log row each run they linger. V064 rec8: the "would
-    -- any route ever carry this?" test now MIRRORS the send eligibility (family +
-    -- company + severity), not company alone -- so "flagged expired" means "was
-    -- eligible to some route but never delivered", never "was never eligible" (an
-    -- event below every route's min-severity is out of scope by policy).
-    -- (An OPEN event whose rule row was deleted from ALERT_CONFIG is undeliverable
-    -- in BOTH the send and expired paths -- both INNER-join config -- so it is
-    -- intentionally not flagged expired; it stays visibly OPEN in-app.)
-    SELECT COUNT(*) INTO :expired
+    -- Loud, not silent: an (event,route) pair aging past the 24h window with NO
+    -- delivery FOR THAT ROUTE gets one error-log row per episode.
+    -- V064 #27 (PER-ROUTE expiry): the old test keyed on ALERT_EVENTS.NOTIFIED_AT,
+    -- which is stamped after the FIRST route delivers -- so an event that reached
+    -- route A but never route B was NEVER flagged expired for B. Expiry is now per
+    -- (event,route): a pair is expired when the event is past the 24h window and has
+    -- NO row in ALERT_DELIVERIES for THAT route (NOT EXISTS on event+route), instead
+    -- of keying on NOTIFIED_AT. The candidate route set is still the SEND eligibility
+    -- (family + company + severity), so a flagged pair was genuinely eligible to that
+    -- route but undelivered.
+    -- (An OPEN event whose rule row was deleted from ALERT_CONFIG is undeliverable in
+    -- BOTH the send and expired paths -- both INNER-join config -- so it is
+    -- intentionally not flagged; it stays visibly OPEN in-app.)
+    -- V064 #40 (log-inflation guard): a persistent backlog must NOT re-insert the
+    -- same pair every sender run -- that would make a 30d failure KPI count RUNS, not
+    -- events. Each (event,route) pair is logged at most once per 24h via NOT EXISTS
+    -- on a prior 'undelivered_expired' row with the same event/route key (CONTEXT).
+    -- The first signal is never lost; a still-stuck pair re-logs at most once a day.
+    INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+        (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
+    SELECT 'NotifyWebhook', 'undelivered_expired',
+           'open event ' || e.EVENT_ID || ' [' || e.SEVERITY ||
+           '] aged past the 24h window undelivered to route ' || r2.ROUTE_ID ||
+           ' (integration ' || r2.INTEGRATION_NAME || '); event remains OPEN in-app',
+           'event ' || e.EVENT_ID || ' route ' || r2.ROUTE_ID,
+           CURRENT_ROLE()
     FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
     JOIN DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG c ON c.RULE_ID = e.RULE_ID
-    WHERE e.STATUS = 'OPEN' AND e.NOTIFIED_AT IS NULL
+    JOIN DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r2
+      ON r2.ENABLED
+     AND (r2.FAMILY = 'ALL' OR c.FAMILY = r2.FAMILY)
+     AND (COALESCE(r2.COMPANY_FILTER, 'ALL') = 'ALL'
+          OR e.COMPANY = r2.COMPANY_FILTER
+          OR UPPER(e.COMPANY) = 'ALL')
+     AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+         >= CASE r2.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+    WHERE e.STATUS = 'OPEN'
       AND e.RAISED_AT < DATEADD('hour', -24, CURRENT_TIMESTAMP())
       AND e.RAISED_AT >= DATEADD('day', -7, CURRENT_TIMESTAMP())
-      AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_ROUTES r2
-                  WHERE r2.ENABLED
-                    AND (r2.FAMILY = 'ALL' OR c.FAMILY = r2.FAMILY)
-                    AND (COALESCE(r2.COMPANY_FILTER, 'ALL') = 'ALL'
-                         OR e.COMPANY = r2.COMPANY_FILTER
-                         OR UPPER(e.COMPANY) = 'ALL')
-                    AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END
-                        >= CASE r2.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END);
-    IF (expired > 0) THEN
-        INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
-            (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-        SELECT 'NotifyWebhook', 'undelivered_expired',
-               :expired || ' open event(s) aged past the 24h delivery window with no successful send',
-               'check ALERT_ROUTES integrations; events remain OPEN in-app',
-               CURRENT_ROLE();
-    END IF;
+      AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_DELIVERIES d
+                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r2.ROUTE_ID)
+      AND NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG a
+                      WHERE a.ERROR_TYPE = 'undelivered_expired'
+                        AND a.CONTEXT = 'event ' || e.EVENT_ID || ' route ' || r2.ROUTE_ID
+                        AND a.LOGGED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP()));
+    expired := SQLROWCOUNT;
+
+    -- V064 #26: release the single-flight lease -- FENCED to this session. Without the
+    -- HOLDER = CURRENT_SESSION() check a stalled run (>1h) whose lease was already
+    -- reclaimed by a successor would, on finally finishing, clear the SUCCESSOR's lease
+    -- and let a third run start concurrently -- defeating single-flight in exactly the
+    -- crash/stall case the 1h window exists for. The fence makes release a no-op unless
+    -- we still hold it. Best-effort otherwise: an unhandled failure above leaves
+    -- HELD=TRUE, and the next run's acquire reclaims it after the 1h staleness window --
+    -- the sender can never wedge itself out permanently.
+    UPDATE DBA_MAINT_DB.OVERWATCH.OW_SENDER_LEASE
+       SET HELD = FALSE, HOLDER = NULL
+     WHERE LEASE_NAME = 'SP_NOTIFY_WEBHOOK'
+       AND HOLDER = CURRENT_SESSION();
 
     RETURN 'sent ' || :sent_total || ' event-route pair(s) across ' || :routes_hit ||
-           ' route(s) in ' || :batches || ' batch(es); ' || :expired || ' expired-undelivered flagged';
+           ' route(s) in ' || :batches || ' batch(es); ' || :expired ||
+           ' newly expired-undelivered (event,route) pair(s) flagged';
 END;
 $$;
 
@@ -33353,7 +33415,17 @@ LANGUAGE SQL
 EXECUTE AS OWNER
 AS
 $$
+DECLARE
+    rv VARCHAR;             -- V064 #9: each child loader's RETURN verdict, captured per CALL
+    fails INT DEFAULT 0;    -- children whose RETURN carried a WITH ERRORS/FAIL token
+    recon_start TIMESTAMP_NTZ;  -- V064 #9: run start, to scope the failure-log count
+    logged_fails INT DEFAULT 0; -- APP_ERROR_LOG failure rows written during this run
 BEGIN
+    -- V064 #9: most child loaders SWALLOW arm failures (log a '%_failed%' row to
+    -- APP_ERROR_LOG, then return a benign 'loaded' string), so a per-CALL return-string
+    -- check catches only the two machine-verdict children. The AUTHORITATIVE signal is
+    -- the count of failure rows the children logged during this run -- captured below.
+    recon_start := CURRENT_TIMESTAMP();
     DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
      WHERE DAY >= DATEADD('day', -3, CURRENT_DATE());
     DELETE FROM DBA_MAINT_DB.OVERWATCH.FACT_METERING_DAILY
@@ -33389,12 +33461,38 @@ BEGIN
                       'FACT_LOGIN_DAILY', 'FACT_STORAGE_DAILY');
 
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(0);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_HOURLY_FACTS();
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 3);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
     CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(3);
+    SELECT $1 INTO :rv FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+    IF (rv IS NOT NULL AND (rv ILIKE '%WITH ERRORS%' OR rv ILIKE '%FAIL%')) THEN fails := fails + 1; END IF;
 
-    RETURN 'nightly reconcile complete (metering + full-retention marts 3 days, extract-fed marts 2)';
+    -- V064 #9: the AUTHORITATIVE failure signal. Every child loader logs a '%_failed%'
+    -- row to APP_ERROR_LOG when an arm fails (fact_load_failed, mart_load_failed,
+    -- extract_load_failed, cloud_svc_mart_failed, object_cost_load_failed, ...), INCLUDING
+    -- the ones that swallow the error and return a benign 'loaded' string -- so a
+    -- return-string check alone would miss 4 of the 5 children. Count what was logged
+    -- during THIS run; the per-CALL return check above is a secondary catch for the two
+    -- machine-verdict children (SP_LOAD_DAILY_FACTS, SP_LOAD_MARTS_V27).
+    SELECT COUNT(*) INTO :logged_fails
+    FROM DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG
+    WHERE LOGGED_AT >= :recon_start
+      AND (ERROR_TYPE ILIKE '%_failed%' OR ERROR_TYPE ILIKE '%WITH ERRORS%');
+    IF (fails > 0 OR logged_fails > 0) THEN
+        RETURN 'RECONCILE WITH ERRORS: ' || :logged_fails || ' loader failure(s) logged'
+            || IFF(:fails > 0, ' + ' || :fails || ' child verdict(s) non-success', '')
+            || ' (metering + full-retention marts 3 days, extract-fed marts 2); inspect APP_ERROR_LOG';
+    END IF;
+    RETURN 'RECONCILE OK - nightly reconcile complete (metering + full-retention marts 3 days, extract-fed marts 2); no child loader failures logged';
 END;
 $$;
 
@@ -34162,6 +34260,16 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --         transaction (BEGIN TRANSACTION/COMMIT, ROLLBACK on error). Under AUTOCOMMIT the
 --         DELETE committed immediately, so a transient INSERT failure blanked the trailing
 --         48h of the incident timeline until the next hourly rebuild.
+--     #10 FALSE SUCCESS -- every mart arm swallows its own failure (logs to APP_ERROR_LOG and
+--         CONTINUES) but the terminal RETURN always claimed the marts loaded. REQUIRED-arm and
+--         OPTIONAL-arm failure counters (incremented in each arm's own handler) now drive a
+--         machine-readable verdict: 'MARTS OK ...' when zero required failures, else
+--         'MARTS WITH ERRORS: <n> required, <m> optional ...'. Per-arm swallow unchanged.
+--     #11 FRESHNESS ADVANCES ON FAILURE -- the per-scope SOURCE_FRESHNESS_STATE MERGE bumped
+--         GENERATION and wrote the successful-arm STATUS across a static source group, so a
+--         source whose arm just failed still looked freshly loaded. The MERGE is now driven by
+--         the sources that actually loaded (their per-arm token is present in :loaded), so the
+--         stamp advances for successful sources only, with per-source STATUS.
 --
 -- No smoke test required (deterministic alert logic + the B34 transaction-wrap pattern
 -- already used elsewhere in this file). Byte-verified by tests/test_v066_alert_escalation.py.
@@ -35199,6 +35307,8 @@ DECLARE
     d INT;
     ext_lo DATE;
     ext_lo_hour TIMESTAMP_LTZ;
+    req_fail INT DEFAULT 0;   -- V066 #10: REQUIRED-arm (core fact/mart) failures this run
+    opt_fail INT DEFAULT 0;   -- V066 #10: OPTIONAL-arm (tag-cov, task-node, AI/Cortex) failures
 BEGIN
     d := GREATEST(1, LEAST(COALESCE(DAYS_BACK, 2), 400))::INT;
 
@@ -35281,6 +35391,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_WAREHOUSE_EFFICIENCY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [2] query families (top 2000/day by exec time) --------------------
@@ -35329,6 +35440,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_QUERY_FAMILY_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [3] role-hour fact -------------------------------------------------
@@ -35361,6 +35473,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_ROLE_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [4] schema-hour fact -----------------------------------------------
@@ -35396,6 +35509,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_QUERY_SCHEMA_HOURLY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [4b] tag coverage by user, day grain (v4.14 tuning trio) --------
@@ -35429,6 +35543,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TAG_COVERAGE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [5] cost allocation (exec-time share of each warehouse-hour) -------
@@ -35497,6 +35612,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_COST_ALLOCATION_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [5b] cross-dim allocation fact (V041 R2): persist _OW_ALLOC_BASE at
@@ -35525,6 +35641,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_COST_ALLOC_XDIM_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [6] task graphs -----------------------------------------------------
@@ -35584,6 +35701,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_GRAPH_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [6b] per-node task timing (queue + exec delay) -> MART_TASK_NODE_DAILY
@@ -35635,6 +35753,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_TASK_NODE_DAILY - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [8] incident timeline (rolling 48h window rebuild) -----------------
@@ -35682,26 +35801,46 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_INCIDENT_TIMELINE - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
 
         -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE: stamp ONLY the sources whose arm actually
+        -- loaded this run. This MERGE used to advance GENERATION and write the successful-arm
+        -- list as STATUS across the whole STATIC group, so a source whose arm just failed
+        -- still looked freshly loaded. Each arm appends its token to :loaded only on its
+        -- success path, so gate the source set on token membership (ARRAY_CONTAINS over
+        -- SPLIT(:loaded)); a failed source is left untouched -- its prior generation/snapshot
+        -- stand, correctly reading as not-loaded-this-run -- and STATUS now carries that
+        -- source's own outcome.
         MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
         USING (
-            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
-            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
-            WHERE SOURCE_NAME IN ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'MART_QUERY_FAMILY_DAILY',
-                                  'FACT_QUERY_ROLE_HOURLY', 'FACT_QUERY_SCHEMA_HOURLY',
-                                  'MART_TAG_COVERAGE_DAILY', 'MART_COST_ALLOCATION_DAILY',
-                                  'FACT_COST_ALLOC_XDIM_DAILY', 'MART_TASK_GRAPH_DAILY',
-                                  'MART_INCIDENT_TIMELINE')
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_WAREHOUSE_EFFICIENCY_DAILY', 'wh_eff'),
+                    ('MART_QUERY_FAMILY_DAILY', 'qfam'),
+                    ('FACT_QUERY_ROLE_HOURLY', 'role_hr'),
+                    ('FACT_QUERY_SCHEMA_HOURLY', 'schema_hr'),
+                    ('MART_TAG_COVERAGE_DAILY', 'tagcov'),
+                    ('MART_COST_ALLOCATION_DAILY', 'alloc'),
+                    ('FACT_COST_ALLOC_XDIM_DAILY', 'alloc_xdim'),
+                    ('MART_TASK_GRAPH_DAILY', 'graphs'),
+                    ('MART_INCIDENT_TIMELINE', 'timeline')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            GROUP BY f.SOURCE_NAME
         ) s
         ON t.SOURCE_NAME = s.SOURCE_NAME
         WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
             SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = :loaded
+            STATUS = s.STATUS
         WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
 
     END IF;
 
@@ -35801,6 +35940,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'MART_SECURITY_POSTURE_DAILY - other marts unaffected', CURRENT_ROLE();
+                req_fail := req_fail + 1;   -- V066 #10: this REQUIRED arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         -- [9] AI usage (Cortex Code views bill this account; Functions guarded)
@@ -35843,6 +35983,7 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (code views) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
         BEGIN
@@ -35876,32 +36017,54 @@ BEGIN
                 emsg := SQLERRM;
                 INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
                 SELECT 'MartLoader', 'mart_load_failed', :emsg, 'FACT_AI_USAGE_DAILY (functions view optional) - other marts unaffected', CURRENT_ROLE();
+                opt_fail := opt_fail + 1;   -- V066 #10: this OPTIONAL arm failed (verdict-only; per-arm swallow unchanged)
         END;
 
 
         -- V041 R6: loader-owned freshness — this scope's sources, one commit.
+        -- V066 #11 FRESHNESS ADVANCES ON FAILURE (DAILY scope): same token-gated stamp.
+        -- Only posture / AI sources whose arm loaded advance; FACT_AI_USAGE_DAILY collapses
+        -- its two arms (ai_code, ai_functions) to one row via GROUP BY so the MERGE matches
+        -- its target exactly once.
         MERGE INTO DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE t
         USING (
-            SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT
-            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS
-            WHERE SOURCE_NAME IN ('MART_SECURITY_POSTURE_DAILY', 'FACT_AI_USAGE_DAILY')
+            SELECT f.SOURCE_NAME, ANY_VALUE(f.LAST_LOAD_TS) AS LAST_LOAD_TS,
+                   ANY_VALUE(f.ROW_COUNT) AS ROW_COUNT, LISTAGG(m.TOKEN, ' ') AS STATUS
+            FROM DBA_MAINT_DB.OVERWATCH.MART_SOURCE_FRESHNESS f
+            JOIN (
+                SELECT SOURCE_NAME, TOKEN FROM VALUES
+                    ('MART_SECURITY_POSTURE_DAILY', 'posture'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_code'),
+                    ('FACT_AI_USAGE_DAILY', 'ai_functions')
+                    AS srcmap(SOURCE_NAME, TOKEN)
+            ) m ON m.SOURCE_NAME = f.SOURCE_NAME
+            WHERE ARRAY_CONTAINS(m.TOKEN::VARIANT, SPLIT(:loaded, ' '))
+            GROUP BY f.SOURCE_NAME
         ) s
         ON t.SOURCE_NAME = s.SOURCE_NAME
         WHEN MATCHED THEN UPDATE SET LAST_LOAD_TS = s.LAST_LOAD_TS, ROW_COUNT = s.ROW_COUNT,
             SNAPSHOT_TS = CURRENT_TIMESTAMP(), GENERATION = COALESCE(t.GENERATION, 0) + 1,
-            STATUS = :loaded
+            STATUS = s.STATUS
         WHEN NOT MATCHED THEN INSERT (SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, GENERATION, STATUS)
-        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, :loaded);
+        VALUES (s.SOURCE_NAME, s.LAST_LOAD_TS, s.ROW_COUNT, 1, s.STATUS);
 
     END IF;
 
-    RETURN 'V27 marts loaded (' || :SCOPE || ', ' || :d || 'd): ' || :loaded;
+    -- V066 #10 FALSE SUCCESS: the terminal RETURN used to always claim the marts loaded,
+    -- even when an arm's EXCEPTION handler swallowed a failure and continued. Return a
+    -- machine-readable verdict from the REQUIRED / OPTIONAL failure counters instead.
+    IF (req_fail = 0) THEN
+        RETURN 'MARTS OK (' || :SCOPE || ', ' || :d || 'd): ' || :loaded
+               || IFF(:opt_fail > 0, '[' || :opt_fail || ' optional failed]', '');
+    END IF;
+    RETURN 'MARTS WITH ERRORS: ' || :req_fail || ' required, ' || :opt_fail || ' optional ('
+           || :SCOPE || ', ' || :d || 'd): ' || :loaded;
 END;
 $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 66 AS VERSION,
-       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
+       'Alert escalation + serverless window + timeline atomicity (bug round 6): SP_ALERT_SCAN dedupe keys for PIPE_COPY_FAILURES (#1) and COST_DEPT_BUDGET_PACE (#11) gain a severity band so a within-bucket HIGH->CRITICAL / MEDIUM->HIGH crossing re-fires; COST_SERVERLESS_CREEP excludes today so both weeks are 7 complete days (#6); SP_ALERT_SCAN_DAILY COST_CONTRACT_BREACH weekly key gains a severity band (#2); SP_LOAD_MARTS_V27 incident-timeline arm [8] DELETE+INSERT wrapped in one transaction so a failed rebuild cannot blank the trailing 48h (#3), the terminal RETURN reports a machine-readable MARTS OK / MARTS WITH ERRORS verdict from required/optional arm-failure counters instead of always claiming success (#10), and the per-scope freshness stamp advances only for sources whose arm actually loaded this run (#11). Re-derived from V062/V065; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 66);
 -- ===========================================================================
 -- >>> V067__alert_attribution_onset_supersede_objectcost.sql
@@ -36649,12 +36812,21 @@ BEGIN
     -- the DELETE and defeat the atomic wrap. The stages read only
     -- ACCOUNT_USAGE, so hoisting them is order-safe.
     CREATE OR REPLACE TEMPORARY TABLE DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE AS
-    SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
-           SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
-    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= :lo
-    GROUP BY QUERY_ID
-    HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;
+    SELECT a.QUERY_ID, MIN(a.START_TIME)::DATE AS DAY,
+           -- V067 #17: carry the executing warehouse so the residual (unattributed-to-object)
+           -- row can resolve its COMPANY from the warehouse instead of being forced to
+           -- 'UNKNOWN'. QUERY_ATTRIBUTION_HISTORY has no WAREHOUSE_NAME, so LEFT JOIN
+           -- QUERY_HISTORY on QUERY_ID (the V036 pattern); LEFT + MAX keeps one row per
+           -- QUERY_ID and never drops a query whose history row is missing.
+           MAX(q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+           SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+      ON q.QUERY_ID = a.QUERY_ID
+     AND q.START_TIME >= :lo
+    WHERE a.START_TIME >= :lo
+    GROUP BY a.QUERY_ID
+    HAVING SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;
 
     -- Read/write role rides the union (V050): write wins when one query both
     -- reads and writes an object, so the object keeps ONE share (additivity)
@@ -36757,12 +36929,21 @@ BEGIN
     -- VANISHED — V049's obj_q counted it attributed while the split had no
     -- row for it; it now lands here, where unattributable compute belongs.)
     INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_OBJECT_COST_DAILY (DAY, OBJECT_FQN, OBJECT_DOMAIN, COST_ARM, COMPANY, CREDITS)
-    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)
+    -- V067 #17: resolve the residual COMPANY from the executing WAREHOUSE_NAME
+    -- (carried through OW_OBJCOST_QA_STAGE) via COMPANY_FOR_WAREHOUSE, so a
+    -- company-filtered object-cost total reconciles when the warehouse identifies the
+    -- company; COMPANY_FOR_WAREHOUSE returns 'UNKNOWN' only when the warehouse does not
+    -- resolve. The company key joins the GROUP BY, so residual credits split by company
+    -- while the per-day total stays additive.
+    -- TODO(#18, deferred): storing BOTH the consumer-company (warehouse) and the
+    -- object-owner-company is a separate dual-lens enhancement, not done here.
+    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(qa.WAREHOUSE_NAME), SUM(qa.CREDITS)
     FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE qa
     LEFT JOIN (SELECT DISTINCT QUERY_ID FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_OBJ_STAGE) obj_q
       ON obj_q.QUERY_ID = qa.QUERY_ID
     WHERE obj_q.QUERY_ID IS NULL
-    GROUP BY 1;
+    GROUP BY 1, 5;
     COMMIT;
     EXCEPTION
         WHEN OTHER THEN
@@ -36986,9 +37167,13 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 --   * CREDITS_BILLED (adjustment applied) is the base -- the same one this page's MTD /
 --     Projected KPIs dollarize, so panel and KPI row agree;
 --   * same window semantics as the existing arm (-365d read horizon, shared windows join);
---   * unchanged column contract, so app/ui/pages/overview.py needs NO change. The board has
---     no KIND column and no room for one, so the kind rides in the DIMENSION label:
---     'Serverless: <SERVICE_TYPE>' / 'AI/Cortex: <SERVICE_TYPE>';
+--   * unchanged column contract, so the mart reader (mart_sql.py exec_board, which selects
+--     every panel generically) needs NO change. The rows land on a DISTINCT panel value
+--     PANEL='COST_DRIVER_SVC' (#12: NOT 'COST_DRIVER'), so the warehouse COST_DRIVER panel
+--     stays warehouse-only and keeps reconciling to the warehouse-only headline KPIs;
+--     overview.py reads COST_DRIVER_SVC and renders it as a separate table beneath the
+--     warehouse drivers. The board has no KIND column, so the kind rides in the DIMENSION
+--     label: 'Serverless: <SERVICE_TYPE>' / 'AI/Cortex: <SERVICE_TYPE>';
 --   * FACT_METERING_DAILY has no company dimension (account-level metering), so the new
 --     rows are emitted for the 'ALL' pill ONLY -- fanning them across ALFA/Trexis would
 --     invent an attribution the source does not carry.
@@ -37171,17 +37356,22 @@ BEGIN
     SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', WAREHOUSE_NAME, NULL,
            SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits', 10
     FROM wh GROUP BY 1, 2, WAREHOUSE_NAME
-    -- V069 (audit C5): serverless + AI/Cortex cost drivers. The arm above reads
-    -- FACT_WAREHOUSE_DAILY ONLY, so a Cortex or auto-clustering line could be the
-    -- account's fastest-growing cost and never reach the "Top cost drivers" panel, while
-    -- this page's KPI caption promises compute + serverless + AI. Same column contract as
-    -- the warehouse arm (the app groups COST_DRIVER by DIMENSION and sums VALUE_USD); the
-    -- kind rides in the DIMENSION label because the board has no KIND column.
-    -- HOUSE RATE LAW: AI/Cortex credits x :ai_credit_price, everything else x
-    -- :credit_price -- the two-partition dollarization of V064/V065's alert blocks, over
-    -- the canonical AI predicate resolved once as sv_daily.IS_AI.
+    -- V069 (audit C5): serverless + AI/Cortex cost drivers on their OWN panel. The
+    -- warehouse arm above reads FACT_WAREHOUSE_DAILY ONLY, so a Cortex or auto-clustering
+    -- line could be the account's fastest-growing cost and never reach the driver panel,
+    -- while this page's KPI caption promises compute + serverless + AI. These rows go under
+    -- PANEL='COST_DRIVER_SVC' -- a DISTINCT panel from the warehouse 'COST_DRIVER' -- so
+    -- the warehouse drivers keep summing to the warehouse-only headline KPIs and the page's
+    -- "% of warehouse compute spend" caption stays true; the app renders this as a separate
+    -- table beneath the warehouse drivers. Same column contract; the kind rides in the
+    -- DIMENSION label because the board has no KIND column.
+    -- BASIS: this panel is BILLED $ -- CREDITS_BILLED (adjustment applied), AI/Cortex
+    -- credits x :ai_credit_price and everything else x :credit_price (the two-partition
+    -- dollarization of V064/V065's alert blocks, over the canonical AI predicate resolved
+    -- once as sv_daily.IS_AI). The warehouse panel is operational CREDITS_TOTAL at the
+    -- compute rate -- the two panels never mix bases.
     UNION ALL
-    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', DRIVER_LABEL, NULL,
+    SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER_SVC', 'CREDITS', DRIVER_LABEL, NULL,
            SUM(CREDITS),
            ROUND(SUM(CASE WHEN IS_AI THEN 0 ELSE CREDITS END) * :credit_price
                  + SUM(CASE WHEN IS_AI THEN CREDITS ELSE 0 END) * :ai_credit_price, 2),
@@ -37214,5 +37404,5 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_REFRESH_EXEC_BOARD();
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 69 AS VERSION,
-       'Exec-board serverless + AI cost drivers (audit C5): SP_REFRESH_EXEC_BOARD built COST_DRIVER rows from FACT_WAREHOUSE_DAILY alone, so serverless (auto-clustering, MV refresh, search optimization, snowpipe, serverless tasks) and AI/Cortex spend could never appear on the Overview driver panel even as the fastest-growing line - while the same page KPIs cover compute + serverless + AI. A second COST_DRIVER arm over FACT_METERING_DAILY (the app fact, not ACCOUNT_USAGE) excludes warehouse metering, prices AI/Cortex credits at AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD (both read from SETTINGS - the proc gains the two-key read), keeps the same -365d/windows semantics and column contract, and labels drivers Serverless:/AI/Cortex: so the panel needs no app change. Account-level metering has no company dimension, so the rows land on the ALL scope only. Re-derived from V054; no new objects.' AS DESCRIPTION
+       'Exec-board serverless + AI cost drivers (audit C5): SP_REFRESH_EXEC_BOARD built COST_DRIVER rows from FACT_WAREHOUSE_DAILY alone, so serverless (auto-clustering, MV refresh, search optimization, snowpipe, serverless tasks) and AI/Cortex spend could never appear on the Overview driver panel even as the fastest-growing line - while the same page KPIs cover compute + serverless + AI. A second driver arm over FACT_METERING_DAILY (the app fact, not ACCOUNT_USAGE) excludes warehouse metering, prices AI/Cortex credits at AI_CREDIT_PRICE_USD and the rest at CREDIT_PRICE_USD (both read from SETTINGS - the proc gains the two-key read), keeps the same -365d/windows semantics and column contract, and labels drivers Serverless:/AI/Cortex:. The rows go under a DISTINCT panel PANEL=COST_DRIVER_SVC (not COST_DRIVER) so the warehouse driver panel stays warehouse-only and keeps reconciling to the warehouse-only KPIs; overview.py renders COST_DRIVER_SVC as a separate table. Account-level metering has no company dimension, so the rows land on the ALL scope only. Re-derived from V054; no new objects.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 69);

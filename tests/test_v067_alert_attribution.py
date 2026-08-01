@@ -84,6 +84,22 @@ def test_supersede_excluded_from_operator_mttr():
     assert "COUNT_IF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED') AS RESOLVED_EVENTS" in ms
 
 
+# #17 — residual compute resolves its company from the executing warehouse
+def test_residual_company_resolved_from_warehouse():
+    oc = _proc(_V67, "SP_LOAD_OBJECT_COST")
+    # the executing warehouse is carried through the QA stage (QAH has no WAREHOUSE_NAME,
+    # so a LEFT JOIN to QUERY_HISTORY on QUERY_ID supplies it — the V036 pattern)
+    assert "MAX(q.WAREHOUSE_NAME) AS WAREHOUSE_NAME" in oc
+    assert "LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q\n      ON q.QUERY_ID = a.QUERY_ID" in oc
+    # the residual row resolves COMPANY via the house UDF; the hardcoded UNKNOWN is gone
+    assert "'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)" not in oc
+    assert "COMPANY_FOR_WAREHOUSE(qa.WAREHOUSE_NAME), SUM(qa.CREDITS)" in oc
+    # resolved company joins the grouping so residuals split by company (UDF still returns
+    # UNKNOWN as the fallback when the warehouse doesn't resolve)
+    residual = oc.split("QUERY_COMPUTE_RESIDUAL", 1)[1]
+    assert "GROUP BY 1, 5;" in residual
+
+
 # #10 — object-cost returns non-OK after a rollback
 def test_object_cost_returns_non_ok_on_failure():
     oc = _proc(_V67, "SP_LOAD_OBJECT_COST")

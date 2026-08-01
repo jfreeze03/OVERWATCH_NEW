@@ -103,7 +103,11 @@ def test_house_rate_law_two_partition_dollarization():
 
 
 def test_existing_warehouse_driver_arm_is_preserved():
-    assert _SQL.count("'COST_DRIVER', 'CREDITS'") == 2, "warehouse arm kept, serverless/AI arm added"
+    # #12: the warehouse COST_DRIVER panel is warehouse-only again — the serverless/AI rows
+    # moved to their OWN panel (COST_DRIVER_SVC), so the warehouse drivers still reconcile
+    # to the warehouse-only headline KPIs and the "% of warehouse compute spend" caption.
+    assert _SQL.count("'COST_DRIVER', 'CREDITS'") == 1, "warehouse arm kept, warehouse-only"
+    assert _SQL.count("'COST_DRIVER_SVC', 'CREDITS'") == 1, "serverless/AI arm on its own panel"
     assert ("SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', WAREHOUSE_NAME, NULL,\n"
             "           SUM(CREDITS), ROUND(SUM(CREDITS) * :credit_price, 2), 'credits', 10\n"
             "    FROM wh GROUP BY 1, 2, WAREHOUSE_NAME\n") in _BOARD
@@ -124,7 +128,9 @@ def test_column_contract_unchanged_so_the_app_needs_no_change():
     assert _SQL.count(
         "(COMPANY, WINDOW_DAYS, PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, "
         "UNIT, SORT_ORDER)") == 1
-    assert ("SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER', 'CREDITS', DRIVER_LABEL, NULL,"
+    # #12: the serverless/AI rows land on a DISTINCT panel so they never poison the
+    # warehouse COST_DRIVER denominator / headline KPIs; the app reads them separately.
+    assert ("SELECT SCOPE_COMPANY, WINDOW_DAYS, 'COST_DRIVER_SVC', 'CREDITS', DRIVER_LABEL, NULL,"
             in _SQL)
     assert "FROM sv GROUP BY 1, 2, DRIVER_LABEL;" in _SQL
     # a human can tell a serverless/AI driver from a warehouse on the bar chart

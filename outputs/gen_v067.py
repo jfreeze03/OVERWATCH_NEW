@@ -122,6 +122,59 @@ EDITS = {
          "    END IF;\n\n" + _SUPERSEDE + "    RETURN 'alert scan v10", 1),
     ]),
     'SP_LOAD_OBJECT_COST': (_V062, [
+        # #17a carry the executing WAREHOUSE_NAME through the query-attribution stage.
+        # QUERY_ATTRIBUTION_HISTORY has no WAREHOUSE_NAME, so LEFT JOIN QUERY_HISTORY on
+        # QUERY_ID (the V036 pattern). LEFT keeps a query whose history row is missing so
+        # its credits still partition exactly; MAX() keeps ONE row per QUERY_ID (the split
+        # + counts join rely on that cardinality). Columns get an `a.` qualifier now.
+        ("""    CREATE OR REPLACE TEMPORARY TABLE DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE AS
+    SELECT QUERY_ID, MIN(START_TIME)::DATE AS DAY,
+           SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= :lo
+    GROUP BY QUERY_ID
+    HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;""",
+         """    CREATE OR REPLACE TEMPORARY TABLE DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE AS
+    SELECT a.QUERY_ID, MIN(a.START_TIME)::DATE AS DAY,
+           -- V067 #17: carry the executing warehouse so the residual (unattributed-to-object)
+           -- row can resolve its COMPANY from the warehouse instead of being forced to
+           -- 'UNKNOWN'. QUERY_ATTRIBUTION_HISTORY has no WAREHOUSE_NAME, so LEFT JOIN
+           -- QUERY_HISTORY on QUERY_ID (the V036 pattern); LEFT + MAX keeps one row per
+           -- QUERY_ID and never drops a query whose history row is missing.
+           MAX(q.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+           SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+    LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+      ON q.QUERY_ID = a.QUERY_ID
+     AND q.START_TIME >= :lo
+    WHERE a.START_TIME >= :lo
+    GROUP BY a.QUERY_ID
+    HAVING SUM(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0;""", 1),
+        # #17b resolve the residual COMPANY from the carried warehouse (was hardcoded
+        # 'UNKNOWN'); the UDF falls back to 'UNKNOWN' only when the warehouse doesn't
+        # resolve. Company joins the GROUP BY so residuals split by company, per-day
+        # total unchanged (additive).
+        ("""    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)
+    FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE qa
+    LEFT JOIN (SELECT DISTINCT QUERY_ID FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_OBJ_STAGE) obj_q
+      ON obj_q.QUERY_ID = qa.QUERY_ID
+    WHERE obj_q.QUERY_ID IS NULL
+    GROUP BY 1;""",
+         """    -- V067 #17: resolve the residual COMPANY from the executing WAREHOUSE_NAME
+    -- (carried through OW_OBJCOST_QA_STAGE) via COMPANY_FOR_WAREHOUSE, so a
+    -- company-filtered object-cost total reconciles when the warehouse identifies the
+    -- company; COMPANY_FOR_WAREHOUSE returns 'UNKNOWN' only when the warehouse does not
+    -- resolve. The company key joins the GROUP BY, so residual credits split by company
+    -- while the per-day total stays additive.
+    -- TODO(#18, deferred): storing BOTH the consumer-company (warehouse) and the
+    -- object-owner-company is a separate dual-lens enhancement, not done here.
+    SELECT qa.DAY, 'UNATTRIBUTED', 'RESIDUAL', 'QUERY_COMPUTE_RESIDUAL',
+           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(qa.WAREHOUSE_NAME), SUM(qa.CREDITS)
+    FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_QA_STAGE qa
+    LEFT JOIN (SELECT DISTINCT QUERY_ID FROM DBA_MAINT_DB.OVERWATCH.OW_OBJCOST_OBJ_STAGE) obj_q
+      ON obj_q.QUERY_ID = qa.QUERY_ID
+    WHERE obj_q.QUERY_ID IS NULL
+    GROUP BY 1, 5;""", 1),
         # #10a failure flag
         ("""DECLARE
     lo DATE;
@@ -181,6 +234,12 @@ assert "/ NULLIF(SUM(IFF(USAGE_DATE < DATEADD('day', -7, CURRENT_DATE()), CREDIT
 assert "RESOLUTION_KIND = 'SUPERSEDED'" in alertscan, "#40 supersede sweep"
 assert "REPLACE(lo.DEDUPE_KEY, '|WARN|', '|CRIT|')" in alertscan and "REPLACE(lo.DEDUPE_KEY, '|MED|', '|HIGH|')" in alertscan, "#40 band-swap match"
 assert alertscan.index("RESOLUTION_KIND = 'SUPERSEDED'") < alertscan.index("RETURN 'alert scan v10"), "#40 sweep runs before the RETURN"
+# #17 residual company resolved from the executing warehouse, not hardcoded UNKNOWN
+assert "MAX(q.WAREHOUSE_NAME) AS WAREHOUSE_NAME" in objectcost, "#17 warehouse carried through the QA stage"
+assert "LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q\n      ON q.QUERY_ID = a.QUERY_ID" in objectcost, "#17 QA stage LEFT JOINs QUERY_HISTORY for the warehouse"
+assert "'QUERY_COMPUTE_RESIDUAL', 'UNKNOWN', SUM(qa.CREDITS)" not in objectcost, "#17 residual COMPANY is no longer hardcoded UNKNOWN"
+assert "'QUERY_COMPUTE_RESIDUAL',\n           DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(qa.WAREHOUSE_NAME), SUM(qa.CREDITS)" in objectcost, "#17 residual COMPANY resolved via COMPANY_FOR_WAREHOUSE"
+assert "GROUP BY 1, 5;" in objectcost, "#17 resolved company joins the residual GROUP BY"
 # #10 conditional return
 assert "failed BOOLEAN DEFAULT FALSE" in objectcost and "failed := TRUE;" in objectcost, "#10 failure flag"
 assert "IF (failed) THEN\n        RETURN 'FAILED: object-cost load rolled back" in objectcost, "#10 non-OK on failure"

@@ -94,5 +94,9 @@ def test_rec15_cost_driver_takeaway():
     # C5: the denominator was described as "tracked drivers", which readers took
     # for total spend. The panel only covers warehouse compute — serverless and
     # AI/Cortex bill on meters it never reads — so the share must name its pie.
-    assert "% of warehouse " in ov and "serverless & AI bill separately" in ov
+    # V069 (2026-07-31): serverless & AI moved to their own COST_DRIVER_SVC panel, so
+    # the warehouse denominator is named "% of warehouse" and the trailing clause now says
+    # they are SHOWN separately below (a distinct rendered panel), not merely that they
+    # "bill separately". The C5 intent — name the pie as warehouse-only — is unchanged.
+    assert "% of warehouse " in ov and "serverless & AI shown separately below" in ov
     assert "% of tracked drivers" not in ov
