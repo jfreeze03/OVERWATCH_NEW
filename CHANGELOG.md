@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.122.1 — Security scrub: re-leaked Teams webhook token + Streamlit design recs doc (2026-08-02)
+
+- **Webhook credential scrub (second occurrence).** Commit `02335b7` (2026-08-02) pasted the
+  live Power Automate trigger URL — including the same `sig=` bearer token scrubbed in
+  v4.115.1 — back into `snowflake/webhook_delivery.sql`, failing both locks in
+  `tests/test_no_committed_secrets.py`. The file is restored to the v4.118 placeholder-only
+  template (warnings, rotation runbook, MERGE route guard). **OWNER ACTION: rotate the flow
+  trigger URL in Power Automate** — the token is in git history twice now, on GitHub; deleting
+  the line does not undo the exposure. The rotation runbook is at the bottom of the restored
+  file. No app code changed.
+- **Streamlit design: 50 recommendations** (`docs/design/STREAMLIT_DESIGN_RECS_2026-08-02.md`).
+  Full audit of the UI layer (shell, theme, components, charts, all pages) — navigation/IA,
+  first-paint cost, fragments/dialogs, table formatting conventions, chart gaps, and
+  design-system drift (duplicate `.ow-chip` CSS, undefined `.ow-scope-row`, config.toml/token
+  palette mismatch). Every item verified at its cited line; prior adjudications
+  (DESIGN_REVIEW_2026-07-31 declines) are respected, not re-opened. Doc only — no behavior
+  changed.
+
 ## 4.122.0 — Codex-R2 Wave 3: CI isolation + a validate contract with teeth (2026-08-02)
 
 Wave 3 hardens the *deploy plumbing* — the CI smoke, the post-install contract, and a task-drift
