@@ -27,6 +27,11 @@ _FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont,
 # series looks bad the same way it does on every card and chip.
 SEV_COLORS = dict(palette.SEVERITY_HUES)
 
+# rec38: heat = orange (intuitive "hotness" for the hour x entity heatmap). ONE
+# ramp, referenced by the theme range AND hour_heatmap, so it is not a one-off
+# scheme string a shade off from everything else.
+_HEATMAP_RANGE = ["#0a0f1c", "#7c2d12", "#c2410c", "#ea580c", "#fdba74"]
+
 
 def _overwatch_theme() -> dict:
     return {
@@ -48,7 +53,7 @@ def _overwatch_theme() -> dict:
             "range": {
                 "category": [_ACCENT, palette.OK, "#c084fc", palette.WARN, palette.BAD,
                               palette.ACCENT2, "#a3e635", palette.HIGH],  # rec50 (#c084fc/#a3e635 chart-only)
-                "heatmap": ["#0f1729", "#164e63", "#0891b2", "#22d3ee", "#a5f3fc"],
+                "heatmap": _HEATMAP_RANGE,  # rec38: one orange heat ramp
             },
             "bar": {"cornerRadiusEnd": 4, "color": _ACCENT},
             "line": {"color": _ACCENT, "strokeWidth": 2.4},
@@ -75,6 +80,47 @@ def _base(df: pd.DataFrame, height: int | None = None) -> alt.Chart:
     return alt.Chart(df).properties(height=height or _HEIGHT)
 
 
+def _empty_note(msg: str = "No plottable rows for this window.") -> None:
+    """rec36: a chart helper must say 'checked, clean' — not render nothing —
+    when coercion empties the frame (house rule 8). Callers guard the PRE-coercion
+    frame, so a bad-typed column would otherwise leave blank space."""
+    st.caption(msg)
+
+
+def _day_axis(day_values, fmt_short: str = "%b %d") -> alt.Axis:
+    """rec37: adaptive time ticks — day for a <=31d span, week to 120d, month
+    beyond — so labels stay predictable at 180/365 (labelOverlap alone dropped
+    them unevenly). Span is inferred from the data; no per-caller change."""
+    try:
+        s = pd.to_datetime(pd.Series(list(day_values)), errors="coerce").dropna()
+        span = int((s.max() - s.min()).days) if len(s) else 0
+    except Exception:  # noqa: BLE001 - axis tuning is cosmetic, never break a chart
+        span = 0
+    if span <= 31:
+        unit, fmt = "day", fmt_short
+    elif span <= 120:
+        unit, fmt = "week", fmt_short
+    else:
+        unit, fmt = "month", "%b"
+    return alt.Axis(format=fmt, tickCount=unit, labelOverlap="greedy")
+
+
+def _legend(wide: bool = False, **kw) -> alt.Legend:
+    """rec39: the legend-placement RULE in one place — wide multi-category stacks
+    read at the BOTTOM (many labels), few-series comparisons at the TOP (next to
+    the title the eye just read). Not a blanket 'always top'."""
+    return alt.Legend(orient="bottom" if wide else "top", title=kw.pop("title", None), **kw)
+
+
+def _share_note(label: str, amount: float, total: float, *, dollars: bool = True) -> str:
+    """rec35 helper: 'Top: X $Y (Z% of $total).' — the lead-with-the-conclusion
+    line, computed from the data the chart already has."""
+    share = (amount / total * 100) if total else 0.0
+    a = f"${amount:,.0f}" if dollars else f"{amount:,.0f}"
+    t = f"${total:,.0f}" if dollars else f"{total:,.0f}"
+    return f"Top: {label} {a} ({share:.0f}% of {t})."
+
+
 def spend_trend(
     df: pd.DataFrame,
     *,
@@ -98,6 +144,7 @@ def spend_trend(
     data["USD"] = pd.to_numeric(data["USD"], errors="coerce").fillna(0.0)
     data = data.dropna(subset=["Day"]).sort_values("Day")
     if data.empty:
+        _empty_note()
         return
     data["AVG7"] = data["USD"].rolling(7, min_periods=3).mean().round(2)
     data["PROVISIONAL"] = data["Day"] == data["Day"].max()
@@ -105,8 +152,7 @@ def spend_trend(
                         stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
     bar_size = max(4, min(20, int(660 / max(len(data), 1))))
-    enc_x = alt.X("yearmonthdate(Day):T", title=None,
-                  axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy"))
+    enc_x = alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"]))
     tip = [alt.Tooltip("Day:T"),
            alt.Tooltip("USD:Q", format="$,.2f", title="Spend"),
            alt.Tooltip("AVG7:Q", format="$,.0f", title="7-day avg")]
@@ -181,7 +227,7 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
         _base(data)
         .mark_bar(color=grad, cornerRadiusEnd=3, size=18)
         .encode(
-            x=alt.X("yearmonthdate(Day):T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
+            x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
             tooltip=[alt.Tooltip("Day:T", title="Day"),
                      alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
@@ -215,27 +261,34 @@ def _stable_color(field: str, names, legend=None) -> alt.Color:
 
 
 def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
-                        value_col: str, title: str = "Count") -> None:
+                        value_col: str, title: str = "Count", takeaway: bool = True) -> None:
     """Per-day stacked bars by category (counts) over a TIME axis — the
     'what kind of change, which day' view. Same day-grain axis contract as
     daily_stacked_usd; counts instead of dollars."""
     data = df[[day_col, category_col, value_col]].copy()
     data.columns = ["Day", "Category", "Value"]
     data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+    if data.dropna(subset=["Day"]).empty:
+        _empty_note()
+        return
     chart = (
         _base(data)
         .mark_bar(cornerRadiusEnd=2)
         .encode(
             x=alt.X("yearmonthdate(Day):T", title=None,
-                    axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
+                    axis=_day_axis(data["Day"])),
             y=alt.Y("sum(Value):Q", title=title, axis=alt.Axis(format=",.0f")),
             color=_stable_color("Category", data["Category"],
-                                legend=alt.Legend(orient="bottom", title=None)),
+                                legend=_legend(wide=True)),
             tooltip=[alt.Tooltip("Day:T"), alt.Tooltip("Category:N"),
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
     st.altair_chart(chart, use_container_width=True)
+    if takeaway:  # rec35: lead with the conclusion
+        _g = data.assign(_v=pd.to_numeric(data["Value"], errors="coerce")).groupby("Category")["_v"].sum()
+        if float(_g.sum()) > 0:
+            st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()), dollars=False))
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10) -> None:
@@ -253,17 +306,21 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
     st.altair_chart(chart, use_container_width=True)
 
 
-def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str) -> None:
+def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,
+                      takeaway: bool = True) -> None:
     data = df[[day_col, category_col, usd_col]].copy()
     data.columns = ["Day", "Category", "USD"]
+    if data.empty:
+        _empty_note()
+        return
     chart = (
         _base(data)
         .mark_bar()
         .encode(
-            x=alt.X("yearmonthdate(Day):T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
+            x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
             color=_stable_color("Category", data["Category"],
-                                legend=alt.Legend(orient="bottom", title=None)),
+                                legend=_legend(wide=True)),
             tooltip=[
                 alt.Tooltip("Day:T"),
                 alt.Tooltip("Category:N"),
@@ -272,6 +329,10 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
         )
     )
     st.altair_chart(chart, use_container_width=True)
+    if takeaway:  # rec35: lead with the conclusion
+        _g = data.assign(_v=pd.to_numeric(data["USD"], errors="coerce")).groupby("Category")["_v"].sum()
+        if float(_g.sum()) > 0:
+            st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum())))
 
 
 def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
@@ -300,10 +361,13 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
 
 
 def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
-                 title: str = "") -> None:
+                 title: str = "", takeaway: bool = True) -> None:
     """Hour-of-day x entity heatmap (e.g. credits burned by warehouse-hour)."""
     data = df[[row_col, hour_col, value_col]].copy()
     data.columns = ["Row", "Hour", "Value"]
+    if data.empty:
+        _empty_note()
+        return
     capped_note = ""
     n_rows = data["Row"].nunique()
     if n_rows > HEATMAP_MAX_ROWS:
@@ -318,7 +382,7 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             x=alt.X("Hour:O", title="hour of day"),
             y=alt.Y("Row:N", title=None),
             color=alt.Color("Value:Q", title=title or value_col,
-                            scale=alt.Scale(scheme="orangered")),
+                            scale=alt.Scale(range=_HEATMAP_RANGE)),  # rec38: one orange heat ramp
             tooltip=["Row:N", "Hour:O", "Value:Q"],
         )
         .properties(height=max(120, 24 * data["Row"].nunique()))
@@ -326,13 +390,24 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
     st.altair_chart(chart, use_container_width=True)
     if capped_note:
         st.caption(capped_note)
+    if takeaway:  # rec35: name the hottest cell
+        _v = pd.to_numeric(data["Value"], errors="coerce")
+        if _v.notna().any() and float(_v.max()) > 0:
+            _i = _v.idxmax()
+            st.caption(f"Hottest: {data.loc[_i, 'Row']} at hour "
+                       f"{int(data.loc[_i, 'Hour']):02d} ({float(_v.loc[_i]):,.0f}).")
 
 
-def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10) -> None:
+def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10,
+                  takeaway: bool = True) -> None:
     """Attribution waterfall: top-N contributors + Other, cumulative build-up."""
     data = df[[label_col, usd_col]].copy()
     data.columns = ["Label", "USD"]
+    data["USD"] = pd.to_numeric(data["USD"], errors="coerce")
     data = data.groupby("Label", as_index=False)["USD"].sum().sort_values("USD", ascending=False)
+    if data.empty:
+        _empty_note()
+        return
     top = data.head(top_n)
     rest = float(data["USD"][top_n:].sum())
     if rest > 0:
@@ -353,6 +428,9 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
         .properties(height=CHART_H_MD)
     )
     st.altair_chart(chart, use_container_width=True)
+    if takeaway:  # rec35: name the top contributor
+        _t = data.iloc[0]
+        st.caption(_share_note(str(_t["Label"]), float(_t["USD"]), float(data["USD"].sum())))
 
 
 def event_timeline(df: pd.DataFrame) -> None:
@@ -389,7 +467,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
         _base(data)
         .mark_line(point=True)
         .encode(
-            x=alt.X("Day:T", title=None, axis=alt.Axis(format="%b %d", tickCount="day", labelOverlap="greedy")),
+            x=alt.X("Day:T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("Value:Q", title=title or value_col),
             tooltip=["Day:T", "Value:Q"],
         )
@@ -404,9 +482,13 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
     st.altair_chart(chart.properties(height=CHART_H_SM), use_container_width=True)
 
 
-def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY", count_col: str = "EVENTS") -> None:
+def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY",
+                  count_col: str = "EVENTS", takeaway: bool = True) -> None:
     data = df[[day_col, severity_col, count_col]].copy()
     data.columns = ["Day", "Severity", "Events"]
+    if data.empty:
+        _empty_note()
+        return
     chart = (
         _base(data)
         .mark_bar()
@@ -422,12 +504,18 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
                     range=[SEV_COLORS["CRITICAL"], SEV_COLORS["HIGH"],
                            SEV_COLORS["MEDIUM"], SEV_COLORS["LOW"]],
                 ),
-                legend=alt.Legend(orient="bottom", title=None),
+                legend=_legend(wide=True),
             ),
             tooltip=["Day:T", "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
         )
     )
     st.altair_chart(chart, use_container_width=True)
+    if takeaway:  # rec35: name the worst day
+        _by_day = data.assign(_v=pd.to_numeric(data["Events"], errors="coerce")).groupby("Day")["_v"].sum()
+        if float(_by_day.sum()) > 0:
+            _dl = pd.to_datetime(_by_day.idxmax(), errors="coerce")
+            _ds = _dl.strftime("%b %d") if pd.notna(_dl) else str(_by_day.idxmax())
+            st.caption(f"Most events: {_ds} ({float(_by_day.max()):,.0f}).")
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                         usd_col: str, partial_month: str = "",
@@ -480,13 +568,16 @@ def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
             x=alt.X("Label:N", sort=None, title=None,
                     axis=alt.Axis(labelAngle=-30, labelLimit=140)),
             xOffset=alt.XOffset("Side:N", sort=[a_label, b_label]),
-            y=alt.Y("Value:Q", title=unit or None),
+            # rec41: dollar unit -> format axis + tooltip like every sibling
+            # ($,.0f axis, $,.2f tooltip); a non-$ unit keeps the plain format.
+            y=alt.Y("Value:Q", title=unit or None,
+                    axis=alt.Axis(format="$,.0f") if unit == "$" else alt.Axis()),
             color=alt.Color("Side:N",
                             scale=alt.Scale(domain=[a_label, b_label],
                                             range=[_ACCENT, "#64748b"]),
-                            legend=alt.Legend(orient="top", title=None)),
+                            legend=_legend()),  # rec39: 2-series compare reads at the top
             tooltip=["Label:N", "Side:N",
-                     alt.Tooltip("Value:Q", format=",.2f")],
+                     alt.Tooltip("Value:Q", format="$,.2f" if unit == "$" else ",.2f")],
         )
         .properties(height=CHART_H_MD, title=title or "")
     )

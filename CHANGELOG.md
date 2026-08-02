@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.126.0 — Cursor design review Wave 4: charts (2026-08-02)
+
+Chart-helper polish (all in `app/ui/charts.py`), app-only.
+
+- **rec35 — takeaway lines.** `daily_stacked_usd`, `daily_stacked_count`, `events_by_day`,
+  `hour_heatmap`, and `waterfall_usd` now emit one computed conclusion (top category + share,
+  worst day, hottest cell) via an opt-out `takeaway=True`, applying the "lead with the conclusion"
+  pattern where the data already is. Suppressed on the org-currency contract chart (would print `$`).
+- **rec36 — honest empty states.** Chart helpers `st.caption("No plottable rows…")` on an early
+  return instead of rendering blank space (house rule 8) — spend_trend and the five above.
+- **rec37 — adaptive x-axis ticks.** New `_day_axis(day_series)` picks day/week/month ticks from
+  the data span, so labels stay predictable at 180/365 (fixed `tickCount="day"` + `labelOverlap`
+  dropped them unevenly). Applied to every daily chart.
+- **rec38 — one heatmap ramp.** `hour_heatmap`'s one-off `scheme="orangered"` → a named
+  `_HEATMAP_RANGE` (orange = intuitive "hotness"), shared with the theme's registered heatmap range.
+- **rec39 — legend-placement rule.** New `_legend(wide=…)` encodes it once: wide multi-category
+  stacks at the bottom, few-series comparisons at the top (not a blanket "always top").
+- **rec41 — dollar-format parity.** `paired_bars` formats its axis + tooltip as `$` when the unit
+  is dollars (was plain `,.2f`), matching every sibling; `waterfall_usd` was already correct.
+
+**rec40 (chart click-through) deferred** — it's M-effort and needs caller wiring + a SiS-gated
+`on_select` selection idiom; a focused follow-up. A caller audit confirmed the new takeaways don't
+duplicate any existing conclusion caption.
+
+Gates green: ruff, mypy, **pytest 1843 passed / 1 skipped**.
+
 ## 4.125.0 — Cursor design review Wave 3: component polish (2026-08-02)
 
 Third wave — component consistency + trust. All app-only.

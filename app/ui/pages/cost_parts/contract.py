@@ -316,7 +316,8 @@ def _org_accounts_spend() -> None:
          "delta_color": "off"},
     ])
     charts.daily_stacked_usd(
-        df.rename(columns={"USAGE_IN_CURRENCY": "USD"}), "DAY", "ACCOUNT_NAME", "USD")
+        df.rename(columns={"USAGE_IN_CURRENCY": "USD"}), "DAY", "ACCOUNT_NAME", "USD",
+        takeaway=False)  # rec35: amounts are the org rate-card CURRENCY, not $ — the caption below states the top
     st.caption(f"Amounts are {currency} from the org rate card, not credits x app rate.")
     pivot = (df.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
              .sort_values(["ACCOUNT_NAME", "USAGE_IN_CURRENCY"], ascending=[True, False]))

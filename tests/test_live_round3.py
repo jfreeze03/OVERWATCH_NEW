@@ -86,8 +86,11 @@ def test_bar_usd_leaves_headroom_for_value_labels():
 
 
 def test_daily_charts_label_days_not_hours():
-    # every daily chart carries the day-format axis; stacked/count bars bin by day
-    assert _CHARTS.count('format="%b %d"') >= 4
+    # every daily chart carries the day-format axis; stacked/count bars bin by day.
+    # rec37: the "%b %d" day format is centralized in _day_axis (adaptive ticks),
+    # applied to every daily chart via _day_axis(data["Day"]).
+    assert 'fmt_short: str = "%b %d"' in _CHARTS
+    assert _CHARTS.count('_day_axis(data["Day"])') >= 4
     assert _CHARTS.count('yearmonthdate(Day)') >= 2
 
 
