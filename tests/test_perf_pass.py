@@ -82,7 +82,7 @@ def test_jump_box_loads_live_targets_on_demand():
     assert "_ow_jump_loaded" in body
     gated = body.split('if bool(st.session_state.get("_ow_jump_loaded"))', 1)[1]
     assert "show_warehouses_sql" in gated and "alert_rules" in gated  # fetches only inside the gate
-    assert "load all warehouses" in body                          # explicit loader row offered
+    assert "_ow_jump_loadall" in body                             # rec16: explicit loader BUTTON, not a fake option
 
 
 # ---------------------------------------------------------------------------

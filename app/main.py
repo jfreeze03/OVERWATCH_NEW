@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import streamlit as st
 
+# rec15: the browser-tab icon is the rendered brand radar-mark PNG, replacing the
+# last emoji in the chrome (emoji render inconsistently across platforms). Falls
+# back to the emoji if the asset is somehow missing, so it can never break load.
+_FAVICON = Path(__file__).parent / "assets" / "favicon.png"
 st.set_page_config(
     page_title="OVERWATCH — Snowflake Command Center",
-    page_icon="🛰️",
+    page_icon=str(_FAVICON) if _FAVICON.exists() else "🛰️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # rec14: "auto" collapses the sidebar on narrow/phone viewports (where it
+    # otherwise covers the content Brief is built for) and stays open on desktop.
+    initial_sidebar_state="auto",
 )
 
 from app.companies import COMPANIES, ENVIRONMENTS, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
+    DEFAULT_DAY_WINDOW,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
     nav_groups_for,
@@ -183,7 +191,7 @@ def _views_popover() -> None:
     """Saved filter views + default landing (USER_PREFS, V013)."""
     from app.core.state import request_navigation
     from app.data import prefs_sql
-    with st.popover("Views"):
+    with st.popover("Views & display"):  # rec12: it holds saved views + density + timezone
         prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
                     source="USER_PREFS")
         views: dict[str, str] = {}
@@ -231,7 +239,13 @@ def _views_popover() -> None:
                             value=st.session_state.get("_ow_density") == "compact",
                             help="Tighter cards and tables for triage screens; "
                                  "hierarchy and colors unchanged.")
-        st.session_state["_ow_density"] = "compact" if compact else "comfortable"
+        _prev_density = st.session_state.get("_ow_density")
+        _new_density = "compact" if compact else "comfortable"
+        st.session_state["_ow_density"] = _new_density
+        # rec12: persist density through the same USER_PREFS machinery as the
+        # timezone (it used to reset on every reload). Write only on a real change.
+        if _prev_density is not None and _new_density != _prev_density:
+            execute_statement(prefs_sql.upsert_pref_sql("DENSITY", _new_density), page="Views")
         current_tz = st.session_state.get("_ow_display_tz") or prefs_sql.DISPLAY_TIMEZONES[0]
         tz_idx = (prefs_sql.DISPLAY_TIMEZONES.index(current_tz)
                   if current_tz in prefs_sql.DISPLAY_TIMEZONES else 0)
@@ -284,6 +298,12 @@ def _apply_default_landing() -> None:
                     if str(r["PREF_KEY"]) == "DISPLAY_TZ"), "")
     if tz_pref:
         st.session_state["_ow_display_tz"] = tz_pref
+    # rec12: density persists across sessions now (was session-only) — hydrate it
+    # here alongside the timezone.
+    density_pref = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
+                         if str(r["PREF_KEY"]) == "DENSITY"), "")
+    if density_pref in ("compact", "comfortable"):
+        st.session_state["_ow_density"] = density_pref
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)
@@ -335,8 +355,14 @@ def _log_usage(page: str, render_ms: int | None = None) -> None:
 def _global_jump(pages: tuple) -> None:
     """Jump-to: pages, databases, warehouses, alert rules — one box."""
     from app.companies import ALFA_DATABASES, TREXIS_DATABASES, TREXIS_WAREHOUSES
+    from app.logic.navigate import PAGE_SECTION_LABELS
 
     options = [f"Page · {p}" for p in pages]
+    # rec4: sections are jumpable too (request_navigation already accepts one) — the
+    # box becomes the command palette it wants to be. Only sections on pages the
+    # profile can actually see (pages is already profile-filtered).
+    for _pg in pages:
+        options.extend(f"Section · {_pg} → {_lbl}" for _lbl in PAGE_SECTION_LABELS.get(_pg, ()))
     options += [f"DB · {d}" for d in sorted(set(ALFA_DATABASES) | set(TREXIS_DATABASES))]
     # Live targets (SHOW WAREHOUSES + alert rules) load on demand: a normal
     # page paint pays ZERO queries for the jump box (Codex #3). Static pages,
@@ -358,18 +384,24 @@ def _global_jump(pages: tuple) -> None:
             options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
     else:
         options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
-        options.append("More · load all warehouses & alert rules…")
     pick = st.selectbox("Jump to", options, index=None, placeholder="Jump to…",
                         key="_ow_jump", label_visibility="collapsed")
+    # rec16: an explicit button — not a fake "More …" OPTION that mutated state
+    # when "selected" (surprising, and invisible unless you opened the list). The
+    # `and` short-circuits so the button only RENDERS while not yet loaded.
+    if not st.session_state.get("_ow_jump_loaded") and st.button(
+            "Load all warehouses & alert rules", key="_ow_jump_loadall",
+            type="tertiary", use_container_width=True):
+        st.session_state["_ow_jump_loaded"] = True
+        st.rerun()
     if not pick:
         return
     kind, _, name = pick.partition(" · ")
-    if kind == "More":
-        st.session_state["_ow_jump_loaded"] = True
-        st.session_state.pop("_ow_jump", None)
-        st.rerun()
-    elif kind == "Page":
+    if kind == "Page":
         request_navigation(name)
+    elif kind == "Section":
+        _pg, _, _lbl = name.partition(" → ")
+        request_navigation(_pg.strip(), _lbl.strip())
     elif kind == "DB":
         # r6-bug9: carry the DB's owning company. The jump list offers databases from BOTH
         # tenants, so picking a Trexis DB while the company filter sits at ALFA used to be
@@ -497,11 +529,10 @@ def _persistent_status_bar(vals: object = _UNSET) -> None:
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
-    from app.core.state import filters as _flt
-    _f = _flt()
+    # rec10: the "Scope" cell restated the company/days the filter toolbar right
+    # above already shows — dropped so the four-cell bar carries only signal not
+    # already on screen (criticals, telemetry age, MTD).
     stats = [
-        {"k": "Scope", "v": f"{_f['company']} · {_f['days']}d",
-         "icon": "refresh", "sev": ""},
         {"k": "Open criticals", "v": crit, "icon": "alerts",
          "sev": "bad" if crit not in ("0", "") else "ok"},
         {"k": "Telemetry age",
@@ -578,8 +609,26 @@ def _topbar_scope_controls() -> None:
                           "Database. Environment-vs-environment comparison is not "
                           "yet built (Compare pairs periods by company + dates).")
     with c_days:
-        st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
-        if int(st.session_state.get("flt_days", 7)) > MAX_LIVE_WINDOW_DAYS:
+        if hasattr(st, "segmented_control"):
+            # rec9: all seven windows visible + one-click switch (the slider hid
+            # them behind a drag interaction). Slider stays as the SiS fallback.
+            def _keep_days() -> None:
+                # single-select segmented_control DESELECTS to None on a second
+                # click of the active pill — never let the window filter go empty.
+                v = st.session_state.get("flt_days")
+                if v is None:
+                    st.session_state["flt_days"] = st.session_state.get("_ow_days_last", DEFAULT_DAY_WINDOW)
+                else:
+                    st.session_state["_ow_days_last"] = v
+            # keep the deselect restore-target current even when flt_days was set
+            # PROGRAMMATICALLY (a saved view / deep link bypasses on_change).
+            if st.session_state.get("flt_days") is not None:
+                st.session_state["_ow_days_last"] = st.session_state["flt_days"]
+            st.segmented_control("Window (days)", options=list(DAY_WINDOW_OPTIONS),
+                                 key="flt_days", on_change=_keep_days)
+        else:
+            st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
+        if int(st.session_state.get("flt_days") or DEFAULT_DAY_WINDOW) > MAX_LIVE_WINDOW_DAYS:
             # v4.54: 180/365 are honored by mart-history (Overview KPIs, storage,
             # chargeback) and the one owner-named live exception (Cortex user
             # costs). Other live-scan panels cap at 90 — disclosed, not silently.

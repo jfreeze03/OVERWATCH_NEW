@@ -11,11 +11,29 @@ import re
 
 # page label -> the lazy_sections widget key on that page
 PAGE_SECTION_KEYS = {
+    "Control Room": "cr_section",
     "Cost & Contract": "cost_section",
     "Operations": "ops_section",
     "Security": "sec_section",
     "Alerts": "alerts_section",
     "Admin": "adm_section",
+}
+
+# page label -> its ordered section labels. The Jump-to command palette (rec4)
+# and the deep-link resolver enumerate a page's sections from here instead of
+# hard-coding them. tests/test_section_labels.py keeps this in lock-step with
+# each page's own lazy_sections() call, so a rename in one place fails CI until
+# the other matches (the house drift-guard pattern, cf. the alert-rule test).
+PAGE_SECTION_LABELS = {
+    "Control Room": ["Pulse", "Incidents & triage", "Timeline & movers", "Freshness & replay"],
+    "Cost & Contract": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
+                         "Unit costs", "Compare", "Optimization & Savings"],
+    "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",
+                   "Pipeline SLA", "Release compare", "Emergency"],
+    "Alerts": ["Open events", "Rules", "History", "Native delivery"],
+    "Security": ["Access", "Changes", "Clients", "Egress", "Trust Center"],
+    "Admin": ["Settings", "Migrations & freshness", "Metrics", "App self-cost",
+              "Performance", "Canary", "Errors & telemetry"],
 }
 
 _RULE_TARGETS = {

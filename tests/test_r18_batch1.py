@@ -71,5 +71,5 @@ def test_expensive_queries_filter_is_display_only():
     sqlglot.parse(sql, dialect="snowflake")
     # page passes the sidebar filters into the scan
     _opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    _blk = _opt.split("expensive_queries_usd(", 1)[1][:220]
+    _blk = _opt.split("expensive_queries_usd(", 1)[1][:400]  # widened: rec2 indented the call
     assert "flt_database" in _blk and "flt_schema_contains" in _blk

@@ -48,13 +48,15 @@ def test_alerts_kpis_carry_severity():
 def test_contains_filters_collapse_but_never_hide_active_ones():
     assert "More filters — warehouse / user / schema contains" in _MAIN
     assert "expanded=_adv_on" in _MAIN                             # auto-open when active
-    assert 'st.popover("Views")' in _MAIN and "💾" not in _MAIN     # emoji retired
+    assert 'st.popover("Views & display")' in _MAIN and "💾" not in _MAIN  # rec12 rename; emoji retired
 
 
 def test_scope_rides_the_status_bar():
-    # 1.45 has no sticky positioning; orientation-while-scrolling comes from
-    # the persistent status bar instead.
-    assert '"k": "Scope"' in _MAIN
+    # rec10: the "Scope" cell restated the filter toolbar right above it (neither
+    # is sticky in 1.45), so it was dropped — the bar now carries only signal not
+    # already on screen (open criticals, telemetry age, MTD).
+    assert '"k": "Scope"' not in _MAIN
+    assert '"k": "Open criticals"' in _MAIN
 
 
 def test_compact_density_mode_exists():

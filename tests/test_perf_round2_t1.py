@@ -82,8 +82,10 @@ def test_t2_1_control_room_live_trio_batched():
     # each read is prefetch-else-run (batch member or its own serial fallback)
     assert '_live_pf.get("oi") or run(' in cr
     assert '_live_pf.get("cra") or run(' in cr
-    # proposals only fetched for operators (non-operators stop paying for it)
-    assert 'if _is_op:\n        _live_specs.append(' in cr
+    # proposals only fetched for operators (non-operators stop paying for it).
+    # rec1 moved this batch into the Incidents & triage section (deeper indent),
+    # so match whitespace-insensitively — the coupling (append inside if _is_op) holds.
+    assert "if _is_op: _live_specs.append(" in " ".join(cr.split())
     assert '_live_pf.get("props") or run(' in cr
     assert ") if _is_op else None" in cr
 

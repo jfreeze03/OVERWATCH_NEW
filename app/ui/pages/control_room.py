@@ -27,6 +27,7 @@ from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
+    lazy_sections,
     load_settings,
     localize_timestamps,
     page_header,
@@ -266,358 +267,364 @@ def render() -> None:
                               use_container_width=True):
             request_navigation("Alerts", "Native delivery")
 
-    # ---- pulse (since yesterday 00:00) ---------------------------------------
-    # Fact-first pulse (Codex #4): the hourly fact answers this without
-    # a live QUERY_HISTORY scan; schema filter (no schema grain) or an empty
-    # fact falls back to live, exactly like the Operations page. Triage #12:
-    # all three feeding builders anchor on CURRENT_DATE, so days=1 covers
-    # yesterday 00:00 -> now (24-48h) — labels say "since yday", not "24h".
-    pulse, pulse_from_mart = None, False
-    if not f["schema_contains"]:
-        m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
-                      page=_PAGE, key=f"pulse_fact_{company}", tier="recent",
-                      source="FACT_QUERY_HOURLY (mart, loaded hourly)")
-        if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
-            pulse, pulse_from_mart = m_pulse, True
-    else:
-        s_pulse = run(mart27_sql.schema_window_summary(1, company, f["database"], f["schema_contains"]),
-                      page=_PAGE, key=f"pulse_schema_fact_{company}", tier="recent",
-                      source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
-        if s_pulse.ok and not s_pulse.empty and safe_float(s_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
-            pulse, pulse_from_mart = s_pulse, True
-    if pulse is None:
-        pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
-                    page=_PAGE, key=f"pulse_{company}",
-                    tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
-    act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
-              key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
-    q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
-    f_spark = act.df["FAILS"].tolist() if act.ok and not act.empty else None
-    if pulse.usable():
-        row = pulse.df.iloc[0]
-        qcount = safe_float(row.get("QUERY_COUNT"))
-        failed = safe_float(row.get("FAILED_COUNT"))
-        _fail_bad = bool(qcount and failed / qcount > 0.02)
-        kpi_row([
-            {"label": "Queries (since yday)", "value": f"{qcount:,.0f}", "spark": q_spark,
-             "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
-                     "time of day) — the same span on the mart and live paths."},
-            {"label": "Failed", "value": f"{failed:,.0f}",
-             "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
-             "delta_color": "inverse" if _fail_bad else "off",
-             "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
-            {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
-             "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
-            {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.1f} min"},
-            {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
-        ])
-        result_caption(pulse)
-    elif not pulse.ok:
-        st.error(f"Pulse unavailable: {pulse.error}")
-    else:
-        st.info("No queries recorded since yesterday 00:00 for this scope.")
+    section = lazy_sections(["Pulse", "Incidents & triage", "Timeline & movers",
+                             "Freshness & replay"], key="cr_section")
 
-
-    # ---- Incidents (V032) ------------------------------------------------------
-    section_header("Incidents")
-    from app.core.query import execute_statement, run_batch
-    from app.core.session import is_operator
-    from app.ui.components import log_ui_event, notify
-    # correctness #3: entitle operator UI from the VIEWER identity, not
-    # CURRENT_ROLE() — under owner's-rights SiS the latter is the app owner's
-    # role for every viewer, so it never differentiates people.
-    _is_op = is_operator()
-    # T2.1: the three live-tier reads this screen makes (open incidents, proposals,
-    # triage alerts) are each re-paid every 30s in steady state. Submit them as ONE
-    # live run_batch so morning triage makes one round trip, not three. Proposals
-    # render for operators only, so the batch carries that member only when _is_op —
-    # non-operators stop paying for it. Each read keeps its own serial fallback if
-    # the batch is unavailable or a member misses (prefetch-else-run).
-    _live_specs = [
-        {"key": "oi", "sql": mart_sql.open_incidents(50, company),
-         "source": f"INCIDENTS (open + mitigated, {company} + account-level)"},
-        {"key": "cra", "sql": mart_sql.open_alert_events(500, company),
-         "source": "ALERT_EVENTS" if company == "ALL"
-                   else f"ALERT_EVENTS ({company} + account-level)"},
-    ]
-    if _is_op:
-        _live_specs.append({"key": "props", "sql": mart_sql.incident_proposals(20, company),
-                            "source": f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)"})
-    _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
-    inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
-                  key=f"inc_metrics_{company}", tier="recent",
-                  source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
-    if inc_met.usable():
-        im = inc_met.df.iloc[0]
-        # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
-        # change-correlated) moved to Alerts > History — retrospective process
-        # health, not morning triage. Only the number that changes overnight
-        # stays on this screen.
-        kpi_row([
-            {"label": "Open incidents", "value": f"{safe_float(im.get('OPEN_NOW')):,.0f}",
-             "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok",
-             "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
-                     "Alerts -> History."},
-        ])
-    oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
-             key=f"open_incidents_{company}", tier="live",
-             source=f"INCIDENTS (open + mitigated, {company} + account-level)")
-    if oi.ok and oi.empty:
-        st.success("No open incidents.")
-    elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
-        sel_i = selectable_table(
-            with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
-            key="cr_inc_sel", height=190)
-        if sel_i is not None:
-            _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
-            mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
-                      key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
-            if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
-                styled_table(with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"))
-            if _is_op:
-                with st.expander("Close this incident (audited, forward-only)"):
-                    _kind = st.selectbox("Root cause",
-                                         ["DEPLOY", "CONFIG_CHANGE", "DATA", "CAPACITY", "EXTERNAL", "UNKNOWN"],
-                                         key=f"inc_rc_{_iid[:8]}")
-                    _note = st.text_input("Root-cause note", key=f"inc_note_{_iid[:8]}", max_chars=500)
-                    _close = _incident_close_sql(_iid, _kind, _note)
-                    st.code(_close, language="sql")
-                    _conf = st.text_input("Type RESOLVE to confirm", key=f"inc_conf_{_iid[:8]}")
-                    if st.button("Execute close", key=f"inc_close_{_iid[:8]}",
-                                 disabled=(_conf != "RESOLVE")):
-                        ok, msg = execute_statement(_close, page=_PAGE)
-                        notify(ok, msg)
-                        if ok:
-                            log_ui_event("incident_close", page=_PAGE)
-    # Read proposals only for operators (they alone can act on them) — prefetched in
-    # the live batch above when _is_op, else read serially here.
-    props = (_live_pf.get("props") or run(mart_sql.incident_proposals(20, company), page=_PAGE,
-                key=f"inc_props_{company}", tier="live",
-                source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")) if _is_op else None
-    if _is_op and props is not None and props.usable():
-        with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
-            styled_table(props.df)
-            _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
-                                 key="inc_prop_pick")
-            _prow = props.df[props.df["PROPOSAL_KEY"].astype(str) == _pick].iloc[0]
-            _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
-                                         str(_prow["COMPANY"]), _pick)
-            st.code(_dec, language="sql")
-            _confd = st.text_input("Type DECLARE to confirm", key="inc_prop_conf")
-            if st.button("Declare incident + link alerts", key="inc_prop_exec", type="primary",
-                         disabled=(_confd != "DECLARE")):
-                _ok_all = True
-                for _stmt in [s for s in _dec.split(";") if s.strip()]:
-                    _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
-                    _ok_all = _ok_all and _ok
-                notify(_ok_all, "Incident declared with members linked." if _ok_all
-                       else "Declare failed — see the error log.")
-                if _ok_all:
-                    log_ui_event("incident_declare", page=_PAGE)
-    st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
-               "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
-               "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")
-
-    # ---- Triage queue ----------------------------------------------------------
-    section_header("Triage queue")
-    alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
-                 key=f"cr_alerts_{company}", tier="live",
-                 source="ALERT_EVENTS" if company == "ALL"
-                 else f"ALERT_EVENTS ({company} + account-level)")
-    tasks = run(mart_sql.fact_task_daily(2, company, f["database"]), page=_PAGE, key=f"cr_tasks_{company}",
-                tier="recent", source="FACT_TASK_DAILY")
-    if not tasks.usable():
-        tasks = run(ops_sql.task_runs(2, company, f["database"], f["schema_contains"]),
-                    page=_PAGE, key=f"cr_tasks_live_{company}",
-                    tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
-
-    wh_daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
-                   key=f"cr_wh_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
-    anomalies: list[dict] = []
-    _base_median_usd = 0.0      # median of the per-warehouse baselines, for the caption
-    _thin_warehouses = 0        # warehouses with too few days to score (see below)
-    if wh_daily.usable():
-        _wh_complete = (complete_days_only(wh_daily.df)  # B4: don't score today's partial row
-                        .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))))
-        flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME")
-        anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
-        # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
-        # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production
-        # warehouse. Attach each hit's excess over its own robust (median) baseline
-        # — the exact baseline robust_zscores used — so triage_queue can escalate
-        # and rank on money. Signed: a collapse comes through negative, and
-        # triage_queue takes the magnitude.
-        _med = _wh_complete.groupby("WAREHOUSE_NAME")["USD"].median()
-        for _a in anomalies:
-            _a["excess_usd"] = safe_float(_a.get("value")) - safe_float(_med.get(_a.get("label")))
-        _base_median_usd = safe_float(_med.median()) if len(_med) else 0.0
-        # E5: robust_zscores returns all-zero for a series with <5 points, so a
-        # warehouse created this week CANNOT be flagged however wild its spend.
-        # That exclusion has to be visible, or the all-clear over-promises.
-        _day_counts = _wh_complete.groupby("WAREHOUSE_NAME")["DAY"].nunique()
-        _thin_warehouses = int((_day_counts < 5).sum())
-        # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
-        # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
-        # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
-        # every morning, indistinguishable from an overnight break. anomaly_summary now
-        # carries each hit's day, so the triage feed can age stale spikes out.
-        if anomalies and "DAY" in _wh_complete.columns and not _wh_complete.empty:
-            _latest = str(_wh_complete["DAY"].max())
-            anomalies = [a for a in anomalies if str(a.get("day") or "") == _latest]
-
-    queue = triage_queue(
-        alerts.df if alerts.usable() else None,
-        tasks.df if tasks.usable() else None,
-        anomalies,
-    )
-    if queue.empty:
-        # R3-1: wh_daily gates the spend-anomaly scan — if that read failed the
-        # queue is empty for the WRONG reason, so a failed FACT_WAREHOUSE_DAILY must
-        # demote the all-clear (a runaway-warehouse day must never hide behind green).
-        sources_ok = alerts.ok and tasks.ok and wh_daily.ok
-        if sources_ok:
-            st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
+    if section == "Pulse":
+        # ---- pulse (since yesterday 00:00) ---------------------------------------
+        # Fact-first pulse (Codex #4): the hourly fact answers this without
+        # a live QUERY_HISTORY scan; schema filter (no schema grain) or an empty
+        # fact falls back to live, exactly like the Operations page. Triage #12:
+        # all three feeding builders anchor on CURRENT_DATE, so days=1 covers
+        # yesterday 00:00 -> now (24-48h) — labels say "since yday", not "24h".
+        pulse, pulse_from_mart = None, False
+        if not f["schema_contains"]:
+            m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
+                          page=_PAGE, key=f"pulse_fact_{company}", tier="recent",
+                          source="FACT_QUERY_HOURLY (mart, loaded hourly)")
+            if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
+                pulse, pulse_from_mart = m_pulse, True
         else:
-            st.info("Triage inputs incomplete: "
-                    + ("alert tables not installed; " if not alerts.ok else "")
-                    + ("task facts not installed; " if not tasks.ok else "")
-                    + ("warehouse spend fact unavailable — spend anomalies not scanned." if not wh_daily.ok else ""))
-    else:
-        # N3: the DBA's one morning list is now actionable — select a row to jump
-        # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
-        _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
-                 if c in queue.columns]
-        # rec29: navigate only on a CHANGED selection (the sticky-selection guard
-        # lives in selectable_nav_table now — was firing request_navigation every
-        # rerun on the sticky row).
-        def _open_triage(_i: int) -> None:
-            _qr = queue.iloc[int(_i)]
-            _dest = {"Alert": ("Alerts", "Open events"),
-                     "Task failure": ("Operations", ""),
-                     "Spend anomaly": ("Cost & Contract", ""),
-                     "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
-            request_navigation(_dest[0], _dest[1])
-        selectable_nav_table(queue[_disp], key="cr_triage_sel", on_select=_open_triage,
-                             height=260, size_note=False)  # the caption below states the count
-        st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
-                   "— select one to open its page. Sources: alerts, task facts, spend "
-                   "anomalies. Task rows are one per task (failures summed across the "
-                   "2-day window), not one per day."
-                   + (" Task failures follow the database filter; alerts and "
-                      "spend anomalies don't have database grain." if f["database"] else ""))
-    # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
-    # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
-    # otherwise every spend break arrived twice, once from each scorer, at two
-    # different severities. E5: name the baseline, the scoring minimum and the money
-    # floor OUTSIDE the empty/non-empty branch, because "nothing to triage" is
-    # exactly where the reader most needs to know what was never in scope.
-    if wh_daily.usable():
-        st.caption(md_dollars(
-            "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
-            f"complete days (baseline median {format_usd(_base_median_usd)}/day). Flagged at "
-            f"|z| >= {DEFAULT_THRESHOLD}; HIGH at |z| >= {ANOMALY_HIGH_Z:.0f} or "
-            f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — fixed in-app defaults. "
-            "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
-            "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
-            "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
-            "authoritative. A warehouse needs 5+ complete days of history "
-            "to be scored at all"
-            + (f" — {_thin_warehouses} currently do not have them and are unscored."
-               if _thin_warehouses else ".")))
+            s_pulse = run(mart27_sql.schema_window_summary(1, company, f["database"], f["schema_contains"]),
+                          page=_PAGE, key=f"pulse_schema_fact_{company}", tier="recent",
+                          source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
+            if s_pulse.ok and not s_pulse.empty and safe_float(s_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
+                pulse, pulse_from_mart = s_pulse, True
+        if pulse is None:
+            pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
+                        page=_PAGE, key=f"pulse_{company}",
+                        tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
+        act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
+                  key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
+        q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
+        f_spark = act.df["FAILS"].tolist() if act.ok and not act.empty else None
+        if pulse.usable():
+            row = pulse.df.iloc[0]
+            qcount = safe_float(row.get("QUERY_COUNT"))
+            failed = safe_float(row.get("FAILED_COUNT"))
+            _fail_bad = bool(qcount and failed / qcount > 0.02)
+            kpi_row([
+                {"label": "Queries (since yday)", "value": f"{qcount:,.0f}", "spark": q_spark,
+                 "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
+                         "time of day) — the same span on the mart and live paths."},
+                {"label": "Failed", "value": f"{failed:,.0f}",
+                 "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
+                 "delta_color": "inverse" if _fail_bad else "off",
+                 "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
+                {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
+                 "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
+                {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.1f} min"},
+                {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
+            ])
+            result_caption(pulse)
+        elif not pulse.ok:
+            st.error(f"Pulse unavailable: {pulse.error}")
+        else:
+            st.info("No queries recorded since yesterday 00:00 for this scope.")
 
-    # ---- Incident correlation timeline -----------------------------------------
-    section_header("Incident correlation timeline")
-    panel_help(
-        "Alerts, task failures, and DDL changes on one time axis (48h or 7d). Click a row "
-        "below the chart to see everything else that happened within ±30 minutes — the "
-        "'what changed right before this broke?' view."
-    )
-    if f["database"]:
-        st.caption("Company events — the database filter doesn't apply here.")
-    tl_win = st.radio("Window", ["48h (fresh)", "7d (cached hourly)"], horizontal=True,
-                      key="cr_tl_win", label_visibility="collapsed",
-                      help="Mid-incident you want fresh; the 7-day retrospective is the "
-                           "heavy three-source join, so it caches for an hour.")
-    tl_days, tl_tier = (2, "recent") if tl_win.startswith("48h") else (7, "historical")
-    _tl_company = f["company"] if isinstance(f, dict) and "company" in f else "ALL"
-    tl = None
-    if tl_win.startswith("48h"):
-        _tl_m = run(mart27_sql.incident_timeline(48, _tl_company), page=_PAGE,
-                    key=f"incident_tl_mart_{_tl_company}", tier="recent",
-                    source="MART_INCIDENT_TIMELINE (mart, rebuilt hourly)")
-        if _tl_m.usable():
-            tl = _tl_m
-    if tl is None:
-        tl = run(mart_sql.incident_timeline(tl_days, _tl_company),
-                 page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
-                 source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL"
-                        + (", live fallback)" if tl_win.startswith("48h") else ")"))
-    if tl.ok and tl.empty:
-        st.success("Quiet week: no alerts, task failures, or DDL in the window.")
-    elif guard(tl, ""):
-        tdf = tl.df.copy()
-        tdf, tz_note = localize_timestamps(tdf, ["AT"])
-        if tz_note:
-            st.caption(tz_note)
-        charts.event_timeline(tdf)
-        sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
-        if sel_tl is not None:
-            anchor = tdf.iloc[sel_tl]
-            try:
-                at = pd.to_datetime(anchor["AT"])
-                lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
-                nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
-                st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
-                styled_table(nearby)
-            except (KeyError, ValueError, TypeError) as exc:
-                st.caption(f"±30 min window unavailable for this row — {type(exc).__name__}: "
-                           f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")
-        result_caption(tl)
+    elif section == "Incidents & triage":
+        # ---- Incidents (V032) ------------------------------------------------------
+        section_header("Incidents")
+        from app.core.query import execute_statement, run_batch
+        from app.core.session import is_operator
+        from app.ui.components import log_ui_event, notify
+        # correctness #3: entitle operator UI from the VIEWER identity, not
+        # CURRENT_ROLE() — under owner's-rights SiS the latter is the app owner's
+        # role for every viewer, so it never differentiates people.
+        _is_op = is_operator()
+        # T2.1: the three live-tier reads this screen makes (open incidents, proposals,
+        # triage alerts) are each re-paid every 30s in steady state. Submit them as ONE
+        # live run_batch so morning triage makes one round trip, not three. Proposals
+        # render for operators only, so the batch carries that member only when _is_op —
+        # non-operators stop paying for it. Each read keeps its own serial fallback if
+        # the batch is unavailable or a member misses (prefetch-else-run).
+        _live_specs = [
+            {"key": "oi", "sql": mart_sql.open_incidents(50, company),
+             "source": f"INCIDENTS (open + mitigated, {company} + account-level)"},
+            {"key": "cra", "sql": mart_sql.open_alert_events(500, company),
+             "source": "ALERT_EVENTS" if company == "ALL"
+                       else f"ALERT_EVENTS ({company} + account-level)"},
+        ]
+        if _is_op:
+            _live_specs.append({"key": "props", "sql": mart_sql.incident_proposals(20, company),
+                                "source": f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)"})
+        _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
+        inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
+                      key=f"inc_metrics_{company}", tier="recent",
+                      source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
+        if inc_met.usable():
+            im = inc_met.df.iloc[0]
+            # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
+            # change-correlated) moved to Alerts > History — retrospective process
+            # health, not morning triage. Only the number that changes overnight
+            # stays on this screen.
+            kpi_row([
+                {"label": "Open incidents", "value": f"{safe_float(im.get('OPEN_NOW')):,.0f}",
+                 "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok",
+                 "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
+                         "Alerts -> History."},
+            ])
+        oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
+                 key=f"open_incidents_{company}", tier="live",
+                 source=f"INCIDENTS (open + mitigated, {company} + account-level)")
+        if oi.ok and oi.empty:
+            st.success("No open incidents.")
+        elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
+            sel_i = selectable_table(
+                with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
+                key="cr_inc_sel", height=190)
+            if sel_i is not None:
+                _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
+                mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
+                          key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
+                if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
+                    styled_table(with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"))
+                if _is_op:
+                    with st.expander("Close this incident (audited, forward-only)"):
+                        _kind = st.selectbox("Root cause",
+                                             ["DEPLOY", "CONFIG_CHANGE", "DATA", "CAPACITY", "EXTERNAL", "UNKNOWN"],
+                                             key=f"inc_rc_{_iid[:8]}")
+                        _note = st.text_input("Root-cause note", key=f"inc_note_{_iid[:8]}", max_chars=500)
+                        _close = _incident_close_sql(_iid, _kind, _note)
+                        st.code(_close, language="sql")
+                        _conf = st.text_input("Type RESOLVE to confirm", key=f"inc_conf_{_iid[:8]}")
+                        if st.button("Execute close", key=f"inc_close_{_iid[:8]}",
+                                     disabled=(_conf != "RESOLVE")):
+                            ok, msg = execute_statement(_close, page=_PAGE)
+                            notify(ok, msg)
+                            if ok:
+                                log_ui_event("incident_close", page=_PAGE)
+        # Read proposals only for operators (they alone can act on them) — prefetched in
+        # the live batch above when _is_op, else read serially here.
+        props = (_live_pf.get("props") or run(mart_sql.incident_proposals(20, company), page=_PAGE,
+                    key=f"inc_props_{company}", tier="live",
+                    source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")) if _is_op else None
+        if _is_op and props is not None and props.usable():
+            with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
+                styled_table(props.df)
+                _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
+                                     key="inc_prop_pick")
+                _prow = props.df[props.df["PROPOSAL_KEY"].astype(str) == _pick].iloc[0]
+                _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
+                                             str(_prow["COMPANY"]), _pick)
+                st.code(_dec, language="sql")
+                _confd = st.text_input("Type DECLARE to confirm", key="inc_prop_conf")
+                if st.button("Declare incident + link alerts", key="inc_prop_exec", type="primary",
+                             disabled=(_confd != "DECLARE")):
+                    _ok_all = True
+                    for _stmt in [s for s in _dec.split(";") if s.strip()]:
+                        _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
+                        _ok_all = _ok_all and _ok
+                    notify(_ok_all, "Incident declared with members linked." if _ok_all
+                           else "Declare failed — see the error log.")
+                    if _ok_all:
+                        log_ui_event("incident_declare", page=_PAGE)
+        st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
+                   "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
+                   "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")
 
-    _spk = run(mart27_sql.lock_wait_spikes(company, f["database"]), page=_PAGE,
-               key=f"cr_lockspike_{company}", tier="recent",
-               source="MART_LOCK_WAIT_DAILY (spikes)")
-    if _spk.ok and not _spk.empty:
-        st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
-        styled_table(_spk.df, height=180)
-        st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
-                   "Warehouses section has the full table and history.")
+        # ---- Triage queue ----------------------------------------------------------
+        section_header("Triage queue")
+        alerts = _live_pf.get("cra") or run(mart_sql.open_alert_events(500, company), page=_PAGE,
+                     key=f"cr_alerts_{company}", tier="live",
+                     source="ALERT_EVENTS" if company == "ALL"
+                     else f"ALERT_EVENTS ({company} + account-level)")
+        tasks = run(mart_sql.fact_task_daily(2, company, f["database"]), page=_PAGE, key=f"cr_tasks_{company}",
+                    tier="recent", source="FACT_TASK_DAILY")
+        if not tasks.usable():
+            tasks = run(ops_sql.task_runs(2, company, f["database"], f["schema_contains"]),
+                        page=_PAGE, key=f"cr_tasks_live_{company}",
+                        tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
 
-    section_header("Spend movers (window vs prior)")
-    if f["database"]:
-        st.caption("Warehouse grain — the database filter doesn't narrow this.")
-    movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-                 key=f"cr_movers_fact_{company}_{days}", tier="recent",
-                 source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
-    if not movers.usable():  # mart not deployed/loaded yet -> bounded live scan
-        movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
-                     key=f"cr_movers_{company}_{days}", tier="historical",
-                     source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
-    if guard(movers, "No warehouse spend to compare in this window."):
-        view = movers.df.copy()
-        view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
-        view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
-        view["DELTA_USD"] = view["USD_CURRENT"] - view["USD_PRIOR"]
-        view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
-        view = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(10)
-        styled_table(  # rec21: + delta sign-coloring on the Δ columns, status tint, CSV
-            view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_USD", "DELTA_PCT"]],
-            column_config={
-                "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.0f"),
-                "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.0f"),
-                "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.0f"),
-                "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
-            },
+        wh_daily = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
+                       key=f"cr_wh_{company}", tier="recent", source="FACT_WAREHOUSE_DAILY")
+        anomalies: list[dict] = []
+        _base_median_usd = 0.0      # median of the per-warehouse baselines, for the caption
+        _thin_warehouses = 0        # warehouses with too few days to score (see below)
+        if wh_daily.usable():
+            _wh_complete = (complete_days_only(wh_daily.df)  # B4: don't score today's partial row
+                            .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))))
+            flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME")
+            anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
+            # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
+            # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production
+            # warehouse. Attach each hit's excess over its own robust (median) baseline
+            # — the exact baseline robust_zscores used — so triage_queue can escalate
+            # and rank on money. Signed: a collapse comes through negative, and
+            # triage_queue takes the magnitude.
+            _med = _wh_complete.groupby("WAREHOUSE_NAME")["USD"].median()
+            for _a in anomalies:
+                _a["excess_usd"] = safe_float(_a.get("value")) - safe_float(_med.get(_a.get("label")))
+            _base_median_usd = safe_float(_med.median()) if len(_med) else 0.0
+            # E5: robust_zscores returns all-zero for a series with <5 points, so a
+            # warehouse created this week CANNOT be flagged however wild its spend.
+            # That exclusion has to be visible, or the all-clear over-promises.
+            _day_counts = _wh_complete.groupby("WAREHOUSE_NAME")["DAY"].nunique()
+            _thin_warehouses = int((_day_counts < 5).sum())
+            # r6-bug5: only surface anomalies from the MOST RECENT complete day. flag_anomalies
+            # is MAD-based, so a one-off spike keeps |z| high for the whole trailing-30d frame;
+            # without this the SAME 30-day-old spike re-fired as an undismissable, dateless HIGH
+            # every morning, indistinguishable from an overnight break. anomaly_summary now
+            # carries each hit's day, so the triage feed can age stale spikes out.
+            if anomalies and "DAY" in _wh_complete.columns and not _wh_complete.empty:
+                _latest = str(_wh_complete["DAY"].max())
+                anomalies = [a for a in anomalies if str(a.get("day") or "") == _latest]
+
+        queue = triage_queue(
+            alerts.df if alerts.usable() else None,
+            tasks.df if tasks.usable() else None,
+            anomalies,
         )
-        total_delta = float(view["DELTA_USD"].sum())
-        st.caption(f"Net movement across top movers: {format_usd(total_delta)}.")
-        result_caption(movers)
+        if queue.empty:
+            # R3-1: wh_daily gates the spend-anomaly scan — if that read failed the
+            # queue is empty for the WRONG reason, so a failed FACT_WAREHOUSE_DAILY must
+            # demote the all-clear (a runaway-warehouse day must never hide behind green).
+            sources_ok = alerts.ok and tasks.ok and wh_daily.ok
+            if sources_ok:
+                st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
+            else:
+                st.info("Triage inputs incomplete: "
+                        + ("alert tables not installed; " if not alerts.ok else "")
+                        + ("task facts not installed; " if not tasks.ok else "")
+                        + ("warehouse spend fact unavailable — spend anomalies not scanned." if not wh_daily.ok else ""))
+        else:
+            # N3: the DBA's one morning list is now actionable — select a row to jump
+            # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
+            _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
+                     if c in queue.columns]
+            # rec29: navigate only on a CHANGED selection (the sticky-selection guard
+            # lives in selectable_nav_table now — was firing request_navigation every
+            # rerun on the sticky row).
+            def _open_triage(_i: int) -> None:
+                _qr = queue.iloc[int(_i)]
+                _dest = {"Alert": ("Alerts", "Open events"),
+                         "Task failure": ("Operations", ""),
+                         "Spend anomaly": ("Cost & Contract", ""),
+                         "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
+                request_navigation(_dest[0], _dest[1])
+            selectable_nav_table(queue[_disp], key="cr_triage_sel", on_select=_open_triage,
+                                 height=260, size_note=False)  # the caption below states the count
+            st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
+                       "— select one to open its page. Sources: alerts, task facts, spend "
+                       "anomalies. Task rows are one per task (failures summed across the "
+                       "2-day window), not one per day."
+                       + (" Task failures follow the database filter; alerts and "
+                          "spend anomalies don't have database grain." if f["database"] else ""))
+        # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
+        # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
+        # otherwise every spend break arrived twice, once from each scorer, at two
+        # different severities. E5: name the baseline, the scoring minimum and the money
+        # floor OUTSIDE the empty/non-empty branch, because "nothing to triage" is
+        # exactly where the reader most needs to know what was never in scope.
+        if wh_daily.usable():
+            st.caption(md_dollars(
+                "Spend anomalies: robust median/MAD z-score per warehouse over the last 30 "
+                f"complete days (baseline median {format_usd(_base_median_usd)}/day). Flagged at "
+                f"|z| >= {DEFAULT_THRESHOLD}; HIGH at |z| >= {ANOMALY_HIGH_Z:.0f} or "
+                f"{format_usd(ANOMALY_HIGH_EXCESS_USD)}/day over baseline — fixed in-app defaults. "
+                "The server sweep SP_ANOMALY_SWEEP escalates on the configurable "
+                "ALERT_CONFIG.THRESHOLD_NUM, so where that threshold has been tuned the two can "
+                "differ; its COST_ANOMALY_SWEEP events (excluded here, shown on Alerts) stay "
+                "authoritative. A warehouse needs 5+ complete days of history "
+                "to be scored at all"
+                + (f" — {_thin_warehouses} currently do not have them and are unscored."
+                   if _thin_warehouses else ".")))
 
-    _freshness_board()
-    st.divider()
-    # r19 #2: six reads for a bottom-of-page feature ran on every rerun —
-    # the flight recorder now loads only when asked (results stay cached).
-    if st.toggle("Load day replay", key="cr_replay_on",
-                 help="Six reads across spend, activity, DDL, grants, tasks, and "
-                      "alerts for one chosen day. Loads when on; caches after."):
-        _day_replay()
+    elif section == "Timeline & movers":
+        # ---- Incident correlation timeline -----------------------------------------
+        section_header("Incident correlation timeline")
+        panel_help(
+            "Alerts, task failures, and DDL changes on one time axis (48h or 7d). Click a row "
+            "below the chart to see everything else that happened within ±30 minutes — the "
+            "'what changed right before this broke?' view."
+        )
+        if f["database"]:
+            st.caption("Company events — the database filter doesn't apply here.")
+        tl_win = st.radio("Window", ["48h (fresh)", "7d (cached hourly)"], horizontal=True,
+                          key="cr_tl_win", label_visibility="collapsed",
+                          help="Mid-incident you want fresh; the 7-day retrospective is the "
+                               "heavy three-source join, so it caches for an hour.")
+        tl_days, tl_tier = (2, "recent") if tl_win.startswith("48h") else (7, "historical")
+        _tl_company = f["company"] if isinstance(f, dict) and "company" in f else "ALL"
+        tl = None
+        if tl_win.startswith("48h"):
+            _tl_m = run(mart27_sql.incident_timeline(48, _tl_company), page=_PAGE,
+                        key=f"incident_tl_mart_{_tl_company}", tier="recent",
+                        source="MART_INCIDENT_TIMELINE (mart, rebuilt hourly)")
+            if _tl_m.usable():
+                tl = _tl_m
+        if tl is None:
+            tl = run(mart_sql.incident_timeline(tl_days, _tl_company),
+                     page=_PAGE, key=f"incident_timeline_{tl_days}", tier=tl_tier,
+                     source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL"
+                            + (", live fallback)" if tl_win.startswith("48h") else ")"))
+        if tl.ok and tl.empty:
+            st.success("Quiet week: no alerts, task failures, or DDL in the window.")
+        elif guard(tl, ""):
+            tdf = tl.df.copy()
+            tdf, tz_note = localize_timestamps(tdf, ["AT"])
+            if tz_note:
+                st.caption(tz_note)
+            charts.event_timeline(tdf)
+            sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
+            if sel_tl is not None:
+                anchor = tdf.iloc[sel_tl]
+                try:
+                    at = pd.to_datetime(anchor["AT"])
+                    lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
+                    nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
+                    st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
+                    styled_table(nearby)
+                except (KeyError, ValueError, TypeError) as exc:
+                    st.caption(f"±30 min window unavailable for this row — {type(exc).__name__}: "
+                               f"{str(exc)[:120]} (usually a non-timestamp AT value from a new source).")
+            result_caption(tl)
+
+        _spk = run(mart27_sql.lock_wait_spikes(company, f["database"]), page=_PAGE,
+                   key=f"cr_lockspike_{company}", tier="recent",
+                   source="MART_LOCK_WAIT_DAILY (spikes)")
+        if _spk.ok and not _spk.empty:
+            st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
+            styled_table(_spk.df, height=180)
+            st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
+                       "Warehouses section has the full table and history.")
+
+        section_header("Spend movers (window vs prior)")
+        if f["database"]:
+            st.caption("Warehouse grain — the database filter doesn't narrow this.")
+        movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
+                     key=f"cr_movers_fact_{company}_{days}", tier="recent",
+                     source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+        if not movers.usable():  # mart not deployed/loaded yet -> bounded live scan
+            movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
+                         key=f"cr_movers_{company}_{days}", tier="historical",
+                         source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
+        if guard(movers, "No warehouse spend to compare in this window."):
+            view = movers.df.copy()
+            view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
+            view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
+            view["DELTA_USD"] = view["USD_CURRENT"] - view["USD_PRIOR"]
+            view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
+            view = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(10)
+            styled_table(  # rec21: + delta sign-coloring on the Δ columns, status tint, CSV
+                view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_USD", "DELTA_PCT"]],
+                column_config={
+                    "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.0f"),
+                    "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.0f"),
+                    "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.0f"),
+                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
+                },
+            )
+            total_delta = float(view["DELTA_USD"].sum())
+            st.caption(f"Net movement across top movers: {format_usd(total_delta)}.")
+            result_caption(movers)
+
+    elif section == "Freshness & replay":
+        _freshness_board()
+        st.divider()
+        # r19 #2: six reads for a bottom-of-page feature ran on every rerun —
+        # the flight recorder now loads only when asked (results stay cached).
+        if st.toggle("Load day replay", key="cr_replay_on",
+                     help="Six reads across spend, activity, DDL, grants, tasks, and "
+                          "alerts for one chosen day. Loads when on; caches after."):
+            _day_replay()

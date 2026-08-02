@@ -184,6 +184,10 @@ def render() -> None:
     else:
         section_header("Optimization", "info", "optimize")
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
-        st.divider()
-        section_header("Savings ledger", "ok", "cost")
-        _savings_tab()
+        # rec2: the savings ledger belongs to the inner "Remediation & ledger" pill
+        # (set by _optimization_tab's nested lazy_sections) — render it only there,
+        # so the other subgroups don't pay for its read.
+        if st.session_state.get("opt_section") == "Remediation & ledger":
+            st.divider()
+            section_header("Savings ledger", "ok", "cost")
+            _savings_tab()

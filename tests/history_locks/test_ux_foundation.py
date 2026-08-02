@@ -25,7 +25,7 @@ def test_investigation_falls_back_by_family_prefix():
 
 def test_section_keys_cover_all_lazy_pages():
     assert set(navigate.PAGE_SECTION_KEYS) == {
-        "Cost & Contract", "Operations", "Security", "Alerts", "Admin"}
+        "Control Room", "Cost & Contract", "Operations", "Security", "Alerts", "Admin"}
 
 
 def test_light_palette_covers_every_dark_pair():

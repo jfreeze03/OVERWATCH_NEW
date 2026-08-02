@@ -13,7 +13,7 @@ from app.config import core_object
 from app.core.identity import identity_sql
 from app.core.sqlsafe import sql_literal
 
-_KEY_RE = re.compile(r"^(DEFAULT_VIEW|DISPLAY_TZ|VIEW:[A-Za-z0-9 _\-]{1,40})$")
+_KEY_RE = re.compile(r"^(DEFAULT_VIEW|DISPLAY_TZ|DENSITY|VIEW:[A-Za-z0-9 _\-]{1,40})$")
 
 # Offered display timezones; 'Account' means render as stored (account time).
 DISPLAY_TIMEZONES = ("Account (America/Chicago)", "America/New_York",

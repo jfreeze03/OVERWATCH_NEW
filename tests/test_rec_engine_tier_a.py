@@ -149,6 +149,8 @@ def test_a3_tuned_warehouses_rank_below_fixable_ones():
 
 def test_a3_generated_sql_never_raises_the_timer():
     opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    assert "if 0 < _cur <= IDLE_TARGET_SUSPEND_SEC:\n                        continue" in opt
+    # rec2 indented this block one level (nested opt_section pills); match
+    # whitespace-insensitively so the guard (skip already-short warehouses) still holds.
+    assert "if 0 < _cur <= IDLE_TARGET_SUSPEND_SEC: continue" in " ".join(opt.split())
     assert "int(min(_cur, IDLE_TARGET_SUSPEND_SEC))" in opt
     assert 'idle_suspend_sql(r["WAREHOUSE_NAME"], _target)' in opt

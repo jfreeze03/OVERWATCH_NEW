@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.124.0 — Cursor design review Wave 2: navigation & shell (2026-08-02)
+
+Second wave of the Cursor design review — nav/IA and shell chrome. All app-only.
+
+- **rec1 — Control Room section pills.** The ~370-line single-scroll render is now four
+  deep-linkable sections (Pulse · Incidents & triage · Timeline & movers · Freshness & replay)
+  via `lazy_sections`, with `"Control Room": "cr_section"` added to `PAGE_SECTION_KEYS`. The live
+  prefetch batch moved into its sole-consumer section, so off-screen sections stop paying for it.
+- **rec2 — Optimize & Savings inner pills.** The ~13-panel divider wall in `optimize.py`
+  `_optimization_tab` is now a nested second-level pill row (Idle & sizing · Queries & patterns ·
+  Storage & waste · Remediation & ledger), each rendering/querying independently. Uses
+  `lazy_sections(..., deep_link=False)` so the nested row does not clobber the page-level
+  `?section=`; `cost.py` gates the savings ledger under the "Remediation & ledger" subgroup.
+- **rec4 — Jump-to sections + central label map.** New `navigate.PAGE_SECTION_LABELS` is the
+  source the Jump-to palette and deep-link resolver enumerate; the box now offers
+  `Section · Page → Label` targets. `tests/test_section_labels.py` drift-guards the map against
+  each page's `lazy_sections` call. Added a `deep_link` flag to `lazy_sections` (rec2's enabler).
+- **rec9 — segmented Window control.** `st.select_slider` → `st.segmented_control` (all seven
+  windows visible, one click), with the slider kept as the `hasattr` fallback and an `on_change`
+  guard so single-select's deselect-to-None never empties the window filter.
+- **rec12 — display prefs.** Popover renamed "Views & display"; **density now persists** to
+  `USER_PREFS` (was session-only, reset every reload) via the same machinery as the timezone.
+- **rec10 / rec14 / rec15 / rec16 — chrome.** Dropped the redundant "Scope" status-bar cell
+  (it restated the filter toolbar directly above); `initial_sidebar_state="auto"` (collapses on
+  phone, where Brief lives); the 🛰️ emoji favicon is now a rendered brand-mark PNG
+  (`app/assets/favicon.png`, with an emoji fallback so a missing asset can't break load); the fake
+  "More…" jump option is a real "Load all warehouses & alert rules" button.
+
+Items 1 and 2 (the two big independent restructures) were implemented by parallel agents on
+disjoint files; the coupled `main.py` shell items were done inline. A 3-lens adversarial review
+(restructures / shell / nav-foundation) returned zero findings on the restructures and nav, and
+one minor UX NIT on the Window deselect-restore target, which was fixed. Eight tests that pinned
+the old shape (Scope cell, popover name, jump option, exact panel indentation) were updated to the
+new shape — behavior verified preserved, none weakened.
+
+Gates green: ruff, mypy, **pytest 1843 passed / 1 skipped**.
+
 ## 4.123.0 — Cursor design review Wave 1: the consistency spine (2026-08-02)
 
 First wave of the Cursor Streamlit-design review (50 items adjudicated: 35 CONFIRMED /

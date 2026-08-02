@@ -91,15 +91,20 @@ def panel_help(text: str) -> None:
         st.markdown(md_dollars(text))  # two $'s in help prose must not go LaTeX-math
 
 
-def lazy_sections(labels: list[str], key: str) -> str:
+def lazy_sections(labels: list[str], key: str, deep_link: bool = True) -> str:
     """Tab-style navigation that renders ONLY the selected section.
 
     st.tabs executes every tab body on every rerun and merely hides the
     output — an 8-tab page fires every tab's queries to paint one. This
     pill radio keeps the navigation but lets the page dispatch a single
     section, so first paint costs one section, not all of them.
+
+    deep_link=False (rec2): for a NESTED pill row (a SECOND lazy_sections on the
+    same page), so it neither seeds from nor writes the shared ?section= query
+    param that the page-level pills own — otherwise the inner row clobbers the
+    outer section's deep link. Nested rows keep their own session key only.
     """
-    if key not in st.session_state:
+    if deep_link and key not in st.session_state:
         try:  # deep link: ?section=<slug> selects the section on first render
             want = str(st.query_params.get("section") or "")
             for label in labels:
@@ -116,12 +121,13 @@ def lazy_sections(labels: list[str], key: str) -> str:
         st.session_state[key] = labels[0]
     choice = st.radio("Section", labels, key=key, horizontal=True,
                       label_visibility="collapsed")
-    try:
-        _slug = _section_slug(choice)
-        if st.query_params.get("section") != _slug:  # r21 #19: no no-op writes
-            st.query_params["section"] = _slug
-    except Exception:  # noqa: BLE001
-        pass
+    if deep_link:
+        try:
+            _slug = _section_slug(choice)
+            if st.query_params.get("section") != _slug:  # r21 #19: no no-op writes
+                st.query_params["section"] = _slug
+        except Exception:  # noqa: BLE001
+            pass
     st.markdown("<hr style='margin: 0.2rem 0 0.9rem 0; opacity: 0.25;'>",
                 unsafe_allow_html=True)
     return str(choice)
