@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.122.1 — Scrub the re-committed Teams webhook credential (2026-08-02)
+
+- **Security: `snowflake/webhook_delivery.sql` restored to the hardened placeholder
+  template.** The 4.122.0 Teams-integration commit replaced the guarded template with a
+  raw paste-and-run script holding the LIVE Power Automate trigger URL — the `sig=` query
+  parameter is a bearer credential, and the Alerts → Native delivery section renders this
+  file in the app, so it was exposed in git history AND on screen. This is the same leak
+  class v4.115.1 scrubbed and built `tests/test_no_committed_secrets.py` to block; that
+  gate has been red on `main` since the re-commit. Restored: the NEVER-PASTE warning, the
+  angle-bracket paste targets + abort guard (a straight run of the tracked file RAISEs
+  before it can clobber the live integration), MERGE-not-INSERT route seeding, the
+  rotation runbook, and the guarded RESUME.
+- **OWNER ACTION (Joe): rotate the flow trigger URL.** Deleting the line does not undo
+  the exposure — the URL is in pushed git history. In Power Automate, regenerate the
+  "When a Teams webhook request is received" trigger URL (or delete + recreate the
+  trigger), then re-create the secret + integration from a Snowsight worksheet per the
+  ROTATION RUNBOOK in the file. `CREATE OR REPLACE` on the integration drops its grants —
+  re-grant USAGE afterward or every send fails silently.
+- No app code changes; all three gates green (the secrets gate goes green again with
+  this scrub).
+
 ## 4.122.0 — Codex-R2 Wave 3: CI isolation + a validate contract with teeth (2026-08-02)
 
 Wave 3 hardens the *deploy plumbing* — the CI smoke, the post-install contract, and a task-drift
