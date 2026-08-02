@@ -16,7 +16,15 @@ from app.data import mart_sql
 from app.logic.actions import rank_actions
 from app.logic.formulas import blended_billed_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
-from app.ui.components import empty_state, kpi_row, load_settings, page_header, styled_table
+from app.ui.components import (
+    empty_state,
+    kpi_row,
+    load_settings,
+    page_header,
+    panel_help,
+    section_header,
+    styled_table,
+)
 from app.ui.sizing import TABLE_H_SM
 
 _PAGE = "Brief"
@@ -87,7 +95,7 @@ def render() -> None:
     kpis = [
         {"label": "MTD spend (account)",
          "badge": "mart" if strip_up else "stale",
-         "value": format_usd(mtd_usd) if strip_up else "n/a",
+         "value": format_usd(mtd_usd) if strip_up else "—",
          "delta": (f"{mtd_credits:,.0f} credits" if strip_up else "telemetry unreachable"),
          "delta_color": "off",
          "severity": "" if strip_up else "warn",
@@ -95,7 +103,7 @@ def render() -> None:
                  "dimension; the company filter scopes warehouse, attribution, and user views."},
         {"label": "Open criticals",
          "badge": "live" if strip_up else "stale",
-         "value": vals.get("OPEN_CRITICAL", "0") if strip_up else "?",
+         "value": vals.get("OPEN_CRITICAL", "0") if strip_up else "—",
          "severity": "" if strip_up else "warn",
          "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
         {"label": "Stalest telemetry",
@@ -164,6 +172,13 @@ def render() -> None:
             "help": "Lifecycle objects — declared or auto-declared CRITICALs. "
                     "The Control Room owns the queue; this is the executive glance.",
         })
+    panel_help(
+        "Your one-scroll morning read: the headline numbers, then open fires, then the "
+        "top asks. A dash (—) means telemetry was unreachable, not zero. When a figure "
+        "turns red — open criticals above zero, or contract/savings in the danger band — "
+        "work the Fires and Asks below, then drill into the linked full page "
+        "(Alerts, Cost & Contract, Control Room)."
+    )
     kpi_row(kpis)
     # N7: same disclosure as Overview — the headline dollars are credit-billed
     # services; storage and data-transfer bill separately (Cost & Contract).
@@ -182,7 +197,7 @@ def render() -> None:
                           key="brief_undelivered", type="primary", use_container_width=True):
         request_navigation("Alerts", "Native delivery")
 
-    st.markdown("**Fires**")
+    section_header("Fires", "warn", "alerts")
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
     # fires showed under an ALFA scope). Account-level events always show.
     events = _b_live.get("events") or run(mart_sql.open_alert_events(50, company), page=_PAGE,
@@ -204,7 +219,7 @@ def render() -> None:
         else:
             empty_state("needs_setup", "Alerting not installed yet.")
 
-    st.markdown("**Asks**")
+    section_header("Asks", "info", "bolt")
     actions = _b_live.get("acts") or run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",
                   source="ACTION_QUEUE")
     if actions.ok and not actions.empty:

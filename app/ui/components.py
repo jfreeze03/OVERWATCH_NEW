@@ -12,6 +12,7 @@ from app.config import ACCOUNT_USAGE_LAG_NOTE, DEFAULT_SETTINGS
 from app.core.result import QueryResult
 from app.data import mart_sql
 from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
+from app.logic.metric_registry import COLUMN_HELP
 from app.theme import chip
 from app.ui import palette
 from app.ui.icons import icon
@@ -113,14 +114,34 @@ def lazy_sections(labels: list[str], key: str, deep_link: bool = True) -> str:
                     break
         except Exception:  # noqa: BLE001 - deep links are progressive enhancement
             pass
-    elif st.session_state.get(key) not in labels:
-        # A router/saved-view pointed at a section that no longer exists
-        # (labels get consolidated); land on the first section instead of
-        # crashing the radio. The navigation-consistency test keeps the
-        # router honest; this keeps stale SAVED links harmless forever.
+    # Always land on a VALID section BEFORE the widget renders: seeds the first
+    # section on a fresh page (a deep-link miss leaves the key unset) and resets a
+    # stale saved-view section (labels get consolidated). rec24: segmented_control
+    # shows NO pill when its key is unset, so this must run unconditionally — the
+    # old `elif` skipped it after a deep-link miss and left the bar blank on first
+    # paint (radio silently defaulted to index 0).
+    if st.session_state.get(key) not in labels:
         st.session_state[key] = labels[0]
-    choice = st.radio("Section", labels, key=key, horizontal=True,
-                      label_visibility="collapsed")
+    if hasattr(st, "segmented_control"):
+        # rec24: the native single-select widget replaces the pill LOOK that was
+        # CSS-on-radio keyed off aria-labels the theme's own docstring calls
+        # version-fragile. Radio stays the degrade path. segmented_control can
+        # DESELECT to None on a second click of the active pill; an on_change guard
+        # keeps the current section so the page is never left section-less.
+        if st.session_state.get(key) in labels:
+            st.session_state[f"_{key}_last"] = st.session_state[key]
+
+        def _keep_section(_k=key, _first=labels[0]) -> None:
+            if st.session_state.get(_k) is None:
+                st.session_state[_k] = st.session_state.get(f"_{_k}_last") or _first
+
+        choice = st.segmented_control("Section", labels, key=key,
+                                      label_visibility="collapsed", on_change=_keep_section)
+        if choice is None:  # belt-and-suspenders for the first-render edge
+            choice = st.session_state.get(f"_{key}_last") or labels[0]
+    else:
+        choice = st.radio("Section", labels, key=key, horizontal=True,
+                          label_visibility="collapsed")
     if deep_link:
         try:
             _slug = _section_slug(choice)
@@ -139,6 +160,7 @@ def _section_slug(label: str) -> str:
 
 def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str = "") -> None:
     st.session_state["_ow_dl_seq"] = 0
+    st.session_state["_ow_tz_note_shown"] = False   # rec34: tz note prints once per page
     st.session_state["_ow_dl_page"] = str(title)   # T1.6: page identity for the CSV-prep slot
     # rec5: no per-page OVERWATCH kicker — the sidebar brand + browser tab are the one
     # brand anchor; repeating it above every header was orientation noise, not signal.
@@ -848,6 +870,14 @@ def _auto_formats(df, skip: set) -> dict:
             fmts[col] = "{:,.1f}"
         elif c.endswith(_COUNT_SUFFIXES):
             fmts[col] = "{:,.0f}"
+    # rec33: movement/delta columns always show a LEADING SIGN so direction
+    # survives red-green color-blindness (delta_css is color-only). Turn each
+    # delta column's chosen format into a signed one (or a signed integer default).
+    for col in df.columns:
+        if not is_delta_column(col) or col in skip or not ptypes.is_numeric_dtype(df[col]):
+            continue
+        f = fmts.get(col)
+        fmts[col] = f.replace("{:", "{:+", 1) if f else "{:+,.0f}"
     return fmts
 
 
@@ -857,7 +887,9 @@ STYLER_MAX_ROWS = 400   # r13 #19: Styler is per-cell Python; Arrow-native forma
 
 # Styler format -> printf equivalent for the large-frame path. Commas are
 # lost above the cap (printf has no grouping); that trade is deliberate.
-_PRINTF_EQUIV = {"${:,.2f}": "$%.2f", "{:,.2f}": "%.2f", "{:,.1f}": "%.1f", "{:,.0f}": "%.0f"}
+_PRINTF_EQUIV = {"${:,.2f}": "$%.2f", "{:,.2f}": "%.2f", "{:,.1f}": "%.1f", "{:,.0f}": "%.0f",
+                 # rec33: signed delta variants so >400-row tables keep the +/- too
+                 "${:+,.2f}": "$%+.2f", "{:+,.2f}": "%+.2f", "{:+,.1f}": "%+.1f", "{:+,.0f}": "%+.0f"}
 
 # Columns that hold account-time timestamps, by naming convention — the
 # display-timezone conversion (Views popover) applies to every table via
@@ -919,8 +951,15 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         ts_cols = [] if getattr(df, "attrs", {}).get("_ow_tz_converted") else timestampish_columns(df.columns)
         if ts_cols:
             display_df, tz_note = localize_timestamps(df, ts_cols)
-            if tz_note:
+            # rec34: the "Times shown in X" note is identical for every converted
+            # table — print it ONCE per page (flag reset in page_header), not above
+            # all six tables in a section. Note only appears when a NON-account
+            # display tz is opted in (the account-tz default renders no note at
+            # all); inside an @st.fragment rerun the page-global flag stays set, so
+            # the note may not re-render there — cosmetic, and only for that opt-in.
+            if tz_note and not st.session_state.get("_ow_tz_note_shown"):
                 st.caption(tz_note)
+                st.session_state["_ow_tz_note_shown"] = True
     except Exception:  # noqa: BLE001 - conversion is cosmetic
         display_df = df
     data = display_df
@@ -935,7 +974,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 if is_delta_column(col):
                     styler = styler.map(lambda v: delta_css(v), subset=[col])
             if fmts:
-                styler = styler.format(fmts, na_rep="–")
+                styler = styler.format(fmts, na_rep="—")  # rec27: one no-value glyph (em-dash)
             data = styler
         except Exception:  # noqa: BLE001 - styling is cosmetic, table must render
             data = display_df
@@ -967,15 +1006,15 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             continue
         _pretty = _prettify_header(_col)
         _label = _pretty if _pretty != str(_col) else None
-        if _label is None and _col != _pin_col:
+        _help = COLUMN_HELP.get(str(_col).upper())   # rec32: which-dollar-is-this on the header
+        if _label is None and _col != _pin_col and not _help:
             continue
         try:
-            _cfg[_col] = st.column_config.Column(_label, pinned=True) if _col == _pin_col \
-                else st.column_config.Column(_label)
-        except TypeError:  # runtime predates pinned= : keep the relabel, drop the pin
-            if _label is not None:
-                _cfg[_col] = st.column_config.Column(_label)
-        except Exception:  # noqa: BLE001 - relabel/pin is cosmetic, never break the table
+            _cfg[_col] = st.column_config.Column(_label, pinned=True, help=_help) if _col == _pin_col \
+                else st.column_config.Column(_label, help=_help)
+        except TypeError:  # runtime predates pinned= : keep the relabel + help, drop the pin
+            _cfg[_col] = st.column_config.Column(_label, help=_help)
+        except Exception:  # noqa: BLE001 - relabel/pin/help is cosmetic, never break the table
             pass
     column_config = _cfg or None
     if height is None and len(df) > 10:
@@ -1019,7 +1058,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     _csv = df.to_csv(index=False).encode("utf-8")
                     _cache[_dlk] = {"fp": _fp, "bytes": _csv}
                 # Downloads are frontend-only, no rerun (r19 #20).
-                st.download_button("⬇", _csv,
+                st.download_button("⬇ CSV", _csv,  # rec30: legible affordance, not a bare glyph
                                    file_name=_export_filename(seq, slug), mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                    on_click="ignore",
@@ -1043,7 +1082,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                                        file_name=_export_filename(seq, slug), mime="text/csv",
                                        key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                        on_click="ignore")
-                elif st.button("⬇", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
+                elif st.button("⬇ CSV", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
                                help=f"Prepare {len(df):,} rows as CSV (account time)."):
                     st.session_state["_ow_dlprep"] = {
                         "fp": _fp, "bytes": df.to_csv(index=False).encode("utf-8")}

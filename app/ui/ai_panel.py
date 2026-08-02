@@ -2,19 +2,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import streamlit as st
 
 from app.core.ai import cortex_complete
 from app.logic.formulas import safe_float
-from app.ui.components import download_text_button
+from app.ui.components import download_text_button, notify
 
 
 def ai_evaluation_panel(*, key: str, prompt: str, settings: dict, page: str,
-                        subject: str) -> None:
+                        subject: str,
+                        on_save: Callable[[str], tuple[bool, str]] | None = None,
+                        save_label: str = "Save evaluation") -> None:
     """Render an expander that runs a grounded Cortex evaluation on demand.
 
     Never auto-runs. Shows the model, the credit warning, and the exact
     grounding prompt for audit. Answers are downloadable.
+
+    ``on_save`` (optional): a persist callback that receives the AI answer text
+    and returns ``(ok, message)``. When supplied, a ``save_label`` button appears
+    under a successful answer; clicking it invokes the callback and reports the
+    result via ``notify``. Callers use this to write the answer somewhere durable
+    (e.g. append it to an alert event). Backward-compatible: omit it and no save
+    button renders.
     """
     model = str(settings.get("CORTEX_MODEL") or "llama3.1-8b")
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
@@ -38,6 +49,9 @@ def ai_evaluation_panel(*, key: str, prompt: str, settings: dict, page: str,
                 st.markdown(md_dollars(answer))
                 st.caption(f"Model: {model} · grounded in the on-screen evidence only · verify before acting.")
                 download_text_button("Download evaluation (.txt)", answer, f"overwatch_ai_{key}.txt")
+                if on_save is not None and st.button(save_label, key=f"ai_save_{key}"):
+                    ok_s, msg_s = on_save(answer)
+                    notify(ok_s, msg_s)
             else:
                 st.error(f"AI evaluation failed: {answer}")
                 st.caption("Check that the role has SNOWFLAKE.CORTEX_USER and the model is enabled in this region.")

@@ -33,7 +33,7 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.ui import charts
-from app.ui.components import guard, kpi_row, result_caption, styled_table
+from app.ui.components import guard, kpi_row, panel_help, result_caption, styled_table
 
 _PAGE = "Cost & Contract"
 
@@ -113,6 +113,12 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     st.caption(f"A = {pair['label_a']} ({a0} to {a1}, end-exclusive) · "
                f"B = {pair['label_b']} ({b0} to {b1}) · account time"
                + (" · A is partial" if pair["partial"] else ""))
+    panel_help(
+        "Period-vs-period from facts only (no live Account Usage scans): A vs B on warehouse "
+        "spend, queries, fail rate, queued time and account billed, then the warehouses and "
+        "query patterns that moved the bill. If a delta looks extreme, check the 'Incomplete "
+        "coverage' warning first — a half-loaded window manufactures false 100% moves."
+    )
 
     _b = run_batch([
         {"key": "wh", "sql": mart27_sql.compare_warehouse_credits(a0, a1, b0, b1, company),

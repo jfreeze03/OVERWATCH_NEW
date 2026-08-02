@@ -92,7 +92,7 @@ def test_spend_alloc_caption_pool_reads_served_source():
 # ---------------------------------------------------------------------------
 def test_prettify_pin_share_one_column():
     comp = _src("app/ui/components.py")
-    assert "st.column_config.Column(_label, pinned=True)" in comp
+    assert "st.column_config.Column(_label, pinned=True, help=_help)" in comp  # rec32 added header help
     assert "def _auto_pin" not in comp   # the separate pin pass (which the prettifier defeated) is gone
 
 

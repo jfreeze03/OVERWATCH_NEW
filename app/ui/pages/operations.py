@@ -20,7 +20,7 @@ from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import complete_days_only, flag_anomalies
 from app.logic.formulas import account_today, credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
-from app.ui import charts
+from app.ui import charts, palette
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     guard,
@@ -135,7 +135,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
         ], page=_PAGE, tier="recent")
 
-    st.markdown("**Heaviest queries**")
+    section_header("Heaviest queries", "info", "search")
     top = _qb.get("top") or run(
         ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter, database, schema_contains),
         page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
@@ -162,7 +162,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         )
         st.caption("Elapsed-time ranking.")
 
-    st.markdown("**Query drill-through**")
+    section_header("Query drill-through", "info", "search")
     candidate_ids: list[str] = []
     if top.usable():
         candidate_ids = [str(q) for q in top.df["QUERY_ID"].dropna().head(50)]
@@ -240,7 +240,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     st.error(f"{row.get('ERROR_CODE')}: {row.get('ERROR_MESSAGE')}")
                 result_caption(detail)
 
-    st.markdown("**Failures by error**")
+    section_header("Failures by error", "warn", "alerts")
     fails = _qb.get("fails") or run(
         ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
         key=f"q_fails_{company}_{days}", tier="recent",
@@ -252,7 +252,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
                               known_failures: float | None = None) -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
-    st.markdown("**Failure root-cause timeline (7d)**")
+    section_header("Failure root-cause timeline (7d)", "warn", "alerts")
     if known_failures is not None and known_failures <= 0:
         st.success("No task failures in the last 7 days for this scope.")
         return
@@ -314,7 +314,7 @@ def _release_compare_tab(company: str) -> None:
     q_res = run(insights_sql.release_query_compare(release_iso, window, company), page=_PAGE,
                 key=f"rel_q_{company}_{release_iso}_{window}", tier="historical",
                 source="ACCOUNT_USAGE.QUERY_HISTORY")
-    st.markdown("**Query health: before vs after**")
+    section_header("Query health: before vs after", "info", "search")
     verdicts: list[dict] = []
     if guard(q_res, "No query history in the compare windows."):
         verdicts = compare_release_periods(q_res.df)
@@ -331,7 +331,7 @@ def _release_compare_tab(company: str) -> None:
             st.info("Need data on both sides of the release date to compare.")
         result_caption(q_res)
 
-    st.markdown("**Task regressions**")
+    section_header("Task regressions", "info", "operations")
     t_res = run(insights_sql.release_task_compare(release_iso, window, company), page=_PAGE,
                 key=f"rel_t_{company}_{release_iso}_{window}", tier="historical",
                 source="ACCOUNT_USAGE.TASK_HISTORY")
@@ -407,7 +407,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
-    st.markdown("**File-load failures (COPY / Snowpipe, 7d)**")
+    section_header("File-load failures (COPY / Snowpipe, 7d)", "warn", "pipeline")
     cpf = run(ops_sql.copy_load_failures(7, "ALL"), page=_PAGE,
               key="copy_fails", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
     if cpf.ok and cpf.empty:
@@ -418,7 +418,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
 
-    st.markdown("**Volume drops (yesterday vs prior-7d average)**")
+    section_header("Volume drops (yesterday vs prior-7d average)", "info", "pipeline")
     panel_help(
         "Rows added per table yesterday vs its prior-7-day average (tables moving "
         "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past a 50% drop on PROD "
@@ -436,7 +436,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         styled_table(vd.df, height=240)
         result_caption(vd)
 
-    st.markdown("**Dynamic table refresh health (7d)**")
+    section_header("Dynamic table refresh health (7d)", "info", "pipeline")
     panel_help(
         "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). A FAILED "
         "row means every downstream consumer is reading stale data. The daily "
@@ -450,7 +450,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         styled_table(dth.df, height=240)
         result_caption(dth)
 
-    st.markdown("**Stream staleness**")
+    section_header("Stream staleness", "info", "pipeline")
     panel_help(
         "SHOW STREAMS (live metadata — no ACCOUNT_USAGE view exists for staleness). "
         "A STALE stream has passed its retention without being consumed: downstream "
@@ -511,7 +511,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
     # per-node dispatch-queue + exec timing it captures (late-start / warehouse
     # contention that the coarse FACT_TASK_DAILY summary above cannot show).
     st.divider()
-    st.markdown("**Per-node timing (dispatch queue & exec p95)**")
+    section_header("Per-node timing (dispatch queue & exec p95)", "info", "operations")
     nres = run(mart27_sql.task_nodes(days, company, database, schema_contains),
                page=_PAGE, key=f"t_node_{company}_{days}", tier="hourly",  # rec 10: MART_TASK_NODE_DAILY loads hourly
                source="MART_TASK_NODE_DAILY")
@@ -529,7 +529,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
                    "live equivalent (the queue delay needs SCHEDULED_TIME). Task grain, scoped by "
                    "database; one task name can appear under multiple schemas.")
 
-    st.markdown("**Task graph (DAG)**")
+    section_header("Task graph (DAG)", "info", "operations")
     if st.toggle("Render account task topology", key="ops_dag_toggle",
                  help="Latest task versions + predecessors; red = failed in 24h, gray = suspended."):
         gres = run(ops_sql.task_graph_nodes(), page=_PAGE, key="task_dag", tier="recent",
@@ -537,13 +537,23 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
         if guard(gres, "No tasks recorded in TASK_VERSIONS."):
             import json as _json
 
-            lines = ["digraph tasks {", 'rankdir=LR; node [shape=box, style="rounded,filled", fontsize=10];']
+            # rec26: theme the DAG for the dark canvas. Transparent bgcolor; the
+            # status hues from palette.py (red/gray/green) match every other surface;
+            # node labels are dark (readable on the saturated fills) while graph/edge
+            # text stays ink so it reads on the transparent background.
+            lines = [
+                "digraph tasks {",
+                'bgcolor="transparent"; rankdir=LR;',
+                f'graph [fontcolor="{palette.INK}"];',
+                f'node [shape=box, style="rounded,filled", fontsize=10, fontcolor="{palette.BG}"];',
+                f'edge [color="{palette.INK}"];',
+            ]
             for _, r in gres.df.iterrows():
                 fqn = str(r["TASK_FQN"])
                 short = fqn.split(".")[-1]
                 fails = int(r.get("FAILURES_24H") or 0)
                 state = str(r.get("STATE") or "").lower()
-                color = "#fecaca" if fails else ("#e2e8f0" if "suspend" in state else "#bbf7d0")
+                color = palette.BAD if fails else (palette.MUTED if "suspend" in state else palette.OK)
                 lines.append(f'"{fqn}" [label="{short}", fillcolor="{color}"];')
                 preds_raw = r.get("PREDECESSORS")
                 preds = []
@@ -593,7 +603,7 @@ def _warehouses_tab(company: str, rate: float) -> None:
         )
     result_caption(res)
 
-    st.markdown("**Concurrency peaks (right-size before queuing hurts)**")
+    section_header("Concurrency peaks (right-size before queuing hurts)", "info", "warehouse")
     peaks = run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
                 key=f"conc_peaks_{company}", tier="recent",
                 source="ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY")
@@ -609,7 +619,7 @@ def _warehouses_tab(company: str, rate: float) -> None:
 def _contention_tab(company: str, days: int) -> None:
     left, right = st.columns(2)
     with left:
-        st.markdown("**Warehouse queue & spill pressure**")
+        section_header("Warehouse queue & spill pressure", "info", "warehouse")
         # r23 #1: the hourly fact answers this without a QUERY_HISTORY scan
         # (the live read sat at 17.8s on the fleet board). r19 #18 still
         # holds — no one-member batch; mart-first with the labeled fallback.
@@ -625,7 +635,7 @@ def _contention_tab(company: str, days: int) -> None:
                              "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds")
             styled_table(res.df)
     with right:
-        st.markdown("**Lock waits**")
+        section_header("Lock waits", "info", "warehouse")
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
@@ -794,7 +804,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             })
         result_caption(res)
 
-        st.markdown("**Run history around one change**")
+        section_header("Run history around one change", "info", "operations")
         picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)})
         clicked_obj = None
         if sel_ci is not None:
@@ -971,7 +981,7 @@ def _emergency_tab(is_operator: bool) -> None:
 
 def _emergency_extras(is_operator: bool) -> None:
     st.divider()
-    st.markdown("**Running queries (kill-switch)**")
+    section_header("Running queries (kill-switch)", "warn", "bolt")
     panel_help(
         "Live in-flight statements via INFORMATION_SCHEMA (real time). Cancel needs "
         "ownership of the query or OPERATE on its warehouse; the attempt is audited "

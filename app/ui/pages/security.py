@@ -26,6 +26,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
     styled_table,
     user_display_map,
     with_user_names,
@@ -65,7 +66,7 @@ def _access_tab(company: str, days: int) -> None:
                        source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
         if live_mfa.ok:
             mfa = live_mfa
-    st.markdown("**MFA gaps with password-login evidence (30d)**")
+    section_header("MFA gaps with password-login evidence (30d)", "warn", "security")
     if mfa.ok and mfa.empty:
         st.success("No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
@@ -79,7 +80,7 @@ def _access_tab(company: str, days: int) -> None:
 
     left, right = st.columns(2)
     with left:
-        st.markdown("**Failed logins**")
+        section_header("Failed logins", "info", "alerts")
         res = batch.get("logins") or run(security_sql.failed_logins(days, company), page=_PAGE,
                   key=f"faillog_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
@@ -88,7 +89,7 @@ def _access_tab(company: str, days: int) -> None:
         elif guard(res, ""):
             styled_table(with_user_names(res.df, _PAGE))
     with right:
-        st.markdown("**Privileged role holders**")
+        section_header("Privileged role holders", "info", "admin")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
@@ -98,7 +99,7 @@ def _access_tab(company: str, days: int) -> None:
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
     # login telemetry, not change evidence.
-    st.markdown("**Failed-login reasons (network policy vs credentials)**")
+    section_header("Failed-login reasons (network policy vs credentials)", "info", "alerts")
     reasons = batch.get("login_reasons") or run(security_sql.failed_login_reasons(days, company),
                   page=_PAGE, key=f"login_reasons_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
@@ -108,7 +109,7 @@ def _access_tab(company: str, days: int) -> None:
         styled_table(reasons.df)
         result_caption(reasons)
 
-    st.markdown("**New networks for privileged users (90-day baseline)**")
+    section_header("New networks for privileged users (90-day baseline)", "warn", "alerts")
     nn = batch.get("newnet") or run(security_sql.new_network_logins(days), page=_PAGE,
               key=f"newnet_{days}", tier="recent",
               source="LOGIN_HISTORY x admin grants (90d baseline)")
@@ -125,7 +126,7 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
-    st.markdown("**Expiring credentials (10-day horizon)**")
+    section_header("Expiring credentials (10-day horizon)", "warn", "clock")
     creds = batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
@@ -145,7 +146,7 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
-    st.markdown("**Dormant users still holding access (90d+)**")
+    section_header("Dormant users still holding access (90d+)", "info", "security")
     from app.ui.components import toggle_cost_hint
     st.caption(toggle_cost_hint("dormant"))
     _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
@@ -175,7 +176,7 @@ def _access_tab(company: str, days: int) -> None:
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.
-    st.markdown("**Unused roles (90d) — revoke candidates**")
+    section_header("Unused roles (90d) — revoke candidates", "info", "admin")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",
@@ -188,7 +189,7 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
 
-    st.markdown("**Role grants in the window (account-wide)**")
+    section_header("Role grants in the window (account-wide)", "info", "admin")
     res = batch.get("grants") or run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
               tier="recent", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
     if res.ok and res.empty:
@@ -205,7 +206,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     (QUERY_TYPE='UNLOAD') — because exfiltration and a surprise egress bill
     both start as 'bytes moved that nobody was watching'."""
     st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
-    st.markdown("**Outbound transfer (account-wide)**")
+    section_header("Outbound transfer (account-wide)", "info", "security")
     xfer = run(security_sql.egress_daily(days), page=_PAGE, key=f"egress_{days}",
                tier="recent", source="ACCOUNT_USAGE.DATA_TRANSFER_HISTORY")
     if xfer.ok and xfer.empty:
@@ -223,7 +224,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
         styled_table(xdf.sort_values("GB", ascending=False).head(50), height=240)
         result_caption(xfer)
 
-    st.markdown("**Unload activity (COPY INTO stage)**")
+    section_header("Unload activity (COPY INTO stage)", "info", "security")
     panel_help(
         "QUERY_HISTORY filtered to QUERY_TYPE='UNLOAD' — every successful COPY INTO "
         "<location>, grouped per user/day. GB_OUT sums the query's byte counters (for "
@@ -379,7 +380,7 @@ def _governance_score_panel():
 
 def _export_pack(company: str, days: int) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
-    st.markdown("**Auditor export pack**")
+    section_header("Auditor export pack", "info", "security")
     st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
                "audit sheets (failed logins, credentials, role matrix, unused roles, 90d grant diff).")
     if not st.button("Build access-review pack", key="sec_pack_build"):
@@ -473,7 +474,7 @@ def _posture_trend_panel(trend) -> None:
 
 def _clients_tab(company: str, days: int) -> None:
     """Driver/version inventory — the 'when do we need to upgrade' sheet."""
-    st.markdown("**Client drivers & versions — who connects with what**")
+    section_header("Client drivers & versions — who connects with what", "info", "operations")
     panel_help(
         "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
         "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
@@ -512,7 +513,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # r23 #4 (the Access-tab pattern): the tab's two independent live reads
     # submit server-side async in one shot; any failure falls back to the
     # serial per-query calls below, unchanged.
-    st.markdown("**Who changed what (DDL/DCL)**")
+    section_header("Who changed what (DDL/DCL)", "info", "admin")
     if str(company or "ALL").upper() != "ALL":
         st.caption(
             "Scope: change evidence follows the actor's company OR the object's — so "
@@ -549,7 +550,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         styled_table(with_user_names(res.df, _PAGE))
         result_caption(res)
 
-    st.markdown("**Break-glass role activity (should hug zero)**")
+    section_header("Break-glass role activity (should hug zero)", "warn", "admin")
     bga = run(security_sql.admin_role_activity(days), page=_PAGE,
               key=f"breakglass_{days}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (admin roles)")

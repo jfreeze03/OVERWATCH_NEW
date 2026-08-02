@@ -24,6 +24,7 @@ from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
+    panel_help,
     result_caption,
     run_mart_first,
     snowsight_profile_column,
@@ -51,6 +52,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~8h lag, idle time "
         "excluded) at your contract rate. For 'who owns the bill' including idle, "
         "use Optimization's allocated view; for pipelines, the task-graph panel below."
+    )
+    panel_help(
+        "The price tag on one query, one procedure CALL, one AI request — MEASURED from "
+        "QUERY_ATTRIBUTION_HISTORY credits (~8h lag, warehouse idle excluded) at your contract "
+        "rate. A high $/call or $/run is your tuning target; for 'who owns the bill' including "
+        "idle, use Optimization's allocated view instead."
     )
     _uc_full = st.toggle(
         f"Price over the full {days}-day page window",

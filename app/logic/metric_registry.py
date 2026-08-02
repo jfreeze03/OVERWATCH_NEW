@@ -40,6 +40,22 @@ WINDOWS = (
 UNITS = ("USD", "credits", "days", "percent", "count", "ratio", "bytes")
 PARTIAL_DAY = ("excluded", "included", "n/a")
 
+# rec32: header help for columns whose BASIS is otherwise only in a per-page
+# caption. _render_table hangs these on the column header (st.column_config help)
+# so hovering answers "which dollar is this?". Keyed by UPPER column name; a
+# missing entry is harmless (no help shown). Extend as ambiguous columns recur.
+COLUMN_HELP = {
+    "CREDITS_BILLED": "BILLED — ties to the invoice (includes the cloud-services adjustment).",
+    "CREDITS_MEASURED": "MEASURED — exact attributed compute (QUERY_ATTRIBUTION_HISTORY); idle excluded.",
+    "CREDITS_ALLOCATED": "ALLOCATED — spread from a coarser grain by a share; an estimate (idle included).",
+    "BILLED_USD": "BILLED USD — ties to the invoice.",
+    "MEASURED_USD": "MEASURED USD — exact attributed compute; idle excluded.",
+    "ALLOCATED_USD": "ALLOCATED USD — a coarse-grain total spread by a share; an estimate.",
+    "ESTIMATED_USD": "ESTIMATED — modeled from bytes/credits x a configured rate, not billed.",
+    "SPEND_USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
+    "USD": "USD = credits x the contract rate ($3.68 compute / $2.20 Cortex). Display-only conversion.",
+}
+
 
 @dataclass(frozen=True)
 class Metric:

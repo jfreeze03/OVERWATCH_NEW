@@ -563,8 +563,9 @@ def render() -> None:
         elif guard(tl, ""):
             tdf = tl.df.copy()
             tdf, tz_note = localize_timestamps(tdf, ["AT"])
-            if tz_note:
+            if tz_note and not st.session_state.get("_ow_tz_note_shown"):  # rec34: once per page
                 st.caption(tz_note)
+                st.session_state["_ow_tz_note_shown"] = True
             charts.event_timeline(tdf)
             sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
             if sel_tl is not None:

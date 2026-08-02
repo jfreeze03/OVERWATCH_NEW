@@ -30,7 +30,8 @@ def test_rec14_export_filename_is_page_scoped():
 # rec2 — Brief: numbers/fires/asks before the AI narrative
 def test_rec2_brief_narrative_below_asks_and_collapsed():
     b = _src("app/ui/pages/brief.py")
-    assert b.index("**Asks**") < b.index("AI morning narrative")   # narrative moved down
+    # rec22: "Asks" is a section_header now, not bold-markdown.
+    assert b.index('section_header("Asks"') < b.index("AI morning narrative")   # narrative moved down
     assert 'expanded=False' in b.split("AI morning narrative", 1)[1][:80]
 
 

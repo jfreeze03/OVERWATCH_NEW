@@ -282,7 +282,7 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
         with slot:
             st.caption(label)
             if df is None or getattr(df, "empty", True):
-                st.caption("–")
+                st.caption("—")  # rec27: one no-value glyph (em-dash)
                 continue
             data = df[[day_col, value_col]].copy()
             data.columns = ["Day", "Value"]

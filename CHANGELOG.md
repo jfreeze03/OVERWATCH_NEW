@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.125.0 — Cursor design review Wave 3: component polish (2026-08-02)
+
+Third wave — component consistency + trust. All app-only.
+
+- **rec22 — one heading system.** Bold-markdown panel TITLES migrated to `section_header`
+  (stripe + icon + severity badge) across Brief, Operations (17), and Security (15); body/data
+  lines left as-is.
+- **rec24 — segmented section pills.** `lazy_sections` renders `st.segmented_control` (the pill
+  look was CSS-on-radio keyed off version-fragile aria-labels), with the radio kept as the
+  `hasattr` degrade path and an `on_change` guard so single-select's deselect-to-None never leaves
+  a page section-less. A valid section is now seeded before the widget so the bar is never blank.
+- **rec25 — unified AI surfaces.** `ai_evaluation_panel` gained an optional `on_save` hook; the
+  alert drawer's hand-rolled AI-explain is deleted and routes through it, so every AI answer now
+  carries the same model+rate cost caption and grounding-prompt popover (save SQL + operator gate
+  unchanged).
+- **rec19 — collapsed the native-delivery SQL walls** into download-expanders with a public-trust
+  caution (this panel renders repo SQL to every viewer — a secret pasted there would leak).
+- **rec26 — themed the task-graph DAG** (transparent bg, status-palette fills red/gray/green, ink
+  fonts) so it matches every other surface instead of light-theme pastels on the dark canvas.
+- **rec28 — panel_help coverage.** Grounded "what is this / when red do X" popovers added to
+  Overview, Admin, Spend, Unit costs, and Compare lead panels (they had none).
+- **rec32 — registry-driven column help.** `metric_registry.COLUMN_HELP` + `_render_table` hangs
+  a "which dollar is this?" help on ambiguous BILLED/MEASURED/ALLOCATED/USD headers.
+- **rec33 — signed deltas.** Delta columns always show a leading `+`/`−` so direction survives
+  red-green color-blindness (the delta color was the only cue).
+- **rec34 — tz note once per page** (was above every converted table); **rec30** CSV button
+  `⬇` → `⬇ CSV`; **rec27** one no-value glyph (em-dash) across cards, tables, sparklines, Brief.
+
+Items 22/26 + brief polish, 25/19, and the panel_help sweep ran as three parallel agents on
+disjoint files; the shared `components.py` cluster (24/27/30/32/33/34) was done inline. A 3-lens
+adversarial review returned zero findings on the AI-panel/SQL-walls, one MEDIUM (segmented pills
+showed no highlight on first paint — fixed by always seeding a valid section), and two minor
+cosmetic notes (tz-note-in-fragment documented; a Brief placeholder left as-is). 3 tests pinning
+exact code shape updated to the new shape.
+
+Gates green: ruff, mypy, **pytest 1843 passed / 1 skipped**.
+
 ## 4.124.0 — Cursor design review Wave 2: navigation & shell (2026-08-02)
 
 Second wave of the Cursor design review — nav/IA and shell chrome. All app-only.

@@ -29,6 +29,7 @@ from app.ui.components import (
     load_settings,
     notify,
     page_header,
+    panel_help,
     result_caption,
     run_mart_first,
     selectable_table,
@@ -215,6 +216,12 @@ def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
     # $-escape: the two literal rates would pair into a LaTeX math span
     st.caption(md_dollars(f"Values from: {settings.get('_source')}. Rates confirmed 2026-07: $3.68 compute / $2.20 Cortex."))
+    panel_help(
+        "Every tunable the app reads — credit/Cortex rates, monthly budget, platform-score "
+        "weights and alert thresholds — plus who last changed each. Edit a value below "
+        "(operators only; it takes effect within one cache cycle); a row flagged 'no longer "
+        "read' is safe to delete."
+    )
     # Deliberately live (audit rule, r24 #8): SETTINGS is an operator-edit surface, so
     # a concurrent admin's change must surface within 30s, not one cache cycle. The
     # perf T1.11 retier was declined here to keep that guarantee — see test_codex_r24.
@@ -257,6 +264,12 @@ def _settings_tab(is_operator: bool) -> None:
 
 
 def _migrations_tab() -> None:
+    panel_help(
+        "Compares the applied SCHEMA_VERSION rows against the migrations this app build expects. "
+        "A 'Missing migrations' warning means the deployment is behind — run them in order "
+        "(DEPLOYMENT.md); the Source freshness panel below reads stale when a loader task has "
+        "stopped, with a per-source cause and the backfill to run."
+    )
     res = run(mart_sql.schema_version(), page=_PAGE, key="schema_version", tier="metadata",  # r24 #8: changes only at migrations
               source="SCHEMA_VERSION")
     if not res.ok:
@@ -642,6 +655,13 @@ def _canary_tab() -> None:
         "Execute mode runs each statement with a 1-row cap; compile-only wraps each "
         "in EXPLAIN — same drift coverage for column/object errors, no data scanned. "
         "Failures are logged to APP_ERROR_LOG."
+    )
+    panel_help(
+        "Runs every registered SQL builder against the live account to catch ACCOUNT_USAGE "
+        "column drift or a missing OVERWATCH object before a user does. A FAIL (not a declared "
+        "GAP) means a query the app depends on no longer compiles — fix the drift; the mart "
+        "reconciliation panel below flags mart totals that diverge past 5% from live and the "
+        "backfill to re-run."
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
 

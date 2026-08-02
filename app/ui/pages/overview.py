@@ -38,6 +38,7 @@ from app.ui.components import (
     kpi_row,
     load_settings,
     page_header,
+    panel_help,
     result_caption,
     run_mart_first,
     section_header,
@@ -492,6 +493,13 @@ def render() -> None:
                           "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
+    panel_help(
+        "The headline board: 'Spend, last Nd' is company-scoped warehouse metering "
+        "(credits x rate); MTD, projected month-end, open alerts and the platform score "
+        "are account-wide, so changing the spend window doesn't move them. When the platform "
+        "score is red (<70) or reads Incomplete, open 'Platform score deductions' below and "
+        "work the highest-penalty driver first."
+    )
     kpi_row(kpis)
     # N7: MTD & Projected are credit-billed services (compute + serverless + AI).
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
@@ -514,6 +522,11 @@ def render() -> None:
     left, right = st.columns([1.15, 1.0])
     with left:
         section_header("Top actions")
+        panel_help(
+            "The real ACTION_QUEUE — the work waiting on an owner — ranked by severity, then "
+            "overdue, then estimated dollars, then age (never template rows). When rows appear "
+            "here, click one to open it in the Control Room queue and assign or resolve it."
+        )
         # actions_res loaded above the score (triage #3) — reused here.
         if not actions_res.ok:
             st.info("Action queue isn't installed yet — no placeholder rows.")

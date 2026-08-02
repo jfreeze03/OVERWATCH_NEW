@@ -12,7 +12,6 @@ from pathlib import Path
 import streamlit as st
 
 from app.config import core_object
-from app.core.ai import cortex_complete
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run
@@ -26,7 +25,9 @@ from app.logic.formulas import md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
+from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    download_text_button,
     empty_state,
     guard,
     kpi_row,
@@ -510,48 +511,54 @@ def _open_events_section(events, is_operator: bool) -> None:
                                    "also get a separate change-scan row that settles itself (V038).")
             rid_u = str(row["RULE_ID"]).upper()
             if rid_u.startswith(("COST_", "PERF_")):
-                with st.expander("Explain with AI (grounded in the day's evidence)"):
-                    import re as _re
+                import re as _re
 
-                    m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
-                    event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
-                    st.caption(f"Evidence window: {event_day} vs its prior 7 days"
-                               + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
-                                  if target["filters"].get("warehouse_contains") else ""))
-                    if st.button("Assemble evidence + explain", key=f"ai_expl_go_{event_id[:8]}"):
-                        ev = run(insights_sql.anomaly_evidence(
-                                     event_day, target["filters"].get("warehouse_contains", "")),
-                                 page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
-                                 source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
-                        if not ev.ok or ev.empty:
-                            st.info("No query-family evidence found for that day/scope — "
-                                    "the driver may be serverless or storage rather than queries.")
-                        else:
-                            settings = load_settings(_PAGE)
-                            prompt = anomaly_explain_prompt(
-                                str(row["TITLE"]), detail_text, ev.df, None,
-                                f"{event_day} vs prior 7d")
-                            ok_ai, answer = cortex_complete(
-                                prompt, str(settings.get("CORTEX_MODEL") or "llama3.1-8b"),
-                                page=_PAGE)
-                            if ok_ai:
-                                st.session_state[f"_ai_expl_{event_id}"] = answer
-                            else:
-                                st.error(answer)
-                    hypothesis = st.session_state.get(f"_ai_expl_{event_id}", "")
-                    if hypothesis:
-                        st.markdown(hypothesis)
-                        st.caption("Grounded on the evidence rows above only; verify before acting.")
-                        if is_operator and st.button("Append hypothesis to the event",
-                                                     key=f"ai_expl_save_{event_id[:8]}"):
-                            appended = (
-                                f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
-                                f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
-                                f"{sql_literal(hypothesis[:800])}, 2000) "
-                                f"WHERE EVENT_ID = {sql_literal(event_id)};"
-                            )
-                            ok_u, msg_u = execute_statement(appended, page=_PAGE)
-                            notify(ok_u, msg_u if not ok_u else "Hypothesis stored on the event.")
+                m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
+                event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
+                st.caption(
+                    f"Explain with AI — evidence window: {event_day} vs its prior 7 days"
+                    + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
+                       if target["filters"].get("warehouse_contains") else ""))
+                # The evidence pack is a historical ACCOUNT_USAGE query, so it stays
+                # button-gated (unchanged behavior); once assembled, the shared
+                # ai_evaluation_panel owns the AI run, cost disclosure, grounding
+                # popover, download, and the operator-only save-to-event hook.
+                _expl_prompt_key = f"_ai_expl_prompt_{event_id}"
+                if st.button("Assemble the day's evidence", key=f"ai_expl_go_{event_id[:8]}",
+                             help="Runs the historical evidence pack for that day/scope, then "
+                                  "unlocks a grounded AI evaluation over exactly those rows."):
+                    ev = run(insights_sql.anomaly_evidence(
+                                 event_day, target["filters"].get("warehouse_contains", "")),
+                             page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
+                             source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
+                    if not ev.ok or ev.empty:
+                        st.session_state.pop(_expl_prompt_key, None)
+                        st.info("No query-family evidence found for that day/scope — "
+                                "the driver may be serverless or storage rather than queries.")
+                    else:
+                        st.session_state[_expl_prompt_key] = anomaly_explain_prompt(
+                            str(row["TITLE"]), detail_text, ev.df, None,
+                            f"{event_day} vs prior 7d")
+                _expl_prompt = st.session_state.get(_expl_prompt_key)
+                if _expl_prompt:
+                    def _append_hypothesis(answer: str) -> tuple[bool, str]:
+                        appended = (
+                            f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
+                            f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
+                            f"{sql_literal(answer[:800])}, 2000) "
+                            f"WHERE EVENT_ID = {sql_literal(event_id)};"
+                        )
+                        ok_u, msg_u = execute_statement(appended, page=_PAGE)
+                        return ok_u, (msg_u if not ok_u else "Hypothesis stored on the event.")
+                    ai_evaluation_panel(
+                        key=f"alert_expl_{event_id[:8]}",
+                        prompt=_expl_prompt,
+                        settings=load_settings(_PAGE),
+                        page=_PAGE,
+                        subject=str(row["TITLE"]),
+                        on_save=_append_hypothesis if is_operator else None,
+                        save_label="Append hypothesis to the event",
+                    )
             c_inv, c_fix, c_act, c_note = st.columns([1.1, 1.1, 0.9, 1.9])
             with c_fix:
                 if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
@@ -894,6 +901,13 @@ def render() -> None:
             "when nobody has the app open. Templates ship in the repo and stay suspended until "
             "the notification integration and recipients are approved."
         )
+        st.warning(
+            "Trust boundary — treat everything rendered in this panel as PUBLIC: it is shown to "
+            "every viewer, so never paste a secret into these templates (keep credentials in "
+            "Snowflake secrets/notification integrations)."
+        )
+        # rec19: each template is hundreds of lines — keep the blurb visible but tuck the
+        # wall of SQL behind a collapsed expander with a real download button.
         for filename, blurb in (
             ("native_alert_templates.sql", "Email via Snowflake ALERT objects"),
             ("webhook_delivery.sql", "Slack / Teams webhook via SYSTEM$SEND_SNOWFLAKE_NOTIFICATION"),
@@ -901,6 +915,10 @@ def render() -> None:
             st.markdown(f"**{blurb}**")
             template_path = Path(__file__).resolve().parents[3] / "snowflake" / filename
             try:
-                st.code(template_path.read_text(encoding="utf-8"), language="sql")
+                _sql_text = template_path.read_text(encoding="utf-8")
             except OSError:
                 st.info(f"File not found in this deployment; see snowflake/{filename} in the repo.")
+                continue
+            with st.expander(f"View / download {filename}", expanded=False):
+                st.code(_sql_text, language="sql")
+                download_text_button(f"Download {filename}", _sql_text, filename)

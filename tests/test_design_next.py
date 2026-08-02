@@ -65,10 +65,10 @@ def test_rec13_prettify_header():
     assert _prettify_header("USD") == "USD"                    # short all-caps left alone
     assert _prettify_header("Already Human") == "Already Human"
     comp = _src("app/ui/components.py")
-    assert "st.column_config.Column(_label)" in comp                      # relabel-only path
+    assert "st.column_config.Column(_label, help=_help)" in comp          # relabel-only path (+ rec32 help)
     # r5-bug: the pin and the pretty label go into the SAME Column so a wide table's
     # first column keeps both (the old code let the prettifier defeat _auto_pin).
-    assert "st.column_config.Column(_label, pinned=True)" in comp
+    assert "st.column_config.Column(_label, pinned=True, help=_help)" in comp
     assert "def _auto_pin" not in comp                                    # inlined away
 
 

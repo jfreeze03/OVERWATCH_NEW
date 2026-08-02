@@ -24,6 +24,7 @@ from app.ui import charts
 from app.ui.components import (
     guard,
     kpi_row,
+    panel_help,
     result_caption,
     run_mart_first,
     served_days,
@@ -89,6 +90,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
                   tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
+    panel_help(
+        "Account-wide billed spend split by service (warehouse, serverless, AI/Cortex): billed "
+        "credits x the configured rate with the cloud-services rebate applied, so it ties to the "
+        "invoice. When a category jumps, the cloud-services-health and Attribution panels below "
+        "name the warehouse, user, or query pattern behind it."
+    )
     df = res.df.copy()
     df["CATEGORY"] = df["SERVICE_TYPE"].map(_categorize)
     df["RATE"] = df["CATEGORY"].map(lambda c: ai_rate if c == "AI / Cortex" else rate)
@@ -238,6 +245,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                  key=f"wh_vs_prior_{company}_{days}", tier="historical",
                  source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
     st.markdown("**By warehouse (exact usage)**")
+    panel_help(
+        "Warehouse spend is EXACT metering (credits x rate, company-scopable); the user/database "
+        "split below it is an elapsed-time-share ESTIMATE, not billing. Trust the by-warehouse "
+        "table for the real breakdown and read the allocated user/database dollars as "
+        "directional — the coverage ladder shows how much of the bill each grain actually explains."
+    )
     if guard(wh, "No warehouse credits in this window."):
         view = wh.df.copy()
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
