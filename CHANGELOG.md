@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.122.0 — Codex-R2 Wave 3: CI isolation + a validate contract with teeth (2026-08-02)
+
+Wave 3 hardens the *deploy plumbing* — the CI smoke, the post-install contract, and a task-drift
+check — so the migration chain that Waves 1–2 built can be applied and verified safely.
+
+- **#1 CI isolation (`.github/workflows/ci.yml`).** The optional Snowflake smoke cloned the prod
+  DB but then applied SQL that is **fully-qualified as `DBA_MAINT_DB.OVERWATCH.*`** — and 16
+  migrations even issue `USE DATABASE DBA_MAINT_DB`, which overrides `--database`. Applied
+  verbatim it would have redefined prod procs, disabled routes, and run loaders against
+  production regardless of the clone. Fix: a **"Rewrite SQL onto the clone"** step copies every
+  `.sql` the smoke runs into a temp dir and rewrites the identifier `DBA_MAINT_DB → $CLONE_DB`
+  (schema `OVERWATCH` and `SNOWFLAKE.ACCOUNT_USAGE` preserved), followed by a **fail-closed
+  guard** that greps the copies and aborts *before applying* if any `DBA_MAINT_DB` reference
+  survives. Layer 2 (defense-in-depth) is a dedicated no-write `SNOWFLAKE_CI_ROLE` the workflow
+  now selects — **owner must create it** (contract documented inline). Job stays opt-in +
+  `continue-on-error` until both hold; the gating-flip steps are documented, not flipped.
+- **#49 validate contract with teeth (`snowflake/validate.sql`).** Alongside the human-readable
+  per-check rows, a bottom `EXECUTE IMMEDIATE` block re-checks each load-bearing invariant and
+  **RAISEs a specific exception** (`-20011..-20018`) on the first failure, so `snow sql -f
+  validate.sql` exits nonzero and CI can go red: migration floor V001..V071, credit rate
+  positive + `= 3.68` (unless a deliberate `CREDIT_PRICE_OVERRIDE` flag), daily-fact freshness
+  (3-day dead-man), no enabled route with a blank integration, `ALERT_CONFIG >= 29` rules
+  (verified: 30 seeded − 1 retired = 29 exactly), and the 4 key procs present.
+  - **Deploy-order fix:** validate.sql runs at the documented step *right after migrations,
+    before the first load*, where the daily facts are legitimately **empty**. The freshness
+    assertions now treat an empty fact as **PASS** (nothing loaded yet) and only bite on a
+    *populated-but-stale* fact (a loader that ran and then stopped — the real dead-man). Without
+    this, every fresh deploy would have aborted on `-20014/-20015`.
+- **#48 task-drift check (`snowflake/task_audit.sql`).** Because tasks are created with
+  `CREATE TASK IF NOT EXISTS`, a later change to a task's schedule/warehouse/predecessor leaves
+  the live task on its OLD definition silently. This diffs live `SHOW TASKS` against an
+  operator-maintained expected set encoding the **post-V071 topology**, with an **exact** single-
+  parent predecessor match (replacing a `%LIKE%` that missed extra parents and false-matched
+  `TASK_ALERT_SCAN` vs `TASK_ALERT_SCAN_DAILY`). Read-only; prints one verdict per task.
+- `tests/test_migrations_parse.py` now also parses `validate.sql` + `task_audit.sql` (each
+  contributes one sqlglot-verified statement). Rebuild bundle regenerated (`05_validate.sql`).
+
+**Owner queue (unchanged + new):** create the no-write `SNOWFLAKE_CI_ROLE`
+(`OVERWATCH_CI_SMOKE`); reconcile `task_audit.sql`'s expected set to the real deployment before
+trusting its OK rows. Gates green: ruff, mypy, **pytest 1838 passed / 1 skipped**.
+
 ## 4.121.0 — Codex-R2 Wave 2b: V071 task-graph re-chaining (fixes the sibling races) (2026-08-01)
 
 Theme A part 2 — the forward migration that fixes the task-graph topology defect (Codex

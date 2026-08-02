@@ -64,19 +64,68 @@ jobs:
   # it runs ONLY on a manual workflow_dispatch with run_snowflake_smoke=true, is
   # not a required status check, and is continue-on-error, so a red run can never
   # gate a merge. It exercises the deploy chain end-to-end against a THROWAWAY
-  # zero-copy clone of the database and drops it on exit, so it never mutates
-  # prod objects. Configure SNOWFLAKE_* repo secrets to enable it; without them
-  # the job self-skips cleanly.
+  # zero-copy clone of the database and drops it on exit. Configure SNOWFLAKE_*
+  # repo secrets to enable it; without them the job self-skips cleanly.
+  #
+  # ============================ ISOLATION CONTRACT =============================
+  # The migration/validate/task_audit SQL is NOT clone-safe on its own: every
+  # object is FULLY-QUALIFIED as DBA_MAINT_DB.OVERWATCH.*, and 16 migrations even
+  # issue `USE DATABASE DBA_MAINT_DB;`, which OVERRIDES the connection's
+  # --database default. So selecting --database $CLONE_DB is NOT enough — applied
+  # verbatim, this job would redefine PROD procs, disable routes, resume tasks,
+  # and run loaders against production DBA_MAINT_DB regardless of the clone.
+  #
+  # FIX (see the "Rewrite SQL onto the clone" step): before anything is applied,
+  # every .sql file the smoke will run is COPIED into a temp dir and every
+  # occurrence of the identifier DBA_MAINT_DB is rewritten to $CLONE_DB (the
+  # OVERWATCH schema is preserved). A fail-closed guard then asserts NO copy
+  # still names DBA_MAINT_DB and aborts BEFORE applying if any does. The smoke
+  # only ever executes the rewritten copies, so it can never touch DBA_MAINT_DB
+  # regardless of the connection's default database. This covers the migrations,
+  # validate.sql AND task_audit.sql (all hardcode DBA_MAINT_DB).
+  #
+  # ####################### OWNER ACTION REQUIRED (role) ########################
+  # Text-rewrite is layer 1. Layer 2 (defense-in-depth, fail-closed) is a
+  # DEDICATED CI ROLE that has NO WRITE on production DBA_MAINT_DB, so that even
+  # a rewrite miss or a future hand-written query cannot mutate prod. The
+  # workflow SELECTS this role via the SNOWFLAKE_CI_ROLE secret/var (wired into
+  # sql() below) but CANNOT create it — an account admin (the OWNER) must:
+  #   1. CREATE ROLE OVERWATCH_CI_SMOKE;   (name is illustrative)
+  #   2. GRANT CREATE DATABASE ON ACCOUNT TO ROLE OVERWATCH_CI_SMOKE;
+  #        (needed to CREATE DATABASE ... CLONE and DROP the throwaway clone)
+  #   3. GRANT USAGE ON WAREHOUSE <CI_WH> TO ROLE OVERWATCH_CI_SMOKE;
+  #        (a CI warehouse, e.g. WH_CI_SMOKE — NOT a prod admin warehouse)
+  #   4. GRANT USAGE ON DATABASE DBA_MAINT_DB TO ROLE OVERWATCH_CI_SMOKE;
+  #      GRANT USAGE ON SCHEMA DBA_MAINT_DB.OVERWATCH TO ROLE OVERWATCH_CI_SMOKE;
+  #      GRANT SELECT ON ALL TABLES IN SCHEMA DBA_MAINT_DB.OVERWATCH TO ROLE ...;
+  #        (READ-ONLY on the source — required to zero-copy clone it)
+  #   5. Explicitly grant NO write on prod: the CI role must NOT hold OWNERSHIP,
+  #      INSERT/UPDATE/DELETE/TRUNCATE, CREATE <object>, or MODIFY on
+  #      DBA_MAINT_DB or DBA_MAINT_DB.OVERWATCH.*, and must NOT inherit them via
+  #      SNOW_SYSADMINS or any prod admin role. Cloning READS prod; it never
+  #      writes, so USAGE + SELECT on the source is sufficient and fail-closed.
+  #   6. GRANT ROLE OVERWATCH_CI_SMOKE TO USER <ci_user>; and set repo secret
+  #      SNOWFLAKE_CI_ROLE=OVERWATCH_CI_SMOKE.
+  # Until SNOWFLAKE_CI_ROLE is set, sql() falls back to SNOWFLAKE_ROLE (a prod
+  # admin) and prod safety rests SOLELY on the text-rewrite + guard above. That
+  # is acceptable ONLY because the job stays opt-in + continue-on-error (below).
+  # ============================================================================
   snowflake-smoke:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_snowflake_smoke }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true    # NON-BLOCKING: never gates merge
+    # NON-BLOCKING: never gates merge. See "GATING FLIP" TODO at the end of the
+    # apply step before removing this.
+    continue-on-error: true
     env:
       SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
       SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
       SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
       SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      # Dedicated fail-closed CI role with NO write on prod DBA_MAINT_DB. OWNER
+      # must create it (see ISOLATION CONTRACT above). Preferred over the prod
+      # SNOWFLAKE_ROLE when set.
+      SNOWFLAKE_CI_ROLE: ${{ secrets.SNOWFLAKE_CI_ROLE }}
       SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
       SNOWFLAKE_DATABASE: DBA_MAINT_DB
     steps:
@@ -103,30 +152,61 @@ jobs:
           CLONE_DB: OVERWATCH_CI_SMOKE_${{ github.run_id }}
         run: |
           set -euo pipefail
+          # Prefer the dedicated fail-closed CI role; fall back to the prod role
+          # only until the OWNER provisions SNOWFLAKE_CI_ROLE (see contract above).
+          CI_ROLE="${SNOWFLAKE_CI_ROLE:-${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}}"
+          echo "Smoke will connect under role: $CI_ROLE"
           sql() { snow sql --temporary-connection \
                     --account "$SNOWFLAKE_ACCOUNT" --user "$SNOWFLAKE_USER" \
-                    --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                    --role "$CI_ROLE" \
                     --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
                     --database "$CLONE_DB" "$@"; }
+
+          # ---- Rewrite SQL onto the clone (ISOLATION, layer 1) ---------------
+          # Copy every .sql the smoke runs into a temp dir and rewrite the
+          # identifier DBA_MAINT_DB -> $CLONE_DB (schema OVERWATCH preserved).
+          # This neutralizes both the fully-qualified references AND the
+          # `USE DATABASE DBA_MAINT_DB;` lines that would otherwise redirect DDL
+          # back to prod. task_audit.sql is rewritten too (it hardcodes prod).
+          REWRITE_DIR="$(mktemp -d)"
+          mkdir -p "$REWRITE_DIR/migrations"
+          cp snowflake/migrations/V*.sql "$REWRITE_DIR/migrations/"
+          cp snowflake/validate.sql "$REWRITE_DIR/validate.sql"
+          [ -f snowflake/task_audit.sql ] && cp snowflake/task_audit.sql "$REWRITE_DIR/task_audit.sql" || true
+          # \b word boundaries so we only ever rewrite the whole identifier.
+          find "$REWRITE_DIR" -name '*.sql' -print0 \
+            | xargs -0 sed -i "s/\bDBA_MAINT_DB\b/$CLONE_DB/g"
+
+          # ---- Fail-closed guard: abort BEFORE applying if any prod ref remains
+          if grep -rIl 'DBA_MAINT_DB' "$REWRITE_DIR" >/dev/null 2>&1; then
+            echo "FATAL: SQL rewrite incomplete — DBA_MAINT_DB still present in:" >&2
+            grep -rIl 'DBA_MAINT_DB' "$REWRITE_DIR" >&2
+            echo "Refusing to apply: the smoke must never touch production." >&2
+            exit 1
+          fi
+          echo "Rewrite verified: no DBA_MAINT_DB reference remains in the SQL to apply."
+
           # Zero-copy clone of the prod DB into a throwaway; always drop it on exit.
+          # (CREATE/DROP need the connection role; sql() targets the clone db.)
           snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
-                   --user "$SNOWFLAKE_USER" --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                   --user "$SNOWFLAKE_USER" --role "$CI_ROLE" \
                    --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
                    -q "CREATE DATABASE $CLONE_DB CLONE $SNOWFLAKE_DATABASE;"
           cleanup() {
             snow sql --temporary-connection --account "$SNOWFLAKE_ACCOUNT" \
-                     --user "$SNOWFLAKE_USER" --role "${SNOWFLAKE_ROLE:-SNOW_SYSADMINS}" \
+                     --user "$SNOWFLAKE_USER" --role "$CI_ROLE" \
                      --warehouse "${SNOWFLAKE_WAREHOUSE:-WH_ALFA_ADMIN}" \
                      -q "DROP DATABASE IF EXISTS $CLONE_DB;" || true
           }
           trap cleanup EXIT
-          # 1. Migrations in order (additive; the clone already has prod state,
-          #    so this proves the chain re-applies cleanly / is idempotent).
-          for f in $(ls snowflake/migrations/V*.sql | sort); do
+          # 1. Migrations in order — REWRITTEN copies (clone-scoped, never prod).
+          #    Additive; the clone already has prod state, so this proves the
+          #    chain re-applies cleanly / is idempotent.
+          for f in $(ls "$REWRITE_DIR"/migrations/V*.sql | sort); do
             echo "== apply $f"; sql -f "$f"
           done
-          # 2. Structural validation — every row must read OK.
-          sql -f snowflake/validate.sql
+          # 2. Structural validation — REWRITTEN copy; every row must read OK.
+          sql -f "$REWRITE_DIR/validate.sql"
           # 3. Exercise one loader end-to-end (fast, self-contained).
           sql -q "CALL $CLONE_DB.OVERWATCH.SP_LOAD_DAILY_FACTS();"
           # 4. Route-ledger check: no ENABLED alert route may name a blank
@@ -137,3 +217,21 @@ jobs:
           # NOTE: account-specific bits (role/warehouse names, auth method) may
           # need tuning for your tenant. The job is opt-in + non-blocking by
           # design, so a mismatch here can never block a merge.
+          #
+          # ======================= GATING FLIP (P1 TODO) ======================
+          # validate.sql now RAISEs on a bad row (its EXECUTE IMMEDIATE contract),
+          # so `sql -f validate.sql` already exits nonzero on a real failure — the
+          # first flip precondition is MET. The remaining blocker is the OWNER
+          # provisioning SNOWFLAKE_CI_ROLE (a role with NO write on prod
+          # DBA_MAINT_DB — see ISOLATION CONTRACT above). Once that is set, make
+          # this a real gate by, in this order:
+          #   a. Confirm the CI role secret is set and the smoke connects under it
+          #      (the "Smoke will connect under role:" line must NOT show a prod
+          #      admin role such as SNOW_SYSADMINS).
+          #   b. Remove `continue-on-error: true` from this job.
+          #   c. Optionally make snowflake-smoke a REQUIRED status check in branch
+          #      protection (and/or run it on pull_request, not only dispatch).
+          # DO NOT flip before both conditions hold: gating an un-isolated job, or
+          # one still running under a prod-write role, would gate merges on the
+          # risk of prod mutation. Isolation (#1) must be proven first.
+          # ====================================================================

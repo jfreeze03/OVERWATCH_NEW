@@ -21,6 +21,11 @@ _FILES = [*sorted(_SNOWFLAKE_DIR.glob("migrations/V0*.sql")),
     _SNOWFLAKE_DIR / "teardown.sql",
     _SNOWFLAKE_DIR / "alert_drill.sql",
     _SNOWFLAKE_DIR / "webhook_delivery.sql",
+    # Operational SQL run at deploy time — same "must parse" bar as migrations.
+    # Both are a single CTE (WITH ... SELECT) diff/check; their $$ blocks (if
+    # any) are still skipped by the splitter (the sqlglot Scripting gap).
+    _SNOWFLAKE_DIR / "validate.sql",
+    _SNOWFLAKE_DIR / "task_audit.sql",
 ]
 
 
@@ -89,7 +94,10 @@ def _plain_statements(text: str):
                     "CREATE TABLE IF NOT EXISTS",
                     "CREATE TRANSIENT TABLE IF NOT EXISTS",
                     "CREATE VIEW", "CREATE OR REPLACE VIEW",
-                    "INSERT ", "MERGE ", "UPDATE ", "DELETE ", "SELECT ")
+                    # WITH: a CTE query is just a SELECT — sqlglot parses it, and
+                    # validate.sql / task_audit.sql are exactly this shape. (SHOW,
+                    # which both files also emit, stays out: it's a dialect gap.)
+                    "WITH ", "INSERT ", "MERGE ", "UPDATE ", "DELETE ", "SELECT ")
         if not upper.startswith(prefixes):
             continue
         yield body
