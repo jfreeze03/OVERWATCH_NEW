@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Streamlit design recommendations (docs, 2026-08-02)
+
+- **50 net-new Streamlit design recommendations** after the v4.103/v4.104 scannability
+  waves: `docs/reviews/STREAMLIT_DESIGN_RECS_50_2026-08-02.md`. Grounded in the live UI
+  (`theme.py`, `components.py`, `charts.py`, shell, page modules). Sequenced into waves
+  D1–D4 (trust/triage → scan/chrome → IA → density/a11y); does not re-litigate the
+  2026-07-31 shipped/declined set.
+
 ## 4.122.0 — Codex-R2 Wave 3: CI isolation + a validate contract with teeth (2026-08-02)
 
 Wave 3 hardens the *deploy plumbing* — the CI smoke, the post-install contract, and a task-drift
