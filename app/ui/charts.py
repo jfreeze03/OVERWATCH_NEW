@@ -220,6 +220,60 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     st.altair_chart(bars + labels, use_container_width=True)
 
 
+def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
+                      title: str = "", top_n: int = 10) -> str | None:
+    """rec40: bar_usd whose bars are CLICKABLE. Returns the clicked Label on a NEW
+    click (guarded against altair's sticky re-emit, same idiom as rec29), else
+    None. DEGRADES to a plain non-clickable bar (returns None) on any runtime that
+    lacks altair on_select or returns a selection shape we can't read — so the
+    chart always renders and a missing click never breaks the page."""
+    data = df[[label_col, usd_col]].head(top_n).copy()
+    data.columns = ["Label", "USD"]
+    grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
+                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
+                               alt.GradientStop(color=_ACCENT, offset=1.0)])
+    enc_y = alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260))
+    dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
+    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"),
+                  scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
+    tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
+    base = _base(data, height=max(_HEIGHT, 30 * len(data)))
+    bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
+    labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
+        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
+    plain = bars + labels
+    try:
+        sel = alt.selection_point(fields=["Label"], name="pt", on="click", clear="dblclick")
+        event = st.altair_chart(plain.add_params(sel), use_container_width=True,
+                                on_select="rerun", key=key)
+    except Exception:  # noqa: BLE001 - runtime without on_select -> plain chart
+        st.altair_chart(plain, use_container_width=True)
+        return None
+    picked = None
+    try:  # selection store shape varies across versions; read it defensively
+        store = getattr(event, "selection", None)
+        if store is None and isinstance(event, dict):
+            store = event.get("selection")
+        rows = (store.get("pt") if isinstance(store, dict) else getattr(store, "pt", None)) or []
+        if rows:
+            first = rows[0]
+            picked = first.get("Label") if isinstance(first, dict) else first
+    except Exception:  # noqa: BLE001
+        picked = None
+    seen = f"_ow_barsel_{key}"
+    if picked is None:
+        # Fresh render with no active selection — e.g. the user navigated away on the
+        # last click and returned, so Streamlit GC'd the chart's selection. Re-arm the
+        # guard so the NEXT click of the same bar counts as new instead of a dead repeat
+        # (without this the guard keeps the last label for the whole session).
+        st.session_state.pop(seen, None)
+        return None
+    if picked != st.session_state.get(seen):
+        st.session_state[seen] = picked
+        return str(picked)
+    return None
+
+
 def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str = "") -> None:
     """Per-day count as vertical gradient bars over a TIME axis. Use this for
     'events/day' series — bar_count would render the date column as epoch

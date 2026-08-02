@@ -92,13 +92,19 @@ def panel_help(text: str) -> None:
         st.markdown(md_dollars(text))  # two $'s in help prose must not go LaTeX-math
 
 
-def lazy_sections(labels: list[str], key: str, deep_link: bool = True) -> str:
+def lazy_sections(labels: list[str], key: str, deep_link: bool = True,
+                  counts: dict[str, int] | None = None) -> str:
     """Tab-style navigation that renders ONLY the selected section.
 
     st.tabs executes every tab body on every rerun and merely hides the
     output — an 8-tab page fires every tab's queries to paint one. This
     pill radio keeps the navigation but lets the page dispatch a single
     section, so first paint costs one section, not all of them.
+
+    counts (rec7): {label: n} badges a pill as "Label (n)" where the number is
+    already in hand (zero extra queries). The DISPLAYED label carries the count
+    via format_func; the option VALUE stays the base label, so a caller's
+    ``section == "Label"`` dispatch is unchanged.
 
     deep_link=False (rec2): for a NESTED pill row (a SECOND lazy_sections on the
     same page), so it neither seeds from nor writes the shared ?section= query
@@ -122,6 +128,8 @@ def lazy_sections(labels: list[str], key: str, deep_link: bool = True) -> str:
     # paint (radio silently defaulted to index 0).
     if st.session_state.get(key) not in labels:
         st.session_state[key] = labels[0]
+    def _fmt(_l: str) -> str:  # rec7: badge a pill with its count; value stays the base label
+        return f"{_l} ({counts[_l]})" if counts and _l in counts else _l
     if hasattr(st, "segmented_control"):
         # rec24: the native single-select widget replaces the pill LOOK that was
         # CSS-on-radio keyed off aria-labels the theme's own docstring calls
@@ -135,12 +143,12 @@ def lazy_sections(labels: list[str], key: str, deep_link: bool = True) -> str:
             if st.session_state.get(_k) is None:
                 st.session_state[_k] = st.session_state.get(f"_{_k}_last") or _first
 
-        choice = st.segmented_control("Section", labels, key=key,
+        choice = st.segmented_control("Section", labels, key=key, format_func=_fmt,
                                       label_visibility="collapsed", on_change=_keep_section)
         if choice is None:  # belt-and-suspenders for the first-render edge
             choice = st.session_state.get(f"_{key}_last") or labels[0]
     else:
-        choice = st.radio("Section", labels, key=key, horizontal=True,
+        choice = st.radio("Section", labels, key=key, horizontal=True, format_func=_fmt,
                           label_visibility="collapsed")
     if deep_link:
         try:
@@ -353,15 +361,48 @@ def kpi_row(items: list[dict], columns: int | None = None) -> None:
 
 
 def section_header(title: str, health: str = "", icon_name: str = "",
-                   badge: str = "") -> None:
+                   badge: str = "", anchor: str = "") -> None:
     """Section header with a left severity stripe + optional icon and status
-    badge — gives visual weight to what matters (CoCo's #2 high item)."""
+    badge — gives visual weight to what matters (CoCo's #2 high item).
+
+    rec5: pass `anchor` to emit an id on the header so a section_toc() chip can
+    scroll to it. The id is inert unless a TOC links to it, so it's safe to add
+    everywhere; harmless on runtimes that don't honor in-page anchor scroll."""
     hcls = f" ow-section--{health}" if health in ("ok", "warn", "bad", "info") else ""
     ico = f'<span class="ow-section__icon">{icon(icon_name)}</span>' if icon_name else ""
     bdg = f'<span class="ow-section__badge">{html.escape(badge)}</span>' if badge else ""
-    st.markdown(f'<div class="ow-section{hcls}">{ico}'
+    aid = f' id="{html.escape(anchor)}"' if anchor else ""
+    st.markdown(f'<div class="ow-section{hcls}"{aid}>{ico}'
                 f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</div>',
                 unsafe_allow_html=True)
+
+
+def section_toc(items: list[tuple[str, str]], lead: str = "Jump to") -> None:
+    """rec5: a compact in-section 'jump to' strip for long, multi-panel views.
+
+    items = [(short_label, anchor), ...] where each anchor matches a
+    section_header(..., anchor=anchor) below. Renders markdown anchor links so a
+    click scrolls to that panel. DEGRADES gracefully: on any runtime/iframe that
+    doesn't honor in-page anchors the links simply don't scroll, but the labels
+    still orient the reader to what the view contains — the core value survives."""
+    chips = [f"[{html.escape(lbl)}](#{html.escape(anc)})"
+             for lbl, anc in items if lbl and anc]
+    if chips:
+        st.caption(f"{lead}  ·  " + "  ·  ".join(chips))
+
+
+def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
+                  key: str | None = None, help: str = "", disabled: bool = False,
+                  use_container_width: bool = False) -> bool:
+    """rec20: one page-level export affordance for the whole app. Thin wrapper over
+    st.download_button that prefixes the same download glyph the per-table export
+    uses ("⬇ ") and suppresses the rerun a download would otherwise trigger.
+    Callers pass the noun phrase only — e.g. "Driver inventory (CSV)" — the glyph
+    conveys "download". Returns the clicked-this-run bool from download_button."""
+    return st.download_button(
+        f"⬇ {label}", data=data, file_name=file_name, mime=mime, key=key,
+        help=help or None, disabled=disabled,
+        use_container_width=use_container_width, on_click="ignore")
 
 
 def status_bar(stats: list[dict]) -> None:

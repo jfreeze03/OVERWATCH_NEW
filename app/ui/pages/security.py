@@ -18,6 +18,7 @@ from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.ui import charts
 from app.ui.components import (
+    export_button,
     guard,
     kpi_row,
     lazy_sections,
@@ -27,6 +28,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     section_header,
+    section_toc,
     styled_table,
     user_display_map,
     with_user_names,
@@ -66,7 +68,19 @@ def _access_tab(company: str, days: int) -> None:
                        source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
         if live_mfa.ok:
             mfa = live_mfa
-    section_header("MFA gaps with password-login evidence (30d)", "warn", "security")
+    # rec5: this tab stacks seven panels — a long scroll. A compact jump strip up
+    # top orients the reader and (where the runtime honors in-page anchors) scrolls.
+    section_toc([
+        ("MFA gaps", "sec-mfa"),
+        ("Failed logins", "sec-faillog"),
+        ("Privileged roles", "sec-privroles"),
+        ("Failure reasons", "sec-failreasons"),
+        ("New networks", "sec-newnet"),
+        ("Expiring creds", "sec-creds"),
+        ("Dormant users", "sec-dormant"),
+    ])
+    section_header("MFA gaps with password-login evidence (30d)", "warn", "security",
+                   anchor="sec-mfa")
     if mfa.ok and mfa.empty:
         st.success("No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
@@ -80,7 +94,7 @@ def _access_tab(company: str, days: int) -> None:
 
     left, right = st.columns(2)
     with left:
-        section_header("Failed logins", "info", "alerts")
+        section_header("Failed logins", "info", "alerts", anchor="sec-faillog")
         res = batch.get("logins") or run(security_sql.failed_logins(days, company), page=_PAGE,
                   key=f"faillog_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
@@ -89,7 +103,7 @@ def _access_tab(company: str, days: int) -> None:
         elif guard(res, ""):
             styled_table(with_user_names(res.df, _PAGE))
     with right:
-        section_header("Privileged role holders", "info", "admin")
+        section_header("Privileged role holders", "info", "admin", anchor="sec-privroles")
         res = batch.get("admins") or run(security_sql.admin_role_holders(), page=_PAGE, key="admins",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
@@ -99,7 +113,8 @@ def _access_tab(company: str, days: int) -> None:
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
     # login telemetry, not change evidence.
-    section_header("Failed-login reasons (network policy vs credentials)", "info", "alerts")
+    section_header("Failed-login reasons (network policy vs credentials)", "info", "alerts",
+                   anchor="sec-failreasons")
     reasons = batch.get("login_reasons") or run(security_sql.failed_login_reasons(days, company),
                   page=_PAGE, key=f"login_reasons_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY")
@@ -109,7 +124,8 @@ def _access_tab(company: str, days: int) -> None:
         styled_table(reasons.df)
         result_caption(reasons)
 
-    section_header("New networks for privileged users (90-day baseline)", "warn", "alerts")
+    section_header("New networks for privileged users (90-day baseline)", "warn", "alerts",
+                   anchor="sec-newnet")
     nn = batch.get("newnet") or run(security_sql.new_network_logins(days), page=_PAGE,
               key=f"newnet_{days}", tier="recent",
               source="LOGIN_HISTORY x admin grants (90d baseline)")
@@ -126,7 +142,7 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
-    section_header("Expiring credentials (10-day horizon)", "warn", "clock")
+    section_header("Expiring credentials (10-day horizon)", "warn", "clock", anchor="sec-creds")
     creds = batch.get("creds") or run(security_sql.expiring_credentials(10, company), page=_PAGE,
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
@@ -146,7 +162,8 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
-    section_header("Dormant users still holding access (90d+)", "info", "security")
+    section_header("Dormant users still holding access (90d+)", "info", "security",
+                   anchor="sec-dormant")
     from app.ui.components import toggle_cost_hint
     st.caption(toggle_cost_hint("dormant"))
     _dorm_on = st.toggle("Run dormant-user scan (90 days of login + grant history)",
@@ -426,10 +443,10 @@ def _export_pack(company: str, days: int) -> None:
              *(f"{k}.csv: {v} rows" for k, v in rows_written.items())]
         )
         bundle.writestr("MANIFEST.txt", manifest)
-    st.download_button(
-        "Download access-review pack (.zip)", data=buffer.getvalue(),
+    export_button(
+        "Access-review pack (.zip)", data=buffer.getvalue(),
         file_name=f"overwatch_access_review_{company}_{stamp}.zip", mime="application/zip",
-        key="sec_pack_dl", on_click="ignore",
+        key="sec_pack_dl",
     )
     st.caption(f"{sum(rows_written.values()):,} rows across {len(sheets)} files.")
 
@@ -503,9 +520,9 @@ def _clients_tab(company: str, days: int) -> None:
                  "so stale LAST_SEEN + BEHIND is the upgrade shortlist."},
     ])
     styled_table(df, height=380)
-    st.download_button("Download driver inventory (CSV)", data=df.to_csv(index=False),
-                       file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
-                       mime="text/csv", key="sec_drivers_csv", on_click="ignore")
+    export_button("Driver inventory (CSV)", data=df.to_csv(index=False),
+                  file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
+                  mime="text/csv", key="sec_drivers_csv")
     result_caption(res)
 
 

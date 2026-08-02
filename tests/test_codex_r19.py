@@ -56,10 +56,15 @@ def test_contention_uses_plain_run_not_a_one_member_batch():
 
 
 def test_exports_cache_bytes_and_never_rerun_on_download():
-    assert _CMP.count('on_click="ignore"') == 3           # two table paths + text
+    assert _CMP.count('on_click="ignore"') == 4           # two table paths + text + export_button (rec20)
     for pg in ("overview.py", "security.py"):
         _p = (_ROOT / "app" / "ui" / "pages" / pg).read_text(encoding="utf-8")
+        # rec20: these pages route page-level exports through the shared export_button
+        # (on_click="ignore" lives in the helper), so any raw download_button here is a
+        # regression. The count-equality still catches a NEW raw button without the flag;
+        # the export_button assertion pins that the migration itself stays in place.
         assert _p.count("download_button") == _p.count('on_click="ignore"')
+        assert "export_button(" in _p
     assert "df.to_csv(index=False).encode" in _CMP        # prep stores BYTES
     # T1.6: the prep blob is a single self-evicting session slot keyed by page +
     # content fingerprint (was a positional key that collided across pages and

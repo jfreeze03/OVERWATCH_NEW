@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.128.0 — Cursor design review: deferred-items pickup (2026-08-02)
+
+The remaining deferred design items, all app-only. Closes the Cursor 50-rec review: 43 shipped
+(rec43 declined for correctness; rec3/6/8 skipped as owner-blocked/low-value).
+
+- **rec13 — sidebar MTD in dollars.** The always-visible health strip now leads with a month-to-date
+  dollar figure ("$X MTD · N cr"). **AI-aware:** the strip already carries the AI/OTHER credit split,
+  so it prices Cortex/AI credits at the AI rate via `blended_billed_usd` exactly like the Brief (the
+  C1 house rule) — not the flat compute rate — with a flat-rate fallback only when a stale cache
+  predates the split. Rates come from Sidebar settings, never inlined.
+- **rec7 — count badges on section pills.** `lazy_sections` takes an optional `counts` map and a
+  `format_func` that renders "Label (N)" on both `st.segmented_control` and the `st.radio` fallback,
+  while the option *value* stays the base label so section dispatch is unchanged. Wired on Alerts →
+  Open events.
+- **rec40 — click-through cost bars.** New `charts.clickable_bar_usd`: an altair bar with an
+  `on_select` point selection; clicking a warehouse in Overview → Top cost drivers jumps to
+  Operations → Warehouses pre-filtered to it. Guarded to fire once per new click (re-arms on an empty
+  selection so a repeat drill-in isn't a dead click), **degrades to a plain bar** on runtimes without
+  altair `on_select`, and is **gated to profiles that actually have Operations** — an executive (no
+  Operations page) gets a plain bar instead of a dead click that would leak a cross-page scope filter.
+- **rec5 — in-section jump strip.** `section_header` gained an optional `anchor`; new `section_toc`
+  renders a compact "Jump to" chip row over the seven-panel Security → Access tab. Degrades to plain
+  orientation labels where the runtime/iframe doesn't honor in-page anchors.
+- **rec20 — one export affordance.** New `export_button` (⬇ glyph + `on_click="ignore"`) replaces the
+  four ad-hoc page-level download buttons across Overview, Security (×2), and AI chargeback.
+
+A 3-lens adversarial review (correctness / SiS-degrade / consistency) then verified each finding.
+Six confirmed → four distinct defects, all **fixed before commit**: the rec40 executive scope-leak
+(profile gate above), the rec40 dead-repeat-click (guard now re-arms on an empty selection), the
+rec13 AI-rate violation (blended pricing above), and the untested `clickable_bar_usd` (new
+`tests/test_rec40_clickable_bar.py` pins extraction / guard / degrade). Two findings refuted (rec5
+anchor scroll is a benign degrade; the export row's widgets are uniform). `test_codex_r19` updated
+(3→4 `on_click="ignore"`) and strengthened to pin the export migration.
+
+Gates green: ruff, mypy (config-scoped pure layers), **pytest 1849 passed / 1 skipped**.
+
 ## 4.127.0 — Cursor design review Wave 5: write actions & feedback (2026-08-02)
 
 Write-action ergonomics + loading/refresh feedback (the last implementation wave). App-only.

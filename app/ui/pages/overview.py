@@ -35,6 +35,7 @@ from app.logic.formulas import (
 from app.ui import charts
 from app.ui.components import (
     download_text_button,
+    export_button,
     kpi_row,
     load_settings,
     page_header,
@@ -564,7 +565,26 @@ def render() -> None:
         if not drivers.empty:
             view = (drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
                     .sort_values("VALUE_USD", ascending=False))
-            charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
+            # rec40: bars are click-through — clicking a warehouse jumps to Operations >
+            # Warehouses pre-filtered to it. clickable_bar_usd degrades to a plain bar on
+            # runtimes without altair on_select, and its return is guarded to fire once
+            # per NEW click (so returning to this page with a sticky selection won't bounce).
+            # Gate the affordance to viewers whose profile HAS Operations: an EXECUTIVE
+            # can't open Operations, so request_navigation would clamp the jump back to
+            # Overview yet still apply warehouse_contains — a dead click that silently
+            # leaks a cross-page scope filter. They get a plain (non-clickable) bar instead.
+            from app.config import PAGES_BY_PROFILE, resolve_role_profile
+            from app.core.session import current_role
+            _can_ops = "Operations" in PAGES_BY_PROFILE.get(
+                resolve_role_profile(current_role()), ())
+            if _can_ops:
+                _picked_wh = charts.clickable_bar_usd(
+                    view, "DIMENSION", "VALUE_USD", key="ov_drivers_bar", title="Spend (USD)")
+                if _picked_wh:
+                    request_navigation("Operations", "Warehouses",
+                                       {"warehouse_contains": _picked_wh})
+            else:
+                charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")
             # rec15: lead with the conclusion — which driver dominates, and by how much.
             _dtot = float(view["VALUE_USD"].map(safe_float).sum())
             if _dtot > 0 and len(view):
@@ -800,8 +820,8 @@ def render() -> None:
     )
     c_html, c_txt = st.columns(2)
     with c_html:
-        st.download_button("Download executive summary (HTML)", html,
-                           file_name="overwatch_executive_summary.html", mime="text/html",
-                           use_container_width=True, on_click="ignore")
+        export_button("Executive summary (HTML)", html,
+                      file_name="overwatch_executive_summary.html", mime="text/html",
+                      use_container_width=True)
     with c_txt:
         download_text_button("Plain-text version (.txt)", summary, "overwatch_executive_summary.txt")

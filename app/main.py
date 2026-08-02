@@ -517,7 +517,31 @@ def _health_strip(vals: object = _UNSET) -> None:
         _strip_line(stale_state, f"Stalest telemetry: {_src}{stale}h")
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     if mtd:
-        _strip_line("INFO", f"MTD: {float(mtd):,.0f} credits")
+        # rec13: lead with USD like every other surface (this strip is the app's most
+        # persistent view). C1: the health strip ALSO carries the AI/OTHER credit split
+        # (MTD_CREDITS_AI / MTD_CREDITS_OTHER), so price AI/Cortex credits at the AI rate
+        # via blended_billed_usd — exactly like the Brief (brief.py), which reads the same
+        # strip. Pricing the total at the flat compute rate overstates AI spend. Fall back
+        # to the flat rate only when a stale cache predates the split (both arms absent).
+        # Rates via settings, never inlined.
+        from app.logic.formulas import (
+            blended_billed_usd,
+            credits_to_usd,
+            format_usd,
+            safe_float,
+        )
+        from app.ui.components import load_settings
+        _sset = load_settings("Sidebar")
+        _rate = safe_float(_sset.get("CREDIT_PRICE_USD"), 3.68)
+        _ai_rate = safe_float(_sset.get("AI_CREDIT_PRICE_USD"), 2.20)
+        _mc = float(mtd)
+        _other = vals.get("MTD_CREDITS_OTHER", ("", ""))[0]
+        _ai = vals.get("MTD_CREDITS_AI", ("", ""))[0]
+        if _other or _ai:
+            _usd = blended_billed_usd(safe_float(_other), safe_float(_ai), _rate, _ai_rate)
+        else:
+            _usd = credits_to_usd(_mc, _rate)
+        _strip_line("INFO", f"{format_usd(_usd)} MTD · {_mc:,.0f} cr")
 
 
 def _persistent_status_bar(vals: object = _UNSET) -> None:

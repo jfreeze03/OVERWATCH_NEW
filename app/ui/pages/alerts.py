@@ -698,8 +698,11 @@ def render() -> None:
     # is anything waiting. The banner answers "is the pipe configured"; this answers
     # "is it moving" — the question that had no answer on 2026-07-31.
     _last_delivery_card()
+    # rec7: badge the Open-events pill with the open count already in hand (0 extra
+    # queries) so triage volume is visible from any section.
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
-                            key="alerts_section")
+                            key="alerts_section",
+                            counts={"Open events": total_n} if (counts.usable() or events.ok) else None)
 
     if section == "Open events":
         _open_events_section(events, is_operator)

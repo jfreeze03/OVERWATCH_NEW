@@ -33,6 +33,7 @@ from app.logic.cortex import (
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import (
+    export_button,
     guard,
     kpi_row,
     notify,
@@ -313,10 +314,10 @@ def _statement_export(company: str, rate: float) -> None:
                     f"Total (warehouse compute): ${float(frame['USD'].sum()):,.2f} across "
                     f"{frame['DEPARTMENT'].nunique()} departments.",
                 )
-            st.download_button(
-                "Download statements (.zip)", data=buffer.getvalue(),
+            export_button(
+                "Statements (.zip)", data=buffer.getvalue(),
                 file_name=f"overwatch_chargeback_{company}_{month}.zip",
-                mime="application/zip", key="cb_dl", on_click="ignore",
+                mime="application/zip", key="cb_dl",
             )
             st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
 
