@@ -320,7 +320,7 @@ def _org_accounts_spend() -> None:
     st.caption(f"Amounts are {currency} from the org rate card, not credits x app rate.")
     pivot = (df.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)["USAGE_IN_CURRENCY"].sum()
              .sort_values(["ACCOUNT_NAME", "USAGE_IN_CURRENCY"], ascending=[True, False]))
-    st.dataframe(pivot, hide_index=True, use_container_width=True,
+    styled_table(pivot,  # rec21
                  column_config={"USAGE_IN_CURRENCY": st.column_config.NumberColumn(
                      f"Spend ({currency})", format="%.2f")})
     result_caption(res)
@@ -561,7 +561,7 @@ def _contract_tab(settings: dict) -> None:
                                                "exhaustion date.")
         daily_usd_adj = daily_usd + float(extra_credits) * eff_rate
         rows = contract_planner.plan_scenarios(daily_usd_adj, term_months, buffer_pct, remaining_usd)
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+        styled_table(pd.DataFrame(rows),  # rec21
                      column_config={
                          "TERM_CONSUMPTION_USD": st.column_config.NumberColumn("Term consumption", format="$%.0f"),
                          "RECOMMENDED_COMMIT_USD": st.column_config.NumberColumn("Recommended commit", format="$%.0f"),

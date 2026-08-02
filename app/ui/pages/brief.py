@@ -16,7 +16,8 @@ from app.data import mart_sql
 from app.logic.actions import rank_actions
 from app.logic.formulas import blended_billed_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
-from app.ui.components import kpi_row, load_settings, page_header, styled_table
+from app.ui.components import empty_state, kpi_row, load_settings, page_header, styled_table
+from app.ui.sizing import TABLE_H_SM
 
 _PAGE = "Brief"
 
@@ -191,13 +192,17 @@ def render() -> None:
         if crit.empty:
             st.success("No open critical or high alerts.")
         else:
-            styled_table(crit[["RAISED_AT", "SEVERITY", "TITLE"]].head(5), height=220)
+            styled_table(crit[["RAISED_AT", "SEVERITY", "TITLE"]].head(5), height=TABLE_H_SM)
             if company != "ALL":
                 st.caption(f"Scoped to {company} plus account-level events.")
             if st.button("Open the alert queue →", key="brief_alerts", use_container_width=True):
                 request_navigation("Alerts", "Open events")
     else:
-        st.success("No open alerts." if events.ok else "Alerting not installed yet.")
+        # rec23/house-rule-8: green means VERIFIED CLEAN, never "nothing loaded".
+        if events.ok:
+            st.success("No open alerts.")
+        else:
+            empty_state("needs_setup", "Alerting not installed yet.")
 
     st.markdown("**Asks**")
     actions = _b_live.get("acts") or run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",

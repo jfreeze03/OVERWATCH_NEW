@@ -10,19 +10,22 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-_HEIGHT = 264
+from app.ui import palette
+from app.ui.sizing import CHART_H_MD, CHART_H_SM
+
+_HEIGHT = CHART_H_MD
 HEATMAP_MAX_ROWS = 20  # 24px/row; beyond this the heatmap became a scroll trap
 
-_ACCENT = "#38bdf8"
-_ACCENT2 = "#22d3ee"
+_ACCENT = palette.ACCENT
+_ACCENT2 = palette.ACCENT2
 _GRID = "rgba(148,163,184,0.14)"
-_LABEL = "#8b98ad"
+_LABEL = palette.LOW
 _TITLE = "#c3cddb"
 _FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, "
          "'Segoe UI', Roboto, sans-serif")
-# severity palette shared with status_colors, so a "bad" series looks bad
-SEV_COLORS = {"CRITICAL": "#fb7185", "HIGH": "#fb923c", "MEDIUM": "#fbbf24",
-              "LOW": "#8b98ad", "INFO": "#38bdf8", "OK": "#34d399"}
+# severity series hues from the single palette source (rec50), so a "bad"
+# series looks bad the same way it does on every card and chip.
+SEV_COLORS = dict(palette.SEVERITY_HUES)
 
 
 def _overwatch_theme() -> dict:
@@ -43,8 +46,8 @@ def _overwatch_theme() -> dict:
                        "labelFont": _FONT, "titleFont": _FONT, "symbolType": "circle",
                        "symbolSize": 90, "orient": "top", "titlePadding": 6},
             "range": {
-                "category": [_ACCENT, "#34d399", "#c084fc", "#fbbf24", "#fb7185",
-                              "#22d3ee", "#a3e635", "#fb923c"],
+                "category": [_ACCENT, palette.OK, "#c084fc", palette.WARN, palette.BAD,
+                              palette.ACCENT2, "#a3e635", palette.HIGH],  # rec50 (#c084fc/#a3e635 chart-only)
                 "heatmap": ["#0f1729", "#164e63", "#0891b2", "#22d3ee", "#a5f3fc"],
             },
             "bar": {"cornerRadiusEnd": 4, "color": _ACCENT},
@@ -347,7 +350,7 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
             tooltip=["Label:N", alt.Tooltip("USD:Q", format="$,.0f"),
                      alt.Tooltip("End:Q", format="$,.0f", title="Cumulative")],
         )
-        .properties(height=260)
+        .properties(height=CHART_H_MD)
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -398,7 +401,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
             .encode(x="Day:T")
         )
         chart = chart + rule
-    st.altair_chart(chart.properties(height=220), use_container_width=True)
+    st.altair_chart(chart.properties(height=CHART_H_SM), use_container_width=True)
 
 
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY", count_col: str = "EVENTS") -> None:
@@ -485,6 +488,6 @@ def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
             tooltip=["Label:N", "Side:N",
                      alt.Tooltip("Value:Q", format=",.2f")],
         )
-        .properties(height=260, title=title or "")
+        .properties(height=CHART_H_MD, title=title or "")
     )
     st.altair_chart(chart, use_container_width=True)

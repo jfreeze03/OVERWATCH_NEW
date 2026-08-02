@@ -42,9 +42,10 @@ from app.ui.components import (
     run_mart_first,
     section_header,
     section_scope_note,
-    selectable_table,
+    selectable_nav_table,
     styled_table,
 )
+from app.ui.sizing import TABLE_H_MD
 
 _PAGE = "Overview"
 
@@ -525,17 +526,14 @@ def render() -> None:
             else:
                 # rec10: a clickable surface, not a dead read-only wall — a row click
                 # jumps to the Control Room where the queue is triaged (matching CR).
-                _sel = selectable_table(
+                # rec29: the sticky-selection guard (st.dataframe re-emits its
+                # selection every rerun) now lives inside selectable_nav_table —
+                # it fires on_select ONLY on a changed row, was hand-rolled here.
+                selectable_nav_table(
                     ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
                     key="ov_actions_sel", slug="top-actions",
+                    on_select=lambda _i: request_navigation("Control Room"),
                     column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f")})
-                # Act only on a NEW selection: st.dataframe's selection is sticky and
-                # re-emits on every rerun, so firing navigation unconditionally re-ran
-                # each time (request_navigation now no-ops a self-jump, but this also
-                # spares the churn on unrelated reruns).
-                if _sel is not None and _sel != st.session_state.get("_ov_actions_last"):
-                    st.session_state["_ov_actions_last"] = _sel
-                    request_navigation("Control Room")
                 # D1: say what "top" means. The ranking is severity, then overdue,
                 # then estimated dollars, then age — an executive reading a top-5
                 # otherwise assumes it is sorted by money, which it is not (money
@@ -588,7 +586,7 @@ def render() -> None:
             st.caption("Serverless & AI billed spend — separate from the warehouse-compute "
                        "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
                        "compute rate).")
-            styled_table(svc_view, height=240, slug="serverless-ai-drivers", column_config={
+            styled_table(svc_view, height=TABLE_H_MD, slug="serverless-ai-drivers", column_config={
                 "BILLED_USD": st.column_config.NumberColumn("Billed $", format="$%.0f"),
             })
 
@@ -635,7 +633,7 @@ def render() -> None:
                                     for d, p in zip(_mv["DELTA_USD"], _mv["PRIOR_USD"], strict=True)]
                 _mv = _mv.iloc[_mv["DELTA_USD"].abs().argsort()[::-1]].head(6)
                 st.caption(f"Top movers — {_last_m} vs {_prev_m}")
-                styled_table(_mv, height=240, slug="warehouse-movers", column_config={
+                styled_table(_mv, height=TABLE_H_MD, slug="warehouse-movers", column_config={
                     "PRIOR_USD": st.column_config.NumberColumn("Prior $", format="$%.0f"),
                     "LATEST_USD": st.column_config.NumberColumn("Latest $", format="$%.0f"),
                     "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),
@@ -691,7 +689,7 @@ def render() -> None:
             elif _bt.empty:
                 st.info("No complete months in the window yet.")
             else:
-                styled_table(_bt, height=240, column_config={
+                styled_table(_bt, height=TABLE_H_MD, column_config={
                     "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
                 })
                 st.caption("Mean absolute error per engine, per held-out month. Change "

@@ -243,9 +243,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
         view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
         view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
-        st.dataframe(
+        styled_table(  # rec21: + delta sign-coloring, status tint, CSV
             view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_PCT"]],
-            hide_index=True, use_container_width=True,
             column_config={
                 "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.2f"),
                 "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.2f"),

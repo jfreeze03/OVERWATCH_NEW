@@ -42,6 +42,7 @@ from app.core.state import (  # noqa: E402
 )
 from app.data import mart_sql, security_sql  # noqa: E402
 from app.theme import inject_theme  # noqa: E402
+from app.ui import palette  # noqa: E402
 from app.ui.components import mark_refreshed, notify  # noqa: E402
 from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
@@ -147,7 +148,8 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
             st.session_state.pop("_ow_current_user", None)
             mark_refreshed()
             st.rerun()
-        st.caption("Account telemetry lags up to ~45 min; metering-daily up to 24h. Labels on every panel.")
+        # rec11: the ACCOUNT_USAGE lag note lives once per page in page_header now
+        # (was duplicated here in the sidebar — same sentence twice is chrome noise).
     return page
 
 
@@ -383,11 +385,10 @@ def _global_jump(pages: tuple) -> None:
         request_navigation("Alerts", "Rules")
 
 
-# A1: the sidebar health strip reads the SAME hues as the theme --ow-* tokens,
-# SEV_COLORS, and the KPI stripes — was #22c55e/#f59e0b/#ef4444, a green/amber/red
-# a shade off from every other surface, so "healthy" looked different in the rail.
-_STRIP_COLORS = {"OK": "#34d399", "WARN": "#fbbf24", "BAD": "#fb7185",
-                 "INFO": "#38bdf8", "MUTED": "#94a3b8"}
+# A1/rec50: the sidebar health strip reads the SAME hues as every other surface,
+# now from the single palette source (was hand-aligned hex literals a shade off
+# from the theme tokens). One source; a drift test guards it.
+_STRIP_COLORS = dict(palette.STATE_HUES)
 
 
 def _strip_line(state: str, text: str) -> None:

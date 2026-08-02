@@ -34,6 +34,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     section_header,
+    selectable_nav_table,
     selectable_table,
     styled_table,
     with_user_names,
@@ -486,20 +487,24 @@ def render() -> None:
         # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
         _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
                  if c in queue.columns]
-        sel_q = selectable_table(queue[_disp], key="cr_triage_sel", height=260)
+        # rec29: navigate only on a CHANGED selection (the sticky-selection guard
+        # lives in selectable_nav_table now — was firing request_navigation every
+        # rerun on the sticky row).
+        def _open_triage(_i: int) -> None:
+            _qr = queue.iloc[int(_i)]
+            _dest = {"Alert": ("Alerts", "Open events"),
+                     "Task failure": ("Operations", ""),
+                     "Spend anomaly": ("Cost & Contract", ""),
+                     "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
+            request_navigation(_dest[0], _dest[1])
+        selectable_nav_table(queue[_disp], key="cr_triage_sel", on_select=_open_triage,
+                             height=260, size_note=False)  # the caption below states the count
         st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
                    "— select one to open its page. Sources: alerts, task facts, spend "
                    "anomalies. Task rows are one per task (failures summed across the "
                    "2-day window), not one per day."
                    + (" Task failures follow the database filter; alerts and "
                       "spend anomalies don't have database grain." if f["database"] else ""))
-        if sel_q is not None:
-            _qr = queue.iloc[int(sel_q)]
-            _dest = {"Alert": ("Alerts", "Open events"),
-                     "Task failure": ("Operations", ""),
-                     "Spend anomaly": ("Cost & Contract", ""),
-                     "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
-            request_navigation(_dest[0], _dest[1])
     # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's
     # COST_ANOMALY_SWEEP events are dropped from THIS feed (they stay on Alerts) —
     # otherwise every spend break arrived twice, once from each scorer, at two
@@ -595,9 +600,8 @@ def render() -> None:
         view["DELTA_USD"] = view["USD_CURRENT"] - view["USD_PRIOR"]
         view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
         view = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(10)
-        st.dataframe(
+        styled_table(  # rec21: + delta sign-coloring on the Δ columns, status tint, CSV
             view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_USD", "DELTA_PCT"]],
-            hide_index=True, use_container_width=True,
             column_config={
                 "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.0f"),
                 "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.0f"),

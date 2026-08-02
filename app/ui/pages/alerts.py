@@ -27,6 +27,7 @@ from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_t
 from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.components import (
+    empty_state,
     guard,
     kpi_row,
     lazy_sections,
@@ -866,7 +867,7 @@ def render() -> None:
             st.caption("High NOISE or UNTAGGED at high volume = tune or retire the rule — "
                        "the precision panel under Rules has suggested thresholds.")
         else:
-            st.caption("Fatigue metrics appear once events exist in the window.")
+            empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 
     else:
         st.markdown("**Routing (family → channel)**")

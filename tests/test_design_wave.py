@@ -44,10 +44,16 @@ def test_rec18_label_sizes_raised():
 
 # A1 — one traffic-light palette across surfaces
 def test_a1_sidebar_strip_matches_token_palette():
+    from app.ui import palette
     m = _src("app/main.py")
-    strip = m.split("_STRIP_COLORS = {", 1)[1].split("}", 1)[0]
-    assert '"OK": "#34d399"' in strip and '"BAD": "#fb7185"' in strip and '"WARN": "#fbbf24"' in strip
-    assert "#22c55e" not in strip and "#ef4444" not in strip and "#f59e0b" not in strip
+    # rec50: the strip now builds from the single palette source, not inline hex.
+    assert "_STRIP_COLORS = dict(palette.STATE_HUES)" in m
+    assert palette.STATE_HUES["OK"] == "#34d399"
+    assert palette.STATE_HUES["BAD"] == "#fb7185"
+    assert palette.STATE_HUES["WARN"] == "#fbbf24"
+    # the old off-shade hues are gone from the palette
+    for _old in ("#22c55e", "#ef4444", "#f59e0b"):
+        assert _old not in palette.STATE_HUES.values()
 
 
 def test_a1_charts_read_shared_severity_palette():
@@ -76,7 +82,8 @@ def test_rec4_top_actions_above_boss_chart():
 
 def test_rec10_top_actions_are_clickable():
     ov = _src("app/ui/pages/overview.py")
-    assert 'selectable_table(' in ov and 'key="ov_actions_sel"' in ov
+    # rec29: selectable_table -> selectable_nav_table (guard built in); still clickable.
+    assert "selectable_nav_table(" in ov and 'key="ov_actions_sel"' in ov
     assert 'request_navigation("Control Room")' in ov
 
 

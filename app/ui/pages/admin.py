@@ -35,6 +35,7 @@ from app.ui.components import (
     styled_table,
     with_user_names,
 )
+from app.ui.sizing import TABLE_H_LG
 
 _PAGE = "Admin"
 _EXPECTED_MIGRATIONS = {
@@ -469,7 +470,7 @@ def _performance_tab() -> None:
               tier="recent", source="APP_QUERY_TELEMETRY (the app's own fetch log)")
     if guard(res, "No fetches persisted in the last 7 days.",
              setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
-        st.dataframe(res.df, hide_index=True, use_container_width=True,
+        styled_table(res.df,  # rec21
                      column_config={
                          "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
                          "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
@@ -797,7 +798,7 @@ def _metric_registry_tab() -> None:
     )
     _order = {m: i for i, m in enumerate(mr.METHODS)}
     _rows = sorted(mr.as_rows(), key=lambda r: _order.get(r["Method"], 99))
-    styled_table(pd.DataFrame(_rows), height=460)
+    styled_table(pd.DataFrame(_rows), height=TABLE_H_LG, size_note=False)  # caption states the count
     st.caption(f"{len(_rows)} registered metrics · methods: {', '.join(mr.METHODS)}.")
 
 

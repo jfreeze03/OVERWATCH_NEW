@@ -584,9 +584,8 @@ def _warehouses_tab(company: str, rate: float) -> None:
         # signal) surface next to spikes instead of sinking to the bottom.
         _anom = anomalies[["DAY", "WAREHOUSE_NAME", "USD", "Z_SCORE"]]
         _anom = _anom.reindex(_anom["Z_SCORE"].abs().sort_values(ascending=False).index)
-        st.dataframe(
-            _anom,
-            hide_index=True, use_container_width=True,
+        styled_table(  # rec21 + rec31: the warning above already states the count
+            _anom, size_note=False,
             column_config={
                 "USD": st.column_config.NumberColumn("Spend $", format="$%.0f"),
                 "Z_SCORE": st.column_config.NumberColumn("Robust z", format="%.1f"),

@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.123.0 — Cursor design review Wave 1: the consistency spine (2026-08-02)
+
+First wave of the Cursor Streamlit-design review (50 items adjudicated: 35 CONFIRMED /
+15 PARTIAL / 0 refuted). Wave 1 is the shared-primitive backbone every later wave builds on —
+all app-only, no migrations.
+
+- **rec50 — one palette source.** New `app/ui/palette.py` is the single home for the semantic
+  hues + chrome tokens; `main.py` (`_STRIP_COLORS`), `components.py` (`_SEV_HEX`, `_delta_html`,
+  spark defaults), `charts.py` (`SEV_COLORS`/accents/category range), and `status_colors.py`
+  (`delta_css`, `_MUTED`) now import from it instead of re-typing hex. `.streamlit/config.toml`
+  is realigned to the tokens (`#0b1220→#0a0f1c` etc. — the one intended visual change, so native
+  widget chrome matches the cards). `tests/test_palette_drift.py` fails CI if palette, the
+  `--ow-*` theme tokens, or config.toml diverge, **and** if a consumer re-hardcodes a severity hue.
+- **rec17 — height tokens.** New `app/ui/sizing.py` (`TABLE_H_*`/`CHART_H_*`); the scattered
+  literals in charts/brief/overview/admin/blast-radius reference them, so a density change is one edit.
+- **rec21 — eight raw `st.dataframe` → `styled_table`** (operations, control room, ai-chargeback,
+  contract ×2, admin, spend, optimize): they now get status tinting, delta sign-coloring, tz
+  conversion, prettified headers, and the CSV export they silently lacked.
+- **rec23 — `empty_state(kind=…)`** codifies the empty-state vocabulary; fixed the real house-rule-8
+  violation where Brief rendered "Alerting not installed yet" in **green** (now blue `needs_setup`).
+- **rec29 — `selectable_nav_table()`** bakes in the sticky-selection guard (st.dataframe re-emits its
+  selection every rerun); Overview top-actions and the Control-Room triage queue use it. The two
+  Control-Room drill-down tables correctly stay `selectable_table` (they render, they don't navigate).
+- **rec31 — tables declare their size.** `styled_table` prints `"{n} rows"` (+ `last Xd` when the
+  caller passes a window) — but only for tables that **scroll** (>10 rows, where the total is hidden),
+  with a `size_note=False` opt-out for the three callers that already print their own count.
+- **rec49 — error walls truncated.** `guard()` leads with the first line and tucks the full
+  (often hundreds-of-chars) Snowflake compile error into an "Error detail" expander.
+- **rec11 — removed the duplicate ACCOUNT_USAGE lag note** from the sidebar (it lives once per page
+  in `page_header`).
+
+Adjudicated by an 8-agent verification workflow, then the implemented diff was run through a
+3-lens adversarial review that caught the rec31 caption-duplication (now gated + opt-out) and the
+residual rec50 hue literals (now migrated + a consumer-drift test added). Four source-grep tests
+that pinned the old selection/palette shape were updated to the new shape (strengthened, not weakened).
+
+Gates green: ruff, mypy, **pytest 1841 passed / 1 skipped**.
+
 ## 4.122.0 — Codex-R2 Wave 3: CI isolation + a validate contract with teeth (2026-08-02)
 
 Wave 3 hardens the *deploy plumbing* — the CI smoke, the post-install contract, and a task-drift

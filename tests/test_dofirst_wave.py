@@ -479,7 +479,8 @@ def test_n3_triage_non_alert_rows_have_empty_ids():
 
 def test_n3_control_room_queue_is_actionable():
     cr = _src("app/ui/pages/control_room.py")
-    assert 'selectable_table(queue[' in cr
+    # rec29: triage queue now navigates via selectable_nav_table (new-selection guard).
+    assert "selectable_nav_table(queue[" in cr
     assert "request_navigation" in cr
 
 

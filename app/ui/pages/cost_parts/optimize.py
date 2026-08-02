@@ -577,9 +577,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
             if "LOW_CONFIDENCE" in movers.columns:
                 _mv_cols.append("LOW_CONFIDENCE")
-            st.dataframe(
+            styled_table(  # rec21: status tint, prettified headers, CSV
                 movers[_mv_cols],
-                hide_index=True, use_container_width=True,
                 column_config={
                     "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
                     "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),

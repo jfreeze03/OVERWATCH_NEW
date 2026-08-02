@@ -68,8 +68,11 @@ def test_request_navigation_still_jumps_cross_page(monkeypatch):
 
 def test_overview_top_actions_acts_only_on_new_selection():
     ov = _src("app/ui/pages/overview.py")
-    # belt-and-suspenders: fire navigation only on a NEW selection, not every rerun.
-    assert '_sel != st.session_state.get("_ov_actions_last")' in ov
+    comp = _src("app/ui/components.py")
+    # rec29: the new-selection guard was extracted into selectable_nav_table.
+    # Overview uses it; the component fires on_select only on a CHANGED selection.
+    assert "selectable_nav_table(" in ov and 'key="ov_actions_sel"' in ov
+    assert "sel != st.session_state.get(seen_key)" in comp
 
 
 # ---------------------------------------------------------------------------

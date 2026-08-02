@@ -13,7 +13,9 @@ from app.core.result import QueryResult
 from app.data import mart_sql
 from app.logic.formulas import ACCOUNT_TIMEZONE, account_today, format_usd, safe_float
 from app.theme import chip
+from app.ui import palette
 from app.ui.icons import icon
+from app.ui.sizing import TABLE_H_SM
 from app.ui.status_colors import delta_css, is_delta_column, status_columns_in, status_css
 
 
@@ -154,11 +156,11 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     st.caption(ACCOUNT_USAGE_LAG_NOTE)
 
 
-_SEV_HEX = {"ok": "#34d399", "warn": "#fbbf24", "bad": "#fb7185",
-            "info": "#38bdf8", "": "#38bdf8"}
+_SEV_HEX = {"ok": palette.OK, "warn": palette.WARN, "bad": palette.BAD,
+            "info": palette.INFO, "": palette.INFO}
 
 
-def spark_svg(values, width: int = 84, height: int = 24, color: str = "#38bdf8",
+def spark_svg(values, width: int = 84, height: int = 24, color: str = palette.INFO,
               fill: bool = True) -> str:
     """Inline SVG sparkline (polyline + soft area). Pure — embeds anywhere.
 
@@ -211,7 +213,7 @@ def _delta_html(delta, delta_color: str) -> str:
         col, arrow = "var(--ow-ink-mute)", "flat"
     else:
         good = down if delta_color == "inverse" else (not down)
-        col = "#34d399" if good else "#fb7185"
+        col = palette.OK if good else palette.BAD   # rec50: single hue source
         arrow = "down" if down else "up"
     return (f'<div style="font-size:0.78rem;font-weight:640;color:{col};'
             f'display:flex;align-items:center;gap:4px;margin-top:3px">'
@@ -230,7 +232,7 @@ def metric_card_html(item: dict) -> str:
     spark = ""
     if item.get("spark"):
         spark = ('<div class="ow-card__meta" style="margin-top:6px">'
-                 + spark_svg(item["spark"], color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
+                 + spark_svg(item["spark"], color=_SEV_HEX.get(sev, palette.INFO)) + "</div>")
     delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
     # rec 15 (a11y): a keyboard-focusable + touch-tappable '?' affordance carrying the
     # help text, replacing the hover-only card title= (invisible on touch, unreachable
@@ -349,7 +351,7 @@ def status_bar(stats: list[dict]) -> None:
         if s.get("spark"):
             spark = ('<div class="ow-stat__spark">'
                      + spark_svg(s["spark"], width=104, height=18,
-                                 color=_SEV_HEX.get(sev, "#38bdf8")) + "</div>")
+                                 color=_SEV_HEX.get(sev, palette.INFO)) + "</div>")
         cells.append(f'<div class="{scls}"><div class="ow-stat__k">{html.escape(str(s.get("k","")))}</div>'
                      f'<div class="ow-stat__v">{ico}{html.escape(str(s.get("v","—")))}</div>{spark}</div>')
     st.markdown(f'<div class="ow-statusbar">{"".join(cells)}</div>', unsafe_allow_html=True)
@@ -690,7 +692,15 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
             st.info("This panel needs OVERWATCH's objects installed — an admin can see "
                     "what's pending on Admin → Migrations & freshness.")
         else:
-            st.error(f"Query failed: {result.error}")
+            # rec49: Snowflake compile errors run hundreds of chars with embedded
+            # SQL and dominate the panel. Lead with the first line; keep the full
+            # text one click away (same idiom as the connection-error screen).
+            _err = str(result.error or "").strip()
+            _first = _err.splitlines()[0] if _err else ""
+            st.error(f"Query failed: {_first}" if _first else "Query failed")
+            if _err and _err != _first:
+                with st.expander("Error detail"):
+                    st.code(_err)
         if setup_hint:
             st.caption(setup_hint)
         return False
@@ -705,6 +715,22 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
             "Narrow the window or filters to see everything."
         )
     return True
+
+
+def empty_state(kind: str, message: str, *, hint: str = "") -> None:
+    """One vocabulary for the three empty states so COLOR carries meaning
+    (house rule 8): 'clean' = verified-clean (green success), 'needs_setup' =
+    not installed / configure something (blue info), 'no_data_yet' = nothing has
+    loaded yet (quiet caption). Green must never mean 'nothing loaded'."""
+    kind = str(kind).lower()
+    if kind == "clean":
+        st.success(message)
+    elif kind == "needs_setup":
+        st.info(message)
+    else:  # "no_data_yet" + any unknown kind -> the quiet, non-green caption
+        st.caption(message)
+    if hint:
+        st.caption(hint)
 
 
 SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
@@ -877,7 +903,8 @@ def _export_filename(seq: int, slug: str | None) -> str:
 
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
-                  slug: str | None = None) -> int | None:
+                  slug: str | None = None, days: int | None = None,
+                  size_note: bool = True) -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
         return None
@@ -1017,6 +1044,14 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     st.rerun()
     except Exception:  # noqa: BLE001 - export is a convenience, never break the table
         pass
+    # rec31: declare size only on tables that SCROLL (>10 rows -> height-capped, so
+    # the total is not visible on screen). Fully-visible small tables need no
+    # caption, and a caller that prints its own count passes size_note=False.
+    if size_note and len(df) > 10:
+        _cap = f"{len(df):,} rows"
+        if isinstance(days, int) and days > 0:
+            _cap += f" · last {days}d"
+        st.caption(_cap)
     return selected
 
 
@@ -1037,19 +1072,41 @@ def _download_fingerprint(df) -> str:
 
 
 def styled_table(df, *, height: int | None = None, column_config: dict | None = None,
-                 slug: str | None = None) -> None:
+                 slug: str | None = None, days: int | None = None,
+                 size_note: bool = True) -> None:
     """st.dataframe with semantic status colors, convention-based number
-    formats, a height cap, and a CSV download. ``slug`` names the export file
-    (rec14): overwatch-{page}-{slug}-{date}.csv."""
-    _render_table(df, height=height, column_config=column_config, slug=slug)
+    formats, a height cap, a size caption, and a CSV download. ``slug`` names the
+    export file (rec14); ``days`` adds the window to the size caption (rec31);
+    ``size_note=False`` suppresses that caption when the caller states its own count."""
+    _render_table(df, height=height, column_config=column_config, slug=slug,
+                  days=days, size_note=size_note)
 
 
 def selectable_table(df, key: str, *, height: int | None = None,
-                     column_config: dict | None = None, slug: str | None = None) -> int | None:
+                     column_config: dict | None = None, slug: str | None = None,
+                     days: int | None = None, size_note: bool = True) -> int | None:
     """styled_table + single-row click selection; returns the positional row
     index or None. Degrades to a plain table on runtimes without selections."""
     return _render_table(df, height=height, column_config=column_config,
-                         key=key, selectable=True, slug=slug)
+                         key=key, selectable=True, slug=slug, days=days, size_note=size_note)
+
+
+def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
+                         column_config: dict | None = None, slug: str | None = None,
+                         days: int | None = None, size_note: bool = True) -> None:
+    """selectable_table with the sticky-selection guard built in (rec29).
+
+    st.dataframe's selection is sticky and re-emits on EVERY rerun, so acting on
+    a raw selection re-fires the action each pass. This calls ``on_select(row)``
+    only when the selection CHANGES from the last one seen — the idiom Overview
+    hand-rolled, extracted so no future page rediscovers the rerun loop.
+    """
+    sel = selectable_table(df, key=key, height=height, column_config=column_config,
+                           slug=slug, days=days, size_note=size_note)
+    seen_key = f"_ow_navsel_{key}"
+    if sel is not None and sel != st.session_state.get(seen_key):
+        st.session_state[seen_key] = sel
+        on_select(sel)
 
 
 def blast_radius(warehouse: str, page: str) -> None:
@@ -1082,7 +1139,7 @@ def blast_radius(warehouse: str, page: str) -> None:
         + (f"; scheduled/tooling tags present ({tagged.iloc[0][:40]}…)" if len(tagged) else "")
         + ". Review before executing."
     )
-    styled_table(with_user_names(df, page), height=200)   # show WHO you'd interrupt
+    styled_table(with_user_names(df, page), height=TABLE_H_SM)   # show WHO you'd interrupt
 
 
 def notify(ok: bool, msg: str) -> None:
