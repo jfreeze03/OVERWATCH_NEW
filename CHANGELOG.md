@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.121.0 — Codex-R2 Wave 2b: V071 task-graph re-chaining (fixes the sibling races) (2026-08-01)
+
+Theme A part 2 — the forward migration that fixes the task-graph topology defect (Codex
+#3/#4/#43/#42). Snowflake runs sibling child tasks in **parallel**, and the DAG had grown by
+hanging readers off the root loaders instead of behind the extract/reconcile that feed them, so
+readers raced their own data (mixed-generation dashboards, up to 1h alert latency).
+
+- **#3 (hourly):** `TASK_REFRESH_EXEC_BOARD` and `TASK_ALERT_SCAN` are re-pointed from
+  `AFTER TASK_LOAD_HOURLY` to `AFTER TASK_QH_EXTRACT`, so they read the query facts the extract
+  refreshes (V041 had moved the mart/diag loaders but missed these two). `TASK_ALERT_NOTIFY`
+  rides along with its parent.
+- **#4 (daily):** `TASK_LOAD_MARTS_V27_DAILY`, `TASK_PLATFORM_SCORE_DAILY`, and
+  `TASK_ALERT_SCAN_DAILY` are re-pointed from `AFTER TASK_LOAD_DAILY` to
+  `AFTER TASK_NIGHTLY_RECONCILE`, so they read reconciled facts instead of racing the reconcile's
+  delete+reload.
+- **#43:** `TASK_AUTO_RETRY_ATTEMPTS = 1` + `SUSPEND_TASK_AFTER_NUM_FAILURES = 10` on both roots.
+- **#42:** the `SCHEMA_VERSION.DESCRIPTION` widen runs at the top of V071 unconditionally, so any
+  install advancing the chain gets it (closes the manual-preflight gap).
+
+Done via `ALTER TASK ADD/REMOVE AFTER` (no `CREATE OR REPLACE TASK` — every task body/schedule/
+warehouse is preserved), inside a suspend → re-point → `SYSTEM$TASK_DEPENDENTS_ENABLE` window.
+
+**Adversarial review caught a HIGH defect in the first cut and it was fixed before commit:** the
+original idempotency wrappers swallowed *all* errors, so a first run interrupted by an in-flight
+task instance (`SUSPEND` doesn't stop an already-running one) could `REMOVE` a predecessor, fail
+the `ADD`, and leave a task with **no predecessor and no schedule — a silent alert/exec-board
+outage recorded as a green migration.** Rebuilt with a **state check**: each re-point snapshots
+the task's predecessors from `SHOW TASKS`, issues `ADD` (before `REMOVE`) only when the new
+predecessor is absent and `REMOVE` only when the old one is present, with **no exception handler**
+— so any genuine `ALTER` failure aborts loudly *before* `VERSION 71`, leaving the graph suspended
+(a loud, self-healing outage) rather than silently orphaned. Idempotent, re-runnable.
+
+**⚠ Owner smoke test required** (re-points live tasks; a byte-compare can't prove runtime): after
+apply, `SHOW TASKS` and confirm the new predecessors and that all tasks are `started`. Deferred:
+#5 finalizer (green-on-failure observability) and #49 validate DAG-assertion — both to a follow-up.
+
+Gates green: ruff, mypy, **pytest 1836 passed / 1 skipped**. Rebuild bundle → `V001_V071`.
+**Apply order: V062 → … → V070 → V071.**
+
 ## 4.120.0 — Codex-R2 Wave 2a: reconcile/webhook/loader robustness (before-apply) (2026-08-01)
 
 Theme A part 1 — the before-apply generator edits to the built-not-applied V064/V066, all

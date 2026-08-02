@@ -172,6 +172,20 @@ _EXPECTED_MIGRATIONS = {
         "burying real errors (#25), and resume TASK_ALERT_NOTIFY when an enabled route "
         "resolves to a live integration so a healthy Teams integration satisfies the gate "
         "(#24). Only SP_DAILY_DIGEST is re-defined; no new objects",
+    71: "task-graph re-chain + root retry policy (DAG surgery on applied tasks): Snowflake "
+        "runs sibling child tasks in parallel, so readers hung off the roots as siblings of "
+        "the extract/reconcile that feed them raced their own data. TASK_REFRESH_EXEC_BOARD + "
+        "TASK_ALERT_SCAN re-pointed AFTER TASK_LOAD_HOURLY -> AFTER TASK_QH_EXTRACT (#3); "
+        "TASK_LOAD_MARTS_V27_DAILY + TASK_PLATFORM_SCORE_DAILY + TASK_ALERT_SCAN_DAILY "
+        "re-pointed AFTER TASK_LOAD_DAILY -> AFTER TASK_NIGHTLY_RECONCILE (#4; reconcile "
+        "atomicity #7 still deferred). Both roots gain TASK_AUTO_RETRY_ATTEMPTS=1 + "
+        "SUSPEND_TASK_AFTER_NUM_FAILURES=10 (#43); SCHEMA_VERSION.DESCRIPTION widened to "
+        "VARCHAR(4000) before the guard (#42). ADD/REMOVE AFTER + SET only (no task body "
+        "re-defined); each re-point is state-checked (ADD only if the new predecessor is "
+        "absent, REMOVE only if the old is present, ADD before REMOVE) with no error "
+        "swallowing, so a matched re-run is a no-op and any genuine ALTER failure aborts "
+        "loudly leaving the graph suspended rather than silently orphaned; green-on-failure "
+        "finalizer (#5) deferred. No new objects",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

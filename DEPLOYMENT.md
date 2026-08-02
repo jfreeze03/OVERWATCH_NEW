@@ -86,6 +86,7 @@ snowflake/migrations/V067__alert_attribution_onset_supersede_objectcost.sql
 snowflake/migrations/V068__standalone_mart_freshness_stamps.sql
 snowflake/migrations/V069__exec_board_serverless_ai_drivers.sql
 snowflake/migrations/V070__delivery_routing_teams_only.sql
+snowflake/migrations/V071__task_graph_rechain_retry.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -207,6 +208,39 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > return `digest written; sent 1/1 routes` and post the morning digest into the Teams channel
 > (a `digest_send_failed` row in `APP_ERROR_LOG` naming the integration means that route's
 > integration is missing a grant — see webhook_delivery.sql's rotation runbook).
+
+> **V071 verify (task-graph re-chain + root retry — OWNER SMOKE TEST):** re-points the
+> readers that were racing their own data and hardens the two roots; byte-verified by
+> `tests/test_v071_task_graph.py`. It only `ALTER TASK ADD/REMOVE AFTER` + `SET` retry params
+> and widens `SCHEMA_VERSION.DESCRIPTION` — it **never** re-defines a task body (no `CREATE OR
+> REPLACE TASK`), so every existing schedule/warehouse/body is preserved. No new objects, no
+> data heal. Idempotency is a **state check** (each re-point reads the live predecessors via
+> `SHOW TASKS` and only ADDs the new predecessor when absent / REMOVEs the old when present,
+> **ADD before REMOVE**), with **no error swallowing** — so a genuine `ALTER` failure (e.g. a
+> graph run executing at apply time; `SUSPEND` does **not** stop an already-running instance)
+> **aborts the migration loudly and leaves that graph SUSPENDED** rather than silently
+> orphaning a task or reporting green. That is deliberate: **loud-suspended self-heals on a
+> re-run** (the whole migration is idempotent), and ADD-before-REMOVE guarantees a failed
+> re-point keeps its original predecessor (never zero). **The re-point + the SUSPEND/RESUME
+> dance are runtime-only — a byte-compare cannot prove the graph resumed, and an abort leaves
+> it suspended, so confirm it once after apply (read-only):**
+> ```sql
+> SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;
+> ```
+> Confirm the `predecessors` column: `TASK_REFRESH_EXEC_BOARD` and `TASK_ALERT_SCAN` now list
+> **`TASK_QH_EXTRACT`** (not `TASK_LOAD_HOURLY`); `TASK_LOAD_MARTS_V27_DAILY`,
+> `TASK_PLATFORM_SCORE_DAILY` and `TASK_ALERT_SCAN_DAILY` now list **`TASK_NIGHTLY_RECONCILE`**
+> (not `TASK_LOAD_DAILY`); and `TASK_ALERT_NOTIFY` still lists `TASK_ALERT_SCAN`. **Every one of
+> the 12 tasks must read `state = started`** — the SUSPEND/RESUME re-enabled them, and a
+> stranded-suspended child is the r07-r12 alert-outage class this migration ends both graphs
+> with `SYSTEM$TASK_DEPENDENTS_ENABLE` to prevent. Also spot-check the roots:
+> `SHOW PARAMETERS LIKE 'TASK_AUTO_RETRY_ATTEMPTS' IN TASK DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY;`
+> should read `1` (same for `TASK_LOAD_DAILY`), and `SUSPEND_TASK_AFTER_NUM_FAILURES` should read
+> `10`. If any task is `suspended`, run
+> `SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');` and the same
+> for `TASK_LOAD_DAILY` (the migration is idempotent; re-running the whole file is also safe —
+> each re-point's state check issues neither `ADD` nor `REMOVE` once the predecessors already
+> match, so a matched re-run is a clean no-op).
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
