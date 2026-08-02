@@ -19,10 +19,12 @@
 -- "Send each adaptive card" action rejects it (the "text card" error).
 -- Setup: Teams channel -> Workflows -> "Post to a channel when a webhook
 -- request is received", copy the HTTP URL, then:
---https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com:443/powerautomate/automations/direct/cu/26/workflows/8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs
+-- PASTE YOUR TEAMS WORKFLOWS HTTP URL IN SNOWSIGHT ONLY.
+-- <REDACTED-PASTE-IN-SNOWSIGHT>  (NEVER PASTE THE REAL URL INTO THIS FILE —
+-- it lands in git + git history; keep it in the SECRET object in Snowsight.)
  CREATE OR REPLACE SECRET DBA_MAINT_DB.OVERWATCH.OVERWATCH_TEAMS_URL
     TYPE = GENERIC_STRING
-     SECRET_STRING = '8bc55bec6a6340b7b04bb7b12eb0e7ed/triggers/manual/paths/invoke?api-version=1&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=jVLNX37r__13fDvdtYaA-lFoJPEsA707FY1wThIrSqs';
+     SECRET_STRING = '<REDACTED-PASTE-IN-SNOWSIGHT>';
  CREATE OR REPLACE NOTIFICATION INTEGRATION OVERWATCH_WEBHOOK_TEAMS
      TYPE = WEBHOOK ENABLED = TRUE
      WEBHOOK_URL = 'https://default22d2e650b7a647b5af0ef9719fea2b.b8.environment.api.powerplatform.com/powerautomate/automations/direct/workflows/SNOWFLAKE_WEBHOOK_SECRET'
