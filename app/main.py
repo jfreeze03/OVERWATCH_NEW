@@ -155,6 +155,10 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
             st.session_state.pop("_ow_current_role", None)
             st.session_state.pop("_ow_current_user", None)
             mark_refreshed()
+            # rec48: acknowledge the click — it clears caches + refetches. The
+            # button used to bump the salt and rerun with no feedback at all.
+            if hasattr(st, "toast"):
+                st.toast("Caches cleared — fetching fresh data.")
             st.rerun()
         # rec11: the ACCOUNT_USAGE lag note lives once per page in page_header now
         # (was duplicated here in the sidebar — same sentence twice is chrome noise).

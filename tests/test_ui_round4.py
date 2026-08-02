@@ -42,7 +42,9 @@ def test_alerts_kpis_carry_severity():
     src = (_ROOT / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
     assert '"severity": "bad" if crit_n else "ok"' in src
     assert '"severity": "warn" if high_n else "ok"' in src
-    assert 'key="alert_bulk_exec", type="primary"' in src          # action hierarchy
+    # rec42: bulk execute is a confirm_gate(...) call now; it still carries the
+    # primary-action hierarchy (type="primary" flows through as a button kwarg).
+    assert 'key="alert_bulk_exec"' in src and 'type="primary"' in src
 
 
 def test_contains_filters_collapse_but_never_hide_active_ones():

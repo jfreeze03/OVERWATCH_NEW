@@ -745,6 +745,25 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
     return True
 
 
+def confirm_gate(expected: str, action_label: str, *, key: str, prompt: str = "",
+                 object_name: bool = False, enabled: bool = True, **button_kwargs) -> bool:
+    """rec42: ONE type-to-confirm gate — renders the confirm input + the action
+    button together, returns True only when the button is clicked AND the typed
+    value matches ``expected``.
+
+    Matching: an OBJECT NAME (warehouse / database) matches case-INSENSITIVELY —
+    typing ``wh_alfa_admin`` satisfies a ``WH_ALFA_ADMIN`` gate — while an ACTION
+    VERB (EMERGENCY / CANCEL / RESOLVE) matches EXACT case. ``enabled=False`` keeps
+    the button disabled for an ADDITIONAL reason (e.g. a non-operator viewer), so
+    the confirm gate and the entitlement gate compose in one place.
+    """
+    typed = st.text_input(prompt or f"Type {expected} to confirm", key=f"{key}_confirm")
+    match = (str(typed).strip().casefold() == str(expected).strip().casefold()) if object_name \
+        else (str(typed).strip() == str(expected))
+    return st.button(action_label, key=f"{key}_btn",
+                     disabled=not (match and enabled), **button_kwargs)
+
+
 def empty_state(kind: str, message: str, *, hint: str = "") -> None:
     """One vocabulary for the three empty states so COLOR carries meaning
     (house rule 8): 'clean' = verified-clean (green success), 'needs_setup' =
@@ -1203,16 +1222,20 @@ def mark_refreshed() -> None:
 
 
 def last_refreshed_note() -> str:
-    """Human 'updated Nm ago' for the always-visible sidebar indicator."""
+    """Human 'session refreshed Nm ago' for the always-visible sidebar indicator.
+
+    rec48: this tracks the SESSION load / manual Refresh, NOT data freshness
+    (per-tier caches mean the data may be newer). 'Updated' overclaimed that —
+    say 'Session refreshed' so it does not read as a data-freshness stamp."""
     from datetime import datetime
     ts = st.session_state.get("_ow_refreshed_at")
     if not ts:
         return "Live · cached per tier"
     secs = max(0, int((datetime.now() - ts).total_seconds()))
     if secs < 60:
-        return f"Updated {secs}s ago"
+        return f"Session refreshed {secs}s ago"
     mins = secs // 60
-    return f"Updated {mins}m ago" if mins < 60 else f"Updated {mins // 60}h ago"
+    return f"Session refreshed {mins}m ago" if mins < 60 else f"Session refreshed {mins // 60}h ago"
 
 
 def download_text_button(label: str, text: str, filename: str) -> None:

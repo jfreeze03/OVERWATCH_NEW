@@ -30,7 +30,10 @@ SEV_COLORS = dict(palette.SEVERITY_HUES)
 # rec38: heat = orange (intuitive "hotness" for the hour x entity heatmap). ONE
 # ramp, referenced by the theme range AND hour_heatmap, so it is not a one-off
 # scheme string a shade off from everything else.
-_HEATMAP_RANGE = ["#0a0f1c", "#7c2d12", "#c2410c", "#ea580c", "#fdba74"]
+# Starts at a visible dark-orange (NOT the page background #0a0f1c) so a low-but-
+# NONZERO cell separates from an EMPTY (undrawn) cell, which stays page-dark —
+# the caller's "dark cells = no activity" reading depends on that separation.
+_HEATMAP_RANGE = ["#431407", "#7c2d12", "#c2410c", "#ea580c", "#fdba74"]
 
 
 def _overwatch_theme() -> dict:
@@ -101,7 +104,7 @@ def _day_axis(day_values, fmt_short: str = "%b %d") -> alt.Axis:
     elif span <= 120:
         unit, fmt = "week", fmt_short
     else:
-        unit, fmt = "month", "%b"
+        unit, fmt = "month", "%b '%y"   # year-tag so a 365d span crossing Jan is unambiguous
     return alt.Axis(format=fmt, tickCount=unit, labelOverlap="greedy")
 
 
@@ -114,11 +117,15 @@ def _legend(wide: bool = False, **kw) -> alt.Legend:
 
 def _share_note(label: str, amount: float, total: float, *, dollars: bool = True) -> str:
     """rec35 helper: 'Top: X $Y (Z% of $total).' — the lead-with-the-conclusion
-    line, computed from the data the chart already has."""
-    share = (amount / total * 100) if total else 0.0
+    line, computed from the data the chart already has. The share is omitted when
+    it would be nonsensical (categories that net out negative make a positive top
+    exceed 100% of the total)."""
     a = f"${amount:,.0f}" if dollars else f"{amount:,.0f}"
-    t = f"${total:,.0f}" if dollars else f"{total:,.0f}"
-    return f"Top: {label} {a} ({share:.0f}% of {t})."
+    share = (amount / total * 100) if total else 0.0
+    if total > 0 and 0 <= share <= 100:
+        t = f"${total:,.0f}" if dollars else f"{total:,.0f}"
+        return f"Top: {label} {a} ({share:.0f}% of {t})."
+    return f"Top: {label} {a}."
 
 
 def spend_trend(
@@ -390,12 +397,16 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
     st.altair_chart(chart, use_container_width=True)
     if capped_note:
         st.caption(capped_note)
-    if takeaway:  # rec35: name the hottest cell
-        _v = pd.to_numeric(data["Value"], errors="coerce")
+    if takeaway:  # rec35: name the hottest cell (positional + coerced, so a
+        # non-unique index or a non-integer Hour can never crash the render)
+        _v = pd.to_numeric(data["Value"], errors="coerce").reset_index(drop=True)
+        _h = pd.to_numeric(data["Hour"], errors="coerce").reset_index(drop=True)
+        _r = data["Row"].reset_index(drop=True)
         if _v.notna().any() and float(_v.max()) > 0:
-            _i = _v.idxmax()
-            st.caption(f"Hottest: {data.loc[_i, 'Row']} at hour "
-                       f"{int(data.loc[_i, 'Hour']):02d} ({float(_v.loc[_i]):,.0f}).")
+            _p = int(_v.idxmax())
+            if pd.notna(_h.iloc[_p]):
+                st.caption(f"Hottest: {_r.iloc[_p]} at hour "
+                           f"{int(_h.iloc[_p]):02d} ({float(_v.iloc[_p]):,.0f}).")
 
 
 def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10,
@@ -428,9 +439,11 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
         .properties(height=CHART_H_MD)
     )
     st.altair_chart(chart, use_container_width=True)
-    if takeaway:  # rec35: name the top contributor
-        _t = data.iloc[0]
-        st.caption(_share_note(str(_t["Label"]), float(_t["USD"]), float(data["USD"].sum())))
+    if takeaway:  # rec35: name the top contributor (only when there is a real total)
+        _total = float(data["USD"].sum())
+        if _total > 0:
+            _t = data.iloc[0]
+            st.caption(_share_note(str(_t["Label"]), float(_t["USD"]), _total))
 
 
 def event_timeline(df: pd.DataFrame) -> None:

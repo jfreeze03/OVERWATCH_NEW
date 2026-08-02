@@ -7,6 +7,8 @@ queue is visible on entry.
 
 from __future__ import annotations
 
+import contextlib
+
 import pandas as pd
 import streamlit as st
 
@@ -25,6 +27,7 @@ from app.logic.anomaly import (
 from app.logic.formulas import credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
+    confirm_gate,
     guard,
     kpi_row,
     lazy_sections,
@@ -348,7 +351,15 @@ def render() -> None:
         if _is_op:
             _live_specs.append({"key": "props", "sql": mart_sql.incident_proposals(20, company),
                                 "source": f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)"})
-        _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
+        # rec47: a slow cold first paint runs these live mart reads behind Streamlit's
+        # bare skeleton, which reads as a hang. Wrap the ONE heaviest prefetch batch in a
+        # collapsed st.status so the wait reads as progress; degrade to a no-op context on
+        # Streamlit builds without st.status (same hasattr degrade pattern as the nav bar).
+        _load_status = (st.status(f"Loading Control Room — {len(_live_specs)} mart reads…",
+                                  expanded=False)
+                        if hasattr(st, "status") else contextlib.nullcontext())
+        with _load_status:
+            _live_pf = run_batch(_live_specs, page=_PAGE, tier="live") or {}
         inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
                       key=f"inc_metrics_{company}", tier="recent",
                       source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
@@ -387,9 +398,8 @@ def render() -> None:
                         _note = st.text_input("Root-cause note", key=f"inc_note_{_iid[:8]}", max_chars=500)
                         _close = _incident_close_sql(_iid, _kind, _note)
                         st.code(_close, language="sql")
-                        _conf = st.text_input("Type RESOLVE to confirm", key=f"inc_conf_{_iid[:8]}")
-                        if st.button("Execute close", key=f"inc_close_{_iid[:8]}",
-                                     disabled=(_conf != "RESOLVE")):
+                        if confirm_gate("RESOLVE", "Execute close", key=f"inc_close_{_iid[:8]}",
+                                        prompt="Type RESOLVE to confirm"):
                             ok, msg = execute_statement(_close, page=_PAGE)
                             notify(ok, msg)
                             if ok:
@@ -408,9 +418,8 @@ def render() -> None:
                 _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
                                              str(_prow["COMPANY"]), _pick)
                 st.code(_dec, language="sql")
-                _confd = st.text_input("Type DECLARE to confirm", key="inc_prop_conf")
-                if st.button("Declare incident + link alerts", key="inc_prop_exec", type="primary",
-                             disabled=(_confd != "DECLARE")):
+                if confirm_gate("DECLARE", "Declare incident + link alerts", key="inc_prop_exec",
+                                prompt="Type DECLARE to confirm", type="primary"):
                     _ok_all = True
                     for _stmt in [s for s in _dec.split(";") if s.strip()]:
                         _ok, _m = execute_statement(_stmt + ";", page=_PAGE)

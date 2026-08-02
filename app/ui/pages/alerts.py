@@ -27,6 +27,7 @@ from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    confirm_gate,
     download_text_button,
     empty_state,
     guard,
@@ -473,10 +474,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                                      else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
                                      else "CLUSTER_RANGE")
                         st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
-                        conf_cl = st.text_input("Type the warehouse name to confirm",
-                                                key=f"clf_confirm_{event_id[:8]}")
-                        if st.button("Execute + audit + book estimate", key=f"clf_exec_{event_id[:8]}",
-                                     disabled=(conf_cl != wh_inline)):
+                        if confirm_gate(wh_inline, "Execute + audit + book estimate",
+                                        key=f"clf_exec_{event_id[:8]}",
+                                        prompt="Type the warehouse name to confirm",
+                                        object_name=True):
                             ok, msg = execute_statement(stmt_cl, page=_PAGE)
                             execute_statement(
                                 f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -559,21 +560,22 @@ def _open_events_section(events, is_operator: bool) -> None:
                         on_save=_append_hypothesis if is_operator else None,
                         save_label="Append hypothesis to the event",
                     )
-            c_inv, c_fix, c_act, c_note = st.columns([1.1, 1.1, 0.9, 1.9])
-            with c_fix:
-                if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
-                                     help="Lands on the remediation surface with this event's "
-                                          "scope applied — generate, confirm, execute, audited."):
-                    request_navigation(fix["page"], fix["section"], fix["filters"])
+            # rec18: two rows — nav buttons + action radio share one row; the note
+            # gets a full-width row of its own instead of a cramped ~30% column.
+            c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
             with c_inv:
                 if st.button("Investigate →", key="alert_investigate", use_container_width=True,
                              help=f"Jump to {target['page']} · {target['section'] or 'top'} "
                                   "with filters applied from this event"):
                     request_navigation(target["page"], target["section"], target["filters"])
+            with c_fix:
+                if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
+                                     help="Lands on the remediation surface with this event's "
+                                          "scope applied — generate, confirm, execute, audited."):
+                    request_navigation(fix["page"], fix["section"], fix["filters"])
             with c_act:
                 action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key=f"alert_action_{event_id[:8]}")
-            with c_note:
-                note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}", max_chars=500)
+            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}", max_chars=500)
             kind = ""
             if action == "RESOLVE":
                 kind = st.radio(
@@ -582,27 +584,32 @@ def _open_events_section(events, is_operator: bool) -> None:
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
                          "on the Rules section.")
             stmts = _lifecycle_stmts(event_id, action, note, kind)
-            with st.expander("SQL that will run"):
-                st.code("\n".join(stmts), language="sql")
-            if is_operator:
-                confirm = st.text_input(f"Type {action} to confirm execution", key=f"alert_confirm_{event_id[:8]}")
-                if st.button("Execute with audit row", key="alert_exec", disabled=(confirm != action)):
-                    # V051: one atomic proc (update + audit in a transaction);
-                    # the pre-V051 legacy path is the split script, unchanged.
-                    call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
-                            f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
-                            f"{sql_literal(kind)}, {identity_sql()}, "
-                            f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
-                    # codex#9: pass the structured statement list straight through — a ';'
-                    # inside the note no longer fractures the legacy fallback.
-                    ok, msg = execute_action(call, stmts, page=_PAGE)
-                    notify(ok, msg)
-                    if ok:
-                        from app.ui.components import log_ui_event
-                        log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
-                                     page=_PAGE)
-            else:
-                st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
+            with st.container(border=True):
+                with st.expander("SQL that will run"):
+                    st.code("\n".join(stmts), language="sql")
+                if is_operator:
+                    # rec42: key PER EVENT so switching to another event clears the
+                    # confirm field — a constant key let "RESOLVE" carry across events
+                    # and enable Execute on the next event with no deliberate re-type.
+                    if confirm_gate(action, "Execute with audit row",
+                                    key=f"alert_exec_{event_id[:8]}",
+                                    prompt=f"Type {action} to confirm execution"):
+                        # V051: one atomic proc (update + audit in a transaction);
+                        # the pre-V051 legacy path is the split script, unchanged.
+                        call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                                f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
+                                f"{sql_literal(kind)}, {identity_sql()}, "
+                                f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
+                        # codex#9: pass the structured statement list straight through — a ';'
+                        # inside the note no longer fractures the legacy fallback.
+                        ok, msg = execute_action(call, stmts, page=_PAGE)
+                        notify(ok, msg)
+                        if ok:
+                            from app.ui.components import log_ui_event
+                            log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
+                                         page=_PAGE)
+                else:
+                    st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
 
         if is_operator and len(edf):
             st.divider()
@@ -622,11 +629,10 @@ def _open_events_section(events, is_operator: bool) -> None:
                                        "precision score.")
             b_note = st.text_input("Bulk note (applies to every selected event)",
                                    key="alert_bulk_note", max_chars=500)
-            confirm_b = st.text_input(
-                f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
-                key="alert_bulk_confirm")
-            if st.button(f"Execute bulk {b_action}", key="alert_bulk_exec", type="primary",
-                         disabled=(not chosen or confirm_b != f"BULK {b_action}")):
+            if confirm_gate(f"BULK {b_action}", f"Execute bulk {b_action}",
+                            key="alert_bulk_exec",
+                            prompt=f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
+                            enabled=bool(chosen), type="primary"):
                 # V051: one atomic proc for the whole selection; the
                 # pre-V051 legacy path is the set-based 2-statement pair.
                 _bulk_ids = [options[c] for c in chosen]

@@ -8,6 +8,7 @@ and says so; estimated and verified savings never mix.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import timedelta
 
 import pandas as pd
@@ -82,12 +83,27 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
-    res = metering_res if metering_res is not None else run(
-        mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
-        tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
-    if not res.ok or res.empty:
-        res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
-                  tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
+    #
+    # rec47: when the prefetch is unavailable (cost.py's batch -> None), the
+    # spend-attribution eager reads run behind Streamlit's bare skeleton on a
+    # cold first paint, which reads as a hang. Wrap the heaviest read behind a
+    # collapsed st.status so the wait reads as progress; degrade to a no-op
+    # context on Streamlit builds without st.status (same hasattr degrade
+    # pattern as Control Room). What is read and the live fallback are unchanged.
+    # Show the status ONLY on the fallback (metering_res is None): that is when
+    # the reads run serially behind the bare skeleton. On the fast prefetched path
+    # the read is already served, so a status here would just flash a no-op.
+    _fallback = metering_res is None
+    _load_status = (
+        st.status("Loading Spend & Attribution…", expanded=False)
+        if (_fallback and hasattr(st, "status")) else contextlib.nullcontext())
+    with _load_status:
+        res = metering_res if metering_res is not None else run(
+            mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
+            tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
+        if not res.ok or res.empty:
+            res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
+                      tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     panel_help(

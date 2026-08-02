@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.127.0 — Cursor design review Wave 5: write actions & feedback (2026-08-02)
+
+Write-action ergonomics + loading/refresh feedback (the last implementation wave). App-only.
+
+- **rec42 — one `confirm_gate()` component.** 11 hand-rolled type-to-confirm sites across Alerts,
+  Operations, Control Room, Admin, and Optimization now go through one helper (renders the confirm
+  input + action button, returns True only on click AND match). Object names (warehouse/table)
+  match **case-insensitively** — typing `wh_alfa_admin` now satisfies a `WH_ALFA_ADMIN` gate (the
+  exact bug the review named); action verbs stay exact-case. Each gate is keyed per-object/-event.
+- **rec44 — `st.dialog` for the account-level emergency lever** (hasattr-gated, inline fallback);
+  the SQL preview + confirm + audit move into a modal so "you are about to change prod" is isolated.
+- **rec45 — typed Admin → Settings editors.** An explicit per-key type map drives
+  `selectbox`/`date_input`/`number_input` (enum/date/number) — not `isinstance` (the score/gov/
+  retention settings are string-typed numbers). Persistence is unchanged: values convert back to
+  their stored string form before the upsert.
+- **rec46** the AI-chargeback dept-budget shows its SQL before the button (SQL-always-shown-first);
+  **rec47** Control Room + Spend wrap their cold first-paint reads in a collapsing `st.status`;
+  **rec48** the Refresh button toasts and the sidebar note is relabelled "Session refreshed" (it
+  tracks the session, not data freshness); **rec18** the alert drawer's action row is reflowed so
+  the note input is full-width.
+- **rec43 (st.form) NOT applied** — both candidate forms (the Operations SLA register and the Admin
+  settings editor) carry a **live SQL preview / conditional reveal** that `st.form` would freeze
+  until submit, breaking the see-the-SQL-before-you-run-it contract. Declined for correctness.
+- **Wave 4 chart fixes folded in** (from Wave 4's review): the heat ramp no longer collides with
+  the page background, the hour/waterfall takeaways are crash-proof and zero-total-guarded,
+  `_share_note` omits a nonsensical >100% share, and month ticks carry the year.
+
+Implemented as 5 parallel agents on disjoint files + a shared `confirm_gate` helper. A 3-lens
+adversarial review caught the SLA-form preview-freeze (reverted), a lost per-event confirm key
+(restored), an overstated loading label, an unguarded SQL preview, and two Admin edge cases (float
+rounding + date bounds) — all fixed. **rec40 (chart click-through) remains deferred.**
+
+Gates green: ruff, mypy, **pytest 1843 passed / 1 skipped**.
+
 ## 4.126.0 — Cursor design review Wave 4: charts (2026-08-02)
 
 Chart-helper polish (all in `app/ui/charts.py`), app-only.

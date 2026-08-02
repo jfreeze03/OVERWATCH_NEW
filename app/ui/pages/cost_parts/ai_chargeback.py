@@ -424,21 +424,28 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         pick_dept = c_d.selectbox("Department", dept_opts, key="bud_dept") if dept_opts else             c_d.text_input("Department", key="bud_dept_txt")
         bud_usd = c_b.number_input("Monthly budget USD (0 removes)", 0, 10_000_000, 0,
                                    step=500, key="bud_usd")
-        if st.button("Save budget", key="bud_save", disabled=not pick_dept):
-            if bud_usd > 0:
-                stmt_b = (
-                    f"MERGE INTO {core_object('DEPT_BUDGETS')} t "
-                    f"USING (SELECT {sql_literal(str(pick_dept))} AS D) s ON t.DEPARTMENT = s.D "
-                    f"WHEN MATCHED THEN UPDATE SET MONTHLY_BUDGET_USD = {sql_number(float(bud_usd))}, "
-                    f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
-                    f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD) "
-                    f"VALUES (s.D, {sql_number(float(bud_usd))});"
-                )
-            else:
-                stmt_b = (f"DELETE FROM {core_object('DEPT_BUDGETS')} "
-                          f"WHERE DEPARTMENT = {sql_literal(str(pick_dept))};")
-            ok, msg = execute_statement(stmt_b, page=_PAGE)
-            notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
+        # rec46: build the upsert/delete SQL and show it BEFORE the save button,
+        # matching every peer write on this page (SQL always shown first). Low-risk
+        # upsert, so no type-to-confirm — just make the statement visible pre-click.
+        if bud_usd > 0:
+            stmt_b = (
+                f"MERGE INTO {core_object('DEPT_BUDGETS')} t "
+                f"USING (SELECT {sql_literal(str(pick_dept))} AS D) s ON t.DEPARTMENT = s.D "
+                f"WHEN MATCHED THEN UPDATE SET MONTHLY_BUDGET_USD = {sql_number(float(bud_usd))}, "
+                f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
+                f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD) "
+                f"VALUES (s.D, {sql_number(float(bud_usd))});"
+            )
+        else:
+            stmt_b = (f"DELETE FROM {core_object('DEPT_BUDGETS')} "
+                      f"WHERE DEPARTMENT = {sql_literal(str(pick_dept))};")
+        if pick_dept:  # rec46: no SQL preview / save until a department is picked
+            st.code(stmt_b, language="sql")
+            if st.button("Save budget", key="bud_save"):
+                ok, msg = execute_statement(stmt_b, page=_PAGE)
+                notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
+        else:
+            st.caption("Pick a department to preview and save its budget.")
 
     _statement_export(company, rate)
 

@@ -42,6 +42,7 @@ from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     blast_radius,
+    confirm_gate,
     guard,
     kpi_row,
     lazy_sections,
@@ -312,9 +313,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
                 from app.logic import remediation as _remediation
                 st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
-                confirm_sz = st.text_input("Type the warehouse name to confirm resize", key="sizing_confirm")
-                if st.button("Execute resize + log", key="sizing_exec",
-                             disabled=(confirm_sz != str(srow["WAREHOUSE_NAME"]))):
+                if confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
+                                prompt="Type the warehouse name to confirm resize", object_name=True):
                     ok, msg = execute_statement(stmt_sz, page=_PAGE)
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -751,9 +751,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "failsafe is NOT included: it drains on a fixed 7-day schedule regardless of "
                         "this setting."
                     )
-                    confirm_w = st.text_input("Type the table name to confirm", key="waste_confirm")
-                    if st.button("Execute retention change + log", key="waste_exec",
-                                 disabled=(confirm_w != str(wrow["TABLE_NAME"]))):
+                    if confirm_gate(str(wrow["TABLE_NAME"]), "Execute retention change + log", key="waste",
+                                    prompt="Type the table name to confirm", object_name=True):
                         ok, msg = execute_statement(stmt_w, page=_PAGE)
                         execute_statement(
                             f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -865,9 +864,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             if stmt:
                 st.code(stmt, language="sql")
                 if is_operator:
-                    confirm = st.text_input("Type the warehouse name to confirm execution", key="remed_confirm")
-                    if st.button("Execute + log + book estimated savings", key="remed_exec",
-                                 disabled=(confirm != wh_pick)):
+                    if confirm_gate(wh_pick, "Execute + log + book estimated savings", key="remed",
+                                    prompt="Type the warehouse name to confirm execution", object_name=True):
                         ok, msg = execute_statement(stmt, page=_PAGE)
                         log_sql = (
                             f"INSERT INTO {core_object('REMEDIATION_LOG')} "

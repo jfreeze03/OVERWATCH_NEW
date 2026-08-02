@@ -23,6 +23,7 @@ from app.logic.insights import build_failure_timeline, compare_release_periods, 
 from app.ui import charts, palette
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    confirm_gate,
     guard,
     kpi_row,
     lazy_sections,
@@ -385,6 +386,10 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
         result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h).")
 
     with st.expander("Register a table"):
+        # rec43 NOT applied here: st.form would freeze the live SQL preview until
+        # submit, so the operator couldn't review the EXACT INSERT before running
+        # it (the submit both shows and runs). The "see the SQL first" contract
+        # wins over batched submit — keep the live preview + a separate button.
         c1, c2, c3 = st.columns(3)
         with c1:
             db = st.text_input("Database", key="sla_db")
@@ -401,10 +406,11 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
             f"{sql_literal(table.upper())}, {max_age}, {sql_literal(owner)});"
         )
         st.code(insert_sql, language="sql")
-        if is_operator and db and schema and table and st.button("Execute insert", key="sla_exec"):
+        if is_operator and st.button("Execute insert", key="sla_exec",
+                                     disabled=not (db and schema and table)):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
             notify(ok, msg)
-        elif not is_operator:
+        if not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
     section_header("File-load failures (COPY / Snowpipe, 7d)", "warn", "pipeline")
@@ -959,13 +965,20 @@ def _emergency_tab(is_operator: bool) -> None:
         st.error(str(exc))
 
     if stmt:
-        st.code(stmt, language="sql")
-        if "ALTER ACCOUNT" in stmt:
-            st.warning("ACCOUNT-level: execute as SNOW_ACCOUNTADMINS. Copy the SQL if this "
-                       "session's role lacks the privilege.")
-        if is_operator:
-            confirm = st.text_input("Type EMERGENCY to confirm execution", key="emg_confirm")
-            if st.button("Execute + audit", key="emg_exec", disabled=(confirm != "EMERGENCY")):
+        is_account = "ALTER ACCOUNT" in stmt
+
+        def _emg_preview() -> None:
+            # rec44: blast-radius warning + SQL preview shown together (inline or in the modal).
+            st.code(stmt, language="sql")
+            if is_account:
+                st.warning("ACCOUNT-level: execute as SNOW_ACCOUNTADMINS. Copy the SQL if this "
+                           "session's role lacks the privilege.")
+
+        def _emg_confirm() -> None:
+            _emg_preview()
+            # rec42: one type-to-confirm gate (input + button); EMERGENCY matches EXACT case.
+            if confirm_gate("EMERGENCY", "Execute + audit", key="emg",
+                            prompt="Type EMERGENCY to confirm execution", enabled=is_operator):
                 ok, msg = execute_statement(stmt, page=_PAGE)
                 log_sql = (
                     f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -975,8 +988,23 @@ def _emergency_tab(is_operator: bool) -> None:
                 )
                 execute_statement(log_sql, page=_PAGE)
                 notify(ok, msg)
-        else:
+
+        if not is_operator:
+            _emg_preview()
             st.caption("Copy the SQL; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+        elif hasattr(st, "dialog"):
+            # rec44: this is the highest-blast-radius single-shot lever, so gate it
+            # behind a modal (same hasattr degrade pattern as the Wave 2/3 widgets).
+            # Dialogs rerun like fragments, so confirm+execute+audit runs correctly
+            # inside _emergency_fragment; older Streamlit falls back to the inline flow.
+            @st.dialog("Emergency lever — confirm")
+            def _emg_modal() -> None:
+                _emg_confirm()
+
+            if st.button("Review + confirm execution", key="emg_open"):
+                _emg_modal()
+        else:
+            _emg_confirm()
 
 
 def _emergency_extras(is_operator: bool) -> None:
@@ -1017,9 +1045,8 @@ def _emergency_extras(is_operator: bool) -> None:
                 qrow = rq.df.iloc[int(sel_rq)]
                 qid = str(qrow["QUERY_ID"])
                 st.code(f"SELECT SYSTEM$CANCEL_QUERY('{qid}');", language="sql")
-                confirm_q = st.text_input("Type CANCEL to confirm", key="emg_rq_confirm")
-                if st.button("Cancel query + audit", key="emg_rq_exec",
-                             disabled=(confirm_q != "CANCEL")):
+                if confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq",
+                                prompt="Type CANCEL to confirm"):
                     ok, msg = execute_cancel_query(qid, page=_PAGE)   # B2: SELECT is outside the write allow-list
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "

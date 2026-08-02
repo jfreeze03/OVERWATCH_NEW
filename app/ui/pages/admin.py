@@ -7,6 +7,8 @@ here, where the people who can act on it will look for it.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pandas as pd
 import streamlit as st
 
@@ -23,6 +25,7 @@ from app.core.sqlsafe import sql_literal
 from app.data import cost_sql, mart_sql
 from app.logic.formulas import md_dollars, safe_float
 from app.ui.components import (
+    confirm_gate,
     guard,
     kpi_row,
     lazy_sections,
@@ -212,6 +215,96 @@ def _context_section() -> None:
         st.error(f"No Snowflake session: {ctx.error}")
 
 
+# rec45: typed editors for the "Change a setting" changer. Driven by an EXPLICIT
+# per-key type map, NOT isinstance on the stored value — SCORE_PTS_*/GOV_PTS_*/
+# *_RETENTION_DAYS are STRING-typed numbers in DEFAULT_SETTINGS, so probing the
+# value's Python type would send every one of them through the wrong widget. Any
+# key ABSENT from this map keeps the generic st.text_input (the safe default).
+# Only the INPUT widget changes; the widget value is converted back to its stored
+# STRING form (dates -> ISO, numbers -> str) before the unchanged upsert SQL runs.
+_NUM = "number"
+_SETTING_EDITORS: dict[str, tuple[str, object]] = {
+    "FORECAST_ENGINE": ("enum", ["linear", "seasonal", "ml_forecast"]),
+    "CONTRACT_START_DATE": ("date", None),
+    "CONTRACT_END_DATE": ("date", None),
+    # Rates / prices ($ per unit).
+    "CREDIT_PRICE_USD": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "AI_CREDIT_PRICE_USD": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "STORAGE_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "STORAGE_STAGE_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "STORAGE_HYBRID_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    "STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH": (_NUM, {"min_value": 0.0, "step": 0.01}),
+    # Budgets / contract credits (dollars / credits).
+    "MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
+    "AI_MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
+    "CONTRACT_CREDITS": (_NUM, {"min_value": 0.0, "step": 1000.0}),
+    # Platform-score weights (per-unit penalties; STRING-typed in DEFAULT_SETTINGS).
+    "SCORE_PTS_BUDGET_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),
+    "SCORE_PTS_PER_CRITICAL": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "SCORE_PTS_PER_HIGH": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "SCORE_PTS_QUERY_FAIL_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),
+    "SCORE_PTS_TASK_FAIL_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),
+    "SCORE_PTS_QUEUE_PER_MIN": (_NUM, {"min_value": 0.0, "step": 0.1}),
+    "SCORE_PTS_SPILL_PER_GB": (_NUM, {"min_value": 0.0, "step": 0.1}),
+    "SCORE_PTS_PER_STALE_SOURCE": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "SCORE_PTS_PER_OPEN_ACTION": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    # Governance-drift weights (per-unit penalties; STRING-typed in DEFAULT_SETTINGS).
+    "GOV_PTS_MFA_GAP": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "GOV_PTS_EXPIRED_CRED": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "GOV_PTS_EXPIRING_CRED": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "GOV_PTS_BREAKGLASS_GRANT": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    "GOV_PTS_NO_AUTOSUSPEND": (_NUM, {"min_value": 0.0, "step": 0.5}),
+    # Fact/log retention (whole days; STRING-typed in DEFAULT_SETTINGS).
+    "FACT_RETENTION_DAYS_HOURLY": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    "FACT_RETENTION_DAYS_DAILY": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    "ERROR_LOG_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+    "APP_USAGE_RETENTION_DAYS": (_NUM, {"min_value": 1.0, "step": 1.0}),
+}
+
+
+def _num_to_str(value: float) -> str:
+    """Stored settings are strings ('400', '3.68'), so trim the float a
+    number_input hands back: an integral value writes '400' not '400.0'."""
+    f = round(float(value), 6)   # trim binary-float noise: 0.30000000000000004 -> 0.3
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def _setting_value_input(key: str, current: dict[str, str]) -> str:
+    """rec45: render the type-appropriate editor for ``key`` and return the value
+    already converted to its stored STRING form (so the upsert SQL is unchanged)."""
+    cur = current.get(key, "")
+    if cur in ("", None) and key in DEFAULT_SETTINGS:
+        cur = str(DEFAULT_SETTINGS[key])
+    editor = _SETTING_EDITORS.get(key)
+    wkey = f"adm_setting_value::{key}"  # per-key so switching widget type never collides
+    if editor is None:
+        return st.text_input(
+            "New value", key=wkey,
+            help="Numeric settings take numbers; dates are YYYY-MM-DD; blank clears.")
+    kind, spec = editor
+    if kind == "enum":
+        options = list(spec)  # type: ignore[arg-type]
+        idx = options.index(cur) if cur in options else 0
+        return st.selectbox("New value", options, index=idx, key=wkey)
+    if kind == "date":
+        try:
+            default = dt.date.fromisoformat(cur) if cur else None
+        except ValueError:
+            default = None
+        picked = st.date_input("New value", value=default, key=wkey,
+                               min_value=dt.date(2000, 1, 1), max_value=dt.date(2100, 12, 31),
+                               help="Clear the field to blank the date.")
+        return picked.isoformat() if picked else ""
+    # number
+    spec = dict(spec or {})  # type: ignore[arg-type]
+    try:
+        value = float(cur) if cur not in ("", None) else float(spec.get("min_value", 0.0))
+    except (TypeError, ValueError):
+        value = float(spec.get("min_value", 0.0))
+    return _num_to_str(st.number_input("New value", value=value, key=wkey, **spec))
+
+
 def _settings_tab(is_operator: bool) -> None:
     settings = load_settings(_PAGE)
     # $-escape: the two literal rates would pair into a LaTeX math span
@@ -242,10 +335,18 @@ def _settings_tab(is_operator: bool) -> None:
             pass
 
     st.markdown("**Change a setting**")
+    # rec45: seed the typed editors from the live values so number/date/enum
+    # widgets open on the current setting, not an empty box.
+    current: dict[str, str] = {}
+    if res.usable():
+        try:
+            current = dict(zip(res.df["KEY"].astype(str), res.df["VALUE"].astype(str),
+                               strict=False))
+        except (KeyError, TypeError):
+            current = {}
     editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")]
     key = st.selectbox("Setting", editable, key="adm_setting_key")
-    new_value = st.text_input("New value", key="adm_setting_value",
-                              help="Numeric settings take numbers; dates are YYYY-MM-DD; blank clears.")
+    new_value = _setting_value_input(key, current)
     update_sql = (
         f"UPDATE {core_object('SETTINGS')} SET VALUE = {sql_literal(new_value)}, "
         f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
@@ -253,8 +354,9 @@ def _settings_tab(is_operator: bool) -> None:
     )
     st.code(update_sql, language="sql")
     if is_operator:
-        confirm = st.text_input("Type the setting key to confirm", key="adm_setting_confirm")
-        if st.button("Execute update", key="adm_setting_exec", disabled=(confirm != key)):
+        # rec42: one type-to-confirm gate (setting KEY, EXACT case) + action button.
+        if confirm_gate(key, "Execute update", key="adm_setting",
+                        prompt="Type the setting key to confirm"):
             ok, msg = execute_statement(update_sql, page=_PAGE)
             notify(ok, msg)
             if ok:
