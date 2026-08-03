@@ -24,7 +24,15 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
 )
-from app.logic.formulas import credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
+from app.logic.formulas import (
+    account_now,
+    credits_to_usd,
+    format_usd,
+    humanize_age,
+    md_dollars,
+    pct_delta,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import (
     confirm_gate,
@@ -501,6 +509,14 @@ def render() -> None:
             # to the page that owns it (alerts/ops/cost), instead of a read-only wall.
             _disp = [c for c in ("SEVERITY", "KIND", "DATABASE", "TITLE", "DETAIL", "SOURCE", "RAISED_AT")
                      if c in queue.columns]
+            # rec27: an "Age" companion ("3h ago") next to RAISED_AT reads at a glance;
+            # the real timestamp stays for sort/tz. assign preserves row order so the
+            # positional selection below still maps back to `queue`.
+            _qdisp = queue
+            if "RAISED_AT" in _disp:
+                _now = account_now()
+                _qdisp = queue.assign(AGE=queue["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
+                _disp = [*_disp, "AGE"]
             # rec29: navigate only on a CHANGED selection (the sticky-selection guard
             # lives in selectable_nav_table now — was firing request_navigation every
             # rerun on the sticky row).
@@ -511,7 +527,7 @@ def render() -> None:
                          "Spend anomaly": ("Cost & Contract", ""),
                          "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
                 request_navigation(_dest[0], _dest[1])
-            selectable_nav_table(queue[_disp], key="cr_triage_sel", on_select=_open_triage,
+            selectable_nav_table(_qdisp[_disp], key="cr_triage_sel", on_select=_open_triage,
                                  height=260, size_note=False)  # the caption below states the count
             st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
                        "— select one to open its page. Sources: alerts, task facts, spend "

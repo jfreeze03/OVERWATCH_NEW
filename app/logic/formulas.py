@@ -244,6 +244,28 @@ def humanize_duration(value: object, unit: str = "s") -> str:
     return f"{sign}{seconds}s"
 
 
+def humanize_age(value: object, now: object = None) -> str:
+    """rec27: compact 'how stale' for a past timestamp — "just now" / "5m ago" /
+    "3h ago" / "2d ago". A DISPLAY-ONLY companion to a real timestamp column (which
+    stays for sort + tz-conversion); the raw timestamp is never mutated. ``now`` is
+    the reference time the caller supplies (account-naive, e.g. account_now()); an
+    unparseable value or a missing ``now`` renders the em-dash no-value glyph."""
+    import pandas as pd
+
+    ts = pd.to_datetime(value, errors="coerce")
+    ref = pd.to_datetime(now, errors="coerce")
+    if pd.isna(ts) or pd.isna(ref):
+        return "—"
+    secs = (ref - ts).total_seconds()
+    if secs < 45:                     # includes small clock skew / future stamps
+        return "just now"
+    if secs < 3600:
+        return f"{round(secs / 60)}m ago"
+    if secs < 86_400:
+        return f"{round(secs / 3600)}h ago"
+    return f"{round(secs / 86_400)}d ago"
+
+
 def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0891b2") -> str:
     """rec20: a self-contained inline-SVG sparkline for the HTML export — pure, no
     Streamlit dependency, so `exec_summary_html` stays in the logic layer and the

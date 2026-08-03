@@ -21,7 +21,7 @@ from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql, recheck_sql
 from app.logic import remediation, tuning
 from app.logic.ai_prompts import anomaly_explain_prompt
-from app.logic.formulas import md_dollars, safe_float
+from app.logic.formulas import account_now, humanize_age, md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
@@ -356,10 +356,14 @@ def _open_events_section(events, is_operator: bool) -> None:
             st.caption("Dedupe semantics are untouched — this is a display rollup. "
                        "Toggle off to open a drawer, bulk-ack, or investigate.")
             return
+        # rec27: an "Age" companion ("3h ago") reads at a glance; RAISED_AT stays the
+        # real, sortable, tz-converted column. rec30: declare the severity-then-newest order.
+        _now = account_now()
+        _feed = with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")
+        _feed = _feed.assign(AGE=_feed["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
         sel = selectable_table(
-            with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")[
-                ["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
-            key="alert_events_sel")
+            _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
+            key="alert_events_sel", sort_label="severity, then newest")
         result_caption(events)
         if sel is None:
             st.caption("Click a row to open its drawer: detail, rule, history, playbook, "

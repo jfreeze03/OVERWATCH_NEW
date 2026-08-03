@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.130.0 — Readability wave 2: relative age (2026-08-03)
+
+- **rec27 — "Age" companion column.** Triage timestamps (RAISED_AT) answer "when",
+  not "how stale". New pure `formulas.humanize_age(value, now)` renders a compact
+  age — "just now" / "5m ago" / "3h ago" / "2d ago" — added as an **Age** column
+  next to RAISED_AT on the Alerts → Open events feed and the Control Room triage
+  queue. Display-only: the real timestamp column stays for sort + tz-conversion, and
+  `assign` preserves row order so the positional row-selection still maps back
+  correctly. `now` is caller-supplied (`account_now()`, account-naive) so the
+  formatter is pure and deterministic.
+- **rec30 (partial) — declared sort.** `sort_label` now forwards through
+  `selectable_table` / `selectable_nav_table`; the Alerts feed declares
+  "severity, then newest" in its size caption.
+
+New `tests/test_humanize_age.py` (buckets, future/skew, NaT/missing-now, string &
+Timestamp inputs). The pinned Control Room triage-shape test was updated to the new
+`_qdisp` (queue + Age) shape and strengthened. Gates green: ruff, mypy, **pytest
+1862 passed / 1 skipped**.
+
 ## 4.129.1 — Readability wave 1 fix: large-frame duration unit (2026-08-03)
 
 Adversarial-review fix on v4.129.0 (found before push). rec26 humanizes durations

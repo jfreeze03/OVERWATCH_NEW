@@ -479,8 +479,10 @@ def test_n3_triage_non_alert_rows_have_empty_ids():
 
 def test_n3_control_room_queue_is_actionable():
     cr = _src("app/ui/pages/control_room.py")
-    # rec29: triage queue now navigates via selectable_nav_table (new-selection guard).
-    assert "selectable_nav_table(queue[" in cr
+    # rec29: triage queue navigates via selectable_nav_table (new-selection guard).
+    # rec27: the rendered frame is `_qdisp` (queue + an "Age" companion off RAISED_AT).
+    assert "selectable_nav_table(_qdisp[" in cr
+    assert 'queue.assign(AGE=queue["RAISED_AT"].map(lambda t: humanize_age(t, _now)))' in cr
     assert "request_navigation" in cr
 
 

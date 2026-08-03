@@ -1243,16 +1243,19 @@ def styled_table(df, *, height: int | None = None, column_config: dict | None = 
 
 def selectable_table(df, key: str, *, height: int | None = None,
                      column_config: dict | None = None, slug: str | None = None,
-                     days: int | None = None, size_note: bool = True) -> int | None:
+                     days: int | None = None, size_note: bool = True,
+                     sort_label: str = "") -> int | None:
     """styled_table + single-row click selection; returns the positional row
     index or None. Degrades to a plain table on runtimes without selections."""
     return _render_table(df, height=height, column_config=column_config,
-                         key=key, selectable=True, slug=slug, days=days, size_note=size_note)
+                         key=key, selectable=True, slug=slug, days=days,
+                         size_note=size_note, sort_label=sort_label)
 
 
 def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
                          column_config: dict | None = None, slug: str | None = None,
-                         days: int | None = None, size_note: bool = True) -> None:
+                         days: int | None = None, size_note: bool = True,
+                         sort_label: str = "") -> None:
     """selectable_table with the sticky-selection guard built in (rec29).
 
     st.dataframe's selection is sticky and re-emits on EVERY rerun, so acting on
@@ -1261,7 +1264,7 @@ def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
     hand-rolled, extracted so no future page rediscovers the rerun loop.
     """
     sel = selectable_table(df, key=key, height=height, column_config=column_config,
-                           slug=slug, days=days, size_note=size_note)
+                           slug=slug, days=days, size_note=size_note, sort_label=sort_label)
     seen_key = f"_ow_navsel_{key}"
     if sel is not None and sel != st.session_state.get(seen_key):
         st.session_state[seen_key] = sel
