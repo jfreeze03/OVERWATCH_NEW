@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.129.1 — Readability wave 1 fix: large-frame duration unit (2026-08-03)
+
+Adversarial-review fix on v4.129.0 (found before push). rec26 humanizes durations
+only on the ≤400-row Styler path; on the large-frame (>400 row) Arrow path a
+`NumberColumn` can't render "1h 30m", so the humanizer callable was skipped and the
+value rendered raw — while rec31's header *still* dropped the unit token, leaving a
+unitless bare number (reachable e.g. on Operations → Tasks `AVG_SEC` over 90–365d).
+Fix: on the large-frame path a duration column now carries its unit in the value
+("1800.0 s" / "850 ms") via `_duration_display_format`, so the header token-drop stays
+correct on both paths. Also collapsed the sub-0.5ms zero glyph ("-0ms"/"0ms" → "0s").
+The review separately **confirmed** CSV-keeps-raw, numeric-sort, and no-crash all hold.
+Gates green: ruff, mypy, **pytest 1858 passed / 1 skipped**.
+
 ## 4.129.0 — Readability wave 1: humanize the numbers (2026-08-03)
 
 Reading-the-numbers pass on the table display layer (`components.py` + one pure

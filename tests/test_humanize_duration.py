@@ -33,6 +33,12 @@ def test_sub_second_seconds_render_ms():
     assert humanize_duration(0.05, "s") == "50ms"
 
 
+def test_sub_millisecond_collapses_to_one_zero_glyph():
+    # sub-0.5ms rounds to nothing -> a single "0s" glyph, never "0ms"/"-0ms"
+    assert humanize_duration(0.0004, "s") == "0s"
+    assert humanize_duration(-0.0004, "s") == "0s"
+
+
 def test_minutes_and_hours_units():
     assert humanize_duration(90, "min") == "1h 30m"      # 90 minutes
     assert humanize_duration(2.5, "h") == "2h 30m"

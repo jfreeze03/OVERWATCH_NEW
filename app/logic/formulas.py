@@ -228,7 +228,10 @@ def humanize_duration(value: object, unit: str = "s") -> str:
     if secs == 0:
         return "0s"
     if secs < 1:
-        return f"{sign}{secs * 1000:.0f}ms"
+        ms = secs * 1000
+        if round(ms) == 0:            # sub-0.5ms rounds to nothing -> one zero glyph
+            return "0s"
+        return f"{sign}{ms:.0f}ms"
     if secs < 10:                    # keep sub-10s legible with one decimal
         return f"{sign}{secs:.1f}s"
     total = round(secs)

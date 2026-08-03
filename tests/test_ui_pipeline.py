@@ -14,6 +14,7 @@ from app.ui.components import (  # noqa: E402
     SEVERITY_RANK,
     STYLER_MAX_ROWS,
     _auto_formats,
+    _duration_display_format,
     severity_sort,
     timestampish_columns,
 )
@@ -59,6 +60,15 @@ def test_printf_equivalents_cover_auto_formats():
     assert string_fmts <= set(_PRINTF_EQUIV), fmts
     assert fmts["SPEND_USD"] == "${:,.2f}"
     assert callable(fmts["LATENCY_MS"])
+
+
+def test_large_frame_duration_columns_carry_their_unit():
+    # rec26 regression guard: on the >400-row Arrow path a duration column can't be
+    # humanized (no printf for "1h 30m"), so its value must carry the unit instead —
+    # otherwise the header (which drops the token) leaves a unitless bare number.
+    assert _duration_display_format("ELAPSED_MS") == "%.0f ms"
+    assert _duration_display_format("QUEUED_SEC") == "%.1f s"
+    assert _duration_display_format("AVG_SEC") == "%.1f s"
 
 
 def test_pipeline_constants_sane():

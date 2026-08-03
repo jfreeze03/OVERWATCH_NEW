@@ -1014,6 +1014,14 @@ def _prettify_header(col: object) -> str:
     return " ".join(words) + unit_suffix
 
 
+def _duration_display_format(col: object) -> str:
+    """rec26: the large-frame (>400 row) Arrow path can't render humanized H/M/S
+    (NumberColumn takes a printf, not a callable). Carry the RAW value with its unit
+    instead — "850 ms" / "1800.0 s" — so a big duration table is never a unitless bare
+    number and the header can drop the token consistently with the Styler path."""
+    return "%.0f ms" if str(col).upper().endswith("_MS") else "%.1f s"
+
+
 def _export_filename(seq: int, slug: str | None) -> str:
     """rec14: a self-identifying CSV name — `overwatch-{page}-{table}-{YYYYMMDD}.csv` —
     so a folder of downloads is readable instead of overwatch_table_1/2/3.csv. The
@@ -1073,7 +1081,20 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         # column_config so display stays consistent (minus thousands commas).
         cfg = dict(column_config or {})
         for col, fmt in fmts.items():
-            if col not in cfg and fmt in _PRINTF_EQUIV:
+            if col in cfg:
+                continue
+            if callable(fmt):
+                # rec26 humanizer (a callable) has no printf equivalent; show the raw
+                # value WITH its unit so a >400-row duration column is never a unitless
+                # bare number (the header drops the token exactly as on the Styler path).
+                _dlabel = _prettify_header(col)
+                try:
+                    cfg[col] = st.column_config.NumberColumn(
+                        _dlabel if _dlabel != str(col) else None,
+                        format=_duration_display_format(col))
+                except Exception:  # noqa: BLE001
+                    pass
+            elif fmt in _PRINTF_EQUIV:
                 try:
                     cfg[col] = st.column_config.NumberColumn(format=_PRINTF_EQUIV[fmt])
                 except Exception:  # noqa: BLE001
