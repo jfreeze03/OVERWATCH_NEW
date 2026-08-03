@@ -297,9 +297,16 @@ def metric_card_html(item: dict) -> str:
     # the freshness/method/scope chips ride in a right-aligned group that wraps to
     # its own line on a long two-chip $ card instead of shrinking the label.
     chips = f'<span class="ow-card__chips">{badge}</span>' if badge else ""
+    # rec28: an optional secondary line under the value — e.g. credits beneath a dollar
+    # headline ("$45,200 MTD" / "12,300 cr") so a $-primary card still reconciles against
+    # Snowsight's credit numbers without mental math. Muted, reuses .ow-card__meta.
+    sub = ""
+    _sub = str(item.get("sub", "") or "")
+    if _sub:
+        sub = f'<div class="ow-card__meta">{html.escape(_sub)}</div>'
     return (f'<div class="{cls}" style="min-height:96px">'
             f'<div class="ow-card__title">{label}{help_html}{chips}</div>'
-            f'<div class="ow-card__value">{value}</div>{delta}{spark}</div>')
+            f'<div class="ow-card__value">{value}</div>{sub}{delta}{spark}</div>')
 
 
 # Global dimension chips a MIXED-scope panel may or may not honor. Kept in one

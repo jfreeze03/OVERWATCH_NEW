@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.132.0 — Readability wave 2: dollars + credits on the spend card (2026-08-03)
+
+- **rec28 (partial) — dollars-primary, credits-secondary.** `metric_card_html` gains
+  an optional `sub` slot (a muted secondary line under the value, reusing
+  `.ow-card__meta` — zero new CSS; absent renders nothing). Wired on Overview's
+  headline "Spend, last Nd" card so the dollar value now carries "12,300 cr" beneath
+  it — reconciling against Snowsight's credit numbers no longer needs mental math.
+  The MTD-pace card is deferred (its credits need a slice matching the pace window).
+  +1 card test. Gates green: ruff, mypy, **pytest 1862 passed / 1 skipped**.
+
 ## 4.131.0 — Readability wave 2: active-filter count (2026-08-03)
 
 - **rec25 — active-filter count on the collapsed scope strip.** The strip's border

@@ -226,6 +226,15 @@ def test_rec13_card_renders_three_distinct_trust_tokens():
     assert "ow-src-badge--other" in h2 and "ow-src-badge--scope" in h2
 
 
+def test_rec28_card_sub_slot_is_optional_secondary_line():
+    from app.ui.components import metric_card_html
+    # rec28: an optional "sub" renders a muted secondary line under the value
+    # (e.g. credits beneath a dollar headline); absent -> nothing extra.
+    h = metric_card_html({"label": "Spend", "value": "$45,200", "sub": "12,300 cr"})
+    assert '<div class="ow-card__value">$45,200</div><div class="ow-card__meta">12,300 cr</div>' in h
+    assert "ow-card__meta" not in metric_card_html({"label": "Spend", "value": "$45,200"})
+
+
 def test_rec13_theme_defines_method_and_scope_chip_styles():
     theme = _src("app/theme.py")
     assert ".ow-src-badge--method" in theme

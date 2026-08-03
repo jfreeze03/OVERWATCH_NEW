@@ -27,6 +27,7 @@ from app.logic.formulas import (
     blended_billed_usd,
     credits_to_usd,
     exec_summary_html,
+    format_credits,
     format_usd,
     md_dollars,
     month_days,
@@ -225,6 +226,8 @@ def render() -> None:
         daily, trend_source = _live_fallback_daily(company, days, rate)
 
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
+    # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
+    _win_credits = float(daily["CREDITS_TOTAL"].map(safe_float).sum()) if not daily.empty else None
     # One 150d metering read serves MTD here AND the forecast backtest below
     # (Codex r16 #17) — the separate 45d read survives only as the fallback
     # inside _mtd_spend_usd when this one fails.
@@ -447,6 +450,7 @@ def render() -> None:
         {
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
+            "sub": f"{format_credits(_win_credits)} cr" if _win_credits is not None else None,  # rec28
             "method": "metering", "scope": "company",  # rec 13: warehouse metering, company-scoped
             "spark": _spend_spark,
             "help": "Warehouse metering credits x "
