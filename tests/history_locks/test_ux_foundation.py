@@ -52,7 +52,11 @@ def test_auto_formats_by_convention():
     assert fmts["SPEND_USD"] == "${:,.2f}"
     assert fmts["CREDITS_BILLED"] == "{:,.2f}"
     assert fmts["RUNS"] == "{:,.0f}"
-    assert fmts["P95_S"] == "{:,.1f}"
+    # rec26: duration columns (_S/_SEC/_MS) humanize to H/M/S via a Styler callable —
+    # display-only, so the underlying value stays numeric (table sorts, CSV keeps raw).
+    assert callable(fmts["P95_S"])
+    assert fmts["P95_S"](5400) == "1h 30m"
+    assert fmts["P95_S"](0.85) == "850ms"
     assert "WAREHOUSE_NAME" not in fmts and "CONFIGURED" not in fmts
     # column_config wins over convention
     assert "SPEND_USD" not in _auto_formats(df, skip={"SPEND_USD"})

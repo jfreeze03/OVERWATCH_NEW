@@ -211,6 +211,36 @@ def format_credits(credits: float) -> str:
     return f"{value:,.4f}"
 
 
+_DURATION_FACTOR_SEC = {"ms": 0.001, "s": 1.0, "sec": 1.0, "min": 60.0, "h": 3600.0}
+
+
+def humanize_duration(value: object, unit: str = "s") -> str:
+    """Render a raw duration as compact H/M/S for reading — "1h 30m", "5m 12s",
+    "45s", "850ms". DISPLAY ONLY: callers format the display cell while the
+    underlying numeric column is untouched, so tables still sort by the real
+    value and the CSV keeps the raw number. ``unit`` is the column's native unit
+    ('ms', 's'/'sec', 'min', 'h'). NaN/garbage renders the em-dash no-value glyph."""
+    v = safe_float(value, default=float("nan"))
+    if v != v:                       # NaN / unparseable
+        return "—"
+    sign = "-" if v < 0 else ""
+    secs = abs(v) * _DURATION_FACTOR_SEC.get(unit.lower(), 1.0)
+    if secs == 0:
+        return "0s"
+    if secs < 1:
+        return f"{sign}{secs * 1000:.0f}ms"
+    if secs < 10:                    # keep sub-10s legible with one decimal
+        return f"{sign}{secs:.1f}s"
+    total = round(secs)
+    hours, rem = divmod(total, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f"{sign}{hours}h {minutes}m" if minutes else f"{sign}{hours}h"
+    if minutes:
+        return f"{sign}{minutes}m {seconds}s" if seconds else f"{sign}{minutes}m"
+    return f"{sign}{seconds}s"
+
+
 def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0891b2") -> str:
     """rec20: a self-contained inline-SVG sparkline for the HTML export — pure, no
     Streamlit dependency, so `exec_summary_html` stays in the logic layer and the

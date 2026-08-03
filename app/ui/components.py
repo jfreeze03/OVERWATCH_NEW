@@ -917,6 +917,8 @@ def _auto_formats(df, skip: set) -> dict:
     shows $ and thousands separators without per-site column_config)."""
     from pandas.api import types as ptypes
 
+    from app.logic.formulas import humanize_duration
+
     fmts: dict = {}
     for col in df.columns:
         if col in skip or not ptypes.is_numeric_dtype(df[col]):
@@ -926,7 +928,15 @@ def _auto_formats(df, skip: set) -> dict:
             fmts[col] = "${:,.2f}"
         elif "CREDITS" in c:
             fmts[col] = "{:,.2f}"
-        elif c.endswith(("_PCT", "_SHARE", "_GB", "_TB", "_MB", "_HOURS", "_S", "_SEC", "_MS")) or c == "HIT_PCT":
+        # rec26: raw durations read as arithmetic ("5,400" seconds). Humanize the
+        # DISPLAY to H/M/S via a Styler callable — the underlying numeric column is
+        # untouched, so the table still sorts by real value and the CSV keeps the raw
+        # number. Non-duration units (%/GB/hours) stay decimal + get a header unit (rec31).
+        elif c.endswith("_MS"):
+            fmts[col] = lambda v: humanize_duration(v, "ms")
+        elif c.endswith(("_SEC", "_S")):
+            fmts[col] = lambda v: humanize_duration(v, "s")
+        elif c.endswith(("_PCT", "_SHARE", "_GB", "_TB", "_MB", "_HOURS")) or c == "HIT_PCT":
             fmts[col] = "{:,.1f}"
         elif c.endswith(_COUNT_SUFFIXES):
             fmts[col] = "{:,.0f}"
@@ -937,6 +947,8 @@ def _auto_formats(df, skip: set) -> dict:
         if not is_delta_column(col) or col in skip or not ptypes.is_numeric_dtype(df[col]):
             continue
         f = fmts.get(col)
+        if callable(f):
+            continue  # a duration formatter (rec26) already signs its own negatives
         fmts[col] = f.replace("{:", "{:+", 1) if f else "{:+,.0f}"
     return fmts
 
@@ -972,16 +984,34 @@ def _slugify(text: object, fallback: str = "table") -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") or fallback
 
 
+# rec31: a trailing unit token becomes a parenthesized display unit on the header
+# (the CSV keeps the raw name). Duration tokens (S/SEC/MS) are handled separately —
+# their VALUES are humanized to H/M/S (rec26) so the token is dropped, not shown.
+_HEADER_UNITS = {"GB": "GB", "TB": "TB", "MB": "MB", "TIB": "TiB",
+                 "PCT": "%", "HOURS": "h", "MIN": "min"}
+_DURATION_TOKENS = {"S", "SEC", "MS"}
+
+
 def _prettify_header(col: object) -> str:
-    """rec13: SQL-shaped UPPER_SNAKE -> Title Case for DISPLAY only (df.to_csv keeps
-    the raw name). Leaves already-human headers (mixed case, or containing a space)
-    and short all-caps tokens (USD, MB, TB, ID, AI, p95) alone."""
+    """rec13/rec31: SQL-shaped UPPER_SNAKE -> Title Case for DISPLAY only (df.to_csv
+    keeps the raw name). A trailing unit token renders as "(GB)"/"(%)"/"(h)"; a
+    duration token (S/SEC/MS) is dropped because the value itself is humanized to
+    H/M/S (rec26). Already-human headers (mixed case, or a space) are left alone."""
     s = str(col)
     if s != s.upper() or " " in s:            # already human
         return s
+    parts = s.split("_")
+    unit_suffix = ""
+    if len(parts) > 1:
+        tail = parts[-1]
+        if tail in _DURATION_TOKENS:          # rec26: value carries the unit now
+            parts = parts[:-1]
+        elif tail in _HEADER_UNITS:           # rec31: show the unit in the header
+            unit_suffix = f" ({_HEADER_UNITS[tail]})"
+            parts = parts[:-1]
     _keep = {"USD", "AI", "ID", "MB", "GB", "TB", "TIB", "MS", "SEC", "PCT", "P95", "P50", "SLA", "CS", "QAS"}
-    words = [w if w in _keep else w.capitalize() for w in s.split("_")]
-    return " ".join(words)
+    words = [w if w in _keep else w.capitalize() for w in parts]
+    return " ".join(words) + unit_suffix
 
 
 def _export_filename(seq: int, slug: str | None) -> str:
@@ -1002,7 +1032,7 @@ def _export_filename(seq: int, slug: str | None) -> str:
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
-                  size_note: bool = True) -> int | None:
+                  size_note: bool = True, sort_label: str = "") -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
         return None
@@ -1154,6 +1184,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     # caption, and a caller that prints its own count passes size_note=False.
     if size_note and len(df) > 10:
         _cap = f"{len(df):,} rows"
+        if sort_label:                       # rec30: never make a reader guess if a list is ranked
+            _cap += f" · by {sort_label}"
         if isinstance(days, int) and days > 0:
             _cap += f" · last {days}d"
         st.caption(_cap)
@@ -1178,13 +1210,14 @@ def _download_fingerprint(df) -> str:
 
 def styled_table(df, *, height: int | None = None, column_config: dict | None = None,
                  slug: str | None = None, days: int | None = None,
-                 size_note: bool = True) -> None:
+                 size_note: bool = True, sort_label: str = "") -> None:
     """st.dataframe with semantic status colors, convention-based number
     formats, a height cap, a size caption, and a CSV download. ``slug`` names the
     export file (rec14); ``days`` adds the window to the size caption (rec31);
+    ``sort_label`` declares the order in that caption ("by $ desc", rec30);
     ``size_note=False`` suppresses that caption when the caller states its own count."""
     _render_table(df, height=height, column_config=column_config, slug=slug,
-                  days=days, size_note=size_note)
+                  days=days, size_note=size_note, sort_label=sort_label)
 
 
 def selectable_table(df, key: str, *, height: int | None = None,

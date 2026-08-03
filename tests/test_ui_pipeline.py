@@ -50,10 +50,15 @@ def test_timestampish_detection():
 
 def test_printf_equivalents_cover_auto_formats():
     df = pd.DataFrame({"SPEND_USD": [1.0], "CREDITS_TOTAL": [1.0],
-                       "IDLE_PCT": [1.0], "QUERY_COUNT": [1]})
+                       "IDLE_PCT": [1.0], "QUERY_COUNT": [1], "LATENCY_MS": [1200.0]})
     fmts = _auto_formats(df, set())
-    assert set(fmts.values()) <= set(_PRINTF_EQUIV), fmts
+    # rec26: duration columns produce a Styler CALLABLE (humanized H/M/S display);
+    # the large-frame path skips callables (renders raw-numeric). Every STRING format,
+    # though, must still have a printf equivalent for that Arrow-native path.
+    string_fmts = {f for f in fmts.values() if isinstance(f, str)}
+    assert string_fmts <= set(_PRINTF_EQUIV), fmts
     assert fmts["SPEND_USD"] == "${:,.2f}"
+    assert callable(fmts["LATENCY_MS"])
 
 
 def test_pipeline_constants_sane():

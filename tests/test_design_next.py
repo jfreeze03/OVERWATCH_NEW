@@ -64,6 +64,13 @@ def test_rec13_prettify_header():
     assert _prettify_header("CREDITS_USD") == "Credits USD"    # USD token preserved
     assert _prettify_header("USD") == "USD"                    # short all-caps left alone
     assert _prettify_header("Already Human") == "Already Human"
+    # rec26/rec31: a duration token drops (the value is humanized to H/M/S), a
+    # size/pct token becomes a parenthesized display unit.
+    assert _prettify_header("ELAPSED_S") == "Elapsed"
+    assert _prettify_header("QUEUED_SEC") == "Queued"
+    assert _prettify_header("LATENCY_MS") == "Latency"
+    assert _prettify_header("SPILL_REMOTE_GB") == "Spill Remote (GB)"
+    assert _prettify_header("HIT_PCT") == "Hit (%)"
     comp = _src("app/ui/components.py")
     assert "st.column_config.Column(_label, help=_help)" in comp          # relabel-only path (+ rec32 help)
     # r5-bug: the pin and the pretty label go into the SAME Column so a wide table's

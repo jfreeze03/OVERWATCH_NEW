@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.129.0 — Readability wave 1: humanize the numbers (2026-08-03)
+
+Reading-the-numbers pass on the table display layer (`components.py` + one pure
+formatter). All display-only — the underlying frame is untouched, so tables still
+sort by real values and every CSV keeps raw numbers. From the 2026-08-03 review.
+
+- **rec26 — humanized durations.** Raw duration columns read as arithmetic ("5,400"
+  seconds). New `formulas.humanize_duration()` renders them compact — "1h 30m",
+  "5m 12s", "45s", "850ms" — wired into `_auto_formats` as a **Styler callable** for
+  `_MS`/`_SEC`/`_S` columns. Because it formats the *display* (not the data), the
+  column still sorts by the real value and the CSV export keeps the raw number; the
+  large-frame (>400 row) Arrow path renders raw-numeric, unchanged.
+- **rec31 — unit-aware headers.** `_prettify_header` now maps a trailing unit token
+  to a parenthesized display unit — "Spill Remote (GB)", "Hit (%)", "Stalest (h)" —
+  and *drops* the token on humanized duration columns (the value carries the unit
+  now), so "Elapsed S" becomes "Elapsed" over "1h 30m" values.
+- **rec30 — declared sort order.** `styled_table(sort_label=…)` adds the ordering to
+  the size caption — "142 rows · by $ desc · last 30d" — so a reader never has to
+  infer whether a list is ranked or arbitrary.
+
+Coverage: new `tests/test_humanize_duration.py` (7 cases across units/magnitudes/NaN/
+sign); the pinned `_auto_formats`, `_prettify_header`, and printf-coverage tests were
+updated to the new shape and strengthened. Gates green: ruff, mypy, **pytest 1856
+passed / 1 skipped**.
+
 ## 4.128.0 — Cursor design review: deferred-items pickup (2026-08-02)
 
 The remaining deferred design items, all app-only. Closes the Cursor 50-rec review: 43 shipped
