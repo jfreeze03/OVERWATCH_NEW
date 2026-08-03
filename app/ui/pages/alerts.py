@@ -38,6 +38,7 @@ from app.ui.components import (
     page_header,
     panel_help,
     result_caption,
+    section_filter_contract,
     selectable_table,
     severity_sort,
     styled_table,
@@ -657,6 +658,11 @@ def _open_events_section(events, is_operator: bool) -> None:
 def render() -> None:
     f = filters()
     page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.", icon_name="alerts")
+    section_filter_contract(
+        f,
+        applies=("company",),
+        note="Headline counts are the current open queue; the global Window does not limit them.",
+    )
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()
 
@@ -707,6 +713,26 @@ def render() -> None:
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
                             key="alerts_section",
                             counts={"Open events": total_n} if (counts.usable() or events.ok) else None)
+    _contracts = {
+        "Open events": {
+            "applies": ("company",),
+            "note": "Current open and acknowledged events, independent of the global Window.",
+        },
+        "Rules": {
+            "applies": (),
+            "note": "Account-wide configuration and fixed 90-day precision evidence.",
+        },
+        "History": {
+            "applies": (),
+            "partial": ("company",),
+            "note": "Fixed 30/90-day lifecycle horizons; Company applies only to incident metrics.",
+        },
+        "Native delivery": {
+            "applies": (),
+            "note": "Account-wide routes, backlog, and delivery configuration.",
+        },
+    }
+    section_filter_contract(f, **_contracts[section])
 
     if section == "Open events":
         _open_events_section(events, is_operator)

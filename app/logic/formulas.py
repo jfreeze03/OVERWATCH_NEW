@@ -6,10 +6,13 @@ formula, rounding, and edge-case behavior live in exactly one tested place.
 
 from __future__ import annotations
 
+import csv
 import html as _html
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
+from io import StringIO
 
 DEFAULT_CREDIT_PRICE_USD = 3.68
 DEFAULT_AI_CREDIT_PRICE_USD = 2.20
@@ -284,6 +287,147 @@ def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0
             f'<polyline fill="none" stroke="{color}" stroke-width="1.6" points="{coords}"/></svg>')
 
 
+@dataclass(frozen=True)
+class ExecutiveSummaryView:
+    """Source-neutral executive readout shared by HTML, text, and CSV exports."""
+
+    company: str
+    days: int
+    generated: str
+    cards: tuple[tuple[str, str], ...]
+    drivers: tuple[tuple[str, str, str], ...] = ()
+    actions: tuple[str, ...] = ()
+    spend_series: tuple[float, ...] = ()
+    scope_notes: tuple[str, ...] = ()
+    title: str = "Executive summary"
+
+
+def executive_summary_html(view: ExecutiveSummaryView, *, presentation: bool = False) -> str:
+    """Render a self-contained, projector- and print-friendly executive summary."""
+    esc = _html.escape
+    spark = _spark_polyline(view.spend_series, width=360 if presentation else 240,
+                            height=64 if presentation else 40)
+    cards = "".join(
+        "<div class='card'><div class='label'>"
+        f"{esc(str(label))}</div><div class='value'>{esc(str(value))}</div></div>"
+        for label, value in view.cards
+    ) or "<div class='card'><div class='value'>No headline metrics available.</div></div>"
+    driver_rows = "".join(
+        "<tr><td>"
+        f"{esc(str(driver))}</td><td class='num'>{esc(str(value))}</td>"
+        f"<td>{esc(str(evidence))}</td></tr>"
+        for driver, value, evidence in view.drivers
+    ) or "<tr><td colspan='3'>No deductions - clean window.</td></tr>"
+    action_items = "".join(f"<li>{esc(str(action))}</li>" for action in view.actions)
+    if not action_items:
+        action_items = "<li>No open actions.</li>"
+    trend = (
+        f"<section class='trend'><div class='label'>Spend trend (last {int(view.days)}d)"
+        f"</div>{spark}</section>"
+        if spark else ""
+    )
+    notes = "<br>".join(esc(str(note)) for note in view.scope_notes)
+    body_class = "presentation" if presentation else "standard"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OVERWATCH {esc(view.title)}</title>
+<style>
+ :root {{ color-scheme: light; --ink:#0f172a; --muted:#475569; --line:#cbd5e1; --accent:#0369a1; }}
+ * {{ box-sizing:border-box; }}
+ body {{ font-family:'Segoe UI',Arial,sans-serif; color:var(--ink); background:#fff; margin:0; }}
+ main {{ max-width:1280px; margin:0 auto; padding:32px; }}
+ .kicker {{ font-size:12px; color:var(--muted); text-transform:uppercase; font-weight:700; }}
+ h1 {{ margin:5px 0 2px; font-size:28px; }}
+ .meta {{ color:var(--muted); font-size:13px; margin-bottom:20px; }}
+ .cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; }}
+ .card {{ border:1px solid var(--line); border-top:4px solid var(--accent); border-radius:6px; padding:14px 16px; }}
+ .label {{ font-size:12px; color:var(--muted); text-transform:uppercase; font-weight:700; }}
+ .value {{ font-size:19px; font-weight:700; margin-top:4px; overflow-wrap:anywhere; }}
+ h2 {{ font-size:17px; margin:24px 0 8px; }}
+ table {{ border-collapse:collapse; width:100%; font-size:14px; }}
+ th,td {{ border-bottom:1px solid var(--line); padding:8px; text-align:left; vertical-align:top; }}
+ th {{ color:var(--muted); font-size:12px; text-transform:uppercase; }}
+ .num {{ text-align:right; white-space:nowrap; }}
+ li {{ margin:6px 0; }}
+ .trend {{ margin:18px 0 4px; }}
+ .scope {{ margin-top:26px; color:var(--muted); font-size:12px; line-height:1.5; }}
+ body.presentation main {{ max-width:1600px; padding:4vh 4vw; }}
+ body.presentation h1 {{ font-size:clamp(32px,4vh,54px); }}
+ body.presentation .cards {{ grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:18px; }}
+ body.presentation .card {{ padding:20px; }}
+ body.presentation .value {{ font-size:clamp(24px,3vh,40px); }}
+ body.presentation table, body.presentation li {{ font-size:clamp(16px,1.7vh,24px); }}
+ @media (max-width:700px) {{ main {{ padding:18px; }} .cards {{ grid-template-columns:1fr; }} }}
+ @media print {{
+   @page {{ margin:14mm; }}
+   main {{ max-width:none; padding:0; }}
+   .card,tr,ul,table,svg,.trend {{ break-inside:avoid; }}
+ }}
+</style></head><body class="{body_class}"><main>
+<div class="kicker">OVERWATCH</div>
+<h1>{esc(view.title)} - {esc(str(view.company))}</h1>
+<div class="meta">Last {int(view.days)} days | generated {esc(str(view.generated))}</div>
+<div class="cards">{cards}</div>
+{trend}
+<h2>Score deductions</h2>
+<table><tr><th>Driver</th><th class="num">Impact</th><th>Evidence</th></tr>{driver_rows}</table>
+<h2>Top actions</h2><ul>{action_items}</ul>
+<div class="scope">{notes}</div>
+</main></body></html>"""
+
+
+def executive_summary_text(view: ExecutiveSummaryView) -> str:
+    """Render the shared executive model as durable plain text."""
+    lines = [
+        f"OVERWATCH {view.title} - {view.company}",
+        f"Last {view.days} days | generated {view.generated}",
+        "",
+    ]
+    lines.extend(f"{label}: {value}" for label, value in view.cards)
+    lines.extend(["", "Score deductions"])
+    lines.extend(
+        (f"- {driver}: {value} ({evidence})" for driver, value, evidence in view.drivers),
+    )
+    if not view.drivers:
+        lines.append("- None")
+    lines.extend(["", "Top actions"])
+    lines.extend(f"- {action}" for action in view.actions)
+    if not view.actions:
+        lines.append("- None")
+    if view.scope_notes:
+        lines.extend(["", "Scope and method"])
+        lines.extend(f"- {note}" for note in view.scope_notes)
+    return "\n".join(lines)
+
+
+def executive_slide_bullets(view: ExecutiveSummaryView) -> str:
+    """Produce paste-ready slide bullets from the same readout."""
+    bullets = [f"{view.title}: {view.company} ({view.days}d)"]
+    bullets.extend(f"- {label}: {value}" for label, value in view.cards)
+    if view.drivers:
+        driver, value, evidence = view.drivers[0]
+        bullets.append(f"- Largest deduction: {driver} {value} - {evidence}")
+    if view.actions:
+        bullets.append(f"- Immediate action: {view.actions[0]}")
+    return "\n".join(bullets)
+
+
+def executive_summary_csv(view: ExecutiveSummaryView) -> str:
+    """Render a tabular companion that keeps every headline and decision row."""
+    output = StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(["SECTION", "METRIC", "VALUE", "DETAIL"])
+    for label, value in view.cards:
+        writer.writerow(["Headline", label, value, ""])
+    for driver, value, evidence in view.drivers:
+        writer.writerow(["Score deduction", driver, value, evidence])
+    for action in view.actions:
+        writer.writerow(["Action", action, "", ""])
+    for note in view.scope_notes:
+        writer.writerow(["Scope", "Method note", "", note])
+    return output.getvalue()
+
+
 def exec_summary_html(*, company: str, days: int, generated: str, window_spend: str,
                       mtd_line: str, forecast_line: str, alerts_line: str,
                       score_line: str, drivers: list[tuple[str, str, str]],
@@ -297,66 +441,27 @@ def exec_summary_html(*, company: str, days: int, generated: str, window_spend: 
     ``spend_series`` (optional daily USD) adds a trend sparkline and the export
     carries a print stylesheet so it prints as a clean one-pager (rec20).
     """
-    esc = _html.escape
-    spark = _spark_polyline(spend_series)
-    company = esc(str(company))
-    generated = esc(str(generated))
-    window_spend = esc(str(window_spend))
-    mtd_line = esc(str(mtd_line))
-    forecast_line = esc(str(forecast_line))
-    alerts_line = esc(str(alerts_line))
-    score_line = esc(str(score_line))
-    driver_rows = "".join(
-        f"<tr><td>{esc(str(d))}</td><td style='text-align:right'>-{esc(str(p))}</td><td>{esc(str(e))}</td></tr>"
-        for d, p, e in drivers
-    ) or "<tr><td colspan='3'>No deductions — clean window.</td></tr>"
-    action_items = "".join(f"<li>{esc(str(a))}</li>" for a in actions) or "<li>No open actions.</li>"
-    trend_block = (f'<div class="trend"><div class="label">Spend trend '
-                   f'(last {int(days)}d)</div>{spark}</div>') if spark else ""
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>OVERWATCH executive summary</title>
-<style>
- body {{ font-family: 'Segoe UI', Arial, sans-serif; color: #0f172a; margin: 32px; }}
- .kicker {{ letter-spacing: .18em; font-size: 11px; color: #64748b; text-transform: uppercase; }}
- h1 {{ margin: 4px 0 2px 0; font-size: 22px; }}
- .meta {{ color: #64748b; font-size: 12px; margin-bottom: 18px; }}
- .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }}
- .card {{ border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 16px; min-width: 170px; }}
- .card .label {{ font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }}
- .card .value {{ font-size: 17px; font-weight: 600; margin-top: 3px; }}
- table {{ border-collapse: collapse; width: 100%; font-size: 13px; }}
- th, td {{ border-bottom: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }}
- th {{ color: #64748b; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }}
- h2 {{ font-size: 14px; margin: 22px 0 8px 0; }}
- .foot {{ margin-top: 26px; color: #94a3b8; font-size: 11px; }}
- .trend {{ margin: 6px 0 18px 0; }}
- .trend .label {{ font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }}
- @media print {{
-   @page {{ margin: 14mm; }}
-   body {{ margin: 0; }}
-   .card, tr, ul, table, svg, .trend {{ break-inside: avoid; }}
- }}
-</style></head><body>
-<div class="kicker">OVERWATCH</div>
-<h1>Executive summary — {company}</h1>
-<div class="meta">Last {days} days · generated {generated}</div>
-<div class="cards">
- <div class="card"><div class="label">Window spend</div><div class="value">{window_spend}</div></div>
- <div class="card"><div class="label">Month to date</div><div class="value">{mtd_line}</div></div>
- <div class="card"><div class="label">Projected month-end</div><div class="value">{forecast_line}</div></div>
- <div class="card"><div class="label">Open alerts</div><div class="value">{alerts_line}</div></div>
- <div class="card"><div class="label">Platform score</div><div class="value">{score_line}</div></div>
-</div>
-{trend_block}
-<h2>Score deductions</h2>
-<table><tr><th>Driver</th><th>Points</th><th>Evidence</th></tr>{driver_rows}</table>
-<h2>Top actions</h2>
-<ul>{action_items}</ul>
-<div class="foot">MTD &amp; projected are billed credits (cloud-services adjustment applied) and
-are account-wide; window spend is warehouse metering (credits &times; rate, no adjustment) and
-is company-scoped. All figures use account time; telemetry lags up to ~45 min (metering
-daily up to 24h). An <em>Incomplete</em> score means required health inputs did not load.</div>
-</body></html>"""
+    return executive_summary_html(ExecutiveSummaryView(
+        company=company,
+        days=days,
+        generated=generated,
+        cards=(
+            ("Window spend", window_spend),
+            ("Month to date", mtd_line),
+            ("Projected month-end", forecast_line),
+            ("Open alerts", alerts_line),
+            ("Platform score", score_line),
+        ),
+        drivers=tuple((driver, f"-{points}", evidence) for driver, points, evidence in drivers),
+        actions=tuple(actions),
+        spend_series=tuple(safe_float(value) for value in (spend_series or [])),
+        scope_notes=(
+            "MTD and projected are billed credits with the cloud-services adjustment applied "
+            "and are account-wide; window spend is warehouse metering and company-scoped.",
+            "All figures use account time; warehouse telemetry lags about 45 minutes and daily "
+            "metering can lag up to 24 hours. An Incomplete score means inputs did not load.",
+        ),
+    ))
 
 def mtd_pace_vs_prior_month(daily, today):
     """MTD spend paced against the SAME first-N-days of the prior month —
@@ -398,4 +503,3 @@ def mtd_pace_vs_prior_month(daily, today):
     if prior_rows.empty or prior <= 0:
         return mtd, prior, None
     return mtd, prior, (mtd_same - prior) / prior * 100.0
-

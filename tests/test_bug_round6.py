@@ -81,7 +81,9 @@ def test_bug4_health_read_distinguishes_error_from_empty():
     assert "raise _HealthUnavailable(" in m
     assert "except _HealthUnavailable:\n        return None" in m
     assert "if res.empty:\n        return {}" in m
-    assert 'if vals is None:   # r6-bug4' in m           # callers render "unavailable"
+    bar = m.split("def _persistent_status_bar", 1)[1].split("\ndef ", 1)[0]
+    assert "if vals is None:" in bar and "unavailable" in bar
+    assert '_page_href("Admin", "Errors & telemetry")' in bar
 
 
 def test_bug7_spend_trend_pace_excludes_partial_day():

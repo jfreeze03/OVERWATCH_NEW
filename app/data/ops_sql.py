@@ -317,18 +317,86 @@ LIMIT 100
 """
 
 
-def task_graph_nodes() -> str:
-    """Latest version of every task with predecessors + 24h failure count —
-    feeds the DAG view (pipeline topology at a glance)."""
-    return """
-WITH latest AS (
-    SELECT DATABASE_NAME, SCHEMA_NAME, NAME,
-           DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
-           PREDECESSORS, STATE, WAREHOUSE_NAME, SCHEDULE
-    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
-    QUALIFY ROW_NUMBER() OVER (PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
-                               ORDER BY GRAPH_VERSION_CREATED_ON DESC) = 1
+def _task_graph_snapshot_ctes(root_task_id: str = "", graph_version: int | None = None) -> str:
+    """Current tasks joined to one coherent version per root task graph."""
+    from app.core.sqlsafe import sql_literal
+
+    root = str(root_task_id or "").strip()
+    root_clause = f"WHERE v.ROOT_TASK_ID = {sql_literal(root)}" if root else ""
+    version_clause = ""
+    if graph_version is not None:
+        version = int(graph_version)
+        if version < 0:
+            raise ValueError("graph_version must be non-negative")
+        version_clause = f"\n      AND v.GRAPH_VERSION = {version}"
+        if not root_clause:
+            root_clause = "WHERE 1 = 1"
+    return f"""
+WITH current_tasks AS (
+    SELECT TO_VARCHAR(ID) AS TASK_ID, STATE, WAREHOUSE AS WAREHOUSE_NAME, SCHEDULE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASKS
+    WHERE DELETED IS NULL
 ),
+versions AS (
+    SELECT TO_VARCHAR(COALESCE(v.ROOT_TASK_ID, v.ID)) AS ROOT_TASK_ID,
+           TO_VARCHAR(v.ID) AS TASK_ID,
+           v.GRAPH_VERSION, v.GRAPH_VERSION_CREATED_ON,
+           v.DATABASE_NAME, v.SCHEMA_NAME, v.NAME,
+           v.DATABASE_NAME || '.' || v.SCHEMA_NAME || '.' || v.NAME AS TASK_FQN,
+           v.PREDECESSORS, t.STATE, t.WAREHOUSE_NAME, t.SCHEDULE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS v
+    INNER JOIN current_tasks t ON t.TASK_ID = TO_VARCHAR(v.ID)
+    INNER JOIN current_tasks r
+        ON r.TASK_ID = TO_VARCHAR(COALESCE(v.ROOT_TASK_ID, v.ID))
+),
+graph_versions AS (
+    SELECT DISTINCT v.ROOT_TASK_ID, v.GRAPH_VERSION, v.GRAPH_VERSION_CREATED_ON
+    FROM versions v
+    {root_clause}{version_clause}
+),
+latest_graphs AS (
+    SELECT ROOT_TASK_ID, GRAPH_VERSION, GRAPH_VERSION_CREATED_ON
+    FROM graph_versions
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY ROOT_TASK_ID
+        ORDER BY GRAPH_VERSION_CREATED_ON DESC, GRAPH_VERSION DESC
+    ) = 1
+),
+snapshot AS (
+    SELECT v.*
+    FROM versions v
+    INNER JOIN latest_graphs g
+        ON g.ROOT_TASK_ID = v.ROOT_TASK_ID
+       AND g.GRAPH_VERSION = v.GRAPH_VERSION
+)
+"""
+
+
+def task_graph_roots() -> str:
+    """Latest coherent graph snapshot per active root, for the graph picker."""
+    return _task_graph_snapshot_ctes() + """
+SELECT ROOT_TASK_ID, GRAPH_VERSION, MAX(GRAPH_VERSION_CREATED_ON) AS GRAPH_CREATED_ON,
+       COALESCE(
+           MAX(IFF(TASK_ID = ROOT_TASK_ID, TASK_FQN, NULL)),
+           MAX(IFF(COALESCE(ARRAY_SIZE(PREDECESSORS), 0) = 0, TASK_FQN, NULL))
+       ) AS ROOT_TASK_FQN,
+       COUNT(*) AS NODE_COUNT,
+       COUNT_IF(LOWER(COALESCE(STATE, '')) LIKE '%suspend%') AS SUSPENDED_NODES
+FROM snapshot
+GROUP BY ROOT_TASK_ID, GRAPH_VERSION
+ORDER BY NODE_COUNT DESC, ROOT_TASK_FQN
+"""
+
+
+def task_graph_nodes(root_task_id: str = "", graph_version: int | None = None) -> str:
+    """One complete task-graph snapshot with current state and 24h failures.
+
+    The old reader chose the newest row independently per task and silently
+    stopped at 300 rows. That could combine graph versions or draw dangling
+    edges. This reader keys the snapshot by ``ROOT_TASK_ID + GRAPH_VERSION``;
+    the UI applies an explicit fetch cap and refuses a truncated frame.
+    """
+    return _task_graph_snapshot_ctes(root_task_id, graph_version) + """,
 fails AS (
     SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
            COUNT(*) AS FAILURES_24H
@@ -337,12 +405,14 @@ fails AS (
       AND STATE = 'FAILED'
     GROUP BY 1
 )
-SELECT l.TASK_FQN, l.PREDECESSORS, l.STATE, l.WAREHOUSE_NAME, l.SCHEDULE,
-       COALESCE(f.FAILURES_24H, 0) AS FAILURES_24H
-FROM latest l
-LEFT JOIN fails f ON f.TASK_FQN = l.TASK_FQN
-ORDER BY l.TASK_FQN
-LIMIT 300
+SELECT s.ROOT_TASK_ID, s.GRAPH_VERSION, s.GRAPH_VERSION_CREATED_ON,
+       s.TASK_ID, s.TASK_FQN, s.PREDECESSORS, s.STATE,
+       s.WAREHOUSE_NAME, s.SCHEDULE,
+       COALESCE(f.FAILURES_24H, 0) AS FAILURES_24H,
+       COUNT(*) OVER () AS SNAPSHOT_NODE_COUNT
+FROM snapshot s
+LEFT JOIN fails f ON f.TASK_FQN = s.TASK_FQN
+ORDER BY s.TASK_FQN
 """
 
 

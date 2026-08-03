@@ -22,11 +22,14 @@ from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
 from app.logic.formulas import (
+    ExecutiveSummaryView,
     account_now,
     account_today,
     blended_billed_usd,
     credits_to_usd,
-    exec_summary_html,
+    executive_slide_bullets,
+    executive_summary_csv,
+    executive_summary_html,
     format_credits,
     format_usd,
     md_dollars,
@@ -43,8 +46,8 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     section_header,
-    section_scope_note,
     selectable_nav_table,
     styled_table,
 )
@@ -170,19 +173,27 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     # C11: metering-daily has no company grain, so MTD is account-wide even under
     # a company filter — the badge says so on the card (the help already did).
     if not hist.usable():
-        return {"label": "MTD spend", "value": format_usd(mtd_spend), "method": "billed", "scope": "account-wide",
+        _mtd_credits = safe_float(mtd_spend) / rate if rate > 0 else None
+        return {"label": "MTD spend", "value": format_usd(mtd_spend),
+                "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
+                "method": "billed", "scope": "account-wide",
                 "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
     frame = hist.df.copy()
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
     mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
+    _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
     if pct is None:
-        return {"label": "MTD spend", "value": format_usd(mtd), "method": "billed", "scope": "account-wide",
+        return {"label": "MTD spend", "value": format_usd(mtd),
+                "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
+                "method": "billed", "scope": "account-wide",
                 "help": "Pace vs last month appears once the prior month has "
                         "daily facts (backfill_365.sql loads the year)." + budget_note}
     return {"label": "MTD vs last month (same days)",
-            "value": format_usd(mtd), "method": "billed", "scope": "account-wide",
+            "value": format_usd(mtd),
+            "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
+            "method": "billed", "scope": "account-wide",
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
             "help": "Billed credits, account-wide, at today's rate. The value is "
@@ -443,12 +454,20 @@ def render() -> None:
         "open_high_actions": open_high_actions,
     }, weights=scoring.resolve_weights(settings), available=_available, degraded=_degraded)
 
-    # ---- KPI row -----------------------------------------------------------
+    # ---- Decision bands ----------------------------------------------------
     _spend_spark = (daily["USD"].tail(14).tolist() if not daily.empty else None)
     _score_incomplete = score.state == "Incomplete"   # C1
     _score_sev = ("warn" if _score_incomplete
                   else "ok" if score.score >= 85 else "warn" if score.score >= 70 else "bad")
-    kpis = [
+    drivers = _board_panel(board, "COST_DRIVER")
+    driver_view = (
+        drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"]
+        .sum()
+        .sort_values("VALUE_USD", ascending=False)
+        if not drivers.empty
+        else pd.DataFrame(columns=["DIMENSION", "VALUE_USD"])
+    )
+    company_kpis = [
         {
             "label": f"Spend, last {days}d ({company})",
             "value": format_usd(window_spend),
@@ -461,6 +480,31 @@ def render() -> None:
                     "are on Cost & Contract -> Spend & Attribution; Snowsight adds storage and transfer, so it "
                     "reads higher.",
         },
+    ]
+    observed_days = int(daily["DAY"].nunique()) if "DAY" in daily.columns else 0
+    if observed_days:
+        company_kpis.append({
+            "label": "Average per observed day",
+            "value": format_usd(window_spend / observed_days),
+            "method": "metering",
+            "scope": "company",
+            "help": "Window warehouse spend divided by days present in the served series. "
+                    "Today may still be partial.",
+        })
+    if not driver_view.empty:
+        top_driver = driver_view.iloc[0]
+        driver_total = float(driver_view["VALUE_USD"].map(safe_float).sum())
+        top_usd = safe_float(top_driver.get("VALUE_USD"))
+        company_kpis.append({
+            "label": "Top warehouse driver",
+            "value": str(top_driver.get("DIMENSION") or "n/a"),
+            "delta": f"{format_usd(top_usd)} · {(top_usd / driver_total * 100) if driver_total else 0:.0f}%",
+            "delta_color": "off",
+            "method": "metering",
+            "scope": "company",
+        })
+
+    account_kpis = [
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
             "label": "MTD spend",
             "value": "Needs daily facts",
@@ -500,28 +544,39 @@ def render() -> None:
                           "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
-    panel_help(
-        "The headline board: 'Spend, last Nd' is company-scoped warehouse metering "
-        "(credits x rate); MTD, projected month-end, open alerts and the platform score "
-        "are account-wide, so changing the spend window doesn't move them. When the platform "
-        "score is red (<70) or reads Incomplete, open 'Platform score deductions' below and "
-        "work the highest-penalty driver first."
+
+    section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
+    section_filter_contract(
+        f,
+        applies=("company", "days"),
+        note="Warehouse-metering lens; detailed Database/Schema filters do not reshape these headlines.",
     )
-    kpi_row(kpis)
+    panel_help(
+        "Company-scoped warehouse economics for the selected window. Serverless, AI, storage, "
+        "transfer, and the cloud-services rebate remain on Cost & Contract so this additive "
+        "warehouse lens continues to reconcile."
+    )
+    kpi_row(company_kpis)
+
+    section_header("Account risk & contract", "warn" if critical_alerts else "info", "contract")
+    section_filter_contract(
+        f,
+        applies=(),
+        partial=("company",),
+        note="MTD, forecast, alerts, freshness, and owner queue are account-wide; the score alone "
+             "uses Company for recent throughput and pressure.",
+    )
+    panel_help(
+        "Account-wide billing pace and operating risk. When the platform score is red (<70) or "
+        "Incomplete, open its deductions below and work the highest-penalty driver first."
+    )
+    kpi_row(account_kpis)
     # N7: MTD & Projected are credit-billed services (compute + serverless + AI).
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
     # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
     # the whole bill. Not folded in: that would break the credits x rate contract.
     st.caption("MTD & Projected cover credit-billed services (compute, serverless, AI). "
                "Storage and data-transfer bill separately — see Cost & Contract → org rate card.")
-    # rec 11: these headline KPIs are account-/company-scoped and do NOT honor the
-    # warehouse/schema/user/database dimension chips. Surface that ONLY when such a
-    # chip is actually set, so a user who narrowed by warehouse upstream isn't misled
-    # into reading these numbers as filtered. (window-spend is company-scoped -> the
-    # 'company' key is honored implicitly; the dimension chips are the misleading ones.)
-    _scope_note = section_scope_note(f)
-    if _scope_note:
-        st.caption(_scope_note)
 
     # ---- The work + the drivers (rec4: above the charts, not buried below) ----
     # An executive landing page leads with what needs an owner, not two charts.
@@ -529,6 +584,11 @@ def render() -> None:
     left, right = st.columns([1.15, 1.0])
     with left:
         section_header("Top actions")
+        section_filter_contract(
+            f,
+            applies=(),
+            note="Account-wide owner queue, ranked by operational priority.",
+        )
         panel_help(
             "The real ACTION_QUEUE — the work waiting on an owner — ranked by severity, then "
             "overdue, then estimated dollars, then age (never template rows). When rows appear "
@@ -567,10 +627,13 @@ def render() -> None:
                 ]
     with right:
         section_header("Top cost drivers")
-        drivers = _board_panel(board, "COST_DRIVER")
-        if not drivers.empty:
-            view = (drivers.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
-                    .sort_values("VALUE_USD", ascending=False))
+        section_filter_contract(
+            f,
+            applies=("company", "days"),
+            note="Warehouse-compute drivers; serverless and AI are reported separately.",
+        )
+        if not driver_view.empty:
+            view = driver_view
             # rec40: bars are click-through — clicking a warehouse jumps to Operations >
             # Warehouses pre-filtered to it. clickable_bar_usd degrades to a plain bar on
             # runtimes without altair on_select, and its return is guarded to fire once
@@ -631,6 +694,11 @@ def render() -> None:
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
     section_header("Monthly spend by warehouse")
+    section_filter_contract(
+        f,
+        applies=("company",),
+        note="Fixed trailing 12-month view; the global Window does not shorten this chart.",
+    )
     _mres = run_mart_first(
         mart27_sql.monthly_spend_by_warehouse(12, company),
         mart27_sql.fact_monthly_spend_by_warehouse(12, company),
@@ -682,6 +750,11 @@ def render() -> None:
 
     # ---- Spend trend ---------------------------------------------------------
     section_header("Spend trend")
+    section_filter_contract(
+        f,
+        applies=("company", "days"),
+        note="Warehouse metering at the configured compute-credit rate.",
+    )
     if daily.empty:
         if not trend_source.ok:
             st.error(f"Spend history unavailable: {trend_source.error}")
@@ -795,16 +868,6 @@ def render() -> None:
     _fc_export = ((format_usd(forecast.projected_usd)
                    + f" ({format_usd(forecast.low_usd)}–{format_usd(forecast.high_usd)}) · account-wide")
                   if forecast.ok else "insufficient history")
-    summary = (
-        f"OVERWATCH executive summary — {company}, last {days} days — "
-        f"{account_now().strftime('%Y-%m-%d %H:%M')} (account time)\n"
-        f"Window spend ({company}, warehouse metering, credits × rate): {format_usd(window_spend)}\n"
-        f"MTD spend: {_mtd_export}\n"
-        f"Projected month-end: {_fc_export}\n"
-        f"Open alerts: {critical_alerts} critical, {high_alerts} high\n"
-        f"Platform score: {_score_export}"
-        + ("".join(f"\n  - {d.driver}: -{d.penalty:.1f} pts ({d.evidence})" for d in score.drivers) if score.drivers else "")
-    )
     # rec20: hand the export the daily spend series so it renders a trend sparkline
     # (defensive — daily/usd_col may be absent when spend history hasn't loaded).
     _export_spark = None
@@ -813,21 +876,42 @@ def render() -> None:
                    daily.columns[-1] if len(daily.columns) else None)
         if _uc is not None:
             _export_spark = [safe_float(v) for v in daily[_uc].tail(30).tolist()]
-    html = exec_summary_html(
-        company=company, days=days, generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
-        window_spend=f"{format_usd(window_spend)} · {company}, metering",
-        mtd_line=_mtd_export,
-        forecast_line=_fc_export,
-        alerts_line=f"{critical_alerts} critical · {high_alerts} high",
-        score_line=_score_export,
-        drivers=[(d.driver, f"{d.penalty:.1f}", d.evidence) for d in score.drivers],
-        actions=action_lines,
-        spend_series=_export_spark,
+    _export_view = ExecutiveSummaryView(
+        company=company,
+        days=days,
+        generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
+        cards=(
+            ("Window spend", f"{format_usd(window_spend)} - {company}, metering"),
+            ("Month to date", _mtd_export),
+            ("Projected month-end", _fc_export),
+            ("Open alerts", f"{critical_alerts} critical | {high_alerts} high"),
+            ("Platform score", _score_export),
+        ),
+        drivers=tuple(
+            (driver.driver, f"-{driver.penalty:.1f} pts", driver.evidence)
+            for driver in score.drivers
+        ),
+        actions=tuple(action_lines),
+        spend_series=tuple(_export_spark or []),
+        scope_notes=(
+            "Window spend is company-scoped warehouse metering at the configured credit rate; "
+            "it excludes the account-level cloud-services adjustment.",
+            "MTD and projected spend are account-wide billed credits with the cloud-services "
+            "adjustment applied. Daily metering can lag up to 24 hours.",
+            "An Incomplete platform score means required health inputs did not load.",
+        ),
     )
-    c_html, c_txt = st.columns(2)
+    html = executive_summary_html(_export_view, presentation=True)
+    summary = executive_slide_bullets(_export_view)
+    c_html, c_txt, c_csv = st.columns(3)
     with c_html:
-        export_button("Executive summary (HTML)", html,
+        export_button("Presentation summary (HTML)", html,
                       file_name="overwatch_executive_summary.html", mime="text/html",
                       use_container_width=True)
     with c_txt:
-        download_text_button("Plain-text version (.txt)", summary, "overwatch_executive_summary.txt")
+        download_text_button("Slide bullets (.txt)", summary,
+                             "overwatch_executive_slide_bullets.txt")
+    with c_csv:
+        export_button("Summary data (CSV)", executive_summary_csv(_export_view),
+                      file_name="overwatch_executive_summary.csv", mime="text/csv",
+                      use_container_width=True)

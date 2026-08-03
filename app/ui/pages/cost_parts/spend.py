@@ -15,16 +15,24 @@ import pandas as pd
 import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
-from app.core.query import run
+from app.core.query import run, run_batch
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
+from app.logic.cost_coverage import (
+    SERVICE_CATEGORY,
+    drill_ready_spend_share,
+    service_category,
+    service_coverage_inventory,
+)
 from app.logic.directory import resolve_display
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
 from app.ui import charts
 from app.ui.components import (
+    empty_state,
     guard,
     kpi_row,
+    lazy_sections,
     panel_help,
     result_caption,
     run_mart_first,
@@ -36,17 +44,7 @@ from app.ui.components import (
 
 _PAGE = "Cost & Contract"
 
-_SERVICE_CATEGORY = {
-    "WAREHOUSE_METERING": "Warehouse",
-    "WAREHOUSE_METERING_READER": "Warehouse (reader)",
-    "SNOWPIPE": "Serverless", "SNOWPIPE_STREAMING": "Serverless",
-    "SERVERLESS_TASK": "Serverless", "SERVERLESS_ALERTS": "Serverless",
-    "AUTOMATIC_CLUSTERING": "Serverless", "MATERIALIZED_VIEW": "Serverless",
-    "SEARCH_OPTIMIZATION": "Serverless", "QUERY_ACCELERATION": "Serverless",
-    "SNOWPARK_CONTAINER_SERVICES": "Serverless", "COPY_FILES": "Serverless",
-    "OPENFLOW_COMPUTE_SNOWFLAKE": "Serverless", "HYBRID_TABLE_REQUESTS": "Storage",
-    "REPLICATION": "Replication", "STORAGE": "Storage",
-}
+_SERVICE_CATEGORY = SERVICE_CATEGORY
 
 
 # Split out of app/ui/pages/cost.py (V028): section bodies only —
@@ -54,10 +52,7 @@ _SERVICE_CATEGORY = {
 # cost.py; ruff --fix prunes what this section does not use.
 
 def _categorize(service: str) -> str:
-    s = str(service or "").upper()
-    if "CORTEX" in s or s.startswith("AI") or "INTELLIGENCE" in s:
-        return "AI / Cortex"
-    return _SERVICE_CATEGORY.get(s, "Other")
+    return service_category(service)
 
 
 def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
@@ -78,7 +73,7 @@ def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
     ]
 
 
-def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
+def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
                *, metering_res=None, csr_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
@@ -153,6 +148,156 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float,
             "- Same telemetry, different lenses — each number is exact for its own question."
         ))
     result_caption(res)
+
+    st.markdown("**Cost drill coverage**")
+    coverage = service_coverage_inventory(df, rate, ai_rate)
+    ready_share = drill_ready_spend_share(coverage)
+    material_gaps = coverage[
+        (coverage["MATERIALITY"] == "Material")
+        & (coverage["DRILL_STATUS"] == "Service total only")
+    ] if not coverage.empty else coverage
+    kpi_row([
+        {
+            "label": "Spend with a native drill path",
+            "value": f"{ready_share:.1f}%",
+            "help": "Share of billed metering dollars backed by a native Snowflake object-level view.",
+        },
+        {
+            "label": "Material coverage gaps",
+            "value": str(len(material_gaps)),
+            "help": "Service totals above $500 or 1% of spend without a native object-level drill.",
+        },
+    ])
+    styled_table(coverage, height=300, sort_label="$ desc")
+    st.caption(
+        "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
+        "charges use organization currency data and appear in the on-demand detail below."
+    )
+
+    if st.toggle(
+        "Load detailed service attribution",
+        key="cost_service_attribution_detail",
+        help="Runs only the selected native service-detail query; off by default for a faster paint.",
+    ):
+        detail = lazy_sections(
+            ["Replication", "Compute pools & notebooks", "Marketplace"],
+            key="cost_service_detail_section",
+            deep_link=False,
+        )
+        if detail == "Replication":
+            rep = run(
+                cost_sql.replication_by_database(days, company, database),
+                page=_PAGE,
+                key=f"replication_db_{company}_{database}_{days}",
+                tier="historical",
+                source="DATABASE_REPLICATION_USAGE_HISTORY (native replication detail)",
+            )
+            if rep.ok and rep.empty:
+                empty_state(
+                    "clean",
+                    "No replication credits or transferred bytes were recorded in this scope.",
+                )
+            elif guard(rep, ""):
+                rep_df = rep.df.copy()
+                rep_df["USD"] = pd.to_numeric(rep_df["CREDITS"], errors="coerce").fillna(0.0) * rate
+                detail_credits = float(rep_df["CREDITS"].sum())
+                metered_credits = float(
+                    pd.to_numeric(
+                        df.loc[df["SERVICE_TYPE"].astype(str).str.upper() == "REPLICATION", "CREDITS_BILLED"],
+                        errors="coerce",
+                    ).fillna(0.0).sum()
+                )
+                ratio = detail_credits / metered_credits * 100.0 if metered_credits > 0 else 0.0
+                kpi_row([
+                    {"label": "Replication detail", "value": format_usd(float(rep_df["USD"].sum()))},
+                    {
+                        "label": "Detail vs billed credits",
+                        "value": f"{ratio:.1f}%" if metered_credits > 0 else "No billed baseline",
+                        "help": "Usage-history credits divided by billed metering credits; latency and adjustments can differ.",
+                    },
+                    {"label": "Databases", "value": str(len(rep_df))},
+                ])
+                styled_table(rep_df, height=300, sort_label="credits desc")
+                st.caption(
+                    "Native secondary-database grain. Company and Database filters are applied to "
+                    "DATABASE_NAME; this is measured usage, while the headline uses billed credits."
+                )
+                result_caption(rep)
+        elif detail == "Compute pools & notebooks":
+            batch = run_batch(
+                [
+                    {
+                        "key": "pools",
+                        "sql": cost_sql.compute_pool_usage(days),
+                        "source": "SNOWPARK_CONTAINER_SERVICES_HISTORY (native pool detail)",
+                    },
+                    {
+                        "key": "notebooks",
+                        "sql": cost_sql.notebook_container_usage(days),
+                        "source": "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY (native notebook detail)",
+                    },
+                ],
+                page=_PAGE,
+                tier="historical",
+            ) or {}
+            pools = batch.get("pools")
+            notebooks = batch.get("notebooks")
+            if pools is not None and pools.ok and pools.empty:
+                empty_state("clean", "No Snowpark Container Services credits were recorded in this window.")
+            elif pools is not None and guard(pools, ""):
+                pool_df = pools.df.copy()
+                pool_df["USD"] = pd.to_numeric(pool_df["CREDITS"], errors="coerce").fillna(0.0) * rate
+                kpi_row([
+                    {"label": "SPCS spend", "value": format_usd(float(pool_df["USD"].sum()))},
+                    {"label": "Compute pools", "value": str(pool_df["COMPUTE_POOL_NAME"].nunique())},
+                    {"label": "Applications", "value": str(pool_df["APPLICATION_NAME"].nunique())},
+                ])
+                styled_table(pool_df, height=300, sort_label="credits desc")
+                result_caption(pools)
+            if notebooks is not None and notebooks.ok and notebooks.empty:
+                empty_state("no_data_yet", "No notebook container runtime was recorded in this window.")
+            elif notebooks is not None and guard(notebooks, ""):
+                notebook_df = notebooks.df.copy()
+                notebook_df["USD"] = (
+                    pd.to_numeric(notebook_df["CREDITS"], errors="coerce").fillna(0.0) * rate
+                )
+                st.markdown("**Notebook subset**")
+                styled_table(notebook_df, height=300, sort_label="credits desc")
+                result_caption(notebooks)
+            st.caption(
+                "Account-wide: these views carry no company key. Notebook credits are a subset of "
+                "SPCS credits and must not be added to the compute-pool total."
+            )
+        else:
+            market = run(
+                cost_sql.marketplace_paid_usage(days),
+                page=_PAGE,
+                key=f"marketplace_paid_{days}",
+                tier="historical",
+                source="ORGANIZATION_USAGE.MARKETPLACE_PAID_USAGE_DAILY",
+            )
+            if market.ok and market.empty:
+                empty_state("clean", "No paid Marketplace charges were recorded for this account.")
+            elif guard(market, ""):
+                market_df = market.df.copy()
+                totals = (
+                    market_df.groupby("CURRENCY", dropna=False)["CHARGE"]
+                    .sum()
+                    .sort_values(ascending=False)
+                )
+                kpi_row([
+                    {
+                        "label": f"Marketplace ({currency})",
+                        "value": f"{float(amount):,.2f} {currency}",
+                    }
+                    for currency, amount in totals.head(4).items()
+                ])
+                styled_table(market_df, height=320, sort_label="charge desc")
+                st.caption(
+                    "Organization billing truth for this consumer account. Charges remain in their "
+                    "native currency and are not converted through the credit-rate setting."
+                )
+                result_caption(market)
 
     st.markdown("**Cloud-services health by warehouse**")
     st.caption(
@@ -272,6 +417,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
         view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
         view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
+        window_usd = float(view["USD_CURRENT"].sum())
+        prior_window_usd = float(view["USD_PRIOR"].sum())
         styled_table(  # rec21: + delta sign-coloring, status tint, CSV
             view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_PCT"]],
             column_config={
@@ -279,8 +426,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.2f"),
                 "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
             },
+            totals=(("Current spend", format_usd(window_usd)),
+                    ("Prior spend", format_usd(prior_window_usd))),
         )
-        window_usd = float(view["USD_CURRENT"].sum())
         # r4: settle the allocated-share vs pool WINDOW mismatch. The live-share
         # fallback scans only <= MAX_LIVE_WINDOW_DAYS of QUERY_HISTORY (a deliberate
         # cost guardrail we KEEP), so for a >90d window its shares are 90d-scoped;

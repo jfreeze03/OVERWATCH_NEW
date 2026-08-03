@@ -987,8 +987,11 @@ def call_children_costs(call_query_id: str, days: int = 7) -> str:
     lit = sql_literal(str(call_query_id or "").strip())
     return f"""
 SELECT a.QUERY_ID,
+       a.PARENT_QUERY_ID,
+       a.ROOT_QUERY_ID,
        IFF(a.QUERY_ID = {lit}, 'CALL (own time)', COALESCE(q.QUERY_TYPE, '?')) AS STEP_TYPE,
        LEFT(COALESCE(q.QUERY_TEXT, '(history pruned)'), 120) AS STEP_PREVIEW,
+       q.START_TIME AS STEP_START,
        ROUND(COALESCE(q.TOTAL_ELAPSED_TIME, 0) / 1000.0, 1) AS ELAPSED_SEC,
        ROUND(COALESCE(a.CREDITS_ATTRIBUTED_COMPUTE, 0)
              + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0), 6) AS CREDITS
@@ -997,7 +1000,7 @@ LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
        ON q.QUERY_ID = a.QUERY_ID
       AND q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 WHERE a.ROOT_QUERY_ID = {lit} OR a.QUERY_ID = {lit}
-ORDER BY CREDITS DESC
+ORDER BY STEP_START, a.QUERY_ID
 LIMIT 500
 """
 

@@ -136,7 +136,8 @@ def test_c18_task_nodes_reader():
 def test_c18_operations_panel_wired_mart_only():
     ops = _src("app/ui/pages/operations.py")
     assert "task_nodes(days, company" in ops
-    assert "Per-node timing" in ops
+    assert "Node run timing" in ops
+    assert '["Health", "Graph", "Runs"]' in ops
     # mart-only: must NOT be wrapped in run_mart_first (no numerically-agreeing live leg)
     assert "run_mart_first(mart27_sql.task_nodes" not in ops
 
@@ -453,7 +454,8 @@ def test_n2_undelivered_arm_in_strip():
 
 def test_n2_surfaced_on_shell_brief_and_control_room():
     assert "UNDELIVERED_CRITICAL" in _src("app/main.py")
-    assert "reached nobody" in _src("app/main.py")
+    assert "Undelivered criticals" in _src("app/main.py")
+    assert '_page_href("Alerts", "Native delivery")' in _src("app/main.py")
     assert "UNDELIVERED_CRITICAL" in _src("app/ui/pages/brief.py")
     assert "UNDELIVERED_CRITICAL" in _src("app/ui/pages/control_room.py")
 

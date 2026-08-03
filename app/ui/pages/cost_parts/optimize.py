@@ -29,6 +29,7 @@ from app.data.common import bounded_days
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
+from app.logic.capacity import capacity_forecasts
 from app.logic.formulas import format_usd, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
@@ -43,6 +44,7 @@ from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     blast_radius,
     confirm_gate,
+    empty_state,
     guard,
     kpi_row,
     lazy_sections,
@@ -134,6 +136,68 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             ])
             for a_line in sim["assumptions"]:
                 st.caption(f"· {a_line}")
+
+def _capacity_forecast_panel(company: str) -> None:
+    """On-demand, mart-only forecast of recurring warehouse pressure."""
+    st.markdown("**Capacity pressure forecast**")
+    st.caption(
+        "Complete days only, fixed 90-day evidence window. A forecast appears only when "
+        "pressure recurs, workload growth agrees, recent settings are stable, and a 7-day "
+        "holdout is accurate enough."
+    )
+    if not st.toggle(
+        "Load capacity forecast",
+        key="capacity_forecast_load",
+        help="Reads warehouse daily facts and change history; no live system-view fallback.",
+    ):
+        st.caption("Load on demand after the current sizing evidence, not on first paint.")
+        return
+    result = run(
+        mart_sql.warehouse_capacity_daily(90, company),
+        page=_PAGE,
+        key=f"capacity_forecast_{company}_90",
+        tier="hourly",
+        source="FACT_QUERY_HOURLY + FACT_WAREHOUSE_DAILY + WAREHOUSE_CHANGE_REGISTRY",
+    )
+    if not guard(result, "No complete-day warehouse facts are available for forecasting."):
+        return
+    forecast = capacity_forecasts(result.df)
+    if forecast.empty:
+        empty_state("no_data_yet", "No warehouse has enough complete-day evidence yet.")
+        return
+    statuses = forecast["STATUS"].value_counts().to_dict()
+    kpi_row([
+        {"label": "Pressure now", "value": str(statuses.get("PRESSURE NOW", 0)),
+         "severity": "bad" if statuses.get("PRESSURE NOW", 0) else ""},
+        {"label": "Forecasted <=180d", "value": str(statuses.get("FORECAST", 0)),
+         "severity": "warn" if statuses.get("FORECAST", 0) else ""},
+        {"label": "Watch / unstable",
+         "value": str(statuses.get("WATCH", 0) + statuses.get("UNSTABLE", 0))},
+        {"label": "Insufficient evidence", "value": str(statuses.get("INSUFFICIENT", 0))},
+    ])
+    styled_table(
+        forecast,
+        height=360,
+        sort_label="risk, then ETA",
+        column_config={
+            "CURRENT_PRESSURE_INDEX": st.column_config.NumberColumn(
+                "Current pressure", format="%.2f",
+                help="max(7d median queue-min / 30, remote-spill-GB / 1).",
+            ),
+            "SLOPE_PER_DAY": st.column_config.NumberColumn("Trend / day", format="%.4f"),
+            "R2": st.column_config.NumberColumn("Fit R2", format="%.2f"),
+            "BACKTEST_MAE": st.column_config.NumberColumn("Holdout MAE", format="%.2f"),
+            "WORKLOAD_GROWTH_PCT": st.column_config.NumberColumn(
+                "Demand growth %", format="%.1f%%"),
+            "COVERAGE_PCT": st.column_config.NumberColumn("Coverage %", format="%.1f%%"),
+        },
+    )
+    st.caption(
+        "No ETA is intentional for STABLE, WATCH, UNSTABLE, or INSUFFICIENT rows. "
+        "The interval is model uncertainty, not a capacity promise; validate against workload plans."
+    )
+    result_caption(result)
+
 
 def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool) -> None:
     """Optimization insights: idle/right-sizing advisors, expensive queries and
@@ -337,6 +401,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
 
+        st.divider()
+        _capacity_forecast_panel(company)
+
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------
         st.markdown("**Most expensive queries (allocated $)**")
@@ -523,7 +590,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             _adf["USD"] = _adf["CREDITS"].map(safe_float) * rate
             kpi_row([{"label": "Object-attributed spend", "value": format_usd(float(_adf["USD"].sum())),
                       "help": "Sum across arms x the configured rate. Additive by construction."}])
-            charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD", title="$ by cost arm")
+            charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD",
+                           title="$ by cost arm", takeaway=True)
             _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db), page=_PAGE,
                        key=f"objcost_top_{company}_{days}_{_oc_db}", tier="recent",
                        source="FACT_OBJECT_COST_DAILY (top objects)", probe=True)

@@ -37,7 +37,7 @@ WINDOWS = (
     "projection",               # a forecast to a horizon
     "n/a",
 )
-UNITS = ("USD", "credits", "days", "percent", "count", "ratio", "bytes")
+UNITS = ("USD", "currency", "credits", "days", "percent", "count", "ratio", "bytes")
 PARTIAL_DAY = ("excluded", "included", "n/a")
 
 # rec32: header help for columns whose BASIS is otherwise only in a per-page
@@ -88,6 +88,36 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD", filters=(),
            required_sources=("ACCOUNT_USAGE.METERING_DAILY_HISTORY", "FACT_METERING_DAILY"),
            coverage="billed = used + cloud-services adjustment; ties to the invoice", owner="platform"),
+    Metric("replication_usage", "Replication usage", METERED,
+           "database / refresh", "ACCOUNT_USAGE.DATABASE_REPLICATION_USAGE_HISTORY",
+           UTC, "up to ~3h", "v4.134",
+           "Native credits and transferred bytes for secondary databases; measured usage can lag "
+           "or differ from billed metering adjustments.",
+           window="rolling-daily", partial_day="included", unit="credits",
+           filters=("company", "database"),
+           required_sources=("ACCOUNT_USAGE.DATABASE_REPLICATION_USAGE_HISTORY",),
+           coverage="native secondary-database grain; no allocation", owner="finops"),
+    Metric("compute_pool_usage", "Snowpark Container Services usage", METERED,
+           "compute pool / application", "ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY",
+           UTC, "up to ~3h", "v4.134",
+           "Account-wide compute-pool credits; the source exposes no company key.",
+           window="rolling-daily", partial_day="included", unit="credits", filters=(),
+           required_sources=("ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY",),
+           coverage="native pool/application grain; account-wide", owner="platform"),
+    Metric("notebook_container_usage", "Notebook container usage", METERED,
+           "notebook / user / compute pool", "ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY",
+           UTC, "up to ~3h", "v4.134",
+           "Notebook runtime and credits are a subset of SPCS and are never added to its total.",
+           window="rolling-daily", partial_day="included", unit="credits", filters=(),
+           required_sources=("ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY",),
+           coverage="native notebook subset; non-additive to SPCS", owner="platform"),
+    Metric("marketplace_paid_usage", "Paid Marketplace charges", BILLED,
+           "listing / day / currency", "ORGANIZATION_USAGE.MARKETPLACE_PAID_USAGE_DAILY",
+           UTC, "up to ~24h", "v4.134",
+           "Organization billing truth for this consumer account; native currency is preserved.",
+           window="rolling-daily", partial_day="included", unit="currency", filters=(),
+           required_sources=("ORGANIZATION_USAGE.MARKETPLACE_PAID_USAGE_DAILY",),
+           coverage="native listing charge; no credit-rate conversion", owner="finops"),
     Metric("org_reconciliation", "Org rate-card dollars", BILLED,
            "account / month / rating-type", "ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY",
            UTC, "up to ~72h; mutates until month close", "item6",
@@ -169,6 +199,17 @@ METRICS: tuple[Metric, ...] = (
            window="vs-prior-half-window", partial_day="excluded", unit="ratio", filters=("company",),
            required_sources=("ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY",),
            coverage="per-warehouse heuristic; real rebate is account-level", owner="platform"),
+    Metric("capacity_pressure_forecast", "Warehouse capacity pressure forecast", ESTIMATED,
+           "warehouse / days-to-pressure",
+           "FACT_QUERY_HOURLY + FACT_WAREHOUSE_DAILY + WAREHOUSE_CHANGE_REGISTRY",
+           ACCOUNT_TZ, "hourly facts; complete days only", "v4.134",
+           "Robust trend of 7-day median queue/spill pressure with workload corroboration, "
+           "change-point suppression, and a 7-day holdout error gate.",
+           window="projection", partial_day="excluded", unit="days", filters=("company",),
+           required_sources=("FACT_QUERY_HOURLY", "FACT_WAREHOUSE_DAILY",
+                             "WAREHOUSE_CHANGE_REGISTRY"),
+           coverage="ETA only with >=30 observed days, >=80% coverage, and stable evidence",
+           owner="platform"),
     Metric("object_query_cost", "Per-object query compute", MEASURED,
            "object / day",
            "FACT_OBJECT_COST_DAILY (QUERY_ATTRIBUTION_HISTORY split across ACCESS_HISTORY "

@@ -4,12 +4,15 @@ callers use components.guard() first."""
 
 from __future__ import annotations
 
+import html
 import zlib
+from collections import defaultdict
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+from app.logic.task_graph import TaskGraphShape, canonical_task_name
 from app.ui import palette
 from app.ui.sizing import CHART_H_MD, CHART_H_SM
 
@@ -128,6 +131,354 @@ def _share_note(label: str, amount: float, total: float, *, dollars: bool = True
     return f"Top: {label} {a}."
 
 
+def _task_node_style(row: pd.Series) -> tuple[str, str]:
+    failures = int(float(row.get("FAILURES_24H") or 0))
+    state = str(row.get("STATE") or "").lower()
+    if failures:
+        return palette.BAD, f"{failures} failed / 24h"
+    if "suspend" in state:
+        return palette.MUTED, "suspended"
+    return palette.OK, "healthy"
+
+
+def _dot_escape(value: object) -> str:
+    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def task_dag_dot(df: pd.DataFrame, shape: TaskGraphShape) -> str:
+    """Graphviz fallback for a previously validated coherent task snapshot."""
+    lookup = {
+        canonical_task_name(row.get("TASK_FQN")): row
+        for _, row in df.iterrows()
+        if canonical_task_name(row.get("TASK_FQN"))
+    }
+    lines = [
+        "digraph tasks {",
+        'bgcolor="transparent"; rankdir=LR; nodesep=0.32; ranksep=0.65;',
+        f'graph [fontcolor="{palette.INK}", pad=0.25];',
+        (f'node [shape=box, style="rounded,filled", fontsize=10, '
+         f'fontcolor="{palette.INK}", fillcolor="{palette.RAISED}"];'),
+        f'edge [color="{palette.INK_MUTE}", arrowsize=0.7];',
+    ]
+    for canonical, row in lookup.items():
+        fqn = str(row.get("TASK_FQN") or canonical)
+        parts = fqn.split(".")
+        label = ".".join(parts[-2:]) if len(parts) >= 2 else fqn
+        color, status = _task_node_style(row)
+        tooltip = " | ".join(
+            value
+            for value in (
+                fqn,
+                status,
+                str(row.get("WAREHOUSE_NAME") or "serverless"),
+                str(row.get("SCHEDULE") or "triggered"),
+            )
+            if value
+        )
+        lines.append(
+            f'"{_dot_escape(canonical)}" [label="{_dot_escape(label)}", '
+            f'color="{color}", penwidth=2, tooltip="{_dot_escape(tooltip)}"];'
+        )
+    for predecessor, child in shape.edges:
+        lines.append(f'"{_dot_escape(predecessor)}" -> "{_dot_escape(child)}";')
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) -> str:
+    """Build a self-contained SVG task graph with pan/zoom controls."""
+    lookup = {
+        canonical_task_name(row.get("TASK_FQN")): row
+        for _, row in df.iterrows()
+        if canonical_task_name(row.get("TASK_FQN"))
+    }
+    levels = dict(shape.levels)
+    by_level: dict[int, list[str]] = defaultdict(list)
+    for name in lookup:
+        by_level[levels.get(name, 0)].append(name)
+    for names in by_level.values():
+        names.sort(key=lambda name: str(lookup[name].get("TASK_FQN") or name))
+
+    node_w, node_h = 238, 76
+    x_gap, y_gap = 112, 26
+    max_rows = max((len(names) for names in by_level.values()), default=1)
+    max_level = max(by_level, default=0)
+    graph_width = max(760, 56 + (max_level + 1) * (node_w + x_gap))
+    graph_height = max(500, 56 + max_rows * (node_h + y_gap))
+    positions: dict[str, tuple[float, float]] = {}
+    for level, names in sorted(by_level.items()):
+        offset = (max_rows - len(names)) * (node_h + y_gap) / 2
+        for index, name in enumerate(names):
+            positions[name] = (
+                32 + level * (node_w + x_gap),
+                28 + offset + index * (node_h + y_gap),
+            )
+
+    edge_markup: list[str] = []
+    for predecessor, child in shape.edges:
+        if predecessor not in positions or child not in positions:
+            continue
+        x1, y1 = positions[predecessor]
+        x2, y2 = positions[child]
+        start_x, start_y = x1 + node_w, y1 + node_h / 2
+        end_x, end_y = x2, y2 + node_h / 2
+        bend = max(42.0, (end_x - start_x) * 0.48)
+        edge_markup.append(
+            f'<path class="edge" d="M {start_x:.1f} {start_y:.1f} '
+            f'C {start_x + bend:.1f} {start_y:.1f}, '
+            f'{end_x - bend:.1f} {end_y:.1f}, {end_x:.1f} {end_y:.1f}"/>'
+        )
+
+    node_markup: list[str] = []
+    for name, (x, y) in positions.items():
+        row = lookup[name]
+        fqn = str(row.get("TASK_FQN") or name)
+        parts = fqn.split(".")
+        task_label = parts[-1]
+        parent_label = ".".join(parts[-3:-1]) if len(parts) >= 3 else ".".join(parts[:-1])
+        task_display = task_label if len(task_label) <= 31 else task_label[:28] + "..."
+        parent_display = parent_label if len(parent_label) <= 38 else "..." + parent_label[-35:]
+        color, status = _task_node_style(row)
+        details = " | ".join(
+            value
+            for value in (
+                fqn,
+                status,
+                f"warehouse: {row.get('WAREHOUSE_NAME') or 'serverless'}",
+                f"schedule: {row.get('SCHEDULE') or 'triggered'}",
+            )
+            if value
+        )
+        aria = html.escape(details, quote=True)
+        node_markup.append(
+            f'<g class="node" transform="translate({x:.1f} {y:.1f})" tabindex="0" '
+            f'role="group" aria-label="{aria}">'
+            f'<title>{html.escape(details)}</title>'
+            f'<rect width="{node_w}" height="{node_h}" rx="6" '
+            f'style="--node-color:{color}"/>'
+            f'<text class="node-title" x="14" y="24">{html.escape(task_display)}</text>'
+            f'<text class="node-meta" x="14" y="44">{html.escape(parent_display)}</text>'
+            f'<text class="node-state" x="{node_w - 12}" y="64" text-anchor="end" '
+            f'style="fill:{color}">{html.escape(status)}</text>'
+            "</g>"
+        )
+
+    return (
+        _TASK_DAG_TEMPLATE.replace("__HEIGHT__", str(int(height)))
+        .replace("__GRAPH_WIDTH__", str(int(graph_width)))
+        .replace("__GRAPH_HEIGHT__", str(int(graph_height)))
+        .replace("__EDGES__", "".join(edge_markup))
+        .replace("__NODES__", "".join(node_markup))
+    )
+
+
+def interactive_task_dag(
+    df: pd.DataFrame, shape: TaskGraphShape, *, height: int = 680
+) -> bool:
+    """Render the dependency-free pan/zoom SVG; return False for fallback."""
+    if df is None or df.empty:
+        return False
+    try:
+        from streamlit.components.v1 import html as component_html
+
+        component_html(
+            _task_dag_markup(df, shape, height=height),
+            height=height + 2,
+            scrolling=False,
+        )
+        return True
+    except Exception:  # noqa: BLE001 - native Graphviz remains the core-value fallback
+        return False
+
+
+_TASK_DAG_TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent;
+}
+body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
+.dag-host {
+  position: relative; width: 100%; height: __HEIGHT__px; overflow: hidden;
+  background: #0a0f1c; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;
+}
+.dag-host:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; }
+.dag-host:fullscreen svg { height: 100vh; }
+.dag-toolbar {
+  position: absolute; z-index: 4; top: 10px; right: 10px; display: flex; gap: 5px;
+  padding: 5px; background: rgba(15,23,41,.94); border: 1px solid rgba(148,163,184,.28);
+  border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
+}
+.dag-toolbar button {
+  min-width: 34px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
+  border-radius: 5px; background: #131d33; color: #e8eef7;
+  font: 650 13px/1 Inter, "Segoe UI", sans-serif; cursor: pointer;
+}
+.dag-toolbar button:hover { border-color: #38bdf8; background: #17233d; }
+.dag-toolbar button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+svg {
+  width: 100%; height: __HEIGHT__px; display: block; cursor: grab;
+  touch-action: none; user-select: none;
+}
+svg.dragging { cursor: grabbing; }
+.edge {
+  fill: none; stroke: #8593a8; stroke-width: 1.5; opacity: .72;
+  marker-end: url(#arrow);
+}
+.node rect {
+  fill: #131d33; stroke: var(--node-color); stroke-width: 2;
+  filter: url(#shadow);
+}
+.node:focus { outline: none; }
+.node:focus rect { stroke-width: 4; }
+.node-title { fill: #e8eef7; font-size: 13px; font-weight: 700; }
+.node-meta { fill: #aab6c8; font-size: 10px; }
+.node-state { font-size: 9px; font-weight: 700; text-transform: uppercase; }
+</style>
+</head>
+<body>
+<div class="dag-host" id="host">
+  <div class="dag-toolbar" role="toolbar" aria-label="Task graph controls">
+    <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
+    <button id="zoomOut" title="Zoom out" aria-label="Zoom out">-</button>
+    <button id="fit" title="Fit graph" aria-label="Fit graph">Fit</button>
+    <button id="full" title="Full screen" aria-label="Full screen">Full</button>
+    <button id="download" title="Download SVG" aria-label="Download SVG">SVG</button>
+  </div>
+  <svg id="dag" tabindex="0" role="img"
+       aria-label="Task dependency graph. Use mouse wheel or plus and minus to zoom; drag to pan.">
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,6 L8,3 z" fill="#8593a8"/>
+      </marker>
+      <filter id="shadow" x="-20%" y="-30%" width="140%" height="160%">
+        <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000"
+                      flood-opacity=".32"/>
+      </filter>
+    </defs>
+    <g id="scene">__EDGES____NODES__</g>
+  </svg>
+</div>
+<script>
+(() => {
+  const host = document.getElementById("host");
+  const svg = document.getElementById("dag");
+  const scene = document.getElementById("scene");
+  const graphWidth = __GRAPH_WIDTH__;
+  const graphHeight = __GRAPH_HEIGHT__;
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
+  let dragging = false;
+  let px = 0;
+  let py = 0;
+  // The 2,000-node safety cap can still produce a very tall graph. Keep the
+  // minimum low enough that Fit always means fit, then let users zoom back in.
+  const clamp = value => Math.max(0.002, Math.min(4.5, value));
+  const apply = () => {
+    scene.setAttribute("transform", `translate(${tx} ${ty}) scale(${scale})`);
+  };
+  const fit = () => {
+    const width = Math.max(svg.clientWidth, 1);
+    const height = Math.max(svg.clientHeight, 1);
+    scale = clamp(Math.min((width - 44) / graphWidth, (height - 44) / graphHeight));
+    tx = (width - graphWidth * scale) / 2;
+    ty = (height - graphHeight * scale) / 2;
+    apply();
+  };
+  const zoomAt = (factor, x = svg.clientWidth / 2, y = svg.clientHeight / 2) => {
+    const next = clamp(scale * factor);
+    const ratio = next / scale;
+    tx = x - (x - tx) * ratio;
+    ty = y - (y - ty) * ratio;
+    scale = next;
+    apply();
+  };
+  document.getElementById("zoomIn").addEventListener("click", () => zoomAt(1.25));
+  document.getElementById("zoomOut").addEventListener("click", () => zoomAt(0.8));
+  document.getElementById("fit").addEventListener("click", fit);
+  document.getElementById("full").addEventListener("click", async () => {
+    if (!document.fullscreenElement && host.requestFullscreen) {
+      await host.requestFullscreen();
+    } else if (document.exitFullscreen) {
+      await document.exitFullscreen();
+    }
+  });
+  document.addEventListener("fullscreenchange", () => setTimeout(fit, 60));
+  document.getElementById("download").addEventListener("click", () => {
+    const clone = svg.cloneNode(true);
+    const cloneScene = clone.querySelector("#scene");
+    cloneScene.removeAttribute("transform");
+    clone.setAttribute("viewBox", `0 0 ${graphWidth} ${graphHeight}`);
+    clone.setAttribute("width", graphWidth);
+    clone.setAttribute("height", graphHeight);
+    const source = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([source], {type: "image/svg+xml"});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "overwatch-task-graph.svg";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  svg.addEventListener("wheel", event => {
+    event.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    zoomAt(
+      event.deltaY < 0 ? 1.12 : 0.89,
+      event.clientX - rect.left,
+      event.clientY - rect.top
+    );
+  }, {passive: false});
+  svg.addEventListener("pointerdown", event => {
+    dragging = true;
+    px = event.clientX;
+    py = event.clientY;
+    svg.classList.add("dragging");
+    svg.setPointerCapture(event.pointerId);
+  });
+  svg.addEventListener("pointermove", event => {
+    if (!dragging) return;
+    tx += event.clientX - px;
+    ty += event.clientY - py;
+    px = event.clientX;
+    py = event.clientY;
+    apply();
+  });
+  const stop = event => {
+    dragging = false;
+    svg.classList.remove("dragging");
+    if (svg.hasPointerCapture(event.pointerId)) svg.releasePointerCapture(event.pointerId);
+  };
+  svg.addEventListener("pointerup", stop);
+  svg.addEventListener("pointercancel", stop);
+  svg.addEventListener("dblclick", fit);
+  svg.addEventListener("keydown", event => {
+    if (event.key === "+" || event.key === "=") zoomAt(1.2);
+    else if (event.key === "-") zoomAt(0.83);
+    else if (event.key === "0") fit();
+    else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+      const step = 42;
+      if (event.key === "ArrowLeft") tx += step;
+      if (event.key === "ArrowRight") tx -= step;
+      if (event.key === "ArrowUp") ty += step;
+      if (event.key === "ArrowDown") ty -= step;
+      apply();
+    }
+  });
+  requestAnimationFrame(fit);
+})();
+</script>
+</body>
+</html>"""
+
+
 def spend_trend(
     df: pd.DataFrame,
     *,
@@ -201,9 +552,14 @@ def spend_trend(
             note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
     st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")
 
-def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10) -> None:
+def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10,
+            *, takeaway: bool = False) -> None:
     data = df[[label_col, usd_col]].head(top_n).copy()
     data.columns = ["Label", "USD"]
+    data["USD"] = pd.to_numeric(data["USD"], errors="coerce").fillna(0.0)
+    if data.empty:
+        _empty_note()
+        return
     grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
                         stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
@@ -218,6 +574,10 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
     st.altair_chart(bars + labels, use_container_width=True)
+    if takeaway and float(data["USD"].sum()) > 0:
+        top = data.loc[data["USD"].idxmax()]
+        st.caption(_share_note(str(top["Label"]), float(top["USD"]),
+                               float(data["USD"].sum())))
 
 
 def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
@@ -352,9 +712,14 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
             st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()), dollars=False))
 
 
-def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10) -> None:
+def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
+              *, takeaway: bool = False) -> None:
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]
+    data["Value"] = pd.to_numeric(data["Value"], errors="coerce").fillna(0.0)
+    if data.empty:
+        _empty_note()
+        return
     chart = (
         _base(data)
         .mark_bar()
@@ -365,6 +730,10 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         )
     )
     st.altair_chart(chart, use_container_width=True)
+    if takeaway and float(data["Value"].sum()) > 0:
+        top = data.loc[data["Value"].idxmax()]
+        st.caption(_share_note(str(top["Label"]), float(top["Value"]),
+                               float(data["Value"].sum()), dollars=False))
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,

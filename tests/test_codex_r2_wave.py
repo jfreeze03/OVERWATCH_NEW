@@ -277,7 +277,10 @@ def test_rec11_section_scope_note_only_fires_on_ignored_filters():
 
 def test_rec11_overview_renders_section_scope_note():
     ov = _src("app/ui/pages/overview.py")
-    assert "section_scope_note(f)" in ov   # wired on the Overview headline KPIs
+    assert "section_filter_contract(" in ov
+    assert 'section_header("Company economics"' in ov
+    assert 'section_header("Account risk & contract"' in ov
+    assert 'applies=("company", "days")' in ov
 
 
 # ---------------------------------------------------------------------------
@@ -314,9 +317,12 @@ def test_rec15_muted_ink_clears_wcag_aa():
 
 def test_rec15_segmented_controls_wrap_not_scroll():
     theme = _src("app/theme.py")
-    rule = theme.split('radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label="Window"] {', 1)[1].split("}", 1)[0]
+    selector = 'div[data-testid="stButtonGroup"] div[data-baseweb="button-group"] {'
+    rule = theme.split(selector, 1)[1].split("}", 1)[0]
     assert "flex-wrap:wrap" in rule          # options wrap to a second row...
     assert "overflow-x:auto" not in rule     # ...instead of hiding behind a scroll edge
+    assert 'div[data-testid="stButtonGroup"] button:focus-visible' in theme
+    assert 'div[role="radiogroup"][aria-label="Section"]' in theme
 
 
 def test_rec15_kpi_help_is_focusable_not_hover_only():

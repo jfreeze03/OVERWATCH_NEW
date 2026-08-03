@@ -46,6 +46,7 @@ def icon(name: str, size: int = 16, cls: str = "", stroke: float = 1.9) -> str:
     body = _PATHS.get(name, _PATHS["dot"])
     klass = f' class="{cls}"' if cls else ""
     return (f'<svg{klass} width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+            f'aria-hidden="true" focusable="false" '
             f'stroke="currentColor" stroke-width="{stroke}" stroke-linecap="round" '
             f'stroke-linejoin="round" style="vertical-align:-2px">{body}</svg>')
 

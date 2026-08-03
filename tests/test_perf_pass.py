@@ -119,12 +119,14 @@ def test_canary_release_anchor_is_recent_not_fixed():
 # Codex round 2 (v4.8.3)
 # ---------------------------------------------------------------------------
 
-def test_health_values_fetched_once_and_passed_down():
+def test_health_values_are_owned_by_the_single_global_pulse():
     src = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "health_vals = _health_values() if connected else {}" in src
-    assert "_sidebar(pages, role, profile, connected, health_vals)" in src
-    assert "_topbar_scope(health_vals)" in src
-    assert "_persistent_status_bar(health_vals)" in src
+    assert "_sidebar(pages, role, profile, connected)" in src
+    assert "_topbar_scope()" in src
+    assert "_health_strip(" not in src
+    body = src.split("def _persistent_status_bar", 1)[1].split("\ndef ", 1)[0]
+    assert "vals = _health_values()" in body
+    assert "_persistent_status_bar()" in src
 
 
 def test_batch_supports_all_four_tiers():
@@ -205,4 +207,3 @@ def test_cost_spend_section_batches_recent_and_defers_storage_unmapped():
     # each batched panel keeps its own live/historical fallback (prefetch-else-run)
     assert spend.count("if metering_res is not None else run(") == 1
     assert spend.count("if wh_res is not None else run(") == 1
-

@@ -1081,6 +1081,58 @@ LIMIT 50
 """
 
 
+def warehouse_capacity_daily(days: int = 90, company: str = "ALL") -> str:
+    """Complete-day warehouse pressure, workload, spend, and capacity changes.
+
+    This is a mart-only forecast input. It deliberately excludes today's
+    partial day and does not fabricate zero rows for missing telemetry.
+    """
+    days = max(30, min(int(days or 90), 365))
+    company_filter = ""
+    if str(company or "ALL").upper() != "ALL":
+        company_filter = f" AND q.COMPANY = {sql_literal(company)}"
+    return f"""
+WITH query_daily AS (
+    SELECT DATE(q.HOUR_TS) AS DAY,
+           q.WAREHOUSE_NAME,
+           q.COMPANY,
+           SUM(COALESCE(q.QUERY_COUNT, 0)) AS QUERY_COUNT,
+           SUM(COALESCE(q.QUEUED_SEC_SUM, 0)) / 60.0 AS QUEUED_MIN,
+           SUM(COALESCE(q.SPILL_REMOTE_GB, 0)) AS SPILL_REMOTE_GB,
+           MAX(COALESCE(q.P95_ELAPSED_SEC, 0)) AS P95_ELAPSED_SEC
+    FROM {core_object("FACT_QUERY_HOURLY")} q
+    WHERE q.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND DATE(q.HOUR_TS) < CURRENT_DATE()
+      AND q.WAREHOUSE_NAME IS NOT NULL{company_filter}
+    GROUP BY 1, 2, 3
+),
+warehouse_daily AS (
+    SELECT DAY, WAREHOUSE_NAME, COMPANY, SUM(COALESCE(CREDITS_TOTAL, 0)) AS CREDITS_TOTAL
+    FROM {core_object("FACT_WAREHOUSE_DAILY")}
+    WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND DAY < CURRENT_DATE()
+    GROUP BY 1, 2, 3
+),
+changes AS (
+    SELECT DATE(CHANGE_SEEN_AT) AS DAY, WAREHOUSE_NAME, COMPANY, COUNT(*) AS CHANGE_EVENTS
+    FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")}
+    WHERE CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND SETTING IN ('SIZE', 'MIN_CLUSTERS', 'MAX_CLUSTERS', 'SCALING_POLICY')
+    GROUP BY 1, 2, 3
+)
+SELECT q.DAY, q.WAREHOUSE_NAME, q.COMPANY, q.QUERY_COUNT, q.QUEUED_MIN,
+       q.SPILL_REMOTE_GB, q.P95_ELAPSED_SEC,
+       COALESCE(w.CREDITS_TOTAL, 0) AS CREDITS_TOTAL,
+       COALESCE(c.CHANGE_EVENTS, 0) AS CHANGE_EVENTS
+FROM query_daily q
+LEFT JOIN warehouse_daily w
+       ON w.DAY = q.DAY AND w.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND w.COMPANY = q.COMPANY
+LEFT JOIN changes c
+       ON c.DAY = q.DAY AND c.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND c.COMPANY = q.COMPANY
+ORDER BY q.WAREHOUSE_NAME, q.DAY
+"""
+
+
 def score_inputs_daily(days: int = 30) -> str:
     """Per-day signals for the RETRO platform-score trend, from facts +
     alert history. The live score adds stale-source/open-action penalties
@@ -1686,8 +1738,7 @@ def incident_proposals(limit: int = 20, company: str = "ALL") -> str:
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f"WHERE (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')\n")
     return f"""
-SELECT PROPOSAL_KEY, SUGGESTED_TITLE, SEVERITY, COMPANY, FIRST_TS, LAST_TS,
-       ALERTS, NEARBY_WH_CHANGES
+SELECT *
 FROM {core_object("INCIDENT_PROPOSALS")}
 {comp}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,
@@ -1822,4 +1873,3 @@ GROUP BY 2
 ORDER BY GRAIN, VALUE DESC
 LIMIT 300
 """
-

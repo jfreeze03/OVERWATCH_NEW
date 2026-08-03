@@ -23,6 +23,7 @@ from app.ui.components import (
     page_header,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     section_header,
     styled_table,
     user_display_map,
@@ -64,6 +65,36 @@ def render() -> None:
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
          "Unit costs", "Compare", "Optimization & Savings"], key="cost_section")
+    _contracts = {
+        "Spend & Attribution": {
+            "applies": ("company", "days"),
+            "partial": ("database", "schema_contains"),
+            "note": "Database and Schema apply only to object-grain attribution panels.",
+        },
+        "Contract & Forecast": {
+            "applies": (),
+            "note": "Account-wide contract calendar and renewal assumptions.",
+        },
+        "Chargeback & AI": {
+            "applies": ("days",),
+            "partial": ("company", "database", "schema_contains"),
+            "note": "Company shapes chargeback/AI users; Cortex service totals remain account-wide.",
+        },
+        "Unit costs": {
+            "applies": ("company", "days", "database", "schema_contains"),
+            "note": "Each metric retains its declared measured or allocated grain.",
+        },
+        "Compare": {
+            "applies": ("company",),
+            "note": "Panel-local periods replace the global Window.",
+        },
+        "Optimization & Savings": {
+            "applies": (),
+            "partial": ("company", "days"),
+            "note": "Savings verification and ledger totals are account-wide where labeled.",
+        },
+    }
+    section_filter_contract(f, **_contracts[section])
     if section == "Spend & Attribution":
         # perf #15: submit the four INDEPENDENT recent mart reads that gate the
         # eager Spend + Attribution paint as ONE parallel batch instead of four
@@ -73,7 +104,7 @@ def render() -> None:
         _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),
                         page=_PAGE, tier="hourly") or {}
         section_header("Spend", "info", "spend")
-        _spend_tab(f["company"], f["days"], rate, ai_rate,
+        _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"))
         st.divider()
         section_header("Attribution", "info", "chargeback")

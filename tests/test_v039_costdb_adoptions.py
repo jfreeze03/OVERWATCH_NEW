@@ -84,7 +84,7 @@ def test_per_warehouse_dollars_carry_the_cs_caveat():
 def test_categorize_stops_bucketing_new_services_as_other():
     from app.ui.pages.cost_parts.spend import _categorize
     assert _categorize("OPENFLOW_COMPUTE_SNOWFLAKE") == "Serverless"
-    assert _categorize("HYBRID_TABLE_REQUESTS") == "Storage"
+    assert _categorize("HYBRID_TABLE_REQUESTS") == "Hybrid requests (historical)"
     assert _categorize("AI_SERVICES") == "AI / Cortex"    # prefix rule still holds
 
 

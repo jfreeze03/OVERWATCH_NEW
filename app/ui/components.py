@@ -162,6 +162,15 @@ def lazy_sections(labels: list[str], key: str, deep_link: bool = True,
     return str(choice)
 
 
+def nested_sections(
+    labels: list[str],
+    key: str,
+    counts: dict[str, int] | None = None,
+) -> str:
+    """Render a local section switcher without taking ownership of the page URL."""
+    return lazy_sections(labels, key, deep_link=False, counts=counts)
+
+
 def _section_slug(label: str) -> str:
     return str(label).lower().replace("&", "and").replace(" ", "-")
 
@@ -174,10 +183,11 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     # brand anchor; repeating it above every header was orientation noise, not signal.
     if icon_name:
         st.markdown(
-            f'<div style="display:flex;align-items:center;gap:11px;margin:-2px 0 2px 0">'
-            f'<span style="color:var(--ow-accent);display:inline-flex">{icon(icon_name, 26)}</span>'
-            f'<span style="font-size:1.72rem;font-weight:750;letter-spacing:-0.015em;'
-            f'color:var(--ow-ink)">{title}</span></div>', unsafe_allow_html=True)
+            f'<div class="ow-page-heading">'
+            f'<span class="ow-page-heading__icon">{icon(icon_name, 26)}</span>'
+            f'<h1>{html.escape(title)}</h1></div>',
+            unsafe_allow_html=True,
+        )
     else:
         st.title(title)
     chips = _scope_chip_html()
@@ -313,11 +323,70 @@ def metric_card_html(item: dict) -> str:
 # place (rec 11/13 single source) so the per-card scope tokens above and the
 # section-level "what this panel ignores" line below never drift apart.
 _SCOPE_DIM_LABELS = {
-    "warehouse_contains": "warehouse",
-    "schema_contains": "schema",
-    "user_contains": "user",
-    "database": "database",
+    "company": "Company",
+    "days": "Window",
+    "database": "Database",
+    "warehouse_contains": "Warehouse",
+    "user_contains": "User",
+    "schema_contains": "Schema",
 }
+
+
+def _active_scope_dimensions(filters: dict) -> tuple[str, ...]:
+    active = []
+    for key in _SCOPE_DIM_LABELS:
+        value = filters.get(key)
+        if key == "days":
+            active.append(key)
+        elif key == "company":
+            if str(value or "ALL").upper() != "ALL":
+                active.append(key)
+        elif str(value or "").strip():
+            active.append(key)
+    return tuple(active)
+
+
+def filter_contract_text(
+    filters: dict,
+    *,
+    applies: tuple[str, ...],
+    partial: tuple[str, ...] = (),
+    note: str = "",
+) -> str:
+    """Return one compact, metadata-driven statement of a section's filter behavior."""
+    apply_labels = [_SCOPE_DIM_LABELS[key] for key in applies if key in _SCOPE_DIM_LABELS]
+    applied = " · ".join(apply_labels) if apply_labels else "Account-wide / fixed horizon"
+    ignored = [
+        _SCOPE_DIM_LABELS[key]
+        for key in _active_scope_dimensions(filters)
+        if key not in applies and key not in partial
+    ]
+    parts = [f"Applies: {applied}"]
+    partial_labels = [_SCOPE_DIM_LABELS[key] for key in partial if key in _SCOPE_DIM_LABELS]
+    if partial_labels:
+        parts.append("Panel-dependent: " + " · ".join(partial_labels))
+    if ignored:
+        parts.append("Active but ignored: " + " · ".join(ignored))
+    if note:
+        parts.append(str(note).strip())
+    return " | ".join(parts)
+
+
+def section_filter_contract(
+    filters: dict,
+    *,
+    applies: tuple[str, ...],
+    partial: tuple[str, ...] = (),
+    note: str = "",
+) -> str:
+    """Render a section-level scope contract next to the metrics it governs."""
+    text = filter_contract_text(filters, applies=applies, partial=partial, note=note)
+    st.markdown(
+        f'<div class="ow-filter-contract" role="note" aria-label="Filter contract">'
+        f'{html.escape(text)}</div>',
+        unsafe_allow_html=True,
+    )
+    return text
 
 
 def section_scope_note(filters: dict, *, honored: tuple[str, ...] = ()) -> str:
@@ -330,8 +399,9 @@ def section_scope_note(filters: dict, *, honored: tuple[str, ...] = ()) -> str:
     the common no-filter path — the note only appears when it prevents a
     misread. `honored` names the filter keys this particular section DOES apply."""
     ignored = [
-        lbl
+        lbl.lower()
         for key, lbl in _SCOPE_DIM_LABELS.items()
+        if key not in ("company", "days")
         if key not in honored and str(filters.get(key, "") or "").strip()
     ]
     if not ignored:
@@ -379,9 +449,11 @@ def section_header(title: str, health: str = "", icon_name: str = "",
     ico = f'<span class="ow-section__icon">{icon(icon_name)}</span>' if icon_name else ""
     bdg = f'<span class="ow-section__badge">{html.escape(badge)}</span>' if badge else ""
     aid = f' id="{html.escape(anchor)}"' if anchor else ""
-    st.markdown(f'<div class="ow-section{hcls}"{aid}>{ico}'
-                f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</div>',
-                unsafe_allow_html=True)
+    st.markdown(
+        f'<h2 class="ow-section{hcls}"{aid}>{ico}'
+        f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</h2>',
+        unsafe_allow_html=True,
+    )
 
 
 def section_toc(items: list[tuple[str, str]], lead: str = "Jump to") -> None:
@@ -428,8 +500,22 @@ def status_bar(stats: list[dict]) -> None:
             spark = ('<div class="ow-stat__spark">'
                      + spark_svg(s["spark"], width=104, height=18,
                                  color=_SEV_HEX.get(sev, palette.INFO)) + "</div>")
-        cells.append(f'<div class="{scls}"><div class="ow-stat__k">{html.escape(str(s.get("k","")))}</div>'
-                     f'<div class="ow-stat__v">{ico}{html.escape(str(s.get("v","—")))}</div>{spark}</div>')
+        label = str(s.get("k", ""))
+        value = str(s.get("v", "—"))
+        href = str(s.get("href", "") or "").strip()
+        if href:
+            scls += " ow-stat--link"
+            start = (
+                f'<a class="{scls}" href="{html.escape(href, quote=True)}" target="_self" '
+                f'aria-label="{html.escape(f"{label}: {value}", quote=True)}">'
+            )
+            end = "</a>"
+        else:
+            start, end = f'<div class="{scls}">', "</div>"
+        cells.append(
+            f'{start}<div class="ow-stat__k">{html.escape(label)}</div>'
+            f'<div class="ow-stat__v">{ico}{html.escape(value)}</div>{spark}{end}'
+        )
     st.markdown(f'<div class="ow-statusbar">{"".join(cells)}</div>', unsafe_allow_html=True)
 
 
@@ -1047,7 +1133,8 @@ def _export_filename(seq: int, slug: str | None) -> str:
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
-                  size_note: bool = True, sort_label: str = "") -> int | None:
+                  size_note: bool = True, sort_label: str = "",
+                  totals: tuple = ()) -> int | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, use_container_width=True)
         return None
@@ -1140,6 +1227,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height
+    if totals:
+        st.caption("Σ " + " · ".join(f"{label}: {value}" for label, value in totals))
     selected: int | None = None
     if selectable and key:
         try:
@@ -1238,14 +1327,16 @@ def _download_fingerprint(df) -> str:
 
 def styled_table(df, *, height: int | None = None, column_config: dict | None = None,
                  slug: str | None = None, days: int | None = None,
-                 size_note: bool = True, sort_label: str = "") -> None:
+                 size_note: bool = True, sort_label: str = "",
+                 totals: tuple = ()) -> None:
     """st.dataframe with semantic status colors, convention-based number
     formats, a height cap, a size caption, and a CSV download. ``slug`` names the
     export file (rec14); ``days`` adds the window to the size caption (rec31);
     ``sort_label`` declares the order in that caption ("by $ desc", rec30);
+    ``totals`` renders additive ``(label, display_value)`` pairs above the table;
     ``size_note=False`` suppresses that caption when the caller states its own count."""
     _render_table(df, height=height, column_config=column_config, slug=slug,
-                  days=days, size_note=size_note, sort_label=sort_label)
+                  days=days, size_note=size_note, sort_label=sort_label, totals=totals)
 
 
 def selectable_table(df, key: str, *, height: int | None = None,
@@ -1368,4 +1459,3 @@ def log_ui_event(kind: str, page: str = "") -> None:
         "INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_USAGE (PAGE, EVENT_KIND, IS_RERUN, USER_NAME) ",
         f"SELECT {sql_literal(str(page or kind)[:80])}, {sql_literal(str(kind)[:40])}, FALSE, {identity_sql()}",
         off_flag="_ow_usage_off", downgrade_flag="_ow_usage_oldshape")
-

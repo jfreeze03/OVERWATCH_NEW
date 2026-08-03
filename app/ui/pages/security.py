@@ -27,6 +27,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     section_header,
     section_toc,
     styled_table,
@@ -589,9 +590,37 @@ def render() -> None:
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
     )
+    section_filter_contract(
+        f,
+        applies=(),
+        note="Governance score and trend are account-wide fixed-horizon posture metrics.",
+    )
     _post90 = _governance_score_panel()
     _posture_trend_panel(_post90)
     section = lazy_sections(["Access", "Changes", "Clients", "Egress", "Trust Center"], key="sec_section")
+    _contracts = {
+        "Access": {
+            "applies": ("company", "days"),
+            "note": "Identity and role evidence at the selected company/window where grain permits.",
+        },
+        "Changes": {
+            "applies": ("company", "days", "database", "schema_contains"),
+            "note": "DDL/DCL change evidence at object grain.",
+        },
+        "Clients": {
+            "applies": ("company", "days"),
+            "note": "Connection inventory has no Database, Warehouse, or Schema grain.",
+        },
+        "Egress": {
+            "applies": ("company", "days", "database", "schema_contains"),
+            "note": "Transfer and unload evidence where object grain is available.",
+        },
+        "Trust Center": {
+            "applies": (),
+            "note": "Account-wide evidence checklist and auditor-facing exports.",
+        },
+    }
+    section_filter_contract(f, **_contracts[section])
     if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()

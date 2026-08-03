@@ -20,19 +20,23 @@ from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import complete_days_only, flag_anomalies
 from app.logic.formulas import account_today, credits_to_usd, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
-from app.ui import charts, palette
+from app.logic.task_graph import inspect_task_graph
+from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     confirm_gate,
+    export_button,
     guard,
     kpi_row,
     lazy_sections,
     load_settings,
+    nested_sections,
     notify,
     page_header,
     panel_help,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     section_header,
     selectable_table,
     snowsight_profile_column,
@@ -282,7 +286,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     ])
     fam = timeline.groupby("ERROR_FAMILY", as_index=False).size().rename(columns={"size": "FAILURES"})
     charts.bar_count(fam.sort_values("FAILURES", ascending=False), "ERROR_FAMILY", "FAILURES",
-                     title="Failures by family")
+                     title="Failures by family", takeaway=True)
     styled_table(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
                    "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
@@ -485,19 +489,22 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
                 styled_table(sdf)
 
 
-def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+def _task_health_view(company: str, days: int, database: str = "",
+                      schema_contains: str = "") -> None:
     res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
               tier="recent", source="FACT_TASK_DAILY")
     if not res.usable():
         res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
+    known_failed = None
     if guard(res, "No task runs recorded for this scope/window."):
         df = res.df.copy()
         failed_col = "FAILED" if "FAILED" in df.columns else None
+        task_sort_label = ""
         if failed_col:
             total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
             total_failed = safe_float(df[failed_col].sum())
-            _known_failed = total_failed
+            known_failed = total_failed
             kpi_row([
                 {"label": f"Task runs ({days}d)", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
@@ -505,77 +512,191 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
                  "delta_color": "inverse" if total_failed else "off"},
             ])
             df = df.sort_values(failed_col, ascending=False)
-        styled_table(df)
+            task_sort_label = "failed runs desc"
+        styled_table(df, sort_label=task_sort_label)
         result_caption(res)
     st.divider()
-    # r19 #6: the summary window (>=7d, same scope) already counted failures
-    # — when it says zero, skip the 7d TASK_HISTORY detail scan entirely.
     _failure_timeline_section(company, database, schema_contains,
-                              known_failures=locals().get("_known_failed") if days >= 7 else None)
+                              known_failures=known_failed if days >= 7 else None)
 
-    # C18: MART_TASK_NODE_DAILY (V058) loaded but had no reader — surface the
-    # per-node dispatch-queue + exec timing it captures (late-start / warehouse
-    # contention that the coarse FACT_TASK_DAILY summary above cannot show).
-    st.divider()
-    section_header("Per-node timing (dispatch queue & exec p95)", "info", "operations")
-    nres = run(mart27_sql.task_nodes(days, company, database, schema_contains),
-               page=_PAGE, key=f"t_node_{company}_{days}", tier="hourly",  # rec 10: MART_TASK_NODE_DAILY loads hourly
-               source="MART_TASK_NODE_DAILY")
-    if guard(nres, "No per-node timing yet — MART_TASK_NODE_DAILY is empty for this scope "
-                   "(it loads hourly once V058 is applied)."):
+
+def _task_runs_view(company: str, days: int, database: str = "",
+                    schema_contains: str = "") -> None:
+    section_header("Node run timing", "info", "clock")
+    nres = run(
+        mart27_sql.task_nodes(days, company, database, schema_contains),
+        page=_PAGE,
+        key=f"t_node_{company}_{days}",
+        tier="hourly",
+        source="MART_TASK_NODE_DAILY",
+    )
+    if guard(
+        nres,
+        "No per-node timing yet — MART_TASK_NODE_DAILY is empty for this scope "
+        "(it loads hourly once V058 is applied).",
+    ):
         ndf = nres.df.copy()
         if {"FAILED", "RUNS"}.issubset(ndf.columns):
-            # failure-rate is derived at read (the loader stores counts, not a rate);
-            # zero-RUNS guard avoids divide-by-zero.
-            ndf["FAIL_PCT"] = [round(safe_float(fl) / safe_float(rn) * 100, 1) if safe_float(rn) else 0.0
-                               for fl, rn in zip(ndf["FAILED"], ndf["RUNS"], strict=False)]
-        styled_table(ndf)
-        st.caption("Dispatch queue = SCHEDULED→START delay (warehouse contention / late start); "
-                   "exec = START→COMPLETE runtime. Ranked by p95 dispatch queue. Mart-only — no "
-                   "live equivalent (the queue delay needs SCHEDULED_TIME). Task grain, scoped by "
-                   "database; one task name can appear under multiple schemas.")
-
-    section_header("Task graph (DAG)", "info", "operations")
-    if st.toggle("Render account task topology", key="ops_dag_toggle",
-                 help="Latest task versions + predecessors; red = failed in 24h, gray = suspended."):
-        gres = run(ops_sql.task_graph_nodes(), page=_PAGE, key="task_dag", tier="recent",
-                   source="TASK_VERSIONS + TASK_HISTORY")
-        if guard(gres, "No tasks recorded in TASK_VERSIONS."):
-            import json as _json
-
-            # rec26: theme the DAG for the dark canvas. Transparent bgcolor; the
-            # status hues from palette.py (red/gray/green) match every other surface;
-            # node labels are dark (readable on the saturated fills) while graph/edge
-            # text stays ink so it reads on the transparent background.
-            lines = [
-                "digraph tasks {",
-                'bgcolor="transparent"; rankdir=LR;',
-                f'graph [fontcolor="{palette.INK}"];',
-                f'node [shape=box, style="rounded,filled", fontsize=10, fontcolor="{palette.BG}"];',
-                f'edge [color="{palette.INK}"];',
+            ndf["FAIL_PCT"] = [
+                round(safe_float(failed) / safe_float(runs) * 100, 1)
+                if safe_float(runs)
+                else 0.0
+                for failed, runs in zip(ndf["FAILED"], ndf["RUNS"], strict=False)
             ]
-            for _, r in gres.df.iterrows():
-                fqn = str(r["TASK_FQN"])
-                short = fqn.split(".")[-1]
-                fails = int(r.get("FAILURES_24H") or 0)
-                state = str(r.get("STATE") or "").lower()
-                color = palette.BAD if fails else (palette.MUTED if "suspend" in state else palette.OK)
-                lines.append(f'"{fqn}" [label="{short}", fillcolor="{color}"];')
-                preds_raw = r.get("PREDECESSORS")
-                preds = []
-                try:
-                    parsed = _json.loads(preds_raw) if isinstance(preds_raw, str) else preds_raw
-                    if isinstance(parsed, list):
-                        preds = [str(p) for p in parsed]
-                except (TypeError, ValueError):
-                    if preds_raw:
-                        preds = [p.strip().strip('"') for p in str(preds_raw).strip("[]").split(",") if p.strip()]
-                lines.extend(f'"{p.upper()}" -> "{fqn}";' for p in preds)
-            lines.append("}")
-            st.graphviz_chart("\n".join(lines))
-            st.caption("Green = healthy, red = failed in the last 24h, gray = suspended. "
-                       "Edges point downstream.")
-            result_caption(gres)
+        styled_table(ndf, sort_label="p95 queue desc, failed desc")
+        st.caption(
+            "Dispatch queue = scheduled-to-start delay; execution = start-to-complete. "
+            "The mart is task-grain and ordered by p95 dispatch queue."
+        )
+        result_caption(nres)
+
+
+def _task_graph_view() -> None:
+    section_header("Pipeline topology", "info", "pipeline")
+    section_filter_contract(
+        filters(),
+        applies=(),
+        note="Account-wide topology; select one current root and coherent graph version.",
+    )
+    roots = run(
+        ops_sql.task_graph_roots(),
+        page=_PAGE,
+        key="task_graph_roots",
+        tier="recent",
+        source="TASK_VERSIONS coherent snapshots + current TASKS",
+        max_rows=500,
+    )
+    if not guard(roots, "No active task graphs found in TASK_VERSIONS."):
+        return
+    if roots.truncated:
+        st.error("More than 500 root task graphs were returned. Narrow the inventory before drawing.")
+        return
+
+    root_rows = {
+        str(row.get("ROOT_TASK_ID") or ""): row
+        for _, row in roots.df.iterrows()
+        if str(row.get("ROOT_TASK_ID") or "").strip()
+    }
+    root_ids = list(root_rows)
+    if not root_ids:
+        st.info("No current root tasks were found.")
+        return
+
+    def _root_label(root_id: str) -> str:
+        row = root_rows[root_id]
+        fqn = str(row.get("ROOT_TASK_FQN") or root_id)
+        nodes = int(safe_float(row.get("NODE_COUNT")))
+        version = int(safe_float(row.get("GRAPH_VERSION")))
+        return f"{fqn} · {nodes} tasks · graph v{version}"
+
+    root_id = st.selectbox(
+        "Root task",
+        root_ids,
+        format_func=_root_label,
+        key="ops_task_graph_root",
+    )
+    root_row = root_rows[str(root_id)]
+    graph_version = int(safe_float(root_row.get("GRAPH_VERSION")))
+    graph = run(
+        ops_sql.task_graph_nodes(str(root_id), graph_version),
+        page=_PAGE,
+        key=f"task_graph_{root_id}_{graph_version}",
+        tier="recent",
+        source="TASK_VERSIONS selected root/version + current TASKS + TASK_HISTORY",
+        max_rows=2_000,
+    )
+    if not guard(graph, "The selected task graph has no nodes."):
+        return
+
+    frame = graph.df.copy()
+    expected = int(safe_float(frame.iloc[0].get("SNAPSHOT_NODE_COUNT")))
+    if graph.truncated or expected != len(frame):
+        st.error(
+            f"Graph snapshot incomplete: received {len(frame):,} of {expected:,} nodes. "
+            "The diagram was not rendered."
+        )
+        return
+    shape = inspect_task_graph(frame["TASK_FQN"], frame["PREDECESSORS"])
+    integrity_errors = []
+    if shape.duplicate_nodes:
+        integrity_errors.append(f"duplicate nodes: {', '.join(shape.duplicate_nodes[:8])}")
+    if shape.missing_predecessors:
+        integrity_errors.append(
+            f"missing predecessors: {', '.join(shape.missing_predecessors[:8])}"
+        )
+    if shape.cyclic_nodes:
+        integrity_errors.append(f"cycle detected around: {', '.join(shape.cyclic_nodes[:8])}")
+    if integrity_errors:
+        st.error("Graph integrity check failed; nothing was drawn. " + " · ".join(integrity_errors))
+        return
+
+    failed = int(frame["FAILURES_24H"].map(safe_float).gt(0).sum())
+    suspended = int(frame["STATE"].astype(str).str.contains("suspend", case=False).sum())
+    kpi_row([
+        {"label": "Tasks", "value": f"{len(frame):,}"},
+        {"label": "Dependencies", "value": f"{len(shape.edges):,}"},
+        {"label": "Failed tasks (24h)", "value": f"{failed:,}",
+         "severity": "bad" if failed else "ok"},
+        {"label": "Suspended", "value": f"{suspended:,}",
+         "severity": "warn" if suspended else "ok"},
+    ])
+
+    dot = charts.task_dag_dot(frame, shape)
+    renderer_options = ["Interactive", "Graphviz"]
+    renderer_key = "ops_task_graph_renderer"
+    if st.session_state.get(renderer_key) not in renderer_options:
+        st.session_state[renderer_key] = renderer_options[0]
+    if hasattr(st, "segmented_control"):
+        st.session_state[f"_{renderer_key}_last"] = st.session_state[renderer_key]
+
+        def _keep_renderer() -> None:
+            if st.session_state.get(renderer_key) is None:
+                st.session_state[renderer_key] = (
+                    st.session_state.get(f"_{renderer_key}_last") or renderer_options[0]
+                )
+
+        renderer = st.segmented_control(
+            "Renderer",
+            renderer_options,
+            key=renderer_key,
+            on_change=_keep_renderer,
+        )
+    else:
+        renderer = st.selectbox(
+            "Renderer", renderer_options, key=renderer_key
+        )
+    renderer = renderer or st.session_state.get(f"_{renderer_key}_last") or "Interactive"
+    rendered = renderer != "Graphviz" and charts.interactive_task_dag(frame, shape, height=680)
+    if not rendered:
+        try:
+            st.graphviz_chart(dot, width="stretch", height=680)
+        except TypeError:
+            st.graphviz_chart(dot, use_container_width=True)
+    export_button(
+        "Task graph (DOT)",
+        dot,
+        file_name="overwatch-task-graph.dot",
+        mime="text/vnd.graphviz",
+        key="ops_task_graph_dot",
+    )
+    st.caption(
+        "Green = healthy · red = failed in 24h · gray = suspended. "
+        "The selected root and graph version are rendered as one coherent snapshot."
+    )
+    result_caption(graph, note=f"root {root_id} · graph version {graph_version}")
+
+
+def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+    view = nested_sections(
+        ["Health", "Graph", "Runs"],
+        key="ops_tasks_view",
+    )
+    if view == "Health":
+        _task_health_view(company, days, database, schema_contains)
+    elif view == "Graph":
+        _task_graph_view()
+    else:
+        _task_runs_view(company, days, database, schema_contains)
 
 
 def _warehouses_tab(company: str, rate: float) -> None:
@@ -638,7 +759,8 @@ def _contention_tab(company: str, days: int) -> None:
             mart_tier="recent", live_tier="recent")
         if guard(res, "No queueing or spill pressure in this window."):
             charts.bar_count(res.df.sort_values("QUEUED_SEC", ascending=False),
-                             "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds")
+                             "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds",
+                             takeaway=True)
             styled_table(res.df)
     with right:
         section_header("Lock waits", "info", "warehouse")
@@ -1079,6 +1201,40 @@ def render() -> None:
     section = lazy_sections(
         ["Queries", "Tasks", "Warehouses", "Change impact",
          "Pipeline SLA", "Release compare", "Emergency"], key="ops_section")
+    _contracts = {
+        "Queries": {
+            "applies": ("company", "days", "database", "warehouse_contains",
+                        "user_contains", "schema_contains"),
+            "note": "Schema scope uses the live path where the hourly fact lacks that grain.",
+        },
+        "Tasks": {
+            "applies": (),
+            "partial": ("company", "days", "database", "schema_contains"),
+            "note": "Health and Runs honor this scope; Graph is account-wide and declares that locally.",
+        },
+        "Warehouses": {
+            "applies": ("company",),
+            "partial": ("days",),
+            "note": "Contention uses Window; warehouse anomaly history is a fixed 30-day view.",
+        },
+        "Change impact": {
+            "applies": ("company", "database", "schema_contains"),
+            "note": "Panel-local before/after windows replace the global Window.",
+        },
+        "Pipeline SLA": {
+            "applies": (),
+            "note": "Account-wide fixed SLA horizons.",
+        },
+        "Release compare": {
+            "applies": ("company",),
+            "note": "Release date and comparison span are selected inside the panel.",
+        },
+        "Emergency": {
+            "applies": (),
+            "note": "Account-level controls; global analytical filters do not constrain actions.",
+        },
+    }
+    section_filter_contract(f, **_contracts[section])
     if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
                      f["database"], f["schema_contains"])

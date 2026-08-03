@@ -44,17 +44,14 @@ def test_rec18_label_sizes_raised():
 
 
 # A1 — one traffic-light palette across surfaces
-def test_a1_sidebar_strip_matches_token_palette():
-    from app.ui import palette
+def test_a1_shell_has_one_global_health_pulse():
     m = _src("app/main.py")
-    # rec50: the strip now builds from the single palette source, not inline hex.
-    assert "_STRIP_COLORS = dict(palette.STATE_HUES)" in m
-    assert palette.STATE_HUES["OK"] == "#34d399"
-    assert palette.STATE_HUES["BAD"] == "#fb7185"
-    assert palette.STATE_HUES["WARN"] == "#fbbf24"
-    # the old off-shade hues are gone from the palette
-    for _old in ("#22c55e", "#ef4444", "#f59e0b"):
-        assert _old not in palette.STATE_HUES.values()
+    assert "def _health_strip(" not in m
+    assert "def _persistent_status_bar(" in m
+    assert m.count("_persistent_status_bar()") == 1
+    assert "_page_href" in m and '"href": _page_href(' in m
+    assert '"k": "Undelivered criticals"' in m
+    assert '"k": "MTD spend"' in m
 
 
 def test_a1_charts_read_shared_severity_palette():

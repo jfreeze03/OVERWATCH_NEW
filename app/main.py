@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 import streamlit as st
 
@@ -50,7 +51,6 @@ from app.core.state import (  # noqa: E402
 )
 from app.data import mart_sql, security_sql  # noqa: E402
 from app.theme import inject_theme  # noqa: E402
-from app.ui import palette  # noqa: E402
 from app.ui.components import mark_refreshed, notify  # noqa: E402
 from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
@@ -80,8 +80,7 @@ _RENDERERS = {
 }
 
 
-def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
-             health_vals: dict | None = None) -> str:
+def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
     """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
         st.markdown(
@@ -147,7 +146,6 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool,
 
         st.divider()
         _global_jump(pages)
-        _health_strip(health_vals)
         if st.button("Refresh data", use_container_width=True):
             bump_refresh_salt()
             # Re-resolve the role too: a grant/role change mid-session should
@@ -421,26 +419,7 @@ def _global_jump(pages: tuple) -> None:
         request_navigation("Alerts", "Rules")
 
 
-# A1/rec50: the sidebar health strip reads the SAME hues as every other surface,
-# now from the single palette source (was hand-aligned hex literals a shade off
-# from the theme tokens). One source; a drift test guards it.
-_STRIP_COLORS = dict(palette.STATE_HUES)
-
-
-def _strip_line(state: str, text: str) -> None:
-    import html as _html
-
-    color = _STRIP_COLORS.get(state, _STRIP_COLORS["MUTED"])
-    st.markdown(
-        f'<div style="display:flex;align-items:center;gap:6px;margin:2px 0;">'
-        f'<span style="width:9px;height:9px;border-radius:50%;background:{color};'
-        f'display:inline-block;flex:none;" role="img" aria-label="{_html.escape(state)}"></span>'
-        f'<span style="font-size:0.8rem;opacity:0.85;">{_html.escape(text)}</span></div>',
-        unsafe_allow_html=True,
-    )
-
-
-# r6-bug4: a sentinel that lets the health-strip callers tell "not passed" (fetch it
+# r6-bug4: a sentinel that lets the health-status caller tell "not passed" (fetch it
 # yourself) apart from None. None now means the health read ERRORED — distinct from {} (a
 # healthy/undeployed account with no rows) — so a failed safety read never renders as a
 # blank/green "all clear" bar while criticals are actually open.
@@ -475,103 +454,85 @@ def _health_values_cached(scope: str) -> dict[str, tuple[str, str]]:
 
 
 def _health_values() -> dict[str, tuple[str, str]] | None:
-    """One fetch+parse of the health-strip mart, shared by the sidebar strip,
-    the persistent status bar, and the top bar (they used to parse it thrice
-    with three different source labels). Returns None on a read ERROR, {} on a
-    successful-but-empty read (see _UNSET note)."""
+    """Fetch and parse the health-strip mart once for the persistent pulse.
+
+    Returns None on a read error and {} on a successful-but-empty read.
+    """
     try:
         return _health_values_cached(cache_scope(mart_sql.health_strip()))
     except _HealthUnavailable:
         return None
 
 
-def _health_strip(vals: object = _UNSET) -> None:
-    """Always-visible pulse: criticals, telemetry freshness, MTD credits.
-    You should not have to visit Overview to know something is red."""
-    vals = _health_values() if vals is _UNSET else vals
-    if vals is None:   # r6-bug4: a FAILED read must not render as blank chrome
-        _strip_line("MUTED", "Health check unavailable")
-        return
-    if not vals:
-        return
-    crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
-    if crit_state == "BAD":
-        if st.button(f"{crit} open critical(s) →", key="strip_crit", use_container_width=True,
-                     type="primary"):
-            request_navigation("Alerts", "Open events")
-    else:
-        _strip_line("OK", "No open criticals")
-    # N2: a critical that paged nobody is worse than a busy pager — surface it
-    # loudly on the shell, one click to the delivery view.
-    und, und_state = vals.get("UNDELIVERED_CRITICAL", ("0", "OK"))
-    if und_state == "BAD" and st.button(f"{und} critical(s) reached nobody →",
-                                        key="strip_undelivered", use_container_width=True,
-                                        type="primary"):
-        request_navigation("Alerts", "Native delivery")
-    stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
-    stale_name = vals.get("STALEST_SOURCE_NAME", ("", ""))[0]
-    _src = f"{stale_name} " if stale_name and stale_name != "none" else ""
-    if stale == "-1" and stale_state == "BAD":   # N15: worst source has never loaded
-        _strip_line("BAD", f"Stalest telemetry: {_src}never loaded")
-    elif stale != "-1":
-        _strip_line(stale_state, f"Stalest telemetry: {_src}{stale}h")
-    mtd, _ = vals.get("MTD_CREDITS", ("", ""))
-    if mtd:
-        # rec13: lead with USD like every other surface (this strip is the app's most
-        # persistent view). C1: the health strip ALSO carries the AI/OTHER credit split
-        # (MTD_CREDITS_AI / MTD_CREDITS_OTHER), so price AI/Cortex credits at the AI rate
-        # via blended_billed_usd — exactly like the Brief (brief.py), which reads the same
-        # strip. Pricing the total at the flat compute rate overstates AI spend. Fall back
-        # to the flat rate only when a stale cache predates the split (both arms absent).
-        # Rates via settings, never inlined.
-        from app.logic.formulas import (
-            blended_billed_usd,
-            credits_to_usd,
-            format_usd,
-            safe_float,
-        )
-        from app.ui.components import load_settings
-        _sset = load_settings("Sidebar")
-        _rate = safe_float(_sset.get("CREDIT_PRICE_USD"), 3.68)
-        _ai_rate = safe_float(_sset.get("AI_CREDIT_PRICE_USD"), 2.20)
-        _mc = float(mtd)
-        _other = vals.get("MTD_CREDITS_OTHER", ("", ""))[0]
-        _ai = vals.get("MTD_CREDITS_AI", ("", ""))[0]
-        if _other or _ai:
-            _usd = blended_billed_usd(safe_float(_other), safe_float(_ai), _rate, _ai_rate)
-        else:
-            _usd = credits_to_usd(_mc, _rate)
-        _strip_line("INFO", f"{format_usd(_usd)} MTD · {_mc:,.0f} cr")
+def _page_href(page: str, section: str = "") -> str:
+    params = {"page": page.lower().replace(" ", "-")}
+    if section:
+        params["section"] = section.lower().replace("&", "and").replace(" ", "-")
+    return "?" + urlencode(params)
 
 
 def _persistent_status_bar(vals: object = _UNSET) -> None:
-    """The 3-4 numbers that matter, on every page (CoCo high item)."""
-    from app.ui.components import status_bar
+    """The one global pulse: four clickable signals, rendered once per page."""
+    from app.logic.formulas import (
+        blended_billed_usd,
+        credits_to_usd,
+        format_usd,
+        safe_float,
+    )
+    from app.ui.components import load_settings, status_bar
+
     vals = _health_values() if vals is _UNSET else vals
-    if vals is None:   # r6-bug4: keep the bar chrome + say the read failed, never vanish
-        status_bar([{"k": "Health", "v": "unavailable", "icon": "alerts", "sev": "warn"}])
+    if vals is None:
+        status_bar([{
+            "k": "Health",
+            "v": "unavailable",
+            "icon": "alerts",
+            "sev": "warn",
+            "href": _page_href("Admin", "Errors & telemetry"),
+        }])
         return
     if not vals:
         return
-    crit, _ = vals.get("OPEN_CRITICAL", ("0", "OK"))
+
+    crit, crit_state = vals.get("OPEN_CRITICAL", ("0", "OK"))
+    undelivered, undelivered_state = vals.get("UNDELIVERED_CRITICAL", ("0", "OK"))
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
+    stale_name = vals.get("STALEST_SOURCE_NAME", ("", ""))[0]
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
-    # rec10: the "Scope" cell restated the company/days the filter toolbar right
-    # above already shows — dropped so the four-cell bar carries only signal not
-    # already on screen (criticals, telemetry age, MTD).
     stats = [
         {"k": "Open criticals", "v": crit, "icon": "alerts",
-         "sev": "bad" if crit not in ("0", "") else "ok"},
+         "sev": "bad" if crit_state == "BAD" or crit not in ("0", "") else "ok",
+         "href": _page_href("Alerts", "Open events")},
+        {"k": "Undelivered criticals", "v": undelivered, "icon": "bolt",
+         "sev": "bad" if undelivered_state == "BAD" or undelivered not in ("0", "") else "ok",
+         "href": _page_href("Alerts", "Native delivery")},
         {"k": "Telemetry age",
-         "v": (f"{stale}h" if stale != "-1" else ("none" if stale_state == "BAD" else "n/a")),
-         "icon": "clock", "sev": _sev.get(stale_state, "")},
+         "v": (f"{stale_name} · {stale}h" if stale != "-1" and stale_name
+               else f"{stale}h" if stale != "-1"
+               else "never loaded" if stale_state == "BAD" else "n/a"),
+         "icon": "clock", "sev": _sev.get(stale_state, ""),
+         "href": _page_href("Control Room", "Freshness & replay")},
     ]
     if mtd:
-        try:
-            stats.append({"k": "MTD credits", "v": f"{float(mtd):,.0f}", "icon": "cost", "sev": "info"})
-        except (TypeError, ValueError):
-            pass
+        settings = load_settings("Status bar")
+        rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+        credits = safe_float(mtd)
+        other = vals.get("MTD_CREDITS_OTHER", ("", ""))[0]
+        ai = vals.get("MTD_CREDITS_AI", ("", ""))[0]
+        usd = (
+            blended_billed_usd(safe_float(other), safe_float(ai), rate, ai_rate)
+            if other or ai
+            else credits_to_usd(credits, rate)
+        )
+        stats.append({
+            "k": "MTD spend",
+            "v": f"{format_usd(usd)} · {credits:,.0f} cr",
+            "icon": "cost",
+            "sev": "info",
+            "href": _page_href("Cost & Contract", "Spend & Attribution"),
+        })
     status_bar(stats)
 
 
@@ -603,15 +564,14 @@ def _scope_is_active() -> bool:
     return _active_filter_count() > 0
 
 
-def _topbar_scope(health_vals: dict | None = None) -> None:
+def _topbar_scope() -> None:
     """Compact triage-filter toolbar above every page (v4.65 sleek pass): the
     kicker and Legend / Views / Reset share one thin header row, then the scope
     controls, then 'More filters'. The strip border glows while any non-default
     filter is live so scoped numbers never read as account-wide. Telemetry age
     lives on the status-bar card below (it was duplicated here), and the
     active-scope chip band is dropped — the controls show the scope and a live
-    warehouse/user/schema filter auto-opens 'More filters'. (health_vals is kept
-    for caller/signature stability; the header no longer reads telemetry.)"""
+    warehouse/user/schema filter auto-opens 'More filters'."""
     from app.ui.components import legend_popover
     active_n = _active_filter_count()
     active = active_n > 0
@@ -744,12 +704,9 @@ def main() -> None:
     profile = resolve_role_profile(role)
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 
-    # One health fetch + parse per rerun, shared by the sidebar strip, the
-    # top bar, and the status bar (Codex #1 — was fetched/parsed three times).
-    health_vals = _health_values() if connected else {}
-    page = _sidebar(pages, role, profile, connected, health_vals)
+    page = _sidebar(pages, role, profile, connected)
     if connected:
-        _topbar_scope(health_vals)
+        _topbar_scope()
 
     if not connected:
         st.title("OVERWATCH")
@@ -772,7 +729,7 @@ def main() -> None:
         return
 
     if page != "Brief":  # Brief is already the compact status view
-        _persistent_status_bar(health_vals)
+        _persistent_status_bar()
     _RENDERERS[page]()
     # RENDER_MS now spans sidebar/topbar/status chrome too, not just the page
     # body — chrome overhead was invisible in APP_USAGE (Codex #18).

@@ -14,14 +14,27 @@ from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
 from app.logic.actions import rank_actions
-from app.logic.formulas import blended_billed_usd, format_usd, md_dollars, safe_float
+from app.logic.formulas import (
+    ExecutiveSummaryView,
+    account_now,
+    blended_billed_usd,
+    executive_slide_bullets,
+    executive_summary_csv,
+    executive_summary_html,
+    format_usd,
+    md_dollars,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import (
+    download_text_button,
     empty_state,
+    export_button,
     kpi_row,
     load_settings,
     page_header,
     panel_help,
+    section_filter_contract,
     section_header,
     styled_table,
 )
@@ -45,19 +58,24 @@ def _stalest_label(vals: dict) -> str:
 
 @safe_page(_PAGE)
 def render() -> None:
+    f = filters()
+    company = f["company"]
     page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
+    section_filter_contract(
+        f,
+        applies=(),
+        partial=("company",),
+        note="Company shapes open incidents/events; spend, contract, freshness, and owner queue use fixed account-wide horizons.",
+    )
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-    company = filters()["company"]
 
     # Two tier-grouped parallel batches (live round 10: ten serial reads made
     # the exec page the slow one — p95 8.9s). Any batch failure falls back to
     # the original serial per-query path below, unchanged.
-    # health_strip deliberately NOT in this batch (r15 #14): the app shell
-    # already runs it under key="health_strip" every render — the batch's
-    # tuple cache was paying the same SQL a second time. The serial call
-    # below shares the shell's cache entry.
+    # health_strip deliberately stays outside this batch: it has its own shell
+    # TTL on other pages and the serial call below keeps the same cache identity.
     _b_live = run_batch([
         {"key": "inc", "sql": mart_sql.open_incidents(5, company),
          "source": f"INCIDENTS (open, {company} + account-level)"},
@@ -187,8 +205,18 @@ def render() -> None:
 
     spend = _b_rec.get("spark") or run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
                 source="FACT_METERING_DAILY")
+    brief_spend_series: list[float] = []
     if spend.ok and not spend.empty:
         charts.sparkline_row([("Spend, 14 days", spend.df, "DAY", "CREDITS_BILLED")])
+        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"}.issubset(spend.df.columns):
+            brief_spend_series = [
+                blended_billed_usd(row["CREDITS_BILLED_OTHER"], row["CREDITS_BILLED_AI"],
+                                   rate, ai_rate)
+                for _, row in spend.df.iterrows()
+            ]
+        else:
+            brief_spend_series = [safe_float(value) * rate
+                                  for value in spend.df["CREDITS_BILLED"].tolist()]
 
     # N2: a critical that paged nobody hides behind a green board — call it out
     # on the one surface a half-awake on-call actually reads.
@@ -220,6 +248,7 @@ def render() -> None:
             empty_state("needs_setup", "Alerting not installed yet.")
 
     section_header("Asks", "info", "bolt")
+    brief_action_lines: list[str] = []
     actions = _b_live.get("acts") or run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",
                   source="ACTION_QUEUE")
     if actions.ok and not actions.empty:
@@ -229,6 +258,10 @@ def render() -> None:
         else:
             for _, a in ranked.iterrows():
                 est = safe_float(a.get("ESTIMATED_USD"))
+                brief_action_lines.append(
+                    f"[{a['SEVERITY']}] {a['TITLE']} - owner {a.get('OWNER') or 'unassigned'}"
+                    + (f" - about {format_usd(est)}" if est > 0 else "")
+                )
                 # $-escape: TITLE is data — a '$' in it pairs with format_usd's '$'
                 st.markdown(md_dollars(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
                             f"{a.get('OWNER') or 'unassigned'}"
@@ -249,6 +282,50 @@ def render() -> None:
         drow = digest.df.iloc[0]
         with st.expander(f"AI morning narrative — {drow.get('DIGEST_DATE')}", expanded=False):
             st.markdown(str(drow.get("BODY") or ""))
+
+    _brief_view = ExecutiveSummaryView(
+        company=company,
+        days=14,
+        generated=account_now().strftime("%Y-%m-%d %H:%M") + " (account time)",
+        cards=tuple(
+            (str(item.get("label", "Metric")),
+             str(item.get("value", "-")).replace("â€”", "-")
+             + (f" | {item['delta']}" if item.get("delta") else ""))
+            for item in kpis
+        ),
+        actions=tuple(brief_action_lines),
+        spend_series=tuple(brief_spend_series),
+        scope_notes=(
+            "MTD spend, contract, savings, and freshness are account-wide unless the card says otherwise.",
+            f"Alerts and incidents honor {company} plus account-level events; the action queue is account-wide.",
+            "Metering can lag up to 24 hours. A dash means telemetry was unavailable, not zero.",
+        ),
+        title="Morning brief",
+    )
+    with st.expander("Executive export", expanded=False):
+        _ex_html, _ex_slide, _ex_csv = st.columns(3)
+        with _ex_html:
+            export_button(
+                "Presentation (HTML)",
+                executive_summary_html(_brief_view, presentation=True),
+                file_name="overwatch_morning_brief.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+        with _ex_slide:
+            download_text_button(
+                "Slide bullets (.txt)",
+                executive_slide_bullets(_brief_view),
+                "overwatch_morning_brief_bullets.txt",
+            )
+        with _ex_csv:
+            export_button(
+                "Brief data (CSV)",
+                executive_summary_csv(_brief_view),
+                file_name="overwatch_morning_brief.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
     st.caption(pd.Timestamp.now().strftime("Generated %Y-%m-%d %H:%M") +
                " · full detail lives on Overview and Control Room.")

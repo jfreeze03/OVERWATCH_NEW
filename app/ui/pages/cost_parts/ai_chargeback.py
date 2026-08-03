@@ -149,7 +149,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         # DISPLAY_NAME is "First Last" with a USER_NAME fallback.
         by_user = (enriched.groupby("DISPLAY_NAME", as_index=False)["SPEND_USD"].sum()
                    .sort_values("SPEND_USD", ascending=False))
-        charts.bar_usd(by_user, "DISPLAY_NAME", "SPEND_USD", title="Spend (USD)", top_n=12)
+        charts.bar_usd(by_user, "DISPLAY_NAME", "SPEND_USD", title="Spend (USD)", top_n=12,
+                       takeaway=True)
     with right:
         st.markdown("**Daily usage by source**")
         if live_res is not None:
@@ -348,10 +349,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
          "delta_color": "inverse" if unmapped_usd > 0 else "normal",
          "help": "Credits from warehouses with no DEPARTMENT_MAP row. Should be $0."},
     ])
-    charts.bar_usd(dept, "DEPARTMENT", "USD", title="Spend (USD, exact)")
+    charts.bar_usd(dept, "DEPARTMENT", "USD", title="Spend (USD, exact)", takeaway=True)
     styled_table(
         df[["DEPARTMENT", "WAREHOUSE_NAME", "COMPANY", "CREDITS_TOTAL", "USD"]],
         column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")},
+        totals=(("Total spend", format_usd(total_usd)),),
     )
     result_caption(dept_res, note="Idle credits stay with the owning department - that is the point of chargeback.")
 

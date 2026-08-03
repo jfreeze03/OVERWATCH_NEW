@@ -52,6 +52,10 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 [data-testid="stCaptionContainer"],.stCaption,small { color:var(--ow-ink-mute) !important; }
 [data-testid="stMetricValue"],.ow-num,td,th { font-variant-numeric:tabular-nums; }
 
+.ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
+.ow-page-heading h1 { margin:0; padding:0; font-size:1.72rem; font-weight:750; letter-spacing:0; }
+.ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
+
 div[data-testid="stMetric"] {
   position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 12px 18px;
@@ -91,9 +95,9 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
    hover-only card title= tooltip (invisible on touch, unreachable by keyboard).
    The affordance is a focusable '?' badge; the tooltip fires on hover AND focus,
    so Tab-users and touch-users both get it. CSP-safe (no JS): content:attr(). */
-.ow-help { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px;
+.ow-help { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px;
   flex:0 0 auto; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2);
-  color:var(--ow-ink-mute); font-size:10px; font-weight:700; line-height:1; cursor:help;
+  color:var(--ow-ink-mute); font-size:0.75rem; font-weight:700; line-height:1; cursor:help;
   position:relative; outline:none; text-transform:none; letter-spacing:0; }
 .ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
 .ow-help:focus-visible { box-shadow:0 0 0 2px rgba(56,189,248,0.45); }
@@ -106,7 +110,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
 .ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
-.ow-section { display:flex; align-items:center; gap:10px; margin:6px 0 6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
+.ow-section { display:flex; align-items:center; gap:10px; margin:6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
   border-left:3px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.06),transparent 60%); }
 .ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
 .ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
@@ -115,6 +119,9 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
+
+.ow-filter-contract { margin:-2px 0 8px 0; padding:4px 10px; border-left:2px solid var(--ow-info);
+  color:var(--ow-ink-mute); background:rgba(56,189,248,0.06); font-size:0.72rem; line-height:1.45; }
 
 .ow-statusbar { display:flex; gap:8px; flex-wrap:wrap; align-items:stretch; margin:0 0 12px 0; }
 .ow-stat { flex:1 1 130px; min-width:120px; position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
@@ -125,6 +132,10 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-stat__k { font-size:0.72rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
 .ow-stat__v { font-size:1.04rem; font-weight:720; color:var(--ow-ink); font-variant-numeric:tabular-nums; display:flex; align-items:center; gap:6px; }
 .ow-stat__spark { margin-top:2px; opacity:0.9; }
+.ow-stat--link { display:block; text-decoration:none; cursor:pointer;
+  transition:border-color var(--ow-ease),box-shadow var(--ow-ease); }
+.ow-stat--link:hover { border-color:var(--ow-accent); box-shadow:var(--ow-shadow2); }
+.ow-stat--link:focus-visible { outline:2px solid var(--ow-accent); outline-offset:2px; }
 
 .ow-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 10px; margin:0 6px 4px 0; border-radius:var(--ow-r-pill);
   font-size:0.72rem; font-weight:620; border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); background:rgba(148,163,184,0.05); }
@@ -144,7 +155,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   border-color:rgba(56,189,248,0.40);
   box-shadow:0 0 0 1px rgba(56,189,248,0.22),var(--ow-shadow);}
-.ow-kicker { font-size:0.68rem; letter-spacing:0.18em; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
+.ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
@@ -154,14 +165,20 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
   -webkit-text-fill-color:transparent; background-clip:text; }
 
-div[role="radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label="Window"] {
-  /* rec 15 (a11y): WRAP instead of horizontal overflow-scroll + nowrap. A scroll
-     edge hides radio options off-screen — invisible to touch and a keyboard trap;
-     wrapping keeps every option reachable. r-lg (not the pill radius) so a two-row
-     group still reads as one grouped control. */
+/* Native segmented controls (stButtonGroup) wrap every option and retain a
+   visible keyboard focus ring. The role/label rules below are the old-radio
+   compatibility path for Streamlit-in-Snowflake runtimes without the widget. */
+div[data-testid="stButtonGroup"] div[data-baseweb="button-group"] {
+  gap:4px; padding:4px; background:var(--ow-surface); border:1px solid var(--ow-hairline);
+  border-radius:var(--ow-r-lg); flex-wrap:wrap !important; width:100%; }
+div[data-testid="stButtonGroup"] button { flex:0 1 auto; min-width:44px; white-space:normal;
+  border-radius:var(--ow-r-pill); }
+div[data-testid="stButtonGroup"] button:focus-visible { outline:2px solid var(--ow-accent);
+  outline-offset:2px; z-index:2; }
+div[role="radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label^="Window"] {
   gap:4px; padding:4px; background:var(--ow-surface); border:1px solid var(--ow-hairline);
   border-radius:var(--ow-r-lg); flex-wrap:wrap; }
-div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-label="Window"] label {
+div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-label^="Window"] label {
   border-radius:var(--ow-r-pill); padding:3px 12px; margin:0; white-space:nowrap; transition:background var(--ow-ease),color var(--ow-ease); }
 div[role="radiogroup"][aria-label="Section"] label:hover { background:rgba(148,163,184,0.10); }
 div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {

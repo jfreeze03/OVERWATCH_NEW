@@ -45,6 +45,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     section_header,
     selectable_nav_table,
     selectable_table,
@@ -67,7 +68,14 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
 
     from app.config import core_object
     from app.core.sqlsafe import sql_literal
-    fam = sql_literal(str(proposal_key).split("|", 1)[0])
+    proposal_parts = str(proposal_key).split("|", 3)
+    fam = sql_literal(proposal_parts[0])
+    entity_filter = ""
+    if len(proposal_parts) == 4 and proposal_parts[2].upper() != "ACCOUNT":
+        entity_filter = (
+            "AND UPPER(SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 2)) = "
+            f"UPPER({sql_literal(proposal_parts[3])}) "
+        )
     inc_id = sql_literal(str(uuid.uuid4()))
     return (
         f"INSERT INTO {core_object('INCIDENTS')} "
@@ -84,6 +92,7 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
         # proposal's company too (live round 8), account-level rides along
         f"AND (e.COMPANY = {sql_literal(str(company))} OR UPPER(e.COMPANY) = 'ALL') "
         f"AND SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) = {fam} "
+        f"{entity_filter}"
         f"AND NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
         "WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID);"
     )
@@ -280,6 +289,29 @@ def render() -> None:
 
     section = lazy_sections(["Pulse", "Incidents & triage", "Timeline & movers",
                              "Freshness & replay"], key="cr_section")
+    _contracts = {
+        "Pulse": {
+            "applies": ("company",),
+            "partial": ("database", "schema_contains"),
+            "note": "Database and Schema narrow query health only; the horizon is fixed since yesterday.",
+        },
+        "Incidents & triage": {
+            "applies": ("company",),
+            "partial": ("database", "schema_contains"),
+            "note": "Database and Schema narrow task evidence, not incident/alert records.",
+        },
+        "Timeline & movers": {
+            "applies": ("company",),
+            "partial": ("days", "database"),
+            "note": "Window shapes spend movers; timeline uses its local 48h/7d control.",
+        },
+        "Freshness & replay": {
+            "applies": (),
+            "partial": ("company", "database"),
+            "note": "Freshness is account-wide; replay uses its own date and scoped evidence where available.",
+        },
+    }
+    section_filter_contract(f, **_contracts[section])
 
     if section == "Pulse":
         # ---- pulse (since yesterday 00:00) ---------------------------------------
@@ -419,10 +451,25 @@ def render() -> None:
                     source=f"INCIDENT_PROPOSALS ({company} + account-level — a human confirms)")) if _is_op else None
         if _is_op and props is not None and props.usable():
             with st.expander(f"Proposed incidents ({len(props.df)}) — nothing groups silently"):
-                styled_table(props.df)
+                _proposal_columns = [
+                    "PROPOSAL_KEY", "SUGGESTED_TITLE", "SEVERITY", "COMPANY",
+                    "ENTITY_KIND", "ENTITY_NAME", "CONFIDENCE", "ALERTS",
+                    "MATCHED_WH_CHANGES", "MATCHED_OBJECT_CHANGES",
+                    "MATCHED_TASK_FAILURES", "FIRST_TS", "LAST_TS", "EVIDENCE",
+                ]
+                styled_table(props.df[[c for c in _proposal_columns if c in props.df.columns]])
                 _pick = st.selectbox("Proposal", props.df["PROPOSAL_KEY"].astype(str).tolist(),
                                      key="inc_prop_pick")
                 _prow = props.df[props.df["PROPOSAL_KEY"].astype(str) == _pick].iloc[0]
+                _entity_kind = str(_prow.get("ENTITY_KIND", "family") or "family")
+                _entity_name = str(_prow.get("ENTITY_NAME", "account") or "account")
+                _confidence = str(_prow.get("CONFIDENCE", "legacy") or "legacy")
+                _evidence = str(_prow.get("EVIDENCE", "Alert-family correlation only.")
+                                or "Alert-family correlation only.")
+                st.caption(
+                    f"Scope: {_entity_kind} {_entity_name} | confidence {_confidence}. "
+                    f"Evidence: {_evidence} Human confirmation is still required."
+                )
                 _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
                                              str(_prow["COMPANY"]), _pick)
                 st.code(_dec, language="sql")

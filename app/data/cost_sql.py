@@ -174,6 +174,95 @@ ORDER BY DAY
 """
 
 
+def replication_by_database(days: int, company: str = "ALL", database: str = "") -> str:
+    """Native replication credits and transferred bytes by secondary database."""
+    days = bounded_days(days, 365)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS,
+    SUM(COALESCE(BYTES_TRANSFERRED, 0)) AS BYTES_TRANSFERRED,
+    SUM(COALESCE(BYTES_TRANSFERRED, 0)) / POWER(1024, 4) AS TIB_TRANSFERRED,
+    MIN(START_TIME) AS FIRST_USE,
+    MAX(END_TIME) AS LAST_USE
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASE_REPLICATION_USAGE_HISTORY
+WHERE {where}
+GROUP BY DATABASE_NAME
+HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
+    OR SUM(COALESCE(BYTES_TRANSFERRED, 0)) > 0
+ORDER BY CREDITS DESC, BYTES_TRANSFERRED DESC
+"""
+
+
+def compute_pool_usage(days: int) -> str:
+    """SPCS credits by compute pool and owning application (account-wide)."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT
+    COMPUTE_POOL_NAME,
+    COALESCE(APPLICATION_NAME, 'Unassigned') AS APPLICATION_NAME,
+    IS_EXCLUSIVE,
+    SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS,
+    MIN(START_TIME) AS FIRST_USE,
+    MAX(END_TIME) AS LAST_USE
+FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY COMPUTE_POOL_NAME, COALESCE(APPLICATION_NAME, 'Unassigned'), IS_EXCLUSIVE
+HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
+ORDER BY CREDITS DESC
+"""
+
+
+def notebook_container_usage(days: int) -> str:
+    """Notebook runtime and credits, a non-additive subset of SPCS usage."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT
+    NOTEBOOK_NAME,
+    USER_NAME,
+    COMPUTE_POOL_NAME,
+    SERVICE_NAME,
+    SUM(COALESCE(NOTEBOOK_EXECUTION_TIME_SECS, 0)) AS EXECUTION_TIME_SEC,
+    SUM(COALESCE(CREDITS, 0)) AS CREDITS,
+    MIN(START_TIME) AS FIRST_USE,
+    MAX(END_TIME) AS LAST_USE
+FROM SNOWFLAKE.ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+GROUP BY NOTEBOOK_NAME, USER_NAME, COMPUTE_POOL_NAME, SERVICE_NAME
+HAVING SUM(COALESCE(CREDITS, 0)) > 0
+    OR SUM(COALESCE(NOTEBOOK_EXECUTION_TIME_SECS, 0)) > 0
+ORDER BY CREDITS DESC, EXECUTION_TIME_SEC DESC
+"""
+
+
+def marketplace_paid_usage(days: int) -> str:
+    """Paid Marketplace charges for this account in their native currency."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT
+    PROVIDER_NAME,
+    LISTING_DISPLAY_NAME,
+    DATABASE_NAME,
+    CHARGE_TYPE,
+    CURRENCY,
+    SUM(COALESCE(UNITS, 0)) AS UNITS,
+    SUM(COALESCE(CHARGE, 0)) AS CHARGE,
+    MIN(USAGE_DATE) AS FIRST_USE,
+    MAX(USAGE_DATE) AS LAST_USE
+FROM SNOWFLAKE.ORGANIZATION_USAGE.MARKETPLACE_PAID_USAGE_DAILY
+WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND CONSUMER_ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
+GROUP BY PROVIDER_NAME, LISTING_DISPLAY_NAME, DATABASE_NAME, CHARGE_TYPE, CURRENCY
+HAVING SUM(COALESCE(CHARGE, 0)) <> 0
+ORDER BY CHARGE DESC
+"""
+
+
 def storage_by_database(days: int, company: str = "ALL", database: str = "") -> str:
     """Per-database storage on the BILLING basis: the average of daily bytes
     over the window (F1, 2026-07-14). Snowflake bills storage on the monthly

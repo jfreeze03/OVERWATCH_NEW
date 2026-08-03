@@ -22,6 +22,7 @@ from app.core.identity import identity_sql
 from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
+from app.core.state import filters
 from app.data import cost_sql, mart_sql
 from app.logic.formulas import md_dollars, safe_float
 from app.ui.components import (
@@ -35,6 +36,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_filter_contract,
     selectable_table,
     styled_table,
     with_user_names,
@@ -191,6 +193,10 @@ _EXPECTED_MIGRATIONS = {
         "swallowing, so a matched re-run is a no-op and any genuine ALTER failure aborts "
         "loudly leaving the graph suspended rather than silently orphaned; green-on-failure "
         "finalizer (#5) deferred. No new objects",
+    72: "entity-aware incident proposals: groups open alerts by family, company, entity "
+        "kind and entity name; exposes exact matched warehouse/object changes, task-failure "
+        "evidence and confidence. Proposal keys carry entity scope so a human declaration "
+        "links only matching members. View-only; auto-declare and lifecycle writes unchanged",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -926,6 +932,7 @@ def _metric_registry_tab() -> None:
 
 @safe_page(_PAGE)
 def render() -> None:
+    f = filters()
     page_header("Admin", "Settings, migrations, metrics, self-cost, performance, canary, and telemetry.", icon_name="admin")
     # #3: operator gating resolves the VIEWER identity against the allowlist, not
     # CURRENT_ROLE() (which is the app owner's role for every viewer under owner's-rights
@@ -935,6 +942,11 @@ def render() -> None:
     section = lazy_sections(
         ["Settings", "Migrations & freshness", "Metrics", "App self-cost",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
+    section_filter_contract(
+        f,
+        applies=(),
+        note=f"{section} is account-wide administration; analytical scope filters do not apply.",
+    )
     if section == "Settings":
         _settings_tab(is_operator)
     elif section == "Migrations & freshness":

@@ -18,6 +18,7 @@ import streamlit as st
 from app.core.query import run, run_batch
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
+from app.logic.call_tree import build_call_tree
 from app.logic.directory import resolve_display
 from app.logic.formulas import credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
@@ -266,10 +267,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                     if kids.usable():
                         kdf = kids.df.copy()
                         kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                        kdf = build_call_tree(kdf, _cid)
                         st.markdown("**Where the money went inside this CALL**")
-                        styled_table(kdf, height=240, column_config={
+                        _tree_columns = [
+                            "STEP", "QUERY_ID", "STEP_PREVIEW", "STEP_START",
+                            "ELAPSED_SEC", "CREDITS", "USD",
+                        ]
+                        styled_table(kdf[[c for c in _tree_columns if c in kdf.columns]],
+                                     height=300, column_config={
                             "USD": st.column_config.NumberColumn("$", format="$%.4f"),
                         })
+                        st.caption(
+                            "Parent-before-child execution order. Indentation follows "
+                            "PARENT_QUERY_ID; orphaned history stays visible at the top level."
+                        )
 
     st.divider()
     st.markdown("**AI — $ by function/model (or Cortex Code source)**")

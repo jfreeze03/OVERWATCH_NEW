@@ -1,5 +1,65 @@
 # Changelog
 
+## 4.135.0 - UI/UX wave 1: task graph workbench and metric hierarchy (2026-08-03)
+
+- Rebuilt Operations task topology around one coherent current
+  `ROOT_TASK_ID + GRAPH_VERSION` snapshot. The graph no longer mixes per-task latest
+  versions or silently stops at 300 rows; incomplete, duplicate, dangling, and cyclic
+  shapes are refused before rendering.
+- Added a Tasks workbench with Health, Graph, and Runs views. Graph offers a root picker,
+  topology KPIs, a dependency-free SVG renderer with pan, zoom, fit, full-screen, keyboard
+  controls and SVG export, plus Graphviz and DOT fallbacks.
+- Reorganized Overview into Company economics and Account risk & contract bands, followed
+  by actions, drivers, and historical context. Section-level filter contracts now state
+  which global dimensions apply, are panel-dependent, or are ignored across every major
+  page.
+- Consolidated duplicate shell health readouts into one clickable global pulse linking
+  criticals, delivery, freshness, and spend to their owning views.
+- Added semantic page/section headings, decorative-icon screen-reader hiding, wrapped and
+  focus-visible segmented controls, clickable status-card focus states, and pinned the
+  Streamlit-in-Snowflake runtime target to `1.52.2`.
+
+No Snowflake migration is required for this release. Snowflake access remained read-only.
+Coverage includes pure graph-shape tests, SQL/source-shape locks, renderer-control checks,
+scope-contract assertions, and shell accessibility/runtime guards.
+
+## 4.134.0 - Cost attribution, evidence, and executive presentation (2026-08-03)
+
+- Added a measured cost-drill inventory plus lazy native detail for replication by database,
+  Snowpark compute pools, the non-additive notebook subset, and paid Marketplace charges in
+  native currency. Hybrid request credits are explicitly labeled historical.
+- Added parent-aware stored-procedure execution trees, selective chart takeaways, larger help
+  and kicker text, and one shared executive export model for projector/print HTML, slide
+  bullets, and CSV on Overview and Morning Brief.
+- Added a conservative warehouse-capacity forecast using complete days, robust trend,
+  workload corroboration, recent-change suppression, and holdout-error gating. Weak or
+  unstable evidence produces no ETA.
+- Added V072 entity-aware incident proposals with exact change/failure evidence and confidence;
+  declaration remains human-confirmed and links only matching entity members.
+
+Migration note: the owner must apply
+`snowflake/migrations/V072__entity_aware_incident_proposals.sql` in Snowsight. The app did not
+execute Snowflake DDL or lifecycle writes.
+
+## 4.133.0 — Readability wave 3: totals and MTD credits (2026-08-03)
+
+- **rec33 — additive totals outside sortable tables.** `styled_table(totals=…)`
+  renders a compact Σ caption above the table while leaving the dataframe numeric,
+  sortable, selectable, and unchanged for CSV. Department chargeback now declares
+  its total spend; warehouse attribution declares current- and prior-window totals.
+  Percentage deltas are deliberately excluded because they are not additive.
+- **rec28 — MTD dollars plus credits.** Every populated MTD-pace card now carries
+  credits beneath the dollar headline. The value is derived from `mtd_usd / rate`,
+  never from a dataframe credit column, so the fallback, no-prior-history, and paced
+  paths share the same column-independent contract.
+- **rec30 — task-failure sort declaration.** Operations → Tasks labels the table
+  "by failed runs desc" only after `sort_values` has executed; frames without a
+  `FAILED` column remain unlabeled and unsorted.
+
+Coverage: behavioral totals-caption and MTD-card tests plus source-shape locks for
+both cost call sites, the column-independent MTD formula, and sort-before-label order.
+Gates green: ruff, mypy, **pytest 1869 passed / 1 skipped**.
+
 ## 4.132.1 — Hotfix: Overview KeyError 'CREDITS_TOTAL' (2026-08-03)
 
 rec28 (v4.132.0) computed the window-spend card's credits from

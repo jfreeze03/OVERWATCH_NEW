@@ -87,6 +87,7 @@ snowflake/migrations/V068__standalone_mart_freshness_stamps.sql
 snowflake/migrations/V069__exec_board_serverless_ai_drivers.sql
 snowflake/migrations/V070__delivery_routing_teams_only.sql
 snowflake/migrations/V071__task_graph_rechain_retry.sql
+snowflake/migrations/V072__entity_aware_incident_proposals.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
@@ -241,6 +242,13 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > for `TASK_LOAD_DAILY` (the migration is idempotent; re-running the whole file is also safe —
 > each re-point's state check issues neither `ADD` nor `REMOVE` once the predecessors already
 > match, so a matched re-run is a clean no-op).
+
+> **V072 verify (entity-aware incident proposals):** this is a view-only change and does not
+> run or replace the auto-declare procedure. After the owner applies V072 in Snowsight, query
+> `DBA_MAINT_DB.OVERWATCH.INCIDENT_PROPOSALS` and confirm separate rows for distinct entity
+> names in the same alert family. `CONFIDENCE` and `EVIDENCE` should disclose exact matched
+> warehouse/object changes or task failures. Incident creation remains a typed human action in
+> Control Room. No app or automation should apply this migration directly.
 
 > **V061 heal (runs in the migration tail; safe to re-run separately/off-hours):**
 > `CALL SP_LOAD_MARTS_V27('DAILY', 365);` rewrites `FACT_AI_USAGE_DAILY` rows the old
