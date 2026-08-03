@@ -235,6 +235,17 @@ def test_rec28_card_sub_slot_is_optional_secondary_line():
     assert "ow-card__meta" not in metric_card_html({"label": "Spend", "value": "$45,200"})
 
 
+def test_rec28_window_credits_derive_from_usd_not_a_missing_column():
+    from pathlib import Path
+    ov = Path(__file__).resolve().parents[1].joinpath(
+        "app", "ui", "pages", "overview.py").read_text(encoding="utf-8")
+    # regression (v4.132.1): the render-scope `daily` frame is only [DAY, USD]; deriving
+    # window credits from daily["CREDITS_TOTAL"] KeyError'd on real data. This card's
+    # value IS credits x rate, so credits = USD / rate — column-independent.
+    assert "_win_credits = safe_float(window_spend) / rate" in ov
+    assert 'daily["CREDITS_TOTAL"]' not in ov.split("def render", 1)[1]
+
+
 def test_rec13_theme_defines_method_and_scope_chip_styles():
     theme = _src("app/theme.py")
     assert ".ow-src-badge--method" in theme

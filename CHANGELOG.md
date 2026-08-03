@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.132.1 — Hotfix: Overview KeyError 'CREDITS_TOTAL' (2026-08-03)
+
+rec28 (v4.132.0) computed the window-spend card's credits from
+`daily["CREDITS_TOTAL"]`, but the render-scope `daily` frame is only `[DAY, USD]`
+(line 108 returns that projection; the board-panel path rebuilds it the same way) —
+so on real, non-empty data the Overview page failed to render with
+`KeyError: 'CREDITS_TOTAL'`. The AppTest render suite stubs run() to *empty* frames,
+so it never hit the line. Fix: derive credits from `window_spend / rate` — exact
+(the card's value IS credits × rate) and column-independent, so it works on every
+path. Added a source regression guard. Gates green: ruff, mypy, **pytest 1863
+passed / 1 skipped**.
+
 ## 4.132.0 — Readability wave 2: dollars + credits on the spend card (2026-08-03)
 
 - **rec28 (partial) — dollars-primary, credits-secondary.** `metric_card_html` gains

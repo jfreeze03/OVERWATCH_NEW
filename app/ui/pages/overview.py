@@ -227,7 +227,9 @@ def render() -> None:
 
     window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
     # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
-    _win_credits = float(daily["CREDITS_TOTAL"].map(safe_float).sum()) if not daily.empty else None
+    # This card's value IS credits x rate (warehouse metering), so credits = USD / rate —
+    # exact and column-independent (the `daily` frame here is only [DAY, USD], no credits col).
+    _win_credits = safe_float(window_spend) / rate if rate > 0 else None
     # One 150d metering read serves MTD here AND the forecast backtest below
     # (Codex r16 #17) — the separate 45d read survives only as the fallback
     # inside _mtd_spend_usd when this one fails.
