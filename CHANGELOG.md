@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.131.0 — Readability wave 2: active-filter count (2026-08-03)
+
+- **rec25 — active-filter count on the collapsed scope strip.** The strip's border
+  glow said *that* a filter was live but not *which* or *how many*. `_scope_is_active`
+  is refactored into `_active_filter_count()` (the bool derives from it, so the glow
+  and Reset are unchanged); the kicker now reads "Triage filters · 2 active" and the
+  "More filters" expander label carries "(N active)" so a hidden `user_contains` can't
+  silently shape every number on the page. Gates green: ruff, mypy, **pytest 1862
+  passed / 1 skipped**.
+
 ## 4.130.0 — Readability wave 2: relative age (2026-08-03)
 
 - **rec27 — "Age" companion column.** Triage timestamps (RAISED_AT) answer "when",

@@ -582,18 +582,25 @@ def _reset_scope() -> None:
         st.session_state[key] = default
 
 
-def _scope_is_active() -> bool:
-    """True when any non-default filter is live — drives the strip's border glow
-    and the Reset button. (v4.65: replaced the scope-chip summary; the controls
-    themselves show the scope, and a live warehouse/user/schema filter auto-opens
-    the 'More filters' row below so it can never hide.)"""
+def _active_filter_count() -> int:
+    """How many non-default filters are live — drives the strip's border glow, the
+    Reset button, and the 'N active' readout (rec25). (v4.65: replaced the scope-chip
+    summary; the controls themselves show the scope, and a live warehouse/user/schema
+    filter auto-opens the 'More filters' row below so it can never hide.)"""
     from app.core.state import FILTER_DEFAULTS
+    count = 0
     for key in ("flt_company", "flt_environment", "flt_days"):
         if st.session_state.get(key) != FILTER_DEFAULTS[key]:
-            return True
-    return bool(str(st.session_state.get("flt_database") or "").strip()) or any(
-        str(st.session_state.get(k) or "").strip()
-        for k in ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"))
+            count += 1
+    for key in ("flt_database", "flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"):
+        if str(st.session_state.get(key) or "").strip():
+            count += 1
+    return count
+
+
+def _scope_is_active() -> bool:
+    """True when any non-default filter is live (border glow + Reset button)."""
+    return _active_filter_count() > 0
 
 
 def _topbar_scope(health_vals: dict | None = None) -> None:
@@ -606,13 +613,18 @@ def _topbar_scope(health_vals: dict | None = None) -> None:
     warehouse/user/schema filter auto-opens 'More filters'. (health_vals is kept
     for caller/signature stability; the header no longer reads telemetry.)"""
     from app.ui.components import legend_popover
-    active = _scope_is_active()
+    active_n = _active_filter_count()
+    active = active_n > 0
     box = st.container(border=True)
     with box:
         head_l, head_leg, head_view, head_reset = st.columns([4.4, 0.9, 0.9, 0.9])
         with head_l:
             marker = '<div class="ow-scope-active"></div>' if active else ""
-            st.markdown(f'{marker}<div class="ow-kicker">Triage filters</div>',
+            # rec25: which/how-many filters are live shouldn't require opening "More
+            # filters" — surface the count on the kicker so a hidden filter can't
+            # silently shape every number on the page.
+            _kick = f"Triage filters · {active_n} active" if active_n else "Triage filters"
+            st.markdown(f'{marker}<div class="ow-kicker">{_kick}</div>',
                         unsafe_allow_html=True)
         with head_leg:
             legend_popover()
@@ -692,9 +704,14 @@ def _topbar_scope_controls() -> None:
     # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
     # visits; the contains-filters open automatically whenever one is active
     # so a live filter can never hide.
-    _adv_on = any(str(st.session_state.get(k) or "").strip() for k in
-                  ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"))
-    with st.expander("More filters — warehouse / user / schema contains", expanded=_adv_on):
+    _adv_n = sum(1 for k in ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains")
+                 if str(st.session_state.get(k) or "").strip())
+    _adv_on = _adv_n > 0
+    # rec25: count the hidden contains-filters on the collapsed label so a live one
+    # announces itself before the reader expands the row.
+    _adv_label = "More filters — warehouse / user / schema contains" + (
+        f" ({_adv_n} active)" if _adv_n else "")
+    with st.expander(_adv_label, expanded=_adv_on):
         c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
         with c_wh:
             st.text_input("Warehouse contains", key="flt_warehouse_contains")
