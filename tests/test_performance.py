@@ -72,11 +72,23 @@ def test_fact_metering_matches_live_columns():
     assert "FACT_METERING_DAILY" in fact
 
 
-def test_app_statement_stats_scoped_to_app_warehouse():
+def test_app_statement_stats_scoped_to_tagged_shared_warehouse():
     sql = mart_sql.app_statement_stats(9999)
-    assert "WAREHOUSE_NAME = 'WH_OVERWATCH_APP'" in sql
-    assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" not in sql
+    assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in sql
+    assert "QUERY_TAG LIKE 'OVERWATCH%'" in sql
+    assert "WH_OVERWATCH_APP" not in sql
     assert "QUERY_PARAMETERIZED_HASH" in sql
     assert "MAX_BY(QUERY_ID, TOTAL_ELAPSED_TIME) AS SLOWEST_QUERY_ID" in sql
     assert "DATEADD('day', -30" in sql  # clamped to 30
     assert "LIMIT 30" in sql
+
+
+def test_app_cost_uses_one_warehouse_and_tag_based_workload_split():
+    self_cost = mart_sql.app_self_cost(14)
+    assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in self_cost
+    assert "IFF(QUERY_TAG LIKE 'OVERWATCH%', 'INTERACTIVE APP', 'LOADERS / TASKS')" in self_cost
+    assert "WH_OVERWATCH_APP" not in self_cost
+
+    quarter = mart_sql.app_cost_quarter()
+    assert "WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in quarter
+    assert "WH_OVERWATCH_APP" not in quarter

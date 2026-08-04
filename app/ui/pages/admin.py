@@ -202,8 +202,8 @@ _EXPECTED_MIGRATIONS = {
         "Current year account-time offsets alongside the fixed rolling windows",
     74: "operating workbench: audited action lifecycle, evidence links, entity ownership, "
         "personal watchlists, optimization experiments and SLO objectives",
-    75: "security operating model: dedicated interactive warehouse, materialized login/change "
-        "evidence, policy registries, Trust Center deltas and durable access reviews",
+    75: "security operating model: materialized login/change evidence, policy registries, "
+        "Trust Center deltas and durable access reviews",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -463,13 +463,13 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 
 def _self_cost_tab() -> None:
     st.caption(
-        "The monitoring app must never become the cost problem: WH_OVERWATCH_APP isolates "
-        "interactive reads from WH_ALFA_ADMIN loader work; both are XSMALL with 60-second "
-        "auto-suspend, and every app query carries an OVERWATCH query tag."
+        "The monitoring app and loader tasks share WH_ALFA_ADMIN (XSMALL, 60-second "
+        "auto-suspend). Every interactive app query carries an OVERWATCH query tag, so "
+        "the table separates UI traffic from loader and task work without another warehouse."
     )
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
-              source="ACCOUNT_USAGE.QUERY_HISTORY (interactive app + loader work)")
+              source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, split by query tag)")
     if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
         df = res.df.copy()
         total = int(pd.to_numeric(df["APP_QUERIES"], errors="coerce").fillna(0).sum())
@@ -601,8 +601,8 @@ def _performance_tab() -> None:
     st.caption(
         "Every fetch the app persisted, grouped by page and query key — the slowest "
         "rows are the builders worth optimizing next, and the key names the call site. "
-        "The WH_OVERWATCH_APP statement-family scan (grouped by parameterized hash, with "
-        "bytes scanned) is one toggle below."
+        "The OVERWATCH-tagged WH_ALFA_ADMIN statement-family scan (grouped by parameterized "
+        "hash, with bytes scanned) is one toggle below."
     )
     telemetry = query_telemetry()
     if not telemetry.empty:
@@ -648,9 +648,9 @@ def _performance_tab() -> None:
                         "one thing the app's own telemetry cannot record."):
         st.caption(_SCAN_NOTE)
         scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_OVERWATCH_APP)")
+                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (tagged WH_ALFA_ADMIN)")
         if guard(scan, "No statements on the app warehouse in the last 7 days.",
-                 setup_hint="Stats appear once the app has run against WH_OVERWATCH_APP."):
+                 setup_hint="Stats appear after OVERWATCH-tagged app traffic runs on WH_ALFA_ADMIN."):
             # House convention: styled_table, not a raw st.dataframe — it carries the
             # status/delta coloring, header prettifier, pinned identity column, and the
             # self-identifying CSV export that every other table on the page has.
@@ -665,7 +665,7 @@ def _performance_tab() -> None:
                     **_scan_cfg,
                 })
             result_caption(scan)
-            st.caption("Interactive statements only; loader and scan tasks remain on WH_ALFA_ADMIN.")
+            st.caption("Interactive statements only; the OVERWATCH query tag excludes loader and task work.")
 
     st.markdown("**Page adoption (30d)**")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",

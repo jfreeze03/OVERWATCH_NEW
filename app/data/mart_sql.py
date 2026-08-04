@@ -105,7 +105,7 @@ WHERE {and_where(*where)}
 
 
 def app_statement_stats(days: int = 7) -> str:
-    """The app's own slowest statement families on the dedicated warehouse.
+    """The app's own slowest tagged statement families on its shared warehouse.
 
     Groups by QUERY_PARAMETERIZED_HASH so each app query pattern (all pages,
     all filter values) collapses to one row — the honest way to find which
@@ -127,6 +127,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
+  AND QUERY_TAG LIKE 'OVERWATCH%'
   AND QUERY_PARAMETERIZED_HASH IS NOT NULL
 GROUP BY 1
 ORDER BY P95_S DESC
@@ -139,7 +140,7 @@ def app_statement_stats_telemetry(days: int = 7) -> str:
     telemetry instead of a QUERY_HISTORY scan.
 
     app_statement_stats() answers the same question by scanning
-    ACCOUNT_USAGE.QUERY_HISTORY for a week of WH_OVERWATCH_APP traffic — 4.6s, and
+    ACCOUNT_USAGE.QUERY_HISTORY for a week of tagged WH_ALFA_ADMIN traffic — 4.6s, and
     ironically the Admin > Performance panel's own worst offender. APP_QUERY_TELEMETRY
     already records every fetch the app decided to keep, keyed by PAGE + QUERY_KEY,
     which is a BETTER grain than QUERY_PARAMETERIZED_HASH for "which builder do I
@@ -601,21 +602,20 @@ LIMIT {limit}
 
 
 def app_self_cost(days: int) -> str:
-    """What OVERWATCH itself spends: interactive app plus loader warehouse."""
+    """What OVERWATCH itself spends, split by query tag on the shared warehouse."""
     from app.config import APP_WAREHOUSE
 
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
-    IFF(WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}, 'INTERACTIVE APP', 'LOADERS / TASKS') AS WORKLOAD,
+    IFF(QUERY_TAG LIKE 'OVERWATCH%', 'INTERACTIVE APP', 'LOADERS / TASKS') AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND (QUERY_TAG LIKE 'OVERWATCH%'
-       OR WAREHOUSE_NAME IN ({sql_literal(APP_WAREHOUSE)}, 'WH_ALFA_ADMIN'))
+  AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
 GROUP BY 1, 2
 ORDER BY DAY, WORKLOAD
 """
@@ -947,12 +947,12 @@ FROM {core_object("SAVINGS_LEDGER")}
 
 def app_cost_quarter() -> str:
     """The ROI denominator: everything the app + its tasks burned this
-    quarter on the dedicated warehouse. From the fact since r14 #5 — the
+    quarter on their shared warehouse. From the fact since r14 #5 — the
     Brief was the last always-on surface paying a live metering scan."""
     return f"""
 SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_QTD
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
-WHERE WAREHOUSE_NAME IN ('WH_ALFA_ADMIN', 'WH_OVERWATCH_APP')
+WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'
   AND DAY >= DATE_TRUNC('quarter', CURRENT_DATE())
 """
 

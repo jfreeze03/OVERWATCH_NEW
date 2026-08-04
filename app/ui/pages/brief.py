@@ -89,7 +89,7 @@ def render() -> None:
          "source": "SETTINGS + FACT_METERING_DAILY"},
         {"key": "roi", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER"},
         {"key": "appq", "sql": mart_sql.app_cost_quarter(),
-         "source": "FACT_WAREHOUSE_DAILY (interactive app + loaders quarter)"},
+         "source": "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)"},
         {"key": "spark", "sql": mart_sql.fact_daily_spend(14), "source": "FACT_METERING_DAILY"},
         {"key": "digest", "sql": mart_sql.latest_digest(),
          "source": "DAILY_DIGEST (Cortex, grounded)"},
@@ -152,7 +152,7 @@ def render() -> None:
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
     cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_quarter(), page=_PAGE, key="brief_app_cost",
-                 tier="recent", source="FACT_WAREHOUSE_DAILY (interactive app + loaders quarter)")
+                 tier="recent", source="FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)")
     if roi.usable():
         rrow = roi.df.iloc[0]
         verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
@@ -167,7 +167,7 @@ def render() -> None:
             "delta_color": ("normal" if verified >= app_usd else "inverse")
                            if app_usd is not None else "off",
             "help": "VERIFIED ledger items only — proven by before/after actuals, never "
-                    "mixed with estimates. App cost = the dedicated warehouse's quarter "
+                    "mixed with estimates. App cost = the shared app/loader warehouse's quarter "
                     "spend. Green means OVERWATCH pays for itself.",
         })
         if pipeline > 0:

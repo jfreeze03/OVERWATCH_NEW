@@ -1,9 +1,8 @@
 -- V075__security_operating_model.sql
 --
--- Security operating model and interactive-workload isolation.
+-- Security operating model.
 --
 -- Adds:
---   * WH_OVERWATCH_APP, a dedicated auto-suspending warehouse for Streamlit reads.
 --   * Narrow persistent login/change facts loaded after the shared QH extract.
 --   * Trust Center snapshots and a latest-vs-prior delta view.
 --   * Identity, egress and client policy tables.
@@ -24,20 +23,6 @@ BEGIN
     END IF;
 END;
 $$;
-
--- Interactive reads no longer queue behind loader, mart and alert tasks.
--- No resource monitor: owner policy uses cost alerts, never warehouse suspension.
-CREATE WAREHOUSE IF NOT EXISTS WH_OVERWATCH_APP
-    WAREHOUSE_SIZE = 'XSMALL'
-    AUTO_SUSPEND = 60
-    AUTO_RESUME = TRUE
-    INITIALLY_SUSPENDED = TRUE
-    COMMENT = 'OVERWATCH Streamlit interactive reads; ETL remains on WH_ALFA_ADMIN';
-ALTER WAREHOUSE WH_OVERWATCH_APP SET
-    WAREHOUSE_SIZE = 'XSMALL'
-    AUTO_SUSPEND = 60
-    AUTO_RESUME = TRUE
-    STATEMENT_TIMEOUT_IN_SECONDS = 120;
 
 CREATE TABLE IF NOT EXISTS DBA_MAINT_DB.OVERWATCH.SECURITY_IDENTITY_POLICY (
     USER_NAME              VARCHAR(200) NOT NULL PRIMARY KEY,
@@ -686,7 +671,7 @@ SELECT SYSTEM$TASK_DEPENDENTS_ENABLE('DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY');
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 75,
-       'Security operating model: dedicated WH_OVERWATCH_APP interactive warehouse; persistent login/change facts and Trust Center snapshots loaded serially after the hourly mart task; identity/egress/client policies; durable access-review campaigns and decisions; Trust Center delta and local exception-queue views. Owner-applied, first fill 90d, no resource monitor.'
+       'Security operating model: persistent login/change facts and Trust Center snapshots loaded serially after the hourly mart task; identity/egress/client policies; durable access-review campaigns and decisions; Trust Center delta and local exception-queue views. Owner-applied, first fill 90d.'
 WHERE NOT EXISTS (
     SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 75
 );

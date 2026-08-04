@@ -31,7 +31,7 @@ def test_metering_surfaces_moved_to_the_fact():
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "fact_monthly_spend_by_warehouse" in ov          # boss-chart fallback = fact
     br = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "FACT_WAREHOUSE_DAILY (interactive app + loaders quarter)" in br
+    assert "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)" in br
 
 
 def test_cache_cardinality_is_bounded():

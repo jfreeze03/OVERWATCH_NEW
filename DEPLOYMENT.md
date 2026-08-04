@@ -288,12 +288,10 @@ safe (idempotent `CREATE OR REPLACE` / `CREATE IF NOT EXISTS` + MERGE seeds).
 The Admin page compares `SCHEMA_VERSION` against the versions bundled with the
 app and flags drift.
 
-Cost controls installed by V002/V075:
-- `WH_ALFA_ADMIN` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to loaders and tasks.
-- `WH_OVERWATCH_APP` — XSMALL, `AUTO_SUSPEND = 60`, dedicated to interactive
-  Streamlit reads so a loader cannot queue the UI.
-  Neither warehouse uses a resource monitor since v4.45 (owner correction:
-  OVERWATCH_RM's 30-credit cap was suspending work mid-use — V045 dropped it).
+Cost controls installed by V002:
+- `WH_ALFA_ADMIN` — XSMALL, `AUTO_SUSPEND = 60`, shared by the app and tasks.
+  It has no resource monitor since v4.45 (owner correction: OVERWATCH_RM's
+  30-credit cap was suspending the warehouse mid-use — V045 dropped it).
 
 ### Shared schema warning (read before migrating)
 
@@ -361,7 +359,7 @@ PUT file://app/*            @DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app/app/ OVE
 CREATE OR REPLACE STREAMLIT DBA_MAINT_DB.OVERWATCH.OVERWATCH_APP
     ROOT_LOCATION = '@DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE/app'
     MAIN_FILE = 'streamlit_app.py'
-    QUERY_WAREHOUSE = WH_OVERWATCH_APP
+    QUERY_WAREHOUSE = WH_ALFA_ADMIN
     TITLE = 'OVERWATCH — Snowflake Command Center';
 ```
 
@@ -370,7 +368,7 @@ shows what is deployed; re-running PUT with OVERWRITE replaces files and the
 app picks them up on next open.
 
 `snowflake.yml` defines the app (`streamlit_app.py`, `query_warehouse:
-WH_OVERWATCH_APP`); `environment.yml` pins the Snowflake-channel packages.
+WH_ALFA_ADMIN`); `environment.yml` pins the Snowflake-channel packages.
 Queries execute with the app owner's rights; USAGE on the Streamlit object
 (two roles only) is the access-control model.
 
@@ -384,7 +382,7 @@ account = "<account>"
 user = "<user>"
 authenticator = "externalbrowser"   # or password
 role = "SNOW_SYSADMINS"
-warehouse = "WH_OVERWATCH_APP"
+warehouse = "WH_ALFA_ADMIN"
 database = "DBA_MAINT_DB"
 schema = "OVERWATCH"
 ```

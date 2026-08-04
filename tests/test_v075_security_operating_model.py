@@ -34,14 +34,13 @@ def _read(path: str) -> str:
     return (_ROOT / path).read_text(encoding="utf-8")
 
 
-def test_v075_is_guarded_versioned_and_never_uses_a_resource_monitor() -> None:
+def test_v075_is_guarded_versioned_and_never_provisions_compute() -> None:
     assert "EXCEPTION (-20075" in _MIGRATION
     assert "IF (v < 74)" in _MIGRATION
     assert "SELECT 75," in _MIGRATION
     assert "WHERE VERSION = 75" in _MIGRATION
-    assert "CREATE WAREHOUSE IF NOT EXISTS WH_OVERWATCH_APP" in _MIGRATION
-    assert "AUTO_SUSPEND = 60" in _MIGRATION
-    assert "STATEMENT_TIMEOUT_IN_SECONDS = 120" in _MIGRATION
+    assert "CREATE WAREHOUSE" not in _MIGRATION
+    assert "ALTER WAREHOUSE" not in _MIGRATION
     assert "RESOURCE_MONITOR" not in _MIGRATION
 
 
@@ -286,9 +285,15 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     assert "QUERY_ID" in security_sql.recent_ddl_changes_fact(7, "ALFA")
     assert "TARGET_LOCATION" in security_sql.unload_activity(7, "ALFA")
     fact_changes = security_sql.recent_ddl_changes_fact(7, "ALFA")
-    assert "COMPANY_FOR_USER(f.USER_NAME) = 'ALFA'" in fact_changes
-    assert "f.DATABASE_NAME ILIKE 'ALFA%'" in fact_changes
+    assert "COMPANY_FOR_USER(g.USER_NAME) = 'ALFA'" in fact_changes
+    assert "g.DATABASE_NAME ILIKE 'ALFA%'" in fact_changes
     assert "THEN 'NOT_APPLICABLE'" in fact_changes
+    for changes in (fact_changes, security_sql.recent_ddl_changes(7, "ALFA")):
+        assert "EXISTS (" not in changes
+        assert "LEFT JOIN DBA_MAINT_DB.OVERWATCH.OBJECT_CHANGE_REGISTRY r" in changes
+        assert "QUALIFY ROW_NUMBER() OVER" in changes
+        assert "ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24" in changes
+        assert changes.index("GROUP BY 1, 2, 3, 4, 5, 6") < changes.index("COMPANY_FOR_USER")
     queue = security_sql.security_exception_queue("ALFA")
     assert "ACTOR_COMPANY" in queue and "OBJECT_COMPANY" in queue
     assert "UPPER(COALESCE(ACTOR_COMPANY, '')) = 'ALFA'" in queue
@@ -429,14 +434,15 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.144.0"' in _read("app/config.py")
-    assert "## 4.144.0 - Security operating model and responsive query execution" in _read(
+    assert 'APP_VERSION = "4.144.3"' in _read("app/config.py")
+    assert "## 4.144.3 - CI guard against unauthorized warehouse provisioning" in _read(
         "CHANGELOG.md"
     )
-    assert 'APP_WAREHOUSE = "WH_OVERWATCH_APP"' in _read("app/config.py")
-    assert "query_warehouse: WH_OVERWATCH_APP" in _read("snowflake.yml")
+    assert 'APP_WAREHOUSE = "WH_ALFA_ADMIN"' in _read("app/config.py")
+    assert "query_warehouse: WH_ALFA_ADMIN" in _read("snowflake.yml")
     roles = _read("snowflake/roles.sql")
-    assert roles.count("GRANT USAGE ON WAREHOUSE WH_OVERWATCH_APP") == 2
+    assert roles.count("GRANT USAGE ON WAREHOUSE WH_ALFA_ADMIN") == 2
+    assert "WH_OVERWATCH_APP" not in roles
     assert roles.count(
         "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG"
     ) == 2
@@ -449,9 +455,23 @@ def test_deploy_and_rebuild_surfaces_track_v075() -> None:
         "FACT_SECURITY_LOGIN_DAILY",
         "SECURITY_IDENTITY_POLICY",
         "ACCESS_REVIEW_DECISION_LOG",
-        "WH_OVERWATCH_APP",
     ):
         assert name in teardown
+    for active_surface in (
+        "app/config.py",
+        "app/data/mart_sql.py",
+        "app/ui/pages/admin.py",
+        "app/ui/pages/brief.py",
+        "snowflake.yml",
+        "snowflake/migrations/V075__security_operating_model.sql",
+        "snowflake/roles.sql",
+        "snowflake/teardown.sql",
+        "snowflake/validate.sql",
+        "DEPLOYMENT.md",
+        "README.md",
+        "docs/FULL_REBUILD.md",
+    ):
+        assert "WH_OVERWATCH_APP" not in _read(active_surface)
     assert "V075__security_operating_model.sql" in _read("DEPLOYMENT.md")
     assert "V075__security_operating_model.sql" in _read("README.md")
 

@@ -186,8 +186,8 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
     # database) failed both lenses under the old AND — visible only under ALL. OR-ing
     # follows the actor's company for context-less DDL and shows cross-company changes
     # under both lenses (union semantics; the disclosure caption states the rule).
-    _uc = companies.user_clause(company)
-    _dc = companies.database_clause(company)
+    _uc = companies.user_clause(company, "g.USER_NAME")
+    _dc = companies.database_clause(company, "g.DATABASE_NAME")
     _actor_or_object = f"({_uc} OR {_dc})" if _uc and _dc else (_uc or _dc)
     where = and_where(
         companies.database_equals_clause(database),
@@ -200,8 +200,10 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
          "'RENAME', 'RENAME_TABLE', 'TRUNCATE_TABLE') OR QUERY_TYPE ILIKE '%POLICY%' "
          "OR QUERY_TYPE ILIKE '%USER%' OR QUERY_TYPE ILIKE '%ROLE%' "
          "OR QUERY_TYPE ILIKE 'DROP%' OR QUERY_TYPE ILIKE 'TRUNCATE%')"),
-        _actor_or_object,
     )
+    scope_where = and_where(_actor_or_object)
+    # Resolve role-backed actor company after aggregation so the UDF runs once
+    # per displayed change group instead of once per raw history row.
     return f"""
 WITH grouped AS (
     SELECT
@@ -227,19 +229,28 @@ WITH grouped AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
     WHERE {where}
     GROUP BY 1, 2, 3, 4, 5, 6
+), scoped AS (
+    SELECT g.*
+    FROM grouped g
+    WHERE {scope_where}
 )
 SELECT g.*,
        CASE WHEN g.RISK_SCORE >= 90 THEN 'CRITICAL'
             WHEN g.RISK_SCORE >= 70 THEN 'HIGH'
             WHEN g.RISK_SCORE >= 45 THEN 'MEDIUM' ELSE 'LOW' END AS RISK_LEVEL,
        CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
-       ELSE IFF(EXISTS (
-           SELECT 1 FROM {core_object('OBJECT_CHANGE_REGISTRY')} r
-           WHERE r.DATABASE_NAME = g.DATABASE_NAME
-             AND r.SCHEMA_NAME = g.SCHEMA_NAME
-             AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
-       ), 'REGISTERED', 'UNREGISTERED') END AS CHANGE_REGISTRATION
-FROM grouped g
+            WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
+            ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
+FROM scoped g
+LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
+  ON r.DATABASE_NAME = g.DATABASE_NAME
+ AND r.SCHEMA_NAME = g.SCHEMA_NAME
+ AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
+                 g.DATABASE_NAME, g.SCHEMA_NAME
+    ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
+) = 1
 ORDER BY g.LAST_CHANGE DESC
 LIMIT 300
 """
@@ -853,18 +864,20 @@ LIMIT 200
 def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
                             schema_contains: str = "") -> str:
     days = bounded_days(days, maximum=90)
-    actor_company = companies.user_clause(company, "f.USER_NAME")
-    object_company = companies.database_clause(company, "f.DATABASE_NAME")
+    actor_company = companies.user_clause(company, "g.USER_NAME")
+    object_company = companies.database_clause(company, "g.DATABASE_NAME")
     actor_or_object = (
         f"({actor_company} OR {object_company})"
         if actor_company and object_company else (actor_company or object_company)
     )
     where = and_where(
         f"f.EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        actor_or_object,
         companies.database_equals_clause(database, "f.DATABASE_NAME"),
         contains_filter("f.SCHEMA_NAME", schema_contains),
     )
+    scope_where = and_where(actor_or_object)
+    # Preserve actor-OR-object parity while limiting role-backed company UDF
+    # evaluation to grouped fact rows.
     return f"""
 WITH grouped AS (
     SELECT f.DAY, f.USER_NAME, f.ROLE_NAME, f.QUERY_TYPE, f.DATABASE_NAME, f.SCHEMA_NAME,
@@ -876,15 +889,25 @@ WITH grouped AS (
     FROM {core_object('FACT_SECURITY_CHANGE')} f
     WHERE {where}
     GROUP BY 1, 2, 3, 4, 5, 6
+), scoped AS (
+    SELECT g.*
+    FROM grouped g
+    WHERE {scope_where}
 )
 SELECT g.*,
        CASE WHEN g.DATABASE_NAME IS NULL OR g.SCHEMA_NAME IS NULL THEN 'NOT_APPLICABLE'
-       ELSE IFF(EXISTS (
-           SELECT 1 FROM {core_object('OBJECT_CHANGE_REGISTRY')} r
-           WHERE r.DATABASE_NAME = g.DATABASE_NAME AND r.SCHEMA_NAME = g.SCHEMA_NAME
-             AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
-       ), 'REGISTERED', 'UNREGISTERED') END AS CHANGE_REGISTRATION
-FROM grouped g
+            WHEN r.CHANGE_SEEN_AT IS NOT NULL THEN 'REGISTERED'
+            ELSE 'UNREGISTERED' END AS CHANGE_REGISTRATION
+FROM scoped g
+LEFT JOIN {core_object('OBJECT_CHANGE_REGISTRY')} r
+  ON r.DATABASE_NAME = g.DATABASE_NAME
+ AND r.SCHEMA_NAME = g.SCHEMA_NAME
+ AND ABS(DATEDIFF('hour', r.CHANGE_SEEN_AT, g.LAST_CHANGE)) <= 24
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY g.DAY, g.USER_NAME, g.ROLE_NAME, g.QUERY_TYPE,
+                 g.DATABASE_NAME, g.SCHEMA_NAME
+    ORDER BY r.CHANGE_SEEN_AT DESC NULLS LAST
+) = 1
 ORDER BY g.LAST_CHANGE DESC
 LIMIT 300
 """

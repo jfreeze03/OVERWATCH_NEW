@@ -1,13 +1,41 @@
 # Changelog
 
+## 4.144.3 - CI guard against unauthorized warehouse provisioning (2026-08-04)
+
+- Added `tests/test_no_unauthorized_warehouse.py`: fails CI if any migration or the rebuild
+  bundle creates a warehouse other than the owner-sanctioned `WH_ALFA_ADMIN`, or if
+  `config.APP_WAREHOUSE` is repointed off it. Provisioning a new billable warehouse — or
+  switching the app's compute — is an owner infrastructure decision, not an app/agent change.
+- Motivated by the `WH_OVERWATCH_APP` creation that was buried inside the 678-line V075
+  migration and reverted by hand (v4.144.1). This guard makes a repeat impossible to merge
+  regardless of the size of the change it hides in.
+
+## 4.144.2 - Compile-safe Security change evidence (2026-08-04)
+
+- Replaced the correlated `EXISTS` used to classify DDL/DCL change registration with
+  a set-based registry join in both the V075 fact reader and live fallback. Snowflake
+  no longer rejects Security -> Changes with `Unsupported subquery type`.
+- Preserved account-level `NOT_APPLICABLE` handling and the 24-hour registry-match rule;
+  multiple matching registry records collapse back to one change group.
+- Moved actor/object company resolution after DDL grouping, reducing role-backed company
+  UDF evaluation from every raw statement to once per displayed change group.
+
+## 4.144.1 - Keep the app on the existing warehouse (2026-08-04)
+
+- Removed the proposed `WH_OVERWATCH_APP` warehouse from V075, deployment configuration,
+  grants, validation, teardown, rebuild instructions, and active application logic.
+- Restored Streamlit and loader/task work to `WH_ALFA_ADMIN`; interactive performance
+  attribution remains available through the existing `OVERWATCH` query tag and app telemetry.
+- Kept the V075 security operating model unchanged apart from compute provisioning. V075
+  remains owner-applied; no Snowflake statements were executed by the app or agent.
+
 ## 4.144.0 - Security operating model and responsive query execution (2026-08-04)
 
 - Reframed Security around an exceptions-first six-domain posture, policy-owned identity,
   client and egress decisions, effective-access investigation, Trust Center movement,
   risk-ranked changes, and durable access-review campaigns with immutable decision history.
 - Added owner-applied V075 with bounded login/change facts, Trust Center snapshots, a local
-  security exception queue, policy and review records, and a dedicated auto-suspending
-  `WH_OVERWATCH_APP` warehouse that isolates interactive reads from loader tasks.
+  security exception queue, and policy and review records.
 - Added query-profile evidence links, Entity 360 and Action Center drills, coverage-aware
   confidence states, an export manifest that records failed evidence sheets, and explicit
   loading gates for expensive posture, stale-source, warehouse-setting, and review history.

@@ -62,8 +62,7 @@ stands for every file). Notes:
 
 ## 4. Grants
 
-Re-run snowflake/roles.sql (new V075 objects and WH_OVERWATCH_APP usage;
-ALL + FUTURE grants).
+Re-run snowflake/roles.sql (new V075 objects plus ALL + FUTURE grants).
 
 ## 5. History backfill (recommended)
 
@@ -80,7 +79,7 @@ snowflake/loader_chain_check.sql when you need task-state diagnosis.)
 ## 7. Redeploy the app
 
 Push the current build to the stage / Streamlit-in-Snowflake as usual
-(DEPLOYMENT.md). App v4.144.0 expects exactly V001..V075.
+(DEPLOYMENT.md). App v4.144.2 expects exactly V001..V075.
 
 ## 8. Prove the chain ticks
 

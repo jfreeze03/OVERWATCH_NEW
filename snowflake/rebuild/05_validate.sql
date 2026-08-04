@@ -59,11 +59,6 @@ WITH checks AS (
                         WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'),
                'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_ADMIN via SHOW WAREHOUSES')
     UNION ALL
-    SELECT 'WH_OVERWATCH_APP exists (event evidence)',
-           IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
-                        WHERE WAREHOUSE_NAME = 'WH_OVERWATCH_APP'),
-               'OK', 'CHECK: no events yet (lag) — confirm WH_OVERWATCH_APP via SHOW WAREHOUSES')
-    UNION ALL
     SELECT 'Alert rules seeded',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')
     UNION ALL
