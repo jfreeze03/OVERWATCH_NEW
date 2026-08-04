@@ -15,6 +15,7 @@ from app.ui.components import (  # noqa: E402
     STYLER_MAX_ROWS,
     _auto_formats,
     _duration_display_format,
+    _duration_unit_for_column,
     severity_sort,
     timestampish_columns,
 )
@@ -69,6 +70,23 @@ def test_large_frame_duration_columns_carry_their_unit():
     assert _duration_display_format("ELAPSED_MS") == "%.0f ms"
     assert _duration_display_format("QUEUED_SEC") == "%.1f s"
     assert _duration_display_format("AVG_SEC") == "%.1f s"
+    assert _duration_display_format("P95_MIN") == "%.1f min"
+    assert _duration_display_format("TOTAL_ELAPSED_HOURS") == "%.1f h"
+
+
+def test_duration_detection_covers_time_metrics_without_misreading_minimums():
+    assert _duration_unit_for_column("P95_MS") == "ms"
+    assert _duration_unit_for_column("P95_ELAPSED_SEC") == "s"
+    assert _duration_unit_for_column("QUEUED_MIN_PER_DAY") == "min"
+    assert _duration_unit_for_column("MINUTES_SINCE_SEND") == "min"
+    assert _duration_unit_for_column("HOURS_SINCE_LOAD") == "h"
+    assert _duration_unit_for_column("MIN") is None
+    assert _duration_unit_for_column("MIN_CLUSTER_COUNT") is None
+
+    df = pd.DataFrame({"P95_MS": [90_000.0], "QUEUED_MIN_PER_DAY": [90.0]})
+    fmts = _auto_formats(df, set(df.columns))
+    assert fmts["P95_MS"](df.iloc[0]["P95_MS"]) == "1m 30s"
+    assert fmts["QUEUED_MIN_PER_DAY"](df.iloc[0]["QUEUED_MIN_PER_DAY"]) == "1h 30m"
 
 
 def test_pipeline_constants_sane():

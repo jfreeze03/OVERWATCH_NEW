@@ -28,11 +28,15 @@ def test_company_labels_use_evidence_udf_residual_unknown():
     assert "ELSE 'ALFA'" not in companies.database_case_sql()
 
 
-def test_environment_marked_picker_only():
-    """Item 8a: Environment only narrows the Database picker, it does not scope
-    the data — the control's own help says so. (The v4.39 'Env (DB picker)' scope
-    chip that also carried this was retired with the v4.65 compact filter bar.)"""
-    assert "Narrows the Database picker only" in (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+def test_environment_is_hidden_and_cannot_be_an_invisible_scope():
+    """Environment is a compatibility field only; Company owns DB options."""
+    main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    state = (_ROOT / "app" / "core" / "state.py").read_text(encoding="utf-8")
+    assert 'st.selectbox("Environment"' not in main
+    assert 'classify_databases(_idf["name"].astype(str).tolist(), _company)' in main
+    assert 'databases_for(_company)' in main
+    assert 'st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT' in state
+    assert '"environment": "flt_environment"' not in state
 
 
 def test_org_readers_document_latency_caveats():
@@ -53,7 +57,7 @@ def test_classify_databases_live_inventory():
 def test_sidebar_db_picker_has_inventory_and_fallback():
     m = (__import__("pathlib").Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
     assert "security_sql.show_databases_sql()" in m       # live inventory
-    assert "databases_for(_company, _env)" in m           # offline fallback preserved
+    assert "databases_for(_company)" in m                 # company-only offline fallback preserved
 
 
 def test_org_buckets_use_structured_dimensions():

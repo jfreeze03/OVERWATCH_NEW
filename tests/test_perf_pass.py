@@ -126,7 +126,7 @@ def test_health_values_are_owned_by_the_single_global_pulse():
     assert "_health_strip(" not in src
     body = src.split("def _persistent_status_bar", 1)[1].split("\ndef ", 1)[0]
     assert "vals = _health_values()" in body
-    assert "_persistent_status_bar()" in src
+    assert "_persistent_status_bar(pages)" in src
 
 
 def test_batch_supports_all_four_tiers():

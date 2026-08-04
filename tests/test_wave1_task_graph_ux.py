@@ -183,7 +183,8 @@ def test_shell_semantics_wrapping_and_runtime_target_are_pinned():
     environment = _src("environment.yml")
     assert "def _health_strip(" not in main
     assert "def _persistent_status_bar(" in main
-    assert '"href": _page_href(' in main
+    assert '"target": _target(' in main
+    assert "request_navigation(page, section)" in components
     assert '<h1>{html.escape(title)}</h1>' in components
     assert '<h2 class="ow-section' in components
     assert '<span class="ow-section__title">' in components

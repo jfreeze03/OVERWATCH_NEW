@@ -11,10 +11,9 @@ FACT_QUERY_HOURLY (company-scoped); account billed = FACT_METERING_DAILY
 never a compare side by default; the escape hatch pairs equal-length
 windows and says so.
 
-Scope honesty (#49): Compare receives only COMPANY + DATES — the sidebar
-Environment filter does NOT apply here. Environment-vs-environment comparison
-is not yet built (Phase 2, docs/design/COMPARE_MODE.md); the sidebar copy says
-so, and this tab adds no per-environment lens.
+Scope honesty (#49): Compare receives only COMPANY + DATES. The retired
+Environment picker never scoped these reads; environment-vs-environment
+comparison is not built (Phase 2, docs/design/COMPARE_MODE.md).
 """
 
 from __future__ import annotations
@@ -29,6 +28,7 @@ from app.logic.formulas import (
     account_today,
     blended_billed_usd,
     format_usd,
+    humanize_duration,
     pct_delta,
     safe_float,
 )
@@ -96,9 +96,8 @@ def _coverage_warning(df: pd.DataFrame, pair: dict) -> str:
 
 
 def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
-    # #49: Compare is scoped by company + dates only. The sidebar Environment
-    # filter is intentionally NOT threaded through here (env-vs-env is Phase 2),
-    # so no env argument is accepted and none is applied to the reads below.
+    # #49: Compare is scoped by company + dates only; no environment argument is
+    # accepted or applied to the reads below.
     pick = st.radio("Pairing", list(_PAIRINGS), horizontal=True, key="cmp_kind")
     kind = _PAIRINGS[pick]
     include_partial = False
@@ -170,10 +169,10 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
                      "delta": f"{a_rate - b_rate:+.2f} pts vs B",
                      "delta_color": "inverse" if a_rate > b_rate else "normal",
                      "help": f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})."})
-        kpis.append({"label": "Queued", "value": f"{aqu / 60:,.0f} min",
+        kpis.append({"label": "Queued", "value": humanize_duration(aqu, "s"),
                      "delta": _delta_chip(aqu, bqu),
                      "delta_color": "inverse" if aqu > bqu else "normal",
-                     "help": f"B = {bqu / 60:,.0f} min."})
+                     "help": f"B = {humanize_duration(bqu, 's')}."})
     if bill.usable():
         # C1: price AI/Cortex credits at the AI rate. compare_billed carries the
         # AI/OTHER split; fall back to the flat rate if it's absent (old cache).

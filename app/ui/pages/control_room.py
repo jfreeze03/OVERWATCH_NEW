@@ -29,6 +29,7 @@ from app.logic.formulas import (
     credits_to_usd,
     format_usd,
     humanize_age,
+    humanize_duration,
     md_dollars,
     pct_delta,
     safe_float,
@@ -260,7 +261,7 @@ def _freshness_board() -> None:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
     styled_table(
         df[["SOURCE_NAME", "STATUS", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD"]],
-        column_config={"HOURS_SINCE_LOAD": st.column_config.NumberColumn("Hours since load", format="%.1f")},
+        column_config={"HOURS_SINCE_LOAD": st.column_config.Column("Age")},
     )
 
 
@@ -339,8 +340,10 @@ def render() -> None:
                         tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
         act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
                   key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
-        q_spark = act.df["QUERIES"].tolist() if act.ok and not act.empty else None
-        f_spark = act.df["FAILS"].tolist() if act.ok and not act.empty else None
+        _activity_cols = {"DAY", "QUERIES", "FAILS"}
+        _activity_ready = act.usable() and _activity_cols.issubset(act.df.columns)
+        q_spark = act.df["QUERIES"].tolist() if _activity_ready else None
+        f_spark = act.df["FAILS"].tolist() if _activity_ready else None
         if pulse.usable():
             row = pulse.df.iloc[0]
             qcount = safe_float(row.get("QUERY_COUNT"))
@@ -355,8 +358,8 @@ def render() -> None:
                  "delta_color": "inverse" if _fail_bad else "off",
                  "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
                 {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
-                 "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s"},
-                {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.1f} min"},
+                 "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s")},
+                {"label": "Queued", "value": humanize_duration(row.get("QUEUED_SEC"), "s")},
                 {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
             ])
             result_caption(pulse)
@@ -364,6 +367,21 @@ def render() -> None:
             st.error(f"Pulse unavailable: {pulse.error}")
         else:
             st.info("No queries recorded since yesterday 00:00 for this scope.")
+
+        section_header("14-day query activity", "info", "operations")
+        if _activity_ready:
+            c_queries, c_fails = st.columns(2)
+            with c_queries:
+                charts.daily_metric_line(act.df, "DAY", "QUERIES", "Queries")
+            with c_fails:
+                charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries")
+            result_caption(act)
+        elif not act.ok:
+            st.warning(f"Activity trend unavailable: {act.error}")
+        elif act.usable():
+            st.warning("Activity trend returned an unexpected data shape.")
+        else:
+            st.info("No query activity recorded in the last 14 days for this scope.")
 
     elif section == "Incidents & triage":
         # ---- Incidents (V032) ------------------------------------------------------

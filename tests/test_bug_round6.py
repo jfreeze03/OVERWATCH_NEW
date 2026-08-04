@@ -83,7 +83,7 @@ def test_bug4_health_read_distinguishes_error_from_empty():
     assert "if res.empty:\n        return {}" in m
     bar = m.split("def _persistent_status_bar", 1)[1].split("\ndef ", 1)[0]
     assert "if vals is None:" in bar and "unavailable" in bar
-    assert '_page_href("Admin", "Errors & telemetry")' in bar
+    assert '_target("Admin", "Errors & telemetry")' in bar
 
 
 def test_bug7_spend_trend_pace_excludes_partial_day():

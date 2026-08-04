@@ -69,6 +69,8 @@ def test_rec13_prettify_header():
     assert _prettify_header("ELAPSED_S") == "Elapsed"
     assert _prettify_header("QUEUED_SEC") == "Queued"
     assert _prettify_header("LATENCY_MS") == "Latency"
+    assert _prettify_header("QUEUED_MIN_PER_DAY") == "Queued Per Day"
+    assert _prettify_header("HOURS_SINCE_LOAD") == "Since Load"
     assert _prettify_header("SPILL_REMOTE_GB") == "Spill Remote (GB)"
     assert _prettify_header("HIT_PCT") == "Hit (%)"
     comp = _src("app/ui/components.py")

@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.136.0 - Scope, pulse navigation, and duration consistency (2026-08-03)
+
+- Removed the Environment control and made its retained saved-view field a fixed `ALL`
+  compatibility value. Database inventory and validation are now company-only, so an old
+  preference cannot leave an invisible PROD/NONPROD constraint behind.
+- Replaced the global pulse's raw query-string links with native Streamlit actions routed
+  through `request_navigation`. Open criticals, undelivered criticals, telemetry freshness,
+  MTD spend, and the health-error fallback now open their owning section without bypassing
+  profile or pre-widget navigation guards.
+- Extended display-only duration inference across millisecond, second, minute, and hour
+  columns, including embedded units such as `QUEUED_MIN_PER_DAY`, while explicitly avoiding
+  false matches such as `MIN_CLUSTER_COUNT`. P95, queue, elapsed, delivery, freshness, and
+  response-time cards now share `humanize_duration`; numeric sorting and raw CSV values stay
+  unchanged.
+- Filled out Control Room Pulse below its five KPI cards with query and failure trends from
+  the 14-day activity frame already fetched for sparklines. The render verifies the actual
+  `DAY / QUERIES / FAILS` shape before any column access and adds no Snowflake query.
+
+No Snowflake migration is required. Snowflake access remained read-only.
+
 ## 4.135.0 - UI/UX wave 1: task graph workbench and metric hierarchy (2026-08-03)
 
 - Rebuilt Operations task topology around one coherent current

@@ -18,7 +18,7 @@ from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_
 from app.logic import remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import complete_days_only, flag_anomalies
-from app.logic.formulas import account_today, credits_to_usd, safe_float
+from app.logic.formulas import account_today, credits_to_usd, humanize_duration, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.logic.task_graph import inspect_task_graph
 from app.ui import charts
@@ -96,11 +96,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "delta": f"{failed:,.0f} failed", "delta_color": "off", "spark": f_spark,
              "severity": "warn" if failed else ""},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
-             "value": f"{safe_float(row.get('P95_ELAPSED_SEC')):,.1f}s",
+             "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s"),
              "help": "Highest hourly p95 from the fact table — a peak, not the "
                      "whole-window p95."
                      if used_mart else None},
-            {"label": "Queued", "value": f"{safe_float(row.get('QUEUED_SEC')) / 60:,.0f} min"},
+            {"label": "Queued", "value": humanize_duration(row.get("QUEUED_SEC"), "s")},
             {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
         ])
         result_caption(summary)
@@ -159,8 +159,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             key="ops_top_sel",
             column_config={
                 "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
-                "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed s", format="%.1f"),
-                "QUEUED_SEC": st.column_config.NumberColumn("Queued s", format="%.1f"),
+                "ELAPSED_SEC": st.column_config.Column("Elapsed"),
+                "QUEUED_SEC": st.column_config.Column("Queued"),
                 "SPILL_REMOTE_GB": st.column_config.NumberColumn("Spill GB", format="%.2f"),
                 **_tp_cfg,
             },
@@ -219,8 +219,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             if guard(detail, "Query not found (IDs age out of QUERY_HISTORY after 365 days)."):
                 row = detail.df.iloc[0]
                 kpi_row([
-                    {"label": "Elapsed", "value": f"{safe_float(row.get('ELAPSED_SEC')):,.1f}s",
-                     "delta": f"queued {safe_float(row.get('QUEUED_SEC')):,.1f}s", "delta_color": "off"},
+                    {"label": "Elapsed", "value": humanize_duration(row.get("ELAPSED_SEC"), "s"),
+                     "delta": f"queued {humanize_duration(row.get('QUEUED_SEC'), 's')}",
+                     "delta_color": "off"},
                     {"label": "Scanned", "value": f"{safe_float(row.get('GB_SCANNED')):,.2f} GB",
                      "delta": f"{safe_float(row.get('CACHE_PCT')):,.0f}% cache", "delta_color": "off"},
                     {"label": "Partitions", "value": (f"{int(safe_float(row.get('PARTITIONS_SCANNED'))):,}"
@@ -927,7 +928,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                 "CHANGE_SEEN_AT": st.column_config.TextColumn("Changed"),
                 "AFTER_CALLS": st.column_config.NumberColumn("Calls (after)", format="%d"),
                 "D_CALLS": st.column_config.NumberColumn("Δ calls", format="%+d"),
-                "D_P95_S": st.column_config.NumberColumn("Δ p95 (s)", format="%+.2f"),
+                "D_P95_S": st.column_config.Column("Δ p95"),
                 "D_CPC": st.column_config.NumberColumn("Δ cr/call", format="%+.4f"),
             })
         result_caption(res)

@@ -436,7 +436,7 @@ def test_c3_board_renders_not_loaded_state():
 def test_n15_brief_stalest_label():
     from app.ui.pages.brief import _stalest_label
     assert _stalest_label({"STALEST_SOURCE_H": "7.0", "STALEST_SOURCE_NAME": "FACT_QUERY_HOURLY"}) == \
-        "FACT_QUERY_HOURLY 7.0h"
+        "FACT_QUERY_HOURLY 7h"
     assert _stalest_label({"STALEST_SOURCE_H": "-1", "STALEST_SOURCE_NAME": "FACT_STORAGE_DAILY"}) == \
         "FACT_STORAGE_DAILY never loaded"
     assert _stalest_label({"STALEST_SOURCE_H": "-1", "STALEST_SOURCE_NAME": "none"}) == "no data yet"
@@ -455,7 +455,7 @@ def test_n2_undelivered_arm_in_strip():
 def test_n2_surfaced_on_shell_brief_and_control_room():
     assert "UNDELIVERED_CRITICAL" in _src("app/main.py")
     assert "Undelivered criticals" in _src("app/main.py")
-    assert '_page_href("Alerts", "Native delivery")' in _src("app/main.py")
+    assert '_target("Alerts", "Native delivery")' in _src("app/main.py")
     assert "UNDELIVERED_CRITICAL" in _src("app/ui/pages/brief.py")
     assert "UNDELIVERED_CRITICAL" in _src("app/ui/pages/control_room.py")
 

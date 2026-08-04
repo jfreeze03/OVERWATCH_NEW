@@ -21,7 +21,7 @@ from app.core.state import filters, request_navigation
 from app.data import insights_sql, mart_sql, recheck_sql
 from app.logic import remediation, tuning
 from app.logic.ai_prompts import anomaly_explain_prompt
-from app.logic.formulas import account_now, humanize_age, md_dollars, safe_float
+from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
 from app.ui import charts
@@ -177,12 +177,9 @@ def _last_delivery_card() -> None:
 
     if never:
         value, sev = "never", "bad"
-    elif mins < 90:
-        value, sev = f"{mins:,.0f} min ago", "ok"
-    elif mins < 60 * 48:
-        value, sev = f"{mins / 60:,.1f} h ago", "ok"
     else:
-        value, sev = f"{mins / 1440:,.1f} d ago", "warn"
+        value = f"{humanize_duration(mins, 'min')} ago"
+        sev = "ok" if mins < 60 * 48 else "warn"
 
     def _rlabel(r) -> str:
         integ = str(r.get("INTEGRATION_NAME") or "").strip()
@@ -815,10 +812,12 @@ def render() -> None:
             latest = df.dropna(subset=["MTTA_MIN"]).tail(4)
             kpi_row([
                 {"label": "MTTA (last 4 active weeks)",
-                 "value": f"{latest['MTTA_MIN'].mean():,.0f} min" if not latest.empty else "No acks yet",
+                 "value": humanize_duration(latest["MTTA_MIN"].mean(), "min")
+                 if not latest.empty else "No acks yet",
                  "help": "Raised -> acknowledged. Improve by working the queue, not the inbox."},
                 {"label": "MTTR (last 4 active weeks)",
-                 "value": (f"{df.dropna(subset=['MTTR_MIN']).tail(4)['MTTR_MIN'].mean():,.0f} min"
+                 "value": (humanize_duration(
+                               df.dropna(subset=["MTTR_MIN"]).tail(4)["MTTR_MIN"].mean(), "min")
                            if df["MTTR_MIN"].notna().any() else "No resolves yet"),
                  "help": "Raised -> resolved, including remediation time."},
                 {"label": "Events (90d)", "value": f"{int(df['EVENTS'].sum()):,}"},
@@ -838,7 +837,8 @@ def render() -> None:
             im = inc_met.df.iloc[0]
             kpi_row([
                 {"label": "MTTA / MTTR (90d)",
-                 "value": f"{safe_float(im.get('MTTA_MIN')):,.0f} / {safe_float(im.get('MTTR_MIN')):,.0f} min",
+                 "value": (f"{humanize_duration(im.get('MTTA_MIN'), 'min')} / "
+                           f"{humanize_duration(im.get('MTTR_MIN'), 'min')}"),
                  "help": "Detected -> acknowledged / resolved at INCIDENT grain — "
                          "the alert-grain pair above counts individual events."},
                 {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
@@ -866,7 +866,8 @@ def render() -> None:
                  "help": "Raised events with at least one delivery row. Routes filter by "
                          "severity, so 100% is not the target."},
                 {"label": "Latency p50 / p95",
-                 "value": f"{safe_float(row0.get('MEDIAN_MIN')):,.0f} / {safe_float(row0.get('P95_MIN')):,.0f} min",
+                 "value": (f"{humanize_duration(row0.get('MEDIAN_MIN'), 'min')} / "
+                           f"{humanize_duration(row0.get('P95_MIN'), 'min')}"),
                  "help": "RAISED_AT -> first SENT_AT; the notify task rides the hourly chain."},
                 {"label": "Undelivered criticals (30m+)", "value": f"{_und}",
                  "severity": "bad" if _und else "ok",
@@ -894,7 +895,7 @@ def render() -> None:
                      tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
             if bl.usable() and not bl.df.empty:
                 styled_table(bl.df, height=170, column_config={
-                    "OLDEST_MIN": st.column_config.NumberColumn("Oldest (min)", format="%.0f"),
+                    "OLDEST_MIN": st.column_config.Column("Oldest"),
                 })
                 st.caption("A rising OLDEST while the notify task runs means a route is starved — "
                            "check its integration. The oldest-first drain (V064) clears the tail first.")

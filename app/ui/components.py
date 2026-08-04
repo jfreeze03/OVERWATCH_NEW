@@ -29,8 +29,7 @@ def _scope_chip_html() -> str:
     except Exception:  # noqa: BLE001 - header chrome must never break a page
         return ""
     chips = [chip(html.escape(f["company"]), "ok"), chip(f"{f['days']}d")]
-    # No environment chip (r11 #1): the Environment picker only narrows the
-    # Database list — a chip here claimed a scope no page query applies.
+    # Environment is a hidden compatibility field fixed to ALL, so it is not scope.
     for key, label in (("database", ""), ("schema_contains", "schema~"),
                         ("warehouse_contains", "wh~"), ("user_contains", "user~")):
         value = str(f.get(key) or "").strip()
@@ -485,8 +484,11 @@ def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
 
 
 def status_bar(stats: list[dict]) -> None:
-    """Persistent status strip: [{k, v, sev?, spark?, icon?}]. Rendered once
-    per page so the 3-4 numbers that matter follow the user everywhere."""
+    """Persistent status strip: [{k, v, sev?, spark?, icon?, target?}].
+
+    ``target`` is a ``(page, section)`` tuple routed through request_navigation;
+    raw query-string anchors are unreliable inside Streamlit-in-Snowflake.
+    """
     stats = [s for s in stats if s]
     if not stats:
         return
@@ -502,21 +504,33 @@ def status_bar(stats: list[dict]) -> None:
                                  color=_SEV_HEX.get(sev, palette.INFO)) + "</div>")
         label = str(s.get("k", ""))
         value = str(s.get("v", "—"))
-        href = str(s.get("href", "") or "").strip()
-        if href:
-            scls += " ow-stat--link"
-            start = (
-                f'<a class="{scls}" href="{html.escape(href, quote=True)}" target="_self" '
-                f'aria-label="{html.escape(f"{label}: {value}", quote=True)}">'
-            )
-            end = "</a>"
-        else:
-            start, end = f'<div class="{scls}">', "</div>"
         cells.append(
-            f'{start}<div class="ow-stat__k">{html.escape(label)}</div>'
-            f'<div class="ow-stat__v">{ico}{html.escape(value)}</div>{spark}{end}'
+            f'<div class="{scls}"><div class="ow-stat__k">{html.escape(label)}</div>'
+            f'<div class="ow-stat__v">{ico}{html.escape(value)}</div>{spark}</div>'
         )
     st.markdown(f'<div class="ow-statusbar">{"".join(cells)}</div>', unsafe_allow_html=True)
+    if any(s.get("target") for s in stats):
+        from app.core.state import request_navigation
+
+        with st.container(key="ow_status_actions"):
+            action_cols = st.columns(len(stats), gap="small")
+            for index, (s, col) in enumerate(zip(stats, action_cols, strict=True)):
+                target = s.get("target")
+                if not isinstance(target, (tuple, list)) or len(target) != 2:
+                    continue
+                page, section = str(target[0]), str(target[1])
+                label = str(s.get("k", "details"))
+                with col:
+                    if st.button(
+                        f"Open {label.lower()}",
+                        key=f"ow_status_open_{index}_{_slugify(label)}",
+                        help=f"Open {page} · {section}",
+                        type="tertiary",
+                        icon=":material/arrow_forward:",
+                        icon_position="right",
+                        use_container_width=True,
+                    ):
+                        request_navigation(page, section)
 
 
 def result_caption(result: QueryResult, note: str = "") -> None:
@@ -1004,6 +1018,32 @@ _COUNT_SUFFIXES = ("_COUNT", "RUNS", "CALLS", "FAILS", "FAILED", "QUERIES", "EVE
                    "ATTEMPTS", "FILES", "USERS", "STMTS", "INTERVALS", "REFRESHES",
                    "FAILURES", "STATEMENTS", "ROWS")
 
+_MINUTE_DURATION_HINTS = {
+    "AGE", "AVG", "BILLED", "BLOCKED", "DURATION", "ELAPSED", "EXEC", "EXECUTION",
+    "IDLE", "LATE", "LATENCY", "MEDIAN", "MTTA", "MTTR", "OLDEST", "P50", "P90",
+    "P95", "P99", "PROVISION", "QUEUE", "QUEUED", "RUNTIME", "SINCE", "TOTAL", "TTD",
+    "WAIT", "WALL",
+}
+
+
+def _duration_unit_for_column(col: object) -> str | None:
+    """Infer a duration unit from SQL-style column names without mistaking
+    ``MIN_CLUSTER_COUNT`` for minutes. The value remains numeric; this only
+    selects the display formatter used by tables.
+    """
+    parts = str(col).upper().split("_")
+    if "MS" in parts:
+        return "ms"
+    if "SEC" in parts or (parts and parts[-1] == "S"):
+        return "s"
+    if "HOURS" in parts or (parts and parts[-1] == "H" and set(parts) & _MINUTE_DURATION_HINTS):
+        return "h"
+    if len(parts) > 1 and parts[-1] in {"MIN", "MINS", "MINUTES"}:
+        return "min"
+    if set(parts) & {"MIN", "MINS", "MINUTES"} and set(parts) & _MINUTE_DURATION_HINTS:
+        return "min"
+    return None
+
 
 def _auto_formats(df, skip: set) -> dict:
     """Consistent number display by column-name convention (item: every table
@@ -1014,21 +1054,20 @@ def _auto_formats(df, skip: set) -> dict:
 
     fmts: dict = {}
     for col in df.columns:
-        if col in skip or not ptypes.is_numeric_dtype(df[col]):
+        if not ptypes.is_numeric_dtype(df[col]):
             continue
         c = str(col).upper()
-        if c.endswith(("_USD", "_PRICE")) or c == "USD":
+        duration_unit = _duration_unit_for_column(col)
+        if duration_unit:
+            # Duration consistency outranks a caller's legacy decimal NumberColumn.
+            # Styler changes the display only; the dataframe stays numeric.
+            fmts[col] = lambda v, _unit=duration_unit: humanize_duration(v, _unit)
+        elif col in skip:
+            continue
+        elif c.endswith(("_USD", "_PRICE")) or c == "USD":
             fmts[col] = "${:,.2f}"
         elif "CREDITS" in c:
             fmts[col] = "{:,.2f}"
-        # rec26: raw durations read as arithmetic ("5,400" seconds). Humanize the
-        # DISPLAY to H/M/S via a Styler callable — the underlying numeric column is
-        # untouched, so the table still sorts by real value and the CSV keeps the raw
-        # number. Non-duration units (%/GB/hours) stay decimal + get a header unit (rec31).
-        elif c.endswith("_MS"):
-            fmts[col] = lambda v: humanize_duration(v, "ms")
-        elif c.endswith(("_SEC", "_S")):
-            fmts[col] = lambda v: humanize_duration(v, "s")
         elif c.endswith(("_PCT", "_SHARE", "_GB", "_TB", "_MB", "_HOURS")) or c == "HIT_PCT":
             fmts[col] = "{:,.1f}"
         elif c.endswith(_COUNT_SUFFIXES):
@@ -1077,14 +1116,11 @@ def _slugify(text: object, fallback: str = "table") -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-") or fallback
 
 
-# rec31: a trailing unit token becomes a parenthesized display unit on the header
-# (the CSV keeps the raw name). Duration tokens (S/SEC/MS) are handled separately —
-# their VALUES are humanized to H/M/S (rec26) so the token is dropped, not shown.
+# rec31: a trailing non-duration unit token becomes a parenthesized display unit on
+# the header (the CSV keeps the raw name). Duration tokens are removed wherever they
+# occur because their values carry the humanized h/min/s/ms unit.
 _HEADER_UNITS = {"GB": "GB", "TB": "TB", "MB": "MB", "TIB": "TiB",
-                 "PCT": "%", "HOURS": "h", "MIN": "min"}
-_DURATION_TOKENS = {"S", "SEC", "MS"}
-
-
+                  "PCT": "%", "HOURS": "h", "MIN": "min"}
 def _prettify_header(col: object) -> str:
     """rec13/rec31: SQL-shaped UPPER_SNAKE -> Title Case for DISPLAY only (df.to_csv
     keeps the raw name). A trailing unit token renders as "(GB)"/"(%)"/"(h)"; a
@@ -1095,11 +1131,16 @@ def _prettify_header(col: object) -> str:
         return s
     parts = s.split("_")
     unit_suffix = ""
-    if len(parts) > 1:
+    duration_unit = _duration_unit_for_column(col)
+    if duration_unit:
+        matching = {
+            "ms": {"MS"}, "s": {"S", "SEC"},
+            "min": {"MIN", "MINS", "MINUTES"}, "h": {"H", "HOURS"},
+        }[duration_unit]
+        parts = [part for part in parts if part not in matching]
+    elif len(parts) > 1:
         tail = parts[-1]
-        if tail in _DURATION_TOKENS:          # rec26: value carries the unit now
-            parts = parts[:-1]
-        elif tail in _HEADER_UNITS:           # rec31: show the unit in the header
+        if tail in _HEADER_UNITS:             # rec31: show the unit in the header
             unit_suffix = f" ({_HEADER_UNITS[tail]})"
             parts = parts[:-1]
     _keep = {"USD", "AI", "ID", "MB", "GB", "TB", "TIB", "MS", "SEC", "PCT", "P95", "P50", "SLA", "CS", "QAS"}
@@ -1112,7 +1153,9 @@ def _duration_display_format(col: object) -> str:
     (NumberColumn takes a printf, not a callable). Carry the RAW value with its unit
     instead — "850 ms" / "1800.0 s" — so a big duration table is never a unitless bare
     number and the header can drop the token consistently with the Styler path."""
-    return "%.0f ms" if str(col).upper().endswith("_MS") else "%.1f s"
+    unit = _duration_unit_for_column(col)
+    return {"ms": "%.0f ms", "s": "%.1f s", "min": "%.1f min", "h": "%.1f h"}.get(
+        unit, "%.1f s")
 
 
 def _export_filename(seq: int, slug: str | None) -> str:
@@ -1175,17 +1218,26 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         # column_config so display stays consistent (minus thousands commas).
         cfg = dict(column_config or {})
         for col, fmt in fmts.items():
-            if col in cfg:
+            if col in cfg and not callable(fmt):
                 continue
             if callable(fmt):
                 # rec26 humanizer (a callable) has no printf equivalent; show the raw
                 # value WITH its unit so a >400-row duration column is never a unitless
                 # bare number (the header drops the token exactly as on the Styler path).
+                _existing = cfg.get(col)
                 _dlabel = _prettify_header(col)
+                _kwargs = {}
+                if isinstance(_existing, dict):
+                    _dlabel = _existing.get("label") or _dlabel
+                    _kwargs = {
+                        name: _existing[name]
+                        for name in ("width", "help", "disabled", "required", "pinned", "alignment")
+                        if _existing.get(name) is not None
+                    }
                 try:
                     cfg[col] = st.column_config.NumberColumn(
                         _dlabel if _dlabel != str(col) else None,
-                        format=_duration_display_format(col))
+                        format=_duration_display_format(col), **_kwargs)
                 except Exception:  # noqa: BLE001
                     pass
             elif fmt in _PRINTF_EQUIV:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.companies import COMPANIES, DEFAULT_COMPANY, DEFAULT_ENVIRONMENT, ENVIRONMENTS
+from app.companies import COMPANIES, DEFAULT_COMPANY, DEFAULT_ENVIRONMENT
 from app.config import DAY_WINDOW_OPTIONS, DEFAULT_DAY_WINDOW
 
 _PAGE_PARAM = "page"
@@ -25,12 +25,12 @@ def init_filters() -> None:
         st.session_state.setdefault(key, default)
     if st.session_state["flt_company"] not in COMPANIES:
         st.session_state["flt_company"] = DEFAULT_COMPANY
-    if st.session_state["flt_environment"] not in ENVIRONMENTS:
-        st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
+    # Environment is retained only as a saved-view compatibility field. It no
+    # longer has a visible control and must never invisibly narrow Database.
+    st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
     if st.session_state["flt_days"] not in DAY_WINDOW_OPTIONS:
         st.session_state["flt_days"] = DEFAULT_DAY_WINDOW
-    # A database selection from another company OR environment scope resets to All
-    # (a PROD scope must not keep a lingering DEV database pin). Bug round 2 B7:
+    # A database selection from another company resets to All. Bug round 2 B7:
     # validate with the SAME live-inventory classification the picker uses, not the
     # static company/environment tuples — otherwise DBA_MAINT_DB and any new
     # ALFA_*/TRXS_* database (offered by the SHOW-DATABASES picker) is silently
@@ -38,7 +38,7 @@ def init_filters() -> None:
     from app.companies import classify_databases  # local import: tiny, avoids cycles
     _db = str(st.session_state["flt_database"] or "").strip()
     if _db and _db.upper() not in classify_databases(
-            (_db,), st.session_state["flt_company"], st.session_state["flt_environment"]):
+            (_db,), st.session_state["flt_company"]):
         st.session_state["flt_database"] = ""
 
 
@@ -64,7 +64,7 @@ def apply_filters(**kwargs) -> None:
     from app.config import DAY_WINDOW_OPTIONS
 
     mapping = {
-        "company": "flt_company", "environment": "flt_environment", "days": "flt_days",
+        "company": "flt_company", "days": "flt_days",
         "warehouse_contains": "flt_warehouse_contains", "user_contains": "flt_user_contains",
         "database": "flt_database", "schema_contains": "flt_schema_contains",
     }

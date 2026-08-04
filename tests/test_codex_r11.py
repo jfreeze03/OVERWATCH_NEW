@@ -254,5 +254,6 @@ def test_environment_claims_no_scope_it_does_not_apply():
     chip_block = comp.split("def _scope_chip_html", 1)[1].split("\ndef ", 1)[0]
     assert 'f["environment"]' not in chip_block          # chip no longer claims it
     mn = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "Narrows the Database picker only" in mn      # picker says what it does
+    assert 'st.selectbox("Environment"' not in mn         # picker is retired
+    assert 'databases_for(_company)' in mn                # company owns DB inventory
     assert "· {_f['environment']} ·" not in mn           # scope stat stopped claiming

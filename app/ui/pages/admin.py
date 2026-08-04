@@ -24,7 +24,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
-from app.logic.formulas import md_dollars, safe_float
+from app.logic.formulas import humanize_duration, md_dollars, safe_float
 from app.ui.components import (
     confirm_gate,
     guard,
@@ -445,7 +445,7 @@ def _migrations_tab() -> None:
                         _r0 = _m.iloc[0]
                         hint = (f"last loader error {_r0['LOGGED_AT']}: "
                                 f"{str(_r0['ERROR_MESSAGE'])[:160]}")
-                st.markdown(f"- **{name}** — {float(s['HOURS_SINCE_LOAD']):.0f}h since load. "
+                st.markdown(f"- **{name}** — {humanize_duration(s['HOURS_SINCE_LOAD'], 'h')} since load. "
                             + (hint or "no matching error logged — check SHOW TASKS "
                                        "(tasks suspend if a migration half-applied)."))
 
@@ -593,9 +593,9 @@ def _performance_tab() -> None:
              setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
         styled_table(res.df,  # rec21
                      column_config={
-                         "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
-                         "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
-                         "EST_WAIT_S": st.column_config.NumberColumn("Est. wait s", format="%.1f"),
+                         "MEDIAN_S": st.column_config.Column("Median"),
+                         "P95_S": st.column_config.Column("p95"),
+                         "EST_WAIT_S": st.column_config.Column("Est. wait"),
                          "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
                      })
         result_caption(res)
@@ -619,8 +619,8 @@ def _performance_tab() -> None:
             styled_table(
                 scan.df,
                 column_config={
-                    "MEDIAN_S": st.column_config.NumberColumn("Median s", format="%.2f"),
-                    "P95_S": st.column_config.NumberColumn("p95 s", format="%.2f"),
+                    "MEDIAN_S": st.column_config.Column("Median"),
+                    "P95_S": st.column_config.Column("p95"),
                     "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
                 })
             result_caption(scan)
@@ -889,7 +889,8 @@ def _canary_tab() -> None:
                  "value": "yes" if last["delivered"] else "NO",
                  "severity": "ok" if last["delivered"] else "bad"},
                 {"label": "Time to ack",
-                 "value": f"{last['mtta_min']:.0f} min" if last["mtta_min"] is not None else "not acked",
+                 "value": (humanize_duration(last["mtta_min"], "min")
+                           if last["mtta_min"] is not None else "not acked"),
                  "severity": "ok" if last["acked"] else "warn"},
             ])
             styled_table(drills.df, height=200)

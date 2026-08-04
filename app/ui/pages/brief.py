@@ -22,6 +22,7 @@ from app.logic.formulas import (
     executive_summary_csv,
     executive_summary_html,
     format_usd,
+    humanize_duration,
     md_dollars,
     safe_float,
 )
@@ -53,7 +54,7 @@ def _stalest_label(vals: dict) -> str:
     src = f"{name} " if name and name != "none" else ""
     if hours == "-1":
         return f"{src}never loaded" if src else "no data yet"
-    return f"{src}{hours}h"
+    return f"{src}{humanize_duration(hours, 'h')}"
 
 
 @safe_page(_PAGE)

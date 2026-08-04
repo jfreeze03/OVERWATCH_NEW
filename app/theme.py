@@ -132,10 +132,8 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-stat__k { font-size:0.72rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
 .ow-stat__v { font-size:1.04rem; font-weight:720; color:var(--ow-ink); font-variant-numeric:tabular-nums; display:flex; align-items:center; gap:6px; }
 .ow-stat__spark { margin-top:2px; opacity:0.9; }
-.ow-stat--link { display:block; text-decoration:none; cursor:pointer;
-  transition:border-color var(--ow-ease),box-shadow var(--ow-ease); }
-.ow-stat--link:hover { border-color:var(--ow-accent); box-shadow:var(--ow-shadow2); }
-.ow-stat--link:focus-visible { outline:2px solid var(--ow-accent); outline-offset:2px; }
+.st-key-ow_status_actions { margin-top:-14px; margin-bottom:8px; }
+.st-key-ow_status_actions button { min-height:1.7rem; font-size:0.72rem; }
 
 .ow-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 10px; margin:0 6px 4px 0; border-radius:var(--ow-r-pill);
   font-size:0.72rem; font-weight:620; border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); background:rgba(148,163,184,0.05); }

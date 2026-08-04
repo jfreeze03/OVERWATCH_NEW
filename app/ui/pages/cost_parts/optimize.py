@@ -30,7 +30,7 @@ from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
-from app.logic.formulas import format_usd, md_dollars, safe_float
+from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_repeat_candidates,
@@ -355,7 +355,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     "SCENARIO_DOWN_USD": st.column_config.NumberColumn("x0.5 $/mo", format="$%.0f"),
                     "SCENARIO_UP_USD": st.column_config.NumberColumn("x2 $/mo", format="$%.0f"),
                     "SPILL_GB_PER_DAY": st.column_config.NumberColumn("Spill GB/day", format="%.2f"),
-                    "PROVISION_MIN_PER_DAY": st.column_config.NumberColumn("Provision min/day", format="%.1f"),
+                    "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
                     "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
                 },
             )
@@ -530,7 +530,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     {"label": "Repeated fingerprints", "value": f"{len(candidates)}"},
                     {"label": "Materialization candidates", "value": f"{len(hot)}",
                      "help": ">=0.5h of compute per 30 days (scaled to this window) and <=25% cache hit."},
-                    {"label": "Compute in repeats", "value": f"{float(candidates['TOTAL_ELAPSED_HOURS'].sum()):,.1f} h"},
+                    {"label": "Compute in repeats",
+                     "value": humanize_duration(candidates["TOTAL_ELAPSED_HOURS"].sum(), "h")},
                 ])
                 # C3: WHY and LAST_RUN were computed on every path and rendered on
                 # none — the engine's own recommendation, and the "is this pattern
@@ -539,7 +540,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _rq_cols = ["RUNS", "USERS", "TOTAL_ELAPSED_HOURS", "AVG_ELAPSED_SEC",
                             "TOTAL_TB_SCANNED", "AVG_CACHE_PCT"]
                 _rq_cfg = {
-                    "TOTAL_ELAPSED_HOURS": st.column_config.NumberColumn("Total hours", format="%.2f"),
+                    "TOTAL_ELAPSED_HOURS": st.column_config.Column("Total elapsed"),
                     "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
                     "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
                 }

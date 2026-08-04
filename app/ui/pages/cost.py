@@ -14,7 +14,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
-from app.logic.formulas import safe_float
+from app.logic.formulas import humanize_duration, safe_float
 from app.ui.components import (
     guard,
     kpi_row,
@@ -184,7 +184,8 @@ def render() -> None:
                 {"label": "Top untagged user",
                  "value": (resolve_display(tdf_g.iloc[0]["USER_NAME"], user_display_map(_PAGE))
                            if len(tdf_g) else "n/a"),
-                 "delta": f"{float(tdf_g.iloc[0]['UNTAGGED_EXEC_SEC']) / 3600:,.1f}h untagged" if len(tdf_g) else None,
+                 "delta": (f"{humanize_duration(tdf_g.iloc[0]['UNTAGGED_EXEC_SEC'], 's')} untagged"
+                           if len(tdf_g) else None),
                  "delta_color": "off"},
             ])
             styled_table(with_user_names(tdf_g, _PAGE), height=260, column_config={

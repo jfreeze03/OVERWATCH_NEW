@@ -46,10 +46,13 @@ def test_rec18_label_sizes_raised():
 # A1 — one traffic-light palette across surfaces
 def test_a1_shell_has_one_global_health_pulse():
     m = _src("app/main.py")
+    components = _src("app/ui/components.py")
     assert "def _health_strip(" not in m
     assert "def _persistent_status_bar(" in m
-    assert m.count("_persistent_status_bar()") == 1
-    assert "_page_href" in m and '"href": _page_href(' in m
+    assert m.count("_persistent_status_bar(pages)") == 1
+    assert "_page_href" not in m and '"target": _target(' in m
+    assert "request_navigation(page, section)" in components
+    assert "href=" not in components.split("def status_bar", 1)[1].split("\ndef ", 1)[0]
     assert '"k": "Undelivered criticals"' in m
     assert '"k": "MTD spend"' in m
 

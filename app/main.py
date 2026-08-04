@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from urllib.parse import urlencode
 
 import streamlit as st
 
@@ -21,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
-from app.companies import COMPANIES, ENVIRONMENTS, classify_databases, databases_for  # noqa: E402
+from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
     DAY_WINDOW_OPTIONS,
@@ -464,22 +463,20 @@ def _health_values() -> dict[str, tuple[str, str]] | None:
         return None
 
 
-def _page_href(page: str, section: str = "") -> str:
-    params = {"page": page.lower().replace(" ", "-")}
-    if section:
-        params["section"] = section.lower().replace("&", "and").replace(" ", "-")
-    return "?" + urlencode(params)
-
-
-def _persistent_status_bar(vals: object = _UNSET) -> None:
-    """The one global pulse: four clickable signals, rendered once per page."""
+def _persistent_status_bar(pages: tuple[str, ...], vals: object = _UNSET) -> None:
+    """The one global pulse: four routed signals, rendered once per page."""
     from app.logic.formulas import (
         blended_billed_usd,
         credits_to_usd,
         format_usd,
+        humanize_duration,
         safe_float,
     )
     from app.ui.components import load_settings, status_bar
+
+    def _target(page: str, section: str) -> tuple[str, str] | None:
+        # Never offer a control that the viewer's profile cannot open.
+        return (page, section) if page in pages else None
 
     vals = _health_values() if vals is _UNSET else vals
     if vals is None:
@@ -488,7 +485,7 @@ def _persistent_status_bar(vals: object = _UNSET) -> None:
             "v": "unavailable",
             "icon": "alerts",
             "sev": "warn",
-            "href": _page_href("Admin", "Errors & telemetry"),
+            "target": _target("Admin", "Errors & telemetry"),
         }])
         return
     if not vals:
@@ -498,21 +495,22 @@ def _persistent_status_bar(vals: object = _UNSET) -> None:
     undelivered, undelivered_state = vals.get("UNDELIVERED_CRITICAL", ("0", "OK"))
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     stale_name = vals.get("STALEST_SOURCE_NAME", ("", ""))[0]
+    stale_age = humanize_duration(stale, "h") if stale != "-1" else ""
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
     stats = [
         {"k": "Open criticals", "v": crit, "icon": "alerts",
          "sev": "bad" if crit_state == "BAD" or crit not in ("0", "") else "ok",
-         "href": _page_href("Alerts", "Open events")},
+         "target": _target("Alerts", "Open events")},
         {"k": "Undelivered criticals", "v": undelivered, "icon": "bolt",
          "sev": "bad" if undelivered_state == "BAD" or undelivered not in ("0", "") else "ok",
-         "href": _page_href("Alerts", "Native delivery")},
+         "target": _target("Alerts", "Native delivery")},
         {"k": "Telemetry age",
-         "v": (f"{stale_name} · {stale}h" if stale != "-1" and stale_name
-               else f"{stale}h" if stale != "-1"
+         "v": (f"{stale_name} · {stale_age}" if stale_age and stale_name
+               else stale_age if stale_age
                else "never loaded" if stale_state == "BAD" else "n/a"),
          "icon": "clock", "sev": _sev.get(stale_state, ""),
-         "href": _page_href("Control Room", "Freshness & replay")},
+         "target": _target("Control Room", "Freshness & replay")},
     ]
     if mtd:
         settings = load_settings("Status bar")
@@ -531,7 +529,7 @@ def _persistent_status_bar(vals: object = _UNSET) -> None:
             "v": f"{format_usd(usd)} · {credits:,.0f} cr",
             "icon": "cost",
             "sev": "info",
-            "href": _page_href("Cost & Contract", "Spend & Attribution"),
+            "target": _target("Cost & Contract", "Spend & Attribution"),
         })
     status_bar(stats)
 
@@ -550,7 +548,7 @@ def _active_filter_count() -> int:
     filter auto-opens the 'More filters' row below so it can never hide.)"""
     from app.core.state import FILTER_DEFAULTS
     count = 0
-    for key in ("flt_company", "flt_environment", "flt_days"):
+    for key in ("flt_company", "flt_days"):
         if st.session_state.get(key) != FILTER_DEFAULTS[key]:
             count += 1
     for key in ("flt_database", "flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"):
@@ -599,15 +597,9 @@ def _topbar_scope() -> None:
 
 
 def _topbar_scope_controls() -> None:
-    c_company, c_env, c_days, c_db = st.columns([1.0, 1.0, 1.2, 1.4])
+    c_company, c_days, c_db = st.columns([1.0, 1.2, 1.5])
     with c_company:
         st.selectbox("Company", COMPANIES, key="flt_company")
-    with c_env:
-        st.selectbox("Environment", ENVIRONMENTS, key="flt_environment",
-                     help="Narrows the Database picker only — pick a database to "
-                          "scope results. Page queries filter by Company and "
-                          "Database. Environment-vs-environment comparison is not "
-                          "yet built (Compare pairs periods by company + dates).")
     with c_days:
         if hasattr(st, "segmented_control"):
             # rec9: all seven windows visible + one-click switch (the slider hid
@@ -637,12 +629,10 @@ def _topbar_scope_controls() -> None:
                        f"Live scans (Operations, Security) cap at {MAX_LIVE_WINDOW_DAYS}d.")
     with c_db:
         # Item 8c (2026-07-14): options come from LIVE inventory (SHOW
-        # DATABASES, cached) classified by the same Company/Environment rules,
+        # DATABASES, cached) classified by the same Company rules,
         # so a new database appears without a code change. The hardcoded
-        # companies.py lists are the offline fallback (live finding 2026-07-08:
-        # ALFA + PROD must offer exactly the PROD databases, not the family).
+        # companies.py lists are the offline fallback.
         _company = st.session_state.get("flt_company", COMPANIES[0])
-        _env = st.session_state.get("flt_environment", ENVIRONMENTS[0])
         _opts = ()
         _inv = run(security_sql.show_databases_sql(), page="Sidebar", key="db_inventory",
                    tier="metadata", source="SHOW DATABASES", max_rows=0)
@@ -650,16 +640,16 @@ def _topbar_scope_controls() -> None:
             _idf = _inv.df.copy()
             _idf.columns = [str(c).lower() for c in _idf.columns]
             if "name" in _idf.columns:
-                _opts = classify_databases(_idf["name"].astype(str).tolist(), _company, _env)
+                _opts = classify_databases(_idf["name"].astype(str).tolist(), _company)
         if not _opts:
-            _opts = databases_for(_company, _env)   # offline fallback
+            _opts = databases_for(_company)   # offline fallback
         db_options = ["", *_opts]
         if st.session_state.get("flt_database") not in db_options:
             st.session_state["flt_database"] = ""
         st.selectbox("Database", db_options, key="flt_database",
                      format_func=lambda v: v or "All databases",
                      help="Applies to query, task, DDL, attribution, storage, and lock panels. "
-                          "Live inventory (SHOW DATABASES) tracked to Company + Environment; "
+                          "Live inventory (SHOW DATABASES) is tracked to Company; "
                           "falls back to the known-database list if inventory is unavailable.")
     # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
     # visits; the contains-filters open automatically whenever one is active
@@ -729,7 +719,7 @@ def main() -> None:
         return
 
     if page != "Brief":  # Brief is already the compact status view
-        _persistent_status_bar()
+        _persistent_status_bar(pages)
     _RENDERERS[page]()
     # RENDER_MS now spans sidebar/topbar/status chrome too, not just the page
     # body — chrome overhead was invisible in APP_USAGE (Codex #18).
