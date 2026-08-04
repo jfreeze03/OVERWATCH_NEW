@@ -76,5 +76,6 @@ def test_app_statement_stats_scoped_to_app_warehouse():
     sql = mart_sql.app_statement_stats(9999)
     assert "WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in sql
     assert "QUERY_PARAMETERIZED_HASH" in sql
+    assert "MAX_BY(QUERY_ID, TOTAL_ELAPSED_TIME) AS SLOWEST_QUERY_ID" in sql
     assert "DATEADD('day', -30" in sql  # clamped to 30
     assert "LIMIT 30" in sql

@@ -60,16 +60,18 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "rate. A high $/call or $/run is your tuning target; for 'who owns the bill' including "
         "idle, use Optimization's allocated view instead."
     )
+    _window_label = str(f.get("window_label") or f"Last {days} days")
     _uc_full = st.toggle(
-        f"Price over the full {days}-day page window",
+        f"Price over the full {_window_label.lower()}",
         key=f"uc_full_window_{company}_{days}",
         help="Off by default. The measured query/procedure reads are capped at "
              f"{_UNIT_COST_MAX_DAYS} days because a long QUERY_ATTRIBUTION_HISTORY scan "
              "costs tens of seconds and barely changes a per-query price. Turn it on to "
              "scan the whole page window anyway.")
-    uc_days = int(days) if _uc_full else min(int(days), _UNIT_COST_MAX_DAYS)
-    if uc_days != int(days):
-        st.caption(f"Page window is {days}d, but unit prices use <={_UNIT_COST_MAX_DAYS}d "
+    uc_days = days if (_uc_full or int(days) <= _UNIT_COST_MAX_DAYS) else _UNIT_COST_MAX_DAYS
+    if int(uc_days) != int(days):
+        st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
+                   f"<={_UNIT_COST_MAX_DAYS}d "
                    f"(scanning {uc_days}d) — a per-query price is stable, and the long scan "
                    "is the slowest read on this page. The AI, pattern, ETL and task-graph "
                    "panels below still follow the page window.")
@@ -144,8 +146,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
         qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
-        styled_table(with_user_names(qdf, _PAGE), height=280, column_config={
+        qdf = with_user_names(qdf, _PAGE)
+        qdf, _q_cfg = snowsight_profile_column(qdf, _PAGE)
+        styled_table(qdf, height=280, column_config={
             "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+            **_q_cfg,
         })
         result_caption(q_res, note="Idle-time excluded by design — that burn lives with "
                                    "the idle advisor, not the query that happened to run.")
@@ -268,14 +273,16 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         kdf = kids.df.copy()
                         kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
                         kdf = build_call_tree(kdf, _cid)
+                        kdf, _tree_cfg = snowsight_profile_column(kdf, _PAGE)
                         st.markdown("**Where the money went inside this CALL**")
                         _tree_columns = [
-                            "STEP", "QUERY_ID", "STEP_PREVIEW", "STEP_START",
+                            "STEP", "QUERY_ID", "PROFILE", "STEP_PREVIEW", "STEP_START",
                             "ELAPSED_SEC", "CREDITS", "USD",
                         ]
                         styled_table(kdf[[c for c in _tree_columns if c in kdf.columns]],
                                      height=300, column_config={
                             "USD": st.column_config.NumberColumn("$", format="$%.4f"),
+                            **_tree_cfg,
                         })
                         st.caption(
                             "Parent-before-child execution order. Indentation follows "

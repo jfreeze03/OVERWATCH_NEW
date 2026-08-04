@@ -227,6 +227,7 @@ SELECT
     ROUND(SUM(e.CREDITS_TOTAL * COALESCE(e.IDLE_PCT, 0) / 100)
           / NULLIF(SUM(e.CREDITS_TOTAL), 0) * 100, 1) AS IDLE_PCT,
     SUM(e.QUERIES) AS QUERY_COUNT,
+    COUNT_IF(COALESCE(e.QUERIES, 0) > 0) AS ACTIVE_QUERY_DAYS,
     MAX(COALESCE(e.P95_S, 0)) AS P95_ELAPSED_SEC,
     ROUND(SUM(COALESCE(e.QUEUED_MIN, 0)) * 60, 1) AS QUEUED_SEC,
     ROUND(SUM(COALESCE(e.SPILL_GB, 0)), 2) AS SPILL_REMOTE_GB
@@ -624,7 +625,7 @@ def lock_wait_daily(days: int, company: str = "ALL") -> str:
     """Lock waits from MART_LOCK_WAIT_DAILY (V035) — the live scan read
     46-56 GB per view; the daily task pays that once. Same ranking as the
     live builder: never-acquired first (those are the aborted statements)."""
-    d = max(1, min(int(days), 90))
+    d = bounded_days(days, 90)
     comp = ""
     if company and company != "ALL":
         comp = (f"    AND (c.COMPANY = {companies.sql_literal(company)}"
@@ -723,7 +724,8 @@ def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
     """Measured $ per repeated statement pattern (V036) — the silent-spend
     table. Attribution credits are MEASURED compute; the sample text rides
     in from the family mart by hash."""
-    d = max(1, min(int(days), 90))
+    d = bounded_days(days, 90)
+    min_runs = max(2, (5 * d + 29) // 30)
     lim = max(5, min(int(limit), 100))
     comp = ""
     if company and company != "ALL":
@@ -745,7 +747,7 @@ LEFT JOIN (
 ) f ON f.QUERY_HASH = p.QUERY_HASH
 WHERE p.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
 {comp}GROUP BY p.QUERY_HASH
-HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01
+HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01 AND SUM(p.RUNS) >= {min_runs}
 ORDER BY CREDITS DESC
 LIMIT {lim}"""
 

@@ -44,6 +44,26 @@ def test_quiet_window_wraps_midnight():
     assert remediation.propose_quiet_window(busy) is None
 
 
+def test_quiet_window_prefers_value_and_refuses_invalid_full_day_schedule():
+    hours = []
+    for hour in range(24):
+        quiet = 1 <= hour < 7 or 12 <= hour < 16
+        credits = 0.1 if 1 <= hour < 7 else 2.0 if 12 <= hour < 16 else 1.0
+        hours.append({"HOUR_OF_DAY": hour, "AVG_QUERIES": 0 if quiet else 50,
+                      "AVG_CREDITS": credits, "DAYS_METERED": 14})
+    win = remediation.propose_quiet_window(hours)
+    assert win is not None and win["start"] == 12 and win["end"] == 16
+    all_quiet = [{"HOUR_OF_DAY": hour, "AVG_QUERIES": 0, "AVG_CREDITS": 1}
+                 for hour in range(24)]
+    assert remediation.propose_quiet_window(all_quiet) is None
+
+
+def test_quiet_window_rejects_sparse_metering_evidence():
+    sparse = [{"HOUR_OF_DAY": hour, "AVG_QUERIES": 0, "AVG_CREDITS": 1,
+               "DAYS_METERED": 1} for hour in range(1, 7)]
+    assert remediation.propose_quiet_window(sparse) is None
+
+
 def test_savings_estimate_monthlyizes():
     assert remediation.monthly_savings_estimate(30, 30, 3.68) == pytest.approx(110.4)
     assert remediation.monthly_savings_estimate(-5, 30, 3.68) == 0.0

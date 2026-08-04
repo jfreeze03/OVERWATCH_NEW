@@ -61,7 +61,9 @@ def test_backup_script_covers_every_operator_table_and_verifies_counts():
               "DEPARTMENT_MAP", "OBJECT_CHANGE_REGISTRY",
               "WAREHOUSE_CHANGE_REGISTRY", "WAREHOUSE_CONFIG_SNAPSHOT",
               "USER_PREFS", "DEPT_BUDGETS", "REMEDIATION_LOG", "INCIDENTS",
-              "INCIDENT_MEMBERS", "APP_USAGE"):
+              "INCIDENT_MEMBERS", "APP_USAGE", "ACTION_ACTIVITY", "EVIDENCE_LINKS",
+              "ENTITY_CATALOG", "USER_WATCHLIST", "OPTIMIZATION_EXPERIMENTS",
+              "SLO_OBJECTIVES"):
         assert f"CLONE DBA_MAINT_DB.OVERWATCH.{t};" in bak, t
         assert f"{t}_BAK_" in bak, t
     assert "SOURCE_ROWS" in bak and "CLONE_ROWS" in bak

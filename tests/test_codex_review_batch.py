@@ -78,7 +78,7 @@ def test_sql_number_rejects_non_finite():
 # ---------------------------------------------------------------------------
 def test_domain_tokens_use_the_real_table_name():
     from app.core.query import _DOMAIN_TOKENS
-    assert _DOMAIN_TOKENS["mappings"] == ("DEPARTMENT_MAP",)
+    assert _DOMAIN_TOKENS["mappings"] == ("DEPARTMENT_MAP", "ENTITY_CATALOG")
     assert "DEPT_MAPPING" not in str(_DOMAIN_TOKENS)
 
 

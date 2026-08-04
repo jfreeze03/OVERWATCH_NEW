@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+from datetime import date, timedelta
 from statistics import median
 
 import pandas as pd
 
-from app.logic.formulas import safe_float
+from app.logic.formulas import account_today, safe_float
+
+MAX_CAPACITY_STALE_DAYS = 2
 
 _OUTPUT_COLUMNS = [
     "WAREHOUSE_NAME",
@@ -23,6 +26,10 @@ _OUTPUT_COLUMNS = [
     "RECENT_PRESSURE_DAYS",
     "OBSERVED_DAYS",
     "COVERAGE_PCT",
+    "SOURCE_LATEST_DAY",
+    "LATEST_DAY",
+    "STALE_DAYS",
+    "ACTIVITY_GAP_DAYS",
     "BASIS",
 ]
 
@@ -64,7 +71,13 @@ def _growth_pct(values: pd.Series) -> float:
     return (last - first) / first * 100.0
 
 
-def capacity_forecasts(frame: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
+def capacity_forecasts(
+    frame: pd.DataFrame,
+    min_days: int = 30,
+    *,
+    as_of: date | None = None,
+    max_stale_days: int = MAX_CAPACITY_STALE_DAYS,
+) -> pd.DataFrame:
     """Forecast days until queue/spill pressure reaches the intervention line.
 
     The pressure index is max(queue minutes / 30, remote spill GB / 1). An ETA
@@ -78,6 +91,18 @@ def capacity_forecasts(frame: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
     if frame is None or frame.empty or not required.issubset(frame.columns):
         return pd.DataFrame(columns=_OUTPUT_COLUMNS)
 
+    anchor = as_of or account_today()
+    expected_latest = pd.Timestamp(anchor - timedelta(days=1))
+    source_values = (
+        pd.to_datetime(frame["SOURCE_LATEST_DAY"], errors="coerce")
+        if "SOURCE_LATEST_DAY" in frame.columns
+        else pd.to_datetime(frame["DAY"], errors="coerce")
+    )
+    source_latest = source_values.max()
+    source_stale_days = (
+        max(0, int((expected_latest - source_latest.normalize()).days))
+        if pd.notna(source_latest) else 0
+    )
     rows: list[dict[str, object]] = []
     for warehouse, source in frame.groupby("WAREHOUSE_NAME", dropna=False):
         group = source.copy()
@@ -88,6 +113,8 @@ def capacity_forecasts(frame: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
         observed = len(group)
         calendar_days = ((group["DAY"].max() - group["DAY"].min()).days + 1) if observed else 0
         coverage = observed / calendar_days * 100.0 if calendar_days else 0.0
+        latest_day = group["DAY"].max().normalize() if observed else pd.NaT
+        activity_gap_days = max(0, int((expected_latest - latest_day).days)) if observed else 0
         base: dict[str, object] = {
             "WAREHOUSE_NAME": str(warehouse),
             "STATUS": "INSUFFICIENT",
@@ -102,8 +129,32 @@ def capacity_forecasts(frame: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
             "RECENT_PRESSURE_DAYS": 0,
             "OBSERVED_DAYS": observed,
             "COVERAGE_PCT": round(coverage, 1),
+            "SOURCE_LATEST_DAY": source_latest.date() if pd.notna(source_latest) else None,
+            "LATEST_DAY": latest_day.date() if observed else None,
+            "STALE_DAYS": source_stale_days,
+            "ACTIVITY_GAP_DAYS": activity_gap_days,
             "BASIS": "Needs at least 30 observed complete days with 80% calendar coverage.",
         }
+        if source_stale_days > max(0, int(max_stale_days)):
+            base.update({
+                "STATUS": "STALE",
+                "BASIS": (
+                    f"Latest complete fact is {source_stale_days} day(s) behind the expected "
+                    f"{expected_latest.date()} boundary; refresh telemetry before forecasting."
+                ),
+            })
+            rows.append(base)
+            continue
+        if activity_gap_days > max(0, int(max_stale_days)):
+            base.update({
+                "STATUS": "INACTIVE",
+                "BASIS": (
+                    f"No query activity for this warehouse in {activity_gap_days} day(s); "
+                    "an old pressure endpoint is not a current capacity forecast."
+                ),
+            })
+            rows.append(base)
+            continue
         if observed < max(30, int(min_days)) or coverage < 80.0:
             rows.append(base)
             continue
@@ -200,7 +251,7 @@ def capacity_forecasts(frame: pd.DataFrame, min_days: int = 30) -> pd.DataFrame:
 
     result = pd.DataFrame(rows, columns=_OUTPUT_COLUMNS)
     rank = {"PRESSURE NOW": 0, "FORECAST": 1, "WATCH": 2, "UNSTABLE": 3,
-            "STABLE": 4, "INSUFFICIENT": 5}
+            "STALE": 4, "STABLE": 5, "INACTIVE": 6, "INSUFFICIENT": 7}
     result["_RANK"] = result["STATUS"].map(rank).fillna(9)
     return result.sort_values(
         ["_RANK", "DAYS_TO_PRESSURE", "CURRENT_PRESSURE_INDEX"],

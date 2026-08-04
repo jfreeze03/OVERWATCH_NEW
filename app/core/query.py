@@ -330,10 +330,14 @@ _DOMAIN_TOKENS = {
     "prefs": ("USER_PREFS",),
     "budgets": ("DEPT_BUDGETS",),
     "ledger": ("SAVINGS_LEDGER",),
-    "queue": ("ACTION_QUEUE",),
+    "queue": ("ACTION_QUEUE", "ACTION_ACTIVITY"),
     "remediation": ("REMEDIATION_LOG",),
     "incidents": ("OVERWATCH.INCIDENTS", "INCIDENT_MEMBERS"),
-    "mappings": ("DEPARTMENT_MAP",),   # codex#45: the table is DEPARTMENT_MAP (was 'DEPT_MAPPING', which matched nothing -> every mapping write fell through to a global cache bump)
+    "mappings": ("DEPARTMENT_MAP", "ENTITY_CATALOG"),   # codex#45: the table is DEPARTMENT_MAP (was 'DEPT_MAPPING', which matched nothing -> every mapping write fell through to a global cache bump)
+    "evidence": ("EVIDENCE_LINKS",),
+    "watchlist": ("USER_WATCHLIST",),
+    "experiments": ("OPTIMIZATION_EXPERIMENTS",),
+    "objectives": ("SLO_OBJECTIVES",),
 }
 
 

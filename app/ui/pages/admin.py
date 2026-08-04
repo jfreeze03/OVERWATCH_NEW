@@ -38,6 +38,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     selectable_table,
+    snowsight_profile_column,
     styled_table,
     with_user_names,
 )
@@ -197,6 +198,10 @@ _EXPECTED_MIGRATIONS = {
         "kind and entity name; exposes exact matched warehouse/object changes, task-failure "
         "evidence and confidence. Proposal keys carry entity scope so a human declaration "
         "links only matching members. View-only; auto-declare and lifecycle writes unchanged",
+    73: "calendar triage windows: exec board materializes deduplicated Current month and "
+        "Current year account-time offsets alongside the fixed rolling windows",
+    74: "operating workbench: audited action lifecycle, evidence links, entity ownership, "
+        "personal watchlists, optimization experiments and SLO objectives",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -555,7 +560,10 @@ def _observability_tab() -> None:
     if telemetry.empty:
         st.caption("No queries have run yet this session.")
     else:
-        styled_table(telemetry.sort_values("at", ascending=False))
+        _tel = telemetry.sort_values("at", ascending=False)
+        _tel, _tel_cfg = snowsight_profile_column(_tel, _PAGE, id_col="query_id")
+        styled_table(_tel, column_config=_tel_cfg or None)
+        st.caption("Profile is unavailable for cache hits because no Snowflake query ran.")
 
     if st.button("Refresh all cached data", key="adm_refresh"):
         bump_refresh_salt()
@@ -591,19 +599,23 @@ def _performance_tab() -> None:
               tier="recent", source="APP_QUERY_TELEMETRY (the app's own fetch log)")
     if guard(res, "No fetches persisted in the last 7 days.",
              setup_hint="Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant)."):
-        styled_table(res.df,  # rec21
+        _stmt, _stmt_cfg = snowsight_profile_column(
+            res.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
+        styled_table(_stmt,  # rec21
                      column_config={
                          "MEDIAN_S": st.column_config.Column("Median"),
                          "P95_S": st.column_config.Column("p95"),
                          "EST_WAIT_S": st.column_config.Column("Est. wait"),
                          "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
+                         **_stmt_cfg,
                      })
         result_caption(res)
         st.caption(
             "Ranked by EST_WAIT_S — estimated total fleet seconds spent on that key, "
             "sample-reweighted. RUNS is what was PERSISTED (every slow/failed fetch plus "
             "a ~2% healthy sample), so MEDIAN_S/P95_S read high; EST_RUNS is the "
-            "re-weighted true count."
+            "re-weighted true count. Slowest profile opens the longest persisted "
+            "server query for that call site; cache-only rows have no profile."
         )
     if st.checkbox("Also scan ACCOUNT_USAGE for bytes scanned (slower)", key="adm_stmt_scan",
                    help="The GB-scanned figure only exists in QUERY_HISTORY — this is the "
@@ -616,12 +628,15 @@ def _performance_tab() -> None:
             # House convention: styled_table, not a raw st.dataframe — it carries the
             # status/delta coloring, header prettifier, pinned identity column, and the
             # self-identifying CSV export that every other table on the page has.
+            _scan, _scan_cfg = snowsight_profile_column(
+                scan.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
             styled_table(
-                scan.df,
+                _scan,
                 column_config={
                     "MEDIAN_S": st.column_config.Column("Median"),
                     "P95_S": st.column_config.Column("p95"),
                     "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
+                    **_scan_cfg,
                 })
             result_caption(scan)
             st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
@@ -644,13 +659,16 @@ def _performance_tab() -> None:
         st.success("No slow (≥2s) or failed fetches persisted in 7 days — every viewer is "
                    "riding the cache.")
     else:
-        styled_table(fq.df, height=280)
+        _fq, _fq_cfg = snowsight_profile_column(
+            fq.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
+        styled_table(_fq, height=280, column_config=_fq_cfg or None)
         st.caption(
             "Only fetches ≥2s or failed are persisted, plus a ~2% healthy sample "
             "(fire-and-forget, 60/session cap) — an EXCEPTION-WEIGHTED sample, so "
             "p50/p95 here read HIGHER than true fleet latency (r22 #20; weighted "
             "stats are queued). This is the regression surface across every user, "
-            "not a complete census. Per-session telemetry lives on Errors & telemetry."
+            "not a complete census. Slowest profile opens the longest persisted server "
+            "query for each row. Per-session telemetry lives on Errors & telemetry."
         )
     _perf_rider_panels(fq.df if fq.ok and not fq.empty else None)
 

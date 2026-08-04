@@ -13,18 +13,25 @@ from app.core.identity import identity_sql
 from app.core.query import execute_cancel_query, execute_statement, run, run_batch
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
-from app.core.state import filters
+from app.core.state import filters, navigation_context, request_navigation
 from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import complete_days_only, flag_anomalies
 from app.logic.formulas import account_today, credits_to_usd, humanize_duration, safe_float
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
-from app.logic.task_graph import inspect_task_graph
+from app.logic.task_graph import (
+    analyze_task_run,
+    canonical_task_name,
+    compare_task_versions,
+    inspect_task_graph,
+)
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     confirm_gate,
+    evidence_gate,
+    exception_summary,
     export_button,
     guard,
     kpi_row,
@@ -38,6 +45,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    selectable_nav_table,
     selectable_table,
     snowsight_profile_column,
     styled_table,
@@ -49,6 +57,12 @@ _PAGE = "Operations"
 
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  database: str = "", schema_contains: str = "") -> None:
+    nav_query = str(navigation_context().get("query_id") or "").strip()
+    nav_signature = f"query:{nav_query}"
+    if nav_query and st.session_state.get("_ow_ops_context_applied") != nav_signature:
+        st.session_state["_ops_drill_target"] = nav_query
+        st.session_state["ops_drill_manual"] = nav_query
+        st.session_state["_ow_ops_context_applied"] = nav_signature
     if str(company or "ALL").upper() != "ALL":
         st.caption(
             f"Scope: queries on {company} warehouses (by COMPANY_FOR_WAREHOUSE, matching "
@@ -552,6 +566,184 @@ def _task_runs_view(company: str, days: int, database: str = "",
         result_caption(nres)
 
 
+def _task_run_analyzer(root_id: str, topology, shape) -> None:
+    runs = run(
+        ops_sql.task_graph_recent_runs(root_id, 7, 40), page=_PAGE,
+        key=f"task_graph_runs_{root_id}", tier="recent",
+        source="TASK_HISTORY (selected root, bounded 7d)", max_rows=40,
+    )
+    if not guard(runs, "No completed graph executions were found for this root in 7 days."):
+        return
+    run_frame = runs.df.reset_index(drop=True)
+    selected = selectable_table(
+        run_frame, key=f"task_graph_run_pick_{root_id}", height=230,
+        sort_label="newest scheduled run",
+    )
+    run_index = int(selected) if selected is not None else 0
+    run_row = run_frame.iloc[run_index]
+    run_key = str(run_row.get("RUN_KEY") or "")
+    if not evidence_gate(
+        "task_run",
+        key=f"task_graph_run_evidence_{root_id}_{run_key}",
+        label="Load selected run analysis",
+    ):
+        return
+    nodes = run(
+        ops_sql.task_graph_run_nodes(root_id, run_key, 7), page=_PAGE,
+        key=f"task_graph_run_nodes_{root_id}_{run_key}", tier="recent",
+        source="TASK_HISTORY (one graph run)", max_rows=2_000,
+    )
+    if not guard(nodes, "The selected graph execution has no task rows."):
+        return
+    diagnostics = analyze_task_run(nodes.df, shape)
+    failed = int(diagnostics["STATE"].astype(str).eq("FAILED").sum())
+    critical = diagnostics[diagnostics["CRITICAL_PATH"]]
+    critical_sec = safe_float(critical["PATH_SEC"].max()) if not critical.empty else 0.0
+    queue_sec = safe_float(run_row.get("QUEUE_SEC"))
+    wall_sec = safe_float(run_row.get("WALL_SEC"))
+    exceptions = []
+    if failed:
+        exceptions.append({
+            "label": "Failed tasks",
+            "value": f"{failed:,}",
+            "detail": "Open the ranked nodes below for the task error and query profile.",
+            "severity": "bad",
+        })
+    if queue_sec >= max(60.0, wall_sec * 0.2):
+        exceptions.append({
+            "label": "Dispatch delay",
+            "value": humanize_duration(queue_sec, "s"),
+            "detail": "Queue time is at least 60 seconds and 20% of run wall time.",
+            "severity": "warn",
+        })
+    exception_summary(exceptions, "No failures or material dispatch delay in this run.")
+    kpi_row([
+        {"label": "Run wall time", "value": humanize_duration(run_row.get("WALL_SEC"), "s")},
+        {"label": "Dispatch queue", "value": humanize_duration(run_row.get("QUEUE_SEC"), "s")},
+        {"label": "Failed tasks", "value": f"{failed:,}",
+         "severity": "bad" if failed else "ok"},
+        {"label": "Critical path", "value": humanize_duration(critical_sec, "s")},
+    ])
+
+    lookup = {
+        canonical_task_name(row.get("TASK_FQN")): row
+        for _, row in diagnostics.iterrows()
+    }
+    overlay = topology.copy()
+    for column in ("RUN_SEC", "QUEUE_SEC", "EXEC_SEC", "RUN_STATE", "CRITICAL_PATH"):
+        source_column = "STATE" if column == "RUN_STATE" else column
+        overlay[column] = overlay["TASK_FQN"].map(
+            lambda value, col=source_column: lookup.get(
+                canonical_task_name(value), {}
+            ).get(col)
+        )
+    if not charts.interactive_task_dag(overlay, shape, height=620):
+        try:
+            st.graphviz_chart(charts.task_dag_dot(overlay, shape), width="stretch", height=620)
+        except TypeError:
+            st.graphviz_chart(charts.task_dag_dot(overlay, shape), use_container_width=True)
+    st.caption(
+        "The highlighted path is the longest observed dependency path for this run. "
+        "Node duration includes dispatch queue plus execution; current topology supplies the edges."
+    )
+
+    ranked = diagnostics.sort_values(
+        ["CRITICAL_PATH", "BOTTLENECK_SCORE", "RUN_SEC"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+    profiled, profile_config = snowsight_profile_column(ranked, _PAGE, id_col="QUERY_ID")
+    columns = [
+        "TASK_FQN", "STATE", "CRITICAL_PATH", "DOWNSTREAM_TASKS", "QUEUE_SEC",
+        "EXEC_SEC", "RUN_SEC", "BOTTLENECK_SCORE", "ERROR_MESSAGE",
+    ]
+    if "PROFILE" in profiled.columns:
+        columns.append("PROFILE")
+
+    def _open_task(index: int) -> None:
+        task = str(ranked.iloc[int(index)]["TASK_FQN"])
+        request_navigation(
+            "Control Room", "Entity 360",
+            context={"entity_type": "TASK", "entity_key": task},
+        )
+
+    selectable_nav_table(
+        profiled[columns], key=f"task_run_nodes_table_{root_id}_{run_key}",
+        on_select=_open_task, height=340, column_config=profile_config,
+        sort_label="critical path, bottleneck score, then duration",
+    )
+    result_caption(nodes, note=f"graph run {run_key}")
+
+
+def _task_version_compare(root_id: str) -> None:
+    versions = run(
+        ops_sql.task_graph_versions(root_id, 30), page=_PAGE,
+        key=f"task_graph_versions_{root_id}", tier="historical",
+        source="TASK_VERSIONS (selected root)", max_rows=30,
+    )
+    if not guard(versions, "No historical graph versions were found for this root."):
+        return
+    options = [int(safe_float(value)) for value in versions.df["GRAPH_VERSION"]]
+    options = list(dict.fromkeys(options))
+    if len(options) < 2:
+        st.info("Only one graph version exists, so there is nothing to compare yet.")
+        return
+    c1, c2 = st.columns(2)
+    with c1:
+        before_version = st.selectbox(
+            "Before", options, index=1, key=f"task_graph_before_{root_id}",
+            format_func=lambda value: f"Graph v{value}",
+        )
+    with c2:
+        after_version = st.selectbox(
+            "After", options, index=0, key=f"task_graph_after_{root_id}",
+            format_func=lambda value: f"Graph v{value}",
+        )
+    if before_version == after_version:
+        st.info("Choose two different graph versions.")
+        return
+    before = run(
+        ops_sql.task_graph_version_nodes(root_id, int(before_version)), page=_PAGE,
+        key=f"task_graph_version_{root_id}_{before_version}", tier="historical",
+        source="TASK_VERSIONS (historical topology)", max_rows=2_000,
+    )
+    after = run(
+        ops_sql.task_graph_version_nodes(root_id, int(after_version)), page=_PAGE,
+        key=f"task_graph_version_{root_id}_{after_version}", tier="historical",
+        source="TASK_VERSIONS (historical topology)", max_rows=2_000,
+    )
+    if not guard(before, "The before-version snapshot is unavailable."):
+        return
+    if not guard(after, "The after-version snapshot is unavailable."):
+        return
+    changes = compare_task_versions(before.df, after.df)
+    added = int(changes["CHANGE"].eq("ADDED").sum()) if not changes.empty else 0
+    removed = int(changes["CHANGE"].eq("REMOVED").sum()) if not changes.empty else 0
+    rewired = int(changes["CHANGE"].eq("DEPENDENCIES_CHANGED").sum()) if not changes.empty else 0
+    kpi_row([
+        {"label": "Before tasks", "value": f"{len(before.df):,}"},
+        {"label": "After tasks", "value": f"{len(after.df):,}"},
+        {"label": "Added", "value": f"{added:,}", "severity": "warn" if added else "ok"},
+        {"label": "Removed", "value": f"{removed:,}", "severity": "bad" if removed else "ok"},
+        {"label": "Rewired", "value": f"{rewired:,}", "severity": "warn" if rewired else "ok"},
+    ])
+    if changes.empty:
+        st.success("These versions have the same tasks and dependency edges.")
+        return
+
+    def _open_changed_task(index: int) -> None:
+        task = str(changes.iloc[int(index)]["TASK_FQN"])
+        request_navigation(
+            "Control Room", "Entity 360",
+            context={"entity_type": "TASK", "entity_key": task},
+        )
+
+    selectable_nav_table(
+        changes, key=f"task_graph_diff_{root_id}_{before_version}_{after_version}",
+        on_select=_open_changed_task, height=360,
+        sort_label="task name within changed nodes",
+    )
+
+
 def _task_graph_view() -> None:
     section_header("Pipeline topology", "info", "pipeline")
     section_filter_contract(
@@ -641,6 +833,17 @@ def _task_graph_view() -> None:
         {"label": "Suspended", "value": f"{suspended:,}",
          "severity": "warn" if suspended else "ok"},
     ])
+
+    graph_view = nested_sections(
+        ["Topology", "Run analyzer", "Version compare"],
+        key="ops_task_graph_detail_view",
+    )
+    if graph_view == "Run analyzer":
+        _task_run_analyzer(str(root_id), frame, shape)
+        return
+    if graph_view == "Version compare":
+        _task_version_compare(str(root_id))
+        return
 
     dot = charts.task_dag_dot(frame, shape)
     renderer_options = ["Interactive", "Graphviz"]
@@ -1196,7 +1399,7 @@ def render() -> None:
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()
     page_header("Operations", "Queries, tasks, warehouses, contention, change impact, releases, pipeline SLAs, and emergency levers.", icon_name="operations",
-                scope_note=f"{f['company']} · last {f['days']} days")
+                scope_note=f"{f['company']} · {f['window_label']}")
     # Contention folded under Warehouses (CoCo): warehouse health and the
     # contention it causes read together.
     section = lazy_sections(

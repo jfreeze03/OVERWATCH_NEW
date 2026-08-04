@@ -23,18 +23,23 @@ SPILL_DOWN_MAX_GB_PER_DAY = 0.1
 DOWN_P95_SEC = 10.0            # fast p95 and calm queue -> down candidate
 DOWN_IDLE_PCT = 30.0           # meaningful idle share strengthens down case
 SUSPEND_FIRST_IDLE_PCT = 50.0  # mostly idle -> fix auto-suspend before resizing
+MIN_ACTIVE_DAYS = 2
+MIN_ACTIVE_DAYS_PER_30D = 3.0
+AUTO_SUSPEND_TARGET_SEC = 60
 
 RECOMMEND_UP = "Size up / add cluster"
 RECOMMEND_DOWN = "Size down candidate"
 RECOMMEND_SUSPEND = "Tune auto-suspend first"
+RECOMMEND_CADENCE = "Review cadence / consolidation"
+RECOMMEND_OBSERVE = "Collect more evidence"
 RECOMMEND_KEEP = "Keep"
 
 
 def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> pd.DataFrame:
     """Score each warehouse row and attach scenario dollars + recommendation.
 
-    Expects columns: WAREHOUSE_NAME, CREDITS_TOTAL, QUERY_COUNT, P95_ELAPSED_SEC,
-    QUEUED_SEC, SPILL_REMOTE_GB, IDLE_PCT (optional),
+    Expects columns: WAREHOUSE_NAME, CREDITS_TOTAL, QUERY_COUNT, ACTIVE_QUERY_DAYS,
+    P95_ELAPSED_SEC, QUEUED_SEC, SPILL_REMOTE_GB, IDLE_PCT (optional),
     QUEUED_PROVISIONING_SEC (optional).
 
     ``window_days`` must be the window actually SERVED (components.served_days),
@@ -51,16 +56,36 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     rate = safe_float(credit_rate_usd, 3.68)
     days = max(int(window_days or 1), 1)
     out = df.copy()
-    for col in ("CREDITS_TOTAL", "QUERY_COUNT", "P95_ELAPSED_SEC", "QUEUED_SEC",
+    for col in ("CREDITS_TOTAL", "QUERY_COUNT", "ACTIVE_QUERY_DAYS", "P95_ELAPSED_SEC", "QUEUED_SEC",
                 "QUEUED_PROVISIONING_SEC", "SPILL_REMOTE_GB", "IDLE_PCT"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
     if "IDLE_PCT" not in out.columns:
         out["IDLE_PCT"] = 0.0
+    if "ACTIVE_QUERY_DAYS" not in out.columns:
+        out["ACTIVE_QUERY_DAYS"] = 0.0
     has_prov = "QUEUED_PROVISIONING_SEC" in out.columns
+    settings_supplied = "AUTO_SUSPEND" in df.columns
+    if settings_supplied:
+        current_suspend = pd.to_numeric(out["AUTO_SUSPEND"], errors="coerce")
+        suspend_known = current_suspend.notna()
+        if "AUTO_SUSPEND_KNOWN" in out.columns:
+            suspend_known &= out["AUTO_SUSPEND_KNOWN"].fillna(False).astype(bool)
+        out["AUTO_SUSPEND"] = current_suspend
+        out["AUTO_SUSPEND_KNOWN"] = suspend_known
 
     out["QUEUED_MIN_PER_DAY"] = (out["QUEUED_SEC"] / 60.0 / days).round(1)
     out["SPILL_GB_PER_DAY"] = (out["SPILL_REMOTE_GB"] / days).round(2)
+    out["ACTIVE_DAYS_PER_30D"] = (out["ACTIVE_QUERY_DAYS"] / days * 30).round(1)
+    out["EVIDENCE_SUFFICIENT"] = (
+        (out["ACTIVE_QUERY_DAYS"] >= MIN_ACTIVE_DAYS)
+        & (out["ACTIVE_DAYS_PER_30D"] >= MIN_ACTIVE_DAYS_PER_30D)
+    )
+    out["CONFIDENCE"] = out["EVIDENCE_SUFFICIENT"].map({True: "MEDIUM", False: "LOW"})
+    out.loc[
+        (out["ACTIVE_QUERY_DAYS"] >= 7) & (out["ACTIVE_DAYS_PER_30D"] >= 7),
+        "CONFIDENCE",
+    ] = "HIGH"
     if has_prov:
         out["PROVISION_MIN_PER_DAY"] = (out["QUEUED_PROVISIONING_SEC"] / 60.0 / days).round(1)
     out["MONTHLY_USD_NOW"] = (out["CREDITS_TOTAL"] * rate / days * 30).round(0)
@@ -75,7 +100,9 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
         spill = row["SPILL_GB_PER_DAY"]
         idle = row["IDLE_PCT"]
         p95 = row["P95_ELAPSED_SEC"]
-        if queued >= QUEUE_UP_MIN_PER_DAY or spill >= SPILL_UP_GB_PER_DAY:
+        pressure = queued >= QUEUE_UP_MIN_PER_DAY or spill >= SPILL_UP_GB_PER_DAY
+        enough = bool(row["EVIDENCE_SUFFICIENT"])
+        if pressure and enough:
             why = []
             if queued >= QUEUE_UP_MIN_PER_DAY:
                 why.append(f"{queued:.0f} overload-queued min/day")
@@ -83,12 +110,26 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
                 why.append(f"{spill:.1f} GB/day remote spill")
             return RECOMMEND_UP, "Concurrency/memory pressure: " + ", ".join(why) + "."
         if idle >= SUSPEND_FIRST_IDLE_PCT:
+            if settings_supplied:
+                if not bool(row.get("AUTO_SUSPEND_KNOWN", False)):
+                    return RECOMMEND_OBSERVE, (
+                        f"{idle:.0f}% idle, but current AUTO_SUSPEND is unknown; verify the setting "
+                        "before treating idle spend as a timer opportunity.")
+                current = safe_float(row.get("AUTO_SUSPEND"), 0.0)
+                if 0 < current <= AUTO_SUSPEND_TARGET_SEC:
+                    return RECOMMEND_CADENCE, (
+                        f"{idle:.0f}% idle despite AUTO_SUSPEND={current:.0f}s; review workload cadence, "
+                        "warehouse consolidation, or retirement instead of lengthening the timer.")
             prov = ""
             if has_prov and row.get("PROVISION_MIN_PER_DAY", 0) >= 1:
                 prov = (f" ({row['PROVISION_MIN_PER_DAY']:.0f} provisioning min/day — "
                         "resume overhead, not concurrency)")
             return RECOMMEND_SUSPEND, (
                 f"{idle:.0f}% of credits are idle-hours{prov} - shorten AUTO_SUSPEND before resizing.")
+        if not enough:
+            return RECOMMEND_OBSERVE, (
+                f"Only {row['ACTIVE_QUERY_DAYS']:.0f} active query day(s) "
+                f"({row['ACTIVE_DAYS_PER_30D']:.1f}/30d); do not resize from episodic evidence.")
         if (queued < 1 and spill < SPILL_DOWN_MAX_GB_PER_DAY
                 and p95 <= DOWN_P95_SEC and idle >= DOWN_IDLE_PCT):
             return RECOMMEND_DOWN, (
@@ -99,6 +140,9 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     verdicts = out.apply(_recommend, axis=1, result_type="expand")
     out["RECOMMENDATION"] = verdicts[0]
     out["RATIONALE"] = verdicts[1]
+    out["ACTIONABLE"] = out["RECOMMENDATION"].isin(
+        {RECOMMEND_UP, RECOMMEND_SUSPEND, RECOMMEND_DOWN}
+    )
     out["POTENTIAL_MONTHLY_SAVING_USD"] = out.apply(
         lambda r: round(r["MONTHLY_USD_NOW"] - r["SCENARIO_DOWN_USD"], 0)
         if r["RECOMMENDATION"] == RECOMMEND_DOWN else 0.0,
@@ -108,7 +152,8 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     # its saving is measured idle; a size-down is a speculative SLA bet whose
     # "saving" is the mechanical half-rate scenario. The old order sold the bet
     # first.
-    order = {RECOMMEND_UP: 0, RECOMMEND_SUSPEND: 1, RECOMMEND_DOWN: 2, RECOMMEND_KEEP: 3}
+    order = {RECOMMEND_UP: 0, RECOMMEND_SUSPEND: 1, RECOMMEND_DOWN: 2,
+             RECOMMEND_CADENCE: 3, RECOMMEND_OBSERVE: 4, RECOMMEND_KEEP: 5}
     out["_O"] = out["RECOMMENDATION"].map(order).fillna(9)
     return (out.sort_values(["_O", "MONTHLY_USD_NOW"], ascending=[True, False])
             .drop(columns="_O").reset_index(drop=True))
@@ -121,7 +166,7 @@ def sizing_summary(out: pd.DataFrame) -> dict:
     need an auto-suspend fix. Adding them would mix a model with a measurement.
     """
     if out is None or out.empty:
-        return {"up": 0, "down": 0, "suspend": 0,
+        return {"up": 0, "down": 0, "suspend": 0, "review": 0, "observe": 0,
                 "potential_saving_usd": 0.0, "idle_saving_usd": 0.0}
     rec = out["RECOMMENDATION"]
     idle_usd = 0.0
@@ -131,6 +176,8 @@ def sizing_summary(out: pd.DataFrame) -> dict:
         "up": int((rec == RECOMMEND_UP).sum()),
         "down": int((rec == RECOMMEND_DOWN).sum()),
         "suspend": int((rec == RECOMMEND_SUSPEND).sum()),
+        "review": int((rec == RECOMMEND_CADENCE).sum()),
+        "observe": int((rec == RECOMMEND_OBSERVE).sum()),
         "potential_saving_usd": round(float(out["POTENTIAL_MONTHLY_SAVING_USD"].sum()), 0),
         "idle_saving_usd": idle_usd,
     }

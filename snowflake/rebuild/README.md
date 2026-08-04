@@ -7,9 +7,9 @@ before moving on:
 
 | # | file | what | verify |
 |---|------|------|--------|
-| 00 | 00_backup_operator_data.sql | date-stamped clones of all 21 operator tables | SOURCE_ROWS == CLONE_ROWS every row |
+| 00 | 00_backup_operator_data.sql | date-stamped clones of all operator tables | SOURCE_ROWS == CLONE_ROWS every row |
 | 01 | 01_teardown_rebuildables.sql | drops every rebuildable OVERWATCH object (operator data survives) | VERIFY select lists ONLY operator tables |
-| 02 | 02_migrations_V001_V072.sql | all 72 migrations, in order | runs to the end; halts AT the failure if any |
+| 02 | 02_migrations_V001_V074.sql | all 74 migrations, in order | runs to the end; halts AT the failure if any |
 | 03 | 03_roles.sql | grants incl. the V041 objects | 'roles applied' |
 | 04 | 04_backfill_365.sql | year of dailies, 90d marts (extract first) | backfill coverage select |
 | 05 | 05_validate.sql | post-install checks | every row OK |
@@ -19,5 +19,7 @@ Then, one hour later: snowflake/loader_chain_check.sql — every task
 
 These files are GENERATED and equality-locked against their sources
 (tests/test_rebuild_bundle.py) — edit the sources, never this folder.
+Regenerate the byte-locked files with `python outputs/gen_rebuild_bundle.py`
+after changing a migration, teardown, roles, backfill, or validation source.
 Factory reset instead (drop operator data too): see docs/FULL_REBUILD.md
 step 0; it is deliberately NOT part of this bundle.

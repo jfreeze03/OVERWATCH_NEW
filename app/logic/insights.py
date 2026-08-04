@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from math import ceil
 
 import pandas as pd
 
@@ -26,6 +27,33 @@ IDLE_TARGET_SUSPEND_SEC = 60
 # timer can genuinely reclaim. Deliberately an estimate on the conservative side:
 # a warehouse resuming many times inside one hour pays more tails than this.
 IDLE_RESUME_TAIL_SEC = IDLE_TARGET_SUSPEND_SEC
+
+
+def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> pd.DataFrame:
+    """Attach case-insensitive SHOW WAREHOUSES auto-suspend evidence.
+
+    Missing metadata stays explicitly unknown. AUTO_SUSPEND=0 is a known,
+    disabled setting and must not be conflated with a failed metadata read.
+    """
+    if idle is None or idle.empty:
+        return pd.DataFrame() if idle is None else idle.copy()
+    out = idle.copy()
+    out["AUTO_SUSPEND"] = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    out["AUTO_SUSPEND_KNOWN"] = False
+    if warehouses is None or warehouses.empty or "WAREHOUSE_NAME" not in out.columns:
+        return out
+    settings = warehouses.copy()
+    settings.columns = [str(column).lower() for column in settings.columns]
+    if not {"name", "auto_suspend"}.issubset(settings.columns):
+        return out
+    values = {
+        str(name).strip().upper(): pd.to_numeric(value, errors="coerce")
+        for name, value in zip(settings["name"], settings["auto_suspend"], strict=False)
+    }
+    mapped = out["WAREHOUSE_NAME"].astype(str).str.strip().str.upper().map(values)
+    out["AUTO_SUSPEND"] = pd.to_numeric(mapped, errors="coerce").astype("Float64")
+    out["AUTO_SUSPEND_KNOWN"] = out["AUTO_SUSPEND"].notna()
+    return out
 
 
 def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> pd.DataFrame:
@@ -65,36 +93,74 @@ def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> 
     # warehouse already tuned to 30s got told to RAISE it to 60 — the generated
     # ALTER made things worse — and a fully-tuned warehouse still ranked #1 with
     # no way to tell it apart. When the current setting is already at/below the
-    # 60s target, the residual is resume overhead, not a tuning gap. Callers that
-    # have SHOW WAREHOUSES data pass AUTO_SUSPEND; without it, behaviour is the
-    # old generic wording (no column, no claim).
+    # 60s target, the residual is resume overhead, not a tuning gap. Callers pass
+    # SHOW WAREHOUSES evidence; missing settings are verification work, never an
+    # executable recommendation or a booked saving.
     has_current = "AUTO_SUSPEND" in out.columns
     if has_current:
-        out["AUTO_SUSPEND"] = out["AUTO_SUSPEND"].map(lambda v: safe_float(v, 0.0))
+        raw_current = pd.to_numeric(out["AUTO_SUSPEND"], errors="coerce")
+        known = raw_current.notna()
+        if "AUTO_SUSPEND_KNOWN" in out.columns:
+            known &= out["AUTO_SUSPEND_KNOWN"].fillna(False).astype(bool)
+        out["AUTO_SUSPEND"] = raw_current
+    else:
+        known = pd.Series(False, index=out.index, dtype=bool)
+        out["AUTO_SUSPEND"] = pd.Series(pd.NA, index=out.index, dtype="Float64")
+    out["AUTO_SUSPEND_KNOWN"] = known
+    current = out["AUTO_SUSPEND"].fillna(0.0)
+    out["ACTIONABLE"] = (
+        out["FLAGGED"]
+        & out["AUTO_SUSPEND_KNOWN"]
+        & ((current <= 0) | (current > IDLE_TARGET_SUSPEND_SEC))
+    )
+    out["ACTIONABLE_MONTHLY_USD"] = out["RECOVERABLE_MONTHLY_USD"].where(
+        out["ACTIONABLE"], 0.0
+    ).round(2)
+
+    def _status(r) -> str:
+        if not r["FLAGGED"]:
+            return "WITHIN TOLERANCE"
+        if not bool(r["AUTO_SUSPEND_KNOWN"]):
+            return "VERIFY SETTING"
+        cur = safe_float(r.get("AUTO_SUSPEND"), 0.0)
+        if 0 < cur <= IDLE_TARGET_SUSPEND_SEC:
+            return "ALREADY TUNED"
+        return "ACTIONABLE"
+
+    out["ACTION_STATUS"] = out.apply(_status, axis=1)
+    out["SAVINGS_CONFIDENCE"] = (
+        "MEDIUM" if {"METERED_HOURS", "IDLE_HOURS"}.issubset(out.columns) else "LOW"
+    )
 
     def _advice(r) -> str:
         if not r["FLAGGED"]:
             return "Idle share within tolerance."
-        cur = safe_float(r.get("AUTO_SUSPEND"), 0.0) if has_current else 0.0
-        if has_current and 0 < cur <= IDLE_TARGET_SUSPEND_SEC:
+        if not bool(r["AUTO_SUSPEND_KNOWN"]):
+            return (f"Verify current AUTO_SUSPEND on {r['WAREHOUSE_NAME']}; measured idle "
+                    "warrants review before generating a change.")
+        cur = safe_float(r.get("AUTO_SUSPEND"), 0.0)
+        if 0 < cur <= IDLE_TARGET_SUSPEND_SEC:
             return (f"{r['WAREHOUSE_NAME']} is already at AUTO_SUSPEND={cur:.0f}s — "
                     f"~{r['IDLE_PCT']:.0f}% idle here is resume overhead, not a tuning gap. "
                     "Look at query cadence/scheduling instead of the suspend timer.")
+        if cur <= 0:
+            return (f"Enable AUTO_SUSPEND={IDLE_TARGET_SUSPEND_SEC}s on "
+                    f"{r['WAREHOUSE_NAME']}: ~{r['IDLE_PCT']:.0f}% of its credits burn "
+                    "in hours with zero queries.")
         target = int(min(cur, IDLE_TARGET_SUSPEND_SEC)) if cur > 0 else IDLE_TARGET_SUSPEND_SEC
         now = f" (currently {cur:.0f}s)" if cur > 0 else ""
         return (f"Reduce AUTO_SUSPEND to {target}s on {r['WAREHOUSE_NAME']}{now}: "
                 f"~{r['IDLE_PCT']:.0f}% of its credits burn in hours with zero queries.")
 
     out["RECOMMENDATION"] = out.apply(_advice, axis=1)
-    # Already-tuned warehouses are not actionable tuning targets — keep them in the
-    # table (the idle $ is real) but rank them below ones that can still be fixed.
-    if has_current:
-        out["_TUNABLE"] = ~((out["AUTO_SUSPEND"] > 0)
-                            & (out["AUTO_SUSPEND"] <= IDLE_TARGET_SUSPEND_SEC)
-                            & out["FLAGGED"])
-        out = out.sort_values(["_TUNABLE", "IDLE_USD"], ascending=[False, False]).drop(columns=["_TUNABLE"])
-        return out.reset_index(drop=True)
-    return out.sort_values("IDLE_USD", ascending=False).reset_index(drop=True)
+    # Rank executable actions first, then settings that need verification, then
+    # already-tuned residual waste and within-tolerance rows.
+    status_order = {"ACTIONABLE": 0, "VERIFY SETTING": 1, "ALREADY TUNED": 2,
+                    "WITHIN TOLERANCE": 3}
+    out["_ACTION_ORDER"] = out["ACTION_STATUS"].map(status_order).fillna(9)
+    return (out.sort_values(["_ACTION_ORDER", "ACTIONABLE_MONTHLY_USD", "IDLE_USD"],
+                            ascending=[True, False, False])
+            .drop(columns="_ACTION_ORDER").reset_index(drop=True))
 
 
 def idle_suspend_sql(warehouse: str, seconds: int = 60) -> str:
@@ -115,13 +181,20 @@ def idle_suspend_sql(warehouse: str, seconds: int = 60) -> str:
 # its calibrated value; window_days normalizes to it.
 REPEAT_MIN_ELAPSED_HOURS = 0.5      # per REPEAT_GATE_BASE_DAYS
 REPEAT_GATE_BASE_DAYS = 30
+REPEAT_MIN_RUNS_PER_30D = 10.0
 REPEAT_LOW_CACHE_PCT = 25.0
+
+
+def repeat_min_runs(window_days: int) -> int:
+    """SQL prefilter matching the 10-runs-per-30d recurrence contract."""
+    days = max(int(window_days or REPEAT_GATE_BASE_DAYS), 1)
+    return max(2, ceil(REPEAT_MIN_RUNS_PER_30D * days / REPEAT_GATE_BASE_DAYS))
 
 
 def flag_repeat_candidates(df: pd.DataFrame, window_days: int = REPEAT_GATE_BASE_DAYS) -> pd.DataFrame:
     """Flag fingerprints worth materializing/caching: heavy + cache-poor.
 
-    Ranked by the money at stake x the cache-MISS share when the reader supplies
+    Ranked by normalized 30-day money at stake x cache-MISS share when the reader supplies
     EST_CREDITS (D3): wall-clock hours rank an X-Small hour equal to a 4X-Large
     hour, and a family that is already 95% cached has nothing left to reclaim
     however many hours it burns. The efficiency mart has no per-size column, so
@@ -135,20 +208,33 @@ def flag_repeat_candidates(df: pd.DataFrame, window_days: int = REPEAT_GATE_BASE
             out[col] = out[col].map(safe_float)
     days = max(int(window_days or REPEAT_GATE_BASE_DAYS), 1)
     out["HOURS_PER_30D"] = (out["TOTAL_ELAPSED_HOURS"] / days * REPEAT_GATE_BASE_DAYS).round(2)
+    out["RUNS_PER_30D"] = (out["RUNS"] / days * REPEAT_GATE_BASE_DAYS).round(1)
     out["CANDIDATE"] = (
         (out["HOURS_PER_30D"] >= REPEAT_MIN_ELAPSED_HOURS)
+        & (out["RUNS_PER_30D"] >= REPEAT_MIN_RUNS_PER_30D)
         & (out["AVG_CACHE_PCT"] <= REPEAT_LOW_CACHE_PCT)
     )
     out["WHY"] = out.apply(
         lambda r: (
-            f"{int(r['RUNS'])} runs, {r['HOURS_PER_30D']:.1f}h compute/30d, "
+            f"{r['RUNS_PER_30D']:.1f} runs/30d, {r['HOURS_PER_30D']:.1f}h compute/30d, "
             f"{r['AVG_CACHE_PCT']:.0f}% cache — consider a materialized/refreshed table or schedule change."
         ) if r["CANDIDATE"] else "",
         axis=1,
     )
     if "EST_CREDITS" in out.columns:
-        out["_RANK"] = out["EST_CREDITS"] * (1 - out["AVG_CACHE_PCT"].clip(0, 100) / 100)
-        out = out.sort_values("_RANK", ascending=False).drop(columns=["_RANK"]).reset_index(drop=True)
+        out["EST_CREDITS_PER_30D"] = (
+            out["EST_CREDITS"] / days * REPEAT_GATE_BASE_DAYS
+        ).round(3)
+        out["AVOIDABLE_CREDITS_PER_30D"] = (
+            out["EST_CREDITS_PER_30D"] * (1 - out["AVG_CACHE_PCT"].clip(0, 100) / 100)
+        ).round(3)
+        out = out.sort_values(
+            ["CANDIDATE", "AVOIDABLE_CREDITS_PER_30D"], ascending=[False, False]
+        ).reset_index(drop=True)
+    else:
+        out = out.sort_values(
+            ["CANDIDATE", "HOURS_PER_30D"], ascending=[False, False]
+        ).reset_index(drop=True)
     return out
 
 
@@ -195,6 +281,10 @@ def storage_movers(df: pd.DataFrame, usd_per_tb_month: float) -> pd.DataFrame:
     observed = out["DAYS_OBSERVED"] if "DAYS_OBSERVED" in out.columns else span
     out["LOW_CONFIDENCE"] = (span < MOVERS_MIN_CONFIDENT_DAYS) | (observed < MOVERS_MIN_CONFIDENT_DAYS)
     out["GROWTH_USD_30D"] = (out["GROWTH_TB_30D"] * rate).round(2)
+    out["PROJECTABLE"] = ~out["LOW_CONFIDENCE"]
+    out["PROJECTABLE_GROWTH_USD_30D"] = out["GROWTH_USD_30D"].where(
+        out["PROJECTABLE"] & (out["GROWTH_USD_30D"] > 0), 0.0
+    ).round(2)
     # E6: AVERAGE_FAILSAFE_BYTES is reported ALONGSIDE AVERAGE_DATABASE_BYTES,
     # not inside it, so failsafe / database could (and did) exceed 100%. Share of
     # the database's TOTAL billed bytes is the number the label promises.

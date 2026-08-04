@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.query import run
-from app.data import cost_sql, insights_sql, mart27_sql, mart_sql
+from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
 from app.logic.formulas import (
@@ -25,7 +25,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
-from app.logic.insights import idle_advisor
+from app.logic.insights import idle_advisor, with_auto_suspend_settings
 from app.ui import charts
 from app.ui.components import (
     guard,
@@ -471,17 +471,21 @@ def _contract_tab(settings: dict) -> None:
     # blended eff_rate the renewal planner below uses. Two rates, on purpose.
     levers: dict = {}
     if idle_lv.usable():
-        adv_st = idle_advisor(idle_lv.df, rate_now, _STEER_WINDOW_DAYS)
-        # C4: only FLAGGED warehouses are auto-suspend targets. The advisor labels
-        # the rest "Idle share within tolerance" (or already-tuned, where the residual
-        # is resume overhead a timer cannot remove) — summing every row turned
-        # tolerable idle into promised savings and inflated the coverage %.
-        _flagged = adv_st[adv_st["FLAGGED"]] if "FLAGGED" in adv_st.columns else adv_st
+        _steer_whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="steer_wh_settings",
+                         tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        _steer_idle = with_auto_suspend_settings(
+            idle_lv.df,
+            _steer_whs.df if _steer_whs.ok and not _steer_whs.empty else pd.DataFrame(),
+        )
+        adv_st = idle_advisor(_steer_idle, rate_now, _STEER_WINDOW_DAYS)
+        # Gross flagged idle, already-tuned residuals, and unknown settings are
+        # measured waste, but they are not executable contract-steering levers.
+        _actionable = adv_st[adv_st["ACTIONABLE"]]
         _idle_monthly = float(pd.to_numeric(
-            _flagged.get("PROJECTED_MONTHLY_IDLE_USD", pd.Series(dtype=float)),
+            _actionable.get("ACTIONABLE_MONTHLY_USD", pd.Series(dtype=float)),
             errors="coerce").fillna(0).sum()) * _REALIZABLE_IDLE
         if _idle_monthly > 0:
-            levers[f"Auto-suspend tuning, flagged only ({_REALIZABLE_IDLE:.0%} realizable)"] = _idle_monthly
+            levers[f"Auto-suspend tuning, verified targets ({_REALIZABLE_IDLE:.0%} realizable)"] = _idle_monthly
     if pats_lv.usable():
         top5 = pats_lv.df.head(5)
         if "CREDITS_PER_DAY" in top5.columns:      # live shape: per-day allocated
@@ -512,7 +516,7 @@ def _contract_tab(settings: dict) -> None:
             styled_table(pd.DataFrame(plan["rows"]), height=140)
         # $-escape: the rate pair below is two '$' tokens in one markdown sink
         st.caption(md_dollars(
-            "Lever estimates come from the idle advisor (flagged warehouses only) and the "
+            "Lever estimates come from the idle advisor (settings-verified actionable warehouses only) and the "
             "recurring-pattern panel — execute them on Optimization & Savings. Each is shown "
             f"AFTER a realizable haircut ({_REALIZABLE_IDLE:.0%} idle, {_REALIZABLE_PATTERNS:.0%} "
             "patterns), so the coverage % is what the levers plausibly bank, not what they "

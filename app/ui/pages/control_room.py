@@ -15,7 +15,7 @@ import streamlit as st
 from app.config import THRESHOLDS
 from app.core.errors import safe_page
 from app.core.query import run, run_batch
-from app.core.state import filters, request_navigation
+from app.core.state import filters, navigation_context, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
 from app.logic.anomaly import (
@@ -37,13 +37,16 @@ from app.logic.formulas import (
 from app.ui import charts
 from app.ui.components import (
     confirm_gate,
+    exception_summary,
     guard,
     kpi_row,
     lazy_sections,
     load_settings,
     localize_timestamps,
+    nested_sections,
     page_header,
     panel_help,
+    read_model_caption,
     result_caption,
     run_mart_first,
     section_filter_contract,
@@ -53,6 +56,8 @@ from app.ui.components import (
     styled_table,
     with_user_names,
 )
+from app.ui.decision_studio import render_decision_studio
+from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
 _PAGE = "Control Room"
 
@@ -272,7 +277,7 @@ def render() -> None:
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     page_header("Control Room", "Morning triage: what broke, what's burning, what's stale.", icon_name="control",
-                scope_note=f"{company} · last {days} days"
+                scope_note=f"{company} · {f['window_label']}"
                            + (f" · {f['database']}" if f["database"] else ""))
 
     # N2: undelivered-critical banner up top — the DBA's first triage question is
@@ -288,13 +293,23 @@ def render() -> None:
                               use_container_width=True):
             request_navigation("Alerts", "Native delivery")
 
-    section = lazy_sections(["Pulse", "Incidents & triage", "Timeline & movers",
-                             "Freshness & replay"], key="cr_section")
+    section = lazy_sections(["Action Center", "Pulse", "Decision Studio", "Incidents & triage",
+                             "Timeline & movers", "Freshness & replay", "Entity 360"],
+                            key="cr_section")
     _contracts = {
+        "Action Center": {
+            "applies": (),
+            "partial": ("company",),
+            "note": "Persistent work is account-wide; Company includes matching and account-level actions.",
+        },
         "Pulse": {
             "applies": ("company",),
             "partial": ("database", "schema_contains"),
             "note": "Database and Schema narrow query health only; the horizon is fixed since yesterday.",
+        },
+        "Decision Studio": {
+            "applies": ("company", "days"),
+            "note": "Portfolio, product economics and Cost Truth use Company and Window; SLO and experiment records keep their own objective windows.",
         },
         "Incidents & triage": {
             "applies": ("company",),
@@ -311,10 +326,18 @@ def render() -> None:
             "partial": ("company", "database"),
             "note": "Freshness is account-wide; replay uses its own date and scoped evidence where available.",
         },
+        "Entity 360": {
+            "applies": (),
+            "partial": ("company", "days"),
+            "note": "Identity and ownership are exact; evidence panels declare their own metric scope.",
+        },
     }
     section_filter_contract(f, **_contracts[section])
 
-    if section == "Pulse":
+    if section == "Action Center":
+        render_action_center(company)
+
+    elif section == "Pulse":
         # ---- pulse (since yesterday 00:00) ---------------------------------------
         # Fact-first pulse (Codex #4): the hourly fact answers this without
         # a live QUERY_HISTORY scan; schema filter (no schema grain) or an empty
@@ -349,6 +372,35 @@ def render() -> None:
             qcount = safe_float(row.get("QUERY_COUNT"))
             failed = safe_float(row.get("FAILED_COUNT"))
             _fail_bad = bool(qcount and failed / qcount > 0.02)
+            queue_sec = safe_float(row.get("QUEUED_SEC"))
+            remote_spill_gb = safe_float(row.get("SPILL_REMOTE_GB"))
+            read_model_caption("control_pulse")
+            exceptions = []
+            if failed:
+                exceptions.append({
+                    "label": "Failed queries",
+                    "value": f"{failed:,.0f}",
+                    "detail": f"{(failed / qcount * 100) if qcount else 0:.1f}% of this scope.",
+                    "severity": "bad" if _fail_bad else "warn",
+                })
+            if queue_sec >= 60:
+                exceptions.append({
+                    "label": "Queue pressure",
+                    "value": humanize_duration(queue_sec, "s"),
+                    "detail": "Aggregate queued time is at least one minute since yesterday.",
+                    "severity": "warn",
+                })
+            if remote_spill_gb > 0:
+                exceptions.append({
+                    "label": "Remote spill",
+                    "value": f"{remote_spill_gb:,.1f} GB",
+                    "detail": "Queries spilled beyond local storage in this scope.",
+                    "severity": "warn",
+                })
+            exception_summary(
+                exceptions,
+                "No failed queries, material queue pressure, or remote spill since yesterday.",
+            )
             kpi_row([
                 {"label": "Queries (since yday)", "value": f"{qcount:,.0f}", "spark": q_spark,
                  "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
@@ -359,8 +411,8 @@ def render() -> None:
                  "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
                 {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
                  "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s")},
-                {"label": "Queued", "value": humanize_duration(row.get("QUEUED_SEC"), "s")},
-                {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
+                {"label": "Queued", "value": humanize_duration(queue_sec, "s")},
+                {"label": "Remote spill", "value": f"{remote_spill_gb:,.1f} GB"},
             ])
             result_caption(pulse)
         elif not pulse.ok:
@@ -382,6 +434,9 @@ def render() -> None:
             st.warning("Activity trend returned an unexpected data shape.")
         else:
             st.info("No query activity recorded in the last 14 days for this scope.")
+
+    elif section == "Decision Studio":
+        render_decision_studio(company, days)
 
     elif section == "Incidents & triage":
         # ---- Incidents (V032) ------------------------------------------------------
@@ -442,6 +497,15 @@ def render() -> None:
             sel_i = selectable_table(
                 with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
                 key="cr_inc_sel", height=190)
+            requested_incident = str(
+                navigation_context().get("incident_id") or ""
+            ).strip()
+            if sel_i is None and requested_incident:
+                matches = [
+                    index for index, value in enumerate(oi.df["INCIDENT_ID"].astype(str))
+                    if value == requested_incident
+                ]
+                sel_i = matches[0] if matches else None
             if sel_i is not None:
                 _iid = str(oi.df.iloc[int(sel_i)]["INCIDENT_ID"])
                 mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
@@ -656,7 +720,7 @@ def render() -> None:
             if tz_note and not st.session_state.get("_ow_tz_note_shown"):  # rec34: once per page
                 st.caption(tz_note)
                 st.session_state["_ow_tz_note_shown"] = True
-            charts.event_timeline(tdf)
+            charts.operational_replay(tdf)
             sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
             if sel_tl is not None:
                 anchor = tdf.iloc[sel_tl]
@@ -719,3 +783,10 @@ def render() -> None:
                      help="Six reads across spend, activity, DDL, grants, tasks, and "
                           "alerts for one chosen day. Loads when on; caches after."):
             _day_replay()
+
+    elif section == "Entity 360":
+        entity_view = nested_sections(["Entity", "Watchlist"], key="cr_entity_view")
+        if entity_view == "Entity":
+            render_entity_360(company)
+        else:
+            render_watchlist()

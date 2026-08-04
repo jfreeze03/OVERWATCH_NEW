@@ -23,10 +23,10 @@ st.set_page_config(
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     APP_VERSION,
-    DAY_WINDOW_OPTIONS,
     DEFAULT_DAY_WINDOW,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
+    TRIAGE_WINDOW_OPTIONS,
     nav_groups_for,
     resolve_role_profile,
 )
@@ -49,6 +49,11 @@ from app.core.state import (  # noqa: E402
     requested_page,
 )
 from app.data import mart_sql, security_sql  # noqa: E402
+from app.logic.date_windows import (  # noqa: E402
+    resolve_window_days,
+    window_option_label,
+    window_scope_label,
+)
 from app.theme import inject_theme  # noqa: E402
 from app.ui.components import mark_refreshed, notify  # noqa: E402
 from app.ui.icons import icon  # noqa: E402
@@ -357,6 +362,7 @@ def _global_jump(pages: tuple) -> None:
     """Jump-to: pages, databases, warehouses, alert rules — one box."""
     from app.companies import ALFA_DATABASES, TREXIS_DATABASES, TREXIS_WAREHOUSES
     from app.logic.navigate import PAGE_SECTION_LABELS
+    from app.logic.workbench import investigation_target
 
     options = [f"Page · {p}" for p in pages]
     # rec4: sections are jumpable too (request_navigation already accepts one) — the
@@ -395,6 +401,38 @@ def _global_jump(pages: tuple) -> None:
             type="tertiary", use_container_width=True):
         st.session_state["_ow_jump_loaded"] = True
         st.rerun()
+    investigation_kinds = []
+    if "Operations" in pages:
+        investigation_kinds.append("Query ID")
+    if "Alerts" in pages:
+        investigation_kinds.append("Alert ID")
+    if "Control Room" in pages:
+        investigation_kinds.extend([
+            "Action ID", "Incident ID", "Warehouse", "Database", "Object",
+            "Task", "Query fingerprint", "User", "Role", "Data product",
+        ])
+    if investigation_kinds:
+        with st.expander("Investigate"):
+            target_kind = st.selectbox(
+                "Type", investigation_kinds, key="_ow_investigate_kind",
+            )
+            target_value = st.text_input(
+                "ID or entity", key="_ow_investigate_value", max_chars=500,
+            )
+            if st.button(
+                "Open investigation", key="_ow_investigate_open",
+                type="primary", use_container_width=True,
+            ):
+                try:
+                    target = investigation_target(target_kind, target_value)
+                    if target.page not in pages:
+                        st.warning("The active profile cannot open that investigation surface.")
+                    else:
+                        request_navigation(
+                            target.page, target.section, context=target.context,
+                        )
+                except ValueError as exc:
+                    st.warning(str(exc))
     if not pick:
         return
     kind, _, name = pick.partition(" · ")
@@ -616,15 +654,27 @@ def _topbar_scope_controls() -> None:
             # PROGRAMMATICALLY (a saved view / deep link bypasses on_change).
             if st.session_state.get("flt_days") is not None:
                 st.session_state["_ow_days_last"] = st.session_state["flt_days"]
-            st.segmented_control("Window (days)", options=list(DAY_WINDOW_OPTIONS),
-                                 key="flt_days", on_change=_keep_days)
+            st.segmented_control(
+                "Date range",
+                options=list(TRIAGE_WINDOW_OPTIONS),
+                key="flt_days",
+                on_change=_keep_days,
+                format_func=window_option_label,
+            )
         else:
-            st.select_slider("Window (days)", options=list(DAY_WINDOW_OPTIONS), key="flt_days")
-        if int(st.session_state.get("flt_days") or DEFAULT_DAY_WINDOW) > MAX_LIVE_WINDOW_DAYS:
+            st.selectbox(
+                "Date range",
+                options=list(TRIAGE_WINDOW_OPTIONS),
+                key="flt_days",
+                format_func=window_option_label,
+            )
+        _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
+        _days = resolve_window_days(_window)
+        if _days > MAX_LIVE_WINDOW_DAYS:
             # v4.54: 180/365 are honored by mart-history (Overview KPIs, storage,
             # chargeback) and the one owner-named live exception (Cortex user
             # costs). Other live-scan panels cap at 90 — disclosed, not silently.
-            st.caption(f"{st.session_state['flt_days']}d applies to Overview KPIs, "
+            st.caption(f"{window_scope_label(_window)} applies to Overview KPIs, "
                        "storage & chargeback history, and Cortex user costs. "
                        f"Live scans (Operations, Security) cap at {MAX_LIVE_WINDOW_DAYS}d.")
     with c_db:

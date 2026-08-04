@@ -155,6 +155,7 @@ def test_app_statement_stats_serves_from_telemetry_with_the_scan_behind_a_toggle
     assert 'key="adm_stmt_scan"' in adm
     sql = mart_sql.app_statement_stats_telemetry(7)
     assert "APP_QUERY_TELEMETRY" in sql and "QUERY_HISTORY" not in sql
+    assert "MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL))" in sql
 
 
 # ---------------------------------------------------------------------------

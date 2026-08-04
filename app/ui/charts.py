@@ -132,10 +132,20 @@ def _share_note(label: str, amount: float, total: float, *, dollars: bool = True
 
 
 def _task_node_style(row: pd.Series) -> tuple[str, str]:
-    failures = int(float(row.get("FAILURES_24H") or 0))
-    state = str(row.get("STATE") or "").lower()
+    try:
+        failures = int(float(row.get("FAILURES_24H") or 0))
+    except (TypeError, ValueError, OverflowError):
+        failures = 0
+    state = str(row.get("RUN_STATE") or row.get("STATE") or "").lower()
+    if state == "failed":
+        return palette.BAD, "failed in selected run"
     if failures:
         return palette.BAD, f"{failures} failed / 24h"
+    critical_path = str(row.get("CRITICAL_PATH") or "").lower() == "true"
+    if critical_path:
+        duration = pd.to_numeric(row.get("RUN_SEC"), errors="coerce")
+        suffix = f" · {float(duration):,.1f}s" if pd.notna(duration) else ""
+        return palette.ACCENT, f"critical path{suffix}"
     if "suspend" in state:
         return palette.MUTED, "suspended"
     return palette.OK, "healthy"
@@ -246,12 +256,18 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
                 status,
                 f"warehouse: {row.get('WAREHOUSE_NAME') or 'serverless'}",
                 f"schedule: {row.get('SCHEDULE') or 'triggered'}",
+                (f"selected run: {float(row.get('RUN_SEC')):,.1f}s"
+                 if pd.notna(pd.to_numeric(row.get("RUN_SEC"), errors="coerce")) else ""),
             )
             if value
         )
         aria = html.escape(details, quote=True)
+        critical_path = str(row.get("CRITICAL_PATH") or "").lower() == "true"
+        node_class = "node critical-path" if critical_path else "node"
+        search_text = html.escape(fqn.lower(), quote=True)
         node_markup.append(
-            f'<g class="node" transform="translate({x:.1f} {y:.1f})" tabindex="0" '
+            f'<g class="{node_class}" transform="translate({x:.1f} {y:.1f})" tabindex="0" '
+            f'data-name="{search_text}" data-x="{x:.1f}" data-y="{y:.1f}" '
             f'role="group" aria-label="{aria}">'
             f'<title>{html.escape(details)}</title>'
             f'<rect width="{node_w}" height="{node_h}" rx="6" '
@@ -313,6 +329,11 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
   padding: 5px; background: rgba(15,23,41,.94); border: 1px solid rgba(148,163,184,.28);
   border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
 }
+.dag-toolbar input {
+  width: 190px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
+  border-radius: 5px; background: #0a0f1c; color: #e8eef7; font: 500 12px Inter, sans-serif;
+}
+.dag-toolbar input:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
 .dag-toolbar button {
   min-width: 34px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
   border-radius: 5px; background: #131d33; color: #e8eef7;
@@ -335,14 +356,20 @@ svg.dragging { cursor: grabbing; }
 }
 .node:focus { outline: none; }
 .node:focus rect { stroke-width: 4; }
+.node.search-hit rect { stroke: #f8fafc; stroke-width: 5; }
+.node.critical-path rect { stroke-dasharray: 7 3; }
 .node-title { fill: #e8eef7; font-size: 13px; font-weight: 700; }
 .node-meta { fill: #aab6c8; font-size: 10px; }
 .node-state { font-size: 9px; font-weight: 700; text-transform: uppercase; }
+.dag-host.compact .node-meta, .dag-host.compact .node-state { display: none; }
+.dag-host.tiny .node-title { display: none; }
 </style>
 </head>
 <body>
 <div class="dag-host" id="host">
   <div class="dag-toolbar" role="toolbar" aria-label="Task graph controls">
+    <input id="taskSearch" type="search" placeholder="Find task" aria-label="Find task">
+    <button id="find" title="Find next task" aria-label="Find next task">Find</button>
     <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
     <button id="zoomOut" title="Zoom out" aria-label="Zoom out">-</button>
     <button id="fit" title="Fit graph" aria-label="Fit graph">Fit</button>
@@ -377,11 +404,14 @@ svg.dragging { cursor: grabbing; }
   let dragging = false;
   let px = 0;
   let py = 0;
+  let searchIndex = -1;
   // The 2,000-node safety cap can still produce a very tall graph. Keep the
   // minimum low enough that Fit always means fit, then let users zoom back in.
   const clamp = value => Math.max(0.002, Math.min(4.5, value));
   const apply = () => {
     scene.setAttribute("transform", `translate(${tx} ${ty}) scale(${scale})`);
+    host.classList.toggle("compact", scale < 0.48);
+    host.classList.toggle("tiny", scale < 0.16);
   };
   const fit = () => {
     const width = Math.max(svg.clientWidth, 1);
@@ -399,6 +429,40 @@ svg.dragging { cursor: grabbing; }
     scale = next;
     apply();
   };
+  const graphNodes = Array.from(scene.querySelectorAll(".node"));
+  const focusNode = node => {
+    const x = Number(node.dataset.x) + 119;
+    const y = Number(node.dataset.y) + 38;
+    scale = Math.max(scale, 1.05);
+    tx = svg.clientWidth / 2 - x * scale;
+    ty = svg.clientHeight / 2 - y * scale;
+    graphNodes.forEach(item => item.classList.remove("search-hit"));
+    node.classList.add("search-hit");
+    node.focus({preventScroll: true});
+    apply();
+  };
+  const findTask = () => {
+    const query = document.getElementById("taskSearch").value.trim().toLowerCase();
+    if (!query) return;
+    const matches = graphNodes.filter(node => (node.dataset.name || "").includes(query));
+    if (!matches.length) {
+      document.getElementById("taskSearch").setCustomValidity("No matching task");
+      document.getElementById("taskSearch").reportValidity();
+      return;
+    }
+    document.getElementById("taskSearch").setCustomValidity("");
+    searchIndex = (searchIndex + 1) % matches.length;
+    focusNode(matches[searchIndex]);
+  };
+  document.getElementById("find").addEventListener("click", findTask);
+  document.getElementById("taskSearch").addEventListener("input", () => { searchIndex = -1; });
+  document.getElementById("taskSearch").addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); findTask(); }
+  });
+  graphNodes.forEach(node => node.addEventListener("click", event => {
+    event.stopPropagation();
+    focusNode(node);
+  }));
   document.getElementById("zoomIn").addEventListener("click", () => zoomAt(1.25));
   document.getElementById("zoomOut").addEventListener("click", () => zoomAt(0.8));
   document.getElementById("fit").addEventListener("click", fit);
@@ -892,6 +956,102 @@ def event_timeline(df: pd.DataFrame) -> None:
                 stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, shape=shape, **common)
     st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
                     use_container_width=True)
+
+
+def operational_replay(df: pd.DataFrame) -> None:
+    """Multi-lane event replay with a persistent overview brush."""
+    data = df.copy()
+    if data is None or data.empty:
+        _empty_note("No operational events to replay in this window.")
+        return
+    data["AT"] = pd.to_datetime(data["AT"], errors="coerce")
+    data = data.dropna(subset=["AT"])
+    if data.empty:
+        _empty_note("No timestamped operational events to replay in this window.")
+        return
+    domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    colors = [SEV_COLORS[level] for level in domain]
+    shapes = ["circle", "diamond", "triangle-up", "square", "cross"]
+    brush = alt.selection_interval(encodings=["x"], name="replay_window")
+    tooltip = [
+        alt.Tooltip("AT:T", title="At"),
+        alt.Tooltip("EVENT_TYPE:N", title="Lane"),
+        alt.Tooltip("SEVERITY:N", title="Severity"),
+        alt.Tooltip("LABEL:N", title="Event"),
+        alt.Tooltip("REF_ID:N", title="Reference"),
+    ]
+    focus = (
+        alt.Chart(data)
+        .mark_point(size=125, filled=True, stroke="#0a0f1c", strokeWidth=0.7)
+        .encode(
+            x=alt.X("AT:T", title=None, scale=alt.Scale(domain=brush)),
+            y=alt.Y("EVENT_TYPE:N", title=None, sort="-x"),
+            color=alt.Color(
+                "SEVERITY:N", scale=alt.Scale(domain=domain, range=colors),
+                legend=alt.Legend(orient="top", title=None),
+            ),
+            shape=alt.Shape(
+                "SEVERITY:N", scale=alt.Scale(domain=domain, range=shapes),
+                legend=alt.Legend(orient="top", title=None),
+            ),
+            tooltip=tooltip,
+        )
+        .properties(height=225)
+    )
+    overview = (
+        alt.Chart(data)
+        .mark_tick(thickness=2, size=24)
+        .encode(
+            x=alt.X("AT:T", title=None),
+            color=alt.Color(
+                "SEVERITY:N", scale=alt.Scale(domain=domain, range=colors), legend=None,
+            ),
+            tooltip=tooltip,
+        )
+        .add_params(brush)
+        .properties(height=48)
+    )
+    st.altair_chart(alt.vconcat(focus, overview, spacing=8), use_container_width=True)
+
+
+def workload_portfolio(df: pd.DataFrame) -> None:
+    """Impact x confidence portfolio; size is the measured blast-radius proxy."""
+    if df is None or df.empty:
+        _empty_note("No workloads qualify for the portfolio.")
+        return
+    data = df.copy()
+    for column in ("IMPACT_USD_30D", "CONFIDENCE", "BLAST_RADIUS", "PRIORITY_SCORE"):
+        data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0.0)
+    lane_domain = ["ACT NOW", "PLAN", "VALIDATE"]
+    lane_colors = [palette.BAD, palette.ACCENT, palette.WARN]
+    chart = (
+        alt.Chart(data)
+        .mark_circle(opacity=0.82, stroke="#0a0f1c", strokeWidth=0.8)
+        .encode(
+            x=alt.X(
+                "IMPACT_USD_30D:Q", title="Measured impact normalized to 30d (USD)",
+                axis=alt.Axis(format="$,.0f"), scale=alt.Scale(zero=True),
+            ),
+            y=alt.Y("CONFIDENCE:Q", title="Evidence confidence", scale=alt.Scale(domain=[0, 1])),
+            size=alt.Size(
+                "BLAST_RADIUS:Q", title="Users + databases", scale=alt.Scale(range=[70, 780]),
+            ),
+            color=alt.Color(
+                "LANE:N", scale=alt.Scale(domain=lane_domain, range=lane_colors),
+                legend=alt.Legend(orient="top", title=None),
+            ),
+            tooltip=[
+                alt.Tooltip("FINGERPRINT:N", title="Fingerprint"),
+                alt.Tooltip("LANE:N", title="Lane"),
+                alt.Tooltip("IMPACT_USD_30D:Q", title="Impact / 30d", format="$,.2f"),
+                alt.Tooltip("CONFIDENCE:Q", title="Confidence", format=".0%"),
+                alt.Tooltip("PRIORITY_SCORE:Q", title="Priority", format=",.2f"),
+                alt.Tooltip("NEXT_MOVE:N", title="Next move"),
+            ],
+        )
+        .properties(height=330)
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,

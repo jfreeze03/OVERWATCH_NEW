@@ -71,14 +71,18 @@ def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int)
     evidence = _serialize_rows(
         advisor,
         ["WAREHOUSE_NAME", "COMPANY", "METERED_HOURS", "IDLE_HOURS", "TOTAL_CREDITS",
-         "IDLE_CREDITS", "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD"],
+         "IDLE_CREDITS", "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD",
+         "AUTO_SUSPEND", "AUTO_SUSPEND_KNOWN", "ACTION_STATUS", "ACTIONABLE",
+         "ACTIONABLE_MONTHLY_USD", "SAVINGS_CONFIDENCE"],
     )
     return _assemble(
         f"Idle warehouse analysis for {company}, last {window_days} days. IDLE_* = credits billed in "
         "hour slices where zero queries ran on that warehouse.",
         evidence,
-        "Recommend auto-suspend or consolidation changes per warehouse, estimate the monthly saving "
-        "from the data, and flag any warehouse where the idle pattern suggests a scheduling gap instead.",
+        "Recommend auto-suspend only where ACTIONABLE=True. Use ACTIONABLE_MONTHLY_USD as the "
+        "timer-change estimate; never substitute gross projected idle. For VERIFY SETTING rows, "
+        "request metadata verification. For ALREADY TUNED rows, investigate cadence, scheduling, "
+        "consolidation, or retirement instead of recommending a longer timer.",
     )
 
 

@@ -17,7 +17,7 @@ from app.core.identity import idempotency_key, identity_sql, viewer_name
 from app.core.query import execute_action, execute_statement, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
-from app.core.state import filters, request_navigation
+from app.core.state import filters, navigation_context, request_navigation
 from app.data import insights_sql, mart_sql, recheck_sql
 from app.logic import remediation, tuning
 from app.logic.ai_prompts import anomaly_explain_prompt
@@ -330,6 +330,12 @@ def _open_events_section(events, is_operator: bool) -> None:
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT):
         edf = severity_sort(events.df)  # worst first, newest within — triage order
+        requested_event = str(navigation_context().get("event_id") or "").strip()
+        event_signature = f"alert:{requested_event}"
+        if (requested_event
+                and st.session_state.get("_ow_alert_context_applied") != event_signature):
+            st.session_state["alert_rollup"] = False
+            st.session_state["_ow_alert_context_applied"] = event_signature
         if st.toggle("Group by rule (storm view)", key="alert_rollup",
                      help="5 warehouses over budget = 1 row here. Toggle off for drawers."):
             sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -362,6 +368,12 @@ def _open_events_section(events, is_operator: bool) -> None:
         sel = selectable_table(
             _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
             key="alert_events_sel", sort_label="severity, then newest")
+        if sel is None and requested_event:
+            matches = [
+                index for index, value in enumerate(edf["EVENT_ID"].astype(str))
+                if value == requested_event
+            ]
+            sel = matches[0] if matches else None
         result_caption(events)
         if sel is None:
             st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
@@ -758,7 +770,8 @@ def render() -> None:
                 })
                 st.caption(
                     "Precision = ACTIONED / (ACTIONED + NOISE); EXPECTED is excluded. High NOISE "
-                    "with low precision = raise the threshold; high UNTAGGED = the score isn't "
+                    "with low precision = move the threshold away from noise in the rule's firing "
+                    "direction; high UNTAGGED = the score isn't "
                     "trustworthy yet — close events with a kind. Tune via the generator below."
                 )
                 st.markdown("**Suggested thresholds (from your resolutions)**")

@@ -85,7 +85,8 @@ def test_rec10_top_actions_are_clickable():
     ov = _src("app/ui/pages/overview.py")
     # rec29: selectable_table -> selectable_nav_table (guard built in); still clickable.
     assert "selectable_nav_table(" in ov and 'key="ov_actions_sel"' in ov
-    assert 'request_navigation("Control Room")' in ov
+    assert '"Control Room", "Action Center"' in ov
+    assert 'context={"action_id": _action_id} if _action_id else {}' in ov
 
 
 # rec20 — the exec export carries a trend sparkline + a print stylesheet

@@ -88,6 +88,8 @@ snowflake/migrations/V069__exec_board_serverless_ai_drivers.sql
 snowflake/migrations/V070__delivery_routing_teams_only.sql
 snowflake/migrations/V071__task_graph_rechain_retry.sql
 snowflake/migrations/V072__entity_aware_incident_proposals.sql
+snowflake/migrations/V073__calendar_triage_windows.sql
+snowflake/migrations/V074__operating_workbench_foundation.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

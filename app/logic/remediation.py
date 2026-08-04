@@ -77,35 +77,47 @@ def monthly_savings_estimate(idle_credits_window: float, window_days: int, rate:
 
 
 def propose_quiet_window(hours: list[dict], min_len: int = 4,
-                         max_avg_queries: float = 1.0,
-                         min_avg_credits: float = 0.05) -> dict | None:
-    """Longest contiguous hour-of-day window (wrap-aware) where a warehouse
-    burns credits but runs (almost) nothing.
+                          max_avg_queries: float = 1.0,
+                          min_avg_credits: float = 0.05,
+                          min_days_metered: int = 4) -> dict | None:
+    """Highest-value contiguous quiet window (wrap-aware).
 
     hours: [{"HOUR_OF_DAY": 0..23, "AVG_CREDITS": x, "AVG_QUERIES": y}, ...]
     Returns {"start", "end", "hours", "avg_credits_per_day"} or None.
+    When DAYS_METERED is supplied, sparse one-off hours are not treated as a
+    recurring schedule opportunity. An all-day quiet profile returns None: a
+    suspend/resume pair cannot represent a 24-hour window and auto-suspend or
+    retirement is the safer recommendation.
     """
     by_hour = {int(h["HOUR_OF_DAY"]): h for h in hours}
     quiet = [hr for hr in range(24)
              if hr in by_hour
              and float(by_hour[hr].get("AVG_QUERIES") or 0) <= max_avg_queries
-             and float(by_hour[hr].get("AVG_CREDITS") or 0) >= min_avg_credits]
+             and float(by_hour[hr].get("AVG_CREDITS") or 0) >= min_avg_credits
+             and ("DAYS_METERED" not in by_hour[hr]
+                  or float(by_hour[hr].get("DAYS_METERED") or 0) >= min_days_metered)]
     if not quiet:
         return None
     qset = set(quiet)
-    best_start, best_len = None, 0
+    if len(qset) == 24:
+        return None
+    best_start, best_len, best_credits = None, 0, 0.0
     for start in quiet:
+        if (start - 1) % 24 in qset:
+            continue
         length = 0
         while (start + length) % 24 in qset and length < 24:
             length += 1
-        if length > best_len:
-            best_start, best_len = start, length
-    if best_len < min_len or best_start is None:
+        if length < min_len:
+            continue
+        candidate = [(start + offset) % 24 for offset in range(length)]
+        credits = sum(float(by_hour[hour].get("AVG_CREDITS") or 0) for hour in candidate)
+        if (credits, length) > (best_credits, best_len):
+            best_start, best_len, best_credits = start, length, credits
+    if best_start is None:
         return None
-    window = [(best_start + i) % 24 for i in range(best_len)]
-    credits = sum(float(by_hour[h].get("AVG_CREDITS") or 0) for h in window)
     return {"start": best_start, "end": (best_start + best_len) % 24,
-            "hours": best_len, "avg_credits_per_day": round(credits, 2)}
+            "hours": best_len, "avg_credits_per_day": round(best_credits, 2)}
 
 
 # ---------------------------------------------------------------------------

@@ -416,6 +416,111 @@ ORDER BY s.TASK_FQN
 """
 
 
+def task_graph_recent_runs(root_task_id: str = "0", days: int = 7,
+                           limit: int = 40) -> str:
+    """Recent graph executions for one root, bounded for TASK_HISTORY pruning."""
+    from app.core.sqlsafe import sql_literal
+
+    root = str(root_task_id or "").strip()
+    if not root:
+        raise ValueError("root_task_id is required")
+    horizon = max(1, min(int(days or 7), 14))
+    cap = max(1, min(int(limit or 40), 100))
+    return f"""
+SELECT COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID) AS RUN_KEY,
+       MIN(SCHEDULED_TIME) AS SCHEDULED_AT,
+       MIN(QUERY_START_TIME) AS STARTED_AT,
+       MAX(COMPLETED_TIME) AS COMPLETED_AT,
+       COUNT(*) AS TASKS,
+       COUNT_IF(STATE = 'FAILED') AS FAILED_TASKS,
+       ROUND(SUM(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
+                                   QUERY_START_TIME), 0)) / 1000, 2) AS QUEUE_SEC,
+       DATEDIFF('second', MIN(SCHEDULED_TIME), MAX(COMPLETED_TIME)) AS WALL_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE SCHEDULED_TIME >= DATEADD('day', -{horizon}, CURRENT_DATE())
+  AND TO_VARCHAR(ROOT_TASK_ID) = {sql_literal(root, 80)}
+  AND GRAPH_RUN_GROUP_ID IS NOT NULL
+GROUP BY COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID)
+ORDER BY SCHEDULED_AT DESC
+LIMIT {cap}
+"""
+
+
+def task_graph_run_nodes(root_task_id: str = "0", run_key: str = "0",
+                         days: int = 7) -> str:
+    """Node timing and profile evidence for one selected graph execution."""
+    from app.core.sqlsafe import sql_literal
+
+    root = str(root_task_id or "").strip()
+    run = str(run_key or "").strip()
+    if not root or not run:
+        raise ValueError("root_task_id and run_key are required")
+    horizon = max(1, min(int(days or 7), 14))
+    return f"""
+SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
+       QUERY_ID, STATE, SCHEDULED_TIME, QUERY_START_TIME, COMPLETED_TIME,
+       ROUND(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
+                               QUERY_START_TIME), 0) / 1000, 2) AS QUEUE_SEC,
+       ROUND(GREATEST(DATEDIFF('millisecond', QUERY_START_TIME,
+                               COMPLETED_TIME), 0) / 1000, 2) AS EXEC_SEC,
+       ROUND(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
+                               COMPLETED_TIME), 0) / 1000, 2) AS RUN_SEC,
+       COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
+       LEFT(COALESCE(ERROR_MESSAGE, ''), 500) AS ERROR_MESSAGE
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+WHERE SCHEDULED_TIME >= DATEADD('day', -{horizon}, CURRENT_DATE())
+  AND TO_VARCHAR(ROOT_TASK_ID) = {sql_literal(root, 80)}
+  AND TO_VARCHAR(GRAPH_RUN_GROUP_ID) = {sql_literal(run, 100)}
+ORDER BY SCHEDULED_TIME, TASK_FQN
+LIMIT 2000
+"""
+
+
+def task_graph_versions(root_task_id: str = "0", limit: int = 30) -> str:
+    """Historical coherent graph versions for a selected root."""
+    from app.core.sqlsafe import sql_literal
+
+    root = str(root_task_id or "").strip()
+    if not root:
+        raise ValueError("root_task_id is required")
+    cap = max(2, min(int(limit or 30), 100))
+    return f"""
+SELECT GRAPH_VERSION, MAX(GRAPH_VERSION_CREATED_ON) AS CREATED_AT,
+       COUNT(*) AS NODE_COUNT,
+       SUM(COALESCE(ARRAY_SIZE(PREDECESSORS), 0)) AS DEPENDENCY_COUNT
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
+WHERE TO_VARCHAR(COALESCE(ROOT_TASK_ID, ID)) = {sql_literal(root, 80)}
+GROUP BY GRAPH_VERSION
+ORDER BY CREATED_AT DESC, GRAPH_VERSION DESC
+LIMIT {cap}
+"""
+
+
+def task_graph_version_nodes(root_task_id: str = "0",
+                             graph_version: int = 0) -> str:
+    """Historical topology for one root/version, including deleted nodes."""
+    from app.core.sqlsafe import sql_literal
+
+    root = str(root_task_id or "").strip()
+    version = int(graph_version)
+    if not root:
+        raise ValueError("root_task_id is required")
+    if version < 0:
+        raise ValueError("graph_version must be non-negative")
+    return f"""
+SELECT TO_VARCHAR(COALESCE(ROOT_TASK_ID, ID)) AS ROOT_TASK_ID,
+       GRAPH_VERSION, GRAPH_VERSION_CREATED_ON,
+       TO_VARCHAR(ID) AS TASK_ID,
+       DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
+       PREDECESSORS
+FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_VERSIONS
+WHERE TO_VARCHAR(COALESCE(ROOT_TASK_ID, ID)) = {sql_literal(root, 80)}
+  AND GRAPH_VERSION = {version}
+ORDER BY TASK_FQN
+LIMIT 2000
+"""
+
+
 def volume_deltas() -> str:
     """Yesterday's rows-added vs prior-7d average per moving table — the panel behind
     the PIPE_VOLUME_DROP alert. That alert is LIVE: SP_ANOMALY_SWEEP (TASK_ANOMALY_SWEEP,

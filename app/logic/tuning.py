@@ -40,15 +40,24 @@ def suggest_threshold(metric_values: pd.DataFrame, current_threshold: float,
 
     current = safe_float(current_threshold)
     inverse = str(rule_id or "").strip().upper() in LOWER_IS_WORSE
-    if metric_values is None or metric_values.empty:
+    required = {"METRIC_VALUE", "RESOLUTION_KIND"}
+    if metric_values is None or metric_values.empty or not required.issubset(metric_values.columns):
         return {"ok": False, "basis": "No resolved events with metric values yet.",
                 "noise_n": 0, "actioned_n": 0}
     frame = metric_values.copy()
-    frame["METRIC_VALUE"] = frame["METRIC_VALUE"].map(safe_float)
+    numeric = pd.to_numeric(frame["METRIC_VALUE"], errors="coerce")
     # A1: filter NON-FINITE only. The old `> 0` dropped 0 and negatives — which on an
     # inverse rule are the MOST actionable evidence there is (expires today / already
     # expired, contract already exhausted).
-    frame = frame[frame["METRIC_VALUE"].map(lambda v: math.isfinite(safe_float(v)))]
+    # Preserve real zero/negative evidence, but reject null, non-numeric, and
+    # infinite values before coercion. safe_float() intentionally maps all of
+    # those values to 0, which would turn corrupt rows into genuine evidence.
+    valid = numeric.notna() & numeric.map(lambda value: math.isfinite(float(value)))
+    frame = frame.loc[valid].copy()
+    frame["METRIC_VALUE"] = numeric.loc[valid].astype(float)
+    if frame.empty:
+        return {"ok": False, "basis": "No valid resolved metric values yet.",
+                "noise_n": 0, "actioned_n": 0}
     kinds = frame["RESOLUTION_KIND"].astype(str).str.upper()
     noise = frame[kinds == "NOISE"]["METRIC_VALUE"]
     actioned = frame[kinds == "ACTIONED"]["METRIC_VALUE"]

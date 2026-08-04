@@ -44,7 +44,10 @@ def test_page_kpis_use_shared_duration_formatter():
     alerts = _src("app/ui/pages/alerts.py")
 
     assert 'humanize_duration(row.get("P95_ELAPSED_SEC"), "s")' in control
-    assert 'humanize_duration(row.get("QUEUED_SEC"), "s")' in control
+    queue_read = 'queue_sec = safe_float(row.get("QUEUED_SEC"))'
+    queue_display = 'humanize_duration(queue_sec, "s")'
+    assert queue_read in control and queue_display in control
+    assert control.index(queue_read) < control.index(queue_display)
     assert 'humanize_duration(row.get("P95_ELAPSED_SEC"), "s")' in operations
     assert 'humanize_duration(row.get("QUEUED_SEC"), "s")' in operations
     assert "humanize_duration(row0.get('P95_MIN'), 'min')" in alerts

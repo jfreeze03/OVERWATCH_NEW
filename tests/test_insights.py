@@ -90,6 +90,8 @@ def test_storage_builders_carry_current_retention():
     much of the Time Travel a shorter window actually releases."""
     for sql in (insights_sql.storage_waste("ALFA"), insights_sql.storage_reclaim("ALFA")):
         assert "RETENTION_DAYS" in sql and "ACCOUNT_USAGE.TABLES" in sql
+        assert "RETENTION_KNOWN" in sql
+        assert "COALESCE(rt.RETENTION_DAYS, 0)" not in sql
 
 
 def test_reclaim_joins_reads_by_object_id():
@@ -205,6 +207,18 @@ def test_repeat_gate_is_window_relative():
     assert bool(insights.flag_repeat_candidates(df, 3).iloc[0]["CANDIDATE"])
 
 
+def test_repeat_gate_requires_recurring_runs_per_30_days():
+    row = {"FINGERPRINT": "monthly", "RUNS": 12, "TOTAL_ELAPSED_HOURS": 120.0,
+           "AVG_CACHE_PCT": 0.0, "TOTAL_TB_SCANNED": 12.0, "EST_CREDITS": 100.0}
+    result = insights.flag_repeat_candidates(pd.DataFrame([row]), 365).iloc[0]
+    assert result["RUNS_PER_30D"] == 1.0
+    assert result["HOURS_PER_30D"] > insights.REPEAT_MIN_ELAPSED_HOURS
+    assert not bool(result["CANDIDATE"])
+    assert insights.repeat_min_runs(7) == 3
+    assert insights.repeat_min_runs(30) == 10
+    assert insights.repeat_min_runs(365) == 122
+
+
 def test_repeat_candidates_rank_by_money_not_hours():
     """D3: an X-Small hour and a 4X-Large hour differ 128x in money, and an
     already-cached family has nothing left to reclaim."""
@@ -270,6 +284,8 @@ def test_storage_movers_prefer_slope_and_flag_short_series():
     assert out.loc["SPIKE", "TREND_BASIS"] == "regression"
     assert not bool(out.loc["SPIKE", "LOW_CONFIDENCE"])
     assert bool(out.loc["NEW", "LOW_CONFIDENCE"])            # 3 observed days
+    assert bool(out.loc["SPIKE", "PROJECTABLE"])
+    assert out.loc["NEW", "PROJECTABLE_GROWTH_USD_30D"] == 0.0
     # ordering is by projected dollars (what the chart's top-10 cut means)
     assert insights.storage_movers(df, 23.0)["DATABASE_NAME"].iloc[0] == "NEW"
 

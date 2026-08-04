@@ -77,6 +77,19 @@ def test_a1_zero_and_negative_evidence_is_kept():
     assert out["ok"] and out["actioned_n"] == 4, "expired/expiring rows must count"
 
 
+def test_a1_invalid_metric_values_are_rejected_not_coerced_to_zero():
+    from app.logic.tuning import suggest_threshold
+    frame = _evidence([60, 75, 90, 80, 70, 65], [1, 2])
+    invalid = pd.DataFrame([
+        {"METRIC_VALUE": None, "RESOLUTION_KIND": "ACTIONED"},
+        {"METRIC_VALUE": "not-a-number", "RESOLUTION_KIND": "ACTIONED"},
+        {"METRIC_VALUE": float("inf"), "RESOLUTION_KIND": "ACTIONED"},
+    ])
+    out = suggest_threshold(pd.concat([frame, invalid], ignore_index=True), 30.0,
+                            "SEC_CRED_EXPIRY")
+    assert out["ok"] and out["actioned_n"] == 2
+
+
 def test_a1_direction_set_and_rule_id_wiring():
     from app.logic.tuning import LOWER_IS_WORSE, suggestions_by_rule
     assert {"SEC_CRED_EXPIRY", "COST_CONTRACT_BREACH"} <= set(LOWER_IS_WORSE)
@@ -126,12 +139,17 @@ def test_a3_still_advises_an_untuned_warehouse():
     out = idle_advisor(_idle_frame(auto_suspend=600), 3.68, 30)
     rec = str(out.iloc[0]["RECOMMENDATION"])
     assert "Reduce AUTO_SUSPEND to 60s" in rec and "currently 600s" in rec
+    assert bool(out.iloc[0]["ACTIONABLE"])
+    assert out.iloc[0]["ACTIONABLE_MONTHLY_USD"] > 0
 
 
-def test_a3_without_current_setting_keeps_generic_wording():
+def test_a3_without_current_setting_is_verification_only():
     from app.logic.insights import idle_advisor
     out = idle_advisor(_idle_frame(), 3.68, 30)     # no AUTO_SUSPEND column
-    assert "Reduce AUTO_SUSPEND to 60s" in str(out.iloc[0]["RECOMMENDATION"])
+    row = out.iloc[0]
+    assert "Verify current AUTO_SUSPEND" in str(row["RECOMMENDATION"])
+    assert not bool(row["ACTIONABLE"])
+    assert row["ACTIONABLE_MONTHLY_USD"] == 0.0
 
 
 def test_a3_tuned_warehouses_rank_below_fixable_ones():
@@ -145,6 +163,22 @@ def test_a3_tuned_warehouses_rank_below_fixable_ones():
     out = idle_advisor(df, 3.68, 30)
     # TUNED has more idle $, but FIXABLE is the actionable tuning target
     assert str(out.iloc[0]["WAREHOUSE_NAME"]) == "FIXABLE"
+    tuned = out[out["WAREHOUSE_NAME"] == "TUNED"].iloc[0]
+    assert tuned["ACTION_STATUS"] == "ALREADY TUNED"
+    assert tuned["ACTIONABLE_MONTHLY_USD"] == 0.0
+
+
+def test_a3_show_warehouses_merge_preserves_disabled_vs_unknown():
+    from app.logic.insights import with_auto_suspend_settings
+    idle = pd.DataFrame([
+        {"WAREHOUSE_NAME": "wh_disabled"},
+        {"WAREHOUSE_NAME": "WH_MISSING"},
+    ])
+    settings = pd.DataFrame({"name": ["WH_DISABLED"], "auto_suspend": [0]})
+    out = with_auto_suspend_settings(idle, settings).set_index("WAREHOUSE_NAME")
+    assert bool(out.loc["wh_disabled", "AUTO_SUSPEND_KNOWN"])
+    assert out.loc["wh_disabled", "AUTO_SUSPEND"] == 0
+    assert not bool(out.loc["WH_MISSING", "AUTO_SUSPEND_KNOWN"])
 
 
 def test_a3_generated_sql_never_raises_the_timer():

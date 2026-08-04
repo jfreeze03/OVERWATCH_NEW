@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -151,7 +152,7 @@ def _capacity_frame(days: int = 60, *, rising: bool = True, changed: bool = Fals
 
 
 def test_capacity_forecast_emits_eta_only_for_dense_stable_backtested_growth():
-    forecast = capacity_forecasts(_capacity_frame())
+    forecast = capacity_forecasts(_capacity_frame(), as_of=date(2026, 7, 31))
     row = forecast.iloc[0]
     assert row["STATUS"] == "FORECAST"
     assert 0 < row["DAYS_TO_PRESSURE"] <= 180
@@ -160,12 +161,31 @@ def test_capacity_forecast_emits_eta_only_for_dense_stable_backtested_growth():
 
 
 def test_capacity_forecast_refuses_sparse_flat_and_recently_changed_evidence():
-    sparse = capacity_forecasts(_capacity_frame(days=20)).iloc[0]
-    stable = capacity_forecasts(_capacity_frame(rising=False)).iloc[0]
-    changed = capacity_forecasts(_capacity_frame(changed=True)).iloc[0]
+    sparse = capacity_forecasts(_capacity_frame(days=20), as_of=date(2026, 6, 21)).iloc[0]
+    stable = capacity_forecasts(_capacity_frame(rising=False), as_of=date(2026, 7, 31)).iloc[0]
+    changed = capacity_forecasts(_capacity_frame(changed=True), as_of=date(2026, 7, 31)).iloc[0]
     assert sparse["STATUS"] == "INSUFFICIENT" and pd.isna(sparse["DAYS_TO_PRESSURE"])
     assert stable["STATUS"] == "STABLE" and pd.isna(stable["DAYS_TO_PRESSURE"])
     assert changed["STATUS"] == "UNSTABLE" and pd.isna(changed["DAYS_TO_PRESSURE"])
+
+
+def test_capacity_forecast_refuses_stale_but_otherwise_strong_history():
+    row = capacity_forecasts(_capacity_frame(), as_of=date(2026, 8, 3)).iloc[0]
+    assert row["STATUS"] == "STALE"
+    assert row["STALE_DAYS"] == 3
+    assert pd.isna(row["DAYS_TO_PRESSURE"])
+    assert "refresh telemetry" in row["BASIS"]
+
+
+def test_capacity_forecast_separates_inactive_warehouse_from_fresh_source():
+    recent = _capacity_frame()
+    older = _capacity_frame(days=40).assign(WAREHOUSE_NAME="WH_OLD")
+    frame = pd.concat([recent, older], ignore_index=True)
+    result = capacity_forecasts(frame, as_of=date(2026, 7, 31)).set_index("WAREHOUSE_NAME")
+    assert result.loc["WH_TEST", "STATUS"] == "FORECAST"
+    assert result.loc["WH_OLD", "STATUS"] == "INACTIVE"
+    assert result.loc["WH_OLD", "STALE_DAYS"] == 0
+    assert result.loc["WH_OLD", "ACTIVITY_GAP_DAYS"] > 2
 
 
 def test_capacity_sql_uses_complete_mart_days_and_capacity_change_points():
@@ -173,6 +193,7 @@ def test_capacity_sql_uses_complete_mart_days_and_capacity_change_points():
     assert "DATE(q.HOUR_TS) < CURRENT_DATE()" in sql
     assert "FACT_QUERY_HOURLY" in sql and "FACT_WAREHOUSE_DAILY" in sql
     assert "WAREHOUSE_CHANGE_REGISTRY" in sql
+    assert "SOURCE_LATEST_DAY" in sql and "CROSS JOIN source_freshness" in sql
     assert "'SIZE', 'MIN_CLUSTERS', 'MAX_CLUSTERS', 'SCALING_POLICY'" in sql
     assert "q.COMPANY = 'ALFA'" in sql
 

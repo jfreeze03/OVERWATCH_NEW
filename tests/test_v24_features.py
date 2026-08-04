@@ -122,7 +122,8 @@ def test_budget_pct_is_month_cumulative():
 
 def test_patterns_sql_shape():
     sql = insights_sql.expensive_patterns_usd(7, "Trexis", 30)
-    assert "QUERY_PARAMETERIZED_HASH" in sql and "HAVING RUNS >= 5" in sql
+    assert "QUERY_PARAMETERIZED_HASH" in sql and "HAVING RUNS >= 2" in sql
+    assert "HAVING RUNS >= 15" in insights_sql.expensive_patterns_usd(90, "Trexis", 30)
     assert "CREDITS_PER_DAY" in sql and "WH_TRXS_LOAD" in sql
     assert "LIMIT 100" in insights_sql.expensive_patterns_usd(7, "ALL", 9999)
 

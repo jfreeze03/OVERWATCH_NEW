@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.136.0"
+APP_VERSION = "4.143.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -84,6 +84,12 @@ DEFAULT_SETTINGS = {
 # ---------------------------------------------------------------------------
 DAY_WINDOW_OPTIONS = (7, 14, 30, 60, 90, 180, 365)
 DEFAULT_DAY_WINDOW = 7
+CURRENT_MONTH_WINDOW = "CURRENT_MONTH"
+CURRENT_YEAR_WINDOW = "CURRENT_YEAR"
+# The fixed tuple remains the exec-board/retention contract. Calendar presets
+# resolve to an account-time day offset at render time and V073 materializes
+# those dynamic offsets in MART_EXEC_BOARD.
+TRIAGE_WINDOW_OPTIONS = (*DAY_WINDOW_OPTIONS, CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
 MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) honor the long window
 # The 90d live cap bounds expensive QUERY_HISTORY-scale scans. The window
@@ -204,4 +210,12 @@ def clamp_days(days: object, maximum: int = MAX_LIVE_WINDOW_DAYS) -> int:
         value = int(days)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         value = DEFAULT_DAY_WINDOW
-    return max(1, min(value, maximum))
+    # Calendar MTD/YTD is a day OFFSET: on the first day of a month/year, zero
+    # means CURRENT_DATE through CURRENT_DATE and must not widen into yesterday.
+    minimum = 0 if getattr(days, "calendar_window", False) else 1
+    clamped = max(minimum, min(value, maximum))
+    if minimum == 0:
+        from app.logic.date_windows import CalendarDayOffset
+
+        return CalendarDayOffset(clamped)  # preserve marker through nested builders
+    return clamped

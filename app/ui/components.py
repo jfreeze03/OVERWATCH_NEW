@@ -552,14 +552,31 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 
 
 
-def snowsight_profile_column(df, page: str, id_col: str = "QUERY_ID"):
+def snowsight_profile_column(
+    df,
+    page: str,
+    id_col: str = "QUERY_ID",
+    label: str = "Profile",
+):
     """Frame + column-config additions that turn QUERY_IDs into Snowsight
     query-profile deep links (owner ask 2026-07-13: "the hyperlinks to the
     query profile are helpful"). The org/account context resolves once per
     session; when it is unavailable the frame returns unchanged and no link
     column renders — an honest degrade, never a dead link."""
+    import pandas as pd
+
     from app.core.query import run
     if df is None or df.empty or id_col not in df.columns:
+        return df, {}
+    # Cache hits and pre-V064 telemetry rows legitimately have no server query.
+    # Avoid both a dead link column and the context probe when every ID is blank.
+    def _query_id(value: object) -> str:
+        if value is None or bool(pd.isna(value)):
+            return ""
+        return str(value).strip()
+
+    query_ids = df[id_col].map(_query_id)
+    if not query_ids.ne("").any():
         return df, {}
     ctx = st.session_state.get("_ow_snowsight_ctx")
     if ctx is None:
@@ -579,10 +596,9 @@ def snowsight_profile_column(df, page: str, id_col: str = "QUERY_ID"):
         return df, {}
     out = df.copy()
     base = f"https://app.snowflake.com/{org}/{acct}/#/compute/history/queries/"
-    out["PROFILE"] = out[id_col].map(
-        lambda q: f"{base}{q}/profile" if str(q or "").strip() else None)
+    out["PROFILE"] = query_ids.map(lambda q: f"{base}{q}/profile" if q else None)
     return out, {"PROFILE": st.column_config.LinkColumn(
-        "Profile", display_text="Open ↗", width="small",
+        label, display_text="Open ↗", width="small",
         help="Query profile in Snowsight — plan, partitions, spilling.")}
 
 
@@ -602,7 +618,10 @@ def _mark_served(result, *, live: bool, days: int | None):
         return result
     df.attrs["_ow_served_live"] = bool(live)
     if days is not None:
-        df.attrs["_ow_effective_days"] = clamp_days(days) if live else int(days)
+        effective = clamp_days(days) if live else int(days)
+        # Calendar day zero means "today only" for SQL, but downstream rates
+        # still need a non-zero elapsed-period denominator.
+        df.attrs["_ow_effective_days"] = max(1, int(effective))
     return result
 
 
@@ -619,8 +638,8 @@ def served_days(result, requested_days: int) -> int:
     if isinstance(effective, int) and effective > 0:
         return effective
     if attrs.get("_ow_served_live"):
-        return clamp_days(requested_days)
-    return int(requested_days)
+        return max(1, int(clamp_days(requested_days)))
+    return max(1, int(requested_days))
 
 
 # ---------------------------------------------------------------------------
@@ -953,6 +972,75 @@ def status_chips(pairs: list[tuple[str, str]]) -> None:
     """Row of small chips: [(text, 'ok'|'bad'|''), ...]."""
     html_out = "".join(chip(html.escape(text), state) for text, state in pairs)
     st.markdown(html_out, unsafe_allow_html=True)
+
+
+def confidence_badge(value: object, *, stale: bool = False,
+                     coverage_pct: object = None) -> dict[str, str]:
+    """Render one evidence-quality treatment wherever a decision is shown."""
+    from app.logic.workbench import confidence_state
+
+    confidence = max(0.0, min(safe_float(value), 1.0))
+    state = confidence_state(confidence, stale=stale, coverage_pct=coverage_pct)
+    pairs = [
+        (state["label"], state["state"]),
+        (f"{confidence:.0%} confidence", ""),
+    ]
+    if coverage_pct is not None:
+        coverage = max(0.0, min(safe_float(coverage_pct), 100.0))
+        pairs.append((f"{coverage:.0f}% coverage", "warn" if coverage < 80 else "ok"))
+    status_chips(pairs)
+    st.caption(state["reason"])
+    return state
+
+
+def exception_summary(items: list[dict], clean_message: str) -> None:
+    """Render only actionable exceptions first, or one compact verified-clean row."""
+    rows = []
+    for item in items:
+        label = html.escape(str(item.get("label") or "Exception"))
+        raw_value = item.get("value")
+        value = html.escape("" if raw_value is None else str(raw_value))
+        detail = html.escape(str(item.get("detail") or ""))
+        severity = "bad" if str(item.get("severity") or "").lower() == "bad" else "warn"
+        rows.append(
+            f'<div class="ow-exception ow-exception--{severity}">'
+            f'<span class="ow-exception__label">{label}</span>'
+            f'<span class="ow-exception__value">{value}</span>'
+            f'<span class="ow-exception__detail">{detail}</span></div>'
+        )
+    if not rows:
+        rows.append(
+            '<div class="ow-exception ow-exception--ok">'
+            '<span class="ow-exception__label">Checked</span>'
+            '<span class="ow-exception__value">Clear</span>'
+            f'<span class="ow-exception__detail">{html.escape(clean_message)}</span></div>'
+        )
+    st.markdown(f'<div class="ow-exceptions">{"".join(rows)}</div>', unsafe_allow_html=True)
+
+
+def read_model_caption(contract_key: str) -> None:
+    """Disclose the summary/evidence split and freshness for a registered surface."""
+    from app.logic.read_models import get_contract
+
+    contract = get_contract(contract_key)
+    summary_reads = (
+        "1 read" if contract.summary_reads == 1
+        else f"up to {contract.summary_reads} reads"
+    )
+    evidence_reads = (
+        "1 read" if contract.evidence_reads == 1
+        else f"up to {contract.evidence_reads} reads"
+    )
+    st.caption(
+        f"Summary: {contract.summary} ({summary_reads}) · Evidence: {contract.evidence} "
+        f"after {contract.trigger} ({evidence_reads}) · {contract.freshness}."
+    )
+
+
+def evidence_gate(contract_key: str, *, key: str, label: str = "Load evidence") -> bool:
+    """Registered on-demand evidence gate; summary remains visible above it."""
+    read_model_caption(contract_key)
+    return bool(st.toggle(label, key=key))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1419,6 +1507,58 @@ def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
     if sel is not None and sel != st.session_state.get(seen_key):
         st.session_state[seen_key] = sel
         on_select(sel)
+
+
+def decision_rows(
+    df,
+    *,
+    key: str,
+    decision_col: str,
+    why_col: str,
+    impact_col: str = "",
+    confidence_col: str = "",
+    owner_col: str = "",
+    status_col: str = "",
+    next_col: str = "",
+    context_cols: tuple[str, ...] = (),
+    on_select=None,
+    height: int | None = None,
+    sort_label: str = "decision priority",
+) -> int | None:
+    """Compact decision contract: decision, why, impact, confidence, owner and next."""
+    import pandas as pd
+
+    source = df if df is not None else pd.DataFrame()
+    mapping = [
+        (decision_col, "Decision"),
+        (why_col, "Why"),
+        (impact_col, "Impact"),
+        (confidence_col, "Confidence"),
+        (owner_col, "Owner"),
+        (status_col, "Status"),
+        (next_col, "Next"),
+    ]
+    selected = [(column, label) for column, label in mapping if column and column in source.columns]
+    selected.extend((column, column) for column in context_cols if column in source.columns)
+    view = source[[column for column, _ in selected]].copy()
+    view.columns = [label for _, label in selected]
+    config = {}
+    if "Impact" in view.columns:
+        config["Impact"] = st.column_config.NumberColumn("Impact", format="$%.2f")
+    if "Confidence" in view.columns:
+        config["Confidence"] = st.column_config.ProgressColumn(
+            "Confidence", min_value=0, max_value=1,
+        )
+    selection = selectable_table(
+        view, key=key, height=height, column_config=config,
+        sort_label=sort_label,
+    )
+    if on_select is not None and selection is not None:
+        seen_key = f"_ow_decision_{key}"
+        if selection != st.session_state.get(seen_key):
+            st.session_state[seen_key] = selection
+            on_select(selection)
+    return selection
 
 
 def blast_radius(warehouse: str, page: str) -> None:

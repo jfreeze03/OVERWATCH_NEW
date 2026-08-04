@@ -6,7 +6,14 @@ lifecycle INSERT/UPDATE statements are built in the pages that own them.
 
 from __future__ import annotations
 
-from app.config import MAX_MART_WINDOW_DAYS, THRESHOLDS, core_object, mart_object
+from app.config import (
+    CURRENT_MONTH_WINDOW,
+    CURRENT_YEAR_WINDOW,
+    MAX_MART_WINDOW_DAYS,
+    THRESHOLDS,
+    core_object,
+    mart_object,
+)
 from app.core.sqlsafe import sql_literal
 from app.data.common import and_where, bounded_days, resolve_effective_window
 
@@ -18,7 +25,7 @@ def _company_filter(company: str) -> str:
     return f"COMPANY = {sql_literal(value)}"
 
 
-def exec_board(company: str, days: int) -> str:
+def exec_board(company: str, days: int, window: object = None) -> str:
     """First-paint executive board rows for one company scope and window."""
     # Mart read: honor the long window (MART_EXEC_BOARD holds 180/365 rows,
     # V052/V054). The live-scan default (90) would silently read the 90-day
@@ -26,7 +33,19 @@ def exec_board(company: str, days: int) -> str:
     # would all show 90-day data. The page filter constrains days to
     # DAY_WINDOW_OPTIONS, so WINDOW_DAYS always resolves to a populated board row.
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = and_where(_company_filter(company), f"WINDOW_DAYS = {days}")
+    if window == CURRENT_MONTH_WINDOW:
+        window_clause = (
+            "WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('month', CURRENT_DATE()), "
+            "CURRENT_DATE())"
+        )
+    elif window == CURRENT_YEAR_WINDOW:
+        window_clause = (
+            "WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('year', CURRENT_DATE()), "
+            "CURRENT_DATE())"
+        )
+    else:
+        window_clause = f"WINDOW_DAYS = {days}"
+    where = and_where(_company_filter(company), window_clause)
     return f"""
 SELECT PANEL, METRIC, DIMENSION, PERIOD_START, VALUE, VALUE_USD, UNIT, SORT_ORDER, REFRESHED_AT
 FROM {mart_object("MART_EXEC_BOARD")}
@@ -103,7 +122,8 @@ SELECT
     COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') AS FAILS,
     ROUND(MEDIAN(TOTAL_ELAPSED_TIME) / 1000, 2) AS MEDIAN_S,
     ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME, 0.95) / 1000, 2) AS P95_S,
-    ROUND(AVG(BYTES_SCANNED) / POWER(1024, 3), 3) AS AVG_GB_SCANNED
+    ROUND(AVG(BYTES_SCANNED) / POWER(1024, 3), 3) AS AVG_GB_SCANNED,
+    MAX_BY(QUERY_ID, TOTAL_ELAPSED_TIME) AS SLOWEST_QUERY_ID
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
@@ -152,7 +172,10 @@ SELECT
         SUM(IFF(CACHE_HIT IS NULL, 0, IFF(CACHE_HIT, 1, 0) / COALESCE(SAMPLE_PROB, 1.0)))
         / NULLIF(SUM(IFF(CACHE_HIT IS NULL, 0, 1.0 / COALESCE(SAMPLE_PROB, 1.0))), 0)
         * 100, 1) AS CACHE_HIT_PCT,
-    MAX(AT) AS NEWEST
+    MAX(AT) AS NEWEST,
+    -- Exact representative, not an arbitrary sample. NULL means every persisted
+    -- row was a cache hit/pre-V064 row and therefore had no server query.
+    MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL)) AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   -- P3: the batch wall-clock rows are a superset of their 'batch:%' members;
@@ -1010,7 +1033,7 @@ SELECT
     -- rec18 (V064): the slowest fetch's QUERY_ID, to deep-link the row to
     -- ACCOUNT_USAGE.QUERY_HISTORY (scan/spill/queue/compile). NULL for pre-V064
     -- rows and cache hits (no server query ran).
-    MAX_BY(QUERY_ID, ELAPSED_MS)               AS SLOWEST_QUERY_ID
+    MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL)) AS SLOWEST_QUERY_ID
 FROM {core_object("APP_QUERY_TELEMETRY")}
 WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){page_filter}
 GROUP BY PAGE, QUERY_KEY
@@ -1106,6 +1129,12 @@ WITH query_daily AS (
       AND q.WAREHOUSE_NAME IS NOT NULL{company_filter}
     GROUP BY 1, 2, 3
 ),
+source_freshness AS (
+    SELECT MAX(DATE(HOUR_TS)) AS SOURCE_LATEST_DAY
+    FROM {core_object("FACT_QUERY_HOURLY")}
+    WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())
+      AND DATE(HOUR_TS) < CURRENT_DATE()
+),
 warehouse_daily AS (
     SELECT DAY, WAREHOUSE_NAME, COMPANY, SUM(COALESCE(CREDITS_TOTAL, 0)) AS CREDITS_TOTAL
     FROM {core_object("FACT_WAREHOUSE_DAILY")}
@@ -1123,8 +1152,10 @@ changes AS (
 SELECT q.DAY, q.WAREHOUSE_NAME, q.COMPANY, q.QUERY_COUNT, q.QUEUED_MIN,
        q.SPILL_REMOTE_GB, q.P95_ELAPSED_SEC,
        COALESCE(w.CREDITS_TOTAL, 0) AS CREDITS_TOTAL,
-       COALESCE(c.CHANGE_EVENTS, 0) AS CHANGE_EVENTS
+       COALESCE(c.CHANGE_EVENTS, 0) AS CHANGE_EVENTS,
+       s.SOURCE_LATEST_DAY
 FROM query_daily q
+CROSS JOIN source_freshness s
 LEFT JOIN warehouse_daily w
        ON w.DAY = q.DAY AND w.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND w.COMPANY = q.COMPANY
 LEFT JOIN changes c

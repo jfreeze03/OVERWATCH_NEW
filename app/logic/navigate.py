@@ -25,7 +25,8 @@ PAGE_SECTION_KEYS = {
 # each page's own lazy_sections() call, so a rename in one place fails CI until
 # the other matches (the house drift-guard pattern, cf. the alert-rule test).
 PAGE_SECTION_LABELS = {
-    "Control Room": ["Pulse", "Incidents & triage", "Timeline & movers", "Freshness & replay"],
+    "Control Room": ["Action Center", "Pulse", "Decision Studio", "Incidents & triage", "Timeline & movers",
+                     "Freshness & replay", "Entity 360"],
     "Cost & Contract": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
                          "Unit costs", "Compare", "Optimization & Savings"],
     "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",

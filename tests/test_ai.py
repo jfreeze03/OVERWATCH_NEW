@@ -55,9 +55,14 @@ def test_idle_prompt_carries_dollars():
         "WAREHOUSE_NAME": "WH_ALFA_QUERY", "COMPANY": "ALFA", "METERED_HOURS": 100,
         "IDLE_HOURS": 60, "TOTAL_CREDITS": 50.0, "IDLE_CREDITS": 30.0,
         "IDLE_PCT": 60.0, "IDLE_USD": 110.4, "PROJECTED_MONTHLY_IDLE_USD": 473.1,
+        "AUTO_SUSPEND": 600, "AUTO_SUSPEND_KNOWN": True,
+        "ACTION_STATUS": "ACTIONABLE", "ACTIONABLE": True,
+        "ACTIONABLE_MONTHLY_USD": 450.0, "SAVINGS_CONFIDENCE": "MEDIUM",
     }])
     prompt = idle_warehouse_prompt(advisor, "ALFA", 7)
     assert "WH_ALFA_QUERY" in prompt and "473.1" in prompt
+    assert "ACTIONABLE_MONTHLY_USD" in prompt
+    assert "never substitute gross projected idle" in prompt
 
 
 def test_release_prompt_includes_both_sections():

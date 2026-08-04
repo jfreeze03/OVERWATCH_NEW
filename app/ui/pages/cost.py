@@ -57,7 +57,7 @@ def render() -> None:
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     page_header("Cost & Contract",
                 "Where the money goes, whether the contract holds, and what savings are proven.",
-                scope_note=f"{f['company']} · last {f['days']} days", icon_name="cost")
+                scope_note=f"{f['company']} · {f['window_label']}", icon_name="cost")
     # #3: operator gating from the VIEWER identity + allowlist, not CURRENT_ROLE().
     is_operator = _is_operator()
     # Six grouped sections instead of eight pills (CoCo density fix): each

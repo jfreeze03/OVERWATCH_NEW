@@ -1,5 +1,108 @@
 # Changelog
 
+## 4.143.0 - Decision-readable operating surfaces (2026-08-03)
+
+- Added exception-first summaries to Action Center, Control Room Pulse, task-run analysis,
+  workload prioritization, and the SLO cockpit. Healthy scopes collapse to one explicit
+  checked-clear row instead of competing with the decisions that need attention.
+- Added a compact decision-row contract and adopted it for the action queue and workload
+  portfolio, keeping impact and confidence numeric while making the decision, rationale,
+  owner/status, and next step scan together.
+- Promoted confidence to a shared evidence-quality treatment and documented each dense
+  workbench's summary/evidence read contract. Task-run and Entity 360 evidence now load only
+  through explicit, contract-labeled gates.
+
+No Snowflake migration is required beyond owner-applied V074. Snowflake access remained read-only.
+
+## 4.142.0 - Decision Studio (2026-08-03)
+
+- Added one Control Room decision surface for six connected workflows: a measured workload
+  portfolio, configurable SLO/error-budget cockpit, data-product economics, basis-aware Cost
+  Truth, confidence-haircut scenarios, and optimization experiment follow-through.
+- Ranked recurring query families by normalized measured impact, evidence confidence,
+  reliability, and a users-plus-databases effort proxy. Rows drill into their persistent
+  query-fingerprint Entity 360 profile.
+- Kept economic grains explicit: product object-attributed and warehouse-metered costs remain
+  separate non-additive columns; Cost Truth keeps billed, metered, measured, and allocated
+  credits as separate lenses; scenarios de-duplicate estimates by entity and never mix in
+  verified savings.
+- Added operator-gated SLO creation and experiment result updates with SQL previews. SLO burn
+  is calculated only for success-rate objectives; latency objectives report target status
+  without inventing an event-level error budget.
+
+No Snowflake migration is required beyond owner-applied V074. Snowflake access remained read-only.
+
+## 4.141.0 - Investigation workbenches and task-run analysis (2026-08-03)
+
+- Added universal investigation routing for query, alert, incident, action, warehouse,
+  database, object, task, query-fingerprint, user, and role identities. Destination pages
+  consume the exact identity without leaking it into global metric filters.
+- Added task-DAG Run analyzer and Version compare views. Recent graph executions expose
+  dispatch delay, failures, critical path, downstream impact, query-profile evidence, and
+  task-level Entity 360 links; historical versions identify added, removed, and rewired nodes.
+- Made large interactive DAGs searchable and click-focusable, with semantic detail levels
+  while zooming and selected-run critical-path coloring. Added a Graphviz fallback for the
+  run overlay as well as the topology.
+- Expanded Entity 360 with basis-labeled mart metrics, wired repeat-query candidates into
+  persistent fingerprint profiles, and upgraded the Control Room timeline to a brushable
+  multi-lane operational replay.
+
+No Snowflake migration is required beyond owner-applied V074. Snowflake access remained read-only.
+
+## 4.140.0 - Operating workbench foundation (2026-08-03)
+
+- Promoted the persistent action queue into Control Room's first section, with exact-row
+  navigation, owner/status/due/defer controls, comments, confidence, and audited lifecycle
+  transitions. The pre-V074 queue remains available as an explicit read-only fallback.
+- Added typed evidence relationships, an entity ownership and service catalog, personal
+  watchlists, optimization experiments, and SLO objective records around the existing
+  telemetry and savings ledgers. Entity 360 connects those records without loading its
+  heavier evidence history until requested.
+- Added owner-applied V074 with additive operator tables and an idempotent atomic action
+  lifecycle procedure. Updated migration canaries, teardown coverage, validation floors,
+  rebuild backups, deployment docs, and regression locks for real non-empty queue shapes.
+
+Snowflake access remained read-only; V074 was authored but not applied.
+
+## 4.139.0 - Recommendation-engine guardrails (2026-08-03)
+
+- Split measured idle from settings-verified auto-suspend opportunity. Already-tuned
+  and unknown-setting warehouses remain visible, but no longer inflate actionable KPIs,
+  contract steering, generated SQL, AI advice, or savings-ledger estimates.
+- Added recurrence-normalized repeat-query and measured-pattern gates, active-day evidence
+  for right-sizing, and stale-fact refusal for capacity forecasts. Low-evidence resizing and
+  storage-growth projections are now review items rather than ranked actions.
+- Hardened alert-threshold tuning against invalid metric values, selected off-hours schedules
+  by recoverable value with sparse/full-day safeguards, and made retention remediation default
+  to no change while requiring a verified strict reduction before SQL can execute.
+
+No Snowflake migration is required. Snowflake access remained read-only.
+
+## 4.138.0 - Calendar triage date ranges (2026-08-03)
+
+- Added `Current month` and `Current year` to the global triage date filter. Both
+  resolve from the account-time calendar boundary, not rolling 30/365-day aliases.
+- Preserved calendar selections through saved views, cross-page navigation, Reset,
+  and the legacy integer-day view format. Page headers and the security export manifest
+  now disclose the selected calendar range.
+- Added owner-applied V073 so `MART_EXEC_BOARD` materializes deduplicated MTD/YTD
+  offsets alongside the seven rolling windows. Long live scans retain the existing
+  90-day safety cap and disclose it in the filter strip.
+
+Snowflake access remained read-only; V073 was authored but not applied.
+
+## 4.137.0 - Query-profile investigation links (2026-08-03)
+
+- Added Snowsight query-profile links to measured expensive queries, every statement in
+  a priced procedure CALL tree, this-session query telemetry, and fleet slow-fetch rows.
+- Added the exact slowest representative query to both Admin statement-family tables, so
+  a performance hotspot can open directly into its Snowflake plan, scan, queue, and spill
+  evidence. Aggregate links are explicitly labeled `Slowest profile`.
+- Hardened the shared profile-link helper for null and cache-only IDs. Blank-only tables
+  no longer render dead links or spend a metadata read resolving Snowsight URL context.
+
+No Snowflake migration is required. Snowflake access remained read-only.
+
 ## 4.136.0 - Scope, pulse navigation, and duration consistency (2026-08-03)
 
 - Removed the Environment control and made its retained saved-view field a fixed `ALL`

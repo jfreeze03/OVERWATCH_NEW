@@ -2,8 +2,10 @@ import pandas as pd
 
 from app.data import insights_sql
 from app.logic.sizing import (
+    RECOMMEND_CADENCE,
     RECOMMEND_DOWN,
     RECOMMEND_KEEP,
+    RECOMMEND_OBSERVE,
     RECOMMEND_SUSPEND,
     RECOMMEND_UP,
     size_recommendations,
@@ -11,9 +13,11 @@ from app.logic.sizing import (
 )
 
 
-def _wh(name, credits=100.0, queued_sec=0.0, spill=0.0, p95=5.0, idle=0.0, queries=1000):
+def _wh(name, credits=100.0, queued_sec=0.0, spill=0.0, p95=5.0, idle=0.0,
+        queries=1000, active_days=7):
     return {"WAREHOUSE_NAME": name, "COMPANY": "ALFA", "CREDITS_TOTAL": credits,
-            "QUERY_COUNT": queries, "P95_ELAPSED_SEC": p95, "QUEUED_SEC": queued_sec,
+            "QUERY_COUNT": queries, "ACTIVE_QUERY_DAYS": active_days,
+            "P95_ELAPSED_SEC": p95, "QUEUED_SEC": queued_sec,
             "SPILL_REMOTE_GB": spill, "IDLE_PCT": idle}
 
 
@@ -85,6 +89,27 @@ def test_scenario_math_and_saving():
     assert summary["down"] == 1 and summary["potential_saving_usd"] > 0
 
 
+def test_resize_advice_is_withheld_for_one_off_pressure_and_savings():
+    df = pd.DataFrame([
+        _wh("ONE_OFF_UP", queued_sec=7 * 60 * 60, active_days=1),
+        _wh("ONE_OFF_DOWN", p95=2.0, idle=40.0, active_days=1),
+    ])
+    out = size_recommendations(df, 3.68, 7).set_index("WAREHOUSE_NAME")
+    assert out.loc["ONE_OFF_UP", "RECOMMENDATION"] == RECOMMEND_OBSERVE
+    assert out.loc["ONE_OFF_DOWN", "RECOMMENDATION"] == RECOMMEND_OBSERVE
+    assert not bool(out.loc["ONE_OFF_UP", "ACTIONABLE"])
+    assert out.loc["ONE_OFF_DOWN", "POTENTIAL_MONTHLY_SAVING_USD"] == 0.0
+
+
+def test_already_short_timer_routes_high_idle_to_cadence_not_timer_tuning():
+    row = {**_wh("TUNED_IDLE", idle=80.0), "AUTO_SUSPEND": 30,
+           "AUTO_SUSPEND_KNOWN": True}
+    result = size_recommendations(pd.DataFrame([row]), 3.68, 7).iloc[0]
+    assert result["RECOMMENDATION"] == RECOMMEND_CADENCE
+    assert not bool(result["ACTIONABLE"])
+    assert sizing_summary(pd.DataFrame([result]))["idle_saving_usd"] == 0.0
+
+
 def test_empty_safe():
     assert size_recommendations(pd.DataFrame(), 3.68, 7).empty
     assert sizing_summary(pd.DataFrame())["potential_saving_usd"] == 0.0
@@ -93,6 +118,7 @@ def test_empty_safe():
 def test_sizing_profile_sql_invariants():
     sql = insights_sql.warehouse_sizing_profile(7, "Trexis")
     assert "WAREHOUSE_METERING_HISTORY" in sql and "IDLE_PCT" in sql
+    assert "COUNT(DISTINCT DATE(START_TIME)) AS ACTIVE_QUERY_DAYS" in sql
     assert "IN ('WH_TRXS_LOAD'" in sql
 
 

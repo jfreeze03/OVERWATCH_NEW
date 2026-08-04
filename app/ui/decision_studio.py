@@ -1,0 +1,437 @@
+"""Decision Studio: prioritization, objectives, economics and experiment follow-through."""
+
+from __future__ import annotations
+
+import pandas as pd
+import streamlit as st
+
+from app.core.identity import viewer_name
+from app.core.query import execute_statement, run
+from app.core.session import is_operator
+from app.core.state import request_navigation
+from app.data import mart_sql, workbench_sql
+from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
+from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.logic.workbench import (
+    EXPERIMENT_STATUSES,
+    SLO_METRIC_KEYS,
+    create_slo_objective_sql,
+    update_experiment_sql,
+)
+from app.ui import charts
+from app.ui.components import (
+    decision_rows,
+    empty_state,
+    exception_summary,
+    guard,
+    kpi_row,
+    load_settings,
+    nested_sections,
+    notify,
+    read_model_caption,
+    result_caption,
+    section_header,
+    selectable_nav_table,
+    selectable_table,
+    styled_table,
+)
+
+_PAGE = "Control Room"
+
+
+def _open_entity(kind: str, key: str) -> None:
+    request_navigation(
+        "Control Room", "Entity 360",
+        context={"entity_type": kind, "entity_key": key},
+    )
+
+
+def _portfolio(company: str, days: int, rate: float) -> None:
+    result = run(
+        workbench_sql.workload_portfolio(days, company, 200), page=_PAGE,
+        key=f"decision_portfolio_{company}_{days}", tier="historical",
+        source="MART_PATTERN_COST_DAILY + MART_QUERY_FAMILY_DAILY",
+    )
+    if not guard(result, "No measured recurring-query cost exists in this scope."):
+        return
+    portfolio = prioritize_workloads(result.df, rate, days)
+    read_model_caption("workload_portfolio")
+    act_now = portfolio[portfolio["LANE"].eq("ACT NOW")]
+    failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
+    validate = portfolio[portfolio["CONFIDENCE"].lt(0.5)]
+    exceptions = []
+    if not act_now.empty:
+        exceptions.append({
+            "label": "Act now",
+            "value": f"{len(act_now):,}",
+            "detail": f"{format_usd(act_now['IMPACT_USD_30D'].sum())} measured 30-day impact.",
+            "severity": "warn",
+        })
+    if not failure_risk.empty:
+        exceptions.append({
+            "label": "Failure risk",
+            "value": f"{len(failure_risk):,}",
+            "detail": "Families at or above a 2% observed failure rate.",
+            "severity": "bad",
+        })
+    if not validate.empty:
+        exceptions.append({
+            "label": "Needs validation",
+            "value": f"{len(validate):,}",
+            "detail": "Evidence confidence is below the action threshold.",
+            "severity": "warn",
+        })
+    exception_summary(
+        exceptions,
+        "No immediate-action, elevated-failure, or low-confidence workload families.",
+    )
+    kpi_row([
+        {"label": "Measured families", "value": f"{len(portfolio):,}"},
+        {"label": "Act now", "value": f"{portfolio['LANE'].eq('ACT NOW').sum():,}",
+         "severity": "warn" if portfolio["LANE"].eq("ACT NOW").any() else "ok"},
+        {"label": "30d normalized impact",
+         "value": format_usd(portfolio["IMPACT_USD_30D"].sum()),
+         "help": "Measured pattern credits normalized to 30 days; observed cost, not promised savings."},
+        {"label": "High-confidence", "value": f"{portfolio['CONFIDENCE'].ge(0.8).sum():,}"},
+    ])
+    charts.workload_portfolio(portfolio)
+    def open_profile(index: int) -> None:
+        _open_entity("QUERY_FINGERPRINT", str(portfolio.iloc[int(index)]["FINGERPRINT"]))
+
+    decision_rows(
+        portfolio,
+        key="decision_portfolio_table",
+        decision_col="NEXT_MOVE",
+        why_col="QUERY_PREVIEW",
+        impact_col="IMPACT_USD_30D",
+        confidence_col="CONFIDENCE",
+        status_col="LANE",
+        context_cols=("EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC"),
+        on_select=open_profile,
+        height=370,
+        sort_label="decision lane, then evidence-weighted priority",
+    )
+    result_caption(result, note="credits are measured; effort is a users + databases proxy")
+
+
+def _slo_editor() -> None:
+    if not is_operator():
+        return
+    with st.expander("Create objective"):
+        metric = st.selectbox("Metric", SLO_METRIC_KEYS, key="slo_new_metric")
+        entity_type = (
+            "WAREHOUSE" if metric.startswith("WAREHOUSE_")
+            else "TASK" if metric.startswith("TASK_")
+            else "QUERY_FINGERPRINT"
+        )
+        name = st.text_input("Objective", key="slo_new_name", max_chars=300)
+        entity_key = st.text_input(
+            f"{entity_type.replace('_', ' ').title()} key", key="slo_new_entity",
+            max_chars=500,
+        )
+        success_metric = metric.endswith("SUCCESS_PCT")
+        comparator = ">=" if success_metric else "<="
+        target = st.number_input(
+            "Target", min_value=0.0, value=99.0 if success_metric else 60.0,
+            step=0.1, key="slo_new_target",
+        )
+        error_budget = st.number_input(
+            "Error budget %", min_value=0.01, max_value=100.0, value=1.0,
+            step=0.1, key="slo_new_budget",
+        )
+        window = st.select_slider(
+            "Window", options=[7, 14, 30, 60, 90], value=30,
+            format_func=lambda value: f"{value} days", key="slo_new_window",
+        )
+        owner = st.text_input("Owner", value="DBA", key="slo_new_owner", max_chars=200)
+        notes = st.text_area("Notes", key="slo_new_notes", max_chars=4000)
+        if name and entity_key:
+            statement = create_slo_objective_sql(
+                name=name, entity_type=entity_type, entity_key=entity_key,
+                metric_key=metric, comparator=comparator, target_value=target,
+                error_budget_pct=error_budget, window_days=window, owner=owner,
+                notes=notes, actor=viewer_name(),
+            )
+            st.code(statement, language="sql")
+            if st.button("Create objective", key="slo_new_execute", type="primary"):
+                ok, message = execute_statement(statement, page=_PAGE)
+                notify(ok, message)
+                if ok:
+                    st.rerun()
+
+
+def _slos() -> None:
+    result = run(
+        workbench_sql.slo_cockpit(), page=_PAGE, key="decision_slos",
+        tier="recent", source="SLO_OBJECTIVES + existing metric marts",
+    )
+    if not result.ok:
+        empty_state("needs_setup", "Apply V074 to configure objectives and error budgets.")
+        return
+    summary = slo_summary(result.df)
+    read_model_caption("slo_cockpit")
+    if not result.empty:
+        exceptions = []
+        if summary["breach"]:
+            exceptions.append({
+                "label": "Breached objectives",
+                "value": f"{summary['breach']:,.0f}",
+                "detail": "Measured value is outside the configured objective.",
+                "severity": "bad",
+            })
+        if summary["no_data"]:
+            exceptions.append({
+                "label": "Missing evidence",
+                "value": f"{summary['no_data']:,.0f}",
+                "detail": "The objective cannot be evaluated from its current mart window.",
+                "severity": "warn",
+            })
+        if summary["worst_burn"] > 1:
+            exceptions.append({
+                "label": "Worst error-budget burn",
+                "value": f"{summary['worst_burn']:,.2f}x",
+                "detail": "Reliability consumption exceeds the configured budget.",
+                "severity": "bad",
+            })
+        exception_summary(exceptions, "Every measured objective is within its configured target.")
+    kpi_row([
+        {"label": "Objectives", "value": f"{summary['total']:,.0f}"},
+        {"label": "Meeting target", "value": f"{summary['met']:,.0f}", "severity": "ok"},
+        {"label": "Breached", "value": f"{summary['breach']:,.0f}",
+         "severity": "bad" if summary["breach"] else "ok"},
+        {"label": "No evidence", "value": f"{summary['no_data']:,.0f}",
+         "severity": "warn" if summary["no_data"] else "ok"},
+        {"label": "Worst burn", "value": f"{summary['worst_burn']:,.2f}x",
+         "severity": "bad" if summary["worst_burn"] > 1 else "ok"},
+    ])
+    if result.empty:
+        empty_state("no_data_yet", "No active objectives are configured.")
+    else:
+        frame = result.df.reset_index(drop=True)
+
+        def open_slo_entity(index: int) -> None:
+            row = frame.iloc[int(index)]
+            _open_entity(str(row["ENTITY_TYPE"]), str(row["ENTITY_KEY"]))
+
+        selectable_nav_table(
+            frame, key="decision_slo_table", on_select=open_slo_entity, height=370,
+            sort_label="breach, missing evidence, then error-budget burn",
+        )
+    _slo_editor()
+
+
+def _products(company: str, days: int, rate: float) -> None:
+    result = run(
+        workbench_sql.data_product_economics(days, company), page=_PAGE,
+        key=f"decision_products_{company}_{days}", tier="historical",
+        source="ENTITY_CATALOG + object, warehouse and task marts",
+    )
+    if not result.ok:
+        empty_state("needs_setup", "Apply V074 and map catalog entities to data products.")
+        return
+    if result.empty:
+        empty_state("no_data_yet", "No catalog entities are mapped to a data product yet.")
+        return
+    frame = result.df.copy()
+    frame["MEASURED_OBJECT_USD"] = frame["MEASURED_OBJECT_CREDITS"].map(
+        lambda value: credits_to_usd(value, rate)
+    )
+    frame["METERED_WAREHOUSE_USD"] = frame["METERED_WAREHOUSE_CREDITS"].map(
+        lambda value: credits_to_usd(value, rate)
+    )
+    kpi_row([
+        {"label": "Data products", "value": f"{len(frame):,}"},
+        {"label": "Catalog entities", "value": f"{safe_float(frame['CATALOG_ENTITIES'].sum()):,.0f}"},
+        {"label": "Object-attributed cost", "value": format_usd(frame["MEASURED_OBJECT_USD"].sum()),
+         "help": "Measured query and maintenance cost at object grain."},
+        {"label": "Warehouse cost", "value": format_usd(frame["METERED_WAREHOUSE_USD"].sum()),
+         "help": "Metered warehouse cost; separate because it can overlap object-attributed compute."},
+    ])
+
+    def open_product(index: int) -> None:
+        _open_entity("DATA_PRODUCT", str(frame.iloc[int(index)]["DATA_PRODUCT"]))
+
+    selectable_nav_table(
+        frame[[
+            "DATA_PRODUCT", "TEAM", "OWNER_NAME", "CRITICALITY", "CATALOG_ENTITIES",
+            "MEASURED_OBJECT_USD", "METERED_WAREHOUSE_USD", "COSTED_OBJECTS",
+            "WAREHOUSES", "TASK_RUNS", "TASK_FAILURES", "TASK_FAIL_PCT",
+        ]],
+        key="decision_product_table", on_select=open_product, height=390,
+        column_config={
+            "MEASURED_OBJECT_USD": st.column_config.NumberColumn("Object-attributed $", format="$%.2f"),
+            "METERED_WAREHOUSE_USD": st.column_config.NumberColumn("Warehouse $", format="$%.2f"),
+            "TASK_FAIL_PCT": st.column_config.NumberColumn("Task fail %", format="%.2f%%"),
+        },
+        sort_label="measured object cost, then metered warehouse cost",
+    )
+
+
+def _cost_truth(company: str, days: int) -> None:
+    result = run(
+        workbench_sql.cost_truth(days, company), page=_PAGE,
+        key=f"decision_cost_truth_{company}_{days}", tier="historical",
+        source="existing billed, metered, measured and allocated facts",
+    )
+    if not guard(result, "No cost facts exist in this window."):
+        return
+    frame = result.df.copy()
+    values = {
+        str(row.get("BASIS")): safe_float(row.get("CREDITS"))
+        for _, row in frame.iterrows()
+    }
+    metered = values.get("METERED", 0.0)
+    allocated = values.get("ALLOCATED", 0.0)
+    measured = values.get("MEASURED", 0.0)
+    kpi_row([
+        {"label": "Billed account", "value": f"{values.get('BILLED', 0):,.2f} cr",
+         "help": "Account-wide billing basis; Company does not apply."},
+        {"label": "Metered warehouse", "value": f"{metered:,.2f} cr"},
+        {"label": "Measured object-query", "value": f"{measured:,.2f} cr",
+         "delta": f"{measured / metered * 100:,.1f}% of metered" if metered else None,
+         "delta_color": "off"},
+        {"label": "Allocated to users", "value": f"{allocated:,.2f} cr",
+         "delta": f"{allocated / metered * 100:,.1f}% of metered" if metered else None,
+         "delta_color": "off"},
+    ])
+    styled_table(frame, height=300, sort_label="semantic basis order")
+    st.caption(
+        "Rows are lenses over cost, not addends. Billed is account truth; metered includes "
+        "warehouse idle; measured excludes idle; allocated redistributes warehouse usage."
+    )
+
+
+def _scenarios(company: str) -> None:
+    actions = run(
+        workbench_sql.action_center(company, False, 500), page=_PAGE,
+        key=f"decision_scenario_actions_{company}", tier="live",
+        source="ACTION_QUEUE with confidence and entity keys",
+    )
+    if not actions.ok:
+        empty_state("needs_setup", "Apply V074 to model confidence-aware action scenarios.")
+        legacy = run(
+            mart_sql.action_queue(500), page=_PAGE, key="decision_scenario_legacy",
+            tier="live", source="ACTION_QUEUE (legacy read-only shape)",
+        )
+        if legacy.ok and not legacy.empty:
+            styled_table(legacy.df, height=260)
+        return
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        adoption = st.slider("Adoption %", 0, 100, 60, 5, key="scenario_adoption")
+    with c2:
+        realization = st.slider("Realization %", 0, 100, 70, 5, key="scenario_realization")
+    with c3:
+        confidence = st.slider("Confidence floor", 0.0, 1.0, 0.6, 0.05,
+                               key="scenario_confidence")
+    projection = scenario_projection(
+        actions.df, adoption_pct=adoption, realization_pct=realization,
+        confidence_floor=confidence,
+    )
+    ledger = run(
+        mart_sql.savings_ledger(), page=_PAGE, key="decision_scenario_ledger",
+        tier="recent", source="SAVINGS_LEDGER",
+    )
+    verified = (
+        safe_float(ledger.df.get("VERIFIED_USD", pd.Series(dtype=float)).sum())
+        if ledger.ok and not ledger.empty else 0.0
+    )
+    kpi_row([
+        {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
+        {"label": "Gross authored estimate", "value": format_usd(projection["gross_estimate"])},
+        {"label": "Expected capture", "value": format_usd(projection["expected_capture"]),
+         "delta": f"{format_usd(projection['low_capture'])} to {format_usd(projection['high_capture'])}",
+         "delta_color": "off"},
+        {"label": "Verified separately", "value": format_usd(verified), "severity": "ok"},
+    ])
+    st.caption(
+        "Open action estimates are de-duplicated by entity, then adoption and realization "
+        "haircuts are applied. Verified savings never enter the projection."
+    )
+    if not actions.empty:
+        styled_table(
+            actions.df[[column for column in (
+                "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
+                "CONFIDENCE", "ESTIMATED_USD", "OWNER", "DUE_DATE",
+            ) if column in actions.df.columns]],
+            height=320, sort_label="action priority order",
+        )
+
+
+def _experiments() -> None:
+    result = run(
+        workbench_sql.experiments(limit=300), page=_PAGE, key="decision_experiments",
+        tier="recent", source="OPTIMIZATION_EXPERIMENTS",
+    )
+    if not result.ok:
+        empty_state("needs_setup", "Apply V074 to track optimization experiments.")
+        return
+    if result.empty:
+        empty_state("no_data_yet", "No optimization experiments have been started.")
+        return
+    frame = result.df.reset_index(drop=True)
+    status = frame["STATUS"].astype(str).str.upper()
+    kpi_row([
+        {"label": "Experiments", "value": f"{len(frame):,}"},
+        {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
+        {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
+        {"label": "Verified value", "value": format_usd(frame["VERIFIED_USD"].map(safe_float).sum())},
+    ])
+    selected = selectable_table(frame, key="decision_experiment_table", height=340,
+                                sort_label="active status, observation end, then update")
+    index = int(selected) if selected is not None else 0
+    row = frame.iloc[index]
+    experiment_id = str(row["EXPERIMENT_ID"])
+    if st.button("Open experiment entity", key=f"experiment_entity_{experiment_id}",
+                 type="tertiary"):
+        _open_entity(str(row["ENTITY_TYPE"]), str(row["ENTITY_KEY"]))
+    st.markdown(f"**{row['TITLE']}**")
+    st.write(str(row.get("HYPOTHESIS") or ""))
+    if is_operator():
+        current = str(row.get("STATUS") or "PLANNED").upper()
+        update_status = st.selectbox(
+            "Status", EXPERIMENT_STATUSES,
+            index=EXPERIMENT_STATUSES.index(current) if current in EXPERIMENT_STATUSES else 0,
+            key=f"experiment_status_{experiment_id}",
+        )
+        result_note = st.text_area(
+            "Result evidence", value=str(row.get("RESULT_NOTE") or ""),
+            key=f"experiment_result_{experiment_id}", max_chars=4000,
+        )
+        verified_value = st.number_input(
+            "Verified USD", min_value=0.0, value=safe_float(row.get("VERIFIED_USD")),
+            step=25.0, key=f"experiment_value_{experiment_id}",
+        )
+        statement = update_experiment_sql(
+            experiment_id, status=update_status, result=result_note,
+            verified_usd=verified_value if update_status == "VERIFIED" else None,
+            actor=viewer_name(),
+        )
+        with st.expander("SQL preview"):
+            st.code(statement, language="sql")
+        if st.button("Save experiment", key=f"experiment_save_{experiment_id}", type="primary"):
+            ok, message = execute_statement(statement, page=_PAGE)
+            notify(ok, message)
+            if ok:
+                st.rerun()
+
+
+def render_decision_studio(company: str, days: int) -> None:
+    section_header("Decision Studio", "info", "target")
+    view = nested_sections(
+        ["Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
+        key="decision_studio_view",
+    )
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    if view == "Portfolio":
+        _portfolio(company, days, rate)
+    elif view == "SLOs":
+        _slos()
+    elif view == "Products":
+        _products(company, days, rate)
+    elif view == "Cost Truth":
+        _cost_truth(company, days)
+    elif view == "Scenarios":
+        _scenarios(company)
+    else:
+        _experiments()

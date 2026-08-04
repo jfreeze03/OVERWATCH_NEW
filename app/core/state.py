@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from app.companies import COMPANIES, DEFAULT_COMPANY, DEFAULT_ENVIRONMENT
-from app.config import DAY_WINDOW_OPTIONS, DEFAULT_DAY_WINDOW
+from app.config import DEFAULT_DAY_WINDOW, TRIAGE_WINDOW_OPTIONS
 
 _PAGE_PARAM = "page"
 
@@ -28,7 +28,7 @@ def init_filters() -> None:
     # Environment is retained only as a saved-view compatibility field. It no
     # longer has a visible control and must never invisibly narrow Database.
     st.session_state["flt_environment"] = DEFAULT_ENVIRONMENT
-    if st.session_state["flt_days"] not in DAY_WINDOW_OPTIONS:
+    if st.session_state["flt_days"] not in TRIAGE_WINDOW_OPTIONS:
         st.session_state["flt_days"] = DEFAULT_DAY_WINDOW
     # A database selection from another company resets to All. Bug round 2 B7:
     # validate with the SAME live-inventory classification the picker uses, not the
@@ -44,10 +44,15 @@ def init_filters() -> None:
 
 def filters() -> dict:
     init_filters()
+    from app.logic.date_windows import resolve_window_days, window_scope_label
+
+    window = st.session_state["flt_days"]
     return {
         "company": str(st.session_state["flt_company"]),
         "environment": str(st.session_state["flt_environment"]),
-        "days": int(st.session_state["flt_days"]),
+        "days": resolve_window_days(window),
+        "window": window,
+        "window_label": window_scope_label(window),
         "warehouse_contains": str(st.session_state["flt_warehouse_contains"]),
         "user_contains": str(st.session_state["flt_user_contains"]),
         "database": str(st.session_state["flt_database"]),
@@ -58,13 +63,19 @@ def filters() -> dict:
 def apply_filters(**kwargs) -> None:
     """Set top-bar filters programmatically (deep links, saved views).
 
-    Values are validated the same way the widgets validate them; days snaps
-    to the nearest allowed window so select_slider never sees a bad value.
+    Values are validated the same way the widgets validate them. Existing
+    integer-only saved views remain compatible; new views preserve MTD/YTD.
     """
-    from app.config import DAY_WINDOW_OPTIONS
+    from app.logic.date_windows import normalize_window
+
+    requested_window = kwargs.get("window")
+    if requested_window is not None:
+        st.session_state["flt_days"] = normalize_window(requested_window)
+    elif kwargs.get("days") is not None:
+        st.session_state["flt_days"] = normalize_window(kwargs["days"])
 
     mapping = {
-        "company": "flt_company", "days": "flt_days",
+        "company": "flt_company",
         "warehouse_contains": "flt_warehouse_contains", "user_contains": "flt_user_contains",
         "database": "flt_database", "schema_contains": "flt_schema_contains",
     }
@@ -72,16 +83,11 @@ def apply_filters(**kwargs) -> None:
         key = mapping.get(name)
         if key is None or value is None:
             continue
-        if name == "days":
-            options = list(DAY_WINDOW_OPTIONS)
-            try:
-                value = min(options, key=lambda o: abs(int(o) - int(value)))
-            except (TypeError, ValueError):
-                continue
         st.session_state[key] = value
 
 
-def request_navigation(page: str, section: str = "", filters: dict | None = None) -> None:
+def request_navigation(page: str, section: str = "", filters: dict | None = None,
+                       context: dict | None = None) -> None:
     """Queue a cross-page jump; consumed at the top of the NEXT run, before
     any widget instantiates (Streamlit forbids touching a live widget's key)."""
     # Clamp off-profile targets HERE (B8 also clamps on consume), then NO-OP a jump
@@ -95,10 +101,11 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
         allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
         if allowed and page not in allowed:
             page = "Overview"  # offered by every profile
-    if page == st.session_state.get("_ow_page") and not section and not filters:
+    if page == st.session_state.get("_ow_page") and not section and not filters and not context:
         return
     st.session_state["_ow_nav_pending"] = {
         "page": page, "section": section, "filters": dict(filters or {}),
+        "context": dict(context or {}),
     }
     st.rerun()
 
@@ -136,6 +143,18 @@ def consume_pending_navigation() -> None:
     if section and section_key:
         st.session_state[section_key] = section
     apply_filters(**pending.get("filters", {}))
+    # Page-local drill identity is deliberately separate from global filters.
+    # A selected action/query/entity should survive the navigation rerun without
+    # silently reshaping every metric on the destination page.
+    st.session_state["_ow_nav_context"] = dict(pending.get("context") or {})
+
+
+def navigation_context(*, consume: bool = False) -> dict:
+    """Return page-local identity carried by the most recent cross-page jump."""
+    value = dict(st.session_state.get("_ow_nav_context") or {})
+    if consume:
+        st.session_state.pop("_ow_nav_context", None)
+    return value
 
 
 def requested_page(valid_pages: tuple[str, ...]) -> str | None:

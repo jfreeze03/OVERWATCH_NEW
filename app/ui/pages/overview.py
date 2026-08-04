@@ -88,10 +88,10 @@ def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
     return board[board["PANEL"] == panel].copy()
 
 
-def _load_board(company: str, days: int) -> QueryResult:
+def _load_board(company: str, days: int, window: object = None) -> QueryResult:
     return run(
-        mart_sql.exec_board(company, days),
-        page=_PAGE, key=f"exec_board_{company}_{days}", tier="hourly",
+        mart_sql.exec_board(company, days, window),
+        page=_PAGE, key=f"exec_board_{company}_{window or days}", tier="hourly",
         source="MART_EXEC_BOARD",
     )
 
@@ -212,7 +212,7 @@ def render() -> None:
     page_header(
         "Overview",
         "Spend, risk, and the work that needs an owner.",
-        scope_note=f"{company} · last {days} days",
+        scope_note=f"{company} · {f['window_label']}",
         icon_name="overview",
     )
 
@@ -221,7 +221,7 @@ def render() -> None:
     # while the 45d MTD fact is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
-    board_res = _load_board(company, days)
+    board_res = _load_board(company, days, f["window"])
     board = board_res.df if board_res.usable() else pd.DataFrame(
         columns=["PANEL", "METRIC", "DIMENSION", "PERIOD_START", "VALUE", "VALUE_USD"]
     )
@@ -469,7 +469,7 @@ def render() -> None:
     )
     company_kpis = [
         {
-            "label": f"Spend, last {days}d ({company})",
+            "label": f"Spend, {str(f['window_label']).lower()} ({company})",
             "value": format_usd(window_spend),
             "sub": f"{format_credits(_win_credits)} cr" if _win_credits is not None else None,  # rec28
             "method": "metering", "scope": "company",  # rec 13: warehouse metering, company-scoped
@@ -609,10 +609,20 @@ def render() -> None:
                 # rec29: the sticky-selection guard (st.dataframe re-emits its
                 # selection every rerun) now lives inside selectable_nav_table —
                 # it fires on_select ONLY on a changed row, was hand-rolled here.
+                def _open_action(_i: int) -> None:
+                    try:
+                        _action_id = str(ranked.iloc[int(_i)]["ACTION_ID"])
+                    except (KeyError, IndexError, ValueError, TypeError):
+                        _action_id = ""
+                    request_navigation(
+                        "Control Room", "Action Center",
+                        context={"action_id": _action_id} if _action_id else {},
+                    )
+
                 selectable_nav_table(
                     ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
                     key="ov_actions_sel", slug="top-actions",
-                    on_select=lambda _i: request_navigation("Control Room"),
+                    on_select=_open_action,
                     column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f")})
                 # D1: say what "top" means. The ranking is severity, then overdue,
                 # then estimated dollars, then age — an executive reading a top-5

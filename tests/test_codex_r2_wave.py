@@ -365,7 +365,8 @@ def test_rec18_view_reweights_volume_and_exposes_query_id():
     assert "SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))" in tbp and "AS EST_TRUE_FETCHES" in tbp
     fqs = mart_sql.fleet_query_stats(7)
     # the slowest fetch's QUERY_ID, for a Query-History deep link
-    assert "MAX_BY(QUERY_ID, ELAPSED_MS)" in fqs and "SLOWEST_QUERY_ID" in fqs
+    assert "MAX_BY(QUERY_ID, IFF(QUERY_ID IS NOT NULL, ELAPSED_MS, NULL))" in fqs
+    assert "SLOWEST_QUERY_ID" in fqs
 
 
 # ---------------------------------------------------------------------------

@@ -396,7 +396,7 @@ def _governance_score_panel():
     return post
 
 
-def _export_pack(company: str, days: int) -> None:
+def _export_pack(company: str, days: int, window_label: str) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     section_header("Auditor export pack", "info", "security")
     st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
@@ -440,7 +440,7 @@ def _export_pack(company: str, days: int) -> None:
             rows_written[name] = len(frame) if res.ok else 0
         manifest = "\n".join(
             [f"OVERWATCH access review pack — {company} — generated {stamp}",
-             f"Window: last {days} days (dormant users fixed at 90d)",
+             f"Window: {window_label} (dormant users fixed at 90d)",
              *(f"{k}.csv: {v} rows" for k, v in rows_written.items())]
         )
         bundle.writestr("MANIFEST.txt", manifest)
@@ -585,7 +585,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
 def render() -> None:
     f = filters()
     page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC.", icon_name="security",
-                scope_note=f"{f['company']} · last {f['days']} days")
+                scope_note=f"{f['company']} · {f['window_label']}")
     st.caption(
         "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
         "revoke anything. Company scoping is a shared-account view filter, not isolation."
@@ -624,7 +624,7 @@ def render() -> None:
     if section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
-        _export_pack(f["company"], f["days"])
+        _export_pack(f["company"], f["days"], f["window_label"])
     elif section == "Changes":
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Clients":

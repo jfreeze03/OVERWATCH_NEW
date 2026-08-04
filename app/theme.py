@@ -123,6 +123,23 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-filter-contract { margin:-2px 0 8px 0; padding:4px 10px; border-left:2px solid var(--ow-info);
   color:var(--ow-ink-mute); background:rgba(56,189,248,0.06); font-size:0.72rem; line-height:1.45; }
 
+.ow-exceptions { margin:4px 0 10px; border-top:1px solid var(--ow-hairline);
+  border-bottom:1px solid var(--ow-hairline); }
+.ow-exception { display:grid; grid-template-columns:minmax(120px,1fr) auto minmax(180px,2fr);
+  gap:12px; align-items:center; padding:7px 10px; border-left:3px solid var(--ow-warn);
+  border-bottom:1px solid var(--ow-hairline); background:rgba(251,191,36,0.045); }
+.ow-exception:last-child { border-bottom:0; }
+.ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(251,113,133,0.055); }
+.ow-exception--ok { border-left-color:var(--ow-ok); background:rgba(52,211,153,0.045); }
+.ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
+.ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
+  font-variant-numeric:tabular-nums; }
+.ow-exception__detail { color:var(--ow-ink-mute); font-size:0.72rem; line-height:1.35; }
+@media (max-width:700px) {
+  .ow-exception { grid-template-columns:1fr auto; }
+  .ow-exception__detail { grid-column:1 / -1; }
+}
+
 .ow-statusbar { display:flex; gap:8px; flex-wrap:wrap; align-items:stretch; margin:0 0 12px 0; }
 .ow-stat { flex:1 1 130px; min-width:120px; position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); padding:8px 12px 8px 14px; box-shadow:var(--ow-shadow); }
