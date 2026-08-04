@@ -527,7 +527,6 @@ def status_bar(stats: list[dict]) -> None:
                         help=f"Open {page} · {section}",
                         type="tertiary",
                         icon=":material/arrow_forward:",
-                        icon_position="right",
                         use_container_width=True,
                     ):
                         request_navigation(page, section)

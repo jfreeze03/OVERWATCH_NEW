@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)
+
+- Removed the newer `icon_position` button argument from persistent status-bar actions.
+  Snowflake's deployed Streamlit runtime does not accept it, which caused every page to fail
+  before its content rendered; the default icon placement remains fully functional.
+- Added an older-runtime behavioral regression test for the complete status-bar button path.
+
+No Snowflake migration is required. Snowflake access remained read-only.
+
 ## 4.143.0 - Decision-readable operating surfaces (2026-08-03)
 
 - Added exception-first summaries to Action Center, Control Room Pulse, task-run analysis,
