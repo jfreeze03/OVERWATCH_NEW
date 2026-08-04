@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.144.0 - Security operating model and responsive query execution (2026-08-04)
+
+- Reframed Security around an exceptions-first six-domain posture, policy-owned identity,
+  client and egress decisions, effective-access investigation, Trust Center movement,
+  risk-ranked changes, and durable access-review campaigns with immutable decision history.
+- Added owner-applied V075 with bounded login/change facts, Trust Center snapshots, a local
+  security exception queue, policy and review records, and a dedicated auto-suspending
+  `WH_OVERWATCH_APP` warehouse that isolates interactive reads from loader tasks.
+- Added query-profile evidence links, Entity 360 and Action Center drills, coverage-aware
+  confidence states, an export manifest that records failed evidence sheets, and explicit
+  loading gates for expensive posture, stale-source, warehouse-setting, and review history.
+- Bounded batch concurrency at four reads and added role/user/scope-aware per-member caching,
+  so a changed panel reuses unchanged siblings without creating an unbounded query burst.
+- Added a measured app-performance SLO, split interactive app cost from loader cost, and
+  extended canaries, teardown, backup, backfill, validation, deployment, and rebuild surfaces.
+
+Snowflake access remained read-only; V075 was authored but not applied.
+
 ## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)
 
 - Removed the newer `icon_position` button argument from persistent status-bar actions.

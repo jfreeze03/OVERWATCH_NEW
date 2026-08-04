@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import re
 import time
+from collections import OrderedDict
 from datetime import datetime
+from threading import RLock
 
 import pandas as pd
 import streamlit as st
@@ -29,6 +31,9 @@ CACHE_TTLS = {"live": 30, "recent": 300, "hourly": 3600, "historical": 3600, "me
 # a 300s TTL re-paid them 12x/hour (fleet evidence 2026-07-11: 1.5-3.4%
 # cache hits with one viewer). Refresh button still clears instantly.
 STATEMENT_TIMEOUTS = {"live": 30, "recent": 120, "hourly": 120, "historical": 180, "metadata": 30}
+BATCH_MAX_CONCURRENCY = 4
+_BATCH_MEMBER_CACHE_MAX_ENTRIES = 128
+_BATCH_MEMBER_CACHE_MAX_BYTES = 128 * 1024 * 1024
 
 _TELEMETRY_KEY = "_ow_query_telemetry"
 _TELEMETRY_MAX = 200
@@ -267,6 +272,83 @@ _BATCH_MEMBER_MS: ContextVar[dict | None] = ContextVar("ow_batch_member_ms", def
 # dict (cache hit) means no job ran, so the id is honestly blank.
 _BATCH_MEMBER_QID: ContextVar[dict | None] = ContextVar("ow_batch_member_qid", default=None)
 
+# A batch used to cache only the full SQL tuple. Changing one filter therefore
+# cold-started every sibling even when six of seven statements were unchanged.
+# Keep a small process-local member cache in front of the tuple cache so a batch
+# submits only genuine misses. The key includes the fetcher identity (tests and
+# hot-reloads cannot inherit an old implementation), tier, capped SQL and the
+# same role/user/salt scope used by run(). Frames are copied on both sides, like
+# st.cache_data, so display-layer mutation cannot poison another viewer.
+_BatchMemberEntry = tuple[pd.DataFrame, bool, float, int]
+_BATCH_MEMBER_CACHE: OrderedDict[tuple, _BatchMemberEntry] = OrderedDict()
+_BATCH_MEMBER_CACHE_BYTES = 0
+_BATCH_MEMBER_CACHE_LOCK = RLock()
+
+
+def _batch_member_cache_key(tier: str, sql: str, scope: str) -> tuple:
+    return (id(_BATCH_FETCHERS.get(tier)), tier, sql, scope)
+
+
+def _batch_member_cache_get(tier: str, sql: str, scope: str) -> tuple[pd.DataFrame, bool] | None:
+    global _BATCH_MEMBER_CACHE_BYTES
+    key = _batch_member_cache_key(tier, sql, scope)
+    now = time.monotonic()
+    with _BATCH_MEMBER_CACHE_LOCK:
+        entry = _BATCH_MEMBER_CACHE.get(key)
+        if entry is None:
+            return None
+        frame, truncated, expires_at, size = entry
+        if expires_at <= now:
+            _BATCH_MEMBER_CACHE.pop(key, None)
+            _BATCH_MEMBER_CACHE_BYTES = max(0, _BATCH_MEMBER_CACHE_BYTES - size)
+            return None
+        _BATCH_MEMBER_CACHE.move_to_end(key)
+        return frame.copy(deep=True), truncated
+
+
+def _batch_member_cache_put(
+    tier: str,
+    sql: str,
+    scope: str,
+    frame: pd.DataFrame,
+    truncated: bool,
+) -> None:
+    global _BATCH_MEMBER_CACHE_BYTES
+    try:
+        size = int(frame.memory_usage(index=True, deep=True).sum())
+    except Exception:  # Cache admission must never fail a read.
+        return
+    if size > _BATCH_MEMBER_CACHE_MAX_BYTES // 2:
+        return
+    key = _batch_member_cache_key(tier, sql, scope)
+    stored = frame.copy(deep=True)
+    entry: _BatchMemberEntry = (
+        stored,
+        bool(truncated),
+        time.monotonic() + CACHE_TTLS[tier],
+        size,
+    )
+    with _BATCH_MEMBER_CACHE_LOCK:
+        old = _BATCH_MEMBER_CACHE.pop(key, None)
+        if old is not None:
+            _BATCH_MEMBER_CACHE_BYTES = max(0, _BATCH_MEMBER_CACHE_BYTES - old[3])
+        _BATCH_MEMBER_CACHE[key] = entry
+        _BATCH_MEMBER_CACHE_BYTES += size
+        while (
+            len(_BATCH_MEMBER_CACHE) > _BATCH_MEMBER_CACHE_MAX_ENTRIES
+            or _BATCH_MEMBER_CACHE_BYTES > _BATCH_MEMBER_CACHE_MAX_BYTES
+        ):
+            _, evicted = _BATCH_MEMBER_CACHE.popitem(last=False)
+            _BATCH_MEMBER_CACHE_BYTES = max(0, _BATCH_MEMBER_CACHE_BYTES - evicted[3])
+
+
+def _batch_member_cache_clear() -> None:
+    """Test/hot-reload hook; refresh uses scoped keys and needs no global flush."""
+    global _BATCH_MEMBER_CACHE_BYTES
+    with _BATCH_MEMBER_CACHE_LOCK:
+        _BATCH_MEMBER_CACHE.clear()
+        _BATCH_MEMBER_CACHE_BYTES = 0
+
 
 def _execute(sql: str, tier: str, page: str) -> pd.DataFrame:
     _FETCH_MISS.set(True)
@@ -338,6 +420,11 @@ _DOMAIN_TOKENS = {
     "watchlist": ("USER_WATCHLIST",),
     "experiments": ("OPTIMIZATION_EXPERIMENTS",),
     "objectives": ("SLO_OBJECTIVES",),
+    "security": (
+        "SECURITY_IDENTITY_POLICY", "SECURITY_EGRESS_POLICY",
+        "SECURITY_CLIENT_POLICY", "ACCESS_REVIEW_CAMPAIGNS",
+        "ACCESS_REVIEW_ITEMS",
+    ),
 }
 
 
@@ -507,6 +594,8 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     """Submit every statement server-side async (collect on one connection is
     serialized; async jobs are not), then gather. Full success returns (and
     caches); any failure raises — _BatchPartial when there are survivors."""
+    if len(sqls) > BATCH_MAX_CONCURRENCY:
+        return _execute_batch_bounded(sqls, tier, page)
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
     apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
@@ -571,6 +660,40 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     if errors:
         raise _BatchPartial(frames, errors)
     return tuple(frames[i] for i in range(len(jobs)))
+
+
+def _execute_batch_bounded(sqls: tuple, tier: str, page: str) -> tuple:
+    """Execute a large batch in bounded async waves.
+
+    Four concurrent statements keep the XS warehouse responsive while
+    preserving _BatchPartial's survivor/error/pending contract across waves.
+    A failed member does not stop later waves; a submission failure marks only
+    that wave's unsubmitted members pending, matching the small-batch path.
+    """
+    frames: dict[int, pd.DataFrame] = {}
+    errors: dict[int, Exception] = {}
+    pending: set[int] = set()
+    member_ms: dict[int, float] = {}
+    member_qid: dict[int, str] = {}
+    for start in range(0, len(sqls), BATCH_MAX_CONCURRENCY):
+        chunk = sqls[start:start + BATCH_MAX_CONCURRENCY]
+        try:
+            returned = _execute_batch(chunk, tier, page)
+            for local, frame in enumerate(returned):
+                frames[start + local] = frame
+        except _BatchPartial as partial:
+            frames.update({start + local: frame for local, frame in partial.frames.items()})
+            errors.update({start + local: exc for local, exc in partial.errors.items()})
+            pending.update(start + local for local in partial.pending)
+        chunk_ms = _BATCH_MEMBER_MS.get() or {}
+        chunk_qid = _BATCH_MEMBER_QID.get() or {}
+        member_ms.update({start + local: value for local, value in chunk_ms.items()})
+        member_qid.update({start + local: value for local, value in chunk_qid.items()})
+    _BATCH_MEMBER_MS.set(member_ms)
+    _BATCH_MEMBER_QID.set(member_qid)
+    if errors:
+        raise _BatchPartial(frames, errors, pending)
+    return tuple(frames[i] for i in range(len(sqls)))
 
 
 @st.cache_data(ttl=CACHE_TTLS["recent"], show_spinner=False, max_entries=64)
@@ -667,19 +790,42 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
             if _solo.ok:
                 _q["keys"].discard(_qk)
                 st.session_state["_ow_batch_quarantine"] = _q
+                _cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
+                _capped = _with_row_cap(str(spec["sql"]), _cap)
+                _batch_member_cache_put(
+                    tier, _capped, _cache_scope(_capped), _solo.df, _solo.truncated)
             out_direct[str(spec["key"])] = _solo
         else:
             bspecs.append(spec)
     if not bspecs:
         return out_direct
-    capped, caps = [], []
+    uncached_specs, capped, caps, member_scopes = [], [], [], []
     for spec in bspecs:
         sql = str(spec["sql"])
         cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
-        capped.append(_with_row_cap(sql, cap))
+        capped_sql = _with_row_cap(sql, cap)
+        member_scope = _cache_scope(capped_sql)
+        cached = _batch_member_cache_get(tier, capped_sql, member_scope)
+        if cached is not None:
+            frame, truncated = cached
+            key = str(spec["key"])
+            _telemetry(page, tier, f"batch:{key}", 0.0, len(frame), ok=True,
+                       batch_size=0, truncated=truncated,
+                       sql_hash=_sql_hash16(sql), cache_hit=True)
+            out_direct[key] = QueryResult(
+                df=frame, ok=True, truncated=truncated,
+                source=str(spec.get("source", "")), tier=tier,
+                fetched_at=datetime.now(), elapsed_ms=0.0)
+            continue
+        uncached_specs.append(spec)
+        capped.append(capped_sql)
         caps.append(cap)
+        member_scopes.append(member_scope)
+    bspecs = uncached_specs
+    if not bspecs:
+        return out_direct
     try:
-        scope = _cache_scope("\n".join(capped))
+        scope = "|members|" + "|".join(member_scopes)
         # P3: clear first — a stale dict from an EARLIER batch in this same
         # thread context would otherwise be read as this batch's timings when
         # the fetcher answers from cache (its body never runs). #43: the QUERY_ID
@@ -717,11 +863,16 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
                     df=df, ok=True, truncated=truncated,
                     source=str(spec.get("source", "")), tier=tier,
                     fetched_at=datetime.now(), elapsed_ms=member_ms)
+                _batch_member_cache_put(tier, capped[idx], member_scopes[idx], df, truncated)
             else:
-                out[str(spec["key"])] = run(
+                solo = run(
                     str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                     source=str(spec.get("source", "")),
                     max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+                out[str(spec["key"])] = solo
+                if solo.ok:
+                    _batch_member_cache_put(
+                        tier, capped[idx], member_scopes[idx], solo.df, solo.truncated)
         return {**out, **out_direct}
     except Exception as exc:
         _telemetry(page, tier, f"batch_fallback:{tier}:n{len(specs)}",
@@ -734,11 +885,15 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
         # come back as ok=False results (same surface the caller's own
         # serial fallback would produce).
         out: dict = {}
-        for spec in bspecs:
-            out[str(spec["key"])] = run(
+        for idx, spec in enumerate(bspecs):
+            solo = run(
                 str(spec["sql"]), page=page, key=f"bfb:{spec['key']}", tier=tier,
                 source=str(spec.get("source", "")),
                 max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+            out[str(spec["key"])] = solo
+            if solo.ok:
+                _batch_member_cache_put(
+                    tier, capped[idx], member_scopes[idx], solo.df, solo.truncated)
         return {**out, **out_direct}
     elapsed = (time.perf_counter() - started) * 1000
     out: dict = {}
@@ -757,6 +912,7 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
             df=df, ok=True, truncated=truncated, source=str(spec.get("source", "")),
             tier=tier, fetched_at=datetime.now(), elapsed_ms=member_ms,
         )
+        _batch_member_cache_put(tier, capped[idx], member_scopes[idx], df, truncated)
     # P3: the members now carry their own slices, so the batch's END-TO-END cost
     # (submits + gather + Snowpark overhead) would vanish from telemetry. Record
     # it ONCE under its own key. Aggregators that SUM elapsed must exclude

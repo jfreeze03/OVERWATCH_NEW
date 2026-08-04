@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.143.1"
+APP_VERSION = "4.144.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -18,7 +18,7 @@ APP_VERSION = "4.143.1"
 OVERWATCH_DB = "DBA_MAINT_DB"
 CORE_SCHEMA = "OVERWATCH"
 MART_SCHEMA = "OVERWATCH"
-APP_WAREHOUSE = "WH_ALFA_ADMIN"
+APP_WAREHOUSE = "WH_OVERWATCH_APP"
 APP_QUERY_TAG_PREFIX = "OVERWATCH"
 
 

@@ -89,9 +89,15 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
         wi_pick = st.selectbox("Warehouse", wi_names, key="whatif_wh")
         wrow_wi = sized[sized["WAREHOUSE_NAME"].astype(str) == wi_pick].iloc[0]
         live_size, live_suspend = "", 600
-        whs_wi = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
-                     tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
-        if whs_wi.ok and not whs_wi.empty:
+        load_settings = st.toggle(
+            "Load current warehouse settings", key="whatif_live_settings",
+            help="Runs SHOW WAREHOUSES only when this scenario needs live size and auto-suspend.",
+        )
+        whs_wi = run(
+            security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+            tier="metadata", source="SHOW WAREHOUSES", max_rows=0,
+        ) if load_settings else None
+        if whs_wi is not None and whs_wi.ok and not whs_wi.empty:
             wdf_wi = whs_wi.df.copy()
             wdf_wi.columns = [str(c).lower() for c in wdf_wi.columns]
             match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
@@ -111,11 +117,17 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             # X-Small warehouse quoted 4x the real dollars — and the only hint
             # ("SHOW WAREHOUSES did not return its size") lived on the failure
             # branch that the MEDIUM default made unreachable.
-            st.warning(
-                "SHOW WAREHOUSES did not return this warehouse's size — the scenario below "
-                "assumes MEDIUM. Treat the size-step dollars as illustrative only; the "
-                "auto-suspend half of the answer is unaffected."
-            )
+            if load_settings:
+                st.warning(
+                    "SHOW WAREHOUSES did not return this warehouse's size — the scenario below "
+                    "assumes MEDIUM. Treat the size-step dollars as illustrative only; the "
+                    "auto-suspend half of the answer is unaffected."
+                )
+            else:
+                st.caption(
+                    "Current settings are not loaded. The preview uses MEDIUM and 600s until "
+                    "you turn on the live-settings control above."
+                )
         idle_wi = safe_float(wrow_wi.get("CREDITS_TOTAL")) * safe_float(wrow_wi.get("IDLE_PCT")) / 100.0
         sim = simulate_scenario(
             size=live_size or "MEDIUM",

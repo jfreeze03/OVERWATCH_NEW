@@ -164,5 +164,5 @@ def test_v074_coverage_surfaces_move_in_lockstep() -> None:
         "SLO_OBJECTIVES",
     ):
         assert name in teardown
-    assert "V001..V074 applied" in validate
+    assert "V001..V075 applied" in validate
     assert "V074__operating_workbench_foundation.sql" in deploy

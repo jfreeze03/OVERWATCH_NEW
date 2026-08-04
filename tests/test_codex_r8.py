@@ -37,11 +37,12 @@ def test_spike_reader_is_quiet_conservative_and_canaried():
     assert "if _spk.ok and not _spk.empty:" in cr                         # silent pre-V035
 
 
-def test_admin_drilldown_and_why_stale():
+def test_admin_drilldown_and_explicit_stale_diagnosis():
     adm = (_ROOT / "app" / "ui" / "pages" / "admin.py").read_text(encoding="utf-8")
     assert 'key="adm_tt_sel"' in adm                                      # targets are clickable
     assert "the slow keys behind the pain" in adm
-    assert "Why stale?" in adm
+    assert 'st.toggle("Diagnose stale sources"' in adm
+    assert 'with st.expander("Why stale?' not in adm
     assert "never filled" in adm and "last loader error" in adm           # causes, not raw errors
     assert "tasks suspend if a migration half-applied" in adm
 

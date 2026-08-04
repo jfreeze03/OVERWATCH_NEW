@@ -1,0 +1,466 @@
+"""V075 security operating-model and app-performance regression locks."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+import app.core.query as query
+from app.core.result import QueryResult
+from app.data import mart_sql, security_sql
+from app.logic.security import (
+    access_review_decision_sql,
+    apply_client_policies,
+    apply_egress_policies,
+    create_access_review_sql,
+    domain_posture,
+    fact_coverage_complete,
+    insert_egress_policy_sql,
+    security_change_risk,
+    upsert_client_policy_sql,
+    upsert_identity_policy_sql,
+)
+from app.ui.security_center import _cell_text
+
+_ROOT = Path(__file__).resolve().parents[1]
+_MIGRATION = (_ROOT / "snowflake/migrations/V075__security_operating_model.sql").read_text(
+    encoding="utf-8"
+)
+
+
+def _read(path: str) -> str:
+    return (_ROOT / path).read_text(encoding="utf-8")
+
+
+def test_v075_is_guarded_versioned_and_never_uses_a_resource_monitor() -> None:
+    assert "EXCEPTION (-20075" in _MIGRATION
+    assert "IF (v < 74)" in _MIGRATION
+    assert "SELECT 75," in _MIGRATION
+    assert "WHERE VERSION = 75" in _MIGRATION
+    assert "CREATE WAREHOUSE IF NOT EXISTS WH_OVERWATCH_APP" in _MIGRATION
+    assert "AUTO_SUSPEND = 60" in _MIGRATION
+    assert "STATEMENT_TIMEOUT_IN_SECONDS = 120" in _MIGRATION
+    assert "RESOURCE_MONITOR" not in _MIGRATION
+
+
+def test_v075_materializes_bounded_evidence_and_serializes_its_task() -> None:
+    for name in (
+        "FACT_SECURITY_LOGIN_DAILY",
+        "FACT_SECURITY_CHANGE",
+        "SECURITY_TRUST_SNAPSHOT",
+        "SP_LOAD_SECURITY_FACTS",
+        "V_SECURITY_TRUST_DELTA",
+        "V_SECURITY_EXCEPTION_QUEUE",
+    ):
+        assert name in _MIGRATION
+    assert "AFTER DBA_MAINT_DB.OVERWATCH.TASK_LOAD_MARTS_V27_HOURLY" in _MIGRATION
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(3)" in _MIGRATION
+    assert "IF (applied = 0 OR fact_rows = 0)" in _MIGRATION
+    assert "CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(90)" in _MIGRATION
+    assert "FROM DBA_MAINT_DB.OVERWATCH.OW_QH_EXTRACT" in _MIGRATION
+    assert "IF (d <= 3)" in _MIGRATION
+    assert _MIGRATION.count("DATEADD('day', -:d, CURRENT_DATE())") >= 5
+    assert "WHERE DAY < DATEADD('day', -180, CURRENT_DATE())" in _MIGRATION
+    assert "WHERE DAY < DATEADD('day', -400, CURRENT_DATE())" in _MIGRATION
+    assert "WITH current_findings AS" in _MIGRATION
+    assert "SELECT CURRENT_DATE(), p.SCANNER_ID" in _MIGRATION
+    assert "TOTAL_AT_RISK_COUNT, SCANNED_AT" in _MIGRATION
+
+
+def test_v075_policies_and_reviews_are_durable_and_audited() -> None:
+    for name in (
+        "SECURITY_IDENTITY_POLICY",
+        "SECURITY_EGRESS_POLICY",
+        "SECURITY_CLIENT_POLICY",
+        "ACCESS_REVIEW_CAMPAIGNS",
+        "ACCESS_REVIEW_ITEMS",
+        "ACCESS_REVIEW_DECISION_LOG",
+        "SP_CREATE_ACCESS_REVIEW",
+        "SP_ACCESS_REVIEW_DECIDE",
+    ):
+        assert name in _MIGRATION
+    review = _MIGRATION.split("SP_CREATE_ACCESS_REVIEW", 1)[1].split(
+        "SP_ACCESS_REVIEW_DECIDE", 1
+    )[0]
+    assert "WITH RECURSIVE role_tree" in review
+    assert "ACCESS_PATH || ' -> '" in review
+    assert "IF (existing_campaign > 0)" in review
+    assert "already exists:" in review
+    assert "STATUS = IFF(:n = 0, 'COMPLETE', 'IN_REVIEW')" in review
+    decision = _MIGRATION.split("SP_ACCESS_REVIEW_DECIDE", 1)[1].split(
+        "SP_BACKUP_OPERATOR_TABLES", 1
+    )[0]
+    assert "INSERT INTO DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG" in decision
+    assert "item_missing EXCEPTION" in decision
+
+
+def test_security_domain_scores_require_proven_coverage() -> None:
+    exceptions = pd.DataFrame(
+        {
+            "DOMAIN": ["IDENTITY", "DATA MOVEMENT"],
+            "SEVERITY": ["HIGH", "CRITICAL"],
+            "IMPACT_COUNT": [2, 50],
+        }
+    )
+    coverage = pd.DataFrame(
+        {
+            "DOMAIN": ["IDENTITY", "DATA MOVEMENT"],
+            "COVERAGE": ["COMPLETE", "ON_DEMAND"],
+            "NEWEST": ["2026-08-04", None],
+        }
+    )
+    by_domain = {item.domain: item for item in domain_posture(exceptions, coverage)}
+    assert by_domain["IDENTITY"].score == 76
+    assert by_domain["IDENTITY"].findings == 2
+    assert by_domain["IDENTITY"].state == "Watch"
+    assert by_domain["DATA MOVEMENT"].score is None
+    assert by_domain["DATA MOVEMENT"].state == "On demand"
+
+    not_configured = pd.DataFrame(
+        {"DOMAIN": ["ACCESS REVIEW"], "COVERAGE": ["NOT_CONFIGURED"], "NEWEST": [None]}
+    )
+    review = {item.domain: item for item in domain_posture(pd.DataFrame(), not_configured)}[
+        "ACCESS REVIEW"
+    ]
+    assert review.score is None
+    assert review.state == "Not configured"
+
+
+def test_nullable_security_cells_never_become_fake_drill_ids() -> None:
+    assert _cell_text(None) == ""
+    assert _cell_text(float("nan")) == ""
+    assert _cell_text(pd.NA, "fallback") == "fallback"
+    assert _cell_text(" QID-1 ") == "QID-1"
+
+
+def test_fact_coverage_requires_span_and_freshness(monkeypatch) -> None:
+    monkeypatch.setattr("app.logic.security.account_today", lambda: pd.Timestamp("2026-08-04").date())
+    complete = QueryResult(
+        df=pd.DataFrame({"COVERAGE_DAYS": [30], "LAST_DAY": ["2026-08-03"]}), ok=True
+    )
+    stale = QueryResult(
+        df=pd.DataFrame({"COVERAGE_DAYS": [30], "LAST_DAY": ["2026-07-30"]}), ok=True
+    )
+    thin = QueryResult(
+        df=pd.DataFrame({"COVERAGE_DAYS": [3], "LAST_DAY": ["2026-08-04"]}), ok=True
+    )
+    ninety = QueryResult(
+        df=pd.DataFrame({"COVERAGE_DAYS": [90], "LAST_DAY": ["2026-08-04"]}), ok=True
+    )
+    assert fact_coverage_complete(complete, 30)
+    assert not fact_coverage_complete(stale, 30)
+    assert not fact_coverage_complete(thin, 30)
+    assert fact_coverage_complete(ninety, 90)
+    assert not fact_coverage_complete(complete, 90)
+
+
+def test_client_and_egress_verdicts_are_policy_driven() -> None:
+    observed = pd.DataFrame(
+        {
+            "DRIVER": ["Python", "Python", "Python", "JDBC"],
+            "VERSION": ["3.9.1", "3.10.2", "?", "3.14"],
+        }
+    )
+    policies = pd.DataFrame(
+        {
+            "DRIVER": ["Python"],
+            "MIN_APPROVED_VERSION": ["3.10.0"],
+            "WARN_AFTER": ["2099-01-01"],
+            "OWNER_NAME": ["Platform"],
+        }
+    )
+    clients = apply_client_policies(observed, policies)
+    assert clients["POLICY_STATUS"].tolist() == [
+        "UNSUPPORTED",
+        "SUPPORTED",
+        "UNKNOWN",
+        "UNKNOWN",
+    ]
+
+    transfers = pd.DataFrame({"TARGET_REGION": ["AWS_US_EAST_1", "AZURE_WESTEUROPE"]})
+    approvals = pd.DataFrame(
+        {
+            "TARGET_KIND": ["REGION", "REGION"],
+            "COMPANY": ["ALFA", "ALFA"],
+            "TARGET_PATTERN": ["AWS_%", "AZURE_%"],
+            "OWNER_NAME": ["Security", "Security"],
+            "STATUS": ["APPROVED", "REVOKED"],
+            "EXPIRES_ON": [None, None],
+        }
+    )
+    egress = apply_egress_policies(
+        transfers, approvals, target_col="TARGET_REGION", target_kind="REGION", company="ALFA"
+    )
+    assert egress["POLICY_STATUS"].tolist() == ["APPROVED", "UNAPPROVED"]
+
+
+def test_change_risk_is_monotonic_for_sensitive_context() -> None:
+    low = security_change_risk("CREATE_TABLE", "ANALYST", "DEV_DB")
+    destructive = security_change_risk("DROP", "ACCOUNTADMIN", "PROD_DB")
+    drop_user = security_change_risk("DROP_USER", "ANALYST", "")
+    assert low == (30, "LOW", "CREATE")
+    assert destructive == (100, "CRITICAL", "DESTRUCTIVE")
+    assert drop_user == (90, "CRITICAL", "DESTRUCTIVE")
+
+
+def test_security_write_builders_parse_and_egress_save_is_an_upsert() -> None:
+    sqlglot = pytest.importorskip("sqlglot")
+    egress = insert_egress_policy_sql(
+        company="ALFA",
+        target_kind="REGION",
+        pattern="AWS_%",
+        owner="Security",
+        expires_on="2027-01-01",
+        notes="Approved path",
+        actor="JFREE",
+    )
+    statements = (
+        upsert_identity_policy_sql(
+            "SERVICE_USER",
+            identity_type="SERVICE",
+            owner="Platform",
+            auth_method="KEYPAIR",
+            network="10.%",
+            rotation_days=90,
+            exception_until=None,
+            notes="Automation",
+            actor="JFREE",
+        ),
+        egress,
+        upsert_client_policy_sql(
+            "Python",
+            minimum_version="3.10.0",
+            warn_after="2027-01-01",
+            owner="Platform",
+            notes="Supported floor",
+            actor="JFREE",
+        ),
+        create_access_review_sql(
+            "AR-TEST",
+            title="Quarterly review",
+            company="ALFA",
+            due_date="2026-08-31",
+            actor="JFREE",
+        ),
+        access_review_decision_sql(
+            "AR-TEST",
+            "ITEM-1",
+            decision="KEEP",
+            reason="Expected access",
+            actor="JFREE",
+        ),
+    )
+    for statement in statements:
+        sqlglot.parse(statement, dialect="snowflake")
+    assert egress.startswith("MERGE INTO")
+    assert "WHEN MATCHED THEN UPDATE SET" in egress
+
+
+def test_new_readers_parse_and_preserve_expected_shapes() -> None:
+    sqlglot = pytest.importorskip("sqlglot")
+    builders = (
+        security_sql.security_exception_queue("ALFA"),
+        security_sql.security_domain_coverage(),
+        security_sql.trust_center_delta(),
+        security_sql.identity_policies("ALFA"),
+        security_sql.egress_policies("ALFA"),
+        security_sql.client_policies(),
+        security_sql.login_fact_coverage(30),
+        security_sql.security_login_fact_coverage(30),
+        security_sql.failed_logins_fact(7, "ALFA"),
+        security_sql.failed_login_reasons_fact(7, "ALFA"),
+        security_sql.new_network_logins_fact(7, "ALFA"),
+        security_sql.recent_ddl_changes_fact(7, "ALFA"),
+        security_sql.admin_role_activity_fact(7, "ALFA"),
+        security_sql.effective_access("ALFA"),
+        security_sql.access_review_campaigns(company="ALFA"),
+        security_sql.access_review_items("AR-TEST"),
+        security_sql.access_review_decisions("AR-TEST"),
+        security_sql.egress_baseline(7),
+        mart_sql.app_performance_slo(7),
+    )
+    for statement in builders:
+        sqlglot.parse(statement, dialect="snowflake")
+    assert "QUERY_ID" in security_sql.recent_ddl_changes_fact(7, "ALFA")
+    assert "TARGET_LOCATION" in security_sql.unload_activity(7, "ALFA")
+    fact_changes = security_sql.recent_ddl_changes_fact(7, "ALFA")
+    assert "COMPANY_FOR_USER(f.USER_NAME) = 'ALFA'" in fact_changes
+    assert "f.DATABASE_NAME ILIKE 'ALFA%'" in fact_changes
+    assert "THEN 'NOT_APPLICABLE'" in fact_changes
+    queue = security_sql.security_exception_queue("ALFA")
+    assert "ACTOR_COMPANY" in queue and "OBJECT_COMPANY" in queue
+    assert "UPPER(COALESCE(ACTOR_COMPANY, '')) = 'ALFA'" in queue
+    for scoped in (
+        security_sql.admin_role_holders("ALFA"),
+        security_sql.admin_role_activity(7, "ALFA"),
+        security_sql.new_network_logins(7, "ALFA"),
+        security_sql.new_network_logins_fact(7, "ALFA"),
+        security_sql.identity_policies("ALFA"),
+    ):
+        assert "COMPANY_FOR_USER" in scoped
+        assert "'ALFA'" in scoped
+    assert "UPPER(COMPANY) = 'ALFA'" in security_sql.egress_policies("ALFA")
+    assert "UPPER(c.COMPANY) = 'ALFA'" in security_sql.access_review_campaigns(
+        company="ALFA"
+    )
+    perf = mart_sql.app_performance_slo(7)
+    assert "RENDER_SAMPLES < 20" in perf
+    assert "NOT STARTSWITH(QUERY_KEY, 'batch_wall:')" in perf
+    assert "SUM(IFF(NOT OK, 1.0 / COALESCE(SAMPLE_PROB, 1.0), 0))" in perf
+    domain_sql = security_sql.security_domain_coverage()
+    assert "IFF(COUNT(*) > 0, 'COMPLETE', 'NOT_CONFIGURED')" in domain_sql
+    assert domain_sql.count("SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())") == 2
+
+
+def test_large_batches_are_executed_in_waves_of_four(monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    def fake(chunk: tuple, tier: str, page: str) -> tuple:
+        calls.append(chunk)
+        return tuple(pd.DataFrame({"VALUE": [value]}) for value in chunk)
+
+    monkeypatch.setattr(query, "_execute_batch", fake)
+    frames = query._execute_batch_bounded(tuple(range(10)), "recent", "Security")
+    assert [len(chunk) for chunk in calls] == [4, 4, 2]
+    assert [int(frame.iloc[0]["VALUE"]) for frame in frames] == list(range(10))
+
+
+def test_bounded_batch_preserves_partial_indices_and_finishes_later_waves(monkeypatch) -> None:
+    calls: list[tuple] = []
+
+    def fake(chunk: tuple, tier: str, page: str) -> tuple:
+        calls.append(chunk)
+        if chunk[0] == 0:
+            raise query._BatchPartial(
+                {
+                    0: pd.DataFrame({"VALUE": [0]}),
+                    2: pd.DataFrame({"VALUE": [2]}),
+                },
+                {1: RuntimeError("member failed")},
+                {3},
+            )
+        return tuple(pd.DataFrame({"VALUE": [value]}) for value in chunk)
+
+    monkeypatch.setattr(query, "_execute_batch", fake)
+    with pytest.raises(query._BatchPartial) as caught:
+        query._execute_batch_bounded(tuple(range(6)), "recent", "Security")
+    assert calls == [(0, 1, 2, 3), (4, 5)]
+    assert set(caught.value.frames) == {0, 2, 4, 5}
+    assert set(caught.value.errors) == {1}
+    assert caught.value.pending == {3}
+
+
+def test_batch_member_cache_reuses_unchanged_siblings(monkeypatch) -> None:
+    import streamlit as st
+
+    calls: list[tuple] = []
+
+    def fake_fetch(sqls: tuple, scope: str, page: str) -> tuple:
+        calls.append(sqls)
+        return tuple(pd.DataFrame({"SQL": [statement]}) for statement in sqls)
+
+    query._batch_member_cache_clear()
+    st.session_state["_ow_refresh_salt"] = "v075-cache-test"
+    st.session_state["_ow_current_role"] = "ROLE_A"
+    st.session_state["_ow_batch_quarantine"] = {"salt": "v075-cache-test", "keys": set()}
+    monkeypatch.setitem(query._BATCH_FETCHERS, "recent", fake_fetch)
+    monkeypatch.setattr(query, "_telemetry", lambda *args, **kwargs: None)
+    monkeypatch.setattr(query, "record_error", lambda *args, **kwargs: None)
+    first = query.run_batch(
+        [{"key": "a", "sql": "SELECT 1"}, {"key": "b", "sql": "SELECT 2"}],
+        page="Security",
+        tier="recent",
+    )
+    second = query.run_batch(
+        [{"key": "a", "sql": "SELECT 1"}, {"key": "c", "sql": "SELECT 3"}],
+        page="Security",
+        tier="recent",
+    )
+    assert second is not None
+    second["a"].df.iloc[0, 0] = "MUTATED"
+    third = query.run_batch(
+        [{"key": "a", "sql": "SELECT 1"}], page="Security", tier="recent"
+    )
+    st.session_state["_ow_current_role"] = "ROLE_B"
+    fourth = query.run_batch(
+        [{"key": "a", "sql": "SELECT 1"}], page="Security", tier="recent"
+    )
+    assert first is not None and third is not None and fourth is not None
+    assert [len(call) for call in calls] == [2, 1, 1]
+    assert first["a"].df.iloc[0]["SQL"].startswith("SELECT 1")
+    assert third["a"].df.iloc[0]["SQL"].startswith("SELECT 1")
+    assert third["a"].df.iloc[0]["SQL"] != "MUTATED"
+    query._batch_member_cache_clear()
+
+
+def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
+    page = _read("app/ui/pages/security.py")
+    center = _read("app/ui/security_center.py")
+    assert page.index("render_security_overview") < page.index("_governance_score_panel()")
+    assert '"Access reviews"' in page
+    assert "security_login_fact_coverage" in page and "fact_coverage_complete" in page
+    assert "fact_coverage_complete(security_coverage, 90)" in page
+    assert "security_login_fact_coverage(90)" in page
+    assert "admin_role_holders(company)" in page
+    assert "new_network_logins_fact(days, company)" in page
+    assert "_domain_covered(coverage, \"TRUST CENTER\")" in page
+    assert 'active = pd.to_numeric(fdf["CURRENT_COUNT"]' in page
+    assert "stable_batch = run_batch" in page and "batch = run_batch" in page
+    assert page.count("snowsight_profile_column") >= 3
+    assert "apply_client_policies" in page and "apply_egress_policies" in page
+    assert "Show posture trend (90d)" in page
+    assert "Account-wide governance sheets:" in page
+    assert "with st.expander(\"Posture trend" not in page
+    for marker in (
+        "render_security_overview",
+        "render_identity_policy_manager",
+        "render_effective_access",
+        "render_client_policy_editor",
+        "render_egress_policy_editor",
+        "render_access_reviews",
+        '"Control Room", "Action Center"',
+        '"Control Room", "Entity 360"',
+        "No exceptions are queued from the evidence that resolved",
+        'frame["SCOPE"] = frame.apply(_scope_label, axis=1)',
+    ):
+        assert marker in page + center
+
+
+def test_deploy_and_rebuild_surfaces_track_v075() -> None:
+    assert 'APP_VERSION = "4.144.0"' in _read("app/config.py")
+    assert "## 4.144.0 - Security operating model and responsive query execution" in _read(
+        "CHANGELOG.md"
+    )
+    assert 'APP_WAREHOUSE = "WH_OVERWATCH_APP"' in _read("app/config.py")
+    assert "query_warehouse: WH_OVERWATCH_APP" in _read("snowflake.yml")
+    roles = _read("snowflake/roles.sql")
+    assert roles.count("GRANT USAGE ON WAREHOUSE WH_OVERWATCH_APP") == 2
+    assert roles.count(
+        "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG"
+    ) == 2
+    assert "SHOW GRANTS ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG" in roles
+    assert "V001..V075 applied" in _read("snowflake/validate.sql")
+    assert "SP_LOAD_SECURITY_FACTS(90)" in _read("snowflake/backfill_365.sql")
+    teardown = _read("snowflake/teardown.sql")
+    for name in (
+        "TASK_LOAD_SECURITY_FACTS",
+        "FACT_SECURITY_LOGIN_DAILY",
+        "SECURITY_IDENTITY_POLICY",
+        "ACCESS_REVIEW_DECISION_LOG",
+        "WH_OVERWATCH_APP",
+    ):
+        assert name in teardown
+    assert "V075__security_operating_model.sql" in _read("DEPLOYMENT.md")
+    assert "V075__security_operating_model.sql" in _read("README.md")
+
+
+def test_hidden_expander_reads_are_now_explicitly_gated() -> None:
+    admin = _read("app/ui/pages/admin.py")
+    optimize = _read("app/ui/pages/cost_parts/optimize.py")
+    assert 'st.toggle("Diagnose stale sources"' in admin
+    assert 'with st.expander("Why stale?' not in admin
+    what_if = optimize.split("def _whatif_panel", 1)[1].split("\ndef ", 1)[0]
+    assert "whatif_live_settings" in what_if
+    assert "if load_settings else None" in what_if

@@ -32,7 +32,9 @@ GRANT USAGE ON FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(VARCHAR) TO ROLE
 GRANT USAGE ON FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(VARCHAR) TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON FUNCTION DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(VARCHAR) TO ROLE SNOW_SYSADMINS;
 
--- Compute for interactive use.
+-- Compute: interactive app traffic is isolated from loader/task traffic.
+GRANT USAGE ON WAREHOUSE WH_OVERWATCH_APP TO ROLE SNOW_ACCOUNTADMINS;
+GRANT USAGE ON WAREHOUSE WH_OVERWATCH_APP TO ROLE SNOW_SYSADMINS;
 GRANT USAGE ON WAREHOUSE WH_ALFA_ADMIN TO ROLE SNOW_ACCOUNTADMINS;
 GRANT USAGE ON WAREHOUSE WH_ALFA_ADMIN TO ROLE SNOW_SYSADMINS;
 
@@ -43,21 +45,23 @@ REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT     FROM ROLE 
 REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT     FROM ROLE SNOW_SYSADMINS;
 REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG FROM ROLE SNOW_ACCOUNTADMINS;
 REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.REMEDIATION_LOG FROM ROLE SNOW_SYSADMINS;
+REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG FROM ROLE SNOW_ACCOUNTADMINS;
+REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG FROM ROLE SNOW_SYSADMINS;
 
--- Validate the seal (Wave 3 #5). The named REVOKEs above only protect the two
+-- Validate the seal (Wave 3 #5). The named REVOKEs above only protect the
 -- audit tables AS THEY EXIST RIGHT NOW. A restore (CREATE OR REPLACE TABLE ...
 -- CLONE, or UNDROP) re-materializes the table and REAPPLIES the schema's FUTURE
 -- grants — which include UPDATE/DELETE (lines 22-23) — silently reopening the
 -- audit trail. Snowflake future grants are schema-wide (there is NO per-table
 -- future grant), and operator tables in this schema legitimately need
 -- UPDATE/DELETE, so a blanket REVOKE ... ON FUTURE TABLES would break them and
--- is the wrong tool. Instead, FAIL LOUDLY if either audit table carries an
+-- is the wrong tool. Instead, FAIL LOUDLY if any audit table carries an
 -- UPDATE or DELETE grant to any role, so a restore can not silently reopen them.
--- Remediate by re-running the four REVOKE statements above.
+-- Remediate by re-running the REVOKE statements above.
 EXECUTE IMMEDIATE $$
 DECLARE
   audit_writable EXCEPTION (-20021,
-    'Append-only violation: ALERT_AUDIT and/or REMEDIATION_LOG carries an UPDATE or DELETE grant (a restore reapplied the schema FUTURE grant). Re-run the four REVOKE UPDATE, DELETE statements above to reseal the audit trail.');
+    'Append-only violation: ALERT_AUDIT, REMEDIATION_LOG and/or ACCESS_REVIEW_DECISION_LOG carries an UPDATE or DELETE grant (a restore reapplied the schema FUTURE grant). Re-run the REVOKE UPDATE, DELETE statements above to reseal the audit trail.');
   writable INTEGER DEFAULT 0;
   c INTEGER;
 BEGIN
@@ -69,10 +73,14 @@ BEGIN
   SELECT COUNT(*) INTO :c FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
     WHERE "privilege" IN ('UPDATE', 'DELETE');
   writable := writable + c;
+  SHOW GRANTS ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG;
+  SELECT COUNT(*) INTO :c FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+    WHERE "privilege" IN ('UPDATE', 'DELETE');
+  writable := writable + c;
   IF (writable > 0) THEN
     RAISE audit_writable;
   END IF;
-  RETURN 'Audit tables sealed — no UPDATE/DELETE grants on ALERT_AUDIT or REMEDIATION_LOG.';
+  RETURN 'Audit tables sealed — no UPDATE/DELETE grants on ALERT_AUDIT, REMEDIATION_LOG or ACCESS_REVIEW_DECISION_LOG.';
 END;
 $$;
 

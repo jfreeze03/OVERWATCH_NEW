@@ -202,6 +202,8 @@ _EXPECTED_MIGRATIONS = {
         "Current year account-time offsets alongside the fixed rolling windows",
     74: "operating workbench: audited action lifecycle, evidence links, entity ownership, "
         "personal watchlists, optimization experiments and SLO objectives",
+    75: "security operating model: dedicated interactive warehouse, materialized login/change "
+        "evidence, policy registries, Trust Center deltas and durable access reviews",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -424,7 +426,7 @@ def _migrations_tab() -> None:
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
         styled_table(fresh.df)
-        with st.expander("Why stale? — diagnose without reading raw errors"):
+        if st.toggle("Diagnose stale sources", key="adm_stale_diagnose"):
             # The deploy-gap week (2026-07): stale marts meant a failing
             # loader, a never-run backfill, or a suspended task. Map each
             # stale source to its likeliest cause from evidence we hold.
@@ -461,12 +463,13 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 
 def _self_cost_tab() -> None:
     st.caption(
-        "The monitoring app must never become the cost problem: WH_ALFA_ADMIN is XSMALL with a "
-        "60-second auto-suspend, and every app query carries an OVERWATCH query tag (no resource monitor since v4.45 — OVERWATCH_RM was suspending the warehouse mid-use)."
+        "The monitoring app must never become the cost problem: WH_OVERWATCH_APP isolates "
+        "interactive reads from WH_ALFA_ADMIN loader work; both are XSMALL with 60-second "
+        "auto-suspend, and every app query carries an OVERWATCH query tag."
     )
     st.caption(_SCAN_NOTE)
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
-              source="ACCOUNT_USAGE.QUERY_HISTORY (OVERWATCH tag or WH_ALFA_ADMIN)")
+              source="ACCOUNT_USAGE.QUERY_HISTORY (interactive app + loader work)")
     if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
         df = res.df.copy()
         total = int(pd.to_numeric(df["APP_QUERIES"], errors="coerce").fillna(0).sum())
@@ -572,10 +575,33 @@ def _observability_tab() -> None:
 
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
+    st.markdown("**Performance SLO scorecard (7d)**")
+    slo = run(
+        mart_sql.app_performance_slo(7), page=_PAGE, key="app_perf_slo",
+        tier="recent", source="APP_USAGE + APP_QUERY_TELEMETRY",
+    )
+    if slo.ok and slo.empty:
+        st.caption("Performance guardrails appear after first-paint and fetch telemetry accumulates.")
+    elif guard(slo, ""):
+        sdf = slo.df.copy()
+        states = sdf["SLO_STATE"].astype(str)
+        kpi_row([
+            {"label": "Passing pages", "value": f"{int((states == 'PASS').sum())}"},
+            {"label": "Failing pages", "value": f"{int((states == 'FAIL').sum())}",
+             "delta_color": "inverse" if (states == "FAIL").any() else "off"},
+            {"label": "Watch / insufficient", "value": f"{int(states.isin(('WATCH', 'INSUFFICIENT')).sum())}"},
+        ])
+        styled_table(sdf, height=300, sort_label="SLO state then p95 render time")
+        st.caption(
+            "Render p95 uses complete APP_USAGE first paints (minimum n=20). Failure and "
+            "cache rates are sample-reweighted; batch-wall telemetry is excluded from totals."
+        )
+        result_caption(slo)
+
     st.caption(
         "Every fetch the app persisted, grouped by page and query key — the slowest "
         "rows are the builders worth optimizing next, and the key names the call site. "
-        "The WH_ALFA_ADMIN statement-family scan (grouped by parameterized hash, with "
+        "The WH_OVERWATCH_APP statement-family scan (grouped by parameterized hash, with "
         "bytes scanned) is one toggle below."
     )
     telemetry = query_telemetry()
@@ -622,9 +648,9 @@ def _performance_tab() -> None:
                         "one thing the app's own telemetry cannot record."):
         st.caption(_SCAN_NOTE)
         scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
-                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN)")
+                   tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (WH_OVERWATCH_APP)")
         if guard(scan, "No statements on the app warehouse in the last 7 days.",
-                 setup_hint="Stats appear once the app and its tasks have run against WH_ALFA_ADMIN."):
+                 setup_hint="Stats appear once the app has run against WH_OVERWATCH_APP."):
             # House convention: styled_table, not a raw st.dataframe — it carries the
             # status/delta coloring, header prettifier, pinned identity column, and the
             # self-identifying CSV export that every other table on the page has.
@@ -639,7 +665,7 @@ def _performance_tab() -> None:
                     **_scan_cfg,
                 })
             result_caption(scan)
-            st.caption("Includes the loader/scan tasks — they share the warehouse by design.")
+            st.caption("Interactive statements only; loader and scan tasks remain on WH_ALFA_ADMIN.")
 
     st.markdown("**Page adoption (30d)**")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",

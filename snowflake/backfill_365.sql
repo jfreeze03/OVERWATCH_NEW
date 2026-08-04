@@ -149,6 +149,8 @@ CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('HOURLY', 90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_OPS_DIAG(90);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27('DAILY', 365);
 CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_PLATFORM_SCORE(120);
+-- V075: security detail is intentionally bounded to 90d even in the 365d pack.
+CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_SECURITY_FACTS(90);
 -- Optional full-year sweep for the cheap daily marts (wh efficiency, graphs)
 -- (fill the extract to the same width first):
 -- CALL DBA_MAINT_DB.OVERWATCH.SP_LOAD_QH_EXTRACT(365);

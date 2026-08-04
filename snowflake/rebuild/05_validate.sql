@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V074 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 74) = 74,
+    SELECT 'V001..V075 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 75) = 75,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -58,6 +58,11 @@ WITH checks AS (
            IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
                         WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'),
                'OK', 'CHECK: no events yet (lag) — confirm WH_ALFA_ADMIN via SHOW WAREHOUSES')
+    UNION ALL
+    SELECT 'WH_OVERWATCH_APP exists (event evidence)',
+           IFF(EXISTS (SELECT 1 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_EVENTS_HISTORY
+                        WHERE WAREHOUSE_NAME = 'WH_OVERWATCH_APP'),
+               'OK', 'CHECK: no events yet (lag) — confirm WH_OVERWATCH_APP via SHOW WAREHOUSES')
     UNION ALL
     SELECT 'Alert rules seeded',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 7, 'OK', 'FAIL')
@@ -132,12 +137,14 @@ WITH checks AS (
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 29,
                'OK', 'FAIL: expected >= 29 rules — seed incomplete')
     UNION ALL
-    SELECT 'Key procs present (LOAD_MARTS_V27/ALERT_SCAN/NOTIFY_WEBHOOK/NIGHTLY_RECONCILE)',
+    SELECT 'Key procs present (platform + security loaders and access reviews)',
            IFF((SELECT COUNT(DISTINCT PROCEDURE_NAME)
                   FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
                  WHERE PROCEDURE_SCHEMA = 'OVERWATCH'
                    AND PROCEDURE_NAME IN ('SP_LOAD_MARTS_V27', 'SP_ALERT_SCAN',
-                                          'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE')) = 4,
+                                          'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE',
+                                          'SP_LOAD_SECURITY_FACTS', 'SP_CREATE_ACCESS_REVIEW',
+                                          'SP_ACCESS_REVIEW_DECIDE')) = 7,
                'OK', 'FAIL: one or more key procs missing')
 )
 SELECT * FROM checks
@@ -170,20 +177,20 @@ DECLARE
     n_procs      INT;
     freshness_sla_days INT DEFAULT 3;   -- loader dead-man SLA (ACCOUNT_USAGE lag-aware)
 
-    e_migrations  EXCEPTION (-20011, 'VALIDATE FAIL: V001..V074 migration floor not met — run missing migrations');
+    e_migrations  EXCEPTION (-20011, 'VALIDATE FAIL: V001..V075 migration floor not met — run missing migrations');
     e_rate_pos    EXCEPTION (-20012, 'VALIDATE FAIL: CREDIT_PRICE_USD is <= 0 or non-numeric — everything prices to $0');
     e_rate_368    EXCEPTION (-20013, 'VALIDATE FAIL: CREDIT_PRICE_USD != 3.68 and no CREDIT_PRICE_OVERRIDE flag — seed SETTINGS(''CREDIT_PRICE_OVERRIDE'',''TRUE'') to run a non-default rate on purpose');
     e_meter_fresh EXCEPTION (-20014, 'VALIDATE FAIL: FACT_METERING_DAILY newest DAY older than the freshness SLA — the metering loader has stalled (empty passes: nothing loaded yet)');
     e_wh_fresh    EXCEPTION (-20015, 'VALIDATE FAIL: FACT_WAREHOUSE_DAILY newest DAY older than the freshness SLA — the warehouse loader has stalled (empty passes: nothing loaded yet)');
     e_route_blank EXCEPTION (-20016, 'VALIDATE FAIL: an ENABLED ALERT_ROUTES row has a blank INTEGRATION_NAME — those alerts drop silently');
     e_alert_cfg   EXCEPTION (-20017, 'VALIDATE FAIL: ALERT_CONFIG rule count below the expected floor (29) — the rule seed is incomplete');
-    e_procs       EXCEPTION (-20018, 'VALIDATE FAIL: a key proc is missing (SP_LOAD_MARTS_V27 / SP_ALERT_SCAN / SP_NOTIFY_WEBHOOK / SP_NIGHTLY_RECONCILE)');
+    e_procs       EXCEPTION (-20018, 'VALIDATE FAIL: a key platform/security proc is missing');
 BEGIN
-    -- (a) migration floor: V001..V074 all applied.
+    -- (a) migration floor: V001..V075 all applied.
     SELECT COUNT(DISTINCT VERSION) INTO :n_versions
       FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-     WHERE VERSION BETWEEN 1 AND 74;
-    IF (n_versions < 74) THEN RAISE e_migrations; END IF;
+     WHERE VERSION BETWEEN 1 AND 75;
+    IF (n_versions < 75) THEN RAISE e_migrations; END IF;
 
     -- (b) credit rate is a positive number.
     SELECT TRY_TO_DOUBLE(VALUE) INTO :v_rate
@@ -227,8 +234,10 @@ BEGIN
       FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
      WHERE PROCEDURE_SCHEMA = 'OVERWATCH'
        AND PROCEDURE_NAME IN ('SP_LOAD_MARTS_V27', 'SP_ALERT_SCAN',
-                              'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE');
-    IF (n_procs < 4) THEN RAISE e_procs; END IF;
+                              'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE',
+                              'SP_LOAD_SECURITY_FACTS', 'SP_CREATE_ACCESS_REVIEW',
+                              'SP_ACCESS_REVIEW_DECIDE');
+    IF (n_procs < 7) THEN RAISE e_procs; END IF;
 
     RETURN 'validate.sql contract: all load-bearing assertions passed';
 END;

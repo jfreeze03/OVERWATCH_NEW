@@ -139,7 +139,7 @@ def app_statement_stats_telemetry(days: int = 7) -> str:
     telemetry instead of a QUERY_HISTORY scan.
 
     app_statement_stats() answers the same question by scanning
-    ACCOUNT_USAGE.QUERY_HISTORY for a week of WH_ALFA_ADMIN traffic — 4.6s, and
+    ACCOUNT_USAGE.QUERY_HISTORY for a week of WH_OVERWATCH_APP traffic — 4.6s, and
     ironically the Admin > Performance panel's own worst offender. APP_QUERY_TELEMETRY
     already records every fetch the app decided to keep, keyed by PAGE + QUERY_KEY,
     which is a BETTER grain than QUERY_PARAMETERIZED_HASH for "which builder do I
@@ -601,19 +601,23 @@ LIMIT {limit}
 
 
 def app_self_cost(days: int) -> str:
-    """What OVERWATCH itself spends: tagged queries + the app warehouse."""
+    """What OVERWATCH itself spends: interactive app plus loader warehouse."""
+    from app.config import APP_WAREHOUSE
+
     days = bounded_days(days, maximum=30)
     return f"""
 SELECT
     DATE(START_TIME) AS DAY,
+    IFF(WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}, 'INTERACTIVE APP', 'LOADERS / TASKS') AS WORKLOAD,
     COUNT(*) AS APP_QUERIES,
     SUM(TOTAL_ELAPSED_TIME) / 1000.0 AS ELAPSED_SEC,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND (QUERY_TAG LIKE 'OVERWATCH%' OR WAREHOUSE_NAME = 'WH_ALFA_ADMIN')
-GROUP BY 1
-ORDER BY DAY
+  AND (QUERY_TAG LIKE 'OVERWATCH%'
+       OR WAREHOUSE_NAME IN ({sql_literal(APP_WAREHOUSE)}, 'WH_ALFA_ADMIN'))
+GROUP BY 1, 2
+ORDER BY DAY, WORKLOAD
 """
 
 
@@ -839,6 +843,63 @@ ORDER BY VISITS DESC
 """
 
 
+def app_performance_slo(days: int = 7) -> str:
+    """Per-page render/fetch guardrails from already-persisted app evidence."""
+    days = bounded_days(days, 30)
+    return f"""
+WITH target AS (
+    SELECT COALESCE(MAX(IFF(RULE_ID = 'OPS_SLOW_RENDER', THRESHOLD_NUM, NULL)), 8) * 1000
+             AS RENDER_TARGET_MS
+    FROM {core_object('ALERT_CONFIG')}
+), renders AS (
+    SELECT PAGE, COUNT(*) AS RENDER_SAMPLES,
+           ROUND(APPROX_PERCENTILE(RENDER_MS, 0.95), 0) AS P95_RENDER_MS
+    FROM {core_object('APP_USAGE')}
+    WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND RENDER_MS IS NOT NULL
+    GROUP BY PAGE
+), fetches AS (
+    SELECT PAGE,
+           ROUND(SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0))) AS EST_FETCHES,
+           ROUND(SUM(IFF(NOT OK, 1.0 / COALESCE(SAMPLE_PROB, 1.0), 0))
+                 / NULLIF(SUM(1.0 / COALESCE(SAMPLE_PROB, 1.0)), 0) * 100, 2)
+             AS EST_FAILURE_PCT,
+           ROUND(
+             SUM(IFF(CACHE_HIT IS NULL, 0,
+                     IFF(CACHE_HIT, 1, 0) / COALESCE(SAMPLE_PROB, 1.0)))
+             / NULLIF(SUM(IFF(CACHE_HIT IS NULL, 0,
+                              1.0 / COALESCE(SAMPLE_PROB, 1.0))), 0) * 100,
+             1
+           ) AS CACHE_HIT_PCT
+    FROM {core_object('APP_QUERY_TELEMETRY')}
+    WHERE AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND NOT STARTSWITH(QUERY_KEY, 'batch_wall:')
+    GROUP BY PAGE
+), joined AS (
+    SELECT COALESCE(r.PAGE, f.PAGE) AS PAGE,
+           COALESCE(r.RENDER_SAMPLES, 0) AS RENDER_SAMPLES,
+           r.P95_RENDER_MS, t.RENDER_TARGET_MS,
+           COALESCE(f.EST_FETCHES, 0) AS EST_FETCHES,
+           f.EST_FAILURE_PCT, f.CACHE_HIT_PCT
+    FROM renders r
+    FULL OUTER JOIN fetches f ON f.PAGE = r.PAGE
+    CROSS JOIN target t
+)
+SELECT *, 1.0 AS FAILURE_TARGET_PCT, 60.0 AS CACHE_TARGET_PCT,
+       CASE
+         WHEN RENDER_SAMPLES < 20 THEN 'INSUFFICIENT'
+         WHEN P95_RENDER_MS > RENDER_TARGET_MS
+           OR COALESCE(EST_FAILURE_PCT, 0) > 1.0 THEN 'FAIL'
+         WHEN CACHE_HIT_PCT IS NULL OR CACHE_HIT_PCT < 60.0 THEN 'WATCH'
+         ELSE 'PASS'
+       END AS SLO_STATE
+FROM joined
+ORDER BY CASE SLO_STATE WHEN 'FAIL' THEN 0 WHEN 'WATCH' THEN 1
+                       WHEN 'INSUFFICIENT' THEN 2 ELSE 3 END,
+         P95_RENDER_MS DESC NULLS LAST
+"""
+
+
 def contract_exhaustion() -> str:
     """The CIO number: projected contract exhaustion at the canonical trailing-30-
     COMPLETE-days burn (rec 20). DAILY_BURN = SUM(billed) over DAY BETWEEN today-30
@@ -891,7 +952,7 @@ def app_cost_quarter() -> str:
     return f"""
 SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_QTD
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
-WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'
+WHERE WAREHOUSE_NAME IN ('WH_ALFA_ADMIN', 'WH_OVERWATCH_APP')
   AND DAY >= DATE_TRUNC('quarter', CURRENT_DATE())
 """
 

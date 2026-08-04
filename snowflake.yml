@@ -10,7 +10,7 @@ entities:
       schema: OVERWATCH
     stage: DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE
     main_file: streamlit_app.py
-    query_warehouse: WH_ALFA_ADMIN
+    query_warehouse: WH_OVERWATCH_APP
     title: "OVERWATCH — Snowflake Command Center"
     artifacts:
       - streamlit_app.py
