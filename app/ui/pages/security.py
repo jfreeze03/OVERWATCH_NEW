@@ -17,9 +17,6 @@ from app.logic.directory import resolve_display
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.logic.security import (
-    apply_client_policies,
-    apply_egress_policies,
-    enrich_identity_policy,
     fact_coverage_complete,
 )
 from app.ui import charts
@@ -42,11 +39,7 @@ from app.ui.components import (
     with_user_names,
 )
 from app.ui.security_center import (
-    render_access_reviews,
-    render_client_policy_editor,
     render_effective_access,
-    render_egress_policy_editor,
-    render_identity_policy_manager,
     render_security_overview,
 )
 
@@ -105,13 +98,6 @@ def _access_tab(company: str, days: int) -> None:
     ], page=_PAGE,
        tier="hourly" if use_security_fact and use_security_network_fact else "recent")
 
-    policies = run(
-        security_sql.identity_policies(company), page=_PAGE,
-        key=f"sec_identity_policies_{company}",
-        tier="live", source="SECURITY_IDENTITY_POLICY", probe=True,
-    )
-    policy_frame = render_identity_policy_manager(policies, company)
-
     mfa = stable_batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
               tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")
     if not mfa.ok or (mfa.empty and not fact_coverage_complete(legacy_coverage, 30)):
@@ -144,7 +130,7 @@ def _access_tab(company: str, days: int) -> None:
             "value": f"{len(mfa.df)}",
             "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
         }])
-        styled_table(with_user_names(enrich_identity_policy(mfa.df, policy_frame), _PAGE))
+        styled_table(with_user_names(mfa.df, _PAGE))
         result_caption(mfa)
 
     left, right = st.columns(2)
@@ -157,7 +143,7 @@ def _access_tab(company: str, days: int) -> None:
         if res.ok and res.empty:
             st.success("No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
-            styled_table(with_user_names(enrich_identity_policy(res.df, policy_frame), _PAGE))
+            styled_table(with_user_names(res.df, _PAGE))
     with right:
         section_header("Privileged role holders", "info", "admin", anchor="sec-privroles")
         res = stable_batch.get("admins") or run(
@@ -165,7 +151,7 @@ def _access_tab(company: str, days: int) -> None:
                   key=f"admins_{company}",
                   tier="metadata", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
         if guard(res, "No SNOW_ACCOUNTADMINS/SNOW_SYSADMINS grants visible to this role."):
-            _admin_frame = enrich_identity_policy(res.df, policy_frame)
+            _admin_frame = res.df
             styled_table(with_user_names(with_user_names(_admin_frame, _PAGE), _PAGE,
                                          user_col="GRANTED_BY", display_col="Granted by"))
             st.caption("This list should be short and every name should be expected.")
@@ -198,7 +184,7 @@ def _access_tab(company: str, days: int) -> None:
                     "An IP quiet for 90+ days re-flags on purpose — better a stale re-flag "
                     "than a silent novel network.",
         }])
-        styled_table(with_user_names(enrich_identity_policy(nn.df, policy_frame), _PAGE))
+        styled_table(with_user_names(nn.df, _PAGE))
         st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
@@ -244,10 +230,9 @@ def _access_tab(company: str, days: int) -> None:
                  "delta_color": "inverse" if len(high) else "off"},
             ])
             styled_table(
-                with_user_names(enrich_identity_policy(ranked, policy_frame), _PAGE)[[
+                with_user_names(ranked, _PAGE)[[
                     "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
-                    "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN", "IDENTITY_TYPE",
-                    "IDENTITY_OWNER"]],
+                    "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
             )
             st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
             result_caption(res)
@@ -286,12 +271,6 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     (QUERY_TYPE='UNLOAD') — because exfiltration and a surprise egress bill
     both start as 'bytes moved that nobody was watching'."""
     st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
-    policies = run(
-        security_sql.egress_policies(company), page=_PAGE,
-        key=f"sec_egress_policies_{company}",
-        tier="live", source="SECURITY_EGRESS_POLICY", probe=True,
-    )
-    render_egress_policy_editor(policies, company)
     section_header("Outbound transfer (account-wide)", "info", "security")
     xfer = run(security_sql.egress_daily(days), page=_PAGE, key=f"egress_{days}",
                tier="recent", source="ACCOUNT_USAGE.DATA_TRANSFER_HISTORY")
@@ -299,27 +278,12 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
         st.success("No cross-cloud or cross-region transfer in this window.")
     elif guard(xfer, "", setup_hint="Needs the ACCOUNT_USAGE.DATA_TRANSFER_HISTORY view."):
         xdf = xfer.df.copy()
-        if policies.ok:
-            xdf = apply_egress_policies(
-                xdf,
-                policies.df,
-                target_col="TARGET_REGION",
-                target_kind="REGION",
-                company=company,
-            )
         _by_tgt = xdf.groupby("TARGET_REGION")["GB"].sum().sort_values(ascending=False)
-        _unapproved = (
-            int((xdf["POLICY_STATUS"].astype(str) == "UNAPPROVED").sum())
-            if "POLICY_STATUS" in xdf else 0
-        )
         kpi_row([
             {"label": f"Egress GB · {days}d", "value": f"{float(xdf['GB'].sum()):,.1f}"},
             {"label": "Top destination", "value": str(_by_tgt.index[0]) if len(_by_tgt) else "—",
              "help": "Region receiving the most bytes. An unexpected destination is the finding."},
             {"label": "Destinations", "value": f"{int((_by_tgt > 0).sum())}"},
-            {"label": "Unapproved rows", "value": f"{_unapproved}",
-             "delta_color": "inverse" if _unapproved else "off",
-             "help": "Rows whose destination region matches no active approval policy."},
         ])
         charts.daily_stacked_count(xdf, "DAY", "TARGET_REGION", "GB", title="GB by destination region")
         styled_table(xdf.sort_values("GB", ascending=False).head(50), height=240)
@@ -360,25 +324,11 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
         st.success("No unloads to stages in this window for this scope.")
     elif guard(unl, ""):
         udf = unl.df.copy()
-        if policies.ok and "TARGET_LOCATION" in udf:
-            udf = apply_egress_policies(
-                udf,
-                policies.df,
-                target_col="TARGET_LOCATION",
-                target_kind="STAGE",
-                company=company,
-            )
         udf, profile_config = snowsight_profile_column(udf, _PAGE)
-        _unapproved = (
-            int((udf["POLICY_STATUS"].astype(str) == "UNAPPROVED").sum())
-            if "POLICY_STATUS" in udf else 0
-        )
         kpi_row([
             {"label": "Unload runs", "value": f"{int(udf['UNLOADS'].sum())}"},
             {"label": "GB written out", "value": f"{float(udf['GB_OUT'].sum()):,.1f}"},
             {"label": "Users unloading", "value": f"{udf['USER_NAME'].nunique()}"},
-            {"label": "Unapproved rows", "value": f"{_unapproved}",
-             "delta_color": "inverse" if _unapproved else "off"},
         ])
         styled_table(with_user_names(udf, _PAGE), height=320, column_config=profile_config,
                      sort_label="day then GB written")
@@ -721,26 +671,13 @@ def _clients_tab(company: str, days: int) -> None:
         return
     if not guard(res, "", setup_hint="Needs the ACCOUNT_USAGE.SESSIONS view (IMPORTED PRIVILEGES on the SNOWFLAKE db)."):
         return
-    policies = run(
-        security_sql.client_policies(), page=_PAGE, key="sec_client_policies",
-        tier="live", source="SECURITY_CLIENT_POLICY", probe=True,
-    )
-    df = apply_client_policies(res.df, policies.df if policies.ok else pd.DataFrame())
+    df = res.df.copy()
     behind = int((df["STATUS"].astype(str) == "BEHIND").sum())
-    unsupported = int((df["POLICY_STATUS"].astype(str) == "UNSUPPORTED").sum())
-    near_eol = int((df["POLICY_STATUS"].astype(str) == "NEAR_EOL").sum())
-    unknown = int((df["POLICY_STATUS"].astype(str) == "UNKNOWN").sum())
     kpi_row([
         {"label": "Driver families", "value": f"{df['DRIVER'].nunique()}"},
         {"label": "Driver+version combos", "value": f"{len(df)}"},
-        {"label": "Unsupported by policy", "value": f"{unsupported}",
-         "delta_color": "inverse" if unsupported else "off"},
-        {"label": "Near support review", "value": f"{near_eol}",
-         "delta_color": "inverse" if near_eol else "off"},
-        {"label": "Unclassified", "value": f"{unknown}",
-         "help": "Driver/version combinations with no minimum-version policy."},
     ])
-    styled_table(df, height=380, sort_label="support policy then last seen")
+    styled_table(df, height=380, sort_label="last seen")
     st.caption(
         f"{behind} combinations trail the newest observed version; that is context, "
         "not the support verdict."
@@ -749,7 +686,6 @@ def _clients_tab(company: str, days: int) -> None:
                   file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
                   mime="text/csv", key="sec_drivers_csv")
     result_caption(res)
-    render_client_policy_editor(policies, df)
 
 
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
@@ -871,7 +807,7 @@ def render() -> None:
     _post90 = _governance_score_panel()
     _posture_trend_panel(_post90)
     section = lazy_sections(
-        ["Access", "Changes", "Clients", "Egress", "Trust Center", "Access reviews"],
+        ["Access", "Changes", "Clients", "Egress", "Trust Center"],
         key="sec_section",
     )
     _contracts = {
@@ -895,23 +831,17 @@ def render() -> None:
             "applies": (),
             "note": "Account-wide scanner posture and change since the prior snapshot.",
         },
-        "Access reviews": {
-            "applies": ("company",),
-            "note": "Durable role-grant review snapshots and auditor-facing exports.",
-        },
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Access":
         _access_tab(f["company"], f["days"])
+        st.divider()
+        _export_pack(f["company"], f["days"], f["window_label"])
     elif section == "Changes":
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Clients":
         _clients_tab(f["company"], f["days"])
     elif section == "Egress":
         _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"])
-    elif section == "Trust Center":
-        _trust_center_tab()
     else:
-        render_access_reviews(f["company"])
-        st.divider()
-        _export_pack(f["company"], f["days"], f["window_label"])
+        _trust_center_tab()

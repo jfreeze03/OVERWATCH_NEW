@@ -11,16 +11,9 @@ import app.core.query as query
 from app.core.result import QueryResult
 from app.data import mart_sql, security_sql
 from app.logic.security import (
-    access_review_decision_sql,
-    apply_client_policies,
-    apply_egress_policies,
-    create_access_review_sql,
     domain_posture,
     fact_coverage_complete,
-    insert_egress_policy_sql,
     security_change_risk,
-    upsert_client_policy_sql,
-    upsert_identity_policy_sql,
 )
 from app.ui.security_center import _cell_text
 
@@ -155,46 +148,6 @@ def test_fact_coverage_requires_span_and_freshness(monkeypatch) -> None:
     assert not fact_coverage_complete(complete, 90)
 
 
-def test_client_and_egress_verdicts_are_policy_driven() -> None:
-    observed = pd.DataFrame(
-        {
-            "DRIVER": ["Python", "Python", "Python", "JDBC"],
-            "VERSION": ["3.9.1", "3.10.2", "?", "3.14"],
-        }
-    )
-    policies = pd.DataFrame(
-        {
-            "DRIVER": ["Python"],
-            "MIN_APPROVED_VERSION": ["3.10.0"],
-            "WARN_AFTER": ["2099-01-01"],
-            "OWNER_NAME": ["Platform"],
-        }
-    )
-    clients = apply_client_policies(observed, policies)
-    assert clients["POLICY_STATUS"].tolist() == [
-        "UNSUPPORTED",
-        "SUPPORTED",
-        "UNKNOWN",
-        "UNKNOWN",
-    ]
-
-    transfers = pd.DataFrame({"TARGET_REGION": ["AWS_US_EAST_1", "AZURE_WESTEUROPE"]})
-    approvals = pd.DataFrame(
-        {
-            "TARGET_KIND": ["REGION", "REGION"],
-            "COMPANY": ["ALFA", "ALFA"],
-            "TARGET_PATTERN": ["AWS_%", "AZURE_%"],
-            "OWNER_NAME": ["Security", "Security"],
-            "STATUS": ["APPROVED", "REVOKED"],
-            "EXPIRES_ON": [None, None],
-        }
-    )
-    egress = apply_egress_policies(
-        transfers, approvals, target_col="TARGET_REGION", target_kind="REGION", company="ALFA"
-    )
-    assert egress["POLICY_STATUS"].tolist() == ["APPROVED", "UNAPPROVED"]
-
-
 def test_change_risk_is_monotonic_for_sensitive_context() -> None:
     low = security_change_risk("CREATE_TABLE", "ANALYST", "DEV_DB")
     destructive = security_change_risk("DROP", "ACCOUNTADMIN", "PROD_DB")
@@ -204,68 +157,12 @@ def test_change_risk_is_monotonic_for_sensitive_context() -> None:
     assert drop_user == (90, "CRITICAL", "DESTRUCTIVE")
 
 
-def test_security_write_builders_parse_and_egress_save_is_an_upsert() -> None:
-    sqlglot = pytest.importorskip("sqlglot")
-    egress = insert_egress_policy_sql(
-        company="ALFA",
-        target_kind="REGION",
-        pattern="AWS_%",
-        owner="Security",
-        expires_on="2027-01-01",
-        notes="Approved path",
-        actor="JFREE",
-    )
-    statements = (
-        upsert_identity_policy_sql(
-            "SERVICE_USER",
-            identity_type="SERVICE",
-            owner="Platform",
-            auth_method="KEYPAIR",
-            network="10.%",
-            rotation_days=90,
-            exception_until=None,
-            notes="Automation",
-            actor="JFREE",
-        ),
-        egress,
-        upsert_client_policy_sql(
-            "Python",
-            minimum_version="3.10.0",
-            warn_after="2027-01-01",
-            owner="Platform",
-            notes="Supported floor",
-            actor="JFREE",
-        ),
-        create_access_review_sql(
-            "AR-TEST",
-            title="Quarterly review",
-            company="ALFA",
-            due_date="2026-08-31",
-            actor="JFREE",
-        ),
-        access_review_decision_sql(
-            "AR-TEST",
-            "ITEM-1",
-            decision="KEEP",
-            reason="Expected access",
-            actor="JFREE",
-        ),
-    )
-    for statement in statements:
-        sqlglot.parse(statement, dialect="snowflake")
-    assert egress.startswith("MERGE INTO")
-    assert "WHEN MATCHED THEN UPDATE SET" in egress
-
-
 def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     sqlglot = pytest.importorskip("sqlglot")
     builders = (
         security_sql.security_exception_queue("ALFA"),
         security_sql.security_domain_coverage(),
         security_sql.trust_center_delta(),
-        security_sql.identity_policies("ALFA"),
-        security_sql.egress_policies("ALFA"),
-        security_sql.client_policies(),
         security_sql.login_fact_coverage(30),
         security_sql.security_login_fact_coverage(30),
         security_sql.failed_logins_fact(7, "ALFA"),
@@ -274,9 +171,6 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
         security_sql.recent_ddl_changes_fact(7, "ALFA"),
         security_sql.admin_role_activity_fact(7, "ALFA"),
         security_sql.effective_access("ALFA"),
-        security_sql.access_review_campaigns(company="ALFA"),
-        security_sql.access_review_items("AR-TEST"),
-        security_sql.access_review_decisions("AR-TEST"),
         security_sql.egress_baseline(7),
         mart_sql.app_performance_slo(7),
     )
@@ -302,14 +196,9 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
         security_sql.admin_role_activity(7, "ALFA"),
         security_sql.new_network_logins(7, "ALFA"),
         security_sql.new_network_logins_fact(7, "ALFA"),
-        security_sql.identity_policies("ALFA"),
     ):
         assert "COMPANY_FOR_USER" in scoped
         assert "'ALFA'" in scoped
-    assert "UPPER(COMPANY) = 'ALFA'" in security_sql.egress_policies("ALFA")
-    assert "UPPER(c.COMPANY) = 'ALFA'" in security_sql.access_review_campaigns(
-        company="ALFA"
-    )
     perf = mart_sql.app_performance_slo(7)
     assert "RENDER_SAMPLES < 20" in perf
     assert "NOT STARTSWITH(QUERY_KEY, 'batch_wall:')" in perf
@@ -404,7 +293,6 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
     page = _read("app/ui/pages/security.py")
     center = _read("app/ui/security_center.py")
     assert page.index("render_security_overview") < page.index("_governance_score_panel()")
-    assert '"Access reviews"' in page
     assert "security_login_fact_coverage" in page and "fact_coverage_complete" in page
     assert "fact_coverage_complete(security_coverage, 90)" in page
     assert "security_login_fact_coverage(90)" in page
@@ -414,17 +302,12 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
     assert 'active = pd.to_numeric(fdf["CURRENT_COUNT"]' in page
     assert "stable_batch = run_batch" in page and "batch = run_batch" in page
     assert page.count("snowsight_profile_column") >= 3
-    assert "apply_client_policies" in page and "apply_egress_policies" in page
     assert "Show posture trend (90d)" in page
     assert "Account-wide governance sheets:" in page
     assert "with st.expander(\"Posture trend" not in page
     for marker in (
         "render_security_overview",
-        "render_identity_policy_manager",
         "render_effective_access",
-        "render_client_policy_editor",
-        "render_egress_policy_editor",
-        "render_access_reviews",
         '"Control Room", "Action Center"',
         '"Control Room", "Entity 360"',
         "No exceptions are queued from the evidence that resolved",
@@ -434,8 +317,8 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.145.0"' in _read("app/config.py")
-    assert "## 4.145.0 - Decision Studio trust pass: name measured vs heuristic" in _read(
+    assert 'APP_VERSION = "4.146.0"' in _read("app/config.py")
+    assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
     assert 'APP_WAREHOUSE = "WH_ALFA_ADMIN"' in _read("app/config.py")

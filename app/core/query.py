@@ -420,11 +420,6 @@ _DOMAIN_TOKENS = {
     "watchlist": ("USER_WATCHLIST",),
     "experiments": ("OPTIMIZATION_EXPERIMENTS",),
     "objectives": ("SLO_OBJECTIVES",),
-    "security": (
-        "SECURITY_IDENTITY_POLICY", "SECURITY_EGRESS_POLICY",
-        "SECURITY_CLIENT_POLICY", "ACCESS_REVIEW_CAMPAIGNS",
-        "ACCESS_REVIEW_ITEMS",
-    ),
 }
 
 

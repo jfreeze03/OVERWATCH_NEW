@@ -727,41 +727,6 @@ LIMIT 200
 """
 
 
-def identity_policies(company: str = "ALL") -> str:
-    where = and_where(companies.user_clause(company, "USER_NAME"))
-    return f"""
-SELECT USER_NAME, IDENTITY_TYPE, OWNER_NAME, EXPECTED_AUTH_METHOD,
-       EXPECTED_NETWORK, ROTATION_DAYS, EXCEPTION_UNTIL, NOTES,
-       UPDATED_AT, UPDATED_BY
-FROM {core_object('SECURITY_IDENTITY_POLICY')}
-WHERE {where}
-ORDER BY USER_NAME
-LIMIT 2000
-"""
-
-
-def egress_policies(company: str = "ALL") -> str:
-    where = and_where(_local_company_clause(company))
-    return f"""
-SELECT POLICY_ID, COMPANY, TARGET_KIND, TARGET_PATTERN, OWNER_NAME,
-       STATUS, EXPIRES_ON, NOTES, UPDATED_AT, UPDATED_BY
-FROM {core_object('SECURITY_EGRESS_POLICY')}
-WHERE {where}
-ORDER BY TARGET_KIND, TARGET_PATTERN
-LIMIT 1000
-"""
-
-
-def client_policies() -> str:
-    return f"""
-SELECT DRIVER, MIN_APPROVED_VERSION, WARN_AFTER, OWNER_NAME, NOTES,
-       UPDATED_AT, UPDATED_BY
-FROM {core_object('SECURITY_CLIENT_POLICY')}
-ORDER BY DRIVER
-LIMIT 500
-"""
-
-
 def login_fact_coverage(days: int = 30) -> str:
     days = bounded_days(days, maximum=90)
     return f"""
@@ -968,51 +933,6 @@ FROM role_tree r
 LEFT JOIN privilege_rollup p ON p.ROLE_NAME = r.EFFECTIVE_ROLE
 ORDER BY RISK_SCORE DESC, r.USER_NAME, r.DEPTH
 LIMIT 3000
-"""
-
-
-def access_review_campaigns(limit: int = 100, company: str = "ALL") -> str:
-    limit = max(1, min(int(limit or 100), 500))
-    where = and_where(_local_company_clause(company, "c.COMPANY"))
-    return f"""
-SELECT c.CAMPAIGN_ID, c.TITLE, c.COMPANY, c.STATUS, c.DUE_DATE, c.SNAPSHOT_AT,
-       COUNT(i.ITEM_ID) AS ITEMS,
-       COUNT_IF(i.DECISION = 'PENDING') AS PENDING,
-       COUNT_IF(i.DECISION = 'KEEP') AS KEPT,
-       COUNT_IF(i.DECISION = 'REVOKE') AS REVOKE,
-       COUNT_IF(i.DECISION = 'EXCEPTION') AS EXCEPTIONS,
-       c.CREATED_BY, c.COMPLETED_AT
-FROM {core_object('ACCESS_REVIEW_CAMPAIGNS')} c
-LEFT JOIN {core_object('ACCESS_REVIEW_ITEMS')} i ON i.CAMPAIGN_ID = c.CAMPAIGN_ID
-WHERE {where}
-GROUP BY c.CAMPAIGN_ID, c.TITLE, c.COMPANY, c.STATUS, c.DUE_DATE,
-         c.SNAPSHOT_AT, c.CREATED_BY, c.COMPLETED_AT
-ORDER BY IFF(c.STATUS = 'COMPLETE', 1, 0), c.DUE_DATE, c.SNAPSHOT_AT DESC
-LIMIT {limit}
-"""
-
-
-def access_review_items(campaign_id: str, limit: int = 2000) -> str:
-    limit = max(1, min(int(limit or 2000), 5000))
-    return f"""
-SELECT ITEM_ID, CAMPAIGN_ID, USER_NAME, ROLE_NAME, ACCESS_PATH, OWNER_NAME,
-       DECISION, REVIEWER, DECISION_REASON, DECIDED_AT, SNAPSHOT_AT
-FROM {core_object('ACCESS_REVIEW_ITEMS')}
-WHERE CAMPAIGN_ID = {sql_literal(campaign_id, 80)}
-ORDER BY IFF(DECISION = 'PENDING', 0, 1), USER_NAME, ROLE_NAME
-LIMIT {limit}
-"""
-
-
-def access_review_decisions(campaign_id: str, limit: int = 1000) -> str:
-    limit = max(1, min(int(limit or 1000), 5000))
-    return f"""
-SELECT DECISION_ID, CAMPAIGN_ID, ITEM_ID, DECISION, DECISION_REASON,
-       REVIEWER, DECIDED_AT
-FROM {core_object('ACCESS_REVIEW_DECISION_LOG')}
-WHERE CAMPAIGN_ID = {sql_literal(campaign_id, 80)}
-ORDER BY DECIDED_AT DESC
-LIMIT {limit}
 """
 
 

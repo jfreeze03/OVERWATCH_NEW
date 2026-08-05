@@ -108,10 +108,11 @@ def test_client_drivers_builder_shape():
 
 def test_clients_panel_wired_and_canaried():
     # r25 superseded the 4-section list: owner picked #7 (egress watch), which
-    # earned its own lazy section between Clients and Trust Center.
-    for label in ("Access", "Changes", "Clients", "Egress", "Trust Center", "Access reviews"):
+    # earned its own lazy section between Clients and Trust Center. v4.146.0
+    # trimmed Security back to read-only posture, dropping the "Access reviews"
+    # section (the policy/review write surfaces were removed).
+    for label in ("Access", "Changes", "Clients", "Egress", "Trust Center"):
         assert f'"{label}"' in _SECURITY
-    assert _SECURITY.index('"Trust Center"') < _SECURITY.index('"Access reviews"')
     assert "ACCOUNT_USAGE.SESSIONS" in _SECURITY
     assert "sec_drivers_csv" in _SECURITY                     # inventory is exportable
     assert "(not reported)" in _SECURITY                      # honest PROGRAM caveat

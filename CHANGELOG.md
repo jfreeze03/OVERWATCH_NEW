@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.146.0 - Security page trimmed to read-only posture (2026-08-05)
+
+Security was over-expanded into a full operating console (policy editors, access-review
+campaigns) that "broke the current model." This trims the app back to the **read
+improvements only** — posture overview, faster fact-backed panels, and effective-access
+drill — and removes the policy/review write surfaces from the UI, logic, data and cache
+layers. The V075 migration still ships those tables (unapplied); a follow-up slims the
+migration to match. No behavior change to any surviving panel.
+
 ## 4.145.0 - Decision Studio trust pass: name measured vs heuristic (2026-08-04)
 
 Decision Studio computes correct dollars, but its `CONFIDENCE`, `LANE` and priority
