@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.145.0 - Decision Studio trust pass: name measured vs heuristic (2026-08-04)
+
+Decision Studio computes correct dollars, but its `CONFIDENCE`, `LANE` and priority
+scores are evidence-weighted **heuristics** that looked like measurements — so the
+numbers were hard to trust. This makes the basis explicit at the point of display
+(the `metric_registry` ethos, applied to decision scores).
+
+- `decision_rows` gains `impact_help` / `confidence_help` so each surface states what
+  its Impact $ and 0-1 Confidence actually are — they look identical across surfaces
+  but are not the same thing.
+- **Portfolio:** Impact is labeled measured ("observed cost, not promised savings");
+  Confidence is labeled an evidence heuristic (run recency + active-day coverage +
+  cost presence), explicitly "NOT statistical confidence"; and a caption states the
+  exact lane rule (ACT NOW = top-20% priority AND confidence ≥ 0.65; VALIDATE =
+  confidence < 0.5; otherwise PLAN) and which columns are measured vs heuristic.
+- **Action Center:** its Impact is labeled an authored ESTIMATE (modeled, not billed;
+  de-duplicated in scenarios, never mixed with verified savings) and its Confidence an
+  authored belief, not a measurement.
+
+No behavior or math changed — display-only labeling. Gates green: ruff, mypy,
+**pytest 2056 passed / 1 skipped** (new `tests/test_decision_studio_trust.py`).
+
 ## 4.144.3 - CI guard against unauthorized warehouse provisioning (2026-08-04)
 
 - Added `tests/test_no_unauthorized_warehouse.py`: fails CI if any migration or the rebuild

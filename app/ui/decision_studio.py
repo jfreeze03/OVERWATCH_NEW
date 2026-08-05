@@ -110,6 +110,17 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         on_select=open_profile,
         height=370,
         sort_label="decision lane, then evidence-weighted priority",
+        impact_help="Measured pattern credits x the compute rate, normalized to 30 days — "
+                    "observed cost, not promised savings.",
+        confidence_help="Evidence heuristic (0-1): a blend of run recency, active-day coverage, "
+                        "and whether the family has measured cost. NOT statistical confidence.",
+    )
+    # Trust: name which numbers are measured and which are heuristics, and give the
+    # exact lane rule so a reader never mistakes an ordering heuristic for a verdict.
+    st.caption(
+        "Impact $, runs, fail % and cache are **measured**; confidence, priority and lane are "
+        "**evidence-weighted heuristics** for ordering, not guarantees. Lane rule: ACT NOW = "
+        "top-20% priority AND confidence ≥ 0.65; VALIDATE = confidence < 0.5; otherwise PLAN."
     )
     result_caption(result, note="credits are measured; effort is a users + databases proxy")
 

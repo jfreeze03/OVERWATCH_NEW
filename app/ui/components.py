@@ -1523,8 +1523,15 @@ def decision_rows(
     on_select=None,
     height: int | None = None,
     sort_label: str = "decision priority",
+    impact_help: str = "",
+    confidence_help: str = "",
 ) -> int | None:
-    """Compact decision contract: decision, why, impact, confidence, owner and next."""
+    """Compact decision contract: decision, why, impact, confidence, owner and next.
+
+    ``impact_help``/``confidence_help`` document what those columns MEAN on this
+    surface (measured vs estimated; evidence-heuristic vs authored belief) — the
+    Impact $ and the 0-1 Confidence look identical across surfaces but are not the
+    same thing, so each caller states its own basis (the metric_registry ethos)."""
     import pandas as pd
 
     source = df if df is not None else pd.DataFrame()
@@ -1543,10 +1550,11 @@ def decision_rows(
     view.columns = [label for _, label in selected]
     config = {}
     if "Impact" in view.columns:
-        config["Impact"] = st.column_config.NumberColumn("Impact", format="$%.2f")
+        config["Impact"] = st.column_config.NumberColumn(
+            "Impact", format="$%.2f", help=impact_help or None)
     if "Confidence" in view.columns:
         config["Confidence"] = st.column_config.ProgressColumn(
-            "Confidence", min_value=0, max_value=1,
+            "Confidence", min_value=0, max_value=1, help=confidence_help or None,
         )
     selection = selectable_table(
         view, key=key, height=height, column_config=config,

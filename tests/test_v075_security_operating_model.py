@@ -434,8 +434,8 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.144.3"' in _read("app/config.py")
-    assert "## 4.144.3 - CI guard against unauthorized warehouse provisioning" in _read(
+    assert 'APP_VERSION = "4.145.0"' in _read("app/config.py")
+    assert "## 4.145.0 - Decision Studio trust pass: name measured vs heuristic" in _read(
         "CHANGELOG.md"
     )
     assert 'APP_WAREHOUSE = "WH_ALFA_ADMIN"' in _read("app/config.py")

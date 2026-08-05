@@ -321,6 +321,10 @@ def render_action_center(company: str) -> None:
             context_cols=("SEVERITY", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
             height=340,
             sort_label="severity, overdue, estimated value, then age",
+            impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate these "
+                        "by entity and never mix them with verified savings.",
+            confidence_help="Authored confidence (0-1) set when the action was created (operator "
+                            "or recommendation engine) — a stated belief, not a measurement.",
         )
         selected_id = _apply_action_context(display)
         if selection is not None:
