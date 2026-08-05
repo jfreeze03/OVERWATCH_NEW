@@ -1,14 +1,12 @@
-"""Pure Security policy, scoring, and write-statement rules."""
+"""Pure Security scoring and coverage rules (read-only posture)."""
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pandas as pd
 
-from app.core.sqlsafe import sql_literal
 from app.logic.formulas import account_today, safe_float
 
 SECURITY_DOMAINS = (
@@ -17,11 +15,7 @@ SECURITY_DOMAINS = (
     "CHANGE RISK",
     "DATA MOVEMENT",
     "TRUST CENTER",
-    "ACCESS REVIEW",
 )
-IDENTITY_TYPES = ("HUMAN", "SERVICE", "EMERGENCY")
-EGRESS_TARGET_KINDS = ("REGION", "STAGE")
-ACCESS_DECISIONS = ("KEEP", "REVOKE", "EXCEPTION")
 _SEVERITY_PENALTY = {"CRITICAL": 25, "HIGH": 12, "MEDIUM": 5, "LOW": 2, "INFO": 0}
 
 
@@ -89,18 +83,6 @@ def domain_posture(exceptions: pd.DataFrame, coverage: pd.DataFrame) -> tuple[Do
     return tuple(rows)
 
 
-def version_key(value: object) -> tuple[int, ...]:
-    """Comparable numeric version key; nonnumeric suffixes are ignored."""
-    parts = re.findall(r"\d+", str(value or ""))
-    return tuple(int(part) for part in parts[:8]) or (0,)
-
-
-def _like_pattern(value: object) -> re.Pattern[str]:
-    text = re.escape(str(value or ""))
-    text = text.replace("%", ".*").replace("_", ".")
-    return re.compile(f"^{text}$", re.IGNORECASE)
-
-
 def security_change_risk(query_type: object, role: object = "", database: object = "") -> tuple[int, str, str]:
     kind = str(query_type or "").upper()
     if kind.startswith(("DROP", "TRUNCATE")):
@@ -120,13 +102,5 @@ def security_change_risk(query_type: object, role: object = "", database: object
     score = min(100, score)
     level = "CRITICAL" if score >= 90 else ("HIGH" if score >= 70 else ("MEDIUM" if score >= 45 else "LOW"))
     return score, level, family
-
-
-def _date_sql(value: date | str | None) -> str:
-    if value is None or not str(value).strip():
-        return "NULL"
-    text = value.isoformat() if isinstance(value, date) else str(value).strip()[:10]
-    date.fromisoformat(text)
-    return f"TO_DATE({sql_literal(text, 10)})"
 
 

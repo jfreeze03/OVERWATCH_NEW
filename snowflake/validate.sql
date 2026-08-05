@@ -129,14 +129,13 @@ WITH checks AS (
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 29,
                'OK', 'FAIL: expected >= 29 rules — seed incomplete')
     UNION ALL
-    SELECT 'Key procs present (platform + security loaders and access reviews)',
+    SELECT 'Key procs present (platform + security loaders)',
            IFF((SELECT COUNT(DISTINCT PROCEDURE_NAME)
                   FROM DBA_MAINT_DB.INFORMATION_SCHEMA.PROCEDURES
                  WHERE PROCEDURE_SCHEMA = 'OVERWATCH'
                    AND PROCEDURE_NAME IN ('SP_LOAD_MARTS_V27', 'SP_ALERT_SCAN',
                                           'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE',
-                                          'SP_LOAD_SECURITY_FACTS', 'SP_CREATE_ACCESS_REVIEW',
-                                          'SP_ACCESS_REVIEW_DECIDE')) = 7,
+                                          'SP_LOAD_SECURITY_FACTS')) = 5,
                'OK', 'FAIL: one or more key procs missing')
 )
 SELECT * FROM checks
@@ -227,9 +226,8 @@ BEGIN
      WHERE PROCEDURE_SCHEMA = 'OVERWATCH'
        AND PROCEDURE_NAME IN ('SP_LOAD_MARTS_V27', 'SP_ALERT_SCAN',
                               'SP_NOTIFY_WEBHOOK', 'SP_NIGHTLY_RECONCILE',
-                              'SP_LOAD_SECURITY_FACTS', 'SP_CREATE_ACCESS_REVIEW',
-                              'SP_ACCESS_REVIEW_DECIDE');
-    IF (n_procs < 7) THEN RAISE e_procs; END IF;
+                              'SP_LOAD_SECURITY_FACTS');
+    IF (n_procs < 5) THEN RAISE e_procs; END IF;
 
     RETURN 'validate.sql contract: all load-bearing assertions passed';
 END;

@@ -202,8 +202,8 @@ _EXPECTED_MIGRATIONS = {
         "Current year account-time offsets alongside the fixed rolling windows",
     74: "operating workbench: audited action lifecycle, evidence links, entity ownership, "
         "personal watchlists, optimization experiments and SLO objectives",
-    75: "security operating model: materialized login/change evidence, policy registries, "
-        "Trust Center deltas and durable access reviews",
+    75: "security posture facts: materialized login/change evidence and Trust Center deltas "
+        "(read-only posture, no policy-editor or access-review write surfaces)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

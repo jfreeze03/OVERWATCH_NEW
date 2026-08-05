@@ -6,8 +6,11 @@ Security was over-expanded into a full operating console (policy editors, access
 campaigns) that "broke the current model." This trims the app back to the **read
 improvements only** — posture overview, faster fact-backed panels, and effective-access
 drill — and removes the policy/review write surfaces from the UI, logic, data and cache
-layers. The V075 migration still ships those tables (unapplied); a follow-up slims the
-migration to match. No behavior change to any surviving panel.
+layers. It also slims the V075 migration and its full lockstep (rebuild bundle, teardown,
+validate proc contract, roles audit seal) to match: the 6 policy/review tables, the two
+access-review procs, and the exception-queue's access-review arm are gone. V075 is
+unapplied, so this is an in-place edit — the migration number stays V075. No behavior
+change to any surviving panel.
 
 ## 4.145.0 - Decision Studio trust pass: name measured vs heuristic (2026-08-04)
 

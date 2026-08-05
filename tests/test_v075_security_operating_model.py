@@ -61,8 +61,10 @@ def test_v075_materializes_bounded_evidence_and_serializes_its_task() -> None:
     assert "TOTAL_AT_RISK_COUNT, SCANNED_AT" in _MIGRATION
 
 
-def test_v075_policies_and_reviews_are_durable_and_audited() -> None:
-    for name in (
+def test_v075_is_read_only_posture_with_no_write_surfaces() -> None:
+    # v4.146.0 trimmed Security to read-only posture. The policy-editor and
+    # access-review write surfaces must NOT be created by this migration.
+    for gone in (
         "SECURITY_IDENTITY_POLICY",
         "SECURITY_EGRESS_POLICY",
         "SECURITY_CLIENT_POLICY",
@@ -71,21 +73,16 @@ def test_v075_policies_and_reviews_are_durable_and_audited() -> None:
         "ACCESS_REVIEW_DECISION_LOG",
         "SP_CREATE_ACCESS_REVIEW",
         "SP_ACCESS_REVIEW_DECIDE",
+        "'ACCESS REVIEW'",  # the exception-queue arm that read the campaign table
     ):
-        assert name in _MIGRATION
-    review = _MIGRATION.split("SP_CREATE_ACCESS_REVIEW", 1)[1].split(
-        "SP_ACCESS_REVIEW_DECIDE", 1
-    )[0]
-    assert "WITH RECURSIVE role_tree" in review
-    assert "ACCESS_PATH || ' -> '" in review
-    assert "IF (existing_campaign > 0)" in review
-    assert "already exists:" in review
-    assert "STATUS = IFF(:n = 0, 'COMPLETE', 'IN_REVIEW')" in review
-    decision = _MIGRATION.split("SP_ACCESS_REVIEW_DECIDE", 1)[1].split(
-        "SP_BACKUP_OPERATOR_TABLES", 1
-    )[0]
-    assert "INSERT INTO DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG" in decision
-    assert "item_missing EXCEPTION" in decision
+        assert gone not in _MIGRATION, f"{gone} should have been removed from V075"
+    # The kept exception-queue view still carries its evidence-backed arms.
+    assert "'CHANGE RISK'" in _MIGRATION
+    assert "'TRUST CENTER'" in _MIGRATION
+    # SP_BACKUP_OPERATOR_TABLES stops at the V074 operator tables.
+    backup = _MIGRATION.split("SP_BACKUP_OPERATOR_TABLES", 1)[1].split("$$;", 1)[0]
+    assert "'SLO_OBJECTIVES'" in backup
+    assert "SECURITY_IDENTITY_POLICY" not in backup
 
 
 def test_security_domain_scores_require_proven_coverage() -> None:
@@ -110,11 +107,14 @@ def test_security_domain_scores_require_proven_coverage() -> None:
     assert by_domain["DATA MOVEMENT"].score is None
     assert by_domain["DATA MOVEMENT"].state == "On demand"
 
+    # A domain reporting NOT_CONFIGURED coverage scores None and reads "Not
+    # configured". Kept as a defensive mapping even though, after the access-
+    # review surface was removed, no live coverage source emits NOT_CONFIGURED.
     not_configured = pd.DataFrame(
-        {"DOMAIN": ["ACCESS REVIEW"], "COVERAGE": ["NOT_CONFIGURED"], "NEWEST": [None]}
+        {"DOMAIN": ["TRUST CENTER"], "COVERAGE": ["NOT_CONFIGURED"], "NEWEST": [None]}
     )
     review = {item.domain: item for item in domain_posture(pd.DataFrame(), not_configured)}[
-        "ACCESS REVIEW"
+        "TRUST CENTER"
     ]
     assert review.score is None
     assert review.state == "Not configured"
@@ -204,7 +204,10 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     assert "NOT STARTSWITH(QUERY_KEY, 'batch_wall:')" in perf
     assert "SUM(IFF(NOT OK, 1.0 / COALESCE(SAMPLE_PROB, 1.0), 0))" in perf
     domain_sql = security_sql.security_domain_coverage()
-    assert "IFF(COUNT(*) > 0, 'COMPLETE', 'NOT_CONFIGURED')" in domain_sql
+    # v4.146.0 removed the access-review write surface, so the domain-coverage
+    # builder no longer probes the removed ACCESS_REVIEW_CAMPAIGNS table.
+    assert "ACCESS REVIEW" not in domain_sql
+    assert "ACCESS_REVIEW_CAMPAIGNS" not in domain_sql
     assert domain_sql.count("SNAPSHOT_TS >= DATEADD('hour', -3, CURRENT_TIMESTAMP())") == 2
 
 
@@ -326,20 +329,25 @@ def test_deploy_and_rebuild_surfaces_track_v075() -> None:
     roles = _read("snowflake/roles.sql")
     assert roles.count("GRANT USAGE ON WAREHOUSE WH_ALFA_ADMIN") == 2
     assert "WH_OVERWATCH_APP" not in roles
+    # v4.146.0 removed the access-review write surface, so its append-only seal
+    # went with it; the platform audit tables stay sealed.
     assert roles.count(
-        "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG"
+        "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT"
     ) == 2
-    assert "SHOW GRANTS ON TABLE DBA_MAINT_DB.OVERWATCH.ACCESS_REVIEW_DECISION_LOG" in roles
+    assert "ACCESS_REVIEW_DECISION_LOG" not in roles
     assert "V001..V075 applied" in _read("snowflake/validate.sql")
     assert "SP_LOAD_SECURITY_FACTS(90)" in _read("snowflake/backfill_365.sql")
     teardown = _read("snowflake/teardown.sql")
     for name in (
         "TASK_LOAD_SECURITY_FACTS",
         "FACT_SECURITY_LOGIN_DAILY",
-        "SECURITY_IDENTITY_POLICY",
-        "ACCESS_REVIEW_DECISION_LOG",
+        "SECURITY_TRUST_SNAPSHOT",
     ):
         assert name in teardown
+    # The policy/review write tables were removed (v4.146.0) — teardown no
+    # longer references them.
+    assert "SECURITY_IDENTITY_POLICY" not in teardown
+    assert "ACCESS_REVIEW_DECISION_LOG" not in teardown
     for active_surface in (
         "app/config.py",
         "app/data/mart_sql.py",

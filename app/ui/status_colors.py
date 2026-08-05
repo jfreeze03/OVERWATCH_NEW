@@ -64,11 +64,10 @@ STATUS_COLOR_MAP = {
     "EXPIRED": _BAD, "EXPIRING": _WARN,
     # client driver versions (Security -> Clients)
     "BEHIND": _WARN, "CURRENT": _OK,
-    # security policy and review states
-    "SUPPORTED": _OK, "NEAR_EOL": _WARN, "UNSUPPORTED": _BAD,
-    "APPROVED": _OK, "UNAPPROVED": _BAD, "UNKNOWN": _MUTED,
+    # change-registration states (Security -> Changes) and generic verdicts
+    "UNKNOWN": _MUTED,
     "REGISTERED": _OK, "UNREGISTERED": _WARN, "NOT_APPLICABLE": _MUTED,
-    "KEEP": _OK, "REVOKE": _BAD, "EXCEPTION": _WARN, "PENDING": _INFO,
+    "PENDING": _INFO,
     "NEW": _WARN, "SPIKE": _BAD,
     "PASS": _OK, "INSUFFICIENT": _MUTED,
     "ELEVATED": _BAD, "WATCH": _WARN, "NORMAL": _OK, "STALE": _WARN, "ACTIVE": _OK,
@@ -79,7 +78,7 @@ STATUS_COLUMNS = (
     "SEVERITY", "STATUS", "STATE", "LAST_STATE", "EXECUTION_STATUS",
     "ROLE_IN_GRAPH", "KIND", "GOT_WORSE", "CANDIDATE", "FLAGGED",
     "STALE", "IS_ANOMALY", "SLA_MET", "ENABLED", "VERDICT",
-    "POLICY_STATUS", "CHANGE_REGISTRATION", "BEHAVIOR", "DECISION", "SLO_STATE",
+    "CHANGE_REGISTRATION", "BEHAVIOR", "DECISION", "SLO_STATE",
 )
 _TRUE_IS_GOOD = {"SLA_MET", "ENABLED"}
 _VERDICTS = {

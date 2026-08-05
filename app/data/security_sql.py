@@ -671,7 +671,7 @@ LIMIT {limit}
 
 
 def security_domain_coverage() -> str:
-    """Coverage/freshness contract for the six Security risk domains."""
+    """Coverage/freshness contract for the five Security risk domains."""
     return f"""
 WITH posture AS (
     SELECT MAX(DAY) AS NEWEST,
@@ -709,9 +709,6 @@ SELECT 'TRUST CENTER',
            'COMPLETE', IFF(COALESCE(STATUS, '') = 'OK', 'STALE', 'INCOMPLETE')),
        SNAPSHOT_TS
 FROM fresh WHERE SOURCE_NAME = 'SECURITY_TRUST_SNAPSHOT'
-UNION ALL
-SELECT 'ACCESS REVIEW', IFF(COUNT(*) > 0, 'COMPLETE', 'NOT_CONFIGURED'), MAX(CREATED_AT)
-FROM {core_object('ACCESS_REVIEW_CAMPAIGNS')}
 """
 
 

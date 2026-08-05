@@ -660,8 +660,8 @@ def _clients_tab(company: str, days: int) -> None:
         "VERSION parse from CLIENT_APPLICATION_ID; PROGRAM is whatever the client "
         "self-reports (VS Code, DBeaver and most JDBC/Python tools do; many ODBC "
         "tools such as Erwin do not — '(not reported)' means exactly that). "
-        "The observed-newest comparison remains useful context, while the V075 support "
-        "policy is the authoritative upgrade decision."
+        "The observed-newest comparison is the upgrade signal; this is a read-only "
+        "inventory, not a support-policy verdict."
     )
     res = run(security_sql.client_drivers(days, company), page=_PAGE,
               key=f"clients_{company}_{days}", tier="historical",
@@ -679,8 +679,7 @@ def _clients_tab(company: str, days: int) -> None:
     ])
     styled_table(df, height=380, sort_label="last seen")
     st.caption(
-        f"{behind} combinations trail the newest observed version; that is context, "
-        "not the support verdict."
+        f"{behind} combinations trail the newest observed version."
     )
     export_button("Driver inventory (CSV)", data=df.to_csv(index=False),
                   file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
