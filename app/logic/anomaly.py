@@ -18,6 +18,15 @@ _MEANAD_K = 0.7979
 # escalation. This app-side scorer stays a fixed-default morning-triage twin.
 DEFAULT_THRESHOLD = 3.5
 
+# Materiality gates for warehouse daily-spend anomalies. A usually-idle warehouse
+# has a near-zero baseline dispersion (~$1-2), so ANY active day scores a huge
+# modified-z and fires a false "investigate" on trivial dollars. The robust
+# estimator can't rescue a near-zero-variance baseline — gate the flag on real
+# money AND a real baseline. Callers opt in (defaults below keep the generic
+# scorer unchanged); the three warehouse-USD panels pass these.
+ANOMALY_MIN_USD = 50.0
+ANOMALY_MIN_ACTIVE_DAYS = 10
+
 
 def complete_days_only(df: pd.DataFrame, day_col: str = "DAY") -> pd.DataFrame:
     """Drop the current, still-growing day before anomaly scoring (bug round 2 B4).
@@ -63,26 +72,54 @@ def flag_anomalies(
     value_col: str,
     group_col: str | None = None,
     threshold: float = DEFAULT_THRESHOLD,
+    *,
+    min_value: float = 0.0,
+    min_active_days: int = 0,
 ) -> pd.DataFrame:
     """Return a copy with ``Z_SCORE`` and ``IS_ANOMALY`` columns.
 
     With ``group_col`` (e.g. warehouse), each group gets its own baseline so a
     naturally large warehouse does not mask a small one's spike.
+
+    ``min_value`` and ``min_active_days`` are materiality gates (default off):
+    a row is only an anomaly when its own value is at least ``min_value`` AND its
+    group has at least ``min_active_days`` non-zero-value rows. This stops a
+    usually-idle warehouse from firing a false z+20 flag on a trivial active day
+    (see ``ANOMALY_MIN_USD`` / ``ANOMALY_MIN_ACTIVE_DAYS``).
     """
     out = df.copy()
     if out.empty or value_col not in out.columns:
         out["Z_SCORE"] = pd.Series(dtype=float)
         out["IS_ANOMALY"] = pd.Series(dtype=bool)
         return out
+    vals = pd.to_numeric(out[value_col], errors="coerce").fillna(0.0)
     if group_col and group_col in out.columns:
         out["Z_SCORE"] = (
             out.groupby(group_col, dropna=False)[value_col]
             .transform(lambda s: robust_zscores(s))
             .fillna(0.0)
         )
+        active = (vals > 0).groupby(out[group_col], dropna=False).transform("sum")
+        baseline = vals.groupby(out[group_col], dropna=False).transform("median")
     else:
         out["Z_SCORE"] = robust_zscores(out[value_col])
-    out["IS_ANOMALY"] = out["Z_SCORE"].abs() >= float(threshold)
+        active = pd.Series(float((vals > 0).sum()), index=out.index)
+        baseline = pd.Series(float(vals.median()), index=out.index)
+    z = out["Z_SCORE"]
+    # An overspend SPIKE (z>0) must be a material DAY — don't flag a $49 spike.
+    # A COLLAPSE (z<0) is low BY DEFINITION (that is the collapse), so its
+    # materiality rides the entity's BASELINE: a $5k/day warehouse dropping to
+    # $10 is a real stalled-pipeline signal (spend.py surfaces it), while a
+    # $2/day sandbox dropping to $0 stays noise.
+    material = (
+        ((z > 0) & (vals >= float(min_value)))
+        | ((z < 0) & (baseline >= float(min_value)))
+    )
+    out["IS_ANOMALY"] = (
+        (z.abs() >= float(threshold))
+        & material
+        & (active >= float(min_active_days))
+    )
     return out
 
 

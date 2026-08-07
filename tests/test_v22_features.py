@@ -108,6 +108,10 @@ def test_mart_recon_two_checks():
     assert sql.count("DRIFT_PCT") >= 1 and "UNION ALL" in sql
     assert "METERING_DAILY_HISTORY" in sql and "FACT_METERING_DAILY" in sql
     assert "FACT_QUERY_HOURLY" in sql
+    # v4.147: both query-count sides count warehouse-bound queries only. The
+    # hourly fact retains warehouse-less USE/SHOW/DESCRIBE rows; without matching
+    # the live side's filter the check read a permanent ~+97% false drift.
+    assert sql.count("WAREHOUSE_NAME IS NOT NULL") == 2
 
 
 def test_fleet_stats_clamps():

@@ -8,8 +8,6 @@ import pytest
 
 from app.data import cortex_sql, mart27_sql
 from app.logic.cortex import (
-    CPR_MIN_PROJECTED_USD,
-    CPR_MIN_REQUESTS,
     aggregate_budget_row,
     classify_exceptions,
     daily_from_user_daily,
@@ -119,11 +117,42 @@ def test_half_budget_is_concentration_and_quarter_is_high_usage():
     assert out.iloc[0]["SEVERITY"] == "Medium"
 
 
-def test_cost_per_request_spike_flags_without_budget():
-    enriched = enrich_user_rollup(_rollup(CREDITS_PER_REQUEST=0.25), 2.20, 30)
+def test_cost_per_request_spike_flags_a_cohort_outlier():
+    # A spike is unusual FOR THE COHORT: five baseline users at ~0.05 cr/req plus
+    # one at 0.25. Only the outlier flags; the baseline users (normal rate) do not
+    # — the old flat > 0.10 rule flagged all-or-none regardless of the cohort.
+    base = [_rollup(USER_NAME=f"U{i}", TOTAL_REQUESTS=200, TOTAL_CREDITS=10.0,
+                    CREDITS_PER_REQUEST=0.05) for i in range(5)]
+    outlier = _rollup(USER_NAME="SPIKE", TOTAL_REQUESTS=200, TOTAL_CREDITS=50.0,
+                      CREDITS_PER_REQUEST=0.25)
+    enriched = enrich_user_rollup(pd.concat([*base, outlier], ignore_index=True), 2.20, 30)
     out = classify_exceptions(enriched, ai_budget_usd=0.0, ai_rate_usd=2.20)
-    assert out.iloc[0]["SEVERITY"] == "High"
-    assert out.iloc[0]["SIGNAL"] == "Cost per request spike"
+    spikes = out[out["SIGNAL"] == "Cost per request spike"]
+    assert list(spikes["USER_NAME"]) == ["SPIKE"]
+    assert spikes.iloc[0]["SEVERITY"] == "High"
+
+
+def test_uniformly_priced_cohort_has_no_spikes():
+    # The KEY fix: a cohort of heavy-but-normal users all at the same rate has no
+    # outlier, so nothing is flagged. The flat > 0.10 rule flagged every one of
+    # them permanently.
+    users = [_rollup(USER_NAME=f"U{i}", TOTAL_REQUESTS=500, TOTAL_CREDITS=75.0,
+                     CREDITS_PER_REQUEST=0.15) for i in range(6)]
+    enriched = enrich_user_rollup(pd.concat(users, ignore_index=True), 2.20, 30)
+    out = classify_exceptions(enriched, ai_budget_usd=0.0, ai_rate_usd=2.20)
+    assert out.empty
+
+
+def test_cpr_spike_needs_five_peers_to_have_a_cohort():
+    # With fewer than five eligible peers there is no cohort to be an outlier of,
+    # so even a lone expensive user is not called a spike (honest — a spike is
+    # relative).
+    base = [_rollup(USER_NAME=f"U{i}", TOTAL_REQUESTS=200, TOTAL_CREDITS=10.0,
+                    CREDITS_PER_REQUEST=0.05) for i in range(3)]
+    outlier = _rollup(USER_NAME="SPIKE", TOTAL_REQUESTS=200, TOTAL_CREDITS=50.0,
+                      CREDITS_PER_REQUEST=0.25)
+    enriched = enrich_user_rollup(pd.concat([*base, outlier], ignore_index=True), 2.20, 30)
+    assert classify_exceptions(enriched, ai_budget_usd=0.0, ai_rate_usd=2.20).empty
 
 
 def test_no_budget_means_no_budget_severities():
@@ -135,7 +164,7 @@ def test_no_budget_means_no_budget_severities():
 def test_exceptions_ranked_critical_first():
     frames = [
         _rollup(USER_NAME="A", TOTAL_CREDITS=300.0),      # breach (>200 cr budget)
-        _rollup(USER_NAME="B", CREDITS_PER_REQUEST=0.5),  # spike (High)
+        _rollup(USER_NAME="B", TOTAL_CREDITS=120.0),      # concentration (High, >50%)
         _rollup(USER_NAME="C", TOTAL_CREDITS=60.0),       # high usage (Medium, >25%)
     ]
     enriched = enrich_user_rollup(pd.concat(frames, ignore_index=True), 2.20, 30)
@@ -284,20 +313,24 @@ def test_projection_divisor_clamps_to_days_since_first_usage():
     assert rollup_summary(enriched, 365)["window_days"] == 3
 
 
-def test_cpr_spike_needs_a_real_sample_and_real_money():
-    # One request at 0.5 cr/request is $1.10 a month — not an exception.
-    tiny = enrich_user_rollup(_rollup(TOTAL_REQUESTS=1, TOTAL_CREDITS=0.5,
-                                      CREDITS_PER_REQUEST=0.5), 2.20, 30)
-    assert classify_exceptions(tiny, 0.0, 2.20).empty
-    # Enough requests but trivial money is still not worth an operator's time.
-    cheap = enrich_user_rollup(_rollup(TOTAL_REQUESTS=CPR_MIN_REQUESTS, TOTAL_CREDITS=2.2,
-                                       CREDITS_PER_REQUEST=0.11), 2.20, 30)
-    assert cheap.iloc[0]["PROJECTED_30D_USD"] < CPR_MIN_PROJECTED_USD
-    assert classify_exceptions(cheap, 0.0, 2.20).empty
-    # Both floors cleared -> the spike is real.
-    real = enrich_user_rollup(_rollup(TOTAL_REQUESTS=200, TOTAL_CREDITS=30.0,
-                                      CREDITS_PER_REQUEST=0.15), 2.20, 30)
-    assert classify_exceptions(real, 0.0, 2.20).iloc[0]["SIGNAL"] == "Cost per request spike"
+def test_cpr_spike_is_cohort_relative_and_needs_real_money():
+    # Baseline cohort at ~0.02 cr/req. A user with huge spend but the SAME rate is
+    # not a spike (relativity — the flat rule missed this). A one-request 0.5
+    # cr/req user has no sample to trend. Only a genuine positive outlier that also
+    # clears the >=20-request and >=$10-projected floors is flagged.
+    base = [_rollup(USER_NAME=f"B{i}", TOTAL_REQUESTS=300, TOTAL_CREDITS=6.0,
+                    CREDITS_PER_REQUEST=0.02) for i in range(5)]
+    heavy_normal = _rollup(USER_NAME="HEAVY", TOTAL_REQUESTS=5000, TOTAL_CREDITS=100.0,
+                           CREDITS_PER_REQUEST=0.02)   # huge spend, normal RATE
+    tiny = _rollup(USER_NAME="TINY", TOTAL_REQUESTS=1, TOTAL_CREDITS=0.5,
+                   CREDITS_PER_REQUEST=0.5)            # high rate, no sample
+    real = _rollup(USER_NAME="REAL", TOTAL_REQUESTS=200, TOTAL_CREDITS=30.0,
+                   CREDITS_PER_REQUEST=0.15)           # genuine outlier + real money
+    enriched = enrich_user_rollup(
+        pd.concat([*base, heavy_normal, tiny, real], ignore_index=True), 2.20, 30)
+    spikes = classify_exceptions(enriched, 0.0, 2.20)
+    spikes = spikes[spikes["SIGNAL"] == "Cost per request spike"]
+    assert list(spikes["USER_NAME"]) == ["REAL"]
 
 
 def test_aggregate_budget_breach_is_reported_even_when_no_user_breaches():

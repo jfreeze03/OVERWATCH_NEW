@@ -21,7 +21,7 @@ from app.logic.cortex import (
     BUDGET_LADDER,
     CPR_MIN_PROJECTED_USD,
     CPR_MIN_REQUESTS,
-    CPR_SPIKE_THRESHOLD,
+    CPR_SPIKE_Z,
     classify_exceptions,
     daily_from_user_daily,
     effective_window_days,
@@ -194,10 +194,11 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     _rules = (
         "Rules — budget ladder on projected 30d spend: "
         + ", ".join(f"over {int(frac * 100)}% = {sev}" for frac, sev, _ in BUDGET_LADDER)
-        + f" (per user, and once for the scope total). Cost-per-request spike = High above "
-        f"{CPR_SPIKE_THRESHOLD:.2f} credits/request, counted only with at least "
+        + f" (per user, and once for the scope total). Cost-per-request spike = High when a "
+        f"user/source's credits-per-request is a positive outlier vs the cohort "
+        f"(median/MAD z ≥ {CPR_SPIKE_Z:.1f}), counted only with at least "
         f"{CPR_MIN_REQUESTS} requests and {format_usd(CPR_MIN_PROJECTED_USD)} projected 30d "
-        f"— one expensive call is not a trend."
+        f"— a spike is unusual for this account, not just a pricier model."
     )
     st.markdown("**Exceptions**")
     if exceptions.empty:

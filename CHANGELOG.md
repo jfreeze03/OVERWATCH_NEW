@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.147.0 - Cost-signal correctness: CoCo rate, canary predicate, anomaly + Cortex thresholds (2026-08-07)
+
+Four cost/metrics fixes from a live-app review (screenshots + code verification). App-only,
+no schema change.
+
+- **CoCo priced at the AI rate.** `SNOWFLAKE_COCO_SNOWSIGHT` (Cortex Code / CoWork) matched
+  neither a CORTEX token nor an AI prefix, so it fell to "Other" and priced at the compute
+  rate ($3.68) instead of the AI rate ($2.20) — over-stating that ~$1.3k row ~67% and
+  violating the never-inline-AI-rate rule. `service_category` now recognizes CoCo/CoWork as
+  AI-family; the drill stays honestly "Service total only" (CoCo compute has no per-user
+  usage history to drill).
+- **Query-count canary predicate aligned.** The mart-vs-live reconciliation compared unequal
+  populations — the live side filtered `WAREHOUSE_NAME IS NOT NULL`, the fact side summed all
+  rows (incl. warehouse-less USE/SHOW/DESCRIBE) — reading a permanent ~+97% false BAD that
+  masked any real drift. Both sides now count warehouse-bound queries.
+- **Anomaly materiality floor.** The per-warehouse daily-spend anomaly scored a huge modified-z
+  on any active day of a usually-idle warehouse, firing false "investigate" on trivial dollars
+  ($49 at z+20). `flag_anomalies` gained `min_value` ($50) + `min_active_days` (10) gates,
+  applied on the Cost / Control Room / Operations panels. The robust z stays the shape signal;
+  the gate demands real money AND a real baseline.
+- **Cortex "cost per request spike" is now relative.** It was a flat > 0.10 cr/req cut
+  mislabeled a "spike" — every heavy-but-normal user of a pricier model was permanently flagged
+  High. It now scores each user/source's cr/req against a robust median/MAD cohort baseline
+  (z >= 3.5), keeping the >=20-request / >=$10-projected materiality floors.
+
+Follow-ups flagged (not in this release): mirror the anomaly gate in the server
+`SP_ANOMALY_SWEEP` (owner migration, so the alert path matches the display), and resume
+`TASK_ALERT_NOTIFY` in Snowsight (ops) for the stranded non-critical alerts.
+
 ## 4.146.0 - Security page trimmed to read-only posture (2026-08-05)
 
 Security was over-expanded into a full operating console (policy editors, access-review

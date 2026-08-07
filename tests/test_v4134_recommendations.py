@@ -43,6 +43,22 @@ def test_cost_coverage_uses_service_specific_rates_and_exposes_material_gap():
     assert round(drill_ready_spend_share(coverage), 2) == 93.75
 
 
+def test_coco_cortex_code_is_priced_at_the_ai_rate_not_compute():
+    # SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork) carries neither a CORTEX
+    # token nor an AI prefix, so a name-only match priced it at the compute rate
+    # and over-stated it ~67%. It must categorize AI / Cortex and price at ai_rate
+    # — but keep the honest "Service total only" drill (CoCo compute has no
+    # per-user usage history to drill).
+    frame = pd.DataFrame({
+        "SERVICE_TYPE": ["SNOWFLAKE_COCO_SNOWSIGHT"],
+        "CREDITS_BILLED": [100.0],
+    })
+    row = service_coverage_inventory(frame, rate=3.68, ai_rate=2.20).iloc[0]
+    assert row["CATEGORY"] == "AI / Cortex"
+    assert round(float(row["BILLED_USD"]), 2) == 220.0   # 100 * 2.20 (AI), not 368.0 (compute)
+    assert row["DRILL_STATUS"] == "Service total only"
+
+
 def test_hybrid_request_label_discloses_that_the_charge_is_historical():
     frame = pd.DataFrame({
         "SERVICE_TYPE": ["HYBRID_TABLE_REQUESTS"],

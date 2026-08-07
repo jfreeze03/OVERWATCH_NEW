@@ -18,7 +18,13 @@ from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
-from app.logic.anomaly import anomaly_summary, complete_days_only, flag_anomalies
+from app.logic.anomaly import (
+    ANOMALY_MIN_ACTIVE_DAYS,
+    ANOMALY_MIN_USD,
+    anomaly_summary,
+    complete_days_only,
+    flag_anomalies,
+)
 from app.logic.cost_coverage import (
     SERVICE_CATEGORY,
     drill_ready_spend_share,
@@ -579,6 +585,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             complete_days_only(daily.df)  # B4: don't score today's partial row
             .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))),
             "USD", group_col="WAREHOUSE_NAME",
+            min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS,
         )
         hits = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
         if hits:

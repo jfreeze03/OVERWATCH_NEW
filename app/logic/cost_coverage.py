@@ -70,15 +70,37 @@ _COLUMNS = [
 ]
 
 
+def _is_ai_family(normalized: str) -> bool:
+    """True for Cortex/AI service types billed at the AI credit rate.
+
+    Includes Cortex Code / CoWork ("CoCo") — its metering names (e.g.
+    ``SNOWFLAKE_COCO_SNOWSIGHT``) carry neither a CORTEX token nor an AI prefix,
+    so a name-only match dropped them to "Other" and priced them at the compute
+    rate — over-stating the row and violating the never-inline-AI-rate rule.
+    """
+    return (
+        "CORTEX" in normalized
+        or normalized.startswith("AI")
+        or "INTELLIGENCE" in normalized
+        or "COCO" in normalized
+        or "COWORK" in normalized
+    )
+
+
 def service_category(service: object) -> str:
     """Return the display category for a Snowflake metering service type."""
     normalized = str(service or "").upper()
-    if "CORTEX" in normalized or normalized.startswith("AI") or "INTELLIGENCE" in normalized:
+    if _is_ai_family(normalized):
         return "AI / Cortex"
     return SERVICE_CATEGORY.get(normalized, "Other")
 
 
 def _coverage_for(service: str) -> tuple[str, str, str]:
+    # NOTE: narrower than _is_ai_family on purpose. A CORTEX_* service has a
+    # per-user CORTEX_CODE_*_USAGE_HISTORY drill; CoCo/CoWork COMPUTE does not,
+    # so it must keep the honest "Service total only" default rather than claim
+    # a Cortex drill it cannot deliver. The rate fix (service_category) and the
+    # drill claim are deliberately decoupled.
     normalized = str(service or "").upper()
     if "CORTEX" in normalized or normalized.startswith("AI") or "INTELLIGENCE" in normalized:
         return _DRILL_COVERAGE["CORTEX"]

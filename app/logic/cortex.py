@@ -3,7 +3,7 @@
 Ported from the original OVERWATCH User Attribution thresholds:
 - projected 30d credits > AI budget            -> Critical "Budget breach"
 - projected 30d credits > 50% of AI budget     -> High     "Budget concentration"
-- credits per request  > 0.10                  -> High     "Cost per request spike"
+- credits/request a positive cohort outlier    -> High     "Cost per request spike"
 - projected 30d credits > 25% of AI budget     -> Medium   "High usage" (exception floor)
 
 C7 additions:
@@ -26,9 +26,16 @@ from datetime import timedelta
 
 import pandas as pd
 
+from .anomaly import robust_zscores
 from .formulas import account_today, safe_float
 
-CPR_SPIKE_THRESHOLD = 0.10  # credits per request
+# A spike is UNUSUAL FOR THIS ACCOUNT, not just an expensive model. Score each
+# (user, source)'s credits-per-request against a robust median/MAD baseline over
+# the eligible cohort (the SAME estimator as the warehouse anomaly scorer) and
+# flag only positive outliers at/above this modified-z. The old flat > 0.10
+# cr/request permanently flagged every heavy-but-normal user of a pricier Cortex
+# model — a flat cut is a model-price floor, not a spike.
+CPR_SPIKE_Z = 3.5
 # C7: a spike is a TREND, not one expensive call. The old rule flagged High
 # off a single request — 1 request x 0.11 credits is $0.24 and cannot be
 # actioned. Both floors must clear: enough requests for the ratio to mean
@@ -215,21 +222,33 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
                 item["SOURCE"] = "(all sources)"
                 item["SEVERITY"], item["SIGNAL"] = sig
                 rows.append(item)
-    # --- CPR spikes are PER-SOURCE and independent of budget, so a spiking source
-    # still surfaces even for a user who is also a budget breach. De-dup on
-    # (user, source) keeping the worst variant so a source is never listed twice.
-    cpr_src = src
-    if {"USER_NAME", "SOURCE"}.issubset(src.columns):
-        cpr_src = (src.sort_values("CREDITS_PER_REQUEST", ascending=False)
-                      .drop_duplicates(subset=["USER_NAME", "SOURCE"], keep="first"))
+    # --- CPR spikes are PER-SOURCE, RELATIVE, and independent of budget, so a
+    # spiking source still surfaces even for a user who is also a budget breach.
+    # De-dup on (user, source) keeping the worst variant so a source is never
+    # listed twice.
+    cpr_src = src.copy()
+    if {"USER_NAME", "SOURCE"}.issubset(cpr_src.columns):
+        cpr_src = (cpr_src.sort_values("CREDITS_PER_REQUEST", ascending=False)
+                          .drop_duplicates(subset=["USER_NAME", "SOURCE"], keep="first"))
+    # Baseline over rows with a MEANINGFUL sample only, so a 1-request ratio can't
+    # define the cohort. robust_zscores needs >=5 points and returns 0 when
+    # dispersion collapses (a uniformly-priced cohort => no spikes) — exactly the
+    # heavy-but-normal case the flat threshold got wrong. With <5 eligible peers
+    # there is no cohort to be an outlier of, so nothing is flagged (honest).
+    eligible = (cpr_src.get("TOTAL_REQUESTS", pd.Series(dtype=float)).map(safe_float)
+                >= CPR_MIN_REQUESTS)
+    cpr_src["_CPR_Z"] = 0.0
+    if int(eligible.sum()) >= 5:
+        cpr_src.loc[eligible, "_CPR_Z"] = robust_zscores(
+            cpr_src.loc[eligible, "CREDITS_PER_REQUEST"])
     for _, row in cpr_src.iterrows():
-        # C7: the ratio alone is not evidence. One request at 0.11 cr/request
-        # used to book a High; require a sample big enough for the ratio to be
-        # a trend AND enough projected money to be worth chasing.
-        if (safe_float(row.get("CREDITS_PER_REQUEST")) > CPR_SPIKE_THRESHOLD
+        # A spike is a POSITIVE cohort outlier that also clears the materiality
+        # floors: enough requests for the ratio to be a trend AND enough projected
+        # money to be worth chasing (one expensive call is not a trend).
+        if (safe_float(row.get("_CPR_Z")) >= CPR_SPIKE_Z
                 and safe_float(row.get("TOTAL_REQUESTS")) >= CPR_MIN_REQUESTS
                 and safe_float(row.get("PROJECTED_30D_USD")) >= CPR_MIN_PROJECTED_USD):
-            item = row.to_dict()
+            item = {k: v for k, v in row.to_dict().items() if k != "_CPR_Z"}
             item["SEVERITY"], item["SIGNAL"] = "High", "Cost per request spike"
             rows.append(item)
 

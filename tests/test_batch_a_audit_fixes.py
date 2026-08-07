@@ -100,6 +100,11 @@ def test_cortex_budget_breach_is_per_user_across_sources():
         {"USER_NAME": "SVC_Y", "SOURCE": "COMPLETE", "PROJECTED_30D_CREDITS": 10.0,
          "PROJECTED_30D_USD": 20.0, "TOTAL_REQUESTS": 9000, "TOTAL_CREDITS": 8.0,
          "CREDITS_PER_REQUEST": 0.001},
+        # v4.147: CPR spikes are cohort-relative now — baseline peers give EMBED's
+        # 0.50 cr/req a cohort to be a positive outlier of (>=5 eligible peers).
+        *[{"USER_NAME": f"SVC_{n}", "SOURCE": "COMPLETE", "PROJECTED_30D_CREDITS": 10.0,
+           "PROJECTED_30D_USD": 20.0, "TOTAL_REQUESTS": 1000, "TOTAL_CREDITS": 8.0,
+           "CREDITS_PER_REQUEST": 0.001} for n in ("Z", "W", "V", "U")],
     ])
     out = cortex.classify_exceptions(enriched, budget_usd, rate)
     # per-user breach: ONE deduped row, with the AGGREGATE breach dollars (60+60),

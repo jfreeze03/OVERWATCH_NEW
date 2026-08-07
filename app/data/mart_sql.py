@@ -1043,10 +1043,15 @@ l_met AS (
       AND USAGE_DATE <  DATEADD('day', -3,  CURRENT_DATE())
 ),
 f_q AS (
+    -- Warehouse-bound only, to match l_q. The hourly fact retains warehouse-less
+    -- USE/SHOW/DESCRIBE/cache-hit rows (NULL warehouse) that the live side's
+    -- warehouse-bound filter excludes; without this predicate the two sides
+    -- count different populations and read a permanent ~+97% false drift.
     SELECT SUM(QUERY_COUNT) AS V
     FROM {core_object("FACT_QUERY_HOURLY")}
     WHERE HOUR_TS >= DATEADD('day', -9, CURRENT_DATE())
       AND HOUR_TS <  DATEADD('day', -2, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
 ),
 l_q AS (
     SELECT COUNT(*) AS V

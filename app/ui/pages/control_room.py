@@ -19,6 +19,8 @@ from app.core.state import filters, navigation_context, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
 from app.logic.anomaly import (
+    ANOMALY_MIN_ACTIVE_DAYS,
+    ANOMALY_MIN_USD,
     DEFAULT_THRESHOLD,
     anomaly_summary,
     complete_days_only,
@@ -590,7 +592,9 @@ def render() -> None:
         if wh_daily.usable():
             _wh_complete = (complete_days_only(wh_daily.df)  # B4: don't score today's partial row
                             .assign(USD=lambda d: d["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))))
-            flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME")
+            flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME",
+                                     min_value=ANOMALY_MIN_USD,
+                                     min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
             anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
             # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
             # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production
