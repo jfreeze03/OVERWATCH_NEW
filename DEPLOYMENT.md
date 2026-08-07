@@ -91,6 +91,7 @@ snowflake/migrations/V072__entity_aware_incident_proposals.sql
 snowflake/migrations/V073__calendar_triage_windows.sql
 snowflake/migrations/V074__operating_workbench_foundation.sql
 snowflake/migrations/V075__security_operating_model.sql
+snowflake/migrations/V076__anomaly_materiality_gate.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

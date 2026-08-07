@@ -25,8 +25,9 @@ no schema change.
   High. It now scores each user/source's cr/req against a robust median/MAD cohort baseline
   (z >= 3.5), keeping the >=20-request / >=$10-projected materiality floors.
 
-Follow-ups flagged (not in this release): mirror the anomaly gate in the server
-`SP_ANOMALY_SWEEP` (owner migration, so the alert path matches the display), and resume
+Follow-ups: the server-side mirror shipped as owner migration **V076** (re-derives
+`SP_ANOMALY_SWEEP` so the `COST_ANOMALY_SWEEP` alert path carries the same $50 / 10-active-day
+/ spike-vs-collapse gate — the alert path now matches the display). Still owner-side: resume
 `TASK_ALERT_NOTIFY` in Snowsight (ops) for the stranded non-critical alerts.
 
 ## 4.146.0 - Security page trimmed to read-only posture (2026-08-05)

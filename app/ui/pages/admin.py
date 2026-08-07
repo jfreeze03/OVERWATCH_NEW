@@ -204,6 +204,8 @@ _EXPECTED_MIGRATIONS = {
         "personal watchlists, optimization experiments and SLO objectives",
     75: "security posture facts: materialized login/change evidence and Trust Center deltas "
         "(read-only posture, no policy-editor or access-review write surfaces)",
+    76: "anomaly materiality gate: SP_ANOMALY_SWEEP gates COST_ANOMALY_SWEEP on a $50 floor, "
+        "10 active days, and a spike-vs-collapse baseline test (mirrors the app-side gate)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
