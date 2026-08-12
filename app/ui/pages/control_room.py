@@ -58,7 +58,6 @@ from app.ui.components import (
     styled_table,
     with_user_names,
 )
-from app.ui.decision_studio import render_decision_studio
 from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
 _PAGE = "Control Room"
@@ -300,7 +299,9 @@ def render() -> None:
 
     # rec11: badge the Incidents pill with open criticals — already in the health strip
     # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
-    section = lazy_sections(["Action Center", "Pulse", "Decision Studio", "Incidents & triage",
+    # rec8: Decision Studio moved out to its own Analyze page — Control Room is now the
+    # pure triage console (Entity 360 stays; it is the drill target for cross-jumps).
+    section = lazy_sections(["Action Center", "Pulse", "Incidents & triage",
                              "Timeline & movers", "Freshness & replay", "Entity 360"],
                             key="cr_section",
                             counts={"Incidents & triage": _open_crit} if _open_crit else None)
@@ -314,10 +315,6 @@ def render() -> None:
             "applies": ("company",),
             "partial": ("database", "schema_contains"),
             "note": "Database and Schema narrow query health only; the horizon is fixed since yesterday.",
-        },
-        "Decision Studio": {
-            "applies": ("company", "days"),
-            "note": "Portfolio, product economics and Cost Truth use Company and Window; SLO and experiment records keep their own objective windows.",
         },
         "Incidents & triage": {
             "applies": ("company",),
@@ -442,9 +439,6 @@ def render() -> None:
             st.warning("Activity trend returned an unexpected data shape.")
         else:
             st.info("No query activity recorded in the last 14 days for this scope.")
-
-    elif section == "Decision Studio":
-        render_decision_studio(company, days)
 
     elif section == "Incidents & triage":
         # ---- Incidents (V032) ------------------------------------------------------

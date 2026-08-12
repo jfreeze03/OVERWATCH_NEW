@@ -115,6 +115,12 @@ def consume_pending_navigation() -> None:
     pending = st.session_state.pop("_ow_nav_pending", None)
     if not pending:
         return
+    # rec8 legacy remap: Decision Studio moved from a Control Room section to its own
+    # top-level page. Rewrite a stale saved-view / default-landing so it lands on the
+    # real page instead of silently falling back to Control Room's first section.
+    if (str(pending.get("page")) == "Control Room"
+            and str(pending.get("section")) == "Decision Studio"):
+        pending = {**pending, "page": "Decision Studio", "section": "Portfolio"}
     # B6: reset the jump box ONLY when we actually consumed a jump. The old
     # unconditional clear ran every rerun and erased the user's pick on the very
     # rerun that delivered it (before _global_jump could read _ow_jump and fire

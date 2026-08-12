@@ -26,17 +26,15 @@ from app.ui.components import (
     guard,
     kpi_row,
     load_settings,
-    nested_sections,
     notify,
     read_model_caption,
     result_caption,
-    section_header,
     selectable_nav_table,
     selectable_table,
     styled_table,
 )
 
-_PAGE = "Control Room"
+_PAGE = "Decision Studio"
 
 
 def _open_entity(kind: str, key: str) -> None:
@@ -476,22 +474,5 @@ def _experiments() -> None:
                 st.rerun()
 
 
-def render_decision_studio(company: str, days: int) -> None:
-    section_header("Decision Studio", "info", "target")
-    view = nested_sections(
-        ["Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
-        key="decision_studio_view",
-    )
-    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
-    if view == "Portfolio":
-        _portfolio(company, days, rate)
-    elif view == "SLOs":
-        _slos()
-    elif view == "Products":
-        _products(company, days, rate)
-    elif view == "Cost Truth":
-        _cost_truth(company, days)
-    elif view == "Scenarios":
-        _scenarios(company)
-    else:
-        _experiments()
+# rec8: the page shell (header + primary section bar + dispatch) now lives in
+# app/ui/pages/decision_studio.py; this module keeps only the section bodies.

@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.151.0 - Decision Studio as its own page + Entity 360 catalog picker (2026-08-12)
+
+App-only, no migration. The final two review recs, unblocked now that V074/V075
+are applied and the workbench surfaces carry data.
+
+- **Decision Studio is its own Analyze page (rec8).** It was nested inside Control
+  Room — three navigation levels (page → section → sub-tab) — and shared a roof with
+  the daily triage console despite being a weekly planning studio. Promoted to a
+  top-level page under Analyze, with its six sections (Portfolio, SLOs, Products,
+  Cost Truth, Scenarios, Experiments) as the primary section bar. Control Room is now
+  the pure triage console (Action Center · Pulse · Incidents · Timeline · Freshness ·
+  Entity 360). The section bodies did not move — only the page shell — so deep links
+  and the cross-jumps into Entity 360 (which stays in Control Room) keep working.
+- **Entity 360 catalog picker (rec12).** The entity input required typing a key — a
+  QUERY_FINGERPRINT is a hash nobody memorizes. It now offers a catalog-seeded
+  selectbox per entity type, keeping the free-text box as the escape hatch for
+  entities not yet catalogued (and as the drill target). Degrades to the text box
+  when the catalog isn't loaded.
+
 ## 4.150.0 - Review wave 2: triage depth, delivery visibility, onboarding (2026-08-12)
 
 App-only, no migration. Second batch from the adjudicated Cursor UI/UX review.

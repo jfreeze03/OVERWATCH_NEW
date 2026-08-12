@@ -14,6 +14,7 @@ PAGE_SECTION_KEYS = {
     "Control Room": "cr_section",
     "Cost & Contract": "cost_section",
     "Operations": "ops_section",
+    "Decision Studio": "decision_section",
     "Security": "sec_section",
     "Alerts": "alerts_section",
     "Admin": "adm_section",
@@ -25,12 +26,13 @@ PAGE_SECTION_KEYS = {
 # each page's own lazy_sections() call, so a rename in one place fails CI until
 # the other matches (the house drift-guard pattern, cf. the alert-rule test).
 PAGE_SECTION_LABELS = {
-    "Control Room": ["Action Center", "Pulse", "Decision Studio", "Incidents & triage", "Timeline & movers",
+    "Control Room": ["Action Center", "Pulse", "Incidents & triage", "Timeline & movers",
                      "Freshness & replay", "Entity 360"],
     "Cost & Contract": ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
                          "Unit costs", "Compare", "Optimization & Savings"],
     "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",
                    "Pipeline SLA", "Release compare", "Emergency"],
+    "Decision Studio": ["Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Access", "Changes", "Clients", "Egress", "Trust Center"],
     "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",

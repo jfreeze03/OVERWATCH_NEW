@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.150.0"
+APP_VERSION = "4.151.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -121,9 +121,9 @@ ROLE_PROFILE_OVERRIDES = {
 
 PAGES_BY_PROFILE = {
     "EXECUTIVE": ("Brief", "Overview", "Cost & Contract", "Alerts"),
-    "ANALYST": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
-    "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security"),
-    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Alerts", "Security", "Admin"),
+    "ANALYST": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
+    "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
+    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
@@ -134,7 +134,7 @@ DEFAULT_PROFILE = "ANALYST"
 # never hidden by omission).
 NAV_GROUPS = {
     "Watch": ("Brief", "Overview", "Alerts"),
-    "Analyze": ("Control Room", "Cost & Contract", "Operations"),
+    "Analyze": ("Control Room", "Cost & Contract", "Operations", "Decision Studio"),
     "Govern": ("Security", "Admin"),
 }
 

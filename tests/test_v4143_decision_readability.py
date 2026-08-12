@@ -187,15 +187,16 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
     assert slos.index("exception_summary(") < slos.index("kpi_row([")
 
     control = _source("app/ui/pages/control_room.py")
+    # rec8: Decision Studio moved out, so Pulse is now bounded by the next section.
     pulse = control.split('elif section == "Pulse":', 1)[1].split(
-        'elif section == "Decision Studio":', 1,
+        'elif section == "Incidents & triage":', 1,
     )[0]
     assert pulse.index("exception_summary(") < pulse.index("kpi_row([")
     assert 'read_model_caption("control_pulse")' in pulse
 
 
 def test_v4143_release_metadata_is_current() -> None:
-    assert 'APP_VERSION = "4.150.0"' in _source("app/config.py")
+    assert 'APP_VERSION = "4.151.0"' in _source("app/config.py")
     changelog = _source("CHANGELOG.md")
     assert "## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)" in changelog
     assert "## 4.143.0 - Decision-readable operating surfaces (2026-08-03)" in changelog

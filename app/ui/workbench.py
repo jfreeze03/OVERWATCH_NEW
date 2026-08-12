@@ -398,6 +398,10 @@ def _seed_entity_context() -> None:
     if kind in ENTITY_TYPES and key and st.session_state.get("_ow_entity_context_applied") != signature:
         st.session_state["entity_360_type"] = kind
         st.session_state["entity_360_key"] = key
+        # rec12: clear this kind's catalog pick so a stale earlier pick cannot shadow
+        # the drilled key (the picker writes into entity_360_key, so a leftover pick
+        # would otherwise re-populate the text box on the next render).
+        st.session_state[f"entity_360_pick_{kind}"] = ""
         st.session_state["_ow_entity_context_applied"] = signature
 
 
@@ -440,7 +444,29 @@ def render_entity_360(company: str) -> None:
     with c1:
         kind = st.selectbox("Entity type", ENTITY_TYPES, key="entity_360_type")
     with c2:
-        key = st.text_input("Entity key", key="entity_360_key", max_chars=500)
+        # rec12: seed a picker from the catalog for this kind — a QUERY_FINGERPRINT is a
+        # hash nobody memorizes. The picker POPULATES the free-text box (the single
+        # source of truth + drill target), so a catalog pick and a drill never fight
+        # over which key wins; the text box stays the escape hatch for un-catalogued
+        # entities (e.g. a fingerprint).
+        cat = run(workbench_sql.entity_catalog(entity_type=kind, limit=200), page=_PAGE,
+                  key=f"entity_pick_{kind}", tier="recent", source="ENTITY_CATALOG", probe=True)
+        if cat.usable() and "ENTITY_KEY" in cat.df.columns:
+            _labels = {str(r["ENTITY_KEY"]): str(r.get("LABEL") or r["ENTITY_KEY"])
+                       for _, r in cat.df.iterrows()}
+
+            def _apply_pick(_k: str = kind) -> None:
+                _p = str(st.session_state.get(f"entity_360_pick_{_k}") or "")
+                if _p:
+                    st.session_state["entity_360_key"] = _p
+
+            st.selectbox(
+                f"Pick a catalogued {kind.lower()}", ["", *list(_labels)],
+                format_func=lambda k: "— or type a key below —" if not k else _labels.get(k, k),
+                key=f"entity_360_pick_{kind}", on_change=_apply_pick)
+        key = st.text_input("Entity key", key="entity_360_key", max_chars=500,
+                            help="For an entity not in the catalog (e.g. a query fingerprint). "
+                                 "Picking from the catalog above fills this in.")
     if not key:
         catalog = run(
             workbench_sql.entity_catalog(limit=100), page=_PAGE, key="entity_catalog_browse",

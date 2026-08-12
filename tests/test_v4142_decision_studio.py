@@ -146,13 +146,16 @@ def test_data_product_is_a_first_class_investigation_entity() -> None:
     assert target.context == {"entity_type": "DATA_PRODUCT", "entity_key": "Finance"}
 
 
-def test_decision_studio_wires_all_six_views_and_control_room() -> None:
+def test_decision_studio_wires_all_six_views_on_its_page() -> None:
+    # rec8: Decision Studio is now its own page; the shell dispatches into the six
+    # section bodies that still live in app/ui/decision_studio.py.
     studio = _source("app/ui/decision_studio.py")
-    control = _source("app/ui/pages/control_room.py")
+    page = _source("app/ui/pages/decision_studio.py")
     for view in ("Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"):
-        assert f'"{view}"' in studio
-    assert "render_decision_studio(company, days)" in control
-    assert '"Decision Studio"' in control
+        assert f'"{view}"' in page
+    assert 'lazy_sections(' in page and 'key="decision_section"' in page
+    # Control Room no longer carries Decision Studio (Entity 360 stays).
+    assert '"Decision Studio"' not in _source("app/ui/pages/control_room.py")
     assert "Verified savings never enter the projection" in studio
 
 

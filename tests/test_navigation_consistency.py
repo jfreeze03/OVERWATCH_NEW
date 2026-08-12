@@ -29,6 +29,7 @@ _PAGES_DIR = _ROOT / "app" / "ui" / "pages"
 _PAGE_FILES = {
     "Overview": "overview.py", "Control Room": "control_room.py",
     "Cost & Contract": "cost.py", "Operations": "operations.py",
+    "Decision Studio": "decision_studio.py",
     "Alerts": "alerts.py", "Security": "security.py",
     "Admin": "admin.py", "Brief": "brief.py",
 }

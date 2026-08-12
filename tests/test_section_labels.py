@@ -17,6 +17,7 @@ _KEY_TO_FILE = {
     "cr_section": "app/ui/pages/control_room.py",
     "cost_section": "app/ui/pages/cost.py",
     "ops_section": "app/ui/pages/operations.py",
+    "decision_section": "app/ui/pages/decision_studio.py",
     "sec_section": "app/ui/pages/security.py",
     "alerts_section": "app/ui/pages/alerts.py",
     "adm_section": "app/ui/pages/admin.py",
