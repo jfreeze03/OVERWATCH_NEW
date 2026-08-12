@@ -16,7 +16,7 @@ import streamlit as st
 
 from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
-from app.data import cost_sql, mart27_sql, mart_sql
+from app.data import app_cost_sql, cost_sql, mart27_sql, mart_sql
 from app.data.common import resolve_effective_window
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -575,6 +575,49 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             )
             st.caption("Each rung narrows scope and adds estimation error — the warehouse row is "
                        "the only exact one. Nothing here re-bills; it maps where the residual lives.")
+
+        # V077: measured cost by CLIENT APPLICATION x user — which program (and who)
+        # drove the credits, so a misconfigured tool is findable. Behind a toggle
+        # because the live fallback (a 3-way ACCOUNT_USAGE join) is heavy until
+        # FACT_APP_COST_DAILY loads. MEASURED warehouse compute only.
+        st.markdown("**Cost by application × user (measured)**")
+        if st.toggle("Load cost by application", key="spend_app_cost_load",
+                     help="Attributes measured query credits to the client program "
+                          "(Tableau, dbt, a driver, a named tool) and the user. Runs a heavy "
+                          "live join until the FACT_APP_COST_DAILY fact (V077) is loaded."):
+            _app = run_mart_first(
+                app_cost_sql.app_cost_mart(days, company),
+                app_cost_sql.app_cost_live(days, company),
+                page=_PAGE, key=f"app_cost_{company}_{days}",
+                mart_source="FACT_APP_COST_DAILY (V077)",
+                live_source="SESSIONS x QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY (live)")
+            if guard(_app, "No measured application cost in this window.",
+                     setup_hint="Apply V077 to materialize FACT_APP_COST_DAILY; until then this "
+                                "runs the live join (needs QUERY_ATTRIBUTION_HISTORY access)."):
+                _adf = _app.df.copy()
+                _adf["USD"] = _adf["CREDITS"].map(safe_float).map(lambda c: credits_to_usd(c, rate))
+                _nm = user_display_map(_PAGE)
+                _adf["USER_NAME"] = [resolve_display(u, _nm) for u in _adf["USER_NAME"]]
+                _byapp = (_adf.groupby("APPLICATION", as_index=False)
+                          .agg(USD=("USD", "sum"), QUERIES=("QUERIES", "sum"))
+                          .sort_values("USD", ascending=False).head(15))
+                charts.bar_usd(_byapp, "APPLICATION", "USD",
+                               title="Measured $ by application", top_n=15)
+                styled_table(
+                    _adf[["APPLICATION", "USER_NAME", "QUERIES", "USD"]].head(300),
+                    height=320,
+                    column_config={"USD": st.column_config.NumberColumn("Measured $", format="$%.2f")},
+                    sort_label="measured $ desc")
+                st.caption(md_dollars(
+                    "MEASURED warehouse compute + query acceleration, attributed to the client "
+                    "program and user; excludes idle, serverless, storage and AI. '(unknown)' = a "
+                    "session that reported no application or could not be joined to a session. A "
+                    "high line for one program is where to look for a misconfiguration. "
+                    "The FACT_APP_COST_DAILY window fills in as the daily loader runs, so soon "
+                    "after V077 is applied it may be shorter than the page window; the live "
+                    "fallback (this toggle before V077 loads) covers up to 90 days. Ranking by "
+                    "program is reliable even while the window is short."))
+                result_caption(_app)
 
     st.markdown("**Daily anomaly check (per warehouse)**")
     daily = daily_res if daily_res is not None else run(

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import timedelta
 
 from app.data import (
+    app_cost_sql,
     change_impact_sql,
     chargeback_sql,
     cortex_sql,
@@ -45,6 +46,8 @@ def _recent_pair() -> tuple[str, str, str, str]:
 
 
 CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
+    ("app_cost.mart", lambda: app_cost_sql.app_cost_mart(2)),
+    ("app_cost.live", lambda: app_cost_sql.app_cost_live(2, "ALFA")),
     ("cost.metering_daily_by_service", lambda: cost_sql.metering_daily_by_service(2)),
     ("cost.warehouse_daily_credits", lambda: cost_sql.warehouse_daily_credits(2, "ALFA")),
     ("cost.warehouse_window_vs_prior", lambda: cost_sql.warehouse_window_vs_prior(2, "ALFA")),

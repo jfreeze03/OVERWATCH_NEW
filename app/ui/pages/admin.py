@@ -206,6 +206,9 @@ _EXPECTED_MIGRATIONS = {
         "(read-only posture, no policy-editor or access-review write surfaces)",
     76: "anomaly materiality gate: SP_ANOMALY_SWEEP gates COST_ANOMALY_SWEEP on a $50 floor, "
         "10 active days, and a spike-vs-collapse baseline test (mirrors the app-side gate)",
+    77: "cost by client application x user: FACT_APP_COST_DAILY joins SESSIONS "
+        "(CLIENT_ENVIRONMENT:APPLICATION / driver) x QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY "
+        "measured credits; daily loader task",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1010,6 +1013,7 @@ def _setup_progress_tab() -> None:
         (74, "V074", "Operating workbench: Action Center, Entity 360, SLOs, experiments"),
         (75, "V075", "Security posture facts: the decision queue"),
         (76, "V076", "Anomaly materiality gate"),
+        (77, "V077", "Cost by application x user: FACT_APP_COST_DAILY"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",

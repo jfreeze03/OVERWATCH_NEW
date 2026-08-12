@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.152.0 - Cost by application × user (V077 owner migration) (2026-08-12)
+
+Answers "which program (and which user) drove the credits" so a misconfigured
+tool is findable — the missing first-class dimension in the cost survey. Adds an
+owner-applied migration + a Cost-page panel.
+
+- **V077 (owner migration): FACT_APP_COST_DAILY.** A new daily fact + loader
+  (`SP_LOAD_APP_COST`) + scheduled task that joins `SESSIONS`
+  (`CLIENT_ENVIRONMENT:APPLICATION`, else the `CLIENT_APPLICATION_ID` driver
+  family) → `QUERY_HISTORY` (`SESSION_ID`) → `QUERY_ATTRIBUTION_HISTORY`
+  (`QUERY_ID`) into measured cost by (day, application, user, company). Each query
+  maps to exactly one session/app/user/warehouse, so credits are additive.
+  Self-trimming (400d); standalone off-peak task on `WH_ALFA_ADMIN`; company via
+  `COMPANY_FOR_WAREHOUSE`. **Owner-applied in Snowsight; smoke-test the loader
+  after applying.**
+- **"Cost by application × user (measured)" panel** (Cost & Contract → Spend &
+  Attribution, behind a toggle). Mart-first: reads `FACT_APP_COST_DAILY` once V077
+  is loaded, else runs the live 3-way join so it works day-one. A bar of measured
+  $ by application + an app × user table. MEASURED warehouse compute only
+  (excludes idle, serverless, storage, AI); `(unknown)` = a session that reported
+  no application or couldn't be joined.
+
+Lockstep: migration floor → V077 (validate.sql, admin `_EXPECTED_MIGRATIONS`,
+rebuild bundle regenerated, teardown, run-lists). New builders canaried.
+
 ## 4.151.0 - Decision Studio as its own page + Entity 360 catalog picker (2026-08-12)
 
 App-only, no migration. The final two review recs, unblocked now that V074/V075
