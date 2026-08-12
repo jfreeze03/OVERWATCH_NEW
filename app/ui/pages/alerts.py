@@ -398,6 +398,19 @@ def _open_events_section(events, is_operator: bool) -> None:
                     rrow = rmatch.iloc[0]
                     st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
                                f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
+            # rec38: did THIS event reach anyone? ALERT_DELIVERIES keys per event+route,
+            # so the drawer can answer directly instead of only History's aggregate SLO.
+            _deliv = run(mart_sql.deliveries_for_event(event_id), page=_PAGE,
+                         key=f"alert_deliv_{event_id}", tier="recent",
+                         source="ALERT_DELIVERIES + ALERT_ROUTES")
+            if _deliv.ok and not _deliv.empty:
+                st.caption("Delivered — " + " · ".join(
+                    f"{r['INTEGRATION_NAME']} at {r['SENT_AT']}" for _, r in _deliv.df.iterrows()))
+            elif _deliv.ok:
+                # Neutral wording: an empty result is normal for a severity/family no
+                # enabled route matches, not necessarily a delivery miss.
+                st.caption("No delivery recorded (a route may not match this event's "
+                           "severity or family).")
             with st.expander("Playbook — what to do first", expanded=True):
                 st.markdown(playbook_for(str(row["RULE_ID"])))
             _rid = str(row["RULE_ID"]).upper()
@@ -581,7 +594,13 @@ def _open_events_section(events, is_operator: bool) -> None:
                 if st.button("Investigate →", key="alert_investigate", use_container_width=True,
                              help=f"Jump to {target['page']} · {target['section'] or 'top'} "
                                   "with filters applied from this event"):
-                    request_navigation(target["page"], target["section"], target["filters"])
+                    # rec24: only claim "filters applied" when the jump actually reshapes
+                    # them, so the arrival note on the destination is never misleading.
+                    _inv_ctx = None
+                    if target["filters"]:
+                        _inv_ctx = {"filter_note": (f"Filters applied from alert "
+                                                    f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
+                    request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
             with c_fix:
                 if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
                                      help="Lands on the remediation surface with this event's "

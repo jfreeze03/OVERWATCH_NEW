@@ -212,6 +212,19 @@ def _billed_split_cols(credits_col: str = "CREDITS_BILLED") -> str:
     )
 
 
+def billed_split(days: int = 30) -> str:
+    """rec29: windowed billed credits split into AI vs OTHER partitions (account-
+    wide — billing carries no company grain) so the Cost Truth BILLED basis
+    dollarizes with the house rate mix (AI/Cortex at ai_rate, compute at the
+    compute rate) instead of a naive single rate. Feeds blended_billed_usd."""
+    horizon = bounded_days(days, 400)
+    return f"""
+SELECT {_billed_split_cols()}
+FROM {core_object('FACT_METERING_DAILY')}
+WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+"""
+
+
 def fact_daily_spend_year() -> str:
     """Calendar-year billed credits per day (COST_DB recon R9). Own builder:
     bounded_days clamps at 90 by default, which would silently turn "YTD"
@@ -1651,6 +1664,22 @@ FROM {core_object("ALERT_DELIVERIES")}
 WHERE SENT_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY ROUTE_ID
 ORDER BY SENDS DESC
+LIMIT 50
+"""
+
+
+def deliveries_for_event(event_id: str) -> str:
+    """rec38: the per-route delivery rows for ONE event — 'did THIS page reach
+    anyone, on which integration, when'. LEFT JOIN routes so an unmatched route
+    id still shows; an EMPTY result means the event has not been delivered yet
+    (which is normal for a severity/family no enabled route matches)."""
+    return f"""
+SELECT COALESCE(r.INTEGRATION_NAME, '(route ' || d.ROUTE_ID || ')') AS INTEGRATION_NAME,
+       d.SENT_AT
+FROM {core_object("ALERT_DELIVERIES")} d
+LEFT JOIN {core_object("ALERT_ROUTES")} r ON r.ROUTE_ID = d.ROUTE_ID
+WHERE d.EVENT_ID = {sql_literal(str(event_id or ''))}
+ORDER BY d.SENT_AT
 LIMIT 50
 """
 

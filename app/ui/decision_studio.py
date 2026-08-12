@@ -11,7 +11,7 @@ from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
-from app.logic.formulas import credits_to_usd, format_usd, safe_float
+from app.logic.formulas import blended_billed_usd, credits_to_usd, format_usd, safe_float
 from app.logic.workbench import (
     EXPERIMENT_STATUSES,
     SLO_METRIC_KEYS,
@@ -306,21 +306,46 @@ def _cost_truth(company: str, days: int) -> None:
     metered = values.get("METERED", 0.0)
     allocated = values.get("ALLOCATED", 0.0)
     measured = values.get("MEASURED", 0.0)
+    billed = values.get("BILLED", 0.0)
+    # rec29: dollars primary (execs read dollars, not credits), credits secondary.
+    # The three compute-clean bases convert at the compute rate; BILLED blends
+    # services, so its AI/Cortex share must price at the AI rate (house rule d) via
+    # the billed AI/OTHER split — a flat rate would overprice AI credits.
+    settings = load_settings(_PAGE)
+    rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+    ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+    split = run(mart_sql.billed_split(days), page=_PAGE,
+                key=f"decision_billed_split_{days}", tier="historical",
+                source="FACT_METERING_DAILY (billed AI/OTHER split)")
+    if split.usable():
+        _s = split.df.iloc[0]
+        billed_usd = blended_billed_usd(safe_float(_s.get("CREDITS_BILLED_OTHER")),
+                                        safe_float(_s.get("CREDITS_BILLED_AI")), rate, ai_rate)
+        _billed_help = ("Account-wide billing basis; Company does not apply. AI/Cortex "
+                        "credits priced at the AI rate, compute at the compute rate.")
+    else:
+        # Degrade only when the AI/OTHER split read fails: a flat compute rate on the
+        # whole billed total slightly overstates AI — say so rather than claiming AI-aware.
+        billed_usd = credits_to_usd(billed, rate)
+        _billed_help = ("Account-wide billing basis; Company does not apply. AI/OTHER split "
+                        "unavailable — priced at the flat compute rate (AI slightly overstated).")
     kpi_row([
-        {"label": "Billed account", "value": f"{values.get('BILLED', 0):,.2f} cr",
-         "help": "Account-wide billing basis; Company does not apply."},
-        {"label": "Metered warehouse", "value": f"{metered:,.2f} cr"},
-        {"label": "Measured object-query", "value": f"{measured:,.2f} cr",
-         "delta": f"{measured / metered * 100:,.1f}% of metered" if metered else None,
-         "delta_color": "off"},
-        {"label": "Allocated to users", "value": f"{allocated:,.2f} cr",
-         "delta": f"{allocated / metered * 100:,.1f}% of metered" if metered else None,
-         "delta_color": "off"},
+        {"label": "Billed account", "value": format_usd(billed_usd),
+         "delta": f"{billed:,.0f} cr", "delta_color": "off", "help": _billed_help},
+        {"label": "Metered warehouse", "value": format_usd(credits_to_usd(metered, rate)),
+         "delta": f"{metered:,.0f} cr", "delta_color": "off"},
+        {"label": "Measured object-query", "value": format_usd(credits_to_usd(measured, rate)),
+         "delta": f"{measured:,.0f} cr", "delta_color": "off"},
+        {"label": "Allocated to users", "value": format_usd(credits_to_usd(allocated, rate)),
+         "delta": f"{allocated:,.0f} cr", "delta_color": "off"},
     ])
     styled_table(frame, height=300, sort_label="semantic basis order")
     st.caption(
-        "Rows are lenses over cost, not addends. Billed is account truth; metered includes "
-        "warehouse idle; measured excludes idle; allocated redistributes warehouse usage."
+        "Dollars primary, credits secondary. Rows are lenses over cost, not addends: "
+        "billed is account truth; metered includes warehouse idle; measured excludes idle; "
+        "allocated redistributes warehouse usage."
+        + (f" Measured is {measured / metered * 100:,.0f}% and allocated "
+           f"{allocated / metered * 100:,.0f}% of metered." if metered else "")
     )
 
 

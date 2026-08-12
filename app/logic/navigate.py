@@ -33,8 +33,8 @@ PAGE_SECTION_LABELS = {
                    "Pipeline SLA", "Release compare", "Emergency"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Access", "Changes", "Clients", "Egress", "Trust Center"],
-    "Admin": ["Settings", "Migrations & freshness", "Metrics", "App self-cost",
-              "Performance", "Canary", "Errors & telemetry"],
+    "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",
+              "App self-cost", "Performance", "Canary", "Errors & telemetry"],
 }
 
 _RULE_TARGETS = {

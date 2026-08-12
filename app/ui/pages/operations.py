@@ -774,8 +774,9 @@ def _task_graph_view() -> None:
                 "(it scopes the Health and Runs views instead). Use the filter below to find a "
                 "root graph by name.")
     if roots.truncated:
-        st.caption("This account has more than 500 root task graphs; showing the 500 largest by "
-                   "task count. Use the filter below to find a specific root.")
+        st.caption("This account has more than 500 root task graphs; showing the 500 with the "
+                   "most 24h failures, then the most tasks. Use the filter below to find a "
+                   "specific root.")
 
     root_rows = {
         str(row.get("ROOT_TASK_ID") or ""): row
@@ -792,7 +793,12 @@ def _task_graph_view() -> None:
         fqn = str(row.get("ROOT_TASK_FQN") or root_id)
         nodes = int(safe_float(row.get("NODE_COUNT")))
         version = int(safe_float(row.get("GRAPH_VERSION")))
-        return f"{fqn} · {nodes} tasks · graph v{version}"
+        # rec34: surface why a graph sorts to the top — recent failures lead the list.
+        # "failed runs" (TASK_HISTORY run count), not distinct tasks — a flaky task that
+        # runs every few minutes can log many failed runs in a small graph.
+        fails = int(safe_float(row.get("FAILURES_24H")))
+        fail_note = f" · ⚠ {fails} failed runs (24h)" if fails else ""
+        return f"{fqn} · {nodes} tasks · graph v{version}{fail_note}"
 
     root_filter = st.text_input(
         "Filter roots (task name contains)",
@@ -811,6 +817,8 @@ def _task_graph_view() -> None:
         root_ids,
         format_func=_root_label,
         key="ops_task_graph_root",
+        help="Ordered by recent (24h) failed runs first, then task count — the graph most "
+             "likely to need attention is on top.",
     )
     root_row = root_rows[str(root_id)]
     graph_version = int(safe_float(root_row.get("GRAPH_VERSION")))

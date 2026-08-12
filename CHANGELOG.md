@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.150.0 - Review wave 2: triage depth, delivery visibility, onboarding (2026-08-12)
+
+App-only, no migration. Second batch from the adjudicated Cursor UI/UX review.
+
+- **Root picker orders failures-first (rec34).** The task-graph root list was
+  ordered by name/size, burying a small failing tree under big healthy ones.
+  `task_graph_roots` now sums 24h `TASK_HISTORY` failures per graph and orders
+  failures-first; the picker label shows `⚠ N failed (24h)` and the 500-row cap
+  keeps the most-failing graphs (never truncated away).
+- **Per-event delivery state in the Alerts drawer (rec38).** The drawer can now
+  answer "did THIS page reach anyone?" — a new `deliveries_for_event` reader joins
+  `ALERT_DELIVERIES` to `ALERT_ROUTES` and the drawer lists the integrations + send
+  times, or says it hasn't been delivered yet.
+- **Duplicate work-item guard (rec19).** Action Center and Security both create
+  into `ACTION_QUEUE` with no dedupe. Both now warn (not block) when the entity
+  already has an open/in-progress item, reusing `related_actions`.
+- **Arrival note for filter-applying jumps (rec24).** An alert "Investigate →"
+  reshapes the global filters; the destination now announces "Filters applied from
+  alert […]" once on arrival (in `page_header`), so the scoped view doesn't read as
+  user-set. Shown only when the jump actually applies filters; drill identity
+  (event_id/query_id) is preserved.
+- **Cost Truth in dollars (rec29).** The four basis KPIs led with credits while the
+  rest of the app leads with dollars. Now dollars-primary / credits-secondary; the
+  compute-clean bases (metered/measured/allocated) convert at the compute rate and
+  **BILLED** prices its AI/Cortex share at the AI rate via a new `billed_split`
+  reader + `blended_billed_usd` — a flat rate would overprice AI credits (house
+  rule d). Measured/allocated coverage ratios move to the caption.
+- **Admin "Setup progress" panel (rec44).** One onboarding checklist consolidating
+  the scattered "Apply VNNN" walls: database migrations (floor + V074/V075/V076
+  presence), marts loading, and budget/contract/route config — each row reads live
+  install state and names the fix. Read-only; applies nothing.
+
 ## 4.149.0 - Triage routing + decision honesty (2026-08-12)
 
 App-only. First do-now batch from the adjudicated Cursor UI/UX review (verified

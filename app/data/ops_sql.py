@@ -373,18 +373,36 @@ snapshot AS (
 
 
 def task_graph_roots() -> str:
-    """Latest coherent graph snapshot per active root, for the graph picker."""
-    return _task_graph_snapshot_ctes() + """
-SELECT ROOT_TASK_ID, GRAPH_VERSION, MAX(GRAPH_VERSION_CREATED_ON) AS GRAPH_CREATED_ON,
+    """Latest coherent graph snapshot per active root, for the graph picker.
+
+    rec34: ordered FAILURES-FIRST (24h) so the graph a DBA needs to open sits on
+    top, not buried alphabetically/by size under healthy trees. FAILURES_24H sums
+    TASK_HISTORY failures across the graph's tasks (same source as the node view's
+    per-task count); the JOIN is 1:0-or-1 per TASK_FQN so it never inflates
+    NODE_COUNT. With the 500-row fetch cap the survivors are the most-failing then
+    largest — a failing tree is never truncated away in favour of a big healthy one.
+    """
+    return _task_graph_snapshot_ctes() + """,
+root_fails AS (
+    SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
+           COUNT(*) AS FAILURES_24H
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE COMPLETED_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND STATE = 'FAILED'
+    GROUP BY 1
+)
+SELECT s.ROOT_TASK_ID, s.GRAPH_VERSION, MAX(s.GRAPH_VERSION_CREATED_ON) AS GRAPH_CREATED_ON,
        COALESCE(
-           MAX(IFF(TASK_ID = ROOT_TASK_ID, TASK_FQN, NULL)),
-           MAX(IFF(COALESCE(ARRAY_SIZE(PREDECESSORS), 0) = 0, TASK_FQN, NULL))
+           MAX(IFF(s.TASK_ID = s.ROOT_TASK_ID, s.TASK_FQN, NULL)),
+           MAX(IFF(COALESCE(ARRAY_SIZE(s.PREDECESSORS), 0) = 0, s.TASK_FQN, NULL))
        ) AS ROOT_TASK_FQN,
        COUNT(*) AS NODE_COUNT,
-       COUNT_IF(LOWER(COALESCE(STATE, '')) LIKE '%suspend%') AS SUSPENDED_NODES
-FROM snapshot
-GROUP BY ROOT_TASK_ID, GRAPH_VERSION
-ORDER BY NODE_COUNT DESC, ROOT_TASK_FQN
+       COUNT_IF(LOWER(COALESCE(s.STATE, '')) LIKE '%suspend%') AS SUSPENDED_NODES,
+       COALESCE(SUM(rf.FAILURES_24H), 0) AS FAILURES_24H
+FROM snapshot s
+LEFT JOIN root_fails rf ON rf.TASK_FQN = s.TASK_FQN
+GROUP BY s.ROOT_TASK_ID, s.GRAPH_VERSION
+ORDER BY FAILURES_24H DESC, NODE_COUNT DESC, ROOT_TASK_FQN
 """
 
 

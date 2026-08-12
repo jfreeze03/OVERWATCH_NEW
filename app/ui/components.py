@@ -199,6 +199,18 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     # rec11: the ACCOUNT_USAGE lag note lives ONCE per page here, not appended verbatim
     # to every panel's result_caption (it was on all ~76 of them).
     st.caption(ACCOUNT_USAGE_LAG_NOTE)
+    # rec24: if this page was reached by a jump that reshaped the GLOBAL filters,
+    # announce it ONCE on arrival — otherwise the scoped view reads as if the user
+    # set it. Drop only the note; any drill identity (event_id, query_id) survives.
+    _nav_ctx = st.session_state.get("_ow_nav_context")
+    if isinstance(_nav_ctx, dict) and _nav_ctx.get("filter_note"):
+        # Point at the always-present sidebar scope controls, not the Reset button
+        # (which only renders when a filter is active — a cross-company database filter
+        # can be validated away, leaving no button to name).
+        st.info(f"{_nav_ctx['filter_note']} — adjust or clear scope in the sidebar.")
+        st.session_state["_ow_nav_context"] = {
+            k: v for k, v in _nav_ctx.items() if k != "filter_note"
+        }
 
 
 _SEV_HEX = {"ok": palette.OK, "warn": palette.WARN, "bad": palette.BAD,

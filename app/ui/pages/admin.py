@@ -977,6 +977,92 @@ def _metric_registry_tab() -> None:
     st.caption(f"{len(_rows)} registered metrics · methods: {', '.join(mr.METHODS)}.")
 
 
+def _setup_progress_tab() -> None:
+    """rec44: ONE onboarding checklist that consolidates the scattered 'Apply VNNN'
+    walls (Action Center, Entity 360, SLOs, experiments, Security queue) plus marts
+    loading and budget/contract/route config — so a fresh deploy has a single place
+    that says what is done and what is pending, not a dozen per-surface walls. All
+    reads are existing probes; this panel applies nothing."""
+    panel_help(
+        "What this install still needs. Each row reads live state — migrations applied, "
+        "marts loading, and the settings/routes that light up alerting and forecasting. "
+        "Apply migrations in Snowsight (owner); configure settings on the Settings tab."
+    )
+    rows: list[dict] = []
+
+    def _add(step: str, done: bool, detail: str, fix: str, partial: bool = False) -> None:
+        status = "Done" if done else ("Partial" if partial else "Pending")
+        rows.append({"STEP": step, "STATUS": status, "DETAIL": detail,
+                     "FIX": "" if done else fix})
+
+    sv = run(mart_sql.schema_version(), page=_PAGE, key="setup_schema_version",
+             tier="metadata", source="SCHEMA_VERSION", probe=True)
+    applied: set[int] = set()
+    if sv.ok and not sv.empty:
+        applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
+    missing = [n for n in _EXPECTED_MIGRATIONS if n not in applied]
+    _add("Database migrations", done=bool(applied) and not missing,
+         detail=(f"{len(applied)} of {len(_EXPECTED_MIGRATIONS)} applied"
+                 + (f"; {len(missing)} missing" if missing else "")) if sv.ok
+                else "SCHEMA_VERSION unreadable — nothing applied yet",
+         fix="Run the missing migrations in order (DEPLOYMENT.md).")
+    for _v, _label, _feature in (
+        (74, "V074", "Operating workbench: Action Center, Entity 360, SLOs, experiments"),
+        (75, "V075", "Security posture facts: the decision queue"),
+        (76, "V076", "Anomaly materiality gate"),
+    ):
+        _add(f"{_label} — {_feature}", done=_v in applied,
+             detail="applied" if _v in applied else "not applied",
+             fix=f"Apply {_label} in Snowsight (owner).")
+
+    fr = run(mart_sql.source_freshness_state(), page=_PAGE, key="setup_freshness",
+             tier="recent", source="SOURCE_FRESHNESS_STATE", probe=True)
+    if fr.usable():
+        # NEVER loaded (LAST_LOAD_TS IS NULL), not merely empty — a healthy mart can
+        # have ROW_COUNT=0 (e.g. no incidents yet) and must still count as loaded.
+        _never = (int(fr.df["LAST_LOAD_TS"].isna().sum())
+                  if "LAST_LOAD_TS" in fr.df.columns else 0)
+        _add("Marts loading", done=_never == 0, partial=_never > 0,
+             detail=f"{len(fr.df)} sources tracked"
+                    + (f"; {_never} not loaded yet" if _never else ""),
+             fix="Loader tasks fill these overnight; a never-loaded source needs its "
+                 "backfill (Migrations & freshness tab).")
+    else:
+        _add("Marts loading", done=False,
+             detail="Freshness view not readable — have the loader tasks run?",
+             fix="Resume the loader tasks (end of V004) / run the backfill.")
+
+    s = load_settings(_PAGE)
+    _budget = str(s.get("MONTHLY_BUDGET_USD") or "").strip()
+    _add("Monthly budget set", done=bool(_budget) and _budget not in ("0", "0.0"),
+         detail=f"MONTHLY_BUDGET_USD = {_budget or '(unset)'}",
+         fix="Set MONTHLY_BUDGET_USD on the Settings tab (drives budget pacing + score).")
+    _contract = str(s.get("CONTRACT_START_DATE") or "").strip()
+    _credits = str(s.get("CONTRACT_CREDITS") or "").strip()
+    _add("Contract configured",
+         done=bool(_contract) and bool(_credits) and _credits not in ("0", "0.0"),
+         detail=f"start {_contract or '(unset)'}, credits {_credits or '(unset)'}",
+         fix="Set CONTRACT_START_DATE and CONTRACT_CREDITS on the Settings tab "
+             "(drives Contract & Forecast).")
+    rt = run(mart_sql.alert_routes(), page=_PAGE, key="setup_routes", tier="recent",
+             source="ALERT_ROUTES", probe=True)
+    _n_routes = 0
+    if rt.usable():
+        _n_routes = (int(rt.df["ENABLED"].astype(str).str.upper().isin(("TRUE", "1")).sum())
+                     if "ENABLED" in rt.df.columns else len(rt.df))
+    _add("Alert routes configured", done=_n_routes > 0,
+         detail=f"{_n_routes} enabled route(s)" if rt.usable() else "routes table not readable",
+         fix="Add an enabled route so alerts reach Teams/email (Alerts → Rules & routes).")
+
+    df = pd.DataFrame(rows)
+    pending = int((df["STATUS"] != "Done").sum())
+    if pending == 0:
+        st.success("Setup complete — every checklist item is satisfied.")
+    else:
+        st.warning(f"{pending} setup item(s) still pending — see the FIX column.")
+    styled_table(df, height=360)
+
+
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
@@ -987,7 +1073,7 @@ def render() -> None:
     is_operator = _is_operator()
     _context_section()
     section = lazy_sections(
-        ["Settings", "Migrations & freshness", "Metrics", "App self-cost",
+        ["Settings", "Migrations & freshness", "Setup progress", "Metrics", "App self-cost",
          "Performance", "Canary", "Errors & telemetry"], key="adm_section")
     section_filter_contract(
         f,
@@ -998,6 +1084,8 @@ def render() -> None:
         _settings_tab(is_operator)
     elif section == "Migrations & freshness":
         _migrations_tab()
+    elif section == "Setup progress":
+        _setup_progress_tab()
     elif section == "Metrics":
         _metric_registry_tab()
     elif section == "App self-cost":

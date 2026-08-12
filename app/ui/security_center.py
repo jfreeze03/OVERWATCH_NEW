@@ -15,7 +15,7 @@ import streamlit as st
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
-from app.data import security_sql
+from app.data import security_sql, workbench_sql
 from app.logic.formulas import account_today, safe_float
 from app.logic.security import (
     domain_posture,
@@ -200,6 +200,19 @@ def render_security_overview(company: str) -> None:
                 entity_key=entity_key,
                 confidence=safe_float(row.get("CONFIDENCE")),
             )
+            # rec19: warn (don't block) if this entity already has an open work item —
+            # this path and Action Center both write to ACTION_QUEUE with no dedupe.
+            _dupes = run(
+                workbench_sql.related_actions(_action_entity_type(row.get("ENTITY_TYPE")), entity_key),
+                page=_PAGE, key=f"sec_dupe_{entity_key.strip().upper()}", tier="recent",
+                source="ACTION_QUEUE")
+            if _dupes.usable():
+                _open_dupes = _dupes.df[_dupes.df["STATUS"].astype(str).str.upper()
+                                        .isin(("OPEN", "IN_PROGRESS"))]
+                if not _open_dupes.empty:
+                    st.warning(f"{len(_open_dupes)} open work item(s) already track this entity — "
+                               "open one from Action Center instead of duplicating, or continue if "
+                               "this is genuinely separate.")
             st.code(statement, language="sql")
             if st.button("Create work item", key="sec_exception_create"):
                 ok, message = execute_statement(statement, page=_PAGE)

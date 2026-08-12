@@ -357,6 +357,20 @@ def render_action_center(company: str) -> None:
                 due = st.date_input("Due", value=account_today() + timedelta(days=7), key="action_new_due")
             entity_type = st.selectbox("Entity type", ENTITY_TYPES, key="action_new_type")
             entity_key = st.text_input("Entity key", key="action_new_key", max_chars=500)
+            # rec19: warn (don't block) if this entity already has an open work item —
+            # both Action Center and Security can create against the same entity, and the
+            # INSERT does not dedupe. Reuses related_actions (open/in-progress first).
+            if entity_key.strip():
+                _dupes = run(workbench_sql.related_actions(entity_type, entity_key), page=_PAGE,
+                             key=f"action_dupe_{entity_type}_{entity_key.strip().upper()}",
+                             tier="recent", source="ACTION_QUEUE")
+                if _dupes.usable():
+                    _open_dupes = _dupes.df[_dupes.df["STATUS"].astype(str).str.upper()
+                                            .isin(("OPEN", "IN_PROGRESS"))]
+                    if not _open_dupes.empty:
+                        st.warning(f"{len(_open_dupes)} open work item(s) already track "
+                                   f"{entity_type} {entity_key.strip()} — open one from the queue "
+                                   "above instead of duplicating, or continue if this is separate.")
             confidence = st.slider("Confidence", 0.0, 1.0, 0.7, 0.05, key="action_new_conf")
             estimated = st.number_input("Estimated USD", min_value=0.0, step=50.0, key="action_new_usd")
             if title and entity_key:
