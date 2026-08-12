@@ -210,6 +210,7 @@ def triage_queue(
                 "RAISED_AT": r.get("RAISED_AT"),
                 "EVENT_ID": str(r.get("EVENT_ID", "") or ""),
                 "RULE_ID": str(r.get("RULE_ID", "") or ""),
+                "WAREHOUSE": "",
                 # Alerts carry no comparable dollar figure; 0.0 keeps them in the
                 # severity band but behind any priced row (see the sort below).
                 "_USD": 0.0,
@@ -232,6 +233,7 @@ def triage_queue(
                 "RAISED_AT": r.get("DAY"),
                 "EVENT_ID": "",
                 "RULE_ID": "",
+                "WAREHOUSE": "",
                 # A failed loader has a real cost, but not one this row can price.
                 "_USD": 0.0,
             })
@@ -271,6 +273,9 @@ def triage_queue(
             "RAISED_AT": a.get("day"),
             "EVENT_ID": "",
             "RULE_ID": "",
+            # rec22: carry the offending warehouse so triage can route the spend
+            # spike to that warehouse instead of restarting account-wide.
+            "WAREHOUSE": str(label),
             "_USD": excess,
         })
     if not rows:

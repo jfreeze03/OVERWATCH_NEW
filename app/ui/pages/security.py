@@ -788,8 +788,9 @@ def render() -> None:
     page_header("Security & Governance", "Hygiene and governance posture — not a threat-detection SOC.", icon_name="security",
                 scope_note=f"{f['company']} · {f['window_label']}")
     st.caption(
-        "Access control is Snowflake RBAC — this page reports posture; it does not grant or "
-        "revoke anything. Company scoping is a shared-account view filter, not isolation."
+        "Access control is Snowflake RBAC — this page reports posture and grants or revokes "
+        "nothing. Its one write is logging a posture exception to OVERWATCH's own work queue "
+        "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
     section_filter_contract(
         f,

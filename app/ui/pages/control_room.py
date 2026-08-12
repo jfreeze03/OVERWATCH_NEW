@@ -287,17 +287,23 @@ def render() -> None:
     # health_strip cache entry (same SQL + key as the sidebar), zero extra queries.
     _strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
                  source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    _sv: dict[str, str] = {}
+    _open_crit = 0
     if _strip.ok and not _strip.empty:
         _sv = {str(r["METRIC"]): str(r["VALUE"]) for _, r in _strip.df.iterrows()}
+        _open_crit = int(safe_float(_sv.get("OPEN_CRITICAL", "0")))
         _und = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
         if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery) — "
                               "check delivery →", key="cr_undelivered", type="primary",
                               use_container_width=True):
             request_navigation("Alerts", "Native delivery")
 
+    # rec11: badge the Incidents pill with open criticals — already in the health strip
+    # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
     section = lazy_sections(["Action Center", "Pulse", "Decision Studio", "Incidents & triage",
                              "Timeline & movers", "Freshness & replay", "Entity 360"],
-                            key="cr_section")
+                            key="cr_section",
+                            counts={"Incidents & triage": _open_crit} if _open_crit else None)
     _contracts = {
         "Action Center": {
             "applies": (),
@@ -478,6 +484,24 @@ def render() -> None:
         inc_met = run(mart_sql.incident_metrics(90, company), page=_PAGE,
                       key=f"inc_metrics_{company}", tier="recent",
                       source=f"INCIDENTS lifecycle (90d, {company} + account-level)")
+        # rec10: lead the section with the house exception-first summary — the DBA's
+        # first triage question is "what needs me", answered from numbers already in
+        # hand (health strip + incident metrics), zero extra queries.
+        _open_now = int(safe_float(inc_met.df.iloc[0].get("OPEN_NOW"))) if inc_met.usable() else 0
+        _exc = []
+        if _open_crit:
+            _exc.append({"label": "Open criticals", "value": f"{_open_crit:,}",
+                         "detail": "Open CRITICAL alert events — in the triage queue below.",
+                         "severity": "bad"})
+        if _open_now:
+            _exc.append({"label": "Open incidents", "value": f"{_open_now:,}",
+                         "detail": "Declared incidents still open.", "severity": "bad"})
+        _stale = int(safe_float(_sv.get("STALE_SOURCES", "0")))
+        if _stale:
+            _exc.append({"label": "Stale sources", "value": f"{_stale:,}",
+                         "detail": "Feeds past their freshness SLA — see Freshness & replay.",
+                         "severity": "warn"})
+        exception_summary(_exc, "No open criticals, open incidents, or stale sources.")
         if inc_met.usable():
             im = inc_met.df.iloc[0]
             # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
@@ -654,12 +678,35 @@ def render() -> None:
             # lives in selectable_nav_table now — was firing request_navigation every
             # rerun on the sticky row).
             def _open_triage(_i: int) -> None:
+                # rec20/21/22: carry the row's IDENTITY (event) / land on the owning
+                # SECTION (task) / SCOPE to the offending entity (spend), instead of
+                # dropping everything and landing account-wide on a page default.
                 _qr = queue.iloc[int(_i)]
-                _dest = {"Alert": ("Alerts", "Open events"),
-                         "Task failure": ("Operations", ""),
-                         "Spend anomaly": ("Cost & Contract", ""),
-                         "Spend collapse": ("Cost & Contract", "")}.get(str(_qr.get("KIND")), ("Alerts", ""))
-                request_navigation(_dest[0], _dest[1])
+                _kind = str(_qr.get("KIND"))
+                _ctx: dict = {}
+                _flt: dict = {}
+                if _kind == "Alert":
+                    # The Alerts drawer self-selects on an event_id context, so carrying
+                    # it lands the click on THIS event's drawer, not the Open-events wall.
+                    _dest = ("Alerts", "Open events")
+                    _eid = str(_qr.get("EVENT_ID") or "").strip()
+                    if _eid:
+                        _ctx["event_id"] = _eid
+                elif _kind == "Task failure":
+                    _dest = ("Operations", "Tasks")  # the section that owns tasks
+                elif _kind in ("Spend anomaly", "Spend collapse"):
+                    # Operations -> Queries is the section that actually CONSUMES
+                    # warehouse_contains (_queries_tab takes it; its contract lists it).
+                    # Warehouses ignores it — its contract even renders "Active but
+                    # ignored: Warehouse" — so route to Queries: the "what ran to spike
+                    # this warehouse" view, genuinely scoped, not a silent no-op.
+                    _dest = ("Operations", "Queries")
+                    _wh = str(_qr.get("WAREHOUSE") or "").strip()
+                    if _wh:
+                        _flt["warehouse_contains"] = _wh
+                else:
+                    _dest = ("Alerts", "")
+                request_navigation(_dest[0], _dest[1], _flt or None, _ctx or None)
             selectable_nav_table(_qdisp[_disp], key="cr_triage_sel", on_select=_open_triage,
                                  height=260, size_note=False)  # the caption below states the count
             st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "

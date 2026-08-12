@@ -71,6 +71,15 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
     (BILLED/METERED/MEASURED/ALLOCATED/ESTIMATED + grain + lag). SQL builders
     return SQL strings only, day windows clamp via `bounded_days`, filters
     flow through `app/companies.py` clause builders exclusively.
+11. **Write-friction policy (rec14):** friction matches CONSEQUENCE, not the
+    table. ONE CLICK (an operator-gated `st.button`, SQL preview still shown)
+    for a REVERSIBLE upsert to OVERWATCH's OWN tables — alert ACK, action /
+    work-item create+save, ownership + watchlist edits, budget / SLO /
+    experiment saves. TYPE-TO-CONFIRM (`confirm_gate`) for a CLASSIFYING or
+    account-touching write — alert RESOLVE (feeds per-rule precision),
+    incident declare/close, warehouse levers. `st.form` stays declined (it
+    hides the preview). `notify()` is the receipt: toast on success,
+    persistent inline error on failure (rec48).
 
 ## Owner decisions (do not relitigate)
 

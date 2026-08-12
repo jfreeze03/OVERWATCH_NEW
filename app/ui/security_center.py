@@ -204,6 +204,12 @@ def render_security_overview(company: str) -> None:
             if st.button("Create work item", key="sec_exception_create"):
                 ok, message = execute_statement(statement, page=_PAGE)
                 notify(ok, message)
+                # rec48: non-idempotent INSERT into OVERWATCH's own queue with no other
+                # rerun — rerun so the surface refreshes and the form/button reset, or a
+                # second click double-inserts (the persistent success banner used to be
+                # the only cue suppressing that).
+                if ok:
+                    st.rerun()
 
 
 def _dot_text(value: object) -> str:

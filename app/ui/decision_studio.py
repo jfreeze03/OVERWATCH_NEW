@@ -112,6 +112,7 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         sort_label="decision lane, then evidence-weighted priority",
         impact_help="Measured pattern credits x the compute rate, normalized to 30 days — "
                     "observed cost, not promised savings.",
+        confidence_label="Confidence (evidence)",
         confidence_help="Evidence heuristic (0-1): a blend of run recency, active-day coverage, "
                         "and whether the family has measured cost. NOT statistical confidence.",
     )
@@ -270,8 +271,19 @@ def _products(company: str, days: int, rate: float) -> None:
         ]],
         key="decision_product_table", on_select=open_product, height=390,
         column_config={
-            "MEASURED_OBJECT_USD": st.column_config.NumberColumn("Object-attributed $", format="$%.2f"),
-            "METERED_WAREHOUSE_USD": st.column_config.NumberColumn("Warehouse $", format="$%.2f"),
+            # rec32: the two dollar columns are SEPARATE lenses that overlap and are
+            # NOT additive — state that in each header's help, where the summing impulse
+            # happens (totals are deliberately absent for the same reason).
+            "MEASURED_OBJECT_USD": st.column_config.NumberColumn(
+                "Object-attributed $", format="$%.2f",
+                help="Cost attributed to this product's objects from measured query cost. "
+                     "A SEPARATE lens from Warehouse $ — the two overlap and are NOT "
+                     "additive; never sum them."),
+            "METERED_WAREHOUSE_USD": st.column_config.NumberColumn(
+                "Warehouse $", format="$%.2f",
+                help="Cost metered on the warehouses this product runs on, including idle. "
+                     "A SEPARATE lens from Object-attributed $ — the two overlap and are "
+                     "NOT additive; never sum them."),
             "TASK_FAIL_PCT": st.column_config.NumberColumn("Task fail %", format="%.2f%%"),
         },
         sort_label="measured object cost, then metered warehouse cost",
@@ -326,6 +338,13 @@ def _scenarios(company: str) -> None:
         )
         if legacy.ok and not legacy.empty:
             styled_table(legacy.df, height=260)
+        return
+    # rec18: with an empty action queue the sliders would model nothing and the KPIs
+    # would silently project $0 — say so and skip the controls until there is a queue.
+    if actions.empty:
+        empty_state("no_data_yet",
+                    "No open actions to model yet — scenarios size a plan from the open "
+                    "action queue. Create actions on Action Center to project savings.")
         return
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -390,8 +409,13 @@ def _experiments() -> None:
     ])
     selected = selectable_table(frame, key="decision_experiment_table", height=340,
                                 sort_label="active status, observation end, then update")
-    index = int(selected) if selected is not None else 0
-    row = frame.iloc[index]
+    # rec17: no silent row-0 — an unselected table must not render (and let an operator
+    # Save) the first experiment as if it were the chosen one. Require a selection.
+    if selected is None:
+        st.caption("Select an experiment above to view its hypothesis, open its entity, "
+                   "or record results.")
+        return
+    row = frame.iloc[int(selected)]
     experiment_id = str(row["EXPERIMENT_ID"])
     if st.button("Open experiment entity", key=f"experiment_entity_{experiment_id}",
                  type="tertiary"):

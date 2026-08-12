@@ -234,6 +234,11 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
                 if st.button("Create experiment", key=f"exp_create_{action_id}"):
                     ok, msg = execute_statement(exp_sql, page=_PAGE)
                     notify(ok, msg)
+                    # rec48: this INSERT is non-idempotent and the surface does not
+                    # otherwise rerun — rerun so the table re-renders as the receipt and
+                    # the form/button reset, or a second click double-inserts.
+                    if ok:
+                        st.rerun()
 
 
 def render_action_center(company: str) -> None:
@@ -323,6 +328,7 @@ def render_action_center(company: str) -> None:
             sort_label="severity, overdue, estimated value, then age",
             impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate these "
                         "by entity and never mix them with verified savings.",
+            confidence_label="Confidence (authored)",
             confidence_help="Authored confidence (0-1) set when the action was created (operator "
                             "or recommendation engine) — a stated belief, not a measurement.",
         )
@@ -364,6 +370,10 @@ def render_action_center(company: str) -> None:
                 if st.button("Create work item", key="action_new_exec"):
                     ok, msg = execute_statement(insert_sql, page=_PAGE)
                     notify(ok, msg)
+                    # rec48: non-idempotent INSERT with no other rerun — rerun so the
+                    # queue re-renders as the receipt and the form/button reset.
+                    if ok:
+                        st.rerun()
 
 
 def _seed_entity_context() -> None:
@@ -467,6 +477,11 @@ def render_entity_360(company: str) -> None:
             st.caption(f"{scoped_days}-day entity evidence · basis: {bases}{freshness}")
         elif metrics.ok:
             empty_state("no_data_yet", "No measured entity metrics exist in this window.")
+    else:
+        # rec26: ALERT/INCIDENT/ACTION/DATA_PRODUCT have no metric snapshot defined —
+        # say so, so the absent KPI block does not read as a broken/empty load.
+        st.caption(f"No metric snapshot is defined for {kind} entities — the ownership "
+                   "above and linked work below are the evidence for this type.")
 
     viewer = viewer_name()
     if viewer and record.ok:

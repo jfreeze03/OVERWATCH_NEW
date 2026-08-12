@@ -602,12 +602,21 @@ def _open_events_section(events, is_operator: bool) -> None:
                 with st.expander("SQL that will run"):
                     st.code("\n".join(stmts), language="sql")
                 if is_operator:
-                    # rec42: key PER EVENT so switching to another event clears the
-                    # confirm field — a constant key let "RESOLVE" carry across events
-                    # and enable Execute on the next event with no deliberate re-type.
-                    if confirm_gate(action, "Execute with audit row",
-                                    key=f"alert_exec_{event_id[:8]}",
-                                    prompt=f"Type {action} to confirm execution"):
+                    # rec14 write-friction policy: ACK is a reversible OPEN->ACK move on
+                    # OVERWATCH's own audit trail, so it is ONE CLICK (the SQL preview
+                    # above stays visible). RESOLVE classifies the event — it feeds the
+                    # per-rule precision score — so it is the consequential write and
+                    # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
+                    # confirm field nor the button state carries across events.
+                    if action == "ACK":
+                        _fire = st.button("Execute with audit row", type="primary",
+                                          use_container_width=True,
+                                          key=f"alert_exec_ack_{event_id[:8]}")
+                    else:
+                        _fire = confirm_gate(action, "Execute with audit row",
+                                             key=f"alert_exec_{event_id[:8]}",
+                                             prompt=f"Type {action} to confirm execution")
+                    if _fire:
                         # V051: one atomic proc (update + audit in a transaction);
                         # the pre-V051 legacy path is the split script, unchanged.
                         call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("

@@ -1525,13 +1525,17 @@ def decision_rows(
     sort_label: str = "decision priority",
     impact_help: str = "",
     confidence_help: str = "",
+    confidence_label: str = "Confidence",
 ) -> int | None:
     """Compact decision contract: decision, why, impact, confidence, owner and next.
 
     ``impact_help``/``confidence_help`` document what those columns MEAN on this
     surface (measured vs estimated; evidence-heuristic vs authored belief) — the
     Impact $ and the 0-1 Confidence look identical across surfaces but are not the
-    same thing, so each caller states its own basis (the metric_registry ethos)."""
+    same thing, so each caller states its own basis (the metric_registry ethos).
+    ``confidence_label`` (rec28) renames the visible Confidence header so an
+    evidence heuristic and an authored belief are told apart at a glance, not only
+    on hover — e.g. "Confidence (evidence)" vs "Confidence (authored)"."""
     import pandas as pd
 
     source = df if df is not None else pd.DataFrame()
@@ -1539,7 +1543,7 @@ def decision_rows(
         (decision_col, "Decision"),
         (why_col, "Why"),
         (impact_col, "Impact"),
-        (confidence_col, "Confidence"),
+        (confidence_col, confidence_label),
         (owner_col, "Owner"),
         (status_col, "Status"),
         (next_col, "Next"),
@@ -1552,9 +1556,9 @@ def decision_rows(
     if "Impact" in view.columns:
         config["Impact"] = st.column_config.NumberColumn(
             "Impact", format="$%.2f", help=impact_help or None)
-    if "Confidence" in view.columns:
-        config["Confidence"] = st.column_config.ProgressColumn(
-            "Confidence", min_value=0, max_value=1, help=confidence_help or None,
+    if confidence_label in view.columns:
+        config[confidence_label] = st.column_config.ProgressColumn(
+            confidence_label, min_value=0, max_value=1, help=confidence_help or None,
         )
     selection = selectable_table(
         view, key=key, height=height, column_config=config,
@@ -1602,12 +1606,26 @@ def blast_radius(warehouse: str, page: str) -> None:
 
 
 def notify(ok: bool, msg: str) -> None:
-    """Operator-action feedback: toast (survives layout shifts) + inline state."""
+    """Operator-action feedback. rec48: a SUCCESS is transient good news — the
+    toast (auto-dismiss ~4s) carries it, and the write's own rerun re-renders the
+    changed table as the durable receipt, so success no longer ALSO leaves a
+    persistent full-width green banner on every write. A FAILURE must NOT vanish
+    before it is read (a toast can auto-dismiss before the operator looks back),
+    so it still gets a persistent inline st.error alongside the toast.
+
+    Callers that write a NON-idempotent row must st.rerun() on success so the
+    changed table is that durable receipt (and the form/button reset) — otherwise
+    the toast is the only cue and a second click double-writes."""
+    toasted = False
     try:
         st.toast(msg[:120], icon="✅" if ok else "⚠️")
+        toasted = True
     except Exception:  # noqa: BLE001 - toast is a nicety
         pass
-    (st.success if ok else st.error)(msg)
+    if not ok:
+        st.error(msg)          # failures ALWAYS get a persistent banner
+    elif not toasted:
+        st.success(msg)        # success falls back to a banner only if the toast didn't land
 
 
 def mark_refreshed() -> None:

@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.149.0 - Triage routing + decision honesty (2026-08-12)
+
+App-only. First do-now batch from the adjudicated Cursor UI/UX review (verified
+against the tree, house-decisions honored). No migration.
+
+- **Triage rows carry their identity (rec20/21/22).** The Control Room morning
+  queue used to compute a row's `EVENT_ID`/`RULE_ID`/warehouse and then navigate
+  with page+section only. Now an **alert** click hands its `event_id` to the
+  Alerts drawer (which already self-selects), a **task failure** lands on
+  Operations → **Tasks** (the owning section, not the page default), and a
+  **spend anomaly/collapse** lands on Operations → **Queries** scoped to the
+  offending warehouse via `warehouse_contains` — the section that actually
+  consumes that filter (a Cost section, or the Warehouses section, would silently
+  no-op it).
+- **Write-friction policy (rec14 + rec1), now a house law.** Friction matches
+  consequence, not the table: a reversible upsert to OVERWATCH's own tables is
+  one click (SQL preview still shown); a classifying/account-touching write keeps
+  the type-to-confirm gate. Applied first to alert **ACK** — one click now, while
+  **RESOLVE** (which feeds per-rule precision) still types to confirm.
+- **`notify()` receipt split (rec48).** Success is a toast (the write's own
+  rerun re-renders the changed table as the durable receipt); a **failure** keeps
+  a persistent inline error so it can't auto-dismiss before it's read.
+- **Exception-first Control Room + pill badge (rec10/11).** The Incidents & triage
+  section now leads with the house `exception_summary` (open criticals / open
+  incidents / stale sources, from numbers already in hand), and the Incidents pill
+  badges its open-critical count — both zero extra queries (health strip).
+- **No silent wrong-target writes (rec17/18).** Experiments no longer render (and
+  let an operator Save) row 0 when nothing is selected; Scenarios shows an
+  empty-state instead of sliders projecting a silent $0 over an empty queue.
+- **Which-number honesty (rec28/32).** The two "Confidence" columns are now
+  labelled by epistemics — **Confidence (evidence)** (portfolio heuristic) vs
+  **Confidence (authored)** (a stated belief); the Products table's two dollar
+  columns state in their help that they are separate, non-additive lenses (totals
+  stay absent).
+- **Honesty captions (rec26/49).** Entity 360 names the entity types that have no
+  metric snapshot (so the absent KPI block doesn't read as broken); the Security
+  caption now says it writes only to OVERWATCH's own work queue (operators only).
+
 ## 4.148.0 - Operations + Cost polish: volume-drop robustness, topology unblock, formatting (2026-08-12)
 
 App-only, from a live-app review (screenshots + code verification):
