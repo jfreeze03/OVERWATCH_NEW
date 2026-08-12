@@ -7,7 +7,7 @@ from math import ceil
 
 import pandas as pd
 
-from .formulas import safe_div, safe_float
+from .formulas import humanize_duration, safe_div, safe_float
 
 # ---- 1. Idle warehouse advisor ---------------------------------------------
 
@@ -320,6 +320,19 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
     def _fail_pct(row) -> float:
         return safe_div(safe_float(row.get("FAILED_COUNT")), safe_float(row.get("QUERY_COUNT"))) * 100
 
+    def _display(col: str, v: float) -> str:
+        # Before/After share one column across metrics of different units, so
+        # per-column number-formatting can't express them — format to a display
+        # string here where the unit is still known per metric (durations
+        # humanize to Hr/Min/Sec, matching the rest of the app).
+        if col in ("P95_ELAPSED_SEC", "QUEUED_SEC"):
+            return humanize_duration(v, "s")
+        if col == "SPILL_REMOTE_GB":
+            return f"{v:,.2f} GB"
+        if col == "FAIL_PCT":
+            return f"{v:,.1f}%"
+        return f"{v:,.0f}"
+
     rows = []
     for col, label, lower_better in _RELEASE_METRICS:
         b = _fail_pct(before) if col == "FAIL_PCT" else safe_float(before.get(col))
@@ -333,7 +346,7 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
             verdict = "Better"
         else:
             verdict = "Worse"
-        rows.append({"Metric": label, "Before": round(b, 2), "After": round(a, 2),
+        rows.append({"Metric": label, "Before": _display(col, b), "After": _display(col, a),
                      "Delta %": delta_pct, "Verdict": verdict})
     return rows
 

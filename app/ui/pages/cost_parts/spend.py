@@ -590,13 +590,21 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         hits = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
         if hits:
             for h in hits[:5]:
+                # Carry the flagged DAY into the message so the operator knows
+                # exactly which day fired without eyeballing the chart.
+                _on = f" on {h['day']}" if h.get("day") else ""
                 # N10: a collapse (z<0) reads differently from an overspend spike.
                 if float(h.get("z", 0) or 0.0) < 0:
-                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} collapsed "
+                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f}{_on} collapsed "
                                f"(z {h['z']:+.1f}) — possible stalled workload / dead pipeline.")
                 else:
-                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f} is a statistical "
+                    st.warning(f"{h['label']}: daily spend ${h['value']:,.0f}{_on} is a statistical "
                                f"outlier (z {h['z']:+.1f}) — investigate.")
+            st.caption(
+                "How to investigate a flag: the **By warehouse (exact usage)** table above breaks "
+                "each warehouse's spend by day; then **Operations → Queries** (filter to the "
+                "warehouse, widen the window to the flagged day) shows the queries that drove it."
+            )
         else:
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:
@@ -654,7 +662,11 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
     if not shown.empty:
         charts.bar_usd(shown.sort_values("USD/mo", ascending=False), "Tier", "USD/mo",
                        title="Storage $/month by tier (est.)")
-    styled_table(tdf, height=220)
+    styled_table(tdf, height=220, column_config={
+        "TiB": st.column_config.NumberColumn("TiB", format="%.2f"),
+        "$/TiB/mo": st.column_config.NumberColumn("$/TiB/mo", format="$%.2f"),
+        "USD/mo": st.column_config.NumberColumn("USD/mo", format="$%.0f"),
+    })
     result_caption(res)
 
 

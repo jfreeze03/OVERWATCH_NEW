@@ -257,11 +257,17 @@ def _rate_card_reconciliation(settings: dict) -> None:
             model_usd = float(model_by_month.get(month, 0.0))
             org_usd = safe_float(orow.get("COMPUTE_USD"))
             drift = (100.0 * (model_usd - org_usd) / org_usd) if org_usd else None
+            # Effective realized rate = what the org actually charged per billed
+            # compute credit this month. This is the number to reconcile
+            # CREDIT_PRICE_USD (SETTINGS) against when the model-vs-org gap is steady.
+            credits_month = (model_usd / rate_now) if rate_now else 0.0
+            eff_rate = (org_usd / credits_month) if credits_month else None
             rows_rc.append({
                 "MONTH": month.strftime("%Y-%m") if pd.notna(month) else "?",
                 "ORG_COMPUTE_USD": round(org_usd, 2),
                 "APP_MODEL_USD": round(model_usd, 2),
                 "DELTA_PCT": round(drift, 2) if drift is not None else None,
+                "EFF_RATE": round(eff_rate, 3) if eff_rate is not None else None,
                 "ORG_AI_USD": round(safe_float(orow.get("AI_USD")), 2),
                 "ORG_STORAGE_USD": round(safe_float(orow.get("STORAGE_USD")), 2),
                 "ORG_TRANSFER_USD": round(safe_float(orow.get("TRANSFER_USD")), 2),
@@ -269,11 +275,13 @@ def _rate_card_reconciliation(settings: dict) -> None:
                 "ORG_TOTAL_USD": round(safe_float(orow.get("TOTAL_USD")), 2),
             })
         styled_table(pd.DataFrame(rows_rc), column_config={
-            "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%")})
+            "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%"),
+            "EFF_RATE": st.column_config.NumberColumn("Effective $/cr", format="$%.3f")})
         st.caption(
             f"Model = FACT_METERING_DAILY billed credits x ${rate_now:.2f} (SETTINGS). The current "
-            "month is partial on both sides; judge the prior month. A steady gap means the "
-            "contract rate in SETTINGS no longer matches the rate card — fix it on Admin → Settings."
+            "month is partial on both sides; judge the prior full month. The **Effective "
+            "rate** column (org compute ÷ billed credits) is the realized per-credit rate — "
+            "reconcile CREDIT_PRICE_USD to it on Admin → Settings when the gap is steady."
         )
 
 

@@ -530,7 +530,7 @@ def volume_deltas() -> str:
     band), so it intentionally shows rows that do not page."""
     return """
 SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
-       Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D,
+       Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D, DAYS_ACTIVE_7D,
        ROUND((1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100, 1) AS DROP_PCT,
        CASE WHEN (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 > 50 THEN 'FAILED'
             WHEN (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 > 30 THEN 'WATCH'
@@ -538,12 +538,28 @@ SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
 FROM (
     SELECT d.DATABASE_NAME AS DB, d.SCHEMA_NAME AS SCH, d.TABLE_NAME AS TBL,
            SUM(IFF(DATE(d.START_TIME) = DATEADD('day', -1, CURRENT_DATE()), d.ROWS_ADDED, 0)) AS Y_ROWS,
-           SUM(IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE()), d.ROWS_ADDED, 0)) / 7 AS AVG_ROWS
+           SUM(IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE()), d.ROWS_ADDED, 0)) / 7 AS AVG_ROWS,
+           COUNT(DISTINCT IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE())
+                              AND d.ROWS_ADDED > 0, DATE(d.START_TIME), NULL)) AS DAYS_ACTIVE_7D
     FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY d
     WHERE d.START_TIME >= DATEADD('day', -8, CURRENT_DATE())
       AND d.START_TIME < CURRENT_DATE()
+      -- Exclude transient / per-run staging tables: dated (name_YYYYMMDD_...)
+      -- load tables, staging schemas (delimited *_STAG / *_STG suffix so we don't
+      -- catch POSTGRES etc.), and the SNOWFLAKE internal database. These
+      -- truncate-reload or write once, so 'yesterday = 0 rows' is their normal
+      -- pattern, not a real loss (the owner's DB_T_PROD_STAG case). Ephemeral
+      -- temp tables are already excluded by the steady-baseline gate below.
+      AND NOT REGEXP_LIKE(d.TABLE_NAME, '.*_[0-9]{8}(_[0-9]+)+', 'i')
+      AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STAG' ESCAPE '!'
+      AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STG' ESCAPE '!'
+      AND UPPER(d.SCHEMA_NAME) NOT LIKE '%!_STAGING' ESCAPE '!'
+      AND UPPER(d.DATABASE_NAME) <> 'SNOWFLAKE'
     GROUP BY 1, 2, 3
-    HAVING AVG_ROWS >= 1000
+    -- A real drop needs a STEADY baseline: >=1,000 rows/day on average AND rows
+    -- written on >=3 of the prior 7 days. A one-shot or newly-dropped table
+    -- cannot establish a baseline and is filtered out.
+    HAVING AVG_ROWS >= 1000 AND DAYS_ACTIVE_7D >= 3
 )
 ORDER BY DROP_PCT DESC
 LIMIT 50

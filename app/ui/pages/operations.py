@@ -450,13 +450,16 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
 
     section_header("Volume drops (yesterday vs prior-7d average)", "info", "pipeline")
     panel_help(
-        "Rows added per table yesterday vs its prior-7-day average (tables moving "
-        "≥1,000 rows/day). The PIPE_VOLUME_DROP alert fires past a 50% drop on PROD "
-        "databases — via SP_ANOMALY_SWEEP / TASK_ANOMALY_SWEEP (HIGH), gated on "
-        "ALERT_CONFIG.ENABLED so it can be turned off. This panel also shows the 30-50% "
-        "WATCH band and non-PROD tables that do not page. Note: tables truncated and "
-        "reloaded by a nightly batch always show a large 'drop' here — the reload pattern, "
-        "not a real loss — so a truncate-reload account often turns the rule off in ALERT_CONFIG."
+        "Rows added per table yesterday vs its prior-7-day average (steady movers: "
+        "≥1,000 rows/day AND written on ≥4 of the prior 7 days). **Timing:** 'yesterday' "
+        "is the prior full calendar day in account time; an overnight batch that finishes "
+        "after midnight books its rows on the day it ran, so a table loaded at 00:30 for "
+        "the prior day reads as 0 for 'yesterday'. To cut the truncate-reload false "
+        "positives, dated/temp tables, *STAG* schemas, the SNOWFLAKE database, and "
+        "one-shot tables are now excluded — so this shows persistent movers only. The "
+        "PIPE_VOLUME_DROP alert fires past a 50% drop on PROD databases (SP_ANOMALY_SWEEP / "
+        "TASK_ANOMALY_SWEEP, HIGH, gated on ALERT_CONFIG.ENABLED). DAYS_ACTIVE_7D shows how "
+        "many of the prior 7 days the table actually moved."
     )
     vd = run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
@@ -766,9 +769,13 @@ def _task_graph_view() -> None:
     )
     if not guard(roots, "No active task graphs found in TASK_VERSIONS."):
         return
+    if filters().get("database"):
+        st.info("The **Database** filter does not narrow this graph — topology is account-wide "
+                "(it scopes the Health and Runs views instead). Use the filter below to find a "
+                "root graph by name.")
     if roots.truncated:
-        st.error("More than 500 root task graphs were returned. Narrow the inventory before drawing.")
-        return
+        st.caption("This account has more than 500 root task graphs; showing the 500 largest by "
+                   "task count. Use the filter below to find a specific root.")
 
     root_rows = {
         str(row.get("ROOT_TASK_ID") or ""): row
@@ -786,6 +793,18 @@ def _task_graph_view() -> None:
         nodes = int(safe_float(row.get("NODE_COUNT")))
         version = int(safe_float(row.get("GRAPH_VERSION")))
         return f"{fqn} · {nodes} tasks · graph v{version}"
+
+    root_filter = st.text_input(
+        "Filter roots (task name contains)",
+        key="ops_task_graph_filter",
+        placeholder="e.g. ALFA_EDW_PRD or WF_BASE_BILLING",
+    ).strip().upper()
+    if root_filter:
+        matches = [rid for rid in root_ids if root_filter in _root_label(rid).upper()]
+        if not matches:
+            st.info(f"No root task graph matches '{root_filter}'.")
+            return
+        root_ids = matches
 
     root_id = st.selectbox(
         "Root task",
@@ -949,7 +968,10 @@ def _warehouses_tab(company: str, rate: float) -> None:
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
                    "or split workloads — before users feel it.")
-        styled_table(peaks.df)
+        styled_table(peaks.df, column_config={
+            "PEAK_RUNNING": st.column_config.NumberColumn("Peak Running", format="%.1f"),
+            "PEAK_QUEUED": st.column_config.NumberColumn("Peak Queued", format="%.1f"),
+        })
         result_caption(peaks)
 
 
@@ -968,10 +990,19 @@ def _contention_tab(company: str, days: int) -> None:
             live_source="QUERY_HISTORY (live fallback)",
             mart_tier="recent", live_tier="recent")
         if guard(res, "No queueing or spill pressure in this window."):
-            charts.bar_count(res.df.sort_values("QUEUED_SEC", ascending=False),
-                             "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds",
+            import pandas as pd
+            pdf = res.df.copy()
+            if {"QUEUED_SEC", "QUERY_COUNT"}.issubset(pdf.columns):
+                _qc = pd.to_numeric(pdf["QUERY_COUNT"], errors="coerce").replace(0, pd.NA)
+                pdf["AVG_QUEUE_SEC"] = pd.to_numeric(pdf["QUEUED_SEC"], errors="coerce") / _qc
+            charts.bar_count(pdf.sort_values("QUEUED_SEC", ascending=False),
+                             "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds (total)",
                              takeaway=True)
-            styled_table(res.df)
+            st.caption("Total queued seconds favor busy warehouses; **Avg queue** = queued ÷ query "
+                       "count surfaces where each query waits longest — a low-volume warehouse that "
+                       "stalls every query outranks a busy one with trivial per-query waits.")
+            styled_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
+                         if "AVG_QUEUE_SEC" in pdf.columns else pdf)
     with right:
         section_header("Lock waits", "info", "warehouse")
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()

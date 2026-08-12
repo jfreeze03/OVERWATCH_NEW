@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.148.0 - Operations + Cost polish: volume-drop robustness, topology unblock, formatting (2026-08-12)
+
+App-only, from a live-app review (screenshots + code verification):
+
+- **Volume-drop false positives (Pipeline SLA).** Truncate-reload and per-run staging tables
+  (dated `_YYYYMMDD_` names, `*_STAG`/`*_STG` schemas, the SNOWFLAKE internal DB) read as 0 rows /
+  100% drop. `volume_deltas` now excludes those and requires a **steady baseline** (≥1,000 rows/day
+  AND written on ≥3 of the prior 7 days), surfaces `DAYS_ACTIVE_7D`, and the panel help spells
+  out the timing (yesterday = prior full calendar day; overnight batches book rows on the day
+  they run).
+- **Pipeline topology unblock.** `>500 root task graphs` hard-errored with no way to narrow.
+  It now shows the 500 largest by task count plus a name filter, and (since Graph is account-wide)
+  a notice that the Database filter scopes Health/Runs, not topology — the source of the
+  "clicking ALFA_EDW_PRD shows other environments" confusion (the DB-scoped panels do filter).
+- **Formatting.** Concurrency-peaks Peak Running/Queued, Storage-by-tier TiB/$/USD, and
+  Release-compare Before/After (durations now humanize to Hr/Min/Sec) no longer render as
+  6-decimal floats.
+- **Anomaly drill.** The daily-anomaly warning now names the flagged day and points to the
+  investigation path (By-warehouse table → Operations → Queries).
+- **Contract effective rate.** Contract pacing gains an **Effective $/cr** column (org compute ÷
+  billed credits) — the realized rate to reconcile `CREDIT_PRICE_USD` against; the prior-month
+  gap indicates the configured $3.68 is ~$0.30 high.
+- **Contention.** Warehouse pressure adds **Avg queue** (queued ÷ query count) so a low-volume
+  warehouse that stalls every query surfaces above a busy one with trivial per-query waits.
+
 ## 4.147.0 - Cost-signal correctness: CoCo rate, canary predicate, anomaly + Cortex thresholds (2026-08-07)
 
 Four cost/metrics fixes from a live-app review (screenshots + code verification). App-only,
