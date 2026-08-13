@@ -830,6 +830,13 @@ def render() -> None:
             _day_replay()
 
     elif section == "Entity 360":
+        # Watchlist row click: land on the Entity sub-tab so the drilled entity
+        # actually shows (the flag is set by render_watchlist just before it
+        # navigates; writing the widget key pre-render is lazy_sections' own
+        # seeding pattern).
+        pending_view = st.session_state.pop("_ow_entity_view_pending", None)
+        if pending_view in ("Entity", "Watchlist"):
+            st.session_state["cr_entity_view"] = pending_view
         entity_view = nested_sections(["Entity", "Watchlist"], key="cr_entity_view")
         if entity_view == "Entity":
             render_entity_360(company)

@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.153.0 - Fix Entity 360 Watchlist infinite-rerun (2026-08-13)
+
+Owner-reported: clicking a watchlist row made the app refresh indefinitely,
+forcing a disconnect. App-only fix, no migration.
+
+- **Root cause.** `render_watchlist` fed a raw sticky `selectable_table`
+  selection straight into `request_navigation`. A same-page jump carrying a
+  section + context is deliberately not a no-op, and the Entity 360 nested
+  sub-tab stayed on "Watchlist" — so each rerun re-rendered the very component
+  that re-fired the navigation. Infinite loop.
+- **Fix.** The established seen-guard (as in `selectable_nav_table` /
+  `decision_rows`): navigate only on a CHANGED selection. The click also sets a
+  one-shot `_ow_entity_view_pending` flag that the Entity 360 dispatch consumes
+  before `nested_sections` renders, switching to the "Entity" sub-tab — the
+  drilled entity actually shows, and the watchlist leaves the render path.
+- **Re-arm on unselected render** (adversarial-review refinement): the drill
+  unmounts the table, so a stale remembered index would silently swallow the
+  first click on whatever row later occupies it; an unselected mount clears the
+  guard (the `clickable_bar_usd` re-arm), so every fresh click lands and a
+  same-row re-drill works. A `None` selection never fires, so no loop path.
+- Regression locks in `tests/test_v4153_watchlist_guard.py` (guard shape,
+  re-arm-before-guard order, pre-render flag consumption order).
+
 ## 4.152.0 - Cost by application × user (V077 owner migration) (2026-08-12)
 
 Answers "which program (and which user) drove the credits" so a misconfigured

@@ -601,7 +601,21 @@ def render_watchlist() -> None:
         return
     frame = result.df.reset_index(drop=True)
     selected = selectable_table(frame, key="watchlist_table", height=260, sort_label="newest watched")
-    if selected is not None:
+    # BUGFIX (infinite-rerun): navigate ONLY on a CHANGED selection. A sticky
+    # st.dataframe selection re-fired request_navigation every rerun; the target
+    # (Entity 360 + a context) never no-ops and the nested sub-tab stayed on
+    # Watchlist, so it looped forever and forced a disconnect. Mirror the
+    # selectable_nav_table / decision_rows seen-guard, and ask the dispatch to switch
+    # to the Entity sub-tab (via a non-widget flag) so the click actually lands.
+    if selected is None:
+        # Fresh mount (the table unmounts when the sub-tab flips to Entity, so
+        # every return renders unselected): re-arm the guard, else a click on
+        # whatever row now sits at the remembered index is silently swallowed.
+        # Same re-arm charts.clickable_bar_usd uses.
+        st.session_state.pop("_ow_watchlist_seen", None)
+    if selected is not None and selected != st.session_state.get("_ow_watchlist_seen"):
+        st.session_state["_ow_watchlist_seen"] = selected
+        st.session_state["_ow_entity_view_pending"] = "Entity"
         row = frame.iloc[int(selected)]
         request_navigation(
             "Control Room", "Entity 360",
