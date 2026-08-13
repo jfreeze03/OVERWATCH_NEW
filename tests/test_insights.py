@@ -334,6 +334,22 @@ def test_error_classification():
     assert insights.classify_task_error("weird") == "Other"
 
 
+def test_error_classification_covers_live_account_top_fallthroughs():
+    # v4.154: the exact messages that made "Other" the top family (73%) in the
+    # live account. Each must land in its new family, not "Other" — and not get
+    # stolen by an earlier pattern.
+    assert insights.classify_task_error(
+        "There is already a live version. Please commit it first."
+    ) == "Concurrency / live version"
+    assert insights.classify_task_error(
+        "Cannot perform SELECT. This session does not have a current database. "
+        "Call 'USE DATABASE', or use a qualified name."
+    ) == "Session not set up"
+    assert insights.classify_task_error(
+        "Role hierarchy data is not yet available in Md Fetch"
+    ) == "Metadata not ready"
+
+
 def test_failure_timeline_marks_root_vs_cascade():
     df = pd.DataFrame([
         {"TASK_NAME": "CHILD", "GRAPH_RUN_GROUP_ID": "g1",

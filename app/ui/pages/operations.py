@@ -763,8 +763,10 @@ def _task_graph_view() -> None:
         ops_sql.task_graph_roots(),
         page=_PAGE,
         key="task_graph_roots",
-        tier="recent",
-        source="TASK_VERSIONS coherent snapshots + current TASKS",
+        # Day-grain failure counts don't need 5-minute freshness; the hourly
+        # tier spares repeat visits the snapshot-CTE cost.
+        tier="hourly",
+        source="TASK_VERSIONS coherent snapshots + current TASKS + MART_TASK_NODE_DAILY",
         max_rows=500,
     )
     if not guard(roots, "No active task graphs found in TASK_VERSIONS."):
@@ -775,7 +777,7 @@ def _task_graph_view() -> None:
                 "root graph by name.")
     if roots.truncated:
         st.caption("This account has more than 500 root task graphs; showing the 500 with the "
-                   "most 24h failures, then the most tasks. Use the filter below to find a "
+                   "most recent failures, then the most tasks. Use the filter below to find a "
                    "specific root.")
 
     root_rows = {
@@ -794,10 +796,10 @@ def _task_graph_view() -> None:
         nodes = int(safe_float(row.get("NODE_COUNT")))
         version = int(safe_float(row.get("GRAPH_VERSION")))
         # rec34: surface why a graph sorts to the top — recent failures lead the list.
-        # "failed runs" (TASK_HISTORY run count), not distinct tasks — a flaky task that
-        # runs every few minutes can log many failed runs in a small graph.
-        fails = int(safe_float(row.get("FAILURES_24H")))
-        fail_note = f" · ⚠ {fails} failed runs (24h)" if fails else ""
+        # "failed runs" (mart run count, today + yesterday), not distinct tasks — a flaky
+        # task that runs every few minutes can log many failed runs in a small graph.
+        fails = int(safe_float(row.get("RECENT_FAILURES")))
+        fail_note = f" · ⚠ {fails} recent failed runs" if fails else ""
         return f"{fqn} · {nodes} tasks · graph v{version}{fail_note}"
 
     root_filter = st.text_input(
@@ -817,8 +819,8 @@ def _task_graph_view() -> None:
         root_ids,
         format_func=_root_label,
         key="ops_task_graph_root",
-        help="Ordered by recent (24h) failed runs first, then task count — the graph most "
-             "likely to need attention is on top.",
+        help="Ordered by recent failed runs first (today + yesterday, from the daily task "
+             "mart), then task count — the graph most likely to need attention is on top.",
     )
     root_row = root_rows[str(root_id)]
     graph_version = int(safe_float(root_row.get("GRAPH_VERSION")))
@@ -827,7 +829,7 @@ def _task_graph_view() -> None:
         page=_PAGE,
         key=f"task_graph_{root_id}_{graph_version}",
         tier="recent",
-        source="TASK_VERSIONS selected root/version + current TASKS + TASK_HISTORY",
+        source="TASK_VERSIONS selected root/version + current TASKS + MART_TASK_NODE_DAILY",
         max_rows=2_000,
     )
     if not guard(graph, "The selected task graph has no nodes."):
@@ -855,12 +857,12 @@ def _task_graph_view() -> None:
         st.error("Graph integrity check failed; nothing was drawn. " + " · ".join(integrity_errors))
         return
 
-    failed = int(frame["FAILURES_24H"].map(safe_float).gt(0).sum())
+    failed = int(frame["RECENT_FAILURES"].map(safe_float).gt(0).sum())
     suspended = int(frame["STATE"].astype(str).str.contains("suspend", case=False).sum())
     kpi_row([
         {"label": "Tasks", "value": f"{len(frame):,}"},
         {"label": "Dependencies", "value": f"{len(shape.edges):,}"},
-        {"label": "Failed tasks (24h)", "value": f"{failed:,}",
+        {"label": "Failed tasks (recent)", "value": f"{failed:,}",
          "severity": "bad" if failed else "ok"},
         {"label": "Suspended", "value": f"{suspended:,}",
          "severity": "warn" if suspended else "ok"},
@@ -916,7 +918,8 @@ def _task_graph_view() -> None:
         key="ops_task_graph_dot",
     )
     st.caption(
-        "Green = healthy · red = failed in 24h · gray = suspended. "
+        "Green = healthy · red = failed recently (today + yesterday, daily task mart) · "
+        "gray = suspended. "
         "The selected root and graph version are rendered as one coherent snapshot."
     )
     result_caption(graph, note=f"root {root_id} · graph version {graph_version}")

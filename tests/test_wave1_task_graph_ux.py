@@ -27,7 +27,7 @@ def _graph_frame() -> pd.DataFrame:
                 "STATE": "started",
                 "WAREHOUSE_NAME": "ETL_WH",
                 "SCHEDULE": "USING CRON 0 * * * * UTC",
-                "FAILURES_24H": 0,
+                "RECENT_FAILURES": 0,
             },
             {
                 "TASK_FQN": "DB.OPS.LOAD_STAGE",
@@ -35,7 +35,7 @@ def _graph_frame() -> pd.DataFrame:
                 "STATE": "started",
                 "WAREHOUSE_NAME": "ETL_WH",
                 "SCHEDULE": None,
-                "FAILURES_24H": 1,
+                "RECENT_FAILURES": 1,
             },
             {
                 "TASK_FQN": "DB.OPS.PUBLISH",
@@ -43,7 +43,7 @@ def _graph_frame() -> pd.DataFrame:
                 "STATE": "suspended",
                 "WAREHOUSE_NAME": None,
                 "SCHEDULE": None,
-                "FAILURES_24H": 0,
+                "RECENT_FAILURES": 0,
             },
         ]
     )
@@ -124,7 +124,7 @@ def test_task_graph_workbench_has_dependency_free_pan_zoom_and_exports():
 def test_operations_refuses_partial_or_invalid_graphs_before_rendering():
     source = _src("app/ui/pages/operations.py")
     sql = ops_sql.task_graph_nodes()
-    for column in ("TASK_FQN", "PREDECESSORS", "STATE", "FAILURES_24H"):
+    for column in ("TASK_FQN", "PREDECESSORS", "STATE", "RECENT_FAILURES"):
         assert f'frame["{column}"]' in source
         assert column in sql
     assert "max_rows=2_000" in source

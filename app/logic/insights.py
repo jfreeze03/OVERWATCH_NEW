@@ -354,6 +354,13 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
 
 _ERROR_FAMILIES = (
     ("Permission / auth", r"not authorized|insufficient privilege|does not exist or not authorized|access denied"),
+    # v4.154: three families for the messages that dominated the "Other" bucket
+    # (73% of task failures in the live account — the top one, "already a live
+    # version", alone logged 929 fails). First match wins, so these sit before
+    # the broader Missing-object / Data-quality patterns they must not fall into.
+    ("Concurrency / live version", r"already a live version|please commit it first|already an? (running|active) version"),
+    ("Session not set up", r"does not have a current (database|schema|warehouse|role)|call use (database|schema|warehouse|role)|no active warehouse"),
+    ("Metadata not ready", r"not yet available"),
     ("Missing object", r"does not exist\b|invalid identifier|unknown (table|view|function)"),
     ("Timeout / cancelled", r"timeout|timed out|statement reached its statement or warehouse timeout|cancelled"),
     ("Resource / memory", r"out of memory|resource|exceeded|quota"),

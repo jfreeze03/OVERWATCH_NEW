@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app import companies
+from app.config import core_object
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import and_where, bounded_days
 
@@ -372,25 +373,39 @@ snapshot AS (
 """
 
 
+def _recent_fails_cte(name: str) -> str:
+    """Day-grain failure counts per task, from MART_TASK_NODE_DAILY (V058).
+
+    The rec34 original summed live ACCOUNT_USAGE.TASK_HISTORY over a rolling
+    24h — the only ACCOUNT_USAGE scan in these formerly metadata-only queries,
+    and its secure-view expansion dominated the ~21s first paint. The mart
+    carries the same FAILED counts at DAY grain, so the window is today +
+    yesterday (the daily loader's reach) rather than rolling 24h. An empty or
+    lagging mart degrades the sort to node-count order through the existing
+    LEFT JOIN + COALESCE — never an error.
+    """
+    return f""",
+{name} AS (
+    SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || TASK_NAME AS TASK_FQN,
+           SUM(FAILED) AS RECENT_FAILURES
+    FROM {core_object('MART_TASK_NODE_DAILY')}
+    WHERE DAY >= DATEADD('day', -1, CURRENT_DATE())
+      AND FAILED > 0
+    GROUP BY 1
+)"""
+
+
 def task_graph_roots() -> str:
     """Latest coherent graph snapshot per active root, for the graph picker.
 
-    rec34: ordered FAILURES-FIRST (24h) so the graph a DBA needs to open sits on
-    top, not buried alphabetically/by size under healthy trees. FAILURES_24H sums
-    TASK_HISTORY failures across the graph's tasks (same source as the node view's
-    per-task count); the JOIN is 1:0-or-1 per TASK_FQN so it never inflates
-    NODE_COUNT. With the 500-row fetch cap the survivors are the most-failing then
-    largest — a failing tree is never truncated away in favour of a big healthy one.
+    rec34: ordered FAILURES-FIRST so the graph a DBA needs to open sits on
+    top, not buried alphabetically/by size under healthy trees. RECENT_FAILURES
+    sums the task mart's day-grain failures across the graph's tasks; the JOIN
+    is 1:0-or-1 per TASK_FQN so it never inflates NODE_COUNT. With the 500-row
+    fetch cap the survivors are the most-failing then largest — a failing tree
+    is never truncated away in favour of a big healthy one.
     """
-    return _task_graph_snapshot_ctes() + """,
-root_fails AS (
-    SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
-           COUNT(*) AS FAILURES_24H
-    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-    WHERE COMPLETED_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-      AND STATE = 'FAILED'
-    GROUP BY 1
-)
+    return _task_graph_snapshot_ctes() + _recent_fails_cte("root_fails") + """
 SELECT s.ROOT_TASK_ID, s.GRAPH_VERSION, MAX(s.GRAPH_VERSION_CREATED_ON) AS GRAPH_CREATED_ON,
        COALESCE(
            MAX(IFF(s.TASK_ID = s.ROOT_TASK_ID, s.TASK_FQN, NULL)),
@@ -398,35 +413,27 @@ SELECT s.ROOT_TASK_ID, s.GRAPH_VERSION, MAX(s.GRAPH_VERSION_CREATED_ON) AS GRAPH
        ) AS ROOT_TASK_FQN,
        COUNT(*) AS NODE_COUNT,
        COUNT_IF(LOWER(COALESCE(s.STATE, '')) LIKE '%suspend%') AS SUSPENDED_NODES,
-       COALESCE(SUM(rf.FAILURES_24H), 0) AS FAILURES_24H
+       COALESCE(SUM(rf.RECENT_FAILURES), 0) AS RECENT_FAILURES
 FROM snapshot s
 LEFT JOIN root_fails rf ON rf.TASK_FQN = s.TASK_FQN
 GROUP BY s.ROOT_TASK_ID, s.GRAPH_VERSION
-ORDER BY FAILURES_24H DESC, NODE_COUNT DESC, ROOT_TASK_FQN
+ORDER BY RECENT_FAILURES DESC, NODE_COUNT DESC, ROOT_TASK_FQN
 """
 
 
 def task_graph_nodes(root_task_id: str = "", graph_version: int | None = None) -> str:
-    """One complete task-graph snapshot with current state and 24h failures.
+    """One complete task-graph snapshot with current state and recent failures.
 
     The old reader chose the newest row independently per task and silently
     stopped at 300 rows. That could combine graph versions or draw dangling
     edges. This reader keys the snapshot by ``ROOT_TASK_ID + GRAPH_VERSION``;
     the UI applies an explicit fetch cap and refuses a truncated frame.
     """
-    return _task_graph_snapshot_ctes(root_task_id, graph_version) + """,
-fails AS (
-    SELECT DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME AS TASK_FQN,
-           COUNT(*) AS FAILURES_24H
-    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-    WHERE COMPLETED_TIME >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
-      AND STATE = 'FAILED'
-    GROUP BY 1
-)
+    return _task_graph_snapshot_ctes(root_task_id, graph_version) + _recent_fails_cte("fails") + """
 SELECT s.ROOT_TASK_ID, s.GRAPH_VERSION, s.GRAPH_VERSION_CREATED_ON,
        s.TASK_ID, s.TASK_FQN, s.PREDECESSORS, s.STATE,
        s.WAREHOUSE_NAME, s.SCHEDULE,
-       COALESCE(f.FAILURES_24H, 0) AS FAILURES_24H,
+       COALESCE(f.RECENT_FAILURES, 0) AS RECENT_FAILURES,
        COUNT(*) OVER () AS SNAPSHOT_NODE_COUNT
 FROM snapshot s
 LEFT JOIN fails f ON f.TASK_FQN = s.TASK_FQN

@@ -22,10 +22,22 @@ def _src(rel: str) -> str:
 # --- rec34: root picker orders failures-first ------------------------------------
 def test_task_graph_roots_orders_failures_first():
     sql = ops_sql.task_graph_roots()
-    assert "FAILURES_24H" in sql
-    assert "ORDER BY FAILURES_24H DESC" in sql
-    # failures come from TASK_HISTORY, joined 1:0-or-1 so NODE_COUNT is not inflated.
-    assert "TASK_HISTORY" in sql and "root_fails" in sql
+    assert "RECENT_FAILURES" in sql
+    assert "ORDER BY RECENT_FAILURES DESC" in sql
+    # v4.154: failures come from the day-grain task mart, joined 1:0-or-1 so
+    # NODE_COUNT is not inflated. rec34's live TASK_HISTORY scan was the only
+    # ACCOUNT_USAGE read in this formerly metadata-only query and dominated the
+    # ~21s first paint — it must not return.
+    assert "MART_TASK_NODE_DAILY" in sql and "root_fails" in sql
+    assert "TASK_HISTORY" not in sql
+    sqlglot.parse(sql, dialect="snowflake")
+
+
+def test_task_graph_nodes_failures_come_from_the_mart_too():
+    # The node query carried an identical live TASK_HISTORY CTE — same tax.
+    sql = ops_sql.task_graph_nodes("root-id", 7)
+    assert "MART_TASK_NODE_DAILY" in sql and "RECENT_FAILURES" in sql
+    assert "TASK_HISTORY" not in sql
     sqlglot.parse(sql, dialect="snowflake")
 
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
+
+Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.
+
+- **Pipeline topology ~21s first paint (rec34 regression).** v4.150's
+  failures-first root sort added the first-ever live `TASK_HISTORY` scan to two
+  formerly metadata-only queries (`task_graph_roots` and `task_graph_nodes`
+  carried identical CTEs), and the secure-view expansion dominated the paint.
+  Both now read the same day-grain `FAILED` counts from `MART_TASK_NODE_DAILY`
+  (V058, already loaded and read on this page) via a shared CTE helper. Honest
+  relabel: `FAILURES_24H` → `RECENT_FAILURES` end to end (SQL, DAG badge, KPI,
+  picker label/help) — the window is now today + yesterday at day grain, not
+  rolling 24h. An empty or lagging mart degrades the sort to node-count order
+  through the existing LEFT JOIN + COALESCE, never an error. The root picker
+  also moves `recent` → `hourly` cache tier (day-grain counts don't need 5-min
+  freshness).
+- **Task-failure "Top error family: Other (73%)".** Three new classifier
+  families for the live account's dominant fall-throughs: **Concurrency /
+  live version** ("There is already a live version. Please commit it first." —
+  929 fails, the single largest error), **Session not set up** ("session does
+  not have a current database"), and **Metadata not ready** ("not yet
+  available"). Ordered before Missing object so nothing is misbucketed; all
+  existing family pins unchanged.
+
 ## 4.153.0 - Fix Entity 360 Watchlist infinite-rerun (2026-08-13)
 
 Owner-reported: clicking a watchlist row made the app refresh indefinitely,

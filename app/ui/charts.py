@@ -133,14 +133,14 @@ def _share_note(label: str, amount: float, total: float, *, dollars: bool = True
 
 def _task_node_style(row: pd.Series) -> tuple[str, str]:
     try:
-        failures = int(float(row.get("FAILURES_24H") or 0))
+        failures = int(float(row.get("RECENT_FAILURES") or 0))
     except (TypeError, ValueError, OverflowError):
         failures = 0
     state = str(row.get("RUN_STATE") or row.get("STATE") or "").lower()
     if state == "failed":
         return palette.BAD, "failed in selected run"
     if failures:
-        return palette.BAD, f"{failures} failed / 24h"
+        return palette.BAD, f"{failures} failed recently"
     critical_path = str(row.get("CRITICAL_PATH") or "").lower() == "true"
     if critical_path:
         duration = pd.to_numeric(row.get("RUN_SEC"), errors="coerce")
