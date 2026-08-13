@@ -93,6 +93,7 @@ snowflake/migrations/V074__operating_workbench_foundation.sql
 snowflake/migrations/V075__security_operating_model.sql
 snowflake/migrations/V076__anomaly_materiality_gate.sql
 snowflake/migrations/V077__app_cost_ledger.sql
+snowflake/migrations/V078__ai_usage_ts_cast.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

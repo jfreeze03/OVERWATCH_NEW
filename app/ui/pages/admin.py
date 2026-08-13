@@ -209,6 +209,9 @@ _EXPECTED_MIGRATIONS = {
     77: "cost by client application x user: FACT_APP_COST_DAILY joins SESSIONS "
         "(CLIENT_ENVIRONMENT:APPLICATION / driver) x QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY "
         "measured credits; daily loader task",
+    78: "AI usage loader unbreak: SP_LOAD_MARTS_V27 ai_code arm casts USAGE_TIME "
+        "(TIMESTAMP_TZ in the CORTEX_CODE_* views) to TIMESTAMP_NTZ so the arm stops "
+        "failing every run; DAILY/365 first-fill included",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1014,6 +1017,7 @@ def _setup_progress_tab() -> None:
         (75, "V075", "Security posture facts: the decision queue"),
         (76, "V076", "Anomaly materiality gate"),
         (77, "V077", "Cost by application x user: FACT_APP_COST_DAILY"),
+        (78, "V078", "AI usage loader unbreak: ai_code TZ->NTZ casts + backfill"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",

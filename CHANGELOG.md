@@ -23,6 +23,16 @@ Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.
   not have a current database"), and **Metadata not ready** ("not yet
   available"). Ordered before Missing object so nothing is misbucketed; all
   existing family pins unchanged.
+- **V078 (owner migration, follow-up): AI usage loader unbreak.** The owner's
+  365-day backfill surfaced why `FACT_AI_USAGE_DAILY` never covers: the ai_code
+  arm of `SP_LOAD_MARTS_V27` failed on *every* run — `CORTEX_CODE_*` views
+  expose `USAGE_TIME` as `TIMESTAMP_TZ`, the fact's `FIRST_TS`/`LAST_TS` are
+  `TIMESTAMP_NTZ`, and MERGE refuses the coercion. V078 re-derives the proc
+  from V066 (generator `outputs/gen_v078.py`, byte-compare-locked) with exactly
+  two `::TIMESTAMP_NTZ` casts, and ends with a DAILY/365 first-fill so the
+  apply itself heals the mart depth. Once applied, the app's AI coverage gate
+  passes and the ~20s live Cortex fallback on Chargeback & AI → AI users stops
+  firing. **Owner-applied in Snowsight after V077.**
 
 ## 4.153.0 - Fix Entity 360 Watchlist infinite-rerun (2026-08-13)
 
