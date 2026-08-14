@@ -90,7 +90,12 @@ def test_multiselect_chips_are_readable():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     seg = theme.split('.stMultiSelect [data-baseweb="tag"]', 1)
     assert len(seg) == 2                               # chip styling exists
-    assert "rgba(56,189,248,0.16)" in theme            # dark chip, not the pale wash
+    # v4.155: the chip fill now references the single-source accent RGB token
+    # (rec50) instead of a hardcoded sky-cyan literal — still a solid accent
+    # tint, never the pale BaseWeb wash. The token also anchors the accent hue so
+    # the whole palette retunes from one place.
+    assert "background:rgba(var(--ow-accent-rgb),0.16)" in theme
+    assert "--ow-accent-rgb:110,139,255" in theme      # the indigo accent triplet
     assert 'tag"] span { color:#dbeafe' in theme       # readable text
 
 

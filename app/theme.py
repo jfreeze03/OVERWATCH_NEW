@@ -19,16 +19,21 @@ import streamlit as st
 _TOKENS = """
 <style>
 :root {
-  --ow-bg:#0a0f1c; --ow-surface:#0f1729; --ow-raised:#131d33;
+  /* v4.155 palette refresh — neutral graphite base + indigo/violet accent.
+     Chrome tokens mirror app/ui/palette.py exactly (tests/test_palette_drift.py).
+     The accent RGB triplets below let the many accent glows/tints reference ONE
+     source (rec50 ethos) so the hue can be retuned in a single place. */
+  --ow-bg:#0b0e14; --ow-surface:#141821; --ow-raised:#1c2130;
   --ow-hairline:rgba(148,163,184,0.16); --ow-hairline2:rgba(148,163,184,0.28);
-  /* rec 15 (a11y): --ow-ink-mute lifted #6b7a90 -> #8593a8 so the small (0.62-0.70rem)
-     muted labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.1, surface 5.7,
-     raised 5.4). Every muted label references this one token, so one change fixes all. */
-  --ow-ink:#e8eef7; --ow-ink-soft:#aab6c8; --ow-ink-mute:#8593a8;
-  --ow-accent:#38bdf8; --ow-accent2:#22d3ee;
-  --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#fb7185; --ow-info:#38bdf8;
+  /* rec 15 (a11y): --ow-ink-mute kept at WCAG AA 4.5:1 for the small (0.62-0.70rem)
+     muted labels on every surface they land on (raised ~5.4:1). Every muted label
+     references this one token, so one change fixes all. */
+  --ow-ink:#e9edf5; --ow-ink-soft:#a9b4c4; --ow-ink-mute:#8a97ab;
+  --ow-accent:#6e8bff; --ow-accent2:#a78bfa;
+  --ow-accent-rgb:110,139,255; --ow-accent2-rgb:167,139,250; --ow-info-rgb:75,180,242;
+  --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#fb7185; --ow-info:#4bb4f2;
   --ow-ok-dim:rgba(52,211,153,0.14); --ow-warn-dim:rgba(251,191,36,0.14);
-  --ow-bad-dim:rgba(251,113,133,0.14); --ow-info-dim:rgba(56,189,248,0.14);
+  --ow-bad-dim:rgba(251,113,133,0.14); --ow-info-dim:rgba(var(--ow-info-rgb),0.14);
   --ow-1:4px; --ow-2:8px; --ow-3:12px; --ow-4:16px; --ow-5:24px; --ow-6:32px;
   --ow-r:8px; --ow-r-sm:6px; --ow-r-lg:12px; --ow-r-pill:999px;
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
@@ -82,7 +87,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
    line instead of shrinking the label (the old float:right was dead on a flex child). */
 .ow-card__chips { margin-left:auto; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
 .ow-src-badge--mart { color:#34d399; border-color:rgba(52,211,153,0.3); }
-.ow-src-badge--live { color:#38bdf8; border-color:rgba(56,189,248,0.3); }
+.ow-src-badge--live { color:var(--ow-info); border-color:rgba(var(--ow-info-rgb),0.3); }
 .ow-src-badge--stale { color:#fbbf24; border-color:rgba(251,191,36,0.3); }
 .ow-src-badge--other { color:#8b98ad; border-color:rgba(139,152,173,0.3); }
 .ow-src-badge--method { color:#c084fc; border-color:rgba(192,132,252,0.35); }  /* rec 13: how derived */
@@ -100,7 +105,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   color:var(--ow-ink-mute); font-size:0.75rem; font-weight:700; line-height:1; cursor:help;
   position:relative; outline:none; text-transform:none; letter-spacing:0; }
 .ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
-.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(56,189,248,0.45); }
+.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(var(--ow-accent-rgb),0.45); }
 .ow-help[data-help]::after {
   content:attr(data-help); position:absolute; left:0; top:calc(100% + 6px);
   min-width:200px; max-width:300px; padding:8px 10px; border-radius:var(--ow-r-sm);
@@ -110,18 +115,24 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
 .ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
-.ow-section { display:flex; align-items:center; gap:10px; margin:6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
-  border-left:3px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.06),transparent 60%); }
+.ow-section { display:flex; align-items:center; gap:11px; margin:16px 0 8px; padding:8px 14px; border-radius:var(--ow-r-sm);
+  border-left:4px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.08),transparent 62%); }
 .ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
 .ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
 .ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
 .ow-section--info { border-left-color:var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
-.ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
-.ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
+.ow-section__title { font-weight:720; color:var(--ow-ink); font-size:1.08rem; letter-spacing:0.01em; }
+.ow-section__icon { display:inline-flex; color:var(--ow-accent); }
+/* On a severity section the icon matches the stripe so the accent never clashes
+   with a red/amber/green band; neutral sections keep the indigo accent icon. */
+.ow-section--ok .ow-section__icon { color:var(--ow-ok); }
+.ow-section--warn .ow-section__icon { color:var(--ow-warn); }
+.ow-section--bad .ow-section__icon { color:var(--ow-bad); }
+.ow-section--info .ow-section__icon { color:var(--ow-info); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
 
 .ow-filter-contract { margin:-2px 0 8px 0; padding:4px 10px; border-left:2px solid var(--ow-info);
-  color:var(--ow-ink-mute); background:rgba(56,189,248,0.06); font-size:0.72rem; line-height:1.45; }
+  color:var(--ow-ink-mute); background:rgba(var(--ow-info-rgb),0.06); font-size:0.72rem; line-height:1.45; }
 
 .ow-exceptions { margin:4px 0 10px; border-top:1px solid var(--ow-hairline);
   border-bottom:1px solid var(--ow-hairline); }
@@ -168,13 +179,13 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-chip b{color:var(--ow-ink);font-weight:700;}
 .ow-chip-warn{border-color:rgba(251,191,36,0.45);background:var(--ow-warn-dim);color:var(--ow-ink);}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
-  border-color:rgba(56,189,248,0.40);
-  box-shadow:0 0 0 1px rgba(56,189,248,0.22),var(--ow-shadow);}
+  border-color:rgba(var(--ow-accent-rgb),0.40);
+  box-shadow:0 0 0 1px rgba(var(--ow-accent-rgb),0.22),var(--ow-shadow);}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
-  box-shadow:0 0 10px rgba(56,189,248,0.9),0 0 2px rgba(56,189,248,1); animation:ow-pulse 2.8s ease-in-out infinite; }
+  box-shadow:0 0 10px rgba(var(--ow-accent-rgb),0.9),0 0 2px rgba(var(--ow-accent-rgb),1); animation:ow-pulse 2.8s ease-in-out infinite; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
 .ow-brand-word { font-weight:800; letter-spacing:0.02em;
   background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
@@ -201,7 +212,7 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
-.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
+.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(var(--ow-accent-rgb),0.6); }
 .stButton > button[kind="primary"],
 .stButton > button[data-testid="stBaseButton-primary"],
 button[data-testid="stBaseButton-primary"],
@@ -220,8 +231,8 @@ button[data-baseweb="tab"] { font-weight:640; }
 /* Multiselect chips: the default BaseWeb tag rendered as a pale wash —
    selections were unreadable (live finding 2026-07-10, Alerts bulk picker).
    Dark chip, accent hairline, real text. */
-.stMultiSelect [data-baseweb="tag"] { background:rgba(56,189,248,0.16) !important;
-  border:1px solid rgba(56,189,248,0.55) !important; border-radius:var(--ow-r-sm); }
+.stMultiSelect [data-baseweb="tag"] { background:rgba(var(--ow-accent-rgb),0.16) !important;
+  border:1px solid rgba(var(--ow-accent-rgb),0.55) !important; border-radius:var(--ow-r-sm); }
 .stMultiSelect [data-baseweb="tag"] span { color:#dbeafe !important; }
 .stMultiSelect [data-baseweb="tag"] svg { fill:#dbeafe !important; }
 [data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; box-shadow:var(--ow-shadow); }
@@ -233,7 +244,7 @@ section[data-testid="stSidebar"] { background:linear-gradient(180deg,var(--ow-bg
 section[data-testid="stSidebar"] div[role="radiogroup"] label { border-radius:var(--ow-r-sm); padding:4px 10px; margin:1px 0; transition:background var(--ow-ease); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:rgba(148,163,184,0.10); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
-  background:linear-gradient(90deg,rgba(56,189,248,0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
+  background:linear-gradient(90deg,rgba(var(--ow-accent-rgb),0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
 
 @media (max-width:640px) {
   .block-container { padding-left:0.6rem; padding-right:0.6rem; }
