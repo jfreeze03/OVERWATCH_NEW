@@ -186,6 +186,9 @@ def test_unit_costs_panel_prices_calls_and_children():
 def test_primary_buttons_force_dark_ink_across_markups():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     assert 'button[data-testid="stBaseButton-primary"]' in theme
-    assert "color:#06121f !important" in theme
+    # v4.155: the on-accent ink is a token now (one place to retune), still
+    # forced with !important so an accent pill can never render pale-on-pale.
+    assert "--ow-on-accent:#14122b" in theme           # token declared...
+    assert "color:var(--ow-on-accent) !important" in theme   # ...and forced
     seg = theme.split('.stButton > button[kind="primary"],', 1)[1][:900]
     assert "span" in seg and "p," in seg               # descendants forced too

@@ -17,18 +17,19 @@ _HIGH = ("#7c2d12", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL
 _WARN = ("#78350f", "#fde68a")    # amber
 _OK = ("#14532d", "#bbf7d0")      # green
 _INFO = ("#0c4a6e", "#bae6fd")    # sky
-_MUTED = ("#1e293b", palette.MUTED)   # slate (text hue = rec50 single source)
+_MUTED = ("#232533", palette.MUTED)   # graphite (v4.155 de-blue; text hue = rec50 single source)
 
 # The pairs above are dark-theme tuned (deep bg, light text). Light theme
 # gets pastel backgrounds with dark text; detection falls back to the dark
-# pairs so a failed lookup never changes today's look.
+# pairs so a failed lookup never changes today's look. Keys are the tuple
+# constants themselves (v4.155) so a re-hue above can never orphan a lookup.
 _LIGHT_EQUIV = {
-    ("#7f1d1d", "#fecaca"): ("#fee2e2", "#991b1b"),
-    ("#7c2d12", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
-    ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
-    ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
-    ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
-    ("#1e293b", "#94a3b8"): ("#f1f5f9", "#475569"),
+    _BAD: ("#fee2e2", "#991b1b"),
+    _HIGH: ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
+    _WARN: ("#fef3c7", "#92400e"),
+    _OK: ("#dcfce7", "#166534"),
+    _INFO: ("#e0f2fe", "#075985"),
+    _MUTED: ("#f1f5f9", "#475569"),
 }
 
 

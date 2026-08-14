@@ -42,6 +42,8 @@ def test_spark_svg_normalizes_and_guards():
 
 
 def test_metric_card_escapes_and_severity_and_trend():
+    from app.ui import palette
+
     card = metric_card_html({"label": "MTD <spend>", "value": "$1,234",
                              "delta": "-3%", "delta_color": "inverse",
                              "severity": "bad", "spark": [1, 2, 3],
@@ -49,8 +51,9 @@ def test_metric_card_escapes_and_severity_and_trend():
     assert "ow-card--bad" in card
     assert _html.escape("MTD <spend>") in card and "<spend>" not in card
     assert "polyline" in card                       # sparkline embedded
-    # inverse + negative delta = good = green
-    assert "#34d399" in card
+    # inverse + negative delta = good = green — via the palette source (rec50),
+    # so this lock survives a re-hue instead of pinning a retired literal.
+    assert palette.OK in card
     assert 'title=' in card                         # help became a tooltip
 
 

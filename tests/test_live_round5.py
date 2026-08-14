@@ -90,8 +90,10 @@ def test_multiselect_chips_are_readable():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     seg = theme.split('.stMultiSelect [data-baseweb="tag"]', 1)
     assert len(seg) == 2                               # chip styling exists
-    assert "rgba(56,189,248,0.16)" in theme            # dark chip, not the pale wash
-    assert 'tag"] span { color:#dbeafe' in theme       # readable text
+    # v4.155 re-hue: iris accent tint replaced the sky one — still a dark chip
+    # with real text, never the pale default wash.
+    assert "rgba(142,143,250,0.18)" in theme           # dark chip, not the pale wash
+    assert 'tag"] span { color:#e4e3ff' in theme       # readable text
 
 
 def test_heaviest_queries_carry_the_date():

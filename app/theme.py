@@ -6,6 +6,13 @@ stripes, refined native-widget styling (metric, table, tabs, segmented
 section nav, buttons, popovers), an inline SVG icon set, a persistent status
 bar, and responsive rules for narrow viewports.
 
+v4.155 scheme ("graphite & iris", owner ask 2026-08-13: "I do not like the
+color scheme"): the cold navy chrome and the everywhere-sky accent are
+retired. Neutrals are de-blued graphite; the accent is iris and appears ONLY
+on interactive elements (buttons, active nav, links, brand); severity hues
+are richer and less neon; neutral cards carry a quiet hairline rail so a
+colored rail always MEANS something (calm by default, color = signal).
+
 Everything degrades safely: if a Streamlit test-id selector shifts between
 versions, the app still renders — it just loses that flourish. No external
 fonts or scripts (Streamlit-in-Snowflake CSP friendly); the type system uses
@@ -19,16 +26,18 @@ import streamlit as st
 _TOKENS = """
 <style>
 :root {
-  --ow-bg:#0a0f1c; --ow-surface:#0f1729; --ow-raised:#131d33;
-  --ow-hairline:rgba(148,163,184,0.16); --ow-hairline2:rgba(148,163,184,0.28);
-  /* rec 15 (a11y): --ow-ink-mute lifted #6b7a90 -> #8593a8 so the small (0.62-0.70rem)
-     muted labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.1, surface 5.7,
-     raised 5.4). Every muted label references this one token, so one change fixes all. */
-  --ow-ink:#e8eef7; --ow-ink-soft:#aab6c8; --ow-ink-mute:#8593a8;
-  --ow-accent:#38bdf8; --ow-accent2:#22d3ee;
-  --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#fb7185; --ow-info:#38bdf8;
-  --ow-ok-dim:rgba(52,211,153,0.14); --ow-warn-dim:rgba(251,191,36,0.14);
-  --ow-bad-dim:rgba(251,113,133,0.14); --ow-info-dim:rgba(56,189,248,0.14);
+  --ow-bg:#0f1016; --ow-surface:#15161f; --ow-raised:#1c1d29;
+  --ow-hairline:rgba(154,158,178,0.16); --ow-hairline2:rgba(154,158,178,0.30);
+  /* rec 15 (a11y): every muted label references --ow-ink-mute, which clears WCAG AA
+     4.5:1 on every surface it lands on (bg 6.3, surface 6.0, raised 5.5) — one token,
+     one place to keep the floor. The v4.155 re-hue kept the same guarantee (tested). */
+  --ow-ink:#edeef4; --ow-ink-soft:#b4b8c6; --ow-ink-mute:#8f94a6;
+  --ow-accent:#8e8ffa; --ow-accent2:#b8b4ff;
+  /* dark ink for text ON an accent-filled control (primary buttons, active pill) */
+  --ow-on-accent:#14122b;
+  --ow-ok:#3ecf8e; --ow-warn:#f0b429; --ow-bad:#f0566d; --ow-info:#4cc3f0;
+  --ow-ok-dim:rgba(62,207,142,0.14); --ow-warn-dim:rgba(240,180,41,0.14);
+  --ow-bad-dim:rgba(240,86,109,0.14); --ow-info-dim:rgba(76,195,240,0.14);
   --ow-1:4px; --ow-2:8px; --ow-3:12px; --ow-4:16px; --ow-5:24px; --ow-6:32px;
   --ow-r:8px; --ow-r-sm:6px; --ow-r-lg:12px; --ow-r-pill:999px;
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
@@ -56,37 +65,41 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 .ow-page-heading h1 { margin:0; padding:0; font-size:1.72rem; font-weight:750; letter-spacing:0; }
 .ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
 
+/* v4.155 calm-by-default: neutral metric/KPI cards carry a quiet hairline rail;
+   only a severity class colors it — so a colored rail always MEANS something.
+   (The old always-on accent stripe made every page glow blue and buried real
+   severity in decoration.) */
 div[data-testid="stMetric"] {
   position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 12px 18px;
   box-shadow:var(--ow-shadow); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); overflow:hidden; }
 div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); opacity:0.85; }
+  background:var(--ow-hairline2); }
 div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
 [data-testid="stMetricLabel"] p { font-size:0.76rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
 [data-testid="stMetricValue"] { font-size:1.62rem; font-weight:720; color:var(--ow-ink); }
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
 .ow-sev-warn div[data-testid="stMetric"]::before { background:var(--ow-warn); opacity:1; }
 .ow-sev-ok div[data-testid="stMetric"]::before { background:var(--ow-ok); opacity:1; }
-.ow-sev-bad div[data-testid="stMetric"] { border-color:rgba(251,113,133,0.35); }
+.ow-sev-bad div[data-testid="stMetric"] { border-color:rgba(240,86,109,0.35); }
 
 .ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
   box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); }
 .ow-card:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
-.ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
+.ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-hairline2); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
 .ow-src-badge { font-size:11px; letter-spacing:0.08em; text-transform:uppercase; border:1px solid; border-radius:8px; padding:1px 6px; white-space:nowrap; }
 /* the chips group right-aligns and, on a long two-chip $ card, wraps to its own
    line instead of shrinking the label (the old float:right was dead on a flex child). */
 .ow-card__chips { margin-left:auto; display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
-.ow-src-badge--mart { color:#34d399; border-color:rgba(52,211,153,0.3); }
-.ow-src-badge--live { color:#38bdf8; border-color:rgba(56,189,248,0.3); }
-.ow-src-badge--stale { color:#fbbf24; border-color:rgba(251,191,36,0.3); }
-.ow-src-badge--other { color:#8b98ad; border-color:rgba(139,152,173,0.3); }
-.ow-src-badge--method { color:#c084fc; border-color:rgba(192,132,252,0.35); }  /* rec 13: how derived */
-.ow-src-badge--scope { color:#a5b4cf; border-color:rgba(165,180,207,0.4); }    /* rec 13: account-wide / company */
+.ow-src-badge--mart { color:#3ecf8e; border-color:rgba(62,207,142,0.3); }
+.ow-src-badge--live { color:#4cc3f0; border-color:rgba(76,195,240,0.3); }
+.ow-src-badge--stale { color:#f0b429; border-color:rgba(240,180,41,0.3); }
+.ow-src-badge--other { color:#8d93a4; border-color:rgba(141,147,164,0.3); }
+.ow-src-badge--method { color:#5bc8bf; border-color:rgba(91,200,191,0.35); }  /* rec 13: how derived (teal — iris now belongs to the accent) */
+.ow-src-badge--scope { color:#a9b0c4; border-color:rgba(169,176,196,0.4); }    /* rec 13: account-wide / company */
 .ow-card__title { font-size:0.76rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
 .ow-card__value { font-size:1.55rem; font-weight:720; color:var(--ow-ink); margin-top:3px; font-variant-numeric:tabular-nums; }
 .ow-card__meta { font-size:0.78rem; color:var(--ow-ink-soft); margin-top:2px; }
@@ -100,7 +113,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   color:var(--ow-ink-mute); font-size:0.75rem; font-weight:700; line-height:1; cursor:help;
   position:relative; outline:none; text-transform:none; letter-spacing:0; }
 .ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
-.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(56,189,248,0.45); }
+.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(142,143,250,0.45); }
 .ow-help[data-help]::after {
   content:attr(data-help); position:absolute; left:0; top:calc(100% + 6px);
   min-width:200px; max-width:300px; padding:8px 10px; border-radius:var(--ow-r-sm);
@@ -110,27 +123,35 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
 .ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
-.ow-section { display:flex; align-items:center; gap:10px; margin:6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
-  border-left:3px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.06),transparent 60%); }
-.ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
-.ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
-.ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
-.ow-section--info { border-left-color:var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 60%); }
-.ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
+/* v4.155 section display: sections were cramped (6px rhythm) and the neutral
+   wash was too faint to separate a header from the panel above it — long pages
+   read as one wall. Headers get real air above, a full hairline frame with the
+   severity rail on the left edge, and wrap cleanly on narrow viewports. */
+.ow-section { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:22px 0 10px; padding:8px 14px;
+  border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline);
+  border-left:3px solid var(--ow-hairline2); background:linear-gradient(90deg,rgba(154,158,178,0.07),transparent 62%); }
+.ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 62%); }
+.ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 62%); }
+.ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 62%); }
+.ow-section--info { border-left-color:var(--ow-info); background:linear-gradient(90deg,var(--ow-info-dim),transparent 62%); }
+.ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.05rem; }
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
 
-.ow-filter-contract { margin:-2px 0 8px 0; padding:4px 10px; border-left:2px solid var(--ow-info);
-  color:var(--ow-ink-mute); background:rgba(56,189,248,0.06); font-size:0.72rem; line-height:1.45; }
+/* v4.155: the scope-contract line tucks under its section header (same rail
+   inset, pulled up) and is neutral — it is metadata, not an info-severity
+   signal; nearly every section renders one, so the blue tint was chrome noise. */
+.ow-filter-contract { margin:-6px 0 10px 0; padding:5px 12px 5px 14px; border-left:3px solid var(--ow-hairline2);
+  color:var(--ow-ink-mute); background:rgba(154,158,178,0.05); font-size:0.72rem; line-height:1.45; }
 
 .ow-exceptions { margin:4px 0 10px; border-top:1px solid var(--ow-hairline);
   border-bottom:1px solid var(--ow-hairline); }
 .ow-exception { display:grid; grid-template-columns:minmax(120px,1fr) auto minmax(180px,2fr);
   gap:12px; align-items:center; padding:7px 10px; border-left:3px solid var(--ow-warn);
-  border-bottom:1px solid var(--ow-hairline); background:rgba(251,191,36,0.045); }
+  border-bottom:1px solid var(--ow-hairline); background:rgba(240,180,41,0.045); }
 .ow-exception:last-child { border-bottom:0; }
-.ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(251,113,133,0.055); }
-.ow-exception--ok { border-left-color:var(--ow-ok); background:rgba(52,211,153,0.045); }
+.ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(240,86,109,0.055); }
+.ow-exception--ok { border-left-color:var(--ow-ok); background:rgba(62,207,142,0.045); }
 .ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
 .ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
   font-variant-numeric:tabular-nums; }
@@ -143,7 +164,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-statusbar { display:flex; gap:8px; flex-wrap:wrap; align-items:stretch; margin:0 0 12px 0; }
 .ow-stat { flex:1 1 130px; min-width:120px; position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); padding:8px 12px 8px 14px; box-shadow:var(--ow-shadow); }
-.ow-stat::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r-sm) 0 0 var(--ow-r-sm); background:var(--ow-accent); }
+.ow-stat::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r-sm) 0 0 var(--ow-r-sm); background:var(--ow-hairline2); }
 .ow-stat--ok::before { background:var(--ow-ok); } .ow-stat--warn::before { background:var(--ow-warn); }
 .ow-stat--bad::before { background:var(--ow-bad); } .ow-stat--info::before { background:var(--ow-info); }
 .ow-stat__k { font-size:0.72rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; }
@@ -153,10 +174,10 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .st-key-ow_status_actions button { min-height:1.7rem; font-size:0.72rem; }
 
 .ow-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 10px; margin:0 6px 4px 0; border-radius:var(--ow-r-pill);
-  font-size:0.72rem; font-weight:620; border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); background:rgba(148,163,184,0.05); }
-.ow-chip-ok { color:var(--ow-ok); border-color:rgba(52,211,153,0.45); background:var(--ow-ok-dim); }
-.ow-chip-bad { color:var(--ow-bad); border-color:rgba(251,113,133,0.45); background:var(--ow-bad-dim); }
-.ow-chip-warn { color:var(--ow-warn); border-color:rgba(251,191,36,0.45); background:var(--ow-warn-dim); }
+  font-size:0.72rem; font-weight:620; border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); background:rgba(154,158,178,0.05); }
+.ow-chip-ok { color:var(--ow-ok); border-color:rgba(62,207,142,0.45); background:var(--ow-ok-dim); }
+.ow-chip-bad { color:var(--ow-bad); border-color:rgba(240,86,109,0.45); background:var(--ow-bad-dim); }
+.ow-chip-warn { color:var(--ow-warn); border-color:rgba(240,180,41,0.45); background:var(--ow-warn-dim); }
 
 /* Chip pills (chip() helper — scope summary in the status bar + severity pills).
    The scope-chip BAND in the filter strip was retired in v4.65 for the compact
@@ -166,15 +187,15 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   letter-spacing:.02em;line-height:1.55;border:1px solid var(--ow-hairline2);
   color:var(--ow-ink-soft);background:var(--ow-raised);}
 .ow-chip b{color:var(--ow-ink);font-weight:700;}
-.ow-chip-warn{border-color:rgba(251,191,36,0.45);background:var(--ow-warn-dim);color:var(--ow-ink);}
+.ow-chip-warn{border-color:rgba(240,180,41,0.45);background:var(--ow-warn-dim);color:var(--ow-ink);}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
-  border-color:rgba(56,189,248,0.40);
-  box-shadow:0 0 0 1px rgba(56,189,248,0.22),var(--ow-shadow);}
+  border-color:rgba(142,143,250,0.40);
+  box-shadow:0 0 0 1px rgba(142,143,250,0.22),var(--ow-shadow);}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
-  box-shadow:0 0 10px rgba(56,189,248,0.9),0 0 2px rgba(56,189,248,1); animation:ow-pulse 2.8s ease-in-out infinite; }
+  box-shadow:0 0 10px rgba(142,143,250,0.9),0 0 2px rgba(142,143,250,1); animation:ow-pulse 2.8s ease-in-out infinite; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
 .ow-brand-word { font-weight:800; letter-spacing:0.02em;
   background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
@@ -195,35 +216,35 @@ div[role="radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label^
   border-radius:var(--ow-r-lg); flex-wrap:wrap; }
 div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-label^="Window"] label {
   border-radius:var(--ow-r-pill); padding:3px 12px; margin:0; white-space:nowrap; transition:background var(--ow-ease),color var(--ow-ease); }
-div[role="radiogroup"][aria-label="Section"] label:hover { background:rgba(148,163,184,0.10); }
+div[role="radiogroup"][aria-label="Section"] label:hover { background:rgba(154,158,178,0.10); }
 div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#06121f; }
+  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:var(--ow-on-accent); }
 
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
-.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
+.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(142,143,250,0.6); }
 .stButton > button[kind="primary"],
 .stButton > button[data-testid="stBaseButton-primary"],
 button[data-testid="stBaseButton-primary"],
 button[data-testid="baseButton-primary"] {
   background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
-  color:#06121f !important; border:none !important; }
+  color:var(--ow-on-accent) !important; border:none !important; }
 /* SiS builds vary the button markup; force dark ink on every descendant so
    an accent pill can never render pale-on-pale (live finding 2026-07-10:
    the '2 open critical(s)' chip and Execute bulk RESOLVE were unreadable). */
 .stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span,
 button[data-testid="stBaseButton-primary"] p, button[data-testid="stBaseButton-primary"] span {
-  color:#06121f !important; }
+  color:var(--ow-on-accent) !important; }
 
 button[data-baseweb="tab"] { font-weight:640; }
 
 /* Multiselect chips: the default BaseWeb tag rendered as a pale wash —
    selections were unreadable (live finding 2026-07-10, Alerts bulk picker).
    Dark chip, accent hairline, real text. */
-.stMultiSelect [data-baseweb="tag"] { background:rgba(56,189,248,0.16) !important;
-  border:1px solid rgba(56,189,248,0.55) !important; border-radius:var(--ow-r-sm); }
-.stMultiSelect [data-baseweb="tag"] span { color:#dbeafe !important; }
-.stMultiSelect [data-baseweb="tag"] svg { fill:#dbeafe !important; }
+.stMultiSelect [data-baseweb="tag"] { background:rgba(142,143,250,0.18) !important;
+  border:1px solid rgba(142,143,250,0.55) !important; border-radius:var(--ow-r-sm); }
+.stMultiSelect [data-baseweb="tag"] span { color:#e4e3ff !important; }
+.stMultiSelect [data-baseweb="tag"] svg { fill:#e4e3ff !important; }
 [data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; box-shadow:var(--ow-shadow); }
 [data-testid="stExpander"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); background:var(--ow-surface); }
 [data-testid="stExpander"] summary:hover { color:var(--ow-accent); }
@@ -231,9 +252,9 @@ div[data-testid="stPopover"] > button { border-radius:var(--ow-r-pill); }
 
 section[data-testid="stSidebar"] { background:linear-gradient(180deg,var(--ow-bg),var(--ow-surface)); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label { border-radius:var(--ow-r-sm); padding:4px 10px; margin:1px 0; transition:background var(--ow-ease); }
-section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:rgba(148,163,184,0.10); }
+section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:rgba(154,158,178,0.10); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
-  background:linear-gradient(90deg,rgba(56,189,248,0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
+  background:linear-gradient(90deg,rgba(142,143,250,0.16),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
 
 @media (max-width:640px) {
   .block-container { padding-left:0.6rem; padding-right:0.6rem; }
@@ -261,7 +282,8 @@ _COMPACT_CSS = """
 div[data-testid="stMetric"] { padding:8px 10px 7px 12px; }
 [data-testid="stMetricValue"] { font-size:1.3rem !important; }
 .ow-card { padding:8px 10px 8px 12px; margin-bottom:var(--ow-2); }
-.ow-section { padding:4px 10px; margin:4px 0; }
+.ow-section { padding:5px 10px; margin:10px 0 6px; }
+.ow-filter-contract { margin:-4px 0 6px 0; }
 div[data-testid="stDataFrame"] { font-size:0.82rem; }
 </style>
 """

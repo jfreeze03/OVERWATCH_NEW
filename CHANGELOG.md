@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.155.0 - "Graphite & iris" re-theme + section display pass (2026-08-13)
+
+Owner ask: "I do not like the color scheme and some of the sections need to be
+displayed better." App-only, no migration. Full review + the recommendations
+that did NOT ship this round: `docs/reviews/UI_THEME_REVIEW_2026-08-13.md`.
+
+- **New color scheme — "graphite & iris".** The cold navy chrome
+  (`#0a0f1c/#0f1729/#131d33`) is retired for de-blued graphite
+  (`#0f1016/#15161f/#1c1d29`); the everywhere-sky accent becomes iris
+  (`#8e8ffa`), reserved for interactive chrome (buttons, active nav, brand,
+  focus rings) — INFO no longer doubles as the accent, so information and
+  interaction stop sharing one color. Severity hues are richer and less
+  pastel-neon (OK `#3ecf8e`, WARN `#f0b429`, BAD `#f0566d`, HIGH `#f5883d`,
+  INFO `#4cc3f0`). All through the existing token architecture: `theme.py`
+  tokens ↔ `palette.py` ↔ `config.toml` stay drift-locked
+  (`test_palette_drift.py`, now banning the retired hues in consumers too);
+  the muted-ink WCAG AA ≥ 4.5:1 floor is preserved on every surface (worst
+  case 5.5:1 vs the old 5.4:1, still enforced by the a11y test). The
+  on-accent ink is a new token (`--ow-on-accent`) instead of a scattered
+  literal; the task-DAG toolbar/nodes, chart grid/title hues, and scatter
+  strokes re-align (strokes now reference `palette.BG`). The chart category
+  range drops violet (iris owns it now) for INFO sky + a teal chart-only
+  extra; the name-stable entity palette (C15) is untouched by design.
+- **Calm by default, color = signal.** Neutral KPI/metric/status cards drop
+  the always-on accent stripe for a quiet hairline rail — only a severity
+  class colors a rail, so a colored edge always MEANS something instead of
+  every card glowing blue.
+- **Section display pass.** Section headers were cramped (6px rhythm) with a
+  wash too faint to separate them from content — long pages read as one wall.
+  Headers get real air above (22px), a full hairline frame with the severity
+  rail on the left edge, a slightly larger title, and flex-wrap so the badge
+  never collides on narrow viewports. The per-section scope-contract line
+  tucks under its header (same rail inset, pulled up) and goes neutral — it
+  is metadata, not an info-severity signal, and it renders under nearly every
+  section. Compact density keeps proportional overrides.
+- Shape locks updated to the new contract (strengthened, not weakened):
+  primary-button ink pins the `--ow-on-accent` token + `!important` force;
+  multiselect chips pin the iris tint; the metric-card trend lock reads
+  `palette.OK` instead of a hex so it survives future re-hues; the severity
+  literal ban covers current AND retired hues.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.

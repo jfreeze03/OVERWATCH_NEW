@@ -45,11 +45,14 @@ def test_palette_matches_theme_tokens():
 
 
 # Consumer files must REFERENCE palette for the pure severity hues, not re-hardcode
-# them (rec50). These four have no other legitimate use in the app, so any literal
+# them (rec50). These have no other legitimate use in the app, so any literal
 # copy in a consumer is drift the palette-vs-theme test alone would miss (the review
 # found several such residuals). Accent/slate hues are excluded — they legitimately
 # recur in gradients (charts heatmap ramp) and light-theme lookup keys.
-_SEVERITY_HUES = ("#34d399", "#fbbf24", "#fb7185", "#fb923c")
+# v4.155 re-hue: the CURRENT hues (OK/WARN/BAD/HIGH) and the RETIRED v4.128-era
+# hues are both banned — a consumer must not resurrect the old scheme either.
+_SEVERITY_HUES = ("#3ecf8e", "#f0b429", "#f0566d", "#f5883d",     # current (palette.py)
+                  "#34d399", "#fbbf24", "#fb7185", "#fb923c")     # retired pre-v4.155
 _CONSUMERS = ("app/main.py", "app/ui/components.py", "app/ui/charts.py",
               "app/ui/status_colors.py")
 
