@@ -42,6 +42,8 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
+    section_toc,
     served_days,
     styled_table,
     user_display_map,
@@ -155,7 +157,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         ))
     result_caption(res)
 
-    st.markdown("**Cost drill coverage**")
+    section_toc([("Coverage", "sp-coverage"), ("Cloud services", "sp-cs-health"),
+                 ("By warehouse", "sp-by-warehouse"), ("Anomalies", "sp-anomaly")])
+    section_header("Cost drill coverage", icon_name="overview", anchor="sp-coverage")
     coverage = service_coverage_inventory(df, rate, ai_rate)
     ready_share = drill_ready_spend_share(coverage)
     material_gaps = coverage[
@@ -305,7 +309,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 )
                 result_caption(market)
 
-    st.markdown("**Cloud-services health by warehouse**")
+    section_header("Cloud-services health by warehouse", icon_name="warehouse",
+                   anchor="sp-cs-health")
     st.caption(
         "Above ~10% (WATCH) of a warehouse's credits usually means many tiny queries, "
         "metadata-heavy patterns, or compile-heavy SQL. ELEVATED starts past 20%, "
@@ -411,7 +416,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"wh_vs_prior_{company}_{days}", tier="historical",
                  source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
-    st.markdown("**By warehouse (exact usage)**")
+    section_header("By warehouse", badge="exact usage", icon_name="warehouse",
+                   anchor="sp-by-warehouse")
     panel_help(
         "Warehouse spend is EXACT metering (credits x rate, company-scopable); the user/database "
         "split below it is an elapsed-time-share ESTIMATE, not billing. Trust the by-warehouse "
@@ -492,7 +498,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         _served = _dim_res["USER_NAME"] if _dim_res["USER_NAME"].usable() else _dim_res["DATABASE_NAME"]
         _intro_pool = _alloc_pool(_served.source)
 
-        st.markdown("**By user and database (allocated — estimate)**")
+        section_header("By user and database", badge="allocated · estimate",
+                       anchor="sp-by-user-db")
         # $-escape (screenshot bug 2026-07-31): format_usd's '$' paired with 'USER$' below
         # into a LaTeX math span — half this caption rendered in serif-italic math font.
         st.caption(md_dollars(
@@ -580,7 +587,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         # drove the credits, so a misconfigured tool is findable. Behind a toggle
         # because the live fallback (a 3-way ACCOUNT_USAGE join) is heavy until
         # FACT_APP_COST_DAILY loads. MEASURED warehouse compute only.
-        st.markdown("**Cost by application × user (measured)**")
+        section_header("Cost by application × user", badge="measured",
+                       anchor="sp-app-user")
         if st.toggle("Load cost by application", key="spend_app_cost_load",
                      help="Attributes measured query credits to the client program "
                           "(Tableau, dbt, a driver, a named tool) and the user. Runs a heavy "
@@ -619,7 +627,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                     "program is reliable even while the window is short."))
                 result_caption(_app)
 
-    st.markdown("**Daily anomaly check (per warehouse)**")
+    section_header("Daily anomaly check", badge="per warehouse",
+                   icon_name="alerts", anchor="sp-anomaly")
     daily = daily_res if daily_res is not None else run(
         mart_sql.fact_warehouse_daily(30, company), page=_PAGE,
         key=f"fact_wh_daily_{company}", tier="hourly", source="FACT_WAREHOUSE_DAILY")
@@ -659,7 +668,8 @@ def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
     at the standard rate; hybrid and archive cool/cold at their own SETTINGS
     rates. Account grain — STORAGE_USAGE carries no per-database split for these
     tiers, so the company filter does not narrow it."""
-    st.markdown("**Account storage by tier (billing basis)**")
+    section_header("Account storage by tier", badge="billing basis",
+                   anchor="sp-storage-tier")
     res = run(cost_sql.storage_account_truth(days), page=_PAGE,
               key=f"stor_acct_{days}", tier="hourly",
               source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
@@ -717,7 +727,7 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
     """Storage economics (moved from Chargeback & AI, v4.50): per-database
     calendar-month billing basis plus the account tier split. Spend-lens
     material — storage is neither chargeback nor AI."""
-    st.markdown("**Storage by database**")
+    section_header("Storage by database", anchor="sp-storage-db")
     # Item 7 (2026-07-14): storage bills on the CALENDAR-month average of
     # daily bytes, so the card shows month-to-date (excl. today's partial
     # day) with the prior completed month for trend — not a trailing-N

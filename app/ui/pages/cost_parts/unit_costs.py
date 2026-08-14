@@ -28,6 +28,8 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
+    section_toc,
     snowsight_profile_column,
     styled_table,
     user_display_map,
@@ -142,7 +144,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if kpis:
         kpi_row(kpis)
 
-    st.markdown("**Most expensive queries — measured $ each**")
+    section_toc([("Queries", "uc-queries"), ("Procedures", "uc-procs"),
+                 ("Patterns", "uc-patterns"), ("AI", "uc-ai"), ("ETL", "uc-etl"),
+                 ("Task graphs", "uc-graphs"), ("Serverless", "uc-serverless")])
+    section_header("Most expensive queries", badge="measured $ each",
+                   icon_name="search", anchor="uc-queries")
     if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
         qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
@@ -155,8 +161,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         result_caption(q_res, note="Idle-time excluded by design — that burn lives with "
                                    "the idle advisor, not the query that happened to run.")
 
-    st.divider()
-    st.markdown("**Stored procedures — $/call leaderboard**")
+    section_header("Stored procedures", badge="$/call leaderboard",
+                   icon_name="cost", anchor="uc-procs")
     if guard(p_res, "No CALLs with attributed credits in this scope/window."):
         pdf = p_res.df.copy()
         # Click a row -> the trend panel below prefills with that proc
@@ -180,7 +186,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "Change-impact (Operations) watches these numbers around "
                                    "each ALTER.")
 
-    st.markdown("**Repeated patterns — the silent spend (measured $)**")
+    section_header("Repeated patterns", badge="the silent spend · measured $",
+                   icon_name="refresh", anchor="uc-patterns")
     # Owner ask (2026-07-11): "a visual of bad code and how it could cost us
     # silently." Unlike the POC's estimates these are MEASURED attribution
     # credits per parameterized hash — one cheap query run thousands of
@@ -289,8 +296,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                             "PARENT_QUERY_ID; orphaned history stays visible at the top level."
                         )
 
-    st.divider()
-    st.markdown("**AI — $ by function/model (or Cortex Code source)**")
+    section_header("AI — $ by function/model", badge="or Cortex Code source",
+                   anchor="uc-ai")
     if not ai_res.usable():
         # This account bills AI through Cortex CODE (Snowsight/CLI token
         # credits), not SQL Cortex functions — fall back to those views
@@ -317,8 +324,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                     "(the usage view carries no database dimension); per-user "
                                     "attribution lives under Chargeback & AI.")
 
-    st.divider()
-    st.markdown("**ETL unit costs (tagged pipelines)**")
+    section_header("ETL unit costs", badge="tagged pipelines",
+                   icon_name="pipeline", anchor="uc-etl")
     # $-escape: four $/unit tokens in one caption pair into LaTeX math spans
     st.caption(md_dollars(
         "Cost governance for pipelines that set a JSON QUERY_TAG "
@@ -372,8 +379,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                      "run grain (retry/abort waste). Rows = write statements only. "
                                      "Method = MEASURED (Admin → Metrics).")
 
-    st.divider()
-    st.markdown("**Task-graph pipeline costs**")
+    section_header("Task-graph pipeline costs", icon_name="pipeline",
+                   anchor="uc-graphs")
     # Moved from Operations > Task graphs ($) (v4.50): $/run per pipeline is
     # unit-cost material on the same QUERY_ATTRIBUTION_HISTORY basis as the
     # ETL panel above. Operational task health (failures, RCA, runtimes)
@@ -431,7 +438,8 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
-    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
+    section_header("Serverless tasks", badge="billed separately · task-day grain",
+                   anchor="uc-serverless")
     if not sls.ok:
         st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
     elif sls.empty:

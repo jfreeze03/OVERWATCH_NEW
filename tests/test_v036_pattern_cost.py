@@ -36,7 +36,9 @@ def test_pattern_reader_is_measured_scoped_and_floored():
     assert "HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01" in sql      # noise floor
     assert "''" in mart27_sql.pattern_cost(30, "x'y")
     uc = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
-    assert "Repeated patterns — the silent spend (measured $)" in uc
+    # v4.155: the flat bold title became a styled section_header (title + badge)
+    assert 'section_header("Repeated patterns"' in uc
+    assert "the silent spend · measured $" in uc
     assert 'key=f"patterns_{company}_{days}"' in uc              # triage filter honored
     assert "probe=True" in uc.split("patterns_", 1)[1][:300]     # quiet pre-V036
 

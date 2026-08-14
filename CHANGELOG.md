@@ -23,11 +23,15 @@ be displayed better." App-only; no migration.
   (drift test updated to the new hues, not weakened). Chart category range
   retuned (indigo primary; violet+lime stay chart-only); the task-DAG iframe's
   stale hardcoded chrome now fills from palette via template placeholders.
-- **Sections displayed better.** Admin (16) and Alerts (10) panel titles were
-  flat bold markdown while the rest of the app used the design-system
-  `section_header` — all static top-level titles converted (stripe, icon,
-  badge, anchor); trailing prose moved to captions. The two longest walls
-  (Alerts → History, Admin → Performance) open with a `section_toc` jump strip.
+- **Sections displayed better.** Admin (16), Alerts (10), and the six Cost
+  bodies (`cost_parts/*`: spend 8, optimize 14, unit costs 7, AI/chargeback 6,
+  contract 5, compare 3) titled their panels with flat bold markdown while the
+  rest of the app used the design-system `section_header` — all static
+  top-level titles converted (stripe, icon, badge, anchor); trailing prose
+  moved to captions; redundant `st.divider()` separators next to the new
+  headers dropped. The longest walls (Alerts → History, Admin → Performance,
+  Cost → Unit costs, Cost → Spend & Attribution) open with a `section_toc`
+  jump strip.
   Control Room's lone `st.subheader` (lock-wait spikes) joins `section_header`
   with an honest warn stripe (it only renders when spikes exist). Section
   headers gain top breathing room (18px comfortable / 10px compact) so long

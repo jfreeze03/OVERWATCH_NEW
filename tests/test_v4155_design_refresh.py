@@ -81,9 +81,25 @@ def test_admin_and_alerts_use_section_headers_not_flat_bold():
     assert "st.subheader(" not in _src("app/ui/pages/control_room.py")
 
 
+def test_cost_parts_use_section_headers_not_flat_bold():
+    """Same contract for the Cost bodies — ranked #2-4 on the section-display
+    review's worst-walls shortlist. The remaining bold labels are all NESTED
+    drill/column labels (call-tree drill, notebook subset, elevated-CS drill,
+    price-a-pattern, the two half-width column headers in the AI split)."""
+    flat = {"spend.py": 4, "unit_costs.py": 1, "optimize.py": 1,
+            "ai_chargeback.py": 2, "compare.py": 0, "contract.py": 0}
+    for name, allowed in flat.items():
+        src = _src(f"app/ui/pages/cost_parts/{name}")
+        found = len(re.findall(r'st\.markdown\("\*\*', src))
+        assert found == allowed, f"{name}: {found} flat bold titles (allowed {allowed})"
+        assert src.count("section_header(") >= 3, name
+
+
 def test_long_walls_open_with_a_toc():
     assert 'section_toc([("Events by day", "al-events-day")' in _src("app/ui/pages/alerts.py")
     assert 'section_toc([("SLO scorecard", "adm-perf-slo")' in _src("app/ui/pages/admin.py")
+    assert 'section_toc([("Queries", "uc-queries")' in _src("app/ui/pages/cost_parts/unit_costs.py")
+    assert 'section_toc([("Coverage", "sp-coverage")' in _src("app/ui/pages/cost_parts/spend.py")
 
 
 def test_section_headers_carry_breathing_room():

@@ -40,6 +40,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
     styled_table,
     with_user_names,
 )
@@ -54,7 +55,8 @@ _PAGE = "Cost & Contract"
 def _cortex_spend_tab(days: int, ai_rate: float) -> None:
     # v4.50: the storage panels moved to Spend & Attribution — storage is
     # neither chargeback nor AI, and the section label was hiding it.
-    st.markdown("**Cortex / AI spend (account-wide)**")
+    section_header("Cortex / AI spend", badge="account-wide", icon_name="spend",
+                   anchor="ai-spend")
     res = run_mart_first(
         mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
         page=_PAGE, key=f"cortex_{days}",
@@ -170,7 +172,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             daily["USD"] = daily["TOTAL_CREDITS"].map(safe_float) * ai_rate
             charts.daily_stacked_usd(daily, "DAY", "SOURCE", "USD")
 
-    st.markdown("**User attribution detail**")
+    section_header("User attribution detail", anchor="ai-attr")
     styled_table(  # rec21: styled_table carries tz conversion, prettified headers, CSV
         enriched[[c for c in ["USER_NAME", "FIRST_NAME", "LAST_NAME", "EMAIL", "SOURCE",
                    "ACTIVE_DAYS", "TOTAL_REQUESTS",
@@ -200,7 +202,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         f"{CPR_MIN_REQUESTS} requests and {format_usd(CPR_MIN_PROJECTED_USD)} projected 30d "
         f"— a spike is unusual for this account, not just a pricier model."
     )
-    st.markdown("**Exceptions**")
+    section_header("Exceptions", anchor="ai-exceptions")
     if exceptions.empty:
         if ai_budget > 0:
             st.success("No users over 25% of the AI budget, scope total inside budget, "
@@ -271,7 +273,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 @st.fragment
 def _statement_export(company: str, rate: float) -> None:
     """Fragment: month picks and the zip build rerun this block only."""
-    st.markdown("**Monthly statement export**")
+    section_header("Monthly statement export", icon_name="chargeback",
+                   anchor="ai-export")
     from datetime import timedelta
 
     today = account_today()
@@ -358,7 +361,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     )
     result_caption(dept_res, note="Idle credits stay with the owning department - that is the point of chargeback.")
 
-    st.markdown("**Role usage within warehouses (allocated)**")
+    section_header("Role usage within warehouses", badge="allocated",
+                   anchor="ai-roles")
     st.caption(
         "Execution-time share per role (elapsed on the live fallback) inside each warehouse x that warehouse's exact spend. "
         "Usage lens for conversations, not the billing number. Shares are whole-warehouse: "
@@ -407,7 +411,8 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                 },
             )
 
-    st.markdown("**Department budgets & pace**")
+    section_header("Department budgets & pace", icon_name="chargeback",
+                   anchor="ai-budgets")
     panel_help(
         "Budgets live in DEPT_BUDGETS; the hourly scan raises COST_DEPT_BUDGET_PACE when a "
         "department runs ahead of pace (threshold on the Alerts page). Spend is the "

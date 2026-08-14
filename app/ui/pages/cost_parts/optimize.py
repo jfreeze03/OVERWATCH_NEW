@@ -55,6 +55,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
     selectable_nav_table,
     selectable_table,
     served_days,
@@ -155,7 +156,7 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
 
 def _capacity_forecast_panel(company: str) -> None:
     """On-demand, mart-only forecast of recurring warehouse pressure."""
-    st.markdown("**Capacity pressure forecast**")
+    section_header("Capacity pressure forecast", anchor="opt-capacity")
     st.caption(
         "Complete days only, fixed 90-day evidence window. A forecast appears only when "
         "pressure recurs, workload growth agrees, recent settings are stable, and a 7-day "
@@ -226,7 +227,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
     if opt_section == "Idle & sizing":
         # ---- Idle warehouse advisor ----------------------------------------------
-        st.markdown("**Idle warehouse advisor**")
+        section_header("Idle warehouse advisor", icon_name="warehouse",
+                       anchor="opt-idle")
         st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company),
@@ -314,9 +316,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 subject="evaluate idle warehouse spend",
             )
 
-        st.divider()
         # ---- Right-sizing simulator ------------------------------------------------
-        st.markdown("**Warehouse right-sizing simulator**")
+        section_header("Warehouse right-sizing simulator", icon_name="warehouse",
+                       anchor="opt-rightsize")
         st.caption(
             "Mechanical scenario model: one Snowflake size step halves or doubles the credit rate. "
             "Runtime effects depend on the workload — the rationale says why; you decide."
@@ -437,7 +439,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------
-        st.markdown("**Most expensive queries (allocated $)**")
+        section_header("Most expensive queries", badge="allocated $",
+                       icon_name="search", anchor="opt-queries")
         if st.toggle("Run expensive-query scan", key="cost_expq_toggle",
                      help="Splits each warehouse-hour's credits across that hour's queries "
                           "by execution-time share. The heaviest scan after repeat-queries."):
@@ -474,7 +477,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
                 st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
-        st.markdown("**Recurring cost patterns (same query, run all day)**")
+        section_header("Recurring cost patterns", badge="same query, run all day",
+                       anchor="opt-patterns")
         # $-escape: the $9/$300 pair would render " query run 400x outranks one " as math
         st.caption(md_dollars("Grouped by parameterized fingerprint: a $9 query run 400x outranks "
                               "one $300 outlier — this is where caching/materialization actually pays."))
@@ -529,9 +533,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 ])
                 st.caption(f"Sample: {str(prow['QUERY_SNIPPET'])[:120]}")
 
-        st.divider()
         # ---- Repeat-query candidates ----------------------------------------------
-        st.markdown("**Repeat-query candidates (cache / materialization)**")
+        section_header("Repeat-query candidates", badge="cache / materialization",
+                       anchor="opt-repeat")
         st.caption(toggle_cost_hint("repeatq"))
         _rq_on = st.toggle("Run repeat-query scan (fingerprints the window's QUERY_HISTORY)",
                            key="cost_repeatq_toggle",
@@ -628,7 +632,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
     elif opt_section == "Storage & waste":
         # ---- Object cost ledger ----------------------------------------------------
-        st.markdown("**Object cost ledger (measured + maintenance)**")
+        section_header("Object cost ledger", badge="measured + maintenance",
+                       anchor="opt-ledger")
         st.caption(
             "Additive per-object credits (V048–V050): measured query compute+QAS split "
             "equally across touched objects, labeled by role — QUERY_COMPUTE_WRITE is "
@@ -672,8 +677,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         else:
             st.info("Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
                     "can apply it on Admin → Migrations & freshness.")
-        st.divider()
-        st.markdown("**Storage growth movers**")
+        section_header("Storage growth movers", anchor="opt-growth")
         days_storage = max(days, 30)
         sg_res = run(insights_sql.storage_growth_by_database(days_storage, company), page=_PAGE,
                      key=f"storgrow_{company}_{days_storage}", tier="historical",
@@ -734,8 +738,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     + " Failsafe % is the failsafe share of TOTAL billed bytes (database + failsafe)."
                 )
 
-        st.divider()
-        st.markdown("**Query efficiency (pruning + result cache)**")
+        section_header("Query efficiency", badge="pruning + result cache",
+                       anchor="opt-efficiency")
         st.caption(toggle_cost_hint("prune_"))
         if st.toggle("Run query-efficiency scan", key="cost_eff_toggle",
                      help="Scans the window's QUERY_HISTORY for full-table-scan families and the zero-scan share."):
@@ -765,7 +769,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            "metadata). A falling line means redundant recomputation. "
                            "Company-wide: not narrowed by the active Database/Schema filter.")
 
-        st.markdown("**Storage waste (Time Travel / failsafe / stale tables)**")
+        section_header("Storage waste", badge="Time Travel / failsafe / stale tables",
+                       anchor="opt-waste")
         st.caption(toggle_cost_hint("reclaim_"))
         if st.toggle("Run storage-waste scan", key="cost_waste_toggle",
                      help="Top tables by retention bytes, flagged STALE when no DML touched them in 90 days."):
@@ -913,7 +918,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
                             notify(ok, msg)
 
-        st.markdown("**Automatic clustering spend (per table)**")
+        section_header("Automatic clustering spend", badge="per table",
+                       anchor="opt-clustering")
         st.caption(toggle_cost_hint("clustering_"))
         if st.toggle("Run clustering-spend scan", key="cost_clustering_toggle",
                      help="Serverless reclustering credits per table over the window — "
@@ -930,7 +936,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 result_caption(clu)
 
     elif opt_section == "Remediation & ledger":
-        st.markdown("**Guarded remediation (generate → review → execute)**")
+        section_header("Guarded remediation", badge="generate → review → execute",
+                       icon_name="bolt", anchor="opt-remediation")
         panel_help(
             "Turns findings into exact `ALTER` statements. Execution needs the "
             "admin profile, writes a REMEDIATION_LOG audit row, and books an "
@@ -1053,7 +1060,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         remlog = run(mart_sql.remediation_log(50), page=_PAGE, key="remed_log", tier="live",
                      source="REMEDIATION_LOG")
         if remlog.ok and not remlog.empty:
-            st.markdown("**Remediation history**")
+            section_header("Remediation history", anchor="opt-rem-history")
             styled_table(remlog.df, height=200)
 
 def _savings_tab() -> None:
@@ -1090,7 +1097,8 @@ def _savings_tab() -> None:
     runs = run(mart_sql.savings_verification_runs(), page=_PAGE, key="savings_runs",
                tier="recent", source="SAVINGS_VERIFICATION_RUNS")
     if runs.usable():
-        st.markdown("**Auto-verification (monthly re-measurement)**")
+        section_header("Auto-verification", badge="monthly re-measurement",
+                       anchor="opt-autoverify")
         st.caption(
             "TASK_VERIFY_SAVINGS re-measures each ESTIMATED auto-suspend item's idle spend and "
             "proposes a verified amount. Apply it below with the standard proof-gated verify flow."
