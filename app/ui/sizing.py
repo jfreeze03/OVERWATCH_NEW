@@ -14,6 +14,7 @@ from __future__ import annotations
 # Scrollable data tables.
 TABLE_H_SM = 220   # compact / phone surfaces (Brief), short secondary lists
 TABLE_H_MD = 260   # standard scrollable table (movers, triage, ledgers)
+TABLE_H_XL = 380   # broad operational detail tables with many rows
 TABLE_H_LG = 460   # dense reference tables (Admin metrics)
 
 # Charts.

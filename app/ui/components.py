@@ -16,7 +16,7 @@ from app.logic.metric_registry import COLUMN_HELP
 from app.theme import chip
 from app.ui import palette
 from app.ui.icons import icon
-from app.ui.sizing import TABLE_H_SM
+from app.ui.sizing import TABLE_H_SM, TABLE_H_XL
 from app.ui.status_colors import delta_css, is_delta_column, status_columns_in, status_css
 
 
@@ -858,13 +858,23 @@ def legend_popover() -> None:
     import streamlit as st
     with st.popover("Legend"):
         st.markdown(
-            "**Severity** — :red[CRITICAL] page-me-now · :orange[HIGH] today · "
-            ":blue[MEDIUM/INFO] awareness · :green[OK] healthy.\n\n"
-            "**Source labels** — *mart* = loaded on schedule (cheap, up to ~1h behind); "
-            "*live fallback* = scanned ACCOUNT_USAGE just now (exact, slower); "
-            "*stale* = the loader is behind, numbers are labeled accordingly.\n\n"
-            "**Dollars** — *measured* = attribution credits; *allocated* = shared "
-            "spend split by usage share; *ESTIMATED vs VERIFIED* savings never mix."
+            "".join((
+                "<div style='line-height:1.6'>",
+                "<b>Severity</b><br>",
+                f"{chip('CRITICAL', 'bad')} page-me-now ",
+                f"{chip('HIGH', 'warn')} today ",
+                f"{chip('MEDIUM / INFO')} awareness ",
+                f"{chip('OK', 'ok')} healthy",
+                "<br><br><b>Source labels</b><br>",
+                "<b>mart</b> = loaded on schedule (cheap, up to ~1h behind); ",
+                "<b>live fallback</b> = scanned ACCOUNT_USAGE just now (exact, slower); ",
+                "<b>stale</b> = the loader is behind, numbers are labeled accordingly.",
+                "<br><br><b>Dollars</b><br>",
+                "<b>measured</b> = attribution credits; <b>allocated</b> = shared spend split ",
+                "by usage share; ESTIMATED vs VERIFIED savings never mix.",
+                "</div>",
+            )),
+            unsafe_allow_html=True,
         )
 
 
@@ -1374,7 +1384,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             pass
     column_config = _cfg or None
     if height is None and len(df) > 10:
-        height = 380
+        height = TABLE_H_XL
     kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height

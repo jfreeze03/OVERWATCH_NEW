@@ -25,6 +25,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    section_toc,
     styled_table,
     user_display_map,
     with_user_names,
@@ -96,6 +97,10 @@ def render() -> None:
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Spend & Attribution":
+        section_toc([
+            ("Spend", "cost-spend"),
+            ("Attribution", "cost-attribution"),
+        ])
         # perf #15: submit the four INDEPENDENT recent mart reads that gate the
         # eager Spend + Attribution paint as ONE parallel batch instead of four
         # serial round-trips. Each panel still falls back to its own mart/live
@@ -103,11 +108,11 @@ def render() -> None:
         # (a None/empty prefetch triggers that panel's existing fallback).
         _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),
                         page=_PAGE, tier="hourly") or {}
-        section_header("Spend", "info", "spend")
+        section_header("Spend", "info", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"))
         st.divider()
-        section_header("Attribution", "info", "chargeback")
+        section_header("Attribution", "info", "chargeback", anchor="cost-attribution")
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
                          wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
         st.divider()
@@ -118,10 +123,14 @@ def render() -> None:
         if st.toggle("Load storage & unmapped-entity detail", key="cost_spend_detail",
                      help="Storage economics (3 reads) and the unmapped-entity check "
                           "(1 read), loaded on demand — kept off the default first paint."):
-            section_header("Storage", "info", "cost")
+            section_toc([
+                ("Storage", "cost-storage"),
+                ("Unmapped entities", "cost-unmapped"),
+            ], lead="Detail")
+            section_header("Storage", "info", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings)
             st.divider()
-            section_header("Unmapped entities", "warn", "chargeback")
+            section_header("Unmapped entities", "warn", "chargeback", anchor="cost-unmapped")
             st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
                        "silently billing ALFA. Empty is the goal state.")
             unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
@@ -142,10 +151,16 @@ def render() -> None:
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)
     elif section == "Chargeback & AI":
-        section_header("Department chargeback", "info", "chargeback")
+        section_toc([
+            ("Department", "cost-chargeback"),
+            ("Tag governance", "cost-tags"),
+            ("Cortex spend", "cost-cortex"),
+            ("AI users", "cost-ai-users"),
+        ])
+        section_header("Department chargeback", "info", "chargeback", anchor="cost-chargeback")
         _chargeback_tab(f["company"], f["days"], rate, is_operator)
         st.divider()
-        section_header("Query-tag governance", "info", "chargeback")
+        section_header("Query-tag governance", "info", "chargeback", anchor="cost-tags")
         st.caption("Chargeback precision is capped by tag coverage — untagged execution "
                    "time can only be allocated, never attributed.")
         # #36: MART_TAG_COVERAGE_DAILY is user x day grain and carries no
@@ -193,10 +208,10 @@ def render() -> None:
             st.caption("Fix at the source: set QUERY_TAG in the tool/session that runs the "
                        "workload; the scoreboard moves within a day.")
         st.divider()
-        section_header("Cortex / AI spend", "info", "cost")
+        section_header("Cortex / AI spend", "info", "cost", anchor="cost-cortex")
         _cortex_spend_tab(f["days"], ai_rate)
         st.divider()
-        section_header("AI users", "info", "operations")
+        section_header("AI users", "info", "operations", anchor="cost-ai-users")
         # r22 #14: the exact Cortex Code user scan is the heaviest read in
         # this group — it runs only when asked, like the other deep scans.
         from app.ui.components import toggle_cost_hint

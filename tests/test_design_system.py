@@ -19,6 +19,7 @@ def test_theme_has_token_layer_and_card_system():
                   "--ow-font", "--ow-r", "--ow-ease"):
         assert token in css, token
     for cls in (".ow-card", ".ow-card--bad", ".ow-section--warn", ".ow-statusbar",
+                ".ow-scope-row",
                 ".ow-stat", "div[data-testid=\"stMetric\"]"):
         assert cls in css, cls
     assert "@media (max-width:640px)" in css        # responsive
@@ -26,11 +27,11 @@ def test_theme_has_token_layer_and_card_system():
 
 
 def test_icons_are_svg_currentcolor_no_emoji():
-    for name in ("brief", "cost", "alerts", "security", "up", "down"):
+    for name in ("brief", "cost", "alerts", "security", "target", "up", "down"):
         svg = icons.icon(name)
         assert svg.startswith("<svg") and "currentColor" in svg
     # every page maps to a real icon, and none of them is an emoji glyph
-    for page in ("Brief", "Cost & Contract", "Alerts", "Admin"):
+    for page in ("Brief", "Cost & Contract", "Decision Studio", "Alerts", "Admin"):
         assert icons.page_icon(page).startswith("<svg")
     assert icons.icon("nonexistent-name").startswith("<svg")   # safe fallback
 
@@ -118,6 +119,8 @@ def test_triage_filter_toolbar_compact():
     theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
     assert ':has(.ow-scope-active)' in theme                # active-filter glow kept
     assert ".ow-chip{" in theme and ".ow-kicker {" in theme  # chip() pills + kicker kept
+    assert theme.count(".ow-chip{") == 1                    # one chip definition owns the token
+    assert ".ow-scope-row{" in theme                        # page-header chips are intentionally laid out
     assert ".ow-scope-chips{" not in theme                 # retired chip band
     main = (root / "app" / "main.py").read_text(encoding="utf-8")
     assert "_scope_is_active" in main and "_reset_scope" in main
@@ -126,4 +129,15 @@ def test_triage_filter_toolbar_compact():
     assert "legend_popover()" in main                       # Legend split into its own header slot
     assert "_scope_chips" not in main                       # chip band removed
     assert "Telemetry ≤" not in main                   # telemetry caption removed (status card only)
+
+
+def test_default_table_height_uses_named_token():
+    """Broad operational tables use the sizing system instead of a magic 380px."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    sizing = (root / "app" / "ui" / "sizing.py").read_text(encoding="utf-8")
+    components = (root / "app" / "ui" / "components.py").read_text(encoding="utf-8")
+    assert "TABLE_H_XL = 380" in sizing
+    assert "from app.ui.sizing import TABLE_H_SM, TABLE_H_XL" in components
+    assert "height = TABLE_H_XL" in components
 

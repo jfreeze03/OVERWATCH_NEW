@@ -50,6 +50,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    section_toc,
     selectable_nav_table,
     selectable_table,
     snowsight_profile_column,
@@ -939,6 +940,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 
 
 def _warehouses_tab(company: str, rate: float) -> None:
+    section_header("Warehouse spend & anomalies", "info", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="recent", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
@@ -970,7 +972,12 @@ def _warehouses_tab(company: str, rate: float) -> None:
         )
     result_caption(res)
 
-    section_header("Concurrency peaks (right-size before queuing hurts)", "info", "warehouse")
+    section_header(
+        "Concurrency peaks (right-size before queuing hurts)",
+        "info",
+        "warehouse",
+        anchor="ops-wh-concurrency",
+    )
     peaks = run(ops_sql.warehouse_concurrency_peaks(14, company), page=_PAGE,
                 key=f"conc_peaks_{company}", tier="recent",
                 source="ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY")
@@ -1049,15 +1056,19 @@ def _contention_tab(company: str, days: int) -> None:
 
 def _wh_change_block(company: str, is_operator: bool) -> None:
     st.divider()
-    section_header("Warehouse setting changes", "info", "warehouse")
+    section_header("Warehouse setting changes", "info", "warehouse", anchor="ops-change-wh")
     st.caption(
+        "Daily warehouse setting diffs, with before/after cost and performance verdicts."
+    )
+    panel_help(
         "Detection is snapshot-diff (daily SHOW WAREHOUSES — this account has no "
         "ACCOUNT_USAGE.WAREHOUSES view), so a change is seen within a day. Each change "
-        "freezes a 14-day baseline and tracks 14 days after: $/day, p95, queueing, "
-        "spill, failures. Confirmed regressions raise WH_CHANGE_REGRESSION alerts."
+        "freezes a 14-day baseline and tracks 14 days after: dollars/day, p95, queueing, "
+        "spill, and failures. Confirmed regressions raise WH_CHANGE_REGRESSION alerts. "
+        "CHANGE_SOURCE: MANAGED = made by a DEPLOY_ACTORS service user; MANUAL = a human; "
+        "UNKNOWN = no matching ALTER found near the snapshot."
     )
     wh_contains = str(st.session_state.get("flt_warehouse_contains", "") or "")
-    st.caption("CHANGE_SOURCE: MANAGED = made by a DEPLOY_ACTORS service user (Settings; empty until Flyway/Terraform land), MANUAL = a human, UNKNOWN = no matching ALTER found near the snapshot.")
     res = run(change_impact_sql.warehouse_change_registry(90, company, wh_contains),
               page=_PAGE, key=f"whchg_{company}_{wh_contains}", tier="recent",
               source="WAREHOUSE_CHANGE_REGISTRY")
@@ -1123,7 +1134,11 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
 
 def _change_impact_tab(company: str, database: str, schema_contains: str,
                        is_operator: bool) -> None:
+    section_header("Procedure and task changes", "info", "operations", anchor="ops-change-objects")
     st.caption(
+        "Daily procedure/task diffs, ranked by before/after runtime, failures, and credits/call."
+    )
+    panel_help(
         "When a stored procedure or task changes, the daily scan freezes a 14-day "
         "pre-change baseline and compares the 14 days after: runs, p95 runtime, failure "
         "rate, and measured credits/call (QUERY_ATTRIBUTION_HISTORY roll-up to the CALL). "
@@ -1493,11 +1508,25 @@ def render() -> None:
     elif section == "Tasks":
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Warehouses":
+        section_toc([
+            ("Spend & anomalies", "ops-wh-spend"),
+            ("Concurrency", "ops-wh-concurrency"),
+            ("Contention", "ops-wh-contention"),
+        ])
         _warehouses_tab(f["company"], rate)
         st.divider()
-        section_header("Contention (queue, spill & lock waits)", "info", "warehouse")
+        section_header(
+            "Contention (queue, spill & lock waits)",
+            "info",
+            "warehouse",
+            anchor="ops-wh-contention",
+        )
         _contention_tab(f["company"], f["days"])
     elif section == "Change impact":
+        section_toc([
+            ("Procedure/task changes", "ops-change-objects"),
+            ("Warehouse settings", "ops-change-wh"),
+        ])
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
         _pipeline_sla_tab(is_operator)

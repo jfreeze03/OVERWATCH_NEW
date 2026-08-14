@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.155.0 - UI theme and section readability polish (2026-08-14)
+
+App-only visual pass from the live screenshot review. No migration.
+
+- **Softer command-center palette.** Replaced the high-contrast navy/cyan chrome
+  with warmer slate surfaces and a calmer blue/teal accent pair, mirrored through
+  `palette.py`, `theme.py`, `.streamlit/config.toml`, chart chrome, and table
+  status fills so cards, charts, native controls, and embedded task graphs agree.
+- **Cleaner section hierarchy.** Added intentional scope-chip layout, removed the
+  duplicate chip CSS block, moved dense Operations change-impact explanations
+  into help popovers, and added jump strips/anchors for long Operations and Cost
+  sections.
+- **Small design-system fixes.** Added the missing Decision Studio target icon,
+  routed the default broad table height through `sizing.py`, and rendered the
+  Legend with the same semantic chip vocabulary used elsewhere.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.

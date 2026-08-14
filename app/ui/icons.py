@@ -23,6 +23,7 @@ _PATHS = {
     "contract": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
     "chargeback": '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>',
     "optimize": '<path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="4"/>',
+    "target": '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>',
     "pipeline": '<path d="M4 7h10a3 3 0 0 1 0 6H8a3 3 0 0 0 0 6h12"/><circle cx="4" cy="7" r="1.5"/><circle cx="20" cy="19" r="1.5"/>',
     "warehouse": '<path d="M3 21V9l9-5 9 5v12"/><path d="M3 21h18M9 21v-6h6v6"/>',
     "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
@@ -38,7 +39,8 @@ _PATHS = {
 _PAGE_ICON = {
     "Brief": "brief", "Overview": "overview", "Control Room": "control",
     "Cost & Contract": "cost", "Operations": "operations", "Alerts": "alerts",
-    "Security & Governance": "security", "Security": "security", "Admin": "admin",
+    "Decision Studio": "target", "Security & Governance": "security",
+    "Security": "security", "Admin": "admin",
 }
 
 

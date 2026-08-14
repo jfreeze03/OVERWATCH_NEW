@@ -12,23 +12,23 @@ import re
 from app.ui import palette
 
 # value (upper) -> (background, text)
-_BAD = ("#7f1d1d", "#fecaca")     # deep red bg, light red text
-_HIGH = ("#7c2d12", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL red (r4)
-_WARN = ("#78350f", "#fde68a")    # amber
-_OK = ("#14532d", "#bbf7d0")      # green
-_INFO = ("#0c4a6e", "#bae6fd")    # sky
-_MUTED = ("#1e293b", palette.MUTED)   # slate (text hue = rec50 single source)
+_BAD = ("#5f1b1b", "#fecaca")     # deep red bg, light red text
+_HIGH = ("#613112", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL red (r4)
+_WARN = ("#5f3b0b", "#fde68a")    # amber
+_OK = ("#123e2c", "#bbf7d0")      # green
+_INFO = ("#183a5a", "#bfdbfe")    # softened blue
+_MUTED = ("#273244", palette.MUTED)   # slate (text hue = rec50 single source)
 
 # The pairs above are dark-theme tuned (deep bg, light text). Light theme
 # gets pastel backgrounds with dark text; detection falls back to the dark
 # pairs so a failed lookup never changes today's look.
 _LIGHT_EQUIV = {
-    ("#7f1d1d", "#fecaca"): ("#fee2e2", "#991b1b"),
-    ("#7c2d12", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
-    ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
-    ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
-    ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
-    ("#1e293b", "#94a3b8"): ("#f1f5f9", "#475569"),
+    ("#5f1b1b", "#fecaca"): ("#fee2e2", "#991b1b"),
+    ("#613112", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
+    ("#5f3b0b", "#fde68a"): ("#fef3c7", "#92400e"),
+    ("#123e2c", "#bbf7d0"): ("#dcfce7", "#166534"),
+    ("#183a5a", "#bfdbfe"): ("#dbeafe", "#1d4ed8"),
+    ("#273244", "#94a3b8"): ("#f1f5f9", "#475569"),
 }
 
 

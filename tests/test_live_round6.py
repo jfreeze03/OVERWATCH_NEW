@@ -186,6 +186,6 @@ def test_unit_costs_panel_prices_calls_and_children():
 def test_primary_buttons_force_dark_ink_across_markups():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     assert 'button[data-testid="stBaseButton-primary"]' in theme
-    assert "color:#06121f !important" in theme
+    assert "color:#0f172a !important" in theme
     seg = theme.split('.stButton > button[kind="primary"],', 1)[1][:900]
     assert "span" in seg and "p," in seg               # descendants forced too

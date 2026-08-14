@@ -11,13 +11,13 @@ def test_severity_colors():
 def test_true_is_good_inversion():
     # SLA_MET True should be green (good), plain booleans amber (attention).
     assert status_css("SLA_MET", True) != status_css("GOT_WORSE", True)
-    assert "14532d" in status_css("SLA_MET", "True")   # green bg
-    assert "7f1d1d" in status_css("SLA_MET", "False")  # red bg
+    assert "123e2c" in status_css("SLA_MET", "True")   # green bg
+    assert "5f1b1b" in status_css("SLA_MET", "False")  # red bg
 
 
 def test_verdicts():
-    assert "14532d" in status_css("VERDICT", "Better")
-    assert "7f1d1d" in status_css("VERDICT", "Worse")
+    assert "123e2c" in status_css("VERDICT", "Better")
+    assert "5f1b1b" in status_css("VERDICT", "Worse")
 
 
 def test_column_detection_preserves_original_names():

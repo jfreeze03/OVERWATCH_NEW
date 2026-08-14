@@ -23,7 +23,7 @@ _ACCENT = palette.ACCENT
 _ACCENT2 = palette.ACCENT2
 _GRID = "rgba(148,163,184,0.14)"
 _LABEL = palette.LOW
-_TITLE = "#c3cddb"
+_TITLE = palette.INK_SOFT
 _FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, "
          "'Segoe UI', Roboto, sans-serif")
 # severity series hues from the single palette source (rec50), so a "bad"
@@ -33,10 +33,10 @@ SEV_COLORS = dict(palette.SEVERITY_HUES)
 # rec38: heat = orange (intuitive "hotness" for the hour x entity heatmap). ONE
 # ramp, referenced by the theme range AND hour_heatmap, so it is not a one-off
 # scheme string a shade off from everything else.
-# Starts at a visible dark-orange (NOT the page background #0a0f1c) so a low-but-
+# Starts at a visible dark-orange (NOT the page background) so a low-but-
 # NONZERO cell separates from an EMPTY (undrawn) cell, which stays page-dark —
 # the caller's "dark cells = no activity" reading depends on that separation.
-_HEATMAP_RANGE = ["#431407", "#7c2d12", "#c2410c", "#ea580c", "#fdba74"]
+_HEATMAP_RANGE = ["#451a03", "#78350f", "#b45309", "#d97706", "#fcd34d"]
 
 
 def _overwatch_theme() -> dict:
@@ -320,7 +320,7 @@ html, body {
 body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
 .dag-host {
   position: relative; width: 100%; height: __HEIGHT__px; overflow: hidden;
-  background: #0a0f1c; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;
+  background: #111827; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;
 }
 .dag-host:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; }
 .dag-host:fullscreen svg { height: 100vh; }
@@ -331,35 +331,35 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
 }
 .dag-toolbar input {
   width: 190px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
-  border-radius: 5px; background: #0a0f1c; color: #e8eef7; font: 500 12px Inter, sans-serif;
+  border-radius: 5px; background: #111827; color: #f8fafc; font: 500 12px Inter, sans-serif;
 }
-.dag-toolbar input:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
+.dag-toolbar input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 1px; }
 .dag-toolbar button {
   min-width: 34px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
-  border-radius: 5px; background: #131d33; color: #e8eef7;
+  border-radius: 5px; background: #1f2937; color: #f8fafc;
   font: 650 13px/1 Inter, "Segoe UI", sans-serif; cursor: pointer;
 }
-.dag-toolbar button:hover { border-color: #38bdf8; background: #17233d; }
-.dag-toolbar button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+.dag-toolbar button:hover { border-color: #60a5fa; background: #243244; }
+.dag-toolbar button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 svg {
   width: 100%; height: __HEIGHT__px; display: block; cursor: grab;
   touch-action: none; user-select: none;
 }
 svg.dragging { cursor: grabbing; }
 .edge {
-  fill: none; stroke: #8593a8; stroke-width: 1.5; opacity: .72;
+  fill: none; stroke: #94a3b8; stroke-width: 1.5; opacity: .72;
   marker-end: url(#arrow);
 }
 .node rect {
-  fill: #131d33; stroke: var(--node-color); stroke-width: 2;
+  fill: #1f2937; stroke: var(--node-color); stroke-width: 2;
   filter: url(#shadow);
 }
 .node:focus { outline: none; }
 .node:focus rect { stroke-width: 4; }
 .node.search-hit rect { stroke: #f8fafc; stroke-width: 5; }
 .node.critical-path rect { stroke-dasharray: 7 3; }
-.node-title { fill: #e8eef7; font-size: 13px; font-weight: 700; }
-.node-meta { fill: #aab6c8; font-size: 10px; }
+.node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
+.node-meta { fill: #cbd5e1; font-size: 10px; }
 .node-state { font-size: 9px; font-weight: 700; text-transform: uppercase; }
 .dag-host.compact .node-meta, .dag-host.compact .node-state { display: none; }
 .dag-host.tiny .node-title { display: none; }
@@ -381,7 +381,7 @@ svg.dragging { cursor: grabbing; }
     <defs>
       <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3"
               orient="auto" markerUnits="strokeWidth">
-        <path d="M0,0 L0,6 L8,3 z" fill="#8593a8"/>
+        <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/>
       </marker>
       <filter id="shadow" x="-20%" y="-30%" width="140%" height="160%">
         <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000"
@@ -584,7 +584,7 @@ def spend_trend(
                     opacity=alt.condition("datum.PROVISIONAL",
                                           alt.value(0.45), alt.value(1.0)),
                     tooltip=tip))
-    avg = (alt.Chart().mark_line(color="#c3cddb", strokeWidth=2, interpolate="monotone")
+    avg = (alt.Chart().mark_line(color=palette.INK_SOFT, strokeWidth=2, interpolate="monotone")
            .encode(x=enc_x, y=alt.Y("AVG7:Q"), tooltip=tip))
     layers = [alt.layer(bars, avg, data=data).properties(height=_HEIGHT)]
     if daily_budget_usd and daily_budget_usd > 0:
@@ -953,7 +953,7 @@ def event_timeline(df: pd.DataFrame) -> None:
     glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(
         color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng), legend=None), **common)
     dots = alt.Chart().mark_point(size=110, opacity=0.95, filled=True,
-                stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, shape=shape, **common)
+                stroke=palette.BG, strokeWidth=0.6).encode(color=color, shape=shape, **common)
     st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
                     use_container_width=True)
 
@@ -982,7 +982,7 @@ def operational_replay(df: pd.DataFrame) -> None:
     ]
     focus = (
         alt.Chart(data)
-        .mark_point(size=125, filled=True, stroke="#0a0f1c", strokeWidth=0.7)
+        .mark_point(size=125, filled=True, stroke=palette.BG, strokeWidth=0.7)
         .encode(
             x=alt.X("AT:T", title=None, scale=alt.Scale(domain=brush)),
             y=alt.Y("EVENT_TYPE:N", title=None, sort="-x"),
@@ -1026,7 +1026,7 @@ def workload_portfolio(df: pd.DataFrame) -> None:
     lane_colors = [palette.BAD, palette.ACCENT, palette.WARN]
     chart = (
         alt.Chart(data)
-        .mark_circle(opacity=0.82, stroke="#0a0f1c", strokeWidth=0.8)
+        .mark_circle(opacity=0.82, stroke=palette.BG, strokeWidth=0.8)
         .encode(
             x=alt.X(
                 "IMPACT_USD_30D:Q", title="Measured impact normalized to 30d (USD)",
