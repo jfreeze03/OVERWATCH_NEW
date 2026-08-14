@@ -109,10 +109,15 @@ def test_canary_release_anchor_is_recent_not_fixed():
     src = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     assert "2026-01-01" not in src                                # the 153s half-year scan
     assert "_recent_release_iso" in src
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from app.data.canary import _recent_release_iso
-    assert _recent_release_iso() == (date.today() - timedelta(days=3)).isoformat()
+    from app.logic.formulas import account_today
+
+    # Compare in ACCOUNT time, matching the anchor's own clock — date.today()
+    # (machine-local) drifted a day ahead on a UTC runner during the hours when
+    # America/Chicago is still on yesterday, failing the suite at baseline.
+    assert _recent_release_iso() == (account_today() - timedelta(days=3)).isoformat()
 
 
 # ---------------------------------------------------------------------------
