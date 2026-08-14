@@ -109,11 +109,7 @@ def test_stale_elements_hidden_for_crisp_section_switch():
     assert '[data-stale="true"]' in theme._CSS   # no bleed between lazy sections
 
 def test_triage_filter_toolbar_compact():
-    """v4.65: the triage filter bar is a compact toolbar — the kicker and
-    Legend / Views / Reset share one thin header row, then the controls. The
-    active-filter border glow and one-click Reset stay; the redundant telemetry
-    caption (now only on the status-bar card) and the scope-chip band are gone —
-    a live warehouse/user/schema filter instead auto-opens 'More filters'."""
+    """The triage filter bar is one compact command strip with popover detail."""
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
@@ -124,9 +120,11 @@ def test_triage_filter_toolbar_compact():
     assert ".ow-scope-chips{" not in theme                 # retired chip band
     main = (root / "app" / "main.py").read_text(encoding="utf-8")
     assert "_scope_is_active" in main and "_reset_scope" in main
-    assert 'st.button("Reset", key="flt_reset", on_click=_reset_scope' in main
+    assert '"Reset", key="flt_reset", on_click=_reset_scope' in main
     assert 'class="ow-scope-active"' in main               # glow marker still emitted when active
-    assert "legend_popover()" in main                       # Legend split into its own header slot
+    assert "legend_popover()" in main
+    assert 'key="ow_triage_toolbar"' in main
+    assert "with st.popover(_more_label" in main
     assert "_scope_chips" not in main                       # chip band removed
     assert "Telemetry ≤" not in main                   # telemetry caption removed (status card only)
 

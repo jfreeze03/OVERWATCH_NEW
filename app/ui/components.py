@@ -468,16 +468,56 @@ def section_header(title: str, health: str = "", icon_name: str = "",
 
 
 def section_toc(items: list[tuple[str, str]], lead: str = "Jump to") -> None:
-    """rec5: a compact in-section 'jump to' strip for long, multi-panel views.
+    """Reliable in-page jump buttons for Snowflake's nested Streamlit frame.
 
-    items = [(short_label, anchor), ...] where each anchor matches a
-    section_header(..., anchor=anchor) below. Renders markdown anchor links so a
-    click scrolls to that panel. DEGRADES gracefully: on any runtime/iframe that
-    doesn't honor in-page anchors the links simply don't scroll, but the labels
-    still orient the reader to what the view contains — the core value survives."""
-    chips = [f"[{html.escape(lbl)}](#{html.escape(anc)})"
-             for lbl, anc in items if lbl and anc]
-    if chips:
+    Markdown ``#anchor`` links update the component/frame URL and often never
+    reach the app document in Streamlit-in-Snowflake. This tiny local component
+    finds the real parent header and calls ``scrollIntoView``. A plain hash-link
+    caption remains the no-component fallback.
+    """
+    valid = [(str(label), str(anchor)) for label, anchor in items if label and anchor]
+    if not valid:
+        return
+    buttons = "".join(
+        f'<button type="button" data-target="{html.escape(anchor, quote=True)}">'
+        f'{html.escape(label)}</button>'
+        for label, anchor in valid
+    )
+    markup = f"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+*{{box-sizing:border-box}}
+html,body{{margin:0;background:transparent;color:#cbd5e1;font:600 12px "Segoe UI",sans-serif}}
+.jump{{display:flex;align-items:center;gap:6px;min-height:34px;white-space:nowrap;overflow-x:auto}}
+.lead{{color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;font-size:10px;margin-right:2px}}
+button{{appearance:none;border:1px solid rgba(148,163,184,.32);background:rgba(31,41,55,.82);
+ color:#cbd5e1;border-radius:999px;padding:5px 10px;cursor:pointer;font:650 11px "Segoe UI",sans-serif}}
+button:hover{{border-color:#60a5fa;color:#f8fafc;background:rgba(96,165,250,.12)}}
+button:focus-visible{{outline:2px solid #60a5fa;outline-offset:1px}}
+</style></head><body><div class="jump"><span class="lead">{html.escape(lead)}</span>{buttons}</div>
+<script>
+document.querySelectorAll("button[data-target]").forEach((button) => {{
+  button.addEventListener("click", () => {{
+    const id = button.dataset.target;
+    let target = null;
+    try {{ target = window.parent.document.getElementById(id); }} catch (_) {{}}
+    if (!target) {{
+      try {{ target = window.top.document.getElementById(id); }} catch (_) {{}}
+    }}
+    if (target) {{
+      target.scrollIntoView({{behavior:"smooth", block:"start"}});
+      return;
+    }}
+    try {{ window.parent.location.hash = id; }} catch (_) {{ window.location.hash = id; }}
+  }});
+}});
+</script></body></html>"""
+    try:
+        from streamlit.components.v1 import html as component_html
+
+        component_html(markup, height=38, scrolling=False)
+    except Exception:  # noqa: BLE001 - orientation labels survive older runtimes
+        chips = [f"[{html.escape(label)}](#{html.escape(anchor)})"
+                 for label, anchor in valid]
         st.caption(f"{lead}  ·  " + "  ·  ".join(chips))
 
 

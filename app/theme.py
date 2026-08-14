@@ -168,6 +168,15 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   border-color:rgba(96,165,250,0.38);
   box-shadow:0 0 0 1px rgba(96,165,250,0.20),var(--ow-shadow);}
+.st-key-ow_triage_toolbar{margin-bottom:8px;}
+.st-key-ow_triage_toolbar [data-testid="stVerticalBlock"]{gap:0.22rem;}
+.st-key-ow_triage_toolbar [data-testid="stHorizontalBlock"]{gap:0.42rem;}
+.st-key-ow_triage_toolbar div[data-baseweb="select"]>div{min-height:2.28rem;}
+.st-key-ow_triage_toolbar button{min-height:2.28rem;padding-left:0.65rem;padding-right:0.65rem;}
+.ow-triage-title{height:2.28rem;display:flex;flex-direction:column;justify-content:center;
+  color:var(--ow-ink);font-size:0.73rem;font-weight:760;letter-spacing:0.06em;text-transform:uppercase;}
+.ow-triage-title small{display:block;color:var(--ow-ink-mute)!important;font-size:0.66rem;
+  font-weight:600;letter-spacing:0;text-transform:none;white-space:nowrap;}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;

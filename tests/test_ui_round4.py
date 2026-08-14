@@ -47,9 +47,10 @@ def test_alerts_kpis_carry_severity():
     assert 'key="alert_bulk_exec"' in src and 'type="primary"' in src
 
 
-def test_contains_filters_collapse_but_never_hide_active_ones():
-    assert "More filters — warehouse / user / schema contains" in _MAIN
-    assert "expanded=_adv_on" in _MAIN                             # auto-open when active
+def test_contains_filters_use_a_count_badged_compact_popover():
+    assert '_more_label = f"More · {_adv_n}" if _adv_n else "More"' in _MAIN
+    assert "with st.popover(_more_label" in _MAIN
+    assert "_adv_label" not in _MAIN and "expanded=_adv_on" not in _MAIN
     assert 'st.popover("Views & display")' in _MAIN and "💾" not in _MAIN  # rec12 rename; emoji retired
 
 

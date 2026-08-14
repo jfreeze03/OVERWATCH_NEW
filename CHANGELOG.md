@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.156.3 - Compact triage command strip + reliable jumps (2026-08-14)
+
+App-only UI/navigation fix; no migration.
+
+- Replaced the three-level triage filter panel with one operator command strip:
+  Scope, Company, Window, Database, More, Legend, Views, and Reset. Advanced
+  contains-filters live in a count-badged popover; long-window disclosure remains.
+- Sidebar Jump-to now uses an explicit Open destination action instead of relying
+  on selectbox rerun timing.
+- In-page Jump-to links now render as CSP-safe buttons that scroll the real parent
+  section header inside Streamlit-in-Snowflake, with a plain-anchor fallback.
+
 ## 4.156.2 - Warehouse runtime reset guard (2026-08-14)
 
 Deployment-only fix; no data migration.

@@ -395,6 +395,11 @@ def _global_jump(pages: tuple) -> None:
         options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
     pick = st.selectbox("Jump to", options, index=None, placeholder="Jump to…",
                         key="_ow_jump", label_visibility="collapsed")
+    open_jump = st.button(
+        "Open destination", key="_ow_jump_open", type="primary",
+        disabled=not bool(pick), use_container_width=True,
+        help="Open the selected page or section.",
+    )
     # rec16: an explicit button — not a fake "More …" OPTION that mutated state
     # when "selected" (surprising, and invisible unless you opened the list). The
     # `and` short-circuits so the button only RENDERS while not yet loaded.
@@ -435,7 +440,7 @@ def _global_jump(pages: tuple) -> None:
                         )
                 except ValueError as exc:
                     st.warning(str(exc))
-    if not pick:
+    if not (pick and open_jump):
         return
     kind, _, name = pick.partition(" · ")
     if kind == "Page":
@@ -603,125 +608,92 @@ def _scope_is_active() -> bool:
 
 
 def _topbar_scope() -> None:
-    """Compact triage-filter toolbar above every page (v4.65 sleek pass): the
-    kicker and Legend / Views / Reset share one thin header row, then the scope
-    controls, then 'More filters'. The strip border glows while any non-default
-    filter is live so scoped numbers never read as account-wide. Telemetry age
-    lives on the status-bar card below (it was duplicated here), and the
-    active-scope chip band is dropped — the controls show the scope and a live
-    warehouse/user/schema filter auto-opens 'More filters'."""
+    """One-row operator scope strip: primary filters + compact utility popovers."""
     from app.ui.components import legend_popover
     active_n = _active_filter_count()
     active = active_n > 0
-    box = st.container(border=True)
+    box = st.container(border=True, key="ow_triage_toolbar")
     with box:
-        head_l, head_leg, head_view, head_reset = st.columns([4.4, 0.9, 0.9, 0.9])
-        with head_l:
-            marker = '<div class="ow-scope-active"></div>' if active else ""
-            # rec25: which/how-many filters are live shouldn't require opening "More
-            # filters" — surface the count on the kicker so a hidden filter can't
-            # silently shape every number on the page.
-            _kick = f"Triage filters · {active_n} active" if active_n else "Triage filters"
-            st.markdown(f'{marker}<div class="ow-kicker">{_kick}</div>',
-                        unsafe_allow_html=True)
-        with head_leg:
-            legend_popover()
-        with head_view:
-            _views_popover()
-        with head_reset:
-            if active:
-                st.button("Reset", key="flt_reset", on_click=_reset_scope,
-                          help="Back to the account-wide default scope.",
-                          use_container_width=True)
-        _topbar_scope_controls()
-
-
-def _topbar_scope_controls() -> None:
-    c_company, c_days, c_db = st.columns([1.0, 1.2, 1.5])
-    with c_company:
-        st.selectbox("Company", COMPANIES, key="flt_company")
-    with c_days:
-        if hasattr(st, "segmented_control"):
-            # rec9: all seven windows visible + one-click switch (the slider hid
-            # them behind a drag interaction). Slider stays as the SiS fallback.
-            def _keep_days() -> None:
-                # single-select segmented_control DESELECTS to None on a second
-                # click of the active pill — never let the window filter go empty.
-                v = st.session_state.get("flt_days")
-                if v is None:
-                    st.session_state["flt_days"] = st.session_state.get("_ow_days_last", DEFAULT_DAY_WINDOW)
-                else:
-                    st.session_state["_ow_days_last"] = v
-            # keep the deselect restore-target current even when flt_days was set
-            # PROGRAMMATICALLY (a saved view / deep link bypasses on_change).
-            if st.session_state.get("flt_days") is not None:
-                st.session_state["_ow_days_last"] = st.session_state["flt_days"]
-            st.segmented_control(
-                "Date range",
-                options=list(TRIAGE_WINDOW_OPTIONS),
-                key="flt_days",
-                on_change=_keep_days,
-                format_func=window_option_label,
+        c_scope, c_company, c_days, c_db, c_more, c_legend, c_view, c_reset = st.columns(
+            [0.82, 0.95, 1.08, 1.55, 0.78, 0.66, 0.82, 0.58],
+            gap="small",
+        )
+        with c_scope:
+            marker = '<span class="ow-scope-active"></span>' if active else ""
+            active_text = f"{active_n} active" if active_n else "Account view"
+            st.markdown(
+                f'{marker}<div class="ow-triage-title">Scope'
+                f'<small>{active_text}</small></div>',
+                unsafe_allow_html=True,
             )
-        else:
+        with c_company:
             st.selectbox(
-                "Date range",
-                options=list(TRIAGE_WINDOW_OPTIONS),
-                key="flt_days",
-                format_func=window_option_label,
+                "Company", COMPANIES, key="flt_company",
+                label_visibility="collapsed", help="Company scope",
             )
+        with c_days:
+            st.selectbox(
+                "Date range", options=list(TRIAGE_WINDOW_OPTIONS), key="flt_days",
+                format_func=window_option_label, label_visibility="collapsed",
+                help="Analysis window",
+            )
+        with c_db:
+            _company = st.session_state.get("flt_company", COMPANIES[0])
+            _opts = ()
+            _inv = run(
+                security_sql.show_databases_sql(), page="Sidebar", key="db_inventory",
+                tier="metadata", source="SHOW DATABASES", max_rows=0,
+            )
+            if _inv.ok and not _inv.empty:
+                _idf = _inv.df.copy()
+                _idf.columns = [str(c).lower() for c in _idf.columns]
+                if "name" in _idf.columns:
+                    _opts = classify_databases(_idf["name"].astype(str).tolist(), _company)
+            if not _opts:
+                _opts = databases_for(_company)
+            db_options = ["", *_opts]
+            if st.session_state.get("flt_database") not in db_options:
+                st.session_state["flt_database"] = ""
+            st.selectbox(
+                "Database", db_options, key="flt_database",
+                format_func=lambda value: value or "All databases",
+                label_visibility="collapsed",
+                help="Database scope where the selected panel supports it.",
+            )
+        with c_more:
+            _adv_n = sum(
+                1 for key in (
+                    "flt_warehouse_contains", "flt_user_contains", "flt_schema_contains"
+                )
+                if str(st.session_state.get(key) or "").strip()
+            )
+            _more_label = f"More · {_adv_n}" if _adv_n else "More"
+            with st.popover(_more_label, use_container_width=True):
+                st.caption("Contains filters")
+                st.text_input("Warehouse contains", key="flt_warehouse_contains")
+                st.text_input("User contains", key="flt_user_contains")
+                st.text_input(
+                    "Schema contains", key="flt_schema_contains",
+                    help="Case-insensitive match where the source has schema grain.",
+                )
+        with c_legend:
+            legend_popover()
+        with c_view:
+            _views_popover()
+        with c_reset:
+            if active:
+                st.button(
+                    "Reset", key="flt_reset", on_click=_reset_scope,
+                    help="Back to the account-wide default scope.",
+                    use_container_width=True,
+                )
         _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
         _days = resolve_window_days(_window)
         if _days > MAX_LIVE_WINDOW_DAYS:
-            # v4.54: 180/365 are honored by mart-history (Overview KPIs, storage,
-            # chargeback) and the one owner-named live exception (Cortex user
-            # costs). Other live-scan panels cap at 90 — disclosed, not silently.
-            st.caption(f"{window_scope_label(_window)} applies to Overview KPIs, "
-                       "storage & chargeback history, and Cortex user costs. "
-                       f"Live scans (Operations, Security) cap at {MAX_LIVE_WINDOW_DAYS}d.")
-    with c_db:
-        # Item 8c (2026-07-14): options come from LIVE inventory (SHOW
-        # DATABASES, cached) classified by the same Company rules,
-        # so a new database appears without a code change. The hardcoded
-        # companies.py lists are the offline fallback.
-        _company = st.session_state.get("flt_company", COMPANIES[0])
-        _opts = ()
-        _inv = run(security_sql.show_databases_sql(), page="Sidebar", key="db_inventory",
-                   tier="metadata", source="SHOW DATABASES", max_rows=0)
-        if _inv.ok and not _inv.empty:
-            _idf = _inv.df.copy()
-            _idf.columns = [str(c).lower() for c in _idf.columns]
-            if "name" in _idf.columns:
-                _opts = classify_databases(_idf["name"].astype(str).tolist(), _company)
-        if not _opts:
-            _opts = databases_for(_company)   # offline fallback
-        db_options = ["", *_opts]
-        if st.session_state.get("flt_database") not in db_options:
-            st.session_state["flt_database"] = ""
-        st.selectbox("Database", db_options, key="flt_database",
-                     format_func=lambda v: v or "All databases",
-                     help="Applies to query, task, DDL, attribution, storage, and lock panels. "
-                          "Live inventory (SHOW DATABASES) is tracked to Company; "
-                          "falls back to the known-database list if inventory is unavailable.")
-    # Collapsed by default (Codex r4 #1): the scope row above answers 90% of
-    # visits; the contains-filters open automatically whenever one is active
-    # so a live filter can never hide.
-    _adv_n = sum(1 for k in ("flt_warehouse_contains", "flt_user_contains", "flt_schema_contains")
-                 if str(st.session_state.get(k) or "").strip())
-    _adv_on = _adv_n > 0
-    # rec25: count the hidden contains-filters on the collapsed label so a live one
-    # announces itself before the reader expands the row.
-    _adv_label = "More filters — warehouse / user / schema contains" + (
-        f" ({_adv_n} active)" if _adv_n else "")
-    with st.expander(_adv_label, expanded=_adv_on):
-        c_wh, c_user, c_schema = st.columns([1.2, 1.2, 1.2])
-        with c_wh:
-            st.text_input("Warehouse contains", key="flt_warehouse_contains")
-        with c_user:
-            st.text_input("User contains", key="flt_user_contains")
-        with c_schema:
-            st.text_input("Schema contains", key="flt_schema_contains",
-                          help="Case-insensitive match where the source has schema grain.")
+            st.caption(
+                f"{window_scope_label(_window)} applies to mart history; live Operations "
+                f"and Security scans cap at {MAX_LIVE_WINDOW_DAYS}d."
+            )
 
 
 def main() -> None:
