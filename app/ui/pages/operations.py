@@ -76,23 +76,50 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             "counted under the warehouse's company, not the user's (C10) — use ALL for the "
             "account-wide total."
         )
-    # Hot path: the hourly fact answers this without scanning QUERY_HISTORY.
-    # The fact has warehouse/user/database dims but no schema — fall back to
-    # live when a schema filter is on, or the mart has no rows yet.
+    # Hot path: batch the independent hourly mart reads that paint the normal
+    # Operations landing (summary, sparklines, top queries, failure families).
+    # Filtered top-N still needs the true live scan; every mart keeps its live
+    # fallback below. Per-member cache reuse means a changed filter only executes
+    # the members whose SQL changed.
+    _use_diag = not (wh_filter or user_filter or database or schema_contains)
+    _summary_sql = ""
+    _summary_key = ""
+    _summary_source = ""
+    if not schema_contains:
+        _summary_sql = mart_sql.fact_query_window_summary(
+            days, company, wh_filter, user_filter, database)
+        _summary_key = f"q_fact_summary_{company}_{days}"
+        _summary_source = "FACT_QUERY_HOURLY (mart, loaded hourly)"
+    elif not wh_filter and not user_filter:
+        _summary_sql = mart27_sql.schema_window_summary(
+            days, company, database, schema_contains)
+        _summary_key = f"q_schema_fact_{company}_{days}"
+        _summary_source = "FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)"
+    _activity_sql = mart_sql.fact_daily_activity(14, company, database)
+    _mart_jobs = [
+        {"key": "activity", "sql": _activity_sql,
+         "source": "FACT_QUERY_HOURLY (daily)"},
+    ]
+    if _summary_sql:
+        _mart_jobs.append(
+            {"key": "summary", "sql": _summary_sql, "source": _summary_source})
+    if _use_diag:
+        _mart_jobs.extend([
+            {"key": "top", "sql": mart27_sql.ops_diag_top_queries(days, company, 50),
+             "source": "MART_OPS_DIAG_HOURLY (mart — union of hourly top-50s)",
+             "max_rows": 50},
+            {"key": "fails", "sql": mart27_sql.ops_diag_failures(days, company),
+             "source": "MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)"},
+        ])
+    _mart_pf = run_batch(_mart_jobs, page=_PAGE, tier="hourly") if len(_mart_jobs) > 1 else {}
+
     summary = None
     used_mart = False
-    if not schema_contains:
-        m = run(mart_sql.fact_query_window_summary(days, company, wh_filter, user_filter, database),
-                page=_PAGE, key=f"q_fact_summary_{company}_{days}", tier="recent",
-                source="FACT_QUERY_HOURLY (mart, loaded hourly)")
-        if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
-            summary, used_mart = m, True
-    elif not wh_filter and not user_filter:
-        # schema filter active: the schema-hour fact answers it (V027) —
-        # the read that used to force a live QUERY_HISTORY scan.
-        m = run(mart27_sql.schema_window_summary(days, company, database, schema_contains),
-                page=_PAGE, key=f"q_schema_fact_{company}_{days}", tier="recent",
-                source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
+    if _summary_sql:
+        m = _mart_pf.get("summary") if isinstance(_mart_pf, dict) else None
+        if m is None or not m.ok:
+            m = run(_summary_sql, page=_PAGE, key=_summary_key, tier="hourly",
+                    source=_summary_source)
         if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
             summary, used_mart = m, True
     if summary is None:
@@ -103,18 +130,21 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         row = summary.df.iloc[0]
         qcount = safe_float(row.get("QUERY_COUNT"))
         failed = safe_float(row.get("FAILED_COUNT"))
-        activity = run(mart_sql.fact_daily_activity(14, company, database), page=_PAGE,
-                       key="ops_spark_activity", tier="recent",
-                       source="FACT_QUERY_HOURLY (daily)")
+        fail_pct = (failed / qcount * 100) if qcount else None
+        activity = _mart_pf.get("activity") if isinstance(_mart_pf, dict) else None
+        if activity is None or not activity.ok:
+            activity = run(_activity_sql, page=_PAGE, key="ops_spark_activity",
+                           tier="hourly", source="FACT_QUERY_HOURLY (daily)")
         q_spark = (activity.df["QUERIES"].tolist()
                    if activity.usable() and "QUERIES" in activity.df.columns else None)
         f_spark = (activity.df["FAILS"].tolist()
                    if activity.usable() and "FAILS" in activity.df.columns else None)
         kpi_row([
             {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
-            {"label": "Fail rate", "value": f"{(failed / qcount * 100) if qcount else 0:.2f}%",
-             "delta": f"{failed:,.0f} failed", "delta_color": "off", "spark": f_spark,
-             "severity": "warn" if failed else ""},
+            {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
+             "delta": f"{failed:,.0f} failed" if fail_pct is not None else "No query denominator",
+             "delta_color": "off", "spark": f_spark,
+             "severity": "warn" if failed else ("ok" if fail_pct is not None else "")},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
              "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s"),
              "help": "Highest hourly p95 from the fact table — a peak, not the "
@@ -125,12 +155,6 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         ])
         result_caption(summary)
 
-    # V041 R7: the UNFILTERED first paint reads MART_OPS_DIAG_HOURLY
-    # (top-50/hour by elapsed + failure families; Operations led the fleet
-    # pain board and this batch ran 30-37s live). An entity or schema filter
-    # needs the true filtered top-N, which only the live scan has — that
-    # path keeps the parallel batch below, unchanged.
-    _use_diag = not (wh_filter or user_filter or database or schema_contains)
     if _use_diag:
         _qb = {
             "top": run_mart_first(
@@ -140,14 +164,16 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 page=_PAGE, key=f"q_top_{company}_{days}",
                 mart_source="MART_OPS_DIAG_HOURLY (mart — union of hourly top-50s)",
                 live_source="QUERY_HISTORY (live fallback)",
-                mart_tier="recent", live_tier="recent", max_rows=50),
+                mart_tier="hourly", live_tier="recent", max_rows=50,
+                preloaded=_mart_pf.get("top") if isinstance(_mart_pf, dict) else None),
             "fails": run_mart_first(
                 mart27_sql.ops_diag_failures(days, company),
                 ops_sql.failures_by_error(days, company, database, schema_contains),
                 page=_PAGE, key=f"q_fails_{company}_{days}",
                 mart_source="MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)",
                 live_source="QUERY_HISTORY (live fallback)",
-                mart_tier="recent", live_tier="recent"),
+                mart_tier="hourly", live_tier="recent",
+                preloaded=_mart_pf.get("fails") if isinstance(_mart_pf, dict) else None),
         }
     else:
         # Parallel path (same contract as Security): both queries submit async
@@ -161,10 +187,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         ], page=_PAGE, tier="recent")
 
     section_header("Heaviest queries", "info", "search")
-    top = _qb.get("top") or run(
-        ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter, user_filter, database, schema_contains),
-        page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
-        source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
+    top = _qb.get("top")
+    if top is None or not top.ok:
+        top = run(
+            ops_sql.top_queries_by_elapsed(
+                days, company, 50, wh_filter, user_filter, database, schema_contains),
+            page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
+            source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
         # r24: every QUERY_ID row links straight to its Snowsight profile
         # (owner ask — the drill's single link earned its keep).
@@ -267,10 +296,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 result_caption(detail)
 
     section_header("Failures by error", "warn", "alerts")
-    fails = _qb.get("fails") or run(
-        ops_sql.failures_by_error(days, company, database, schema_contains), page=_PAGE,
-        key=f"q_fails_{company}_{days}", tier="recent",
-        source="ACCOUNT_USAGE.QUERY_HISTORY")
+    fails = _qb.get("fails")
+    if fails is None or not fails.ok:
+        fails = run(
+            ops_sql.failures_by_error(days, company, database, schema_contains),
+            page=_PAGE, key=f"q_fails_{company}_{days}", tier="recent",
+            source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
         styled_table(fails.df)
 
@@ -516,7 +547,7 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
 def _task_health_view(company: str, days: int, database: str = "",
                       schema_contains: str = "") -> None:
     res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
-              tier="recent", source="FACT_TASK_DAILY")
+              tier="hourly", source="FACT_TASK_DAILY")
     if not res.usable():
         res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
@@ -528,11 +559,13 @@ def _task_health_view(company: str, days: int, database: str = "",
         if failed_col:
             total_runs = safe_float(df.get("RUNS", 0).sum() if "RUNS" in df.columns else 0)
             total_failed = safe_float(df[failed_col].sum())
+            task_fail_pct = (total_failed / total_runs * 100) if total_runs else None
             known_failed = total_failed
             kpi_row([
                 {"label": f"Task runs ({days}d)", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
-                 "delta": f"{(total_failed / total_runs * 100) if total_runs else 0:.1f}%",
+                 "delta": (f"{task_fail_pct:.1f}%" if task_fail_pct is not None
+                           else "No run denominator"),
                  "delta_color": "inverse" if total_failed else "off"},
             ])
             df = df.sort_values(failed_col, ascending=False)
@@ -942,7 +975,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 def _warehouses_tab(company: str, rate: float) -> None:
     section_header("Warehouse spend & anomalies", "info", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
-              tier="recent", source="FACT_WAREHOUSE_DAILY")
+              tier="hourly", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
                  setup_hint="Live equivalent lives on Cost & Contract > Spend & Attribution."):
         return
@@ -1006,19 +1039,22 @@ def _contention_tab(company: str, days: int) -> None:
             page=_PAGE, key=f"c_pressure_{company}_{days}",
             mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
             live_source="QUERY_HISTORY (live fallback)",
-            mart_tier="recent", live_tier="recent")
+            mart_tier="hourly", live_tier="recent")
         if guard(res, "No queueing or spill pressure in this window."):
             import pandas as pd
             pdf = res.df.copy()
             if {"QUEUED_SEC", "QUERY_COUNT"}.issubset(pdf.columns):
                 _qc = pd.to_numeric(pdf["QUERY_COUNT"], errors="coerce").replace(0, pd.NA)
                 pdf["AVG_QUEUE_SEC"] = pd.to_numeric(pdf["QUEUED_SEC"], errors="coerce") / _qc
-            charts.bar_count(pdf.sort_values("QUEUED_SEC", ascending=False),
-                             "WAREHOUSE_NAME", "QUEUED_SEC", title="Queued seconds (total)",
+            _chart_metric = "AVG_QUEUE_SEC" if "AVG_QUEUE_SEC" in pdf.columns else "QUEUED_SEC"
+            _chart_title = ("Average queue per query (seconds)"
+                            if _chart_metric == "AVG_QUEUE_SEC" else "Queued seconds (total)")
+            charts.bar_count(pdf.sort_values(_chart_metric, ascending=False),
+                             "WAREHOUSE_NAME", _chart_metric, title=_chart_title,
                              takeaway=True)
-            st.caption("Total queued seconds favor busy warehouses; **Avg queue** = queued ÷ query "
-                       "count surfaces where each query waits longest — a low-volume warehouse that "
-                       "stalls every query outranks a busy one with trivial per-query waits.")
+            st.caption("Ranked by **Avg queue per query**, the user-felt stall signal. Query count "
+                       "and total queued time remain in the evidence table so sustained materiality "
+                       "is visible beside the rate.")
             styled_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
                          if "AVG_QUEUE_SEC" in pdf.columns else pdf)
     with right:
@@ -1092,28 +1128,34 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         ])
         sel = selectable_table(df[[c for c in (
             "VERDICT", "WAREHOUSE_NAME", "SETTING", "OLD_VALUE", "NEW_VALUE",
-            "CHANGE_SEEN_AT", "BASELINE_CREDITS_PER_DAY", "AFTER_CREDITS_PER_DAY",
-            "BASELINE_P95_S", "AFTER_P95_S", "VERDICT_DETAIL") if c in df.columns]],
+            "CHANGE_SEEN_AT") if c in df.columns]],
             key="whchg_sel", height=260)
         result_caption(res)
-        row = df.iloc[int(sel)] if sel is not None else df.iloc[0]
-        deltas = wh_change.change_deltas(row.to_dict())
-        st.markdown(f"**{row['WAREHOUSE_NAME']}** — {row['SETTING']} "
-                    f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
-        if deltas:
-            kpi_row([{
-                "label": d["metric"],
-                "value": f"{d['base']:g} → {d['after']:g}",
-                "delta": (f"{d['delta_pct']:+.1f}%" if d["delta_pct"] is not None else "new load"),
-                "delta_color": ("inverse" if d["direction"] == "worse"
-                                else "normal" if d["direction"] == "better" else "off"),
-            } for d in deltas[:5]])
+        row = df.iloc[int(sel)] if sel is not None else None
+        if row is None:
+            st.caption("Select a warehouse change to inspect its before/after evidence.")
         else:
-            st.caption("Before/after stats still accumulating for this change.")
+            deltas = wh_change.change_deltas(row.to_dict())
+            st.markdown(f"**{row['WAREHOUSE_NAME']}** — {row['SETTING']} "
+                        f"{row.get('OLD_VALUE', '?')} → {row.get('NEW_VALUE', '?')}")
+            _verdict_detail = str(row.get("VERDICT_DETAIL") or "").strip()
+            if _verdict_detail:
+                st.caption(f"**{row.get('VERDICT')}** — {_verdict_detail}")
+            if deltas:
+                kpi_row([{
+                    "label": d["metric"],
+                    "value": f"{d['base']:g} → {d['after']:g}",
+                    "delta": (f"{d['delta_pct']:+.1f}%"
+                              if d["delta_pct"] is not None else "new load"),
+                    "delta_color": ("inverse" if d["direction"] == "worse"
+                                    else "normal" if d["direction"] == "better" else "off"),
+                } for d in deltas[:5]])
+            else:
+                st.caption("Before/after stats still accumulating for this change.")
         # T1.4: the 28d WMH+QH history join is heavy and used to run every render on
         # the defaulted first row. Load it only on an explicit row selection, and off
         # the live cadence (historical tier — the sources lag 45min+).
-        if sel is not None:
+        if sel is not None and row is not None:
             hist = run(change_impact_sql.warehouse_daily_series(str(row["WAREHOUSE_NAME"]), 28),
                        page=_PAGE, key=f"whchg_hist_{row['WAREHOUSE_NAME']}", tier="historical",
                        source="WAREHOUSE_METERING_HISTORY + QUERY_HISTORY")

@@ -174,10 +174,11 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     # a company filter — the badge says so on the card (the help already did).
     if not hist.usable():
         _mtd_credits = safe_float(mtd_spend) / rate if rate > 0 else None
-        return {"label": "MTD spend", "value": format_usd(mtd_spend),
+        return {"label": "MTD credit spend", "value": format_usd(mtd_spend),
                 "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
                 "method": "billed", "scope": "account-wide",
-                "help": "Billed credits incl. the cloud-services adjustment (account-wide)."}
+                "help": "Credit-billed services at configured rates, including the "
+                        "cloud-services adjustment. Storage and transfer are separate."}
     frame = hist.df.copy()
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
     mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
@@ -185,20 +186,20 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
     if pct is None:
-        return {"label": "MTD spend", "value": format_usd(mtd),
+        return {"label": "MTD credit spend", "value": format_usd(mtd),
                 "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
                 "method": "billed", "scope": "account-wide",
                 "help": "Pace vs last month appears once the prior month has "
                         "daily facts (backfill_365.sql loads the year)." + budget_note}
-    return {"label": "MTD vs last month (same days)",
+    return {"label": "MTD credit spend vs last month",
             "value": format_usd(mtd),
             "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
             "method": "billed", "scope": "account-wide",
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
-            "help": "Billed credits, account-wide, at today's rate. The value is "
+            "help": "Credit-billed services, account-wide, at configured rates. The value is "
                     "this month to date; the pace delta compares the same number "
-                    "of days both months share." + budget_note}
+                    "of days both months share. Storage and transfer are separate." + budget_note}
 
 
 @safe_page(_PAGE)
@@ -428,7 +429,7 @@ def render() -> None:
     # of a false green. C2/N5: the required health source is now the fixed-window
     # throughput read (not the exec board, which no longer feeds the score).
     _available = set()
-    if _thr.usable():
+    if _thr.usable() and queries > 0:
         _available.add("throughput")
     if alerts_res.ok:
         _available.add("alerts")
@@ -506,13 +507,14 @@ def render() -> None:
 
     account_kpis = [
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
-            "label": "MTD spend",
+            "label": "MTD credit spend",
             "value": "Needs daily facts",
             "method": "billed", "scope": "account-wide",
-            "help": "Appears once the daily metering facts are installed (billed credits incl. cloud-services adjustment).",
+            "help": "Appears once daily metering facts are installed. This is configured-rate "
+                    "credit spend, not the full invoice; storage and transfer are separate.",
         },
         {
-            "label": "Projected month-end",
+            "label": "Projected month-end credit spend",
             "value": format_usd(forecast.projected_usd) if forecast.ok else "Needs history",
             "method": "billed", "scope": "account-wide",
             "help": (f"{forecast.basis} Range {format_usd(forecast.low_usd)}-{format_usd(forecast.high_usd)}."
@@ -523,7 +525,8 @@ def render() -> None:
             "value": f"{critical_alerts} / {high_alerts}" if alerts_res.ok else "Setup",
             "severity": ("bad" if (alerts_res.ok and critical_alerts) else
                          "warn" if (alerts_res.ok and high_alerts) else "ok"),
-            "help": "The Alerts page has the full queue." if alerts_res.ok
+            "help": f"{company} plus account-level events — the same scope as the Alerts queue."
+                    if alerts_res.ok
                     else f"Alert tables unreachable: {alerts_res.error}",
         },
         {
@@ -563,8 +566,8 @@ def render() -> None:
         f,
         applies=(),
         partial=("company",),
-        note="MTD, forecast, alerts, freshness, and owner queue are account-wide; the score alone "
-             "uses Company for recent throughput and pressure.",
+        note="MTD, forecast, freshness, and owner queue are account-wide; alerts and the score "
+             "use Company plus account-level events where applicable.",
     )
     panel_help(
         "Account-wide billing pace and operating risk. When the platform score is red (<70) or "
@@ -575,8 +578,9 @@ def render() -> None:
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
     # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
     # the whole bill. Not folded in: that would break the credits x rate contract.
-    st.caption("MTD & Projected cover credit-billed services (compute, serverless, AI). "
-               "Storage and data-transfer bill separately — see Cost & Contract → org rate card.")
+    st.caption("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
+               "and AI. Storage, transfer, and organization currency adjustments are separate — "
+               "Cost & Contract → org rate card is billing truth.")
 
     # ---- The work + the drivers (rec4: above the charts, not buried below) ----
     # An executive landing page leads with what needs an owner, not two charts.

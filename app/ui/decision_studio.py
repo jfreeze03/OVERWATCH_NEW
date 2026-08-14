@@ -179,6 +179,7 @@ def _slos() -> None:
         empty_state("needs_setup", "Apply V074 to configure objectives and error budgets.")
         return
     summary = slo_summary(result.df)
+    measured_objectives = int(summary["met"] + summary["breach"])
     read_model_caption("slo_cockpit")
     if not result.empty:
         exceptions = []
@@ -206,13 +207,15 @@ def _slos() -> None:
         exception_summary(exceptions, "Every measured objective is within its configured target.")
     kpi_row([
         {"label": "Objectives", "value": f"{summary['total']:,.0f}"},
-        {"label": "Meeting target", "value": f"{summary['met']:,.0f}", "severity": "ok"},
+        {"label": "Meeting target", "value": f"{summary['met']:,.0f}",
+         "severity": "ok" if measured_objectives else ""},
         {"label": "Breached", "value": f"{summary['breach']:,.0f}",
-         "severity": "bad" if summary["breach"] else "ok"},
+         "severity": "bad" if summary["breach"] else ("ok" if measured_objectives else "")},
         {"label": "No evidence", "value": f"{summary['no_data']:,.0f}",
-         "severity": "warn" if summary["no_data"] else "ok"},
-        {"label": "Worst burn", "value": f"{summary['worst_burn']:,.2f}x",
-         "severity": "bad" if summary["worst_burn"] > 1 else "ok"},
+         "severity": "warn" if summary["no_data"] else ("ok" if summary["total"] else "")},
+        {"label": "Worst burn",
+         "value": f"{summary['worst_burn']:,.2f}x" if measured_objectives else "No evidence",
+         "severity": ("bad" if summary["worst_burn"] > 1 else "ok") if measured_objectives else ""},
     ])
     if result.empty:
         empty_state("no_data_yet", "No active objectives are configured.")
@@ -328,7 +331,7 @@ def _cost_truth(company: str, days: int) -> None:
         _billed_help = ("Account-wide billing basis; Company does not apply. AI/OTHER split "
                         "unavailable — priced at the flat compute rate (AI slightly overstated).")
     kpi_row([
-        {"label": "Billed account", "value": format_usd(billed_usd),
+        {"label": "Billed credits (modeled $)", "value": format_usd(billed_usd),
          "delta": f"{billed:,.0f} cr", "delta_color": "off", "help": _billed_help},
         {"label": "Metered warehouse", "value": format_usd(credits_to_usd(metered, rate)),
          "delta": f"{metered:,.0f} cr", "delta_color": "off"},
@@ -340,7 +343,9 @@ def _cost_truth(company: str, days: int) -> None:
     styled_table(frame, height=300, sort_label="semantic basis order")
     st.caption(
         "Dollars primary, credits secondary. Rows are lenses over cost, not addends: "
-        "billed is account truth; metered includes warehouse idle; measured excludes idle; "
+        "billed credits include the cloud-services adjustment but modeled $ uses configured "
+        "rates; organization currency is billing truth. Metered includes warehouse idle; "
+        "measured excludes idle; "
         "allocated redistributes warehouse usage."
         + (f" Measured is {measured / metered * 100:,.0f}% and allocated "
            f"{allocated / metered * 100:,.0f}% of metered." if metered else "")
@@ -385,17 +390,19 @@ def _scenarios(company: str) -> None:
         mart_sql.savings_ledger(), page=_PAGE, key="decision_scenario_ledger",
         tier="recent", source="SAVINGS_LEDGER",
     )
-    verified = (
-        safe_float(ledger.df.get("VERIFIED_USD", pd.Series(dtype=float)).sum())
-        if ledger.ok and not ledger.empty else 0.0
-    )
+    verified = (safe_float(ledger.df.get("VERIFIED_USD", pd.Series(dtype=float)).sum())
+                if ledger.ok and not ledger.empty else 0.0)
+    verified_value = format_usd(verified) if ledger.ok else "Unavailable"
     kpi_row([
         {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
         {"label": "Gross authored estimate", "value": format_usd(projection["gross_estimate"])},
         {"label": "Expected capture", "value": format_usd(projection["expected_capture"]),
          "delta": f"{format_usd(projection['low_capture'])} to {format_usd(projection['high_capture'])}",
          "delta_color": "off"},
-        {"label": "Verified separately", "value": format_usd(verified), "severity": "ok"},
+        {"label": "Verified separately", "value": verified_value,
+         "severity": "ok" if ledger.ok else "warn",
+         "help": ("Verified savings ledger total." if ledger.ok
+                  else f"Savings ledger read failed: {ledger.error}")},
     ])
     st.caption(
         "Open action estimates are de-duplicated by entity, then adoption and realization "

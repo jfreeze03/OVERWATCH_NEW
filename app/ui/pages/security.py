@@ -681,9 +681,6 @@ def _clients_tab(company: str, days: int) -> None:
     st.caption(
         f"{behind} combinations trail the newest observed version."
     )
-    export_button("Driver inventory (CSV)", data=df.to_csv(index=False),
-                  file_name=f"overwatch_client_drivers_{company}_{days}d.csv",
-                  mime="text/csv", key="sec_drivers_csv")
     result_caption(res)
 
 
@@ -792,25 +789,16 @@ def render() -> None:
         "nothing. Its one write is logging a posture exception to OVERWATCH's own work queue "
         "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
-    section_filter_contract(
-        f,
-        applies=("company",),
-        note=("The queue applies Company where evidence has company grain and retains "
-              "account-wide rows marked ALL; domain coverage is account-wide."),
-    )
-    render_security_overview(f["company"])
-    section_header("Operational governance", "info", "security")
-    section_filter_contract(
-        f, applies=(),
-        note="Governance score and trend are account-wide fixed-horizon posture metrics.",
-    )
-    _post90 = _governance_score_panel()
-    _posture_trend_panel(_post90)
     section = lazy_sections(
-        ["Access", "Changes", "Clients", "Egress", "Trust Center"],
+        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Trust Center"],
         key="sec_section",
     )
     _contracts = {
+        "Decision queue": {
+            "applies": ("company",),
+            "note": ("Exceptions apply Company where evidence has company grain and retain "
+                     "account-wide rows marked ALL; governance posture is account-wide."),
+        },
         "Access": {
             "applies": ("company", "days"),
             "note": "Identity and role evidence at the selected company/window where grain permits.",
@@ -833,7 +821,16 @@ def render() -> None:
         },
     }
     section_filter_contract(f, **_contracts[section])
-    if section == "Access":
+    if section == "Decision queue":
+        render_security_overview(f["company"])
+        section_header("Operational governance", "info", "security")
+        section_filter_contract(
+            f, applies=(),
+            note="Governance score and trend are account-wide fixed-horizon posture metrics.",
+        )
+        _post90 = _governance_score_panel()
+        _posture_trend_panel(_post90)
+    elif section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()
         _export_pack(f["company"], f["days"], f["window_label"])

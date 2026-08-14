@@ -263,19 +263,38 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "help": f"{len(flagged)} met the idle gate; already-tuned and unknown-setting rows "
                          "remain visible but are not counted as timer opportunities."},
             ])
-            styled_table(
-                advisor[["WAREHOUSE_NAME", "COMPANY", "TOTAL_CREDITS", "IDLE_CREDITS",
-                          "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD",
-                          "AUTO_SUSPEND", "ACTION_STATUS", "ACTIONABLE_MONTHLY_USD",
-                          "SAVINGS_CONFIDENCE", "RECOMMENDATION"]],
+            idle_sel = selectable_table(
+                advisor[["WAREHOUSE_NAME", "RECOMMENDATION", "ACTIONABLE_MONTHLY_USD",
+                          "SAVINGS_CONFIDENCE", "ACTION_STATUS"]],
+                key="idle_advisor_sel",
                 column_config={
-                    "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
-                    "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
-                    "PROJECTED_MONTHLY_IDLE_USD": st.column_config.NumberColumn("Proj. monthly $", format="$%.0f"),
-                    "AUTO_SUSPEND": st.column_config.NumberColumn("Auto-suspend (s)", format="%.0f"),
                     "ACTIONABLE_MONTHLY_USD": st.column_config.NumberColumn("Actionable $/mo", format="$%.0f"),
                 },
+                sort_label="actionable monthly dollars, then confidence",
             )
+            if idle_sel is None:
+                st.caption("Select a warehouse to inspect measured idle, timer state, and gross projections.")
+            else:
+                st.markdown("**Selected warehouse evidence**")
+                styled_table(
+                    advisor.iloc[[int(idle_sel)]][[
+                        "WAREHOUSE_NAME", "COMPANY", "TOTAL_CREDITS", "IDLE_CREDITS",
+                        "IDLE_PCT", "IDLE_USD", "PROJECTED_MONTHLY_IDLE_USD",
+                        "AUTO_SUSPEND", "ACTION_STATUS", "ACTIONABLE_MONTHLY_USD",
+                        "SAVINGS_CONFIDENCE", "RECOMMENDATION",
+                    ]],
+                    size_note=False,
+                    column_config={
+                        "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
+                        "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
+                        "PROJECTED_MONTHLY_IDLE_USD": st.column_config.NumberColumn(
+                            "Proj. monthly $", format="$%.0f"),
+                        "AUTO_SUSPEND": st.column_config.NumberColumn(
+                            "Auto-suspend (s)", format="%.0f"),
+                        "ACTIONABLE_MONTHLY_USD": st.column_config.NumberColumn(
+                            "Actionable $/mo", format="$%.0f"),
+                    },
+                )
             result_caption(idle_res, note="Hour-slice granularity; short auto-suspends already reduce this.")
             st.caption(
                 f"Actionable $ = idle minus one ~{IDLE_TARGET_SUSPEND_SEC}s suspend/resume tail per active "
@@ -371,20 +390,43 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "help": "Resize advice is withheld for episodic evidence, unknown timers, and "
                          "high idle that remains after an already-short timer."},
             ])
+            _sz_primary = [
+                "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
+                "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD",
+            ]
             sel_sz = selectable_table(
-                sized[_sz_cols],
+                sized[[c for c in _sz_primary if c in sized.columns]],
                 key="sizing_sel",
                 column_config={
                     "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
                     "IDLE_MONTHLY_USD": st.column_config.NumberColumn("of which idle $/mo", format="$%.0f"),
-                    "SCENARIO_DOWN_USD": st.column_config.NumberColumn("x0.5 $/mo", format="$%.0f"),
-                    "SCENARIO_UP_USD": st.column_config.NumberColumn("x2 $/mo", format="$%.0f"),
-                    "AUTO_SUSPEND": st.column_config.NumberColumn("Auto-suspend (s)", format="%.0f"),
-                    "SPILL_GB_PER_DAY": st.column_config.NumberColumn("Spill GB/day", format="%.2f"),
-                    "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
-                    "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
                 },
+                sort_label="recommendation priority, then monthly cost",
             )
+            if sel_sz is None:
+                st.caption("Select a recommendation to load queue, spill, P95, timer, and scenario evidence.")
+            else:
+                srow = sized.iloc[int(sel_sz)]
+                st.markdown("**Selected recommendation evidence**")
+                styled_table(
+                    sized.iloc[[int(sel_sz)]][[c for c in _sz_cols if c in sized.columns]],
+                    size_note=False,
+                    column_config={
+                        "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
+                        "IDLE_MONTHLY_USD": st.column_config.NumberColumn(
+                            "of which idle $/mo", format="$%.0f"),
+                        "SCENARIO_DOWN_USD": st.column_config.NumberColumn(
+                            "x0.5 $/mo", format="$%.0f"),
+                        "SCENARIO_UP_USD": st.column_config.NumberColumn(
+                            "x2 $/mo", format="$%.0f"),
+                        "AUTO_SUSPEND": st.column_config.NumberColumn(
+                            "Auto-suspend (s)", format="%.0f"),
+                        "SPILL_GB_PER_DAY": st.column_config.NumberColumn(
+                            "Spill GB/day", format="%.2f"),
+                        "PROVISION_MIN_PER_DAY": st.column_config.Column("Provision per day"),
+                        "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+                    },
+                )
             if sel_sz is not None and is_operator:
                 srow = sized.iloc[int(sel_sz)]
                 if not bool(srow.get("ACTIONABLE", False)):

@@ -108,10 +108,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     panel_help(
-        "Account-wide billed spend split by service (warehouse, serverless, AI/Cortex): billed "
-        "credits x the configured rate with the cloud-services rebate applied, so it ties to the "
-        "invoice. When a category jumps, the cloud-services-health and Attribution panels below "
-        "name the warehouse, user, or query pattern behind it."
+        "Account-wide credit-billed services split by warehouse, serverless, and AI/Cortex: "
+        "billed credits x configured rates with the cloud-services rebate applied. This is a "
+        "modeled credit-spend view, not the full invoice: storage, transfer, marketplace, and "
+        "organization currency adjustments remain in the org rate-card panels."
     )
     df = res.df.copy()
     df["CATEGORY"] = df["SERVICE_TYPE"].map(_categorize)
@@ -122,8 +122,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     billed_usd = float(df["USD"].sum())
     rebate_usd = float(df["ADJ_USD"].sum())  # negative or zero
     kpi_row([
-        {"label": f"Billed spend, {days}d (account)", "value": format_usd(billed_usd),
-         "help": "Billed credits x rate. Includes the cloud-services adjustment."},
+        {"label": f"Credit spend, {days}d (account)", "value": format_usd(billed_usd),
+         "help": "Billed credits x configured rates, including the cloud-services adjustment. "
+                 "Not the full invoice."},
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
         {"label": "Compute rate", "value": f"${rate:.2f}/cr", "help": "SETTINGS CREDIT_PRICE_USD."},
@@ -136,8 +137,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
         other_usd = float(sum(cat_usd.values())) - wh_usd
         st.markdown(md_dollars(  # $-escape: three dollar amounts in one markdown body
-            f"- **This page — billed spend ({days}d): {format_usd(billed_usd)}.** Account-wide, "
-            "every compute service, cloud-services rebate applied. The number that ties to the bill.\n"
+            f"- **This page — configured-rate credit spend ({days}d): {format_usd(billed_usd)}.** "
+            "Account-wide credit-billed services with the cloud-services rebate applied; it "
+            "excludes storage, transfer, marketplace, and org currency adjustments.\n"
             f"- **Warehouse portion of that billed spend: {format_usd(wh_usd)}** — account-wide, "
             "cloud-services rebate applied, reader metering included. Overview's company KPI "
             "prices UNADJUSTED warehouse usage (no rebate, main-account metering only) — a "

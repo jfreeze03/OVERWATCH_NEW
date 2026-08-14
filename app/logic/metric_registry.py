@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # --- Method: HOW a number is derived (the contract's core) ------------------
-BILLED = "BILLED"        # ties to the invoice: billed credits / org rate-card currency
+BILLED = "BILLED"        # Snowflake billed-credit basis; USD may be modeled or org currency
 METERED = "METERED"      # exact metering usage at its native grain (idle in, CS unadjusted)
 MEASURED = "MEASURED"    # exact attributed compute (QUERY_ATTRIBUTION_HISTORY), idle excluded
 ALLOCATED = "ALLOCATED"  # spread from a coarser grain by a share (idle included) — an estimate
@@ -45,10 +45,10 @@ PARTIAL_DAY = ("excluded", "included", "n/a")
 # so hovering answers "which dollar is this?". Keyed by UPPER column name; a
 # missing entry is harmless (no help shown). Extend as ambiguous columns recur.
 COLUMN_HELP = {
-    "CREDITS_BILLED": "BILLED — ties to the invoice (includes the cloud-services adjustment).",
+    "CREDITS_BILLED": "BILLED credits — includes the cloud-services adjustment; USD still depends on the pricing source.",
     "CREDITS_MEASURED": "MEASURED — exact attributed compute (QUERY_ATTRIBUTION_HISTORY); idle excluded.",
     "CREDITS_ALLOCATED": "ALLOCATED — spread from a coarser grain by a share; an estimate (idle included).",
-    "BILLED_USD": "BILLED USD — ties to the invoice.",
+    "BILLED_USD": "BILLED-credit USD — configured-rate model unless the source is organization currency.",
     "MEASURED_USD": "MEASURED USD — exact attributed compute; idle excluded.",
     "ALLOCATED_USD": "ALLOCATED USD — a coarse-grain total spread by a share; an estimate.",
     "ESTIMATED_USD": "ESTIMATED — modeled from bytes/credits x a configured rate, not billed.",
@@ -81,13 +81,16 @@ class Metric:
 
 
 METRICS: tuple[Metric, ...] = (
-    Metric("account_billed_spend", "Account billed spend", BILLED,
+    Metric("account_billed_spend", "Configured-rate credit spend", BILLED,
            "account / day / service", "ACCOUNT_USAGE.METERING_DAILY_HISTORY (CREDITS_BILLED)",
            UTC, "up to 24h", "v4.30",
-           "Billed = used + cloud-services adjustment. The number that ties to the bill.",
+           "Billed credits = used + cloud-services adjustment, priced at configured rates. "
+           "This excludes storage, transfer, and organization currency adjustments; "
+           "USAGE_IN_CURRENCY is billing truth.",
            window="rolling-daily", partial_day="included", unit="USD", filters=(),
            required_sources=("ACCOUNT_USAGE.METERING_DAILY_HISTORY", "FACT_METERING_DAILY"),
-           coverage="billed = used + cloud-services adjustment; ties to the invoice", owner="platform"),
+           coverage="credit-billed services only; excludes storage, transfer, and org currency adjustments",
+           owner="platform"),
     Metric("replication_usage", "Replication usage", METERED,
            "database / refresh", "ACCOUNT_USAGE.DATABASE_REPLICATION_USAGE_HISTORY",
            UTC, "up to ~3h", "v4.134",

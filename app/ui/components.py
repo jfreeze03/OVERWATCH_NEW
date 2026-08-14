@@ -1194,9 +1194,13 @@ def _auto_formats(df, skip: set) -> dict:
     return fmts
 
 
-# Above this row count, pandas Styler (per-cell styles for the WHOLE frame)
-# dominates paint time — fall back to Arrow-native printf formats instead.
-STYLER_MAX_ROWS = 400   # r13 #19: Styler is per-cell Python; Arrow-native formats above this
+# Pandas Styler is per-cell Python. Bound BOTH dimensions: a 350x30 evidence
+# table is much more expensive than a 450x4 summary even though the row-only
+# rule called the first "small." Above either budget, use Arrow-native formats.
+STYLER_MAX_ROWS = 400
+STYLER_MAX_CELLS = 6_000
+EAGER_CSV_MAX_ROWS = 200
+EAGER_CSV_MAX_CELLS = 1_500
 
 # Styler format -> printf equivalent for the large-frame path. Commas are
 # lost above the cap (printf has no grouping); that trade is deliberate.
@@ -1308,7 +1312,8 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         display_df = df
     data = display_df
     fmts = _auto_formats(df, set(column_config or {}))
-    if len(df) <= STYLER_MAX_ROWS:
+    _cell_count = len(df) * max(1, len(df.columns))
+    if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
             styler = display_df.style
             for col in status_columns_in(list(df.columns)):
@@ -1405,7 +1410,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         if len(df) >= 4:
             seq = int(st.session_state.get("_ow_dl_seq", 0))
             st.session_state["_ow_dl_seq"] = seq + 1
-            if len(df) <= 200:
+            if len(df) <= EAGER_CSV_MAX_ROWS and _cell_count <= EAGER_CSV_MAX_CELLS:
                 # N9: keep one-click export, but serialize ONCE per content instead
                 # of re-encoding the frame on every 30s rerun (the large-frame path
                 # already memoizes; the small path re-shipped the full CSV each pass).

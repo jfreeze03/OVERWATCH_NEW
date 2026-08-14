@@ -290,12 +290,23 @@ def render() -> None:
     _open_crit = 0
     if _strip.ok and not _strip.empty:
         _sv = {str(r["METRIC"]): str(r["VALUE"]) for _, r in _strip.df.iterrows()}
-        _open_crit = int(safe_float(_sv.get("OPEN_CRITICAL", "0")))
         _und = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
         if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery) — "
                               "check delivery →", key="cr_undelivered", type="primary",
                               use_container_width=True):
             request_navigation("Alerts", "Native delivery")
+    # The shell strip is intentionally account-wide. The page badge must match the
+    # company-scoped incident/alert queue it opens (company + account-level events).
+    _crit_counts = run(
+        mart_sql.open_alert_severity_counts(company),
+        page=_PAGE,
+        key=f"cr_alert_counts_{company}",
+        tier="live",
+        source=f"ALERT_EVENTS counts ({company} + account-level)",
+    )
+    _crit_known = _crit_counts.usable()
+    if _crit_known:
+        _open_crit = int(safe_float(_crit_counts.df.iloc[0].get("CRIT")))
 
     # rec11: badge the Incidents pill with open criticals — already in the health strip
     # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
@@ -304,7 +315,7 @@ def render() -> None:
     section = lazy_sections(["Action Center", "Pulse", "Incidents & triage",
                              "Timeline & movers", "Freshness & replay", "Entity 360"],
                             key="cr_section",
-                            counts={"Incidents & triage": _open_crit} if _open_crit else None)
+                            counts={"Incidents & triage": _open_crit} if _crit_known else None)
     _contracts = {
         "Action Center": {
             "applies": (),
@@ -352,13 +363,13 @@ def render() -> None:
         pulse, pulse_from_mart = None, False
         if not f["schema_contains"]:
             m_pulse = run(mart_sql.fact_query_window_summary(1, company, "", "", f["database"]),
-                          page=_PAGE, key=f"pulse_fact_{company}", tier="recent",
+                          page=_PAGE, key=f"pulse_fact_{company}", tier="hourly",
                           source="FACT_QUERY_HOURLY (mart, loaded hourly)")
             if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
                 pulse, pulse_from_mart = m_pulse, True
         else:
             s_pulse = run(mart27_sql.schema_window_summary(1, company, f["database"], f["schema_contains"]),
-                          page=_PAGE, key=f"pulse_schema_fact_{company}", tier="recent",
+                          page=_PAGE, key=f"pulse_schema_fact_{company}", tier="hourly",
                           source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")
             if s_pulse.ok and not s_pulse.empty and safe_float(s_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
                 pulse, pulse_from_mart = s_pulse, True
@@ -367,7 +378,7 @@ def render() -> None:
                         page=_PAGE, key=f"pulse_{company}",
                         tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
         act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
-                  key="cr_activity", tier="recent", source="FACT_QUERY_HOURLY (daily)")
+                  key="cr_activity", tier="hourly", source="FACT_QUERY_HOURLY (daily)")
         _activity_cols = {"DAY", "QUERIES", "FAILS"}
         _activity_ready = act.usable() and _activity_cols.issubset(act.df.columns)
         q_spark = act.df["QUERIES"].tolist() if _activity_ready else None
@@ -376,6 +387,7 @@ def render() -> None:
             row = pulse.df.iloc[0]
             qcount = safe_float(row.get("QUERY_COUNT"))
             failed = safe_float(row.get("FAILED_COUNT"))
+            fail_pct = (failed / qcount * 100) if qcount else None
             _fail_bad = bool(qcount and failed / qcount > 0.02)
             queue_sec = safe_float(row.get("QUEUED_SEC"))
             remote_spill_gb = safe_float(row.get("SPILL_REMOTE_GB"))
@@ -385,7 +397,8 @@ def render() -> None:
                 exceptions.append({
                     "label": "Failed queries",
                     "value": f"{failed:,.0f}",
-                    "detail": f"{(failed / qcount * 100) if qcount else 0:.1f}% of this scope.",
+                    "detail": (f"{fail_pct:.1f}% of this scope." if fail_pct is not None
+                               else "No query denominator is available."),
                     "severity": "bad" if _fail_bad else "warn",
                 })
             if queue_sec >= 60:
@@ -411,9 +424,10 @@ def render() -> None:
                  "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
                          "time of day) — the same span on the mart and live paths."},
                 {"label": "Failed", "value": f"{failed:,.0f}",
-                 "delta": f"{(failed / qcount * 100) if qcount else 0:.1f}%",
+                 "delta": f"{fail_pct:.1f}%" if fail_pct is not None else "No query denominator",
                  "delta_color": "inverse" if _fail_bad else "off",
-                 "severity": "bad" if _fail_bad else "ok", "spark": f_spark},
+                 "severity": "bad" if _fail_bad else ("ok" if fail_pct is not None else ""),
+                 "spark": f_spark},
                 {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
                  "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s")},
                 {"label": "Queued", "value": humanize_duration(queue_sec, "s")},

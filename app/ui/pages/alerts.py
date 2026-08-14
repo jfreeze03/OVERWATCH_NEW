@@ -7,6 +7,7 @@ same action. Rule changes are generate-only by design.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import streamlit as st
@@ -46,6 +47,17 @@ from app.ui.components import (
 )
 
 _PAGE = "Alerts"
+def _optional_number(value: object, suffix: str = "", decimals: int = 0) -> str:
+    """Format a measured ratio without turning NULL evidence into a healthy zero."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if not math.isfinite(number):
+        return "n/a"
+    return f"{number:,.{decimals}f}{suffix}"
+
+
 _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin → Migrations & freshness."
 
 
@@ -704,13 +716,8 @@ def render() -> None:
     is_operator = _is_operator()
 
     company = f["company"]
-    events = run(mart_sql.open_alert_events(500, company), page=_PAGE,
-                 key=f"alert_events_{company}", tier="live",
-                 source="ALERT_EVENTS" if company == "ALL"
-                 else f"ALERT_EVENTS ({company} + account-level)")
-    # C4/C7: count severities with a single uncapped COUNT_IF aggregate — the
-    # 500-row feed below undercounts the tiles exactly when it matters most (a
-    # storm of >500 open events). The feed-derived counts remain the fallback.
+    # The small uncapped count owns the section badge. The 500-row event payload
+    # loads only inside Open events, after the lazy section is selected.
     counts = run(mart_sql.open_alert_severity_counts(company), page=_PAGE,
                  key=f"alert_counts_{company}", tier="live",
                  source="ALERT_EVENTS (COUNT_IF by severity, uncapped)")
@@ -719,37 +726,11 @@ def render() -> None:
         crit_n = int(safe_float(_c0.get("CRIT")))
         high_n = int(safe_float(_c0.get("HIGH")))
         total_n = int(safe_float(_c0.get("TOTAL")))
-    elif events.ok and not events.empty:
-        _sev = events.df["SEVERITY"].astype(str).str.upper()
-        crit_n = int((_sev == "CRITICAL").sum())
-        high_n = int((_sev == "HIGH").sum())
-        total_n = len(events.df)
     else:
         crit_n = high_n = total_n = 0
-    if counts.usable() or events.ok:
-        kpi_row([
-            {"label": "Open critical", "value": f"{crit_n}",
-             "severity": "bad" if crit_n else "ok",
-             "delta_color": "inverse" if crit_n else "off"},
-            {"label": "Open high", "value": f"{high_n}",
-             "severity": "warn" if high_n else "ok"},
-            {"label": "Open total", "value": f"{total_n}",
-             "help": ("True open+ack count across all severities. The feed table below "
-                      "shows the 500 most severe/newest; tiles count every open event."
-                      if total_n > 500 else "Open + acknowledged events across all severities."),
-             "severity": "info"},
-        ])
-
-    _delivery_status()
-    # Directly under the who-gets-paged banner: WHEN did a page last actually land, and
-    # is anything waiting. The banner answers "is the pipe configured"; this answers
-    # "is it moving" — the question that had no answer on 2026-07-31.
-    _last_delivery_card()
-    # rec7: badge the Open-events pill with the open count already in hand (0 extra
-    # queries) so triage volume is visible from any section.
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
                             key="alerts_section",
-                            counts={"Open events": total_n} if (counts.usable() or events.ok) else None)
+                            counts={"Open events": total_n} if counts.usable() else None)
     _contracts = {
         "Open events": {
             "applies": ("company",),
@@ -772,6 +753,38 @@ def render() -> None:
     section_filter_contract(f, **_contracts[section])
 
     if section == "Open events":
+        events = run(mart_sql.open_alert_events(500, company), page=_PAGE,
+                     key=f"alert_events_{company}", tier="live",
+                     source="ALERT_EVENTS" if company == "ALL"
+                     else f"ALERT_EVENTS ({company} + account-level)")
+        # The uncapped aggregate owns the tiles; feed-derived counts are only a
+        # labeled fallback when that tiny aggregate fails.
+        _counts_known = counts.usable()
+        if not _counts_known and events.ok:
+            if events.empty:
+                crit_n = high_n = total_n = 0
+            else:
+                _sev = events.df["SEVERITY"].astype(str).str.upper()
+                crit_n = int((_sev == "CRITICAL").sum())
+                high_n = int((_sev == "HIGH").sum())
+                total_n = len(events.df)
+            _counts_known = True
+        if _counts_known:
+            kpi_row([
+                {"label": "Open critical", "value": f"{crit_n}",
+                 "severity": "bad" if crit_n else "ok",
+                 "delta_color": "inverse" if crit_n else "off"},
+                {"label": "Open high", "value": f"{high_n}",
+                 "severity": "warn" if high_n else "ok"},
+                {"label": "Open total", "value": f"{total_n}",
+                 "help": ("True open+ack count across all severities. The feed table below "
+                          "shows the 500 most severe/newest; tiles count every open event."
+                          if counts.usable() and total_n > 500
+                          else "Open + acknowledged events across all severities."),
+                 "severity": "info"},
+            ])
+        _delivery_status()
+        _last_delivery_card()
         _open_events_section(events, is_operator)
     elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
@@ -882,12 +895,12 @@ def render() -> None:
                            f"{humanize_duration(im.get('MTTR_MIN'), 'min')}"),
                  "help": "Detected -> acknowledged / resolved at INCIDENT grain — "
                          "the alert-grain pair above counts individual events."},
-                {"label": "Reopen rate", "value": f"{safe_float(im.get('REOPEN_PCT')):,.0f}%",
+                {"label": "Reopen rate", "value": _optional_number(im.get("REOPEN_PCT"), "%"),
                  "help": "Share of closed incidents reopened within 14 days (owner-set window)."},
-                {"label": "Alerts / incident", "value": f"{safe_float(im.get('COMPRESSION')):,.1f}",
+                {"label": "Alerts / incident", "value": _optional_number(im.get("COMPRESSION"), decimals=1),
                  "help": "How many alerts each incident absorbs — higher means storms "
                          "compress into one object instead of many pages."},
-                {"label": "Change-correlated", "value": f"{safe_float(im.get('CHANGE_PCT')):,.0f}%",
+                {"label": "Change-correlated", "value": _optional_number(im.get("CHANGE_PCT"), "%"),
                  "help": "Incidents with a warehouse-change or deploy member — how often "
                          "a change explains the breakage."},
             ])
@@ -958,6 +971,8 @@ def render() -> None:
             empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 
     else:
+        _delivery_status()
+        _last_delivery_card()
         st.markdown("**Routing (family → channel)**")
         panel_help(
             "Routing sends each family/severity through a named notification "

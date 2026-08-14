@@ -970,7 +970,8 @@ def _metric_registry_tab() -> None:
     from app.logic import metric_registry as mr
     st.markdown("**Cost metric registry — what every number means**")
     st.caption(
-        "Read a figure by its METHOD: BILLED ties to the invoice, METERED is "
+        "Read a figure by its METHOD: BILLED uses Snowflake's billed-credit basis "
+        "(organization currency is invoice truth), METERED is "
         "exact usage (idle in, CS unadjusted), MEASURED is attributed compute "
         "(idle out), ALLOCATED is a share-based estimate, ESTIMATED is "
         "bytes/credits x a configured rate. Documentation-grade today: the "

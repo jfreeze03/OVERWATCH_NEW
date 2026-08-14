@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.156.0 - Metric trust, decision surfaces, and hot-path performance (2026-08-14)
+
+App-only implementation round from the v4.155 metric/visual/performance audits.
+No migration; the owner-deferred loader scan consolidation remains deferred.
+
+- **Headline trust.** Brief and Control Room alert counts now use the same
+  company-plus-account-level scope as the queues they open; Overview wording
+  matches that scope. Zero query/task/SLO denominators and failed savings-ledger
+  reads render as `n/a`, `No evidence`, or `Unavailable` instead of healthy zeroes.
+- **Billing terminology.** Configured-rate credit spend and credit-commitment
+  runway no longer claim to be the full invoice. Organization currency/rate-card
+  panels remain the explicitly labeled billing truth.
+- **Decision-first surfaces.** Security's queue/governance overview is now its
+  own default lazy section, so Access/Changes/Clients/Egress/Trust Center do not
+  pay for it. Warehouse contention ranks average queue per query. Idle,
+  right-sizing, and warehouse-change tables lead with the decision and reveal
+  full evidence only after selection—never silently row zero.
+- **Hot-path performance.** Operations → Queries batches its hourly summary,
+  activity, top-query, and failure-family marts while preserving filtered live
+  fallbacks. Alerts selects its lazy section before loading the 500-row open
+  feed. Table styling and eager CSVs use cell budgets, and Security Clients no
+  longer serializes a duplicate CSV.
+
 ## 4.155.0 - UI theme and section readability polish (2026-08-14)
 
 App-only visual pass from the live screenshot review. No migration.

@@ -76,8 +76,16 @@ def test_compare_adjacent_windows_prune_as_one_range():
 
 def test_exports_are_lazy_for_big_frames_and_styler_bounded():
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
-    from app.ui.components import STYLER_MAX_ROWS
+    from app.ui.components import (
+        EAGER_CSV_MAX_CELLS,
+        EAGER_CSV_MAX_ROWS,
+        STYLER_MAX_CELLS,
+        STYLER_MAX_ROWS,
+    )
     assert STYLER_MAX_ROWS == 400
+    assert STYLER_MAX_CELLS == 6_000
+    assert EAGER_CSV_MAX_ROWS == 200
+    assert EAGER_CSV_MAX_CELLS == 1_500
     assert "ow_dlprep_" in comp                            # two-step export path exists
     seg = comp.split("ow_dlprep_", 1)[0].split("every real table is exportable", 1)[1]
-    assert "len(df) <= 200" in seg                         # small frames stay one-click
+    assert "_cell_count <= EAGER_CSV_MAX_CELLS" in seg     # only genuinely small payloads stay one-click

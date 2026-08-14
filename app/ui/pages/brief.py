@@ -80,6 +80,9 @@ def render() -> None:
     _b_live = run_batch([
         {"key": "inc", "sql": mart_sql.open_incidents(5, company),
          "source": f"INCIDENTS (open, {company} + account-level)"},
+        {"key": f"brief_alert_counts_{company}",
+         "sql": mart_sql.open_alert_severity_counts(company),
+         "source": f"ALERT_EVENTS counts ({company} + account-level)"},
         {"key": "events", "sql": mart_sql.open_alert_events(50, company),
          "source": "ALERT_EVENTS"},
         {"key": "acts", "sql": mart_sql.action_queue(100), "source": "ACTION_QUEUE"},
@@ -109,22 +112,36 @@ def render() -> None:
                                      safe_float(vals.get("MTD_CREDITS_AI")), rate, ai_rate)
     else:
         mtd_usd = mtd_credits * rate
+    alert_counts = _b_live.get(f"brief_alert_counts_{company}")
+    if alert_counts is None or not alert_counts.ok:
+        alert_counts = run(
+            mart_sql.open_alert_severity_counts(company),
+            page=_PAGE,
+            key=f"brief_alert_counts_{company}",
+            tier="live",
+            source=f"ALERT_EVENTS counts ({company} + account-level)",
+        )
+    scoped_crit: int | None = None
+    if alert_counts is not None and alert_counts.usable():
+        scoped_crit = int(safe_float(alert_counts.df.iloc[0].get("CRIT")))
     # Honesty contract: when telemetry is unreachable the Brief says SO —
     # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
-        {"label": "MTD spend (account)",
+        {"label": "MTD credit spend (account)",
          "badge": "mart" if strip_up else "stale",
          "value": format_usd(mtd_usd) if strip_up else "—",
          "delta": (f"{mtd_credits:,.0f} credits" if strip_up else "telemetry unreachable"),
          "delta_color": "off",
          "severity": "" if strip_up else "warn",
-         "help": "Account-wide billed credits this month. Metering-daily has no company "
-                 "dimension; the company filter scopes warehouse, attribution, and user views."},
+         "help": "Account-wide credit-billed services at configured rates this month. "
+                 "Storage, transfer, and organization rate-card adjustments are separate; "
+                 "the company filter scopes warehouse, attribution, and user views."},
         {"label": "Open criticals",
-         "badge": "live" if strip_up else "stale",
-         "value": vals.get("OPEN_CRITICAL", "0") if strip_up else "—",
-         "severity": "" if strip_up else "warn",
-         "delta_color": "inverse" if vals.get("OPEN_CRITICAL", "0") not in ("0", "") else "off"},
+         "badge": "live" if scoped_crit is not None else "stale",
+         "value": f"{scoped_crit}" if scoped_crit is not None else "—",
+         "severity": "bad" if scoped_crit else ("" if scoped_crit is not None else "warn"),
+         "delta_color": "inverse" if scoped_crit else "off",
+         "help": f"Open criticals for {company} plus account-level events — the same scope as Fires."},
         {"label": "Stalest telemetry",
          # N15: name the source, not just the age — "which one?" is the DBA's
          # first question. N14: the strip's age arm is already cadence-aware.
@@ -142,12 +159,13 @@ def render() -> None:
         days_left = safe_float(erow.get("DAYS_LEFT"), -1.0)
         if total > 0 and days_left >= 0:
             kpis.append({
-                "label": "Contract exhausts",
+                "label": "Credit commitment exhausts",
                 "value": str(erow.get("EXHAUST_DATE")),
                 "delta": f"{days_left:,.0f} days at current burn",
                 "delta_color": "inverse" if days_left <= 90 else "off",
-                "help": "Straight-line on trailing 30d billed credits vs contracted credits. "
-                        "Scenarios: Cost & Contract > Contract & Forecast > Renewal planner.",
+                "help": "Configured-rate credit runway from trailing 30 complete days. "
+                        "It excludes storage, transfer, and organization currency adjustments; "
+                        "billing-truth runway is on Cost & Contract > Contract & Forecast.",
             })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
