@@ -19,16 +19,20 @@ import streamlit as st
 _TOKENS = """
 <style>
 :root {
-  --ow-bg:#0a0f1c; --ow-surface:#0f1729; --ow-raised:#131d33;
+  /* v4.155 recolor (owner review 2026-08-14): neutral graphite chrome replaces
+     the blue-navy wash, indigo accent replaces the stock sky/cyan pair, and
+     --ow-bad is a true red instead of pink-leaning rose. INFO stays sky, so
+     informational (sky) and interactive/brand (indigo) no longer share a hue. */
+  --ow-bg:#0c0d12; --ow-surface:#13151c; --ow-raised:#1a1d26;
   --ow-hairline:rgba(148,163,184,0.16); --ow-hairline2:rgba(148,163,184,0.28);
-  /* rec 15 (a11y): --ow-ink-mute lifted #6b7a90 -> #8593a8 so the small (0.62-0.70rem)
-     muted labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.1, surface 5.7,
+  /* rec 15 (a11y): --ow-ink-mute stays sized so the small (0.62-0.70rem) muted
+     labels clear WCAG AA 4.5:1 on every surface they land on (bg 6.2, surface 5.8,
      raised 5.4). Every muted label references this one token, so one change fixes all. */
-  --ow-ink:#e8eef7; --ow-ink-soft:#aab6c8; --ow-ink-mute:#8593a8;
-  --ow-accent:#38bdf8; --ow-accent2:#22d3ee;
-  --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#fb7185; --ow-info:#38bdf8;
+  --ow-ink:#edeef2; --ow-ink-soft:#b0b4bf; --ow-ink-mute:#8b92a1;
+  --ow-accent:#818cf8; --ow-accent2:#a5b4fc;
+  --ow-ok:#34d399; --ow-warn:#fbbf24; --ow-bad:#ef5350; --ow-info:#38bdf8;
   --ow-ok-dim:rgba(52,211,153,0.14); --ow-warn-dim:rgba(251,191,36,0.14);
-  --ow-bad-dim:rgba(251,113,133,0.14); --ow-info-dim:rgba(56,189,248,0.14);
+  --ow-bad-dim:rgba(239,83,80,0.14); --ow-info-dim:rgba(56,189,248,0.14);
   --ow-1:4px; --ow-2:8px; --ow-3:12px; --ow-4:16px; --ow-5:24px; --ow-6:32px;
   --ow-r:8px; --ow-r-sm:6px; --ow-r-lg:12px; --ow-r-pill:999px;
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
@@ -68,7 +72,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
 .ow-sev-warn div[data-testid="stMetric"]::before { background:var(--ow-warn); opacity:1; }
 .ow-sev-ok div[data-testid="stMetric"]::before { background:var(--ow-ok); opacity:1; }
-.ow-sev-bad div[data-testid="stMetric"] { border-color:rgba(251,113,133,0.35); }
+.ow-sev-bad div[data-testid="stMetric"] { border-color:rgba(239,83,80,0.35); }
 
 .ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
@@ -100,7 +104,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   color:var(--ow-ink-mute); font-size:0.75rem; font-weight:700; line-height:1; cursor:help;
   position:relative; outline:none; text-transform:none; letter-spacing:0; }
 .ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
-.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(56,189,248,0.45); }
+.ow-help:focus-visible { box-shadow:0 0 0 2px rgba(129,140,248,0.45); }
 .ow-help[data-help]::after {
   content:attr(data-help); position:absolute; left:0; top:calc(100% + 6px);
   min-width:200px; max-width:300px; padding:8px 10px; border-radius:var(--ow-r-sm);
@@ -129,7 +133,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   gap:12px; align-items:center; padding:7px 10px; border-left:3px solid var(--ow-warn);
   border-bottom:1px solid var(--ow-hairline); background:rgba(251,191,36,0.045); }
 .ow-exception:last-child { border-bottom:0; }
-.ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(251,113,133,0.055); }
+.ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(239,83,80,0.055); }
 .ow-exception--ok { border-left-color:var(--ow-ok); background:rgba(52,211,153,0.045); }
 .ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
 .ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
@@ -155,7 +159,7 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 10px; margin:0 6px 4px 0; border-radius:var(--ow-r-pill);
   font-size:0.72rem; font-weight:620; border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); background:rgba(148,163,184,0.05); }
 .ow-chip-ok { color:var(--ow-ok); border-color:rgba(52,211,153,0.45); background:var(--ow-ok-dim); }
-.ow-chip-bad { color:var(--ow-bad); border-color:rgba(251,113,133,0.45); background:var(--ow-bad-dim); }
+.ow-chip-bad { color:var(--ow-bad); border-color:rgba(239,83,80,0.45); background:var(--ow-bad-dim); }
 .ow-chip-warn { color:var(--ow-warn); border-color:rgba(251,191,36,0.45); background:var(--ow-warn-dim); }
 
 /* Chip pills (chip() helper — scope summary in the status bar + severity pills).
@@ -168,13 +172,13 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-chip b{color:var(--ow-ink);font-weight:700;}
 .ow-chip-warn{border-color:rgba(251,191,36,0.45);background:var(--ow-warn-dim);color:var(--ow-ink);}
 div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
-  border-color:rgba(56,189,248,0.40);
-  box-shadow:0 0 0 1px rgba(56,189,248,0.22),var(--ow-shadow);}
+  border-color:rgba(129,140,248,0.40);
+  box-shadow:0 0 0 1px rgba(129,140,248,0.22),var(--ow-shadow);}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
-  box-shadow:0 0 10px rgba(56,189,248,0.9),0 0 2px rgba(56,189,248,1); animation:ow-pulse 2.8s ease-in-out infinite; }
+  box-shadow:0 0 10px rgba(129,140,248,0.9),0 0 2px rgba(129,140,248,1); animation:ow-pulse 2.8s ease-in-out infinite; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
 .ow-brand-word { font-weight:800; letter-spacing:0.02em;
   background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
@@ -201,7 +205,7 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
-.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(56,189,248,0.6); }
+.stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(129,140,248,0.6); }
 .stButton > button[kind="primary"],
 .stButton > button[data-testid="stBaseButton-primary"],
 button[data-testid="stBaseButton-primary"],
@@ -220,10 +224,10 @@ button[data-baseweb="tab"] { font-weight:640; }
 /* Multiselect chips: the default BaseWeb tag rendered as a pale wash —
    selections were unreadable (live finding 2026-07-10, Alerts bulk picker).
    Dark chip, accent hairline, real text. */
-.stMultiSelect [data-baseweb="tag"] { background:rgba(56,189,248,0.16) !important;
-  border:1px solid rgba(56,189,248,0.55) !important; border-radius:var(--ow-r-sm); }
-.stMultiSelect [data-baseweb="tag"] span { color:#dbeafe !important; }
-.stMultiSelect [data-baseweb="tag"] svg { fill:#dbeafe !important; }
+.stMultiSelect [data-baseweb="tag"] { background:rgba(129,140,248,0.16) !important;
+  border:1px solid rgba(129,140,248,0.55) !important; border-radius:var(--ow-r-sm); }
+.stMultiSelect [data-baseweb="tag"] span { color:#e0e7ff !important; }
+.stMultiSelect [data-baseweb="tag"] svg { fill:#e0e7ff !important; }
 [data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; box-shadow:var(--ow-shadow); }
 [data-testid="stExpander"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); background:var(--ow-surface); }
 [data-testid="stExpander"] summary:hover { color:var(--ow-accent); }
@@ -233,7 +237,7 @@ section[data-testid="stSidebar"] { background:linear-gradient(180deg,var(--ow-bg
 section[data-testid="stSidebar"] div[role="radiogroup"] label { border-radius:var(--ow-r-sm); padding:4px 10px; margin:1px 0; transition:background var(--ow-ease); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:rgba(148,163,184,0.10); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
-  background:linear-gradient(90deg,rgba(56,189,248,0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
+  background:linear-gradient(90deg,rgba(129,140,248,0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
 
 @media (max-width:640px) {
   .block-container { padding-left:0.6rem; padding-right:0.6rem; }

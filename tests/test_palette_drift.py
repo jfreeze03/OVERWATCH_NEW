@@ -49,7 +49,7 @@ def test_palette_matches_theme_tokens():
 # copy in a consumer is drift the palette-vs-theme test alone would miss (the review
 # found several such residuals). Accent/slate hues are excluded — they legitimately
 # recur in gradients (charts heatmap ramp) and light-theme lookup keys.
-_SEVERITY_HUES = ("#34d399", "#fbbf24", "#fb7185", "#fb923c")
+_SEVERITY_HUES = ("#34d399", "#fbbf24", "#ef5350", "#fb923c")
 _CONSUMERS = ("app/main.py", "app/ui/components.py", "app/ui/charts.py",
               "app/ui/status_colors.py")
 
