@@ -48,6 +48,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    section_toc,
     selectable_nav_table,
     styled_table,
 )
@@ -545,7 +546,16 @@ def render() -> None:
         },
     ]
 
-    section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
+    section_toc([
+        ("Company economics", "ov-economics"),
+        ("Account risk", "ov-risk"),
+        ("Top actions", "ov-actions"),
+        ("Cost drivers", "ov-drivers"),
+        ("Monthly spend", "ov-monthly"),
+        ("Spend trend", "ov-trend"),
+    ])
+    section_header("Company economics", "info", "spend", badge=f"{company} · {days}d",
+                   anchor="ov-economics")
     section_filter_contract(
         f,
         applies=("company", "days"),
@@ -558,7 +568,8 @@ def render() -> None:
     )
     kpi_row(company_kpis)
 
-    section_header("Account risk & contract", "warn" if critical_alerts else "info", "contract")
+    section_header("Account risk & contract", "warn" if critical_alerts else "info", "contract",
+                   anchor="ov-risk")
     section_filter_contract(
         f,
         applies=(),
@@ -583,7 +594,7 @@ def render() -> None:
     action_lines: list[str] = []
     left, right = st.columns([1.15, 1.0])
     with left:
-        section_header("Top actions")
+        section_header("Top actions", "info", "control", anchor="ov-actions")
         section_filter_contract(
             f,
             applies=(),
@@ -636,7 +647,7 @@ def render() -> None:
                     for _, a in ranked.iterrows()
                 ]
     with right:
-        section_header("Top cost drivers")
+        section_header("Top cost drivers", "info", "spend", anchor="ov-drivers")
         section_filter_contract(
             f,
             applies=("company", "days"),
@@ -703,7 +714,7 @@ def render() -> None:
             })
 
     # ---- Monthly spend by warehouse (owner ask 2026-07-11: the boss chart) --
-    section_header("Monthly spend by warehouse")
+    section_header("Monthly spend by warehouse", "info", "warehouse", anchor="ov-monthly")
     section_filter_contract(
         f,
         applies=("company",),
@@ -759,7 +770,7 @@ def render() -> None:
         result_caption(_mres)
 
     # ---- Spend trend ---------------------------------------------------------
-    section_header("Spend trend")
+    section_header("Spend trend", "info", "spend", anchor="ov-trend")
     section_filter_contract(
         f,
         applies=("company", "days"),

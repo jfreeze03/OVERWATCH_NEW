@@ -310,6 +310,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     styled_table(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
                    "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
+        height=360, sort_label="most recent first",
     )
     result_caption(res)
     ai_evaluation_panel(
@@ -939,6 +940,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 
 
 def _warehouses_tab(company: str, rate: float) -> None:
+    section_header("Daily warehouse spend & anomalies (30d)", "info", "warehouse")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="recent", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",

@@ -78,7 +78,7 @@ def test_rec16_boss_chart_defaults_and_movers():
 # rec4 + rec10 — Top actions above the charts, and clickable
 def test_rec4_top_actions_above_boss_chart():
     ov = _src("app/ui/pages/overview.py")
-    assert ov.index('section_header("Top actions")') < ov.index('section_header("Monthly spend by warehouse")')
+    assert ov.index('section_header("Top actions"') < ov.index('section_header("Monthly spend by warehouse"')
 
 
 def test_rec10_top_actions_are_clickable():

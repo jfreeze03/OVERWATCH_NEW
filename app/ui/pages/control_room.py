@@ -784,7 +784,8 @@ def render() -> None:
                    key=f"cr_lockspike_{company}", tier="recent",
                    source="MART_LOCK_WAIT_DAILY (spikes)")
         if _spk.ok and not _spk.empty:
-            st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
+            section_header("Lock-wait spikes (last day vs prior 6-day avg)", "warn",
+                           "warehouse", anchor="cr-lockspike")
             styled_table(_spk.df, height=180)
             st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
                        "Warehouses section has the full table and history.")

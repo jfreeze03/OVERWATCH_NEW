@@ -142,13 +142,18 @@ def test_overview_orders_economics_risk_actions_drivers_then_context():
     ordered = (
         'section_header("Company economics"',
         'section_header("Account risk & contract"',
-        'section_header("Top actions")',
-        'section_header("Top cost drivers")',
-        'section_header("Monthly spend by warehouse")',
-        'section_header("Spend trend")',
+        'section_header("Top actions"',
+        'section_header("Top cost drivers"',
+        'section_header("Monthly spend by warehouse"',
+        'section_header("Spend trend"',
     )
     positions = [source.index(fragment) for fragment in ordered]
     assert positions == sorted(positions)
+    # v4.155: every Overview section carries an anchor so the jump-nav TOC lands on it.
+    for anchor in ("ov-economics", "ov-risk", "ov-actions", "ov-drivers",
+                   "ov-monthly", "ov-trend"):
+        assert f'anchor="{anchor}"' in source
+    assert "section_toc([" in source
     assert source.count("section_filter_contract(") >= len(ordered)
     risk_contract = source.split('section_header("Account risk & contract"', 1)[1]
     risk_contract = risk_contract.split("kpi_row(account_kpis)", 1)[0]

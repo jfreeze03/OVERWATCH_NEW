@@ -86,7 +86,9 @@ def test_rec6_control_room_headings():
     cr = _src("app/ui/pages/control_room.py")
     for title in ("Triage queue", "Incidents", "Telemetry freshness", "Spend movers (window vs prior)"):
         assert f'section_header("{title}")' in cr
-    assert cr.count("st.subheader(") <= 1                     # only the one sub-panel remains
+    # v4.155: the last st.subheader (lock-wait spikes) became a section_header too.
+    assert cr.count("st.subheader(") == 0                     # every panel uses the styled header
+    assert 'section_header("Lock-wait spikes' in cr
 
 
 # A5 — one dollar-axis spelling

@@ -402,7 +402,7 @@ def _migrations_tab() -> None:
     applied = set()
     if not res.empty:
         applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
-        styled_table(res.df)
+        styled_table(res.df, height=300)
     missing = [f"V{n:03d} ({name})" for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
         # $-escape: migration descriptions carry '$' (V036 "measured $", V065 "MTD$/...") —
@@ -433,7 +433,7 @@ def _migrations_tab() -> None:
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     if guard(fresh, "Freshness view empty — have the loader tasks run yet?",
              setup_hint="Tasks resume at the end of V004. Check SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH."):
-        styled_table(fresh.df)
+        styled_table(fresh.df, height=300)
         if st.toggle("Diagnose stale sources", key="adm_stale_diagnose"):
             # The deploy-gap week (2026-07): stale marts meant a failing
             # loader, a never-run backfill, or a suspended task. Map each

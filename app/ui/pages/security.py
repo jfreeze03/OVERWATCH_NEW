@@ -118,6 +118,8 @@ def _access_tab(company: str, days: int) -> None:
         ("New networks", "sec-newnet"),
         ("Expiring creds", "sec-creds"),
         ("Dormant users", "sec-dormant"),
+        ("Unused roles", "sec-unused"),
+        ("Role grants", "sec-grants"),
         ("Effective access", "sec-effective"),
     ])
     section_header("MFA gaps with password-login evidence (30d)", "warn", "security",
@@ -130,7 +132,7 @@ def _access_tab(company: str, days: int) -> None:
             "value": f"{len(mfa.df)}",
             "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
         }])
-        styled_table(with_user_names(mfa.df, _PAGE))
+        styled_table(with_user_names(mfa.df, _PAGE), height=280)
         result_caption(mfa)
 
     left, right = st.columns(2)
@@ -143,7 +145,7 @@ def _access_tab(company: str, days: int) -> None:
         if res.ok and res.empty:
             st.success("No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
-            styled_table(with_user_names(res.df, _PAGE))
+            styled_table(with_user_names(res.df, _PAGE), height=280)
     with right:
         section_header("Privileged role holders", "info", "admin", anchor="sec-privroles")
         res = stable_batch.get("admins") or run(
@@ -239,7 +241,8 @@ def _access_tab(company: str, days: int) -> None:
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.
-    section_header("Unused roles (90d) — revoke candidates", "info", "admin")
+    section_header("Unused roles (90d) — revoke candidates", "info", "admin",
+                   anchor="sec-unused")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",
@@ -248,18 +251,19 @@ def _access_tab(company: str, days: int) -> None:
     if ur.ok and ur.empty:
         st.success("Every active role was assumed in the last 90 days.")
     elif guard(ur, ""):
-        styled_table(ur.df)
+        styled_table(ur.df, height=280)
         st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
 
-    section_header("Role grants in the window (account-wide)", "info", "admin")
+    section_header("Role grants in the window (account-wide)", "info", "admin",
+                   anchor="sec-grants")
     res = batch.get("grants") or run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
               tier="recent", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
     if res.ok and res.empty:
         st.success("No new role grants in this window.")
     elif guard(res, ""):
         styled_table(with_user_names(with_user_names(res.df, _PAGE), _PAGE,
-                                     user_col="GRANTED_BY", display_col="Granted by"))
+                                     user_col="GRANTED_BY", display_col="Granted by"), height=280)
         result_caption(res)
 
     render_effective_access(company)
