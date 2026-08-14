@@ -467,6 +467,30 @@ def section_header(title: str, health: str = "", icon_name: str = "",
     )
 
 
+def subsection_header(title: str, desc: str = "", *, icon_name: str = "") -> None:
+    """A lightweight panel sub-heading — the consistent replacement for a raw
+    ``st.markdown("**Title**")`` inside a section.
+
+    Cost-parts and Admin panels historically titled their sub-panels with bare
+    bold markdown, which renders as plain text and gives those long pages no
+    visual grammar. This emits an underlined, tabular-weight sub-heading that
+    sits BELOW ``section_header`` in the hierarchy (no severity stripe) so a
+    section can carry several titled panels that still read as one family.
+
+    ``desc`` is an optional muted trailing clause (e.g. an "— explanation" that
+    used to be crammed into the bold string). ``icon_name`` optionally prefixes
+    one of the inline SVG glyphs."""
+    ico = (f'<span class="ow-subsection__icon">{icon(icon_name)}</span>'
+           if icon_name else "")
+    dsc = (f'<span class="ow-subsection__desc">{html.escape(desc)}</span>'
+           if desc else "")
+    st.markdown(
+        f'<div class="ow-subsection">{ico}'
+        f'<span class="ow-subsection__title">{html.escape(title)}</span>{dsc}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def section_toc(items: list[tuple[str, str]], lead: str = "Jump to") -> None:
     """rec5: a compact in-section 'jump to' strip for long, multi-panel views.
 

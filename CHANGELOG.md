@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.155.0 - UI refresh: recolor + consistent sub-panel headings (2026-08-14)
+
+App-only visual pass in response to an owner review ("I don't like the color
+scheme and some sections need to be displayed better"). No migration.
+
+- **Recolor — indigo brand accent + deeper cool neutrals.** Retired the stock
+  sky-blue (`#38bdf8`) for an indigo (`#6c8cff`) brand accent over a cyan
+  (`#22d3ee`) secondary, on deeper/cooler neutrals (`bg #090d17`,
+  `surface #0f1626`, `raised #17203a`) with clearer surface separation. `INFO`
+  tracks the accent (one blue family). Changed in lockstep across the single
+  source of truth (`app/ui/palette.py`), the `--ow-*` tokens + accent literals
+  in `app/theme.py`, `.streamlit/config.toml`, the `status_colors` INFO tint
+  (+ its light-theme equivalent), and the DAG toolbar's iframe CSS in
+  `charts.py`. All chrome still clears WCAG-AA for `--ow-ink-mute`
+  (`tests/test_codex_r2_wave.py`); `tests/test_palette_drift.py` keeps the
+  three color surfaces aligned. Semantic OK/WARN/BAD/HIGH hues are unchanged.
+- **Consistent sub-panel headings.** Added `components.subsection_header()`
+  (`.ow-subsection`: hairline-underlined, tabular-weight, one step below
+  `section_header`, no severity stripe) and replaced the ~68 bare
+  `st.markdown("**Title**")` panel titles on the Admin page and every
+  `cost_parts/*` module with it, so the long Cost/Admin surfaces share the same
+  visual grammar as the rest of the app. `tests/test_subsection_header.py` pins
+  the helper and fails if a bare bold subhead is reintroduced.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.

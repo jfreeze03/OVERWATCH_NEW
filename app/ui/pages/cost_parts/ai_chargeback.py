@@ -41,6 +41,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     styled_table,
+    subsection_header,
     with_user_names,
 )
 
@@ -54,7 +55,7 @@ _PAGE = "Cost & Contract"
 def _cortex_spend_tab(days: int, ai_rate: float) -> None:
     # v4.50: the storage panels moved to Spend & Attribution — storage is
     # neither chargeback nor AI, and the section label was hiding it.
-    st.markdown("**Cortex / AI spend (account-wide)**")
+    subsection_header('Cortex / AI spend (account-wide)')
     res = run_mart_first(
         mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
         page=_PAGE, key=f"cortex_{days}",
@@ -144,7 +145,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 
     left, right = st.columns([1.1, 1.0])
     with left:
-        st.markdown("**Cost by user (exact token credits)**")
+        subsection_header('Cost by user (exact token credits)')
         # Owner ask (v4.50): the chart shows people, not login names —
         # DISPLAY_NAME is "First Last" with a USER_NAME fallback.
         by_user = (enriched.groupby("DISPLAY_NAME", as_index=False)["SPEND_USD"].sum()
@@ -152,7 +153,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         charts.bar_usd(by_user, "DISPLAY_NAME", "SPEND_USD", title="Spend (USD)", top_n=12,
                        takeaway=True)
     with right:
-        st.markdown("**Daily usage by source**")
+        subsection_header('Daily usage by source')
         if live_res is not None:
             # The 365d fetch that served the rollup already holds every day —
             # folding it costs nothing, where the old live cortex_code_daily
@@ -170,7 +171,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             daily["USD"] = daily["TOTAL_CREDITS"].map(safe_float) * ai_rate
             charts.daily_stacked_usd(daily, "DAY", "SOURCE", "USD")
 
-    st.markdown("**User attribution detail**")
+    subsection_header('User attribution detail')
     styled_table(  # rec21: styled_table carries tz conversion, prettified headers, CSV
         enriched[[c for c in ["USER_NAME", "FIRST_NAME", "LAST_NAME", "EMAIL", "SOURCE",
                    "ACTIVE_DAYS", "TOTAL_REQUESTS",
@@ -200,7 +201,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         f"{CPR_MIN_REQUESTS} requests and {format_usd(CPR_MIN_PROJECTED_USD)} projected 30d "
         f"— a spike is unusual for this account, not just a pricier model."
     )
-    st.markdown("**Exceptions**")
+    subsection_header('Exceptions')
     if exceptions.empty:
         if ai_budget > 0:
             st.success("No users over 25% of the AI budget, scope total inside budget, "
@@ -271,7 +272,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 @st.fragment
 def _statement_export(company: str, rate: float) -> None:
     """Fragment: month picks and the zip build rerun this block only."""
-    st.markdown("**Monthly statement export**")
+    subsection_header('Monthly statement export')
     from datetime import timedelta
 
     today = account_today()
@@ -358,7 +359,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     )
     result_caption(dept_res, note="Idle credits stay with the owning department - that is the point of chargeback.")
 
-    st.markdown("**Role usage within warehouses (allocated)**")
+    subsection_header('Role usage within warehouses (allocated)')
     st.caption(
         "Execution-time share per role (elapsed on the live fallback) inside each warehouse x that warehouse's exact spend. "
         "Usage lens for conversations, not the billing number. Shares are whole-warehouse: "
@@ -407,7 +408,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                 },
             )
 
-    st.markdown("**Department budgets & pace**")
+    subsection_header('Department budgets & pace')
     panel_help(
         "Budgets live in DEPT_BUDGETS; the hourly scan raises COST_DEPT_BUDGET_PACE when a "
         "department runs ahead of pace (threshold on the Alerts page). Spend is the "

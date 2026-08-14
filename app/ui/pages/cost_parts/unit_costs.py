@@ -30,6 +30,7 @@ from app.ui.components import (
     run_mart_first,
     snowsight_profile_column,
     styled_table,
+    subsection_header,
     user_display_map,
     with_user_names,
 )
@@ -142,7 +143,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if kpis:
         kpi_row(kpis)
 
-    st.markdown("**Most expensive queries — measured $ each**")
+    subsection_header('Most expensive queries — measured $ each')
     if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
         qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
@@ -156,7 +157,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "the idle advisor, not the query that happened to run.")
 
     st.divider()
-    st.markdown("**Stored procedures — $/call leaderboard**")
+    subsection_header('Stored procedures — $/call leaderboard')
     if guard(p_res, "No CALLs with attributed credits in this scope/window."):
         pdf = p_res.df.copy()
         # Click a row -> the trend panel below prefills with that proc
@@ -180,7 +181,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                    "Change-impact (Operations) watches these numbers around "
                                    "each ALTER.")
 
-    st.markdown("**Repeated patterns — the silent spend (measured $)**")
+    subsection_header('Repeated patterns — the silent spend (measured $)')
     # Owner ask (2026-07-11): "a visual of bad code and how it could cost us
     # silently." Unlike the POC's estimates these are MEASURED attribution
     # credits per parameterized hash — one cheap query run thousands of
@@ -274,7 +275,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
                         kdf = build_call_tree(kdf, _cid)
                         kdf, _tree_cfg = snowsight_profile_column(kdf, _PAGE)
-                        st.markdown("**Where the money went inside this CALL**")
+                        subsection_header('Where the money went inside this CALL')
                         _tree_columns = [
                             "STEP", "QUERY_ID", "PROFILE", "STEP_PREVIEW", "STEP_START",
                             "ELAPSED_SEC", "CREDITS", "USD",
@@ -290,7 +291,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         )
 
     st.divider()
-    st.markdown("**AI — $ by function/model (or Cortex Code source)**")
+    subsection_header('AI — $ by function/model (or Cortex Code source)')
     if not ai_res.usable():
         # This account bills AI through Cortex CODE (Snowsight/CLI token
         # credits), not SQL Cortex functions — fall back to those views
@@ -318,7 +319,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                     "attribution lives under Chargeback & AI.")
 
     st.divider()
-    st.markdown("**ETL unit costs (tagged pipelines)**")
+    subsection_header('ETL unit costs (tagged pipelines)')
     # $-escape: four $/unit tokens in one caption pair into LaTeX math spans
     st.caption(md_dollars(
         "Cost governance for pipelines that set a JSON QUERY_TAG "
@@ -373,7 +374,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                      "Method = MEASURED (Admin → Metrics).")
 
     st.divider()
-    st.markdown("**Task-graph pipeline costs**")
+    subsection_header('Task-graph pipeline costs')
     # Moved from Operations > Task graphs ($) (v4.50): $/run per pipeline is
     # unit-cost material on the same QUERY_ATTRIBUTION_HISTORY basis as the
     # ETL panel above. Operational task health (failures, RCA, runtimes)
@@ -431,7 +432,7 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     sls = run(graph_sql.serverless_task_daily(days, company, database, schema_contains),
               page=_PAGE, key=f"sls_costs_{company}_{days}_{database}_{schema_contains}",
               tier="historical", source="SERVERLESS_TASK_HISTORY")
-    st.markdown("**Serverless tasks (billed separately, task-day grain)**")
+    subsection_header('Serverless tasks (billed separately, task-day grain)')
     if not sls.ok:
         st.caption("SERVERLESS_TASK_HISTORY is not accessible on this account/role.")
     elif sls.empty:

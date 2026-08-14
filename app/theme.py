@@ -123,6 +123,15 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
 
+/* Sub-panel heading (subsection_header) — one step below .ow-section: no stripe,
+   a hairline underline, tabular weight. Replaces bare **bold** panel titles on
+   the long Cost/Admin pages so nested panels share the section grammar. */
+.ow-subsection { display:flex; align-items:baseline; gap:8px; margin:14px 0 5px; padding-bottom:5px;
+  border-bottom:1px solid var(--ow-hairline); }
+.ow-subsection__title { font-size:0.9rem; font-weight:700; color:var(--ow-ink); letter-spacing:0.01em; }
+.ow-subsection__desc { font-size:0.74rem; color:var(--ow-ink-mute); font-weight:500; }
+.ow-subsection__icon { color:var(--ow-ink-soft); display:inline-flex; align-self:center; }
+
 .ow-filter-contract { margin:-2px 0 8px 0; padding:4px 10px; border-left:2px solid var(--ow-info);
   color:var(--ow-ink-mute); background:rgba(108,140,255,0.06); font-size:0.72rem; line-height:1.45; }
 

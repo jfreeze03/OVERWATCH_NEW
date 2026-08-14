@@ -34,6 +34,7 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     styled_table,
+    subsection_header,
 )
 
 _PAGE = "Cost & Contract"
@@ -123,7 +124,7 @@ def _org_truth_panel() -> bool:
         ends = pd.to_datetime(items.df["END_DATE"], errors="coerce").dropna()
         if len(ends):
             end_note = str(ends.max().date())
-    st.markdown("**Contract balance — billing truth (Snowflake org rate card, $)**")
+    subsection_header('Contract balance — billing truth (Snowflake org rate card, $)')
     burn = safe_float(summary.get("burn_per_day_usd"))
     runway = summary.get("runway_days")
     kpis = [
@@ -226,7 +227,7 @@ def _rate_card_reconciliation(settings: dict) -> None:
     Lives directly under the year projection because it audits the very rate
     the projection (and the pacing and planner below) price with: a steady
     drift here means every dollar on this page is scaled wrong."""
-    st.markdown("**Billing truth vs app model (this account)**")
+    subsection_header('Billing truth vs app model (this account)')
     st.caption(
         "Org rate-card dollars for THIS account vs the app's credits x configured rate. "
         "The compute bucket should track closely; the residual is rate-card reality "
@@ -291,7 +292,7 @@ def _org_accounts_spend() -> None:
     Org-grain billed spend is cost analysis, not app plumbing — it sits with
     the contract's billing truth, on the one Cost section that is already
     company-agnostic (org data has no company grain)."""
-    st.markdown("**Org accounts spend (all accounts, billed currency)**")
+    subsection_header('Org accounts spend (all accounts, billed currency)')
     st.caption(
         "Org-level billed spend in currency per account and usage type — the same source "
         "as Snowsight's Accounts Spend Summary (USAGE_IN_CURRENCY_DAILY, lags up to 24-72h)."
@@ -457,7 +458,7 @@ def _contract_tab(settings: dict) -> None:
            else "commitment but are not counted here. Grant ORGANIZATION_USAGE to see the dollar balance.")
     )
 
-    st.markdown("**Steering to commit — the levers, in dollars per day**")
+    subsection_header('Steering to commit — the levers, in dollars per day')
     # r13 #6: mart-first steering — the live idle join and pattern
     # allocation were the last Account Usage scans on this section's
     # default render (fleet slow-key evidence 2026-07-11).
@@ -534,7 +535,7 @@ def _contract_tab(settings: dict) -> None:
             "them after the fact."))
 
     st.divider()
-    st.markdown("**Renewal planner (what-if)**")
+    subsection_header('Renewal planner (what-if)')
     panel_help(
         "Straight-line scenarios from the trailing 30-day burn — no seasonality is "
         "invented. Recommended commit = term consumption plus your buffer. Use it to "

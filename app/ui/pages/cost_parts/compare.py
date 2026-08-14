@@ -33,7 +33,14 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.ui import charts
-from app.ui.components import guard, kpi_row, panel_help, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    panel_help,
+    result_caption,
+    styled_table,
+    subsection_header,
+)
 
 _PAGE = "Cost & Contract"
 
@@ -199,7 +206,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         st.info("No fact rows in either window yet — the hourly loaders fill these.")
 
     # ---- warehouse movers ---------------------------------------------------
-    st.markdown("**Warehouse movers — who moved the bill**")
+    subsection_header('Warehouse movers — who moved the bill')
     if guard(wh, "No warehouse credits in either window."):
         view = wh.df.copy()
         # #34: a partial backfill on either side manufactures false movers — gate
@@ -226,7 +233,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         result_caption(wh)
 
     # ---- pattern movers -----------------------------------------------------
-    st.markdown("**Pattern movers — the silent-spend delta (measured $)**")
+    subsection_header('Pattern movers — the silent-spend delta (measured $)')
     if not pat.ok:
         st.info("Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
                 "an admin can apply the pending schema update on Admin → Migrations & freshness.")
@@ -248,7 +255,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
 
     # ---- volume shape ---------------------------------------------------------
     if act.usable():
-        st.markdown("**Volume shape**")
+        subsection_header('Volume shape')
         rows = []
         for metric, col, scale in (("Queries", "QUERIES", 1.0), ("Fails", "FAILS", 1.0),
                                    ("Queued min", "QUEUED_SEC", 1 / 60), ("Remote spill GB", "SPILL_REMOTE_GB", 1.0)):
