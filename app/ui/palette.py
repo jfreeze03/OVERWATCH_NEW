@@ -17,15 +17,17 @@ from __future__ import annotations
 
 # --- Semantic hues (foreground / chart series) ------------------------------
 # These four mirror the --ow-ok/warn/bad/info tokens in theme.py (asserted by
-# the drift test). BAD doubles as CRITICAL; INFO doubles as the sky accent.
+# the drift test). BAD doubles as CRITICAL; INFO doubles as the indigo accent.
 OK = "#34d399"        # healthy / better / success            (--ow-ok)
 WARN = "#fbbf24"      # watch / MEDIUM / amber                 (--ow-warn)
 BAD = "#fb7185"       # act-now / CRITICAL / worse / red       (--ow-bad)
-INFO = "#38bdf8"      # informational / sky                    (--ow-info)
+INFO = "#818cf8"      # informational / indigo                 (--ow-info)
 
-# Accents (mirror --ow-accent / --ow-accent2).
-ACCENT = "#38bdf8"
-ACCENT2 = "#22d3ee"
+# Accents (mirror --ow-accent / --ow-accent2). v4.155: retired the generic
+# sky/cyan pair for a distinctive indigo->violet gradient on a warmer graphite
+# base (owner asked for a fresh scheme); INFO follows the accent as before.
+ACCENT = "#818cf8"    # indigo
+ACCENT2 = "#a78bfa"   # violet
 
 # Chart-only severity extras — not design tokens (no --ow-* equivalent), but
 # still centralized here so they have one home. HIGH is a distinct orange so a
@@ -35,9 +37,12 @@ LOW = "#8b98ad"       # LOW severity / chart axis labels
 MUTED = "#94a3b8"     # neutral slate (sidebar strip / status cells)
 
 # --- Chrome tokens (mirror theme.py; config.toml is aligned to these) --------
-BG = "#0a0f1c"        # app background       (--ow-bg)
-SURFACE = "#0f1729"   # cards / secondary bg (--ow-surface)
-RAISED = "#131d33"    # raised surfaces      (--ow-raised)
+# v4.155: warmer, near-neutral graphite (less pure-navy) so the indigo/violet
+# accent reads cleanly against it. Muted-ink contrast on RAISED stays >=4.5:1
+# (WCAG AA — enforced by tests/test_codex_r2_wave.py).
+BG = "#0e1016"        # app background       (--ow-bg)
+SURFACE = "#161922"   # cards / secondary bg (--ow-surface)
+RAISED = "#1e222e"    # raised surfaces      (--ow-raised)
 INK = "#e8eef7"       # primary text         (--ow-ink)
 INK_SOFT = "#aab6c8"  # secondary text       (--ow-ink-soft)
 INK_MUTE = "#8593a8"  # muted labels         (--ow-ink-mute)

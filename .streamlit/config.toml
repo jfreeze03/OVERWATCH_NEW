@@ -3,9 +3,9 @@
 # cards beside it. Edit palette.py + these together, not one alone.
 [theme]
 base = "dark"
-primaryColor = "#38bdf8"
-backgroundColor = "#0a0f1c"
-secondaryBackgroundColor = "#0f1729"
+primaryColor = "#818cf8"
+backgroundColor = "#0e1016"
+secondaryBackgroundColor = "#161922"
 textColor = "#e8eef7"
 
 [server]
