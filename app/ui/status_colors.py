@@ -1,7 +1,7 @@
 """Semantic status colors for tables and chips (pure module, tested).
 
 One palette for the whole app: red = act now, amber = watch, green = healthy,
-sky = informational, slate = neutral. Backgrounds are tints with dark text so
+indigo = informational, slate = neutral. Backgrounds are tints with dark text so
 contrast stays readable on the dark theme.
 """
 
@@ -16,7 +16,7 @@ _BAD = ("#7f1d1d", "#fecaca")     # deep red bg, light red text
 _HIGH = ("#7c2d12", "#fed7aa")    # deep orange — HIGH, distinct from CRITICAL red (r4)
 _WARN = ("#78350f", "#fde68a")    # amber
 _OK = ("#14532d", "#bbf7d0")      # green
-_INFO = ("#0c4a6e", "#bae6fd")    # sky
+_INFO = ("#312e81", "#c7d2fe")    # indigo (tracks --ow-info / --ow-accent)
 _MUTED = ("#1e293b", palette.MUTED)   # slate (text hue = rec50 single source)
 
 # The pairs above are dark-theme tuned (deep bg, light text). Light theme
@@ -27,7 +27,7 @@ _LIGHT_EQUIV = {
     ("#7c2d12", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
     ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
     ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
-    ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
+    ("#312e81", "#c7d2fe"): ("#e0e7ff", "#3730a3"),   # indigo INFO
     ("#1e293b", "#94a3b8"): ("#f1f5f9", "#475569"),
 }
 

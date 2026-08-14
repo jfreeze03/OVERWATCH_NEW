@@ -21,10 +21,12 @@ from __future__ import annotations
 OK = "#34d399"        # healthy / better / success            (--ow-ok)
 WARN = "#fbbf24"      # watch / MEDIUM / amber                 (--ow-warn)
 BAD = "#fb7185"       # act-now / CRITICAL / worse / red       (--ow-bad)
-INFO = "#38bdf8"      # informational / sky                    (--ow-info)
+INFO = "#6c8cff"      # informational / indigo                 (--ow-info)
 
-# Accents (mirror --ow-accent / --ow-accent2).
-ACCENT = "#38bdf8"
+# Accents (mirror --ow-accent / --ow-accent2). v4.155 recolor: the brand
+# identity moved off the stock sky-blue to an indigo->cyan pair for a cooler,
+# more distinctive command-center look. INFO tracks ACCENT (one blue family).
+ACCENT = "#6c8cff"
 ACCENT2 = "#22d3ee"
 
 # Chart-only severity extras — not design tokens (no --ow-* equivalent), but
@@ -35,9 +37,11 @@ LOW = "#8b98ad"       # LOW severity / chart axis labels
 MUTED = "#94a3b8"     # neutral slate (sidebar strip / status cells)
 
 # --- Chrome tokens (mirror theme.py; config.toml is aligned to these) --------
-BG = "#0a0f1c"        # app background       (--ow-bg)
-SURFACE = "#0f1729"   # cards / secondary bg (--ow-surface)
-RAISED = "#131d33"    # raised surfaces      (--ow-raised)
+# v4.155 recolor: deeper, slightly cooler neutrals with clearer bg/surface/raised
+# separation (all three still clear WCAG-AA for --ow-ink-mute, tested).
+BG = "#090d17"        # app background       (--ow-bg)
+SURFACE = "#0f1626"   # cards / secondary bg (--ow-surface)
+RAISED = "#17203a"    # raised surfaces      (--ow-raised)
 INK = "#e8eef7"       # primary text         (--ow-ink)
 INK_SOFT = "#aab6c8"  # secondary text       (--ow-ink-soft)
 INK_MUTE = "#8593a8"  # muted labels         (--ow-ink-mute)

@@ -33,7 +33,7 @@ SEV_COLORS = dict(palette.SEVERITY_HUES)
 # rec38: heat = orange (intuitive "hotness" for the hour x entity heatmap). ONE
 # ramp, referenced by the theme range AND hour_heatmap, so it is not a one-off
 # scheme string a shade off from everything else.
-# Starts at a visible dark-orange (NOT the page background #0a0f1c) so a low-but-
+# Starts at a visible dark-orange (NOT the page background #090d17) so a low-but-
 # NONZERO cell separates from an EMPTY (undrawn) cell, which stays page-dark —
 # the caller's "dark cells = no activity" reading depends on that separation.
 _HEATMAP_RANGE = ["#431407", "#7c2d12", "#c2410c", "#ea580c", "#fdba74"]
@@ -320,27 +320,27 @@ html, body {
 body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
 .dag-host {
   position: relative; width: 100%; height: __HEIGHT__px; overflow: hidden;
-  background: #0a0f1c; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;
+  background: #090d17; border: 1px solid rgba(148,163,184,.28); border-radius: 6px;
 }
 .dag-host:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; }
 .dag-host:fullscreen svg { height: 100vh; }
 .dag-toolbar {
   position: absolute; z-index: 4; top: 10px; right: 10px; display: flex; gap: 5px;
-  padding: 5px; background: rgba(15,23,41,.94); border: 1px solid rgba(148,163,184,.28);
+  padding: 5px; background: rgba(15,22,38,.94); border: 1px solid rgba(148,163,184,.28);
   border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
 }
 .dag-toolbar input {
   width: 190px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
-  border-radius: 5px; background: #0a0f1c; color: #e8eef7; font: 500 12px Inter, sans-serif;
+  border-radius: 5px; background: #090d17; color: #e8eef7; font: 500 12px Inter, sans-serif;
 }
-.dag-toolbar input:focus-visible { outline: 2px solid #38bdf8; outline-offset: 1px; }
+.dag-toolbar input:focus-visible { outline: 2px solid #6c8cff; outline-offset: 1px; }
 .dag-toolbar button {
   min-width: 34px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
-  border-radius: 5px; background: #131d33; color: #e8eef7;
+  border-radius: 5px; background: #17203a; color: #e8eef7;
   font: 650 13px/1 Inter, "Segoe UI", sans-serif; cursor: pointer;
 }
-.dag-toolbar button:hover { border-color: #38bdf8; background: #17233d; }
-.dag-toolbar button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+.dag-toolbar button:hover { border-color: #6c8cff; background: #202b4a; }
+.dag-toolbar button:focus-visible { outline: 2px solid #6c8cff; outline-offset: 2px; }
 svg {
   width: 100%; height: __HEIGHT__px; display: block; cursor: grab;
   touch-action: none; user-select: none;
@@ -351,7 +351,7 @@ svg.dragging { cursor: grabbing; }
   marker-end: url(#arrow);
 }
 .node rect {
-  fill: #131d33; stroke: var(--node-color); stroke-width: 2;
+  fill: #17203a; stroke: var(--node-color); stroke-width: 2;
   filter: url(#shadow);
 }
 .node:focus { outline: none; }
@@ -953,7 +953,7 @@ def event_timeline(df: pd.DataFrame) -> None:
     glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(
         color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng), legend=None), **common)
     dots = alt.Chart().mark_point(size=110, opacity=0.95, filled=True,
-                stroke="#0a0f1c", strokeWidth=0.6).encode(color=color, shape=shape, **common)
+                stroke="#090d17", strokeWidth=0.6).encode(color=color, shape=shape, **common)
     st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
                     use_container_width=True)
 
@@ -982,7 +982,7 @@ def operational_replay(df: pd.DataFrame) -> None:
     ]
     focus = (
         alt.Chart(data)
-        .mark_point(size=125, filled=True, stroke="#0a0f1c", strokeWidth=0.7)
+        .mark_point(size=125, filled=True, stroke="#090d17", strokeWidth=0.7)
         .encode(
             x=alt.X("AT:T", title=None, scale=alt.Scale(domain=brush)),
             y=alt.Y("EVENT_TYPE:N", title=None, sort="-x"),
@@ -1026,7 +1026,7 @@ def workload_portfolio(df: pd.DataFrame) -> None:
     lane_colors = [palette.BAD, palette.ACCENT, palette.WARN]
     chart = (
         alt.Chart(data)
-        .mark_circle(opacity=0.82, stroke="#0a0f1c", strokeWidth=0.8)
+        .mark_circle(opacity=0.82, stroke="#090d17", strokeWidth=0.8)
         .encode(
             x=alt.X(
                 "IMPACT_USD_30D:Q", title="Measured impact normalized to 30d (USD)",
