@@ -37,6 +37,8 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     section_filter_contract,
+    section_header,
+    section_toc,
     selectable_table,
     snowsight_profile_column,
     styled_table,
@@ -355,7 +357,7 @@ def _settings_tab(is_operator: bool) -> None:
         except (KeyError, TypeError):
             pass
 
-    st.markdown("**Change a setting**")
+    section_header("Change a setting", icon_name="admin", anchor="adm-change-setting")
     # rec45: seed the typed editors from the live values so number/date/enum
     # widgets open on the current setting, not an empty box.
     current: dict[str, str] = {}
@@ -414,7 +416,8 @@ def _migrations_tab() -> None:
     fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="recent",  # r24 #8: external ledger probe
              source="flyway_schema_history (Flyway ledger)", probe=True)
     if fh.usable():
-        st.markdown("**Flyway deploy history** — the transport's own ledger")
+        section_header("Flyway deploy history", badge="transport ledger",
+                       icon_name="contract", anchor="adm-flyway")
         styled_table(fh.df, height=220)
         st.caption("Flyway owns WHAT ran WHEN once adopted; SCHEMA_VERSION above stays "
                    "the app's contract check (and the in-file guards stay as defense "
@@ -424,7 +427,7 @@ def _migrations_tab() -> None:
                    "procurement lands, docs/FLYWAY_ADOPTION.md is the adoption runbook; "
                    "this panel lights up on its own once flyway_schema_history exists.")
 
-    st.markdown("**Source freshness**")
+    section_header("Source freshness", icon_name="refresh", anchor="adm-freshness")
     fresh = run_mart_first(
         mart_sql.source_freshness_state(), mart_sql.source_freshness(),
         page=_PAGE, key="adm_freshness",
@@ -495,7 +498,7 @@ def _access_self_check() -> None:
     """r27 H3: probe every privileged source the app reads and hand back the
     exact missing grant — the next access error becomes a checklist row,
     not a debugging session."""
-    st.markdown("**Access self-check**")
+    section_header("Access self-check", icon_name="security", anchor="adm-access-check")
     st.caption("Probes each privileged source with a 1-row read. Run after a rebuild, "
                "a role change, or when any panel reports an access error.")
     if not st.button("Run access self-check", key="adm_access_check"):
@@ -540,7 +543,8 @@ def _access_self_check() -> None:
 
 def _observability_tab() -> None:
     _access_self_check()
-    st.markdown("**Recent app errors (this session)**")
+    section_header("Recent app errors", badge="this session", icon_name="alerts",
+                   anchor="adm-errors-session")
     buffer = error_buffer()
     if not buffer:
         st.success("No errors recorded in this session.")
@@ -548,7 +552,8 @@ def _observability_tab() -> None:
         styled_table(pd.DataFrame(buffer)[["at", "page", "type", "message"]])
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
                source="APP_ERROR_LOG")
-    st.markdown("**Persisted error log (all sessions)**")
+    section_header("Persisted error log", badge="all sessions", icon_name="alerts",
+                   anchor="adm-errors-log")
     if sink.ok and sink.empty:
         st.success("Error sink is empty.")
     elif guard(sink, "", setup_hint="Sink table comes from V001."):
@@ -566,7 +571,8 @@ def _observability_tab() -> None:
         except (KeyError, TypeError):
             styled_table(sink.df)
 
-    st.markdown("**Query telemetry (this session)**")
+    section_header("Query telemetry", badge="this session", icon_name="search",
+                   anchor="adm-telemetry-session")
     telemetry = query_telemetry()
     if telemetry.empty:
         st.caption("No queries have run yet this session.")
@@ -583,7 +589,14 @@ def _observability_tab() -> None:
 
 def _performance_tab() -> None:
     """Prove (or disprove) that the app is fast: its own statement stats."""
-    st.markdown("**Performance SLO scorecard (7d)**")
+    # Owner review 2026-08-14: this is Admin's longest wall — orient first.
+    section_toc([("SLO scorecard", "adm-perf-slo"),
+                 ("Page adoption", "adm-adoption"),
+                 ("Fleet fetches", "adm-fleet-fetches"),
+                 ("Telemetry by page", "adm-fleet-pages"),
+                 ("Usage & acceptance", "adm-usage-events")])
+    section_header("Performance SLO scorecard", badge="7d", icon_name="bolt",
+                   anchor="adm-perf-slo")
     slo = run(
         mart_sql.app_performance_slo(7), page=_PAGE, key="app_perf_slo",
         tier="recent", source="APP_USAGE + APP_QUERY_TELEMETRY",
@@ -675,7 +688,8 @@ def _performance_tab() -> None:
             result_caption(scan)
             st.caption("Interactive statements only; the OVERWATCH query tag excludes loader and task work.")
 
-    st.markdown("**Page adoption (30d)**")
+    section_header("Page adoption", badge="30d", icon_name="overview",
+                   anchor="adm-adoption")
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",
                 source="APP_USAGE")
     if usage.ok and usage.empty:
@@ -684,7 +698,8 @@ def _performance_tab() -> None:
         styled_table(usage.df)
         st.caption("Merging or retiring sections should follow this table, not opinions.")
 
-    st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")
+    section_header("Fleet slow / failed fetches", badge="all viewers · 7d",
+                   icon_name="search", anchor="adm-fleet-fetches")
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
              source="APP_QUERY_TELEMETRY (V021)")
     if not fq.ok:
@@ -709,7 +724,8 @@ def _performance_tab() -> None:
 
 def _perf_rider_panels(fq_df=None) -> None:
     """V027 telemetry-rider readouts (Codex r6 #8, #12, #19)."""
-    st.markdown("**Fleet telemetry by page (7d)**")
+    section_header("Fleet telemetry by page", badge="7d", icon_name="operations",
+                   anchor="adm-fleet-pages")
     tbp = run(mart_sql.telemetry_by_page(7), page=_PAGE, key="tel_by_page", tier="recent",
               source="APP_QUERY_TELEMETRY (persisted = slow/failed + 2% sample)")
     if tbp.usable():
@@ -733,8 +749,9 @@ def _perf_rider_panels(fq_df=None) -> None:
             # to fill the board with PAIN=0 rows whenever fewer than five pages
             # had any, and every one of those was an un-drillable dead end.
             _tt = _tt[_tt["PAIN"] > 0].sort_values("PAIN", ascending=False).head(5)
-            st.markdown("**Next tuning targets** — pain = estimated total fleet seconds "
-                        "waited (sample-reweighted); the telemetry picks, not opinions.")
+            section_header("Next tuning targets", anchor="adm-tuning-targets")
+            st.caption("Pain = estimated total fleet seconds waited "
+                       "(sample-reweighted); the telemetry picks, not opinions.")
             if _tt.empty:
                 st.caption("No page has measurable persisted wait in 7d — nothing to rank.")
                 _sel = None
@@ -780,7 +797,8 @@ def _perf_rider_panels(fq_df=None) -> None:
     else:
         st.caption("Per-page telemetry appears after V027 and a day of traffic.")
 
-    st.markdown("**Usage events (30d) & remediation acceptance (90d)**")
+    section_header("Usage events & remediation acceptance", badge="30d / 90d",
+                   icon_name="brief", anchor="adm-usage-events")
     ue = run(mart_sql.usage_event_summary(30), page=_PAGE, key="usage_events", tier="recent",
              source="APP_USAGE.EVENT_KIND (V027 rider)")
     if ue.usable():
@@ -889,8 +907,10 @@ def _canary_tab() -> None:
         _styled(view, height=420)
 
     st.divider()
-    st.markdown("**Mart reconciliation — do the numbers MATCH the source?**")
+    section_header("Mart reconciliation", badge="mart vs live", icon_name="cost",
+                   anchor="adm-recon")
     st.caption(
+        "Do the numbers MATCH the source? "
         "Freshness proves the loaders ran; this compares mart totals against live "
         "ACCOUNT_USAGE over the same complete window. ±2% is normal late-arrival noise; "
         "beyond ±5%, re-run the backfill for that window (snowflake/backfill_365.sql, scoped)."
@@ -919,7 +939,9 @@ def _canary_tab() -> None:
         result_caption(recon)
 
     st.divider()
-    st.markdown("**Fire-drill scoreboard — does the page reach a human?**")
+    section_header("Fire-drill scoreboard", badge="monthly", icon_name="alerts",
+                   anchor="adm-drill")
+    st.caption("Does the page reach a human?")
     from app.logic.drill import drill_report
     drills = run(mart_sql.drill_history(14), page=_PAGE, key="drill_hist", tier="recent",
                  source="ALERT_EVENTS (OPS_ALERT_DRILL)")
@@ -949,7 +971,9 @@ def _canary_tab() -> None:
             st.caption("Resolve drills as EXPECTED — they're excluded from rule precision.")
 
     st.divider()
-    st.markdown("**Restated days — did a reported number move after close?**")
+    section_header("Restated days", badge="60d", icon_name="clock",
+                   anchor="adm-restated")
+    st.caption("Did a reported number move after close?")
     rest = run(mart_sql.metering_restatements(60), page=_PAGE, key="restatements",
                tier="recent", source="FACT_METERING_DAILY LOAD_TS lag")
     if rest.ok and rest.empty:
@@ -968,8 +992,9 @@ def _metric_registry_tab() -> None:
     """Phase 1 (architectural): the single semantic contract for every cost
     number — method, grain, source, timezone, latency, formula version."""
     from app.logic import metric_registry as mr
-    st.markdown("**Cost metric registry — what every number means**")
+    section_header("Cost metric registry", icon_name="cost", anchor="adm-registry")
     st.caption(
+        "What every number means. "
         "Read a figure by its METHOD: BILLED ties to the invoice, METERED is "
         "exact usage (idle in, CS unadjusted), MEASURED is attributed compute "
         "(idle out), ALLOCATED is a share-based estimate, ESTIMATED is "

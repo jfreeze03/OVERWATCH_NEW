@@ -114,7 +114,10 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
   opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
 .ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
-.ow-section { display:flex; align-items:center; gap:10px; margin:6px 0; padding:6px 12px; border-radius:var(--ow-r-sm);
+/* v4.155 (owner review 2026-08-14): section headers get real breathing room
+   ABOVE them (18px vs the old symmetric 6px) so consecutive panels on long
+   pages read as distinct sections instead of one continuous wall. */
+.ow-section { display:flex; align-items:center; gap:10px; margin:18px 0 8px; padding:6px 12px; border-radius:var(--ow-r-sm);
   border-left:3px solid var(--ow-ink-mute); background:linear-gradient(90deg,rgba(148,163,184,0.06),transparent 60%); }
 .ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
 .ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
@@ -265,7 +268,7 @@ _COMPACT_CSS = """
 div[data-testid="stMetric"] { padding:8px 10px 7px 12px; }
 [data-testid="stMetricValue"] { font-size:1.3rem !important; }
 .ow-card { padding:8px 10px 8px 12px; margin-bottom:var(--ow-2); }
-.ow-section { padding:4px 10px; margin:4px 0; }
+.ow-section { padding:4px 10px; margin:10px 0 4px; }
 div[data-testid="stDataFrame"] { font-size:0.82rem; }
 </style>
 """

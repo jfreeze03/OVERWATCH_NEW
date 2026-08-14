@@ -39,6 +39,8 @@ from app.ui.components import (
     panel_help,
     result_caption,
     section_filter_contract,
+    section_header,
+    section_toc,
     selectable_table,
     severity_sort,
     styled_table,
@@ -655,7 +657,7 @@ def _open_events_section(events, is_operator: bool) -> None:
 
         if is_operator and len(edf):
             st.divider()
-            st.markdown("**Bulk acknowledge / resolve**")
+            section_header("Bulk acknowledge / resolve", icon_name="bolt", anchor="al-bulk")
             options = {
                 f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
                 for _, r in edf.iterrows()
@@ -783,7 +785,9 @@ def render() -> None:
                 "Statistical anomaly detection runs in-app (Cost & Contract > Spend & Attribution, Operations > Warehouses) "
                 "and is deliberately separate from these deterministic rules."
             )
-            st.markdown("**Rule precision (90d)** — is each rule worth its pages?")
+            section_header("Rule precision", badge="90d", icon_name="search",
+                           anchor="al-precision")
+            st.caption("Is each rule worth its pages?")
             prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",
                        tier="recent", source="ALERT_EVENTS.RESOLUTION_KIND")
             if not prec.ok:
@@ -802,7 +806,8 @@ def render() -> None:
                     "direction; high UNTAGGED = the score isn't "
                     "trustworthy yet — close events with a kind. Tune via the generator below."
                 )
-                st.markdown("**Suggested thresholds (from your resolutions)**")
+                section_header("Suggested thresholds", badge="from your resolutions",
+                               anchor="al-suggested")
                 mk = run(mart_sql.rule_metric_kinds(90), page=_PAGE, key="rule_metric_kinds",
                          tier="recent", source="ALERT_EVENTS metric values by resolution kind")
                 if mk.usable():
@@ -840,12 +845,22 @@ def render() -> None:
                                "catalogue) — editing the column does not change the scan.")
 
     elif section == "History":
+        # rec5 follow-through (owner review 2026-08-14): History is the page's
+        # longest wall — orient the reader before the first chart renders.
+        section_toc([("Events by day", "al-events-day"),
+                     ("Response performance", "al-mttr"),
+                     ("Incident lifecycle", "al-incidents"),
+                     ("Delivery health", "al-delivery"),
+                     ("Alert fatigue", "al-fatigue")])
+        section_header("Events by day", badge="30d", icon_name="alerts",
+                       anchor="al-events-day")
         hist = run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",
                    tier="recent", source="ALERT_EVENTS")
         if guard(hist, "No alert events in the last 30 days.", setup_hint=_SETUP_HINT):
             charts.events_by_day(hist.df)
             result_caption(hist)
-        st.markdown("**Response performance (MTTA / MTTR)**")
+        section_header("Response performance (MTTA / MTTR)", badge="90d",
+                       icon_name="clock", anchor="al-mttr")
         mttr = run(mart_sql.alert_mttr(90), page=_PAGE, key="alert_mttr",
                    tier="recent", source="ALERT_EVENTS lifecycle timestamps")
         if mttr.usable():
@@ -867,7 +882,8 @@ def render() -> None:
         else:
             st.caption("MTTA/MTTR appears once events have been acknowledged/resolved via the lifecycle workflow.")
 
-        st.markdown("**Incident lifecycle (90d, incident grain)**")
+        section_header("Incident lifecycle", badge="90d · incident grain",
+                       icon_name="control", anchor="al-incidents")
         # Moved from Control Room (v4.50): retrospective process-health
         # medians don't change morning to morning — they read with alert
         # history, beside the alert-grain MTTA/MTTR above.
@@ -894,7 +910,9 @@ def render() -> None:
         else:
             st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")
 
-        st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
+        section_header("Delivery health (SLO)", badge="30d", icon_name="pipeline",
+                       anchor="al-delivery")
+        st.caption("Did alerts leave the building, and how fast?")
         slo = run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
                   tier="recent", source="ALERT_DELIVERIES + ALERT_EVENTS + APP_ERROR_LOG")
         if slo.usable():
@@ -931,7 +949,8 @@ def render() -> None:
             # rec19: per-route BACKLOG — what SP_NOTIFY_WEBHOOK will drain next and
             # the age of the oldest pending event (the starvation signal rec8 fixes).
             # Same send-eligibility predicate as the drainer, so the two agree.
-            st.markdown("**Route backlog** — open eligible events not yet delivered, oldest first.")
+            section_header("Route backlog", anchor="al-backlog")
+            st.caption("Open eligible events not yet delivered, oldest first.")
             bl = run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
                      tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
             if bl.usable() and not bl.df.empty:
@@ -945,7 +964,9 @@ def render() -> None:
         else:
             st.caption("Delivery SLOs appear once the per-route ledger has rows.")
 
-        st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
+        section_header("Alert fatigue", badge="30d", icon_name="alerts",
+                       anchor="al-fatigue")
+        st.caption("Which rules burn attention without earning it?")
         fat = run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
                   tier="recent", source="ALERT_EVENTS (resolution kinds + dedupe repeats)")
         if fat.usable():
@@ -958,7 +979,8 @@ def render() -> None:
             empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 
     else:
-        st.markdown("**Routing (family → channel)**")
+        section_header("Routing (family → channel)", icon_name="pipeline",
+                       anchor="al-routing")
         panel_help(
             "Routing sends each family/severity through a named notification "
             "integration — COST to #finops, SECURITY to #security. The seeded ALL/HIGH "
