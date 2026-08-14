@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.155.0 - Fresh color scheme + section display polish (2026-08-14)
+
+Owner review ask: "I do not like the color scheme and some of the sections need
+to be displayed better." App-only, no migration. Two logical changes.
+
+- **New palette — indigo/violet on warmer graphite.** Retired the generic
+  sky-blue-on-navy for a distinctive indigo (`#818cf8`) → violet (`#a78bfa`)
+  accent gradient over a warmer, near-neutral graphite base (`#0e1016` /
+  `#161922` / `#1e222e`) instead of the pure-navy `#0a0f1c`. `INFO` follows the
+  accent as before. Semantic OK/WARN/BAD/HIGH hues are unchanged (they carry
+  meaning and stay a11y-tuned). Every surface moved in lockstep — `palette.py`
+  (single source of truth), `theme.py` `--ow-*` tokens and all coupled `rgba()`
+  tints, `.streamlit/config.toml` native-widget chrome, and the inline task-DAG
+  SVG/toolbar in `charts.py` (which now references `palette.BG` for point
+  strokes so it can't drift again). The categorical chart series swaps its 3rd
+  slot to cyan so cool hues stay distinct now that the accent is indigo.
+  Muted-ink contrast on the (slightly lighter) raised surface stays ≥4.5:1 WCAG
+  AA. Drift gates (`tests/test_palette_drift.py`) stay green.
+- **Section display polish (presentation only).** Overview — the app's longest
+  scroll — gains a `section_toc` jump strip and an `anchor=` on every panel,
+  plus icon/health stripes on the four headers that were rendering as plain
+  titles, so hierarchy holds top to bottom. Security → Access completes its TOC
+  (Unused roles, Role grants were skipped) and caps its four uncapped tables at
+  280px. Control Room's lone `st.subheader` (lock-wait spikes) becomes a proper
+  `section_header`. Operations caps the wide failure-timeline table (360px,
+  most-recent-first) and gives the Warehouses tab an opening header instead of
+  an orphaned trend+anomaly block. Cortex/AI chargeback promotes its detail
+  heading to `section_header` and caps the 13-column table at 320px. Admin caps
+  the SCHEMA_VERSION and source-freshness tables at 300px. Shape-pinning tests
+  updated to the new (strengthened) contracts.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.
