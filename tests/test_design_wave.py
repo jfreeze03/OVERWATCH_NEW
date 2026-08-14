@@ -54,7 +54,7 @@ def test_a1_shell_has_one_global_health_pulse():
     assert "request_navigation(page, section)" in components
     assert "href=" not in components.split("def status_bar", 1)[1].split("\ndef ", 1)[0]
     assert '"k": "Undelivered criticals"' in m
-    assert '"k": "MTD spend"' in m
+    assert '"k": "MTD credit spend"' in m
 
 
 def test_a1_charts_read_shared_severity_palette():
