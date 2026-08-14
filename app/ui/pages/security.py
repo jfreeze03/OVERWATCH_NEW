@@ -677,7 +677,7 @@ def _clients_tab(company: str, days: int) -> None:
         {"label": "Driver families", "value": f"{df['DRIVER'].nunique()}"},
         {"label": "Driver+version combos", "value": f"{len(df)}"},
     ])
-    styled_table(df, height=380, sort_label="last seen")
+    styled_table(df, height=380, slug="client-drivers", sort_label="last seen")
     st.caption(
         f"{behind} combinations trail the newest observed version."
     )

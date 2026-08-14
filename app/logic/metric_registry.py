@@ -244,7 +244,7 @@ METRICS: tuple[Metric, ...] = (
            window="rolling-daily", partial_day="included", unit="USD", filters=("company",),
            required_sources=("ACCOUNT_USAGE.QUERY_HISTORY", "ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY"),
            coverage="credit-weighted coverage %", owner="dataeng"),
-    Metric("contract_runway", "Contract runway (days to exhaust)", ESTIMATED,
+    Metric("contract_runway", "Credit commitment runway (modeled)", ESTIMATED,
            "account", "FACT_METERING_DAILY (trailing-30-complete-day burn) vs CONTRACT_CREDITS",
            ACCOUNT_TZ, "up to 24h", "rec20",
            "days-left = (contracted - consumed) / trailing-30-COMPLETE-day burn. The ONE "

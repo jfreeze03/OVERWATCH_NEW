@@ -393,6 +393,13 @@ def render() -> None:
             remote_spill_gb = safe_float(row.get("SPILL_REMOTE_GB"))
             read_model_caption("control_pulse")
             exceptions = []
+            if qcount <= 0:
+                exceptions.append({
+                    "label": "Query evidence",
+                    "value": "Unavailable",
+                    "detail": "No query denominator exists for this scope, so health cannot be cleared.",
+                    "severity": "warn",
+                })
             if failed:
                 exceptions.append({
                     "label": "Failed queries",

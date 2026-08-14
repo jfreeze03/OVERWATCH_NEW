@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.156.1 - Complete no-evidence and credit-label contracts (2026-08-14)
+
+App-only follow-up from the completed v4.156 architecture cross-check. No migration.
+
+- Control Room cannot render “Checked / Clear” when query count has no denominator.
+- Decision scenarios show `No evidence` when confidence filtering leaves no eligible entities.
+- The shell and metric registry explicitly label modeled credit spend/runway, reserving billing
+  truth for organization currency. Security Clients keeps one self-identifying built-in CSV.
+
 ## 4.156.0 - Metric trust, decision surfaces, and hot-path performance (2026-08-14)
 
 App-only implementation round from the v4.155 metric/visual/performance audits.

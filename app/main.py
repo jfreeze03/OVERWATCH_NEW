@@ -565,7 +565,7 @@ def _persistent_status_bar(pages: tuple[str, ...], vals: object = _UNSET) -> Non
             else credits_to_usd(credits, rate)
         )
         stats.append({
-            "k": "MTD spend",
+            "k": "MTD credit spend",
             "v": f"{format_usd(usd)} · {credits:,.0f} cr",
             "icon": "cost",
             "sev": "info",

@@ -386,6 +386,7 @@ def _scenarios(company: str) -> None:
         actions.df, adoption_pct=adoption, realization_pct=realization,
         confidence_floor=confidence,
     )
+    has_candidates = projection["candidates"] > 0
     ledger = run(
         mart_sql.savings_ledger(), page=_PAGE, key="decision_scenario_ledger",
         tier="recent", source="SAVINGS_LEDGER",
@@ -395,9 +396,12 @@ def _scenarios(company: str) -> None:
     verified_value = format_usd(verified) if ledger.ok else "Unavailable"
     kpi_row([
         {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
-        {"label": "Gross authored estimate", "value": format_usd(projection["gross_estimate"])},
-        {"label": "Expected capture", "value": format_usd(projection["expected_capture"]),
-         "delta": f"{format_usd(projection['low_capture'])} to {format_usd(projection['high_capture'])}",
+        {"label": "Gross authored estimate",
+         "value": format_usd(projection["gross_estimate"]) if has_candidates else "No evidence"},
+        {"label": "Expected capture",
+         "value": format_usd(projection["expected_capture"]) if has_candidates else "No evidence",
+         "delta": (f"{format_usd(projection['low_capture'])} to "
+                   f"{format_usd(projection['high_capture'])}") if has_candidates else None,
          "delta_color": "off"},
         {"label": "Verified separately", "value": verified_value,
          "severity": "ok" if ledger.ok else "warn",
