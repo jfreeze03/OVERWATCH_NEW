@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.155.0 - Owner re-theme: warm graphite + iris, section display (2026-08-14)
+
+Owner design round: "I do not like the color scheme and some of the sections
+need to be displayed better." App-only, no migration. Full review +
+recommendations: `docs/reviews/DESIGN_REVIEW_2026-08-14.md`.
+
+- **Chrome re-theme.** The navy void (`#0a0f1c/#0f1729/#131d33`) + cyan accent
+  is retired everywhere (theme tokens, palette, config.toml, the DAG viewer's
+  own iframe CSS, Altair point strokes). New chrome is warm graphite
+  (`#131215/#1a191d/#232228`) with neutral inks/hairlines — the app no longer
+  reads monochrome blue. Muted ink clears WCAG AA on all three surfaces
+  (5.97/5.59/5.05, computed).
+- **Accent ≠ INFO.** The brand accent is now iris (`#8f8aff`/`#b0acff`),
+  decoupled from the INFO severity sky it used to share a hex with —
+  interactive affordances and informational signals stopped wearing one blue.
+  Primary-button ink `#12101f` clears 6.5:1 on the accent (computed lock).
+  **Severity hues are unchanged** and now pinned against re-theme drift.
+- **Section display.** `section_header` is a real divider: 1.14rem title
+  (was 1.02), 20px top rhythm, hairline underline; the neutral gray wash is
+  dropped while severity tints stay (color = signal). Micro-label floor
+  raised again (0.76→0.80rem cards/metrics, 0.72→0.75 status bar). The two
+  silently-overriding `.ow-chip` blocks are consolidated into one.
+- **Chart-series de-collision.** The categorical scale's `#c084fc` purple
+  (too close to the new iris accent) moved to fuchsia `#e879f9`; the
+  near-accent `ACCENT2` slot became the retired cyan `#22d3ee`; the method
+  badge follows. Eight series hues stay tellable-apart.
+- Locks: `tests/test_v4155_theme_refresh.py` (retired chrome gone, accent ≠
+  info, severities pinned, computed button-ink contrast, section rhythm, chip
+  consolidation, DAG chrome); pinned tests strengthened to the new shapes
+  (`test_live_round5/6`, `test_design_wave` label floor).
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.

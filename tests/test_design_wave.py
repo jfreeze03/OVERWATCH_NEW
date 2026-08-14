@@ -35,12 +35,13 @@ def test_rec2_brief_narrative_below_asks_and_collapsed():
     assert 'expanded=False' in b.split("AI morning narrative", 1)[1][:80]
 
 
-# rec18 — micro-label floor raised off ~10.6-11.5px
+# rec18 — micro-label floor raised off ~10.6-11.5px (v4.155: raised again to
+# 12.0-12.8px in the owner re-theme; the pins move UP with it, never down)
 def test_rec18_label_sizes_raised():
     t = _src("app/theme.py")
-    assert ".ow-stat__k { font-size:0.72rem" in t
-    assert ".ow-card__title { font-size:0.76rem" in t
-    assert 'stMetricLabel"] p { font-size:0.76rem' in t
+    assert ".ow-stat__k { font-size:0.75rem" in t
+    assert ".ow-card__title { font-size:0.80rem" in t
+    assert 'stMetricLabel"] p { font-size:0.80rem' in t
 
 
 # A1 — one traffic-light palette across surfaces

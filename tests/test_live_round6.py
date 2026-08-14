@@ -186,6 +186,8 @@ def test_unit_costs_panel_prices_calls_and_children():
 def test_primary_buttons_force_dark_ink_across_markups():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     assert 'button[data-testid="stBaseButton-primary"]' in theme
-    assert "color:#06121f !important" in theme
+    # v4.155: dark ink is #12101f on the iris accent (6.5:1 — see
+    # tests/test_v4155_theme_refresh.py for the computed-contrast lock).
+    assert "color:#12101f !important" in theme
     seg = theme.split('.stButton > button[kind="primary"],', 1)[1][:900]
     assert "span" in seg and "p," in seg               # descendants forced too
