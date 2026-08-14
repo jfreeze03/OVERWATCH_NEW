@@ -29,10 +29,22 @@ def test_section_keys_cover_all_lazy_pages():
         "Security", "Alerts", "Admin"}
 
 
-def test_light_palette_covers_every_dark_pair():
-    pairs = set(status_colors.STATUS_COLOR_MAP.values()) | set(status_colors._VERDICTS.values())
-    missing = pairs - set(status_colors._LIGHT_EQUIV)
-    assert not missing, f"dark pairs without a light equivalent: {missing}"
+def test_status_colors_never_consult_the_browser_theme():
+    """v4.155 (owner color review 2026-08-14): the chrome is pinned dark by
+    inject_theme(), but st.context.theme reports the VIEWER'S browser/host
+    preference — in SiS/Snowsight-light it said "light" and every status cell
+    flipped to pastel light pairs on dark chrome. The light path is gone; this
+    replaces the old light-coverage lock with the stronger contract: one
+    dark-tuned palette, no runtime theme detection anywhere in the module."""
+    from pathlib import Path
+
+    src = Path(status_colors.__file__).read_text(encoding="utf-8")
+    assert "_theme_is_light" not in src
+    assert "_LIGHT_EQUIV" not in src
+    assert "import streamlit" not in src   # pure module: no runtime detection
+    # the dark pairs are what renders, always
+    assert "7f1d1d" in status_colors.status_css("SEVERITY", "CRITICAL")
+    assert "14532d" in status_colors.status_css("STATUS", "RESOLVED")
 
 
 def test_status_css_still_emits_css_outside_streamlit_runtime():

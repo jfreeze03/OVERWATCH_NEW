@@ -3,6 +3,14 @@
 One palette for the whole app: red = act now, amber = watch, green = healthy,
 sky = informational, slate = neutral. Backgrounds are tints with dark text so
 contrast stays readable on the dark theme.
+
+DARK PAIRS ONLY (v4.155, owner color review 2026-08-14): the app's chrome is
+pinned dark by inject_theme() regardless of runtime, but ``st.context.theme``
+reports the VIEWER'S browser/host preference — in SiS/Snowsight-light it says
+"light" while the cards behind the table are still dark. The old detection
+then swapped every status cell to pastel light-theme pairs on dark chrome
+(observed live: washed-out pale-yellow/green cells). The browser theme is
+irrelevant to a hardcoded-dark design system, so it is no longer consulted.
 """
 
 from __future__ import annotations
@@ -18,30 +26,6 @@ _WARN = ("#78350f", "#fde68a")    # amber
 _OK = ("#14532d", "#bbf7d0")      # green
 _INFO = ("#0c4a6e", "#bae6fd")    # sky
 _MUTED = ("#1e293b", palette.MUTED)   # slate (text hue = rec50 single source)
-
-# The pairs above are dark-theme tuned (deep bg, light text). Light theme
-# gets pastel backgrounds with dark text; detection falls back to the dark
-# pairs so a failed lookup never changes today's look.
-_LIGHT_EQUIV = {
-    ("#7f1d1d", "#fecaca"): ("#fee2e2", "#991b1b"),
-    ("#7c2d12", "#fed7aa"): ("#ffedd5", "#9a3412"),   # HIGH orange (r4)
-    ("#78350f", "#fde68a"): ("#fef3c7", "#92400e"),
-    ("#14532d", "#bbf7d0"): ("#dcfce7", "#166534"),
-    ("#0c4a6e", "#bae6fd"): ("#e0f2fe", "#075985"),
-    ("#1e293b", "#94a3b8"): ("#f1f5f9", "#475569"),
-}
-
-
-def _theme_is_light() -> bool:
-    try:
-        import streamlit as _st
-
-        ctx_theme = getattr(getattr(_st, "context", None), "theme", None)
-        if ctx_theme is not None and getattr(ctx_theme, "type", None):
-            return str(ctx_theme.type).lower() == "light"
-        return str(_st.get_option("theme.base") or "").lower() == "light"
-    except Exception:  # noqa: BLE001 - theming is cosmetic; default to dark pairs
-        return False
 
 STATUS_COLOR_MAP = {
     # severities
@@ -103,8 +87,6 @@ def status_css(column: str, value: object) -> str:
         pair = STATUS_COLOR_MAP.get(text)
     if not pair:
         return ""
-    if _theme_is_light():
-        pair = _LIGHT_EQUIV.get(pair, pair)
     bg, fg = pair
     return f"background-color: {bg}; color: {fg}; font-weight: 600;"
 
@@ -135,9 +117,9 @@ def delta_css(value: object) -> str:
     except (TypeError, ValueError):
         return ""
     if v > 0:
-        col = "#b91c1c" if _theme_is_light() else palette.BAD    # up = worse
+        col = palette.BAD    # up = worse
     elif v < 0:
-        col = "#15803d" if _theme_is_light() else palette.OK     # down = better
+        col = palette.OK     # down = better
     else:
         return ""
     return f"color: {col}; font-weight: 600;"
