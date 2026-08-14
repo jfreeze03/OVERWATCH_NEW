@@ -11,6 +11,9 @@ entities:
     stage: DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE
     main_file: streamlit_app.py
     query_warehouse: WH_ALFA_ADMIN
+    # Warehouse runtime by contract: omit runtime_name, compute_pool, and
+    # artifact_repositories. If this app previously ran on a container, run
+    # snowflake/warehouse_runtime_reset.sql once before saving App settings.
     title: "OVERWATCH — Snowflake Command Center"
     artifacts:
       - streamlit_app.py

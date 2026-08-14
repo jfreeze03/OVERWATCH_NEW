@@ -438,9 +438,18 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
   the CONTAINER runtime. Snowsight's editor defaults new deploys to it, and
   the container runtime installs from PyPI (blocked here — no EAI). The
   warehouse runtime installs from Snowflake's Anaconda channel via
-  `environment.yml`. Fix: app settings → **Run on warehouse**. The CLI path
-  (`snow streamlit deploy --replace`) pins the warehouse runtime and never
-  hits this — prefer it for redeploys.
+  `environment.yml`.
+- **Saving "Run on warehouse" fails with `ARTIFACT_REPOSITORIES are only
+  supported by Streamlit applications running in the container runtime`:**
+  Snowflake retained a container-only property on the existing app object.
+  As the role that owns the app, run
+  `snowflake/warehouse_runtime_reset.sql` in Snowsight. It first executes
+  `ALTER STREAMLIT ... UNSET ARTIFACT_REPOSITORIES`, then explicitly sets
+  `RUNTIME_NAME = 'SYSTEM$WAREHOUSE_RUNTIME'` and
+  `QUERY_WAREHOUSE = WH_ALFA_ADMIN`. Reopen App settings and save. The
+  warehouse-shaped `snowflake.yml` deliberately omits `runtime_name`,
+  `compute_pool`, and `artifact_repositories`; omission alone does not clear a
+  property already persisted on the Snowflake object.
 
 ## 7. Release checklist
 
@@ -452,9 +461,9 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
    set, catching a stale `CREATE TASK IF NOT EXISTS` whose updated definition
    never re-applied).
 4. `snow streamlit deploy --replace`.
-5. If the deploy happened through SNOWSIGHT instead of the CLI: check app
-   settings → runtime = **Run on warehouse** (Snowsight resets it to the
-   container runtime, which fails on PyPI/EAI at load — see §6).
+5. Check app settings → runtime = **Run on warehouse**. If save reports a
+   retained `ARTIFACT_REPOSITORIES` setting, run
+   `snowflake/warehouse_runtime_reset.sql` as the app-owning role (see §6).
 6. Open Admin → Migration status (no drift), Source freshness (all fresh),
    Self-cost (task + app spend sane).
 7. Tag the release; update `CHANGELOG.md`.

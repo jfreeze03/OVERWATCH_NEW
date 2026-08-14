@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.156.2 - Warehouse runtime reset guard (2026-08-14)
+
+Deployment-only fix; no data migration.
+
+- Added an owner-run worksheet that unsets retained container-only
+  `ARTIFACT_REPOSITORIES` before explicitly selecting
+  `SYSTEM$WAREHOUSE_RUNTIME` on `WH_ALFA_ADMIN`.
+- Locked `snowflake.yml` to the warehouse-runtime shape and documented the
+  Snowsight save failure. Git omission alone does not clear persisted
+  Streamlit object properties.
+
 ## 4.156.1 - Complete no-evidence and credit-label contracts (2026-08-14)
 
 App-only follow-up from the completed v4.156 architecture cross-check. No migration.
