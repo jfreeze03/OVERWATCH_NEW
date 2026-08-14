@@ -70,7 +70,7 @@ def test_v052_live_cap_unchanged_but_mart_and_cortex_honor_long_window():
 def test_v052_filter_strip_discloses_the_cap():
     main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     assert "MAX_LIVE_WINDOW_DAYS" in main
-    assert "Live scans (Operations, Security) cap at" in main
+    assert "live Operations" in main and "and Security scans cap at" in main
 
 
 def test_v052_plain_sql_parses():

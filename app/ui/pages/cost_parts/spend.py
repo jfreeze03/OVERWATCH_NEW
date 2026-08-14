@@ -45,6 +45,7 @@ from app.ui.components import (
     served_days,
     styled_table,
     user_display_map,
+    with_user_name_parts,
     with_user_names,
 )
 
@@ -265,7 +266,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             if notebooks is not None and notebooks.ok and notebooks.empty:
                 empty_state("no_data_yet", "No notebook container runtime was recorded in this window.")
             elif notebooks is not None and guard(notebooks, ""):
-                notebook_df = notebooks.df.copy()
+                notebook_df = with_user_name_parts(notebooks.df, _PAGE)
                 notebook_df["USD"] = (
                     pd.to_numeric(notebook_df["CREDITS"], errors="coerce").fillna(0.0) * rate
                 )

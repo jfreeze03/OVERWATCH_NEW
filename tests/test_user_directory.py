@@ -3,7 +3,13 @@ appears, generalizing the Cortex AI attribution treatment)."""
 import pandas as pd
 
 from app.data import directory_sql
-from app.logic.directory import attach_display_name, display_name_map, resolve_display
+from app.logic.directory import (
+    attach_display_name,
+    attach_name_parts,
+    display_name_map,
+    name_parts_map,
+    resolve_display,
+)
 
 
 def _dir() -> pd.DataFrame:
@@ -44,6 +50,20 @@ def test_attach_display_name_adds_column_and_keeps_login():
     assert attach_display_name(plain, m).equals(plain)
 
 
+def test_attach_name_parts_preserves_exact_first_and_last_columns():
+    parts = name_parts_map(_dir())
+    assert parts == {
+        "SSLONSKY": ("Steve", "Slonsky"),
+        "KEBARR1": ("Kevin", ""),
+    }
+    df = pd.DataFrame({"USER_NAME": ["SSLONSKY", "svc_etl"], "CREDITS": [10, 5]})
+    out = attach_name_parts(df, parts)
+    assert list(out.columns[:4]) == ["USER_NAME", "FIRST_NAME", "LAST_NAME", "CREDITS"]
+    assert out.iloc[0]["FIRST_NAME"] == "Steve"
+    assert out.iloc[0]["LAST_NAME"] == "Slonsky"
+    assert pd.isna(out.iloc[1]["FIRST_NAME"]) and pd.isna(out.iloc[1]["LAST_NAME"])
+
+
 def test_user_directory_sql_shape():
     sql = directory_sql.user_directory()
     assert "SNOWFLAKE.ACCOUNT_USAGE.USERS" in sql
@@ -57,7 +77,9 @@ def test_components_expose_the_reusable_helpers():
     cmp = Path(__file__).resolve().parents[1] / "app" / "ui" / "components.py"
     src = cmp.read_text(encoding="utf-8")
     assert "def user_display_map(page: str)" in src
+    assert "def user_name_parts_map(page: str)" in src
     assert "def with_user_names(" in src
+    assert "def with_user_name_parts(" in src
     assert 'tier="metadata"' in src and 'key="user_directory"' in src  # one shared cached read
 
 

@@ -45,3 +45,13 @@ def test_in_page_jumps_scroll_parent_section_headers() -> None:
     assert 'target.scrollIntoView({{behavior:"smooth", block:"start"}})' in body
     assert "component_html(markup, height=38, scrolling=False)" in body
     assert "st.caption" in body  # no-component fallback remains
+
+
+def test_notebook_subset_adds_exact_name_parts() -> None:
+    spend = _read("app/ui/pages/cost_parts/spend.py")
+    notebook = spend.split('detail == "Compute pools & notebooks"', 1)[1].split(
+        'st.caption(', 1
+    )[0]
+    assert "with_user_name_parts(notebooks.df, _PAGE)" in notebook
+    directory = _read("app/data/directory_sql.py")
+    assert "FIRST_NAME" in directory and "LAST_NAME" in directory

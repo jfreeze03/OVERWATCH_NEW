@@ -11,6 +11,8 @@ App-only UI/navigation fix; no migration.
   on selectbox rerun timing.
 - In-page Jump-to links now render as CSP-safe buttons that scroll the real parent
   section header inside Streamlit-in-Snowflake, with a plain-anchor fallback.
+- Cost → Compute pools & notebooks resolves each notebook login through the shared
+  user directory and shows exact First name / Last name columns beside User name.
 
 ## 4.156.2 - Warehouse runtime reset guard (2026-08-14)
 

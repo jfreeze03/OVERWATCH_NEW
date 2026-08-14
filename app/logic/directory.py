@@ -25,6 +25,23 @@ def display_name_map(directory: pd.DataFrame, user_col: str = "USER_NAME") -> di
     return {k: v for k, v in zip(keys, full, strict=False) if k and v}
 
 
+def name_parts_map(
+    directory: pd.DataFrame, user_col: str = "USER_NAME"
+) -> dict[str, tuple[str, str]]:
+    """Build {UPPER(login): (first, last)} without inventing missing names."""
+    if (directory is None or directory.empty or user_col not in directory.columns
+            or "FIRST_NAME" not in directory.columns or "LAST_NAME" not in directory.columns):
+        return {}
+    keys = directory[user_col].fillna("").astype(str).str.strip().str.upper()
+    first = directory["FIRST_NAME"].fillna("").astype(str).str.strip()
+    last = directory["LAST_NAME"].fillna("").astype(str).str.strip()
+    return {
+        key: (first_name, last_name)
+        for key, first_name, last_name in zip(keys, first, last, strict=False)
+        if key and (first_name or last_name)
+    }
+
+
 def resolve_display(user_name: object, name_map: dict[str, str]) -> str:
     """"First Last" if the login is known, else the login string (never blank)."""
     login = str(user_name or "").strip()
@@ -46,4 +63,33 @@ def attach_display_name(df: pd.DataFrame, name_map: dict[str, str],
         out[display_col] = values
     else:
         out.insert(out.columns.get_loc(user_col) + 1, display_col, values)   # next to the login
+    return out
+
+
+def attach_name_parts(
+    df: pd.DataFrame,
+    parts_map: dict[str, tuple[str, str]],
+    *,
+    user_col: str = "USER_NAME",
+    first_col: str = "FIRST_NAME",
+    last_col: str = "LAST_NAME",
+) -> pd.DataFrame:
+    """Add exact first/last columns beside a login; unresolved users stay null."""
+    if df is None or df.empty or user_col not in df.columns:
+        return df
+    out = df.copy()
+    parts = out[user_col].map(
+        lambda user: parts_map.get(str(user or "").strip().upper(), (None, None))
+    )
+    first = parts.map(lambda value: value[0])
+    last = parts.map(lambda value: value[1])
+    position = out.columns.get_loc(user_col) + 1
+    if first_col in out.columns:
+        out[first_col] = first
+    else:
+        out.insert(position, first_col, first)
+    if last_col in out.columns:
+        out[last_col] = last
+    else:
+        out.insert(position + 1, last_col, last)
     return out

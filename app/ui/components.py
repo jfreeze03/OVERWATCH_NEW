@@ -884,12 +884,45 @@ def user_display_map(page: str) -> dict:
         return {}
 
 
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=4)
+def _user_name_parts_map_cached(scope: str, _page: str) -> dict:
+    """Exact first/last directory; inner run shares the display-map SQL cache."""
+    from app.core.query import run
+    from app.data import directory_sql
+    from app.logic.directory import name_parts_map
+
+    res = run(directory_sql.user_directory(), page=_page, key="user_directory",
+              tier="metadata", source="ACCOUNT_USAGE.USERS (name directory)")
+    if not res.usable():
+        raise _DirectoryUnavailable(res.error or "user directory unavailable")
+    return name_parts_map(res.df)
+
+
+def user_name_parts_map(page: str) -> dict:
+    """Cached login -> (FIRST_NAME, LAST_NAME); empty on directory failure."""
+    from app.core.query import cache_scope
+    from app.data import directory_sql
+
+    try:
+        return _user_name_parts_map_cached(
+            cache_scope(directory_sql.user_directory()), page)
+    except _DirectoryUnavailable:
+        return {}
+
+
 def with_user_names(df, page: str, *, user_col: str = "USER_NAME", display_col: str = "USER"):
     """Add a "First Last" ``display_col`` (login fallback) beside ``user_col`` using
     the cached directory — the one-liner for detail tables. No-op if the frame has
     no ``user_col``."""
     from app.logic.directory import attach_display_name
     return attach_display_name(df, user_display_map(page), user_col=user_col, display_col=display_col)
+
+
+def with_user_name_parts(df, page: str, *, user_col: str = "USER_NAME"):
+    """Add exact FIRST_NAME/LAST_NAME columns beside a login."""
+    from app.logic.directory import attach_name_parts
+
+    return attach_name_parts(df, user_name_parts_map(page), user_col=user_col)
 
 
 def legend_popover() -> None:
