@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.155.0 - Design refresh: recolor + section display (2026-08-14)
+
+Owner review: "I do not like the color scheme and some of the sections need to
+be displayed better." App-only; no migration.
+
+- **Status cells were rendering LIGHT-theme pastels on the dark chrome (bug,
+  found live).** `st.context.theme` reports the VIEWER'S browser/host
+  preference, not the app's — in SiS/Snowsight-light it says "light" while
+  `inject_theme()` keeps every surface dark, so severity/status table cells
+  flipped to washed-out pastel pairs (pale yellow/green on near-black). The
+  browser-theme detection is removed from `status_colors`: one dark-tuned
+  palette, always. Lock: `test_status_colors_never_consult_the_browser_theme`
+  (replaces the old light-coverage lock).
+- **Recolor — graphite + indigo.** The blue-navy chrome (`#0a0f1c/#0f1729/
+  #131d33`) moves to neutral graphite (`#0c0d12/#13151c/#1a1d26`) so the
+  semantic hues carry the color instead of everything washing blue; the accent
+  moves from stock sky/cyan to indigo (`#818cf8`/`#a5b4fc`), which also fixes
+  ACCENT==INFO — informational (sky) and interactive/brand (indigo) are now
+  different hues; BAD moves from pink-leaning rose `#fb7185` to true signal
+  red `#ef5350`. palette.py, theme.py tokens, and config.toml move in lockstep
+  (drift test updated to the new hues, not weakened). Chart category range
+  retuned (indigo primary; violet+lime stay chart-only); the task-DAG iframe's
+  stale hardcoded chrome now fills from palette via template placeholders.
+- **Sections displayed better.** Admin (16) and Alerts (10) panel titles were
+  flat bold markdown while the rest of the app used the design-system
+  `section_header` — all static top-level titles converted (stripe, icon,
+  badge, anchor); trailing prose moved to captions. The two longest walls
+  (Alerts → History, Admin → Performance) open with a `section_toc` jump strip.
+  Control Room's lone `st.subheader` (lock-wait spikes) joins `section_header`
+  with an honest warn stripe (it only renders when spikes exist). Section
+  headers gain top breathing room (18px comfortable / 10px compact) so long
+  pages read as sections, not one continuous wall.
+- **Test hygiene:** the canary-anchor test compared `account_today()` (account
+  time) against machine-local `date.today()` and failed on UTC runners in the
+  early-UTC hours — it now compares in account time.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.
