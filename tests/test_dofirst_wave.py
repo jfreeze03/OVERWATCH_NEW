@@ -97,7 +97,9 @@ def test_c11_account_wide_badges_on_metering_kpis():
 
 
 def test_n7_storage_transfer_disclosure_on_overview_and_brief():
-    assert "Storage and data-transfer bill separately" in _src("app/ui/pages/overview.py")
+    overview = _src("app/ui/pages/overview.py")
+    assert "Storage, transfer, and organization currency adjustments are separate" in overview
+    assert "org rate card is billing truth" in overview
     assert "storage and data-transfer bill separately" in _src("app/ui/pages/brief.py")
 
 

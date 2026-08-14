@@ -63,7 +63,9 @@ def test_t1_6_csv_prep_is_page_and_content_keyed():
 def test_t1_4_change_impact_drills_are_gated():
     op = _read("app/ui/pages/operations.py")
     # warehouse 28d history runs only on an explicit row selection, historical tier
-    assert "if sel is not None:\n            hist = run(change_impact_sql.warehouse_daily_series" in op
+    assert ("if sel is not None and row is not None:\n"
+            "            hist = run(change_impact_sql.warehouse_daily_series") in op
+    assert "row = df.iloc[int(sel)] if sel is not None else None" in op
     assert 'key=f"whchg_hist_{row[\'WAREHOUSE_NAME\']}", tier="historical"' in op
     # object 28d history behind a row click or a load toggle, historical tier
     assert 'st.toggle("Load 28-day run history", key="chg_hist_toggle")' in op

@@ -71,7 +71,9 @@ def test_overview_budget_kpi_replaced_by_the_pace_kpi():
     assert "budget_kpi" not in ov                        # the dead KPI is gone
     assert "_mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget)" in ov
     assert "mtd_pace_vs_prior_month" in ov
-    assert "MTD vs last month (same days)" in ov
+    assert "MTD credit spend vs last month" in ov
+    assert "pace delta compares the same number" in ov
+    assert "of days both months share" in ov
     assert "Budget context" in ov                        # configured budgets still visible
     assert "never a fabricated 0%" in (
         (_ROOT / "app" / "logic" / "formulas.py").read_text(encoding="utf-8"))

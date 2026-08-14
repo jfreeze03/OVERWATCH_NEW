@@ -114,7 +114,9 @@ def test_clients_panel_wired_and_canaried():
     for label in ("Access", "Changes", "Clients", "Egress", "Trust Center"):
         assert f'"{label}"' in _SECURITY
     assert "ACCOUNT_USAGE.SESSIONS" in _SECURITY
-    assert "sec_drivers_csv" in _SECURITY                     # inventory is exportable
+    clients = _SECURITY.split("def _clients_tab", 1)[1].split("\ndef ", 1)[0]
+    assert "styled_table(df" in clients                       # shared table export stays
+    assert "sec_drivers_csv" not in clients                   # duplicate second CSV is gone
     assert "(not reported)" in _SECURITY                      # honest PROGRAM caveat
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     assert "security_sql.client_drivers" in canary

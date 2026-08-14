@@ -66,10 +66,16 @@ def test_send_failures_are_counted_separately_from_silence():
 
 
 def test_card_is_rendered_under_the_delivery_banner():
-    # compare CALL sites (indented), not definitions — the card is defined above the
-    # banner but must render below it
-    assert "\n    _last_delivery_card()\n" in _ALERTS
-    assert _ALERTS.index("\n    _delivery_status()\n") < _ALERTS.index("\n    _last_delivery_card()\n")
+    # Section-aware rendering keeps the health card on the two operating surfaces
+    # that need it (Open events + Native delivery), always below the banner.
+    render = _ALERTS.split("def render()", 1)[1]
+    assert render.count("_delivery_status()") == 2
+    assert render.count("_last_delivery_card()") == 2
+    assert render.index('section = lazy_sections(') < render.index("_delivery_status()")
+    first_status = render.index("_delivery_status()")
+    first_card = render.index("_last_delivery_card()")
+    assert first_status < first_card
+    assert render.rindex("_delivery_status()") < render.rindex("_last_delivery_card()")
 
 
 def test_card_separates_quiet_from_broken():

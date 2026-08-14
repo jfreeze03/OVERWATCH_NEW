@@ -27,7 +27,10 @@ def test_kpi_cards_carry_source_badges():
     assert ".ow-src-badge--mart" in theme and ".ow-src-badge--stale" in theme
     brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
     assert '"badge": "mart" if strip_up else "stale"' in brief    # money KPI says its source
-    assert '"badge": "live" if strip_up else "stale"' in brief
+    # Alert source truth is independent of the account-wide health strip: the
+    # company-scoped uncapped count owns the badge and value.
+    assert '"badge": "live" if scoped_crit is not None else "stale"' in brief
+    assert "open_alert_severity_counts(company)" in brief
 
 
 def test_admin_ranks_next_tuning_targets_from_telemetry():
