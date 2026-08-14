@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.155.0 - Palette refresh + section presentation (2026-08-14)
+
+App-only visual pass from an owner UI review ("I do not like the color scheme
+and some of the sections need to be displayed better"). No migration; no data
+path, SQL builder, or formula touched.
+
+- **Color scheme refreshed to graphite + indigo/violet.** The base moved off
+  the blue-heavy navy (`#0a0f1c`/`#0f1729`/`#131d33`) to a neutral graphite
+  (`#0b0e14`/`#141821`/`#1c2130`) so cards read as slate panels, and the
+  primary accent moved from sky-cyan (`#38bdf8`/`#22d3ee`) to an indigo→violet
+  pair (`#6e8bff`/`#a78bfa`). Semantic severity hues (OK green, WARN amber, BAD
+  rose) are **deliberately unchanged** — they carry meaning, not brand.
+  `INFO` decoupled from the accent to stay a distinct sky-blue (`#4bb4f2`), so
+  "live / informational" no longer collides with the accent. Ink tokens were
+  re-tuned for the new base; `INK_MUTE` still clears WCAG AA (>=4.5:1) on the
+  darkest small-text surface.
+- **One source for the accent hue (rec50).** The ~10 accent glows/tints in
+  `app/theme.py` now reference new `--ow-accent-rgb` / `--ow-accent2-rgb` /
+  `--ow-info-rgb` triplets instead of repeating a hardcoded RGB, so the accent
+  retunes from a single line. Chrome literals embedded in the task-graph DAG
+  SVG/CSS and Altair point strokes (`app/ui/charts.py`) were realigned to the
+  new base. `palette.py` stays the single source of truth; the drift gates
+  (`tests/test_palette_drift.py`) and `.streamlit/config.toml` mirror it.
+- **Section headers read with more weight.** `.ow-section` bands gained top
+  separation, a thicker stripe, and a slightly larger title so section breaks
+  are legible in long-scroll pages; the header icon now takes the section's
+  severity color (accent on neutral sections) instead of flat slate.
+- **Decision Studio no longer feels flat.** Its six section bodies (Portfolio,
+  SLOs, Products, Cost Truth, Scenarios, Experiments) now open with a
+  `section_header` band + icon, matching the visual hierarchy of Cost and
+  Operations. The exception-first → KPI → decision-rows contract is unchanged.
+
 ## 4.154.0 - Topology first-paint + error-family coverage (2026-08-13)
 
 Two app-only fixes from the 2026-08-13 live-screenshot review. No migration.

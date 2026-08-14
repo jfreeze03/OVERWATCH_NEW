@@ -29,6 +29,7 @@ from app.ui.components import (
     notify,
     read_model_caption,
     result_caption,
+    section_header,
     selectable_nav_table,
     selectable_table,
     styled_table,
@@ -45,6 +46,8 @@ def _open_entity(kind: str, key: str) -> None:
 
 
 def _portfolio(company: str, days: int, rate: float) -> None:
+    section_header("Workload portfolio", icon_name="spend",
+                   badge="evidence-weighted")
     result = run(
         workbench_sql.workload_portfolio(days, company, 200), page=_PAGE,
         key=f"decision_portfolio_{company}_{days}", tier="historical",
@@ -171,6 +174,7 @@ def _slo_editor() -> None:
 
 
 def _slos() -> None:
+    section_header("Service-level objectives", icon_name="security")
     result = run(
         workbench_sql.slo_cockpit(), page=_PAGE, key="decision_slos",
         tier="recent", source="SLO_OBJECTIVES + existing metric marts",
@@ -231,6 +235,7 @@ def _slos() -> None:
 
 
 def _products(company: str, days: int, rate: float) -> None:
+    section_header("Data product economics", icon_name="chargeback")
     result = run(
         workbench_sql.data_product_economics(days, company), page=_PAGE,
         key=f"decision_products_{company}_{days}", tier="historical",
@@ -289,6 +294,7 @@ def _products(company: str, days: int, rate: float) -> None:
 
 
 def _cost_truth(company: str, days: int) -> None:
+    section_header("Cost truth", icon_name="cost")
     result = run(
         workbench_sql.cost_truth(days, company), page=_PAGE,
         key=f"decision_cost_truth_{company}_{days}", tier="historical",
@@ -348,6 +354,7 @@ def _cost_truth(company: str, days: int) -> None:
 
 
 def _scenarios(company: str) -> None:
+    section_header("Savings scenarios", icon_name="optimize")
     actions = run(
         workbench_sql.action_center(company, False, 500), page=_PAGE,
         key=f"decision_scenario_actions_{company}", tier="live",
@@ -412,6 +419,7 @@ def _scenarios(company: str) -> None:
 
 
 def _experiments() -> None:
+    section_header("Optimization experiments", icon_name="bolt")
     result = run(
         workbench_sql.experiments(limit=300), page=_PAGE, key="decision_experiments",
         tier="recent", source="OPTIMIZATION_EXPERIMENTS",
