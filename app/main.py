@@ -35,7 +35,6 @@ from app.core.query import (  # noqa: E402
     _buffer_write,
     bump_refresh_salt,
     cache_scope,
-    execute_statement,
     flush_write_buffer,
     run,
 )
@@ -55,7 +54,7 @@ from app.logic.date_windows import (  # noqa: E402
     window_scope_label,
 )
 from app.theme import inject_theme  # noqa: E402
-from app.ui.components import mark_refreshed, notify  # noqa: E402
+from app.ui.components import mark_refreshed  # noqa: E402
 from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
     admin,
@@ -169,21 +168,6 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
     return page
 
 
-def _current_view_payload() -> str:
-    import json
-
-    from app.core.state import filters
-    from app.logic.navigate import PAGE_SECTION_KEYS
-
-    page = str(st.session_state.get("_ow_page") or "")
-    section_key = PAGE_SECTION_KEYS.get(page, "")
-    return json.dumps({
-        "page": page,
-        "section": str(st.session_state.get(section_key) or "") if section_key else "",
-        "filters": filters(),
-    })
-
-
 def _parse_view(raw: str) -> dict | None:
     import json
 
@@ -192,82 +176,6 @@ def _parse_view(raw: str) -> dict | None:
         return data if isinstance(data, dict) else None
     except (TypeError, ValueError):
         return None
-
-
-@st.fragment
-def _views_popover() -> None:
-    """Saved filter views + default landing (USER_PREFS, V013)."""
-    from app.core.state import request_navigation
-    from app.data import prefs_sql
-    with st.popover("Views & display"):  # rec12: it holds saved views + density + timezone
-        prefs = run(prefs_sql.user_prefs(), page="Views", key="user_prefs", tier="live",
-                    source="USER_PREFS")
-        views: dict[str, str] = {}
-        has_default = False
-        if prefs.ok and not prefs.empty:
-            for _, row in prefs.df.iterrows():
-                key = str(row["PREF_KEY"])
-                if key.startswith("VIEW:"):
-                    views[key[5:]] = str(row["PREF_VALUE"] or "")
-                elif key == "DEFAULT_VIEW":
-                    has_default = True
-        elif not prefs.ok:
-            st.caption("Saved views need migration V013 (and a roles.sql re-run).")
-
-        if views:
-            pick = st.selectbox("Saved views", sorted(views), key="views_pick")
-            c1, c2, c3 = st.columns(3)
-            if c1.button("Apply", key="views_apply", use_container_width=True):
-                from app.ui.components import log_ui_event
-                log_ui_event("saved_view_apply")
-                data = _parse_view(views.get(pick, ""))
-                if data:
-                    request_navigation(str(data.get("page") or st.session_state.get("_ow_page") or ""),
-                                       str(data.get("section") or ""),
-                                       dict(data.get("filters") or {}))
-            if c2.button("Set default", key="views_default", use_container_width=True,
-                         help="This view loads automatically when you open the app."):
-                ok, msg = execute_statement(
-                    prefs_sql.upsert_pref_sql("DEFAULT_VIEW", views.get(pick, "")), page="Views")
-                notify(ok, msg if not ok else f"'{pick}' is now your landing view.")
-            if c3.button("Delete", key="views_delete", use_container_width=True):
-                ok, msg = execute_statement(prefs_sql.delete_pref_sql(f"VIEW:{pick}"), page="Views")
-                notify(ok, msg if not ok else f"Deleted '{pick}'.")
-
-        name = st.text_input("Save current filters as", key="views_name", max_chars=40,
-                             placeholder="e.g. Trexis prod 7d")
-        clean = name.strip()
-        if st.button("Save view", key="views_save",
-                     disabled=not (clean and prefs_sql.VIEW_NAME_RE.match(clean))):
-            ok, msg = execute_statement(
-                prefs_sql.upsert_pref_sql(f"VIEW:{clean}", _current_view_payload()), page="Views")
-            notify(ok, msg if not ok else f"Saved '{clean}' (page, section, and filters).")
-        st.divider()
-        compact = st.toggle("Compact density", key="views_density",
-                            value=st.session_state.get("_ow_density") == "compact",
-                            help="Tighter cards and tables for triage screens; "
-                                 "hierarchy and colors unchanged.")
-        _prev_density = st.session_state.get("_ow_density")
-        _new_density = "compact" if compact else "comfortable"
-        st.session_state["_ow_density"] = _new_density
-        # rec12: persist density through the same USER_PREFS machinery as the
-        # timezone (it used to reset on every reload). Write only on a real change.
-        if _prev_density is not None and _new_density != _prev_density:
-            execute_statement(prefs_sql.upsert_pref_sql("DENSITY", _new_density), page="Views")
-        current_tz = st.session_state.get("_ow_display_tz") or prefs_sql.DISPLAY_TIMEZONES[0]
-        tz_idx = (prefs_sql.DISPLAY_TIMEZONES.index(current_tz)
-                  if current_tz in prefs_sql.DISPLAY_TIMEZONES else 0)
-        tz_pick = st.selectbox("Display timezone", prefs_sql.DISPLAY_TIMEZONES, index=tz_idx,
-                               key="views_tz",
-                               help="Display-only: tables and the timeline convert; SQL, alerts, "
-                                    "and exports stay in account time (America/Chicago).")
-        if st.button("Save timezone", key="views_tz_save"):
-            st.session_state["_ow_display_tz"] = tz_pick
-            ok, msg = execute_statement(prefs_sql.upsert_pref_sql("DISPLAY_TZ", tz_pick), page="Views")
-            notify(ok, msg if not ok else f"Times will display in {tz_pick}.")
-        if has_default and st.button("Clear default landing", key="views_clear_default"):
-            ok, msg = execute_statement(prefs_sql.delete_pref_sql("DEFAULT_VIEW"), page="Views")
-            notify(ok, msg if not ok else "Default cleared — app opens on Overview again.")
 
 
 def _apply_default_landing() -> None:
@@ -608,14 +516,20 @@ def _scope_is_active() -> bool:
 
 
 def _topbar_scope() -> None:
-    """One-row operator scope strip: primary filters + compact utility popovers."""
-    from app.ui.components import legend_popover
+    """One-row operator scope strip: primary filters + a compact More popover.
+
+    v4.157.0: dropped the Legend and "Views & display" popovers (owner: nobody
+    uses them once the app is in daily use). Saved default views / density /
+    display-timezone still hydrate at startup from USER_PREFS (see
+    _apply_default_landing) — only the in-strip editors are gone. More (the
+    warehouse/user/schema contains-filters) stays.
+    """
     active_n = _active_filter_count()
     active = active_n > 0
     box = st.container(border=True, key="ow_triage_toolbar")
     with box:
-        c_scope, c_company, c_days, c_db, c_more, c_legend, c_view, c_reset = st.columns(
-            [0.82, 0.95, 1.08, 1.55, 0.78, 0.66, 0.82, 0.58],
+        c_scope, c_company, c_days, c_db, c_more, c_reset = st.columns(
+            [0.82, 0.95, 1.08, 1.55, 0.78, 0.58],
             gap="small",
         )
         with c_scope:
@@ -676,10 +590,6 @@ def _topbar_scope() -> None:
                     "Schema contains", key="flt_schema_contains",
                     help="Case-insensitive match where the source has schema grain.",
                 )
-        with c_legend:
-            legend_popover()
-        with c_view:
-            _views_popover()
         with c_reset:
             if active:
                 st.button(
@@ -742,7 +652,11 @@ def main() -> None:
             st.rerun()
         return
 
-    if page != "Brief":  # Brief is already the compact status view
+    # rec: the persistent status strip is orientation for the two morning
+    # surfaces only. Brief IS the compact status view (renders these signals as
+    # its body), and Overview keeps the strip; every drill/govern page below
+    # them is task-focused and does not repeat it (owner 2026-08-14).
+    if page == "Overview":
         _persistent_status_bar(pages)
     _RENDERERS[page]()
     # RENDER_MS now spans sidebar/topbar/status chrome too, not just the page

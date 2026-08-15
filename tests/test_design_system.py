@@ -122,7 +122,6 @@ def test_triage_filter_toolbar_compact():
     assert "_scope_is_active" in main and "_reset_scope" in main
     assert '"Reset", key="flt_reset", on_click=_reset_scope' in main
     assert 'class="ow-scope-active"' in main               # glow marker still emitted when active
-    assert "legend_popover()" in main
     assert 'key="ow_triage_toolbar"' in main
     assert "with st.popover(_more_label" in main
     assert "_scope_chips" not in main                       # chip band removed

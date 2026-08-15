@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.157.0 - Triage/AI cleanup + jump removal + filter accuracy (2026-08-15)
+
+App-only UI pass from the live-screenshot review. No migration. (Cost
+completeness — CoCo/Replication understatement vs org-currency truth — is a
+separate reconciliation release.)
+
+- **Triage strip slimmed.** Removed the **Legend** and **Views & display**
+  popovers (owner: unused in daily operation). Saved default views, compact
+  density, and display timezone still hydrate at startup from `USER_PREFS`
+  (`_apply_default_landing`) — only the in-strip editors are gone. **More**
+  (warehouse/user/schema contains-filters) stays.
+- **Status strip on Brief + Overview only.** The persistent Open-criticals /
+  Undelivered / Telemetry-age / MTD-spend strip is orientation for the two
+  morning surfaces; the drill/govern pages below no longer repeat it.
+- **In-page "JUMP TO" chips removed.** They rendered scroll JS inside a
+  cross-origin `components.v1.html` iframe, so `window.parent.document` was a
+  SecurityError and nothing ever scrolled in Streamlit-in-Snowflake — dead since
+  they shipped. The sidebar "Open destination" jump (which works) stays; the
+  test that pinned the dead markup is replaced with a removal assertion.
+- **Cost & Contract KPI swap.** The two static rate tiles (Compute rate /
+  Cortex rate — just SETTINGS echoes) become **Total credits** (free from the
+  frame already read) and **CoCo spend** (Cortex Code $, priced at the AI rate
+  via the formulas layer, batched off `FACT_AI_USAGE_DAILY`).
+- **Duplicate AI panel consolidated.** The "AI Functions usage" breakout moved
+  out of the per-user AI-users panel to a drill-down under **Cortex / AI spend**
+  — one home for account AI spend.
+- **Sub-dollar money reads honestly.** `daily_stacked_usd` uses a
+  magnitude-aware axis and `_share_note` shows cents below $100, so a genuinely
+  pennies total renders `$0.01`, not `$0` / "58% of $0".
+- **`n/a` model name clarified.** A caption explains Cortex Code bills by token
+  with no per-model grain — expected, not missing data.
+- **More filters — accuracy.** Operations → Queries' failure-family panel now
+  honors the warehouse/user contains filters it advertised (it scoped by
+  company/db/schema only). Three filter-contract declarations (Unit costs,
+  Change impact, Optimization) now list the contains filters they actually
+  apply, so the banner stops falsely warning "ignored".
+
 ## 4.156.3 - Compact triage command strip + reliable jumps (2026-08-14)
 
 App-only UI/navigation fix; no migration.

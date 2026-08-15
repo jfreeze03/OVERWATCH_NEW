@@ -453,9 +453,9 @@ def section_header(title: str, health: str = "", icon_name: str = "",
     """Section header with a left severity stripe + optional icon and status
     badge — gives visual weight to what matters (CoCo's #2 high item).
 
-    rec5: pass `anchor` to emit an id on the header so a section_toc() chip can
-    scroll to it. The id is inert unless a TOC links to it, so it's safe to add
-    everywhere; harmless on runtimes that don't honor in-page anchor scroll."""
+    `anchor` emits an id on the header. It is inert today (the in-page jump
+    chips were removed in v4.157.0 — they could not scroll across the SiS
+    component iframe), but kept as a harmless, stable hook for deep links."""
     hcls = f" ow-section--{health}" if health in ("ok", "warn", "bad", "info") else ""
     ico = f'<span class="ow-section__icon">{icon(icon_name)}</span>' if icon_name else ""
     bdg = f'<span class="ow-section__badge">{html.escape(badge)}</span>' if badge else ""
@@ -465,60 +465,6 @@ def section_header(title: str, health: str = "", icon_name: str = "",
         f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</h2>',
         unsafe_allow_html=True,
     )
-
-
-def section_toc(items: list[tuple[str, str]], lead: str = "Jump to") -> None:
-    """Reliable in-page jump buttons for Snowflake's nested Streamlit frame.
-
-    Markdown ``#anchor`` links update the component/frame URL and often never
-    reach the app document in Streamlit-in-Snowflake. This tiny local component
-    finds the real parent header and calls ``scrollIntoView``. A plain hash-link
-    caption remains the no-component fallback.
-    """
-    valid = [(str(label), str(anchor)) for label, anchor in items if label and anchor]
-    if not valid:
-        return
-    buttons = "".join(
-        f'<button type="button" data-target="{html.escape(anchor, quote=True)}">'
-        f'{html.escape(label)}</button>'
-        for label, anchor in valid
-    )
-    markup = f"""<!doctype html>
-<html><head><meta charset="utf-8"><style>
-*{{box-sizing:border-box}}
-html,body{{margin:0;background:transparent;color:#cbd5e1;font:600 12px "Segoe UI",sans-serif}}
-.jump{{display:flex;align-items:center;gap:6px;min-height:34px;white-space:nowrap;overflow-x:auto}}
-.lead{{color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;font-size:10px;margin-right:2px}}
-button{{appearance:none;border:1px solid rgba(148,163,184,.32);background:rgba(31,41,55,.82);
- color:#cbd5e1;border-radius:999px;padding:5px 10px;cursor:pointer;font:650 11px "Segoe UI",sans-serif}}
-button:hover{{border-color:#60a5fa;color:#f8fafc;background:rgba(96,165,250,.12)}}
-button:focus-visible{{outline:2px solid #60a5fa;outline-offset:1px}}
-</style></head><body><div class="jump"><span class="lead">{html.escape(lead)}</span>{buttons}</div>
-<script>
-document.querySelectorAll("button[data-target]").forEach((button) => {{
-  button.addEventListener("click", () => {{
-    const id = button.dataset.target;
-    let target = null;
-    try {{ target = window.parent.document.getElementById(id); }} catch (_) {{}}
-    if (!target) {{
-      try {{ target = window.top.document.getElementById(id); }} catch (_) {{}}
-    }}
-    if (target) {{
-      target.scrollIntoView({{behavior:"smooth", block:"start"}});
-      return;
-    }}
-    try {{ window.parent.location.hash = id; }} catch (_) {{ window.location.hash = id; }}
-  }});
-}});
-</script></body></html>"""
-    try:
-        from streamlit.components.v1 import html as component_html
-
-        component_html(markup, height=38, scrolling=False)
-    except Exception:  # noqa: BLE001 - orientation labels survive older runtimes
-        chips = [f"[{html.escape(label)}](#{html.escape(anchor)})"
-                 for label, anchor in valid]
-        st.caption(f"{lead}  ·  " + "  ·  ".join(chips))
 
 
 def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
@@ -923,32 +869,6 @@ def with_user_name_parts(df, page: str, *, user_col: str = "USER_NAME"):
     from app.logic.directory import attach_name_parts
 
     return attach_name_parts(df, user_name_parts_map(page), user_col=user_col)
-
-
-def legend_popover() -> None:
-    """The app's color/source semantics in one popover (Codex r7 #18) —
-    for operators who didn't sit through the design reviews."""
-    import streamlit as st
-    with st.popover("Legend"):
-        st.markdown(
-            "".join((
-                "<div style='line-height:1.6'>",
-                "<b>Severity</b><br>",
-                f"{chip('CRITICAL', 'bad')} page-me-now ",
-                f"{chip('HIGH', 'warn')} today ",
-                f"{chip('MEDIUM / INFO')} awareness ",
-                f"{chip('OK', 'ok')} healthy",
-                "<br><br><b>Source labels</b><br>",
-                "<b>mart</b> = loaded on schedule (cheap, up to ~1h behind); ",
-                "<b>live fallback</b> = scanned ACCOUNT_USAGE just now (exact, slower); ",
-                "<b>stale</b> = the loader is behind, numbers are labeled accordingly.",
-                "<br><br><b>Dollars</b><br>",
-                "<b>measured</b> = attribution credits; <b>allocated</b> = shared spend split ",
-                "by usage share; ESTIMATED vs VERIFIED savings never mix.",
-                "</div>",
-            )),
-            unsafe_allow_html=True,
-        )
 
 
 def toggle_cost_hint(key_contains: str) -> str:

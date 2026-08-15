@@ -139,6 +139,8 @@ def test_usage_rider_keeps_first_paint_p95_honest():
     assert "_ow_usage_oldshape" in body                                # pre-apply degrade
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     assert "def log_ui_event" in comp
-    assert 'log_ui_event("saved_view_apply")' in src
+    # v4.157.0: the saved-view "Apply" UI (which logged saved_view_apply) was
+    # removed with the Views & display popover; log_ui_event stays wired via the
+    # CSV-export path below.
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     assert 'log_ui_event("csv_export"' in sec

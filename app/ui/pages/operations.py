@@ -50,7 +50,6 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
-    section_toc,
     selectable_nav_table,
     selectable_table,
     snowsight_profile_column,
@@ -168,7 +167,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 preloaded=_mart_pf.get("top") if isinstance(_mart_pf, dict) else None),
             "fails": run_mart_first(
                 mart27_sql.ops_diag_failures(days, company),
-                ops_sql.failures_by_error(days, company, database, schema_contains),
+                ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
                 page=_PAGE, key=f"q_fails_{company}_{days}",
                 mart_source="MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)",
                 live_source="QUERY_HISTORY (live fallback)",
@@ -182,7 +181,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
                                                                  user_filter, database, schema_contains),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
-            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, database, schema_contains),
+            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
         ], page=_PAGE, tier="recent")
 
@@ -299,7 +298,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     fails = _qb.get("fails")
     if fails is None or not fails.ok:
         fails = run(
-            ops_sql.failures_by_error(days, company, database, schema_contains),
+            ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
             page=_PAGE, key=f"q_fails_{company}_{days}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
@@ -1527,7 +1526,9 @@ def render() -> None:
             "note": "Contention uses Window; warehouse anomaly history is a fixed 30-day view.",
         },
         "Change impact": {
-            "applies": ("company", "database", "schema_contains"),
+            # v4.157.0: the warehouse-settings registry honors warehouse contains —
+            # declare it so the banner stops warning "ignored" where it filters.
+            "applies": ("company", "database", "schema_contains", "warehouse_contains"),
             "note": "Panel-local before/after windows replace the global Window.",
         },
         "Pipeline SLA": {
@@ -1550,11 +1551,6 @@ def render() -> None:
     elif section == "Tasks":
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Warehouses":
-        section_toc([
-            ("Spend & anomalies", "ops-wh-spend"),
-            ("Concurrency", "ops-wh-concurrency"),
-            ("Contention", "ops-wh-contention"),
-        ])
         _warehouses_tab(f["company"], rate)
         st.divider()
         section_header(
@@ -1565,10 +1561,6 @@ def render() -> None:
         )
         _contention_tab(f["company"], f["days"])
     elif section == "Change impact":
-        section_toc([
-            ("Procedure/task changes", "ops-change-objects"),
-            ("Warehouse settings", "ops-change-wh"),
-        ])
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
         _pipeline_sla_tab(is_operator)

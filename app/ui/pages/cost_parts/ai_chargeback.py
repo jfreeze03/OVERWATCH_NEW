@@ -68,6 +68,34 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
         charts.daily_stacked_usd(df, "DAY", "SERVICE_TYPE", "USD")
         result_caption(res)
 
+    # v4.157.0: the "AI Functions usage" breakout was a duplicate AI-spend chart
+    # buried inside the per-user "AI users" panel. It is account-wide AI spend, so
+    # it belongs here as an optional drill-down under Cortex/AI spend — one home
+    # for account AI spend instead of two.
+    with st.expander("AI Functions usage (optional view)"):
+        # Expander bodies run even when collapsed (Codex r17 #18) — the scan
+        # itself waits for the toggle, like the deep-scan forensics toggles.
+        if not st.toggle("Load AI Functions usage", key="ai_fn_scan",
+                         help="Scans CORTEX_AI_FUNCTIONS_USAGE_HISTORY once, then cached."):
+            st.caption("Off until you ask — this view needs its own history scan.")
+        else:
+            # P8: metadata tier (4h). The source view lags hours and the numbers
+            # are exact token metering, so an hourly re-scan re-pays the
+            # secure-view expansion for an answer that cannot have changed.
+            fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
+                         key=f"cortex_fn_{days}", tier="metadata",
+                         source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
+            if fn_res.ok and not fn_res.empty:
+                fn = fn_res.df.copy()
+                fn["USD"] = fn["TOTAL_CREDITS"].map(safe_float) * ai_rate
+                charts.daily_stacked_usd(fn, "DAY", "SOURCE", "USD")
+                result_caption(fn_res)
+            elif fn_res.ok:
+                st.caption("No AI Functions usage in this window.")
+            else:
+                st.caption(f"View not available in this account/role: {fn_res.error}")
+
+
 def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:
     """Cortex Code user attribution — ported from the original AI & Cortex
     Monitor. Token credits are exact per user; projections and severities are
@@ -243,30 +271,6 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 (st.success if ok_all else st.error)(f"{count}/{len(statements)} action(s) queued.")
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
-
-    with st.expander("AI Functions usage (optional view)"):
-        # Expander bodies run even when collapsed (Codex r17 #18) — the scan
-        # itself waits for the toggle, like the deep-scan forensics toggles.
-        if not st.toggle("Load AI Functions usage", key="ai_fn_scan",
-                         help="Scans CORTEX_AI_FUNCTIONS_USAGE_HISTORY once, then cached."):
-            st.caption("Off until you ask — this view needs its own history scan.")
-            return
-        # P8: metadata tier (4h) like the other Cortex reads on this tab. The
-        # source view lags hours and the numbers are exact token metering —
-        # an hourly re-scan re-pays the secure-view expansion for an answer
-        # that provably cannot have changed.
-        fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
-                     key=f"cortex_fn_{days}", tier="metadata",
-                     source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
-        if fn_res.ok and not fn_res.empty:
-            fn = fn_res.df.copy()
-            fn["USD"] = fn["TOTAL_CREDITS"].map(safe_float) * ai_rate
-            charts.daily_stacked_usd(fn, "DAY", "SOURCE", "USD")
-            result_caption(fn_res)
-        elif fn_res.ok:
-            st.caption("No AI Functions usage in this window.")
-        else:
-            st.caption(f"View not available in this account/role: {fn_res.error}")
 
 @st.fragment
 def _statement_export(company: str, rate: float) -> None:

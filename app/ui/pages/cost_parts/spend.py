@@ -32,7 +32,15 @@ from app.logic.cost_coverage import (
     service_coverage_inventory,
 )
 from app.logic.directory import resolve_display
-from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, pct_delta, safe_float
+from app.logic.formulas import (
+    account_today,
+    credits_to_usd,
+    format_credits,
+    format_usd,
+    md_dollars,
+    pct_delta,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -77,11 +85,17 @@ def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
          "source": "FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)"},
         {"key": "daily", "sql": mart_sql.fact_warehouse_daily(30, company),
          "source": "FACT_WAREHOUSE_DAILY"},
+        # v4.157.0: CoCo (Cortex Code) spend for the Spend-tab KPI tile. Account-wide
+        # (ALL) to match the '(account)' basis of the other tiles; a small day×source
+        # aggregate off FACT_AI_USAGE_DAILY, so it rides the same batch, not a serial
+        # round-trip.
+        {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL"),
+         "source": "FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)"},
     ]
 
 
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
-               *, metering_res=None, csr_res=None) -> None:
+               *, metering_res=None, csr_res=None, coco_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
@@ -122,14 +136,34 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
 
     billed_usd = float(df["USD"].sum())
     rebate_usd = float(df["ADJ_USD"].sum())  # negative or zero
+    total_credits = float(df["CREDITS_BILLED"].map(safe_float).sum())
+    # v4.157.0: the two static rate tiles (compute/cortex rate — just SETTINGS
+    # echoes) carried no daily signal. Replace with total credits (free from the
+    # frame already read) and CoCo spend (Cortex Code, a near-real-time line
+    # billed separately from metering). Rates still live in the "why totals
+    # differ" expander below and on Admin.
+    coco_usd = None
+    if coco_res is None:
+        coco_res = run(mart27_sql.ai_code_daily(days, "ALL"), page=_PAGE,
+                       key=f"coco_spend_{days}", tier="hourly",
+                       source="FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)")
+    if coco_res is not None and coco_res.usable() and "TOTAL_CREDITS" in coco_res.df.columns:
+        coco_usd = credits_to_usd(float(coco_res.df["TOTAL_CREDITS"].map(safe_float).sum()), ai_rate)
     kpi_row([
         {"label": f"Credit spend, {days}d (account)", "value": format_usd(billed_usd),
          "help": "Billed credits x configured rates, including the cloud-services adjustment. "
                  "Not the full invoice."},
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
-        {"label": "Compute rate", "value": f"${rate:.2f}/cr", "help": "SETTINGS CREDIT_PRICE_USD."},
-        {"label": "Cortex rate", "value": f"${ai_rate:.2f}/cr", "help": "SETTINGS AI_CREDIT_PRICE_USD."},
+        {"label": f"Total credits, {days}d", "value": format_credits(total_credits),
+         "help": "Billed credits across all services this window (compute + serverless + AI, "
+                 "cloud-services rebate applied). Credits are additive; the dollar split is on "
+                 "the Credit-spend tile."},
+        {"label": f"CoCo spend, {days}d",
+         "value": format_usd(coco_usd) if coco_usd is not None else "—",
+         "help": "Cortex Code (Snowsight + CLI) token credits x the configured AI rate, from "
+                 "FACT_AI_USAGE_DAILY (loaded daily). Billed separately from the metering line "
+                 "on the left; '—' until the fact loads."},
     ])
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")

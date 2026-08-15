@@ -316,6 +316,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         result_caption(ai_res, note=f"Billed Cortex credits at ${ai_rate}/credit. Account-wide "
                                     "(the usage view carries no database dimension); per-user "
                                     "attribution lives under Chargeback & AI.")
+        # rec: 'n/a' in Model Name is expected, not missing data — Cortex Code
+        # (Snowsight/CLI) bills by token with no per-model grain in its usage views.
+        if "MODEL_NAME" in adf.columns and adf["MODEL_NAME"].astype(str).eq("n/a").any():
+            st.caption("“n/a” model = Cortex Code (Snowsight / CLI), which bills by token "
+                       "with no per-model breakdown in its usage views. SQL AI Functions carry "
+                       "a real model name where that usage view has data.")
 
     st.divider()
     st.markdown("**ETL unit costs (tagged pipelines)**")

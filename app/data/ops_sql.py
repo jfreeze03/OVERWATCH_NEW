@@ -72,11 +72,19 @@ LIMIT {limit}
 """
 
 
-def failures_by_error(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
-    """Failed queries grouped by error code/message family."""
+def failures_by_error(days: int, company: str = "ALL", warehouse_contains: str = "",
+                      user_contains: str = "", database: str = "", schema_contains: str = "") -> str:
+    """Failed queries grouped by error code/message family.
+
+    v4.157.0: honors the warehouse/user contains filters too — the Queries
+    section's filter contract advertises them, but this panel used to scope by
+    company/db/schema only, so 'Warehouse contains' silently didn't narrow the
+    failure taxonomy.
+    """
     days = bounded_days(days)
     where = and_where(
-        _query_scope(days, company, database=database, schema_contains=schema_contains),
+        _query_scope(days, company, warehouse_contains=warehouse_contains,
+                     user_contains=user_contains, database=database, schema_contains=schema_contains),
         "EXECUTION_STATUS <> 'SUCCESS'",
     )
     return f"""

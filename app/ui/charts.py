@@ -118,15 +118,23 @@ def _legend(wide: bool = False, **kw) -> alt.Legend:
     return alt.Legend(orient="bottom" if wide else "top", title=kw.pop("title", None), **kw)
 
 
+def _magnitude_usd(value: float) -> str:
+    """Whole dollars normally, cents only when the value is sub-dollar (would
+    otherwise round to '$0'). v4.157.0: the Cortex/AI spend takeaway read
+    'Top: X $0 (58% of $0)' because whole-dollar rounding flattened a pennies
+    total; keep the cents where the number actually lives in cents."""
+    return f"${value:,.2f}" if 0 < abs(value) < 1 else f"${value:,.0f}"
+
+
 def _share_note(label: str, amount: float, total: float, *, dollars: bool = True) -> str:
     """rec35 helper: 'Top: X $Y (Z% of $total).' — the lead-with-the-conclusion
     line, computed from the data the chart already has. The share is omitted when
     it would be nonsensical (categories that net out negative make a positive top
     exceed 100% of the total)."""
-    a = f"${amount:,.0f}" if dollars else f"{amount:,.0f}"
+    a = _magnitude_usd(amount) if dollars else f"{amount:,.0f}"
     share = (amount / total * 100) if total else 0.0
     if total > 0 and 0 <= share <= 100:
-        t = f"${total:,.0f}" if dollars else f"{total:,.0f}"
+        t = _magnitude_usd(total) if dollars else f"{total:,.0f}"
         return f"Top: {label} {a} ({share:.0f}% of {t})."
     return f"Top: {label} {a}."
 
@@ -807,12 +815,20 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     if data.empty:
         _empty_note()
         return
+    # v4.157.0: magnitude-aware axis — a genuinely sub-dollar stacked total would
+    # otherwise draw tall auto-scaled bars against an all-"$0" whole-dollar axis
+    # (the Cortex/AI spend "signal but $0" report). Show cents only when the
+    # biggest day's stack is sub-dollar (else whole-dollar ticks stay legible).
+    _max_stack = float(
+        pd.to_numeric(data["USD"], errors="coerce").groupby(data["Day"]).sum().max() or 0.0
+    )
+    _yfmt = "$,.2f" if 0 < _max_stack < 1 else "$,.0f"
     chart = (
         _base(data)
         .mark_bar()
         .encode(
             x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
-            y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
+            y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format=_yfmt)),
             color=_stable_color("Category", data["Category"],
                                 legend=_legend(wide=True)),
             tooltip=[

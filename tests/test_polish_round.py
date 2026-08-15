@@ -38,14 +38,6 @@ def test_leaderboard_prefills_the_trend():
     assert 'st.session_state["uc_proc_trend_name"] = str(pdf.iloc[int(_psel)]["PROC_NAME"])' in uc
 
 
-def test_legend_exists_and_is_wired():
-    comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
-    assert "def legend_popover(" in comp
-    assert "ESTIMATED vs VERIFIED" in comp                   # the money semantics
-    main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    assert "legend_popover()" in main
-
-
 def test_table_consistency_progress():
     import glob
     n = sum(Path(p).read_text(encoding="utf-8").count("st.dataframe(")

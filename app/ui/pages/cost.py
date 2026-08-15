@@ -25,7 +25,6 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
-    section_toc,
     styled_table,
     user_display_map,
     with_user_names,
@@ -82,7 +81,10 @@ def render() -> None:
             "note": "Company shapes chargeback/AI users; Cortex service totals remain account-wide.",
         },
         "Unit costs": {
-            "applies": ("company", "days", "database", "schema_contains"),
+            # v4.157.0: measured_query_costs honors warehouse/user contains too —
+            # declare them so the banner stops warning "ignored" where it filters.
+            "applies": ("company", "days", "warehouse_contains", "user_contains",
+                        "database", "schema_contains"),
             "note": "Each metric retains its declared measured or allocated grain.",
         },
         "Compare": {
@@ -91,16 +93,14 @@ def render() -> None:
         },
         "Optimization & Savings": {
             "applies": (),
-            "partial": ("company", "days"),
+            # v4.157.0: the expensive/repeat/pruning scan panels honor db + schema
+            # when a scan is run — declare them partial so the banner is accurate.
+            "partial": ("company", "days", "database", "schema_contains"),
             "note": "Savings verification and ledger totals are account-wide where labeled.",
         },
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Spend & Attribution":
-        section_toc([
-            ("Spend", "cost-spend"),
-            ("Attribution", "cost-attribution"),
-        ])
         # perf #15: submit the four INDEPENDENT recent mart reads that gate the
         # eager Spend + Attribution paint as ONE parallel batch instead of four
         # serial round-trips. Each panel still falls back to its own mart/live
@@ -110,7 +110,8 @@ def render() -> None:
                         page=_PAGE, tier="hourly") or {}
         section_header("Spend", "info", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
-                   metering_res=_pf.get("metering"), csr_res=_pf.get("csr"))
+                   metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
+                   coco_res=_pf.get("coco"))
         st.divider()
         section_header("Attribution", "info", "chargeback", anchor="cost-attribution")
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
@@ -123,10 +124,6 @@ def render() -> None:
         if st.toggle("Load storage & unmapped-entity detail", key="cost_spend_detail",
                      help="Storage economics (3 reads) and the unmapped-entity check "
                           "(1 read), loaded on demand — kept off the default first paint."):
-            section_toc([
-                ("Storage", "cost-storage"),
-                ("Unmapped entities", "cost-unmapped"),
-            ], lead="Detail")
             section_header("Storage", "info", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings)
             st.divider()
@@ -151,12 +148,6 @@ def render() -> None:
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)
     elif section == "Chargeback & AI":
-        section_toc([
-            ("Department", "cost-chargeback"),
-            ("Tag governance", "cost-tags"),
-            ("Cortex spend", "cost-cortex"),
-            ("AI users", "cost-ai-users"),
-        ])
         section_header("Department chargeback", "info", "chargeback", anchor="cost-chargeback")
         _chargeback_tab(f["company"], f["days"], rate, is_operator)
         st.divider()

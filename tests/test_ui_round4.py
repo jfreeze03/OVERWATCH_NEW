@@ -51,7 +51,9 @@ def test_contains_filters_use_a_count_badged_compact_popover():
     assert '_more_label = f"More · {_adv_n}" if _adv_n else "More"' in _MAIN
     assert "with st.popover(_more_label" in _MAIN
     assert "_adv_label" not in _MAIN and "expanded=_adv_on" not in _MAIN
-    assert 'st.popover("Views & display")' in _MAIN and "💾" not in _MAIN  # rec12 rename; emoji retired
+    # v4.157.0: the "Views & display" popover was removed (owner: unused); saved
+    # views / density / timezone still hydrate at startup via _apply_default_landing.
+    assert 'st.popover("Views & display")' not in _MAIN
 
 
 def test_scope_rides_the_status_bar():
@@ -64,7 +66,9 @@ def test_scope_rides_the_status_bar():
 
 def test_compact_density_mode_exists():
     assert "_COMPACT_CSS" in _THEME
-    assert '_ow_density' in _THEME and "_ow_density" in _MAIN      # toggle wired
+    # v4.157.0: the density TOGGLE moved out with the Views popover, but the
+    # pref still hydrates at startup (_apply_default_landing) and drives the CSS.
+    assert '_ow_density' in _THEME and "_ow_density" in _MAIN
 
 
 def test_dashboard_surfaces_hold_still():

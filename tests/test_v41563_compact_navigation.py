@@ -1,4 +1,4 @@
-"""v4.156.3 locks: compact triage toolbar and reliable jump controls."""
+"""v4.157.0 locks: compact triage toolbar and reliable jump controls."""
 
 from pathlib import Path
 
@@ -14,7 +14,7 @@ def test_triage_filters_render_as_one_command_strip() -> None:
     body = main.split("def _topbar_scope", 1)[1].split("\ndef ", 1)[0]
     assert 'st.container(border=True, key="ow_triage_toolbar")' in body
     assert body.count("st.columns(") == 1
-    assert "c_scope, c_company, c_days, c_db, c_more, c_legend, c_view, c_reset" in body
+    assert "c_scope, c_company, c_days, c_db, c_more, c_reset" in body
     assert '"Date range", options=list(TRIAGE_WINDOW_OPTIONS)' in body
     assert 'label_visibility="collapsed"' in body
     assert "with st.popover(_more_label" in body
@@ -37,14 +37,17 @@ def test_sidebar_jump_requires_explicit_open_action() -> None:
     assert body.index("if not (pick and open_jump):") < body.index('if kind == "Page":')
 
 
-def test_in_page_jumps_scroll_parent_section_headers() -> None:
-    components = _read("app/ui/components.py")
-    body = components.split("def section_toc", 1)[1].split("\ndef ", 1)[0]
-    assert 'data-target="' in body
-    assert "window.parent.document.getElementById(id)" in body
-    assert 'target.scrollIntoView({{behavior:"smooth", block:"start"}})' in body
-    assert "component_html(markup, height=38, scrolling=False)" in body
-    assert "st.caption" in body  # no-component fallback remains
+def test_in_page_jump_chips_are_removed() -> None:
+    # v4.157.0: the in-page "JUMP TO" chips could never scroll in
+    # Streamlit-in-Snowflake — section_toc rendered its scroll JS inside a
+    # cross-origin components.v1.html iframe, so window.parent.document was a
+    # SecurityError and every fallback dead-ended. The chips are gone; the old
+    # test asserted the dead markup existed (source-grep theater). Sidebar
+    # "Open destination" remains the working jump (test above).
+    assert "def section_toc" not in _read("app/ui/components.py")
+    for page in ("app/ui/pages/cost.py", "app/ui/pages/operations.py",
+                 "app/ui/pages/security.py"):
+        assert "section_toc" not in _read(page)
 
 
 def test_notebook_subset_adds_exact_name_parts() -> None:

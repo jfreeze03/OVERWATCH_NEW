@@ -32,7 +32,6 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
-    section_toc,
     snowsight_profile_column,
     styled_table,
     user_display_map,
@@ -108,18 +107,6 @@ def _access_tab(company: str, days: int) -> None:
                        source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
         if live_mfa.ok:
             mfa = live_mfa
-    # rec5: this tab stacks seven panels — a long scroll. A compact jump strip up
-    # top orients the reader and (where the runtime honors in-page anchors) scrolls.
-    section_toc([
-        ("MFA gaps", "sec-mfa"),
-        ("Failed logins", "sec-faillog"),
-        ("Privileged roles", "sec-privroles"),
-        ("Failure reasons", "sec-failreasons"),
-        ("New networks", "sec-newnet"),
-        ("Expiring creds", "sec-creds"),
-        ("Dormant users", "sec-dormant"),
-        ("Effective access", "sec-effective"),
-    ])
     section_header("MFA gaps with password-login evidence (30d)", "warn", "security",
                    anchor="sec-mfa")
     if mfa.ok and mfa.empty:
