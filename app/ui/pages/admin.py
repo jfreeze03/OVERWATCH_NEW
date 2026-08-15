@@ -217,6 +217,11 @@ _EXPECTED_MIGRATIONS = {
         "Code / CoWork (SNOWFLAKE_COCO_SNOWSIGHT), and SP_ALERT_SCAN rewrites the "
         "COST_SERVERLESS_CREEP carve-out so CoCo is not double-alerted; re-fills score "
         "+ exec board",
+    80: "Security change-risk ETL exclusion: V_SECURITY_EXCEPTION_QUEUE excludes "
+        "DESTRUCTIVE (DROP/TRUNCATE) events by the 3 ETL-engine role families "
+        "(Glue/Informatica/transform, across all environments) so routine "
+        "truncate-and-reload stops flooding the queue; GRANT/REVOKE/POLICY and human "
+        "drops still surface",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1025,6 +1030,7 @@ def _setup_progress_tab() -> None:
         (77, "V077", "Cost by application x user: FACT_APP_COST_DAILY"),
         (78, "V078", "AI usage loader unbreak: ai_code TZ->NTZ casts + backfill"),
         (79, "V079", "AI predicate historical split: loader procs count CoCo as AI"),
+        (80, "V080", "Security change-risk ETL exclusion: ETL-role DROP/TRUNCATE de-noised"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",

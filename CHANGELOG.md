@@ -1,5 +1,47 @@
 # Changelog
 
+## V080 (owner migration) - Security change-risk ETL exclusion (2026-08-15)
+
+Stops the Security **Change Risk** queue from flooding on routine ETL truncate-
+and-reload DDL. V075 classifies every DROP/TRUNCATE as a CRITICAL "DESTRUCTIVE"
+change and `V_SECURITY_EXCEPTION_QUEUE` surfaces it (RISK_SCORE >= 70). But on
+this account that volume is automated ETL — three service-role families run
+`DROP TABLE IF EXISTS` / `TRUNCATE` on EDW tables thousands of times a day
+(confirmed from `ACCOUNT_USAGE.QUERY_HISTORY`, owner 2026-08-15) — which buried
+real signal and forced the domain score to 0/100. No app version bump (owner
+migration + lockstep only).
+
+- Re-derives (derivation law, `outputs/gen_v080.py`, byte-compare-locked)
+  **V_SECURITY_EXCEPTION_QUEUE** (from V075) with ONE addition to the CHANGE RISK
+  arm's `WHERE`: exclude `CHANGE_KIND = 'DESTRUCTIVE'` events performed BY the 18
+  confirmed ETL-engine roles — the three families `TF_SFR_<env>_GLUE`,
+  `TF_SFR_<env>_INFORMATICA`, `TF_O_<env>_ALFA_SYSADMIN`, each expanded across the
+  six environments (PRD, MGM, SAN, SEA, DEV, PHX).
+- **Deliberately scoped so real signal still flows:** GRANT / REVOKE / POLICY
+  changes by those same roles are STILL surfaced (privilege escalation is real);
+  a DESTRUCTIVE drop by any OTHER (human / interactive) role, even in the same
+  EDW schemas, is STILL surfaced. Only automated truncate-and-reload by the named
+  engines is de-noised.
+- **Audit-safe:** the rows are NOT deleted — they remain in
+  `FACT_SECURITY_CHANGE` for drill-down and audit; only the exception QUEUE (and
+  the domain score that reads it) stop counting them. Adding/removing a role later
+  is a one-line re-derivation of this same view.
+- **NULL-safe:** the match uses `COALESCE(ROLE_NAME, '') IN (…)`, not a bare
+  `ROLE_NAME IN (…)`. `ROLE_NAME` is nullable in `FACT_SECURITY_CHANGE` (the base
+  view already `COALESCE`s it), and a bare `IN` under `NOT (…)` would go three-
+  valued and silently drop a DESTRUCTIVE event with an unattributed (NULL) role —
+  precisely the event a security queue must keep. A NULL role now surfaces.
+- View-only: no data reload, no new objects, teardown unchanged. Fixes both the
+  queue display and the domain score at once (same view). Guarded `IF (v < 79)`;
+  owner applies in Snowsight after V079.
+- Lockstep to floor 80: `validate.sql` (6 spots), `admin.py` `_EXPECTED_MIGRATIONS[80]`
+  + Setup-progress tuple, `02_migrations_V001_V080.sql` bundle regen, run-lists
+  (DEPLOYMENT / README / FULL_REBUILD / rebuild README), floor-pin tests bumped.
+- Tests: `tests/test_v080_change_risk_etl_exclusion.py` (5) — byte-identical
+  regen, one guarded view swap, the 18 ETL roles excluded scoped to DESTRUCTIVE
+  (and `SNOW_PRI_GFR` deliberately absent), reverse-derivation proving the ONLY
+  change vs the V075 base is the exclusion block, and sqlglot parse.
+
 ## V079 (owner migration) - AI predicate historical split (2026-08-15)
 
 Follow-up to v4.158.0's app-side reconciliation: the app DISPLAY splits AI vs
