@@ -146,7 +146,7 @@ def test_v061_ai_predicate_identical_everywhere():
     # strict superset of the loader's narrow form (the deliberate divergence).
     canonical = ai_service_predicate()
     assert "%COCO%" in canonical and "%COWORK%" in canonical
-    assert mart_sql._AI_SERVICE_PRED == canonical
+    assert canonical == mart_sql._AI_SERVICE_PRED
     assert _AI not in canonical                                                # loader form is narrower, pending migration
 
 

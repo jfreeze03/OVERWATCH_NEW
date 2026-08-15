@@ -1,4 +1,4 @@
-# Full rebuild — drop the OVERWATCH objects and reinstall V001..V078
+# Full rebuild — drop the OVERWATCH objects and reinstall V001..V079
 
 Owner ask 2026-07-12: "a full database drop instead of this incremental
 build." This runbook is that, made safe.
@@ -6,7 +6,7 @@ build." This runbook is that, made safe.
 **The one rule: never drop DBA_MAINT_DB or the OVERWATCH schema.** The
 schema is SHARED with the previous app's objects (teardown.sql's safety
 model). "Full rebuild" here means: drop every OVERWATCH object by name,
-then run all 78 migrations in order. Same end state as a virgin install.
+then run all 79 migrations in order. Same end state as a virgin install.
 
 Everything below runs in Snowsight as your deployment role (the one that
 owns the objects — see DEPLOYMENT.md), in a worksheet with:
@@ -45,16 +45,16 @@ after a factory reset).
 
 ## 3. Migrations, in order, one file at a time
 
-V001 → V078, each file fully, **stopping at the first error** — never run
+V001 → V079, each file fully, **stopping at the first error** — never run
 past a failure (a partial apply is how task trees end up suspended; V041
 resumes its graph both before and after its first fills now, but the rule
 stands for every file). Notes:
 
-- V027, V029, V030, V031, V041, V042, V043, V045, V061, V075, V077, and V078 end
+- V027, V029, V030, V031, V041, V042, V043, V045, V061, V075, V077, V078, and V079 end
   with first-fill CALLs — the slow ones; expect a few minutes each on
   WH_ALFA_ADMIN. (V042/V043/V045/V061 were always in this club; the list was
   incomplete before 2026-08-13.)
-- If you kept operator data, SCHEMA_VERSION already holds 1..78: the
+- If you kept operator data, SCHEMA_VERSION already holds 1..79: the
   guards pass, IF NOT EXISTS objects recreate only what teardown dropped,
   and the version MERGEs no-op. That is the designed restore path.
 - If you factory-reset, V001 reseeds SETTINGS/ALERT_CONFIG/COMPANY_SCOPE
@@ -81,7 +81,7 @@ snowflake/loader_chain_check.sql when you need task-state diagnosis.)
 ## 7. Redeploy the app
 
 Push the current build to the stage / Streamlit-in-Snowflake as usual
-(DEPLOYMENT.md). App v4.154.0 expects exactly V001..V078.
+(DEPLOYMENT.md). App v4.158.0 expects exactly V001..V079.
 
 ## 8. Prove the chain ticks
 

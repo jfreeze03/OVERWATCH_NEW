@@ -212,6 +212,11 @@ _EXPECTED_MIGRATIONS = {
     78: "AI usage loader unbreak: SP_LOAD_MARTS_V27 ai_code arm casts USAGE_TIME "
         "(TIMESTAMP_TZ in the CORTEX_CODE_* views) to TIMESTAMP_NTZ so the arm stops "
         "failing every run; DAILY/365 first-fill included",
+    79: "AI predicate historical split: SP_LOAD_PLATFORM_SCORE / SP_ALERT_SCAN_DAILY / "
+        "SP_REFRESH_EXEC_BOARD broaden the AI service-type predicate to include Cortex "
+        "Code / CoWork (SNOWFLAKE_COCO_SNOWSIGHT), and SP_ALERT_SCAN rewrites the "
+        "COST_SERVERLESS_CREEP carve-out so CoCo is not double-alerted; re-fills score "
+        "+ exec board",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1019,6 +1024,7 @@ def _setup_progress_tab() -> None:
         (76, "V076", "Anomaly materiality gate"),
         (77, "V077", "Cost by application x user: FACT_APP_COST_DAILY"),
         (78, "V078", "AI usage loader unbreak: ai_code TZ->NTZ casts + backfill"),
+        (79, "V079", "AI predicate historical split: loader procs count CoCo as AI"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",

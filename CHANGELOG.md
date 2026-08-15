@@ -1,5 +1,36 @@
 # Changelog
 
+## V079 (owner migration) - AI predicate historical split (2026-08-15)
+
+Follow-up to v4.158.0's app-side reconciliation: the app DISPLAY splits AI vs
+compute at read time (correct for all history), but three LOADER procs still
+MATERIALIZED the split with the narrow predicate, so stored columns / thresholds
+priced Cortex Code / CoWork as compute. V079 re-derives them with the broadened
+predicate. No app version bump (owner migration + lockstep only).
+
+- Re-derives (derivation law, `outputs/gen_v079.py`, byte-compare-locked) four
+  procs: **SP_LOAD_PLATFORM_SCORE** (from V061 →
+  `FACT_PLATFORM_SCORE_DAILY.CREDITS_BILLED_AI`), **SP_ALERT_SCAN_DAILY** (from
+  V066 → `COST_BUDGET_PACE`/`COST_FORECAST_BREACH` MTD_USD + `COST_AI_CREEP`),
+  **SP_REFRESH_EXEC_BOARD** (from V073 → `MART_EXEC_BOARD` IS_AI + DRIVER_LABEL)
+  broaden the AI positive predicate with `%COCO%`/`%COWORK%` (byte-equal to
+  `common.ai_service_predicate()`); and **SP_ALERT_SCAN** (from V067) rewrites
+  `COST_SERVERLESS_CREEP`'s hardcoded `NOT IN (…,'AI_SERVICES')` carve-out to the
+  canonical `not_ai_service_predicate()` so CoCo is excluded from the serverless
+  scan — otherwise it would double-alert (AI-creep *and* serverless-creep) on
+  the same credits. AI and serverless stay mutually exclusive.
+- **Rate-attribution only** — total `CREDITS_BILLED` unchanged; only the
+  AI/OTHER partition and blended USD move. CoCo now prices at the AI rate
+  ($2.20) not compute ($3.68): budget-pace/forecast alerts soften slightly,
+  AI-creep sharpens (CoCo joins the AI bucket); serverless stays mutually
+  exclusive with AI.
+- Ends with a re-fill of the two materializing loaders
+  (`SP_LOAD_PLATFORM_SCORE(120)`, `SP_REFRESH_EXEC_BOARD()`) to re-attribute
+  recent history at apply time. `SP_ALERT_SCAN_DAILY` is **not** called (it
+  would fire alerts) — it self-corrects on its next scheduled run.
+- No new objects (three `CREATE OR REPLACE PROCEDURE` only); teardown
+  unchanged. **Owner applies in Snowsight after V078.**
+
 ## 4.158.0 - Metric reconciliation: CoCo/AI, serverless labels, replication (2026-08-15)
 
 App-side fixes from the "reconcile every metric vs org-currency truth" audit
