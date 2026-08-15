@@ -14,10 +14,16 @@ from app.logic.formulas import safe_float
 SERVICE_CATEGORY: dict[str, str] = {
     "WAREHOUSE_METERING": "Warehouse",
     "WAREHOUSE_METERING_READER": "Warehouse (reader)",
+    # v4.158.0: METERING_DAILY_HISTORY names Snowpipe "PIPE" and auto-clustering
+    # "AUTO_CLUSTERING". The old keys ("SNOWPIPE", "AUTOMATIC_CLUSTERING") never
+    # matched, so both landed in "Other" and were flagged as coverage gaps.
+    # Keep the old spellings as aliases in case org-currency uses them.
+    "PIPE": "Serverless",
     "SNOWPIPE": "Serverless",
     "SNOWPIPE_STREAMING": "Serverless",
     "SERVERLESS_TASK": "Serverless",
     "SERVERLESS_ALERTS": "Serverless",
+    "AUTO_CLUSTERING": "Serverless",
     "AUTOMATIC_CLUSTERING": "Serverless",
     "MATERIALIZED_VIEW": "Serverless",
     "SEARCH_OPTIMIZATION": "Serverless",
@@ -48,9 +54,11 @@ _DRILL_COVERAGE: dict[str, tuple[str, str, str]] = {
     ),
     "CORTEX": ("User / model / warehouse", "Cortex usage", "Drill ready"),
     "AI": ("User / model / warehouse", "Cortex usage", "Drill ready"),
+    "PIPE": ("Pipe / table", "Pipe usage", "Partial"),
     "SNOWPIPE": ("Pipe / table", "Pipe usage", "Partial"),
     "SNOWPIPE_STREAMING": ("Client / table", "Streaming usage", "Partial"),
     "SERVERLESS_TASK": ("Task / day", "Task history", "Partial"),
+    "AUTO_CLUSTERING": ("Table / day", "Clustering history", "Partial"),
     "AUTOMATIC_CLUSTERING": ("Table / day", "Clustering history", "Partial"),
     "MATERIALIZED_VIEW": ("Materialized view / day", "MV refresh history", "Partial"),
     "SEARCH_OPTIMIZATION": ("Table / day", "Search optimization history", "Partial"),

@@ -127,13 +127,27 @@ def test_v061_c1_score_column_populated():
 
 
 def test_v061_ai_predicate_identical_everywhere():
-    """B5-crit (cross-proc lock): the AI predicate must be byte-identical across the
-    SP_ALERT_SCAN mtd/creep arms, the score loader, and app _AI_SERVICE_PRED."""
-    assert _V61.count(_AI) >= 5                                                 # mtd x2 (2 CASE each? at least) + creep + score
+    """B5-crit (cross-proc lock): the AI predicate is byte-identical across the
+    V061 loader arms (SP_ALERT_SCAN mtd/creep + score loader).
+
+    v4.158.0: the APP predicate was deliberately BROADENED to include Cortex
+    Code / CoWork (SNOWFLAKE_COCO_SNOWSIGHT) via the canonical
+    common.ai_service_predicate(), fixing the display/rate-split so CoCo prices
+    at the AI rate. The V061 LOADER still carries the narrow 3-token predicate;
+    re-syncing it (so the historical mart split + alert/score thresholds also
+    count CoCo as AI) is the tracked follow-up owner migration. This pins BOTH
+    sides of that known, intentional divergence."""
+    # Loader side: unchanged — still the narrow predicate, identical across arms.
+    assert _V61.count(_AI) >= 5                                                 # mtd x2 + creep + score
     from app.data import mart_sql
-    src = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
-    assert _AI in src                                                          # app twin uses the same spelling
+    from app.data.common import ai_service_predicate
     assert hasattr(mart_sql, "_AI_SERVICE_PRED")
+    # App side: now the canonical predicate, which INCLUDES CoCo/CoWork and is a
+    # strict superset of the loader's narrow form (the deliberate divergence).
+    canonical = ai_service_predicate()
+    assert "%COCO%" in canonical and "%COWORK%" in canonical
+    assert mart_sql._AI_SERVICE_PRED == canonical
+    assert _AI not in canonical                                                # loader form is narrower, pending migration
 
 
 def test_v061_prior_fixes_survive():

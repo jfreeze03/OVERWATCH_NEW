@@ -236,10 +236,55 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 source="DATABASE_REPLICATION_USAGE_HISTORY (native replication detail)",
             )
             if rep.ok and rep.empty:
-                empty_state(
-                    "clean",
-                    "No replication credits or transferred bytes were recorded in this scope.",
+                # v4.158.0: DATABASE_REPLICATION_USAGE_HISTORY is CURRENT-account
+                # only, but replication + data transfer bill on the secondary/DR
+                # account — so this credits view is legitimately empty here while
+                # the org rate card shows real spend (e.g. PRIMARY_DR REPLICATION).
+                # Fall back to org-currency billing truth instead of claiming
+                # nothing was recorded (cost rule d: show the currency as-is).
+                org = run(
+                    cost_sql.org_usage_in_currency(30), page=_PAGE,
+                    key="org_replication_fallback", tier="historical",
+                    source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (replication + transfer, billed)",
+                    probe=True,
                 )
+                shown = False
+                if org.usable() and "SERVICE_TYPE" in org.df.columns:
+                    o = org.df.copy()
+                    o["SERVICE_TYPE"] = o["SERVICE_TYPE"].astype(str).str.upper()
+                    o = o[o["SERVICE_TYPE"].isin(["REPLICATION", "DATA_TRANSFER"])]
+                    if not o.empty:
+                        ccy = (str(o["CURRENCY"].dropna().iloc[0])
+                               if o["CURRENCY"].notna().any() else "USD")
+                        rep_amt = float(pd.to_numeric(
+                            o.loc[o["SERVICE_TYPE"] == "REPLICATION", "USAGE_IN_CURRENCY"],
+                            errors="coerce").fillna(0.0).sum())
+                        by = (o.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)
+                                ["USAGE_IN_CURRENCY"].sum()
+                                .sort_values("USAGE_IN_CURRENCY", ascending=False))
+                        by.columns = ["Account", "Service", f"Spend ({ccy})"]
+                        kpi_row([
+                            {"label": f"Replication (30d, {ccy})", "value": f"{rep_amt:,.2f}",
+                             "help": "Org rate-card billing truth. The native per-database credits "
+                                     "view is empty because replication bills on the secondary/DR "
+                                     "account, not this one."},
+                            {"label": "Accounts", "value": str(by["Account"].nunique())},
+                        ])
+                        styled_table(by, height=240, sort_label=f"spend ({ccy}) desc")
+                        st.caption(
+                            "Replication and data transfer bill on the secondary/DR account "
+                            "(e.g. PRIMARY_DR); the native per-database credits view only sees the "
+                            "current account, so it reads empty. Amounts are org rate-card currency, "
+                            "last 30 days (org usage lags up to ~72h)."
+                        )
+                        result_caption(org)
+                        shown = True
+                if not shown:
+                    empty_state(
+                        "clean",
+                        "No replication credits recorded on this account. Replication bills on the "
+                        "secondary/DR account; enable ORGANIZATION_USAGE to surface its rate-card spend.",
+                    )
             elif guard(rep, ""):
                 rep_df = rep.df.copy()
                 rep_df["USD"] = pd.to_numeric(rep_df["CREDITS"], errors="coerce").fillna(0.0) * rate

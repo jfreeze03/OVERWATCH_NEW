@@ -55,6 +55,33 @@ def lag_offset_start(days: int, lag_hours: int = 24) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Canonical AI/Cortex service-type predicate (v4.158.0). MUST stay byte-equal
+# to app.logic.cost_coverage._is_ai_family — the SQL predicates had diverged and
+# dropped SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork), so CoCo was excluded
+# from the "account-wide" Cortex/AI chart and priced at the compute rate ($3.68)
+# instead of the AI rate ($2.20) in every billed AI/OTHER split. One source now;
+# every metering builder references these so the two layers cannot re-diverge.
+# ---------------------------------------------------------------------------
+AI_SERVICE_TOKENS = ("%CORTEX%", "AI%", "%INTELLIGENCE%", "%COCO%", "%COWORK%")
+
+
+def ai_service_predicate(col: str = "SERVICE_TYPE") -> str:
+    """SQL predicate true for Cortex/AI service types (incl. Cortex Code/CoWork).
+
+    Mirrors app.logic.cost_coverage._is_ai_family: CORTEX / AI-prefix /
+    INTELLIGENCE / COCO / COWORK. Kept in one place so the SQL and Python
+    classifications never drift again.
+    """
+    return "(" + " OR ".join(f"{col} ILIKE '{t}'" for t in AI_SERVICE_TOKENS) + ")"
+
+
+def not_ai_service_predicate(col: str = "SERVICE_TYPE") -> str:
+    """NULL-safe negation of ai_service_predicate (NULL -> not AI -> compute rate)."""
+    safe = f"COALESCE({col}, '')"
+    return " AND ".join(f"{safe} NOT ILIKE '{t}'" for t in AI_SERVICE_TOKENS)
+
+
 def day_literal(day: object) -> str:
     """Validated DATE literal for day-scoped builders (deep-linked replay).
 

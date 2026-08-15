@@ -12,7 +12,12 @@ from __future__ import annotations
 from app import companies
 from app.config import mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
-from app.data.common import and_where, bounded_days, resolve_effective_window
+from app.data.common import (
+    ai_service_predicate,
+    and_where,
+    bounded_days,
+    resolve_effective_window,
+)
 
 
 def _company_arm(company: str, column: str = "COMPANY") -> str:
@@ -855,8 +860,7 @@ def compare_billed(a_start: str, a_end: str, b_start: str, b_end: str) -> str:
     by construction; the strip labels it so). Carries the AI/OTHER split (C1)
     so the caller prices AI credits at the AI rate, not the compute rate."""
     in_a, _in_b, either = _side_windows(a_start, a_end, b_start, b_end)
-    _ai = ("(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' "
-           "OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')")
+    _ai = ai_service_predicate()
     return f"""SELECT
     IFF({in_a}, 'A', 'B') AS SIDE,
     SUM(CREDITS_BILLED) AS CREDITS_BILLED,

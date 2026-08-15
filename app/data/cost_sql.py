@@ -11,7 +11,12 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days, resolve_effective_window
+from app.data.common import (
+    ai_service_predicate,
+    and_where,
+    bounded_days,
+    resolve_effective_window,
+)
 
 _BILLED = (
     "COALESCE(CREDITS_BILLED, GREATEST(0, COALESCE(CREDITS_USED, 0) "
@@ -168,7 +173,7 @@ SELECT
     SUM({_BILLED}) AS CREDITS_BILLED
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
 WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')
+  AND {ai_service_predicate()}
 GROUP BY 1, 2
 ORDER BY DAY
 """

@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.158.0 - Metric reconciliation: CoCo/AI, serverless labels, replication (2026-08-15)
+
+App-side fixes from the "reconcile every metric vs org-currency truth" audit
+(owner: "we need to do this for every metric"). Corrects the DISPLAY today; a
+follow-up owner migration re-derives the historical mart split.
+
+- **Canonical AI-service predicate.** The SQL predicate identifying Cortex/AI
+  service types had drifted from `cost_coverage._is_ai_family` and excluded
+  `SNOWFLAKE_COCO_SNOWSIGHT` (Cortex Code / CoWork). One shared
+  `ai_service_predicate()` / `not_ai_service_predicate()` in `data/common.py`
+  now feeds every metering builder (`_AI_SERVICE_PRED`, the compute complement,
+  `fact_cortex_daily_spend`, `cortex_daily_spend`, `compare_billed`), so:
+  - the "Cortex / AI spend (account-wide)" chart no longer drops the largest AI
+    line (CoCo was ~100% of real AI spend, rendering ~$0.01), and
+  - the billed AI-vs-OTHER split prices CoCo at the AI rate ($2.20), not the
+    compute rate ($3.68), across MTD / Cost Truth / YTD / Compare / Decision
+    Studio headlines. The SQL and Python classifications can no longer diverge.
+- **Serverless service-type labels.** `METERING_DAILY_HISTORY` names Snowpipe
+  `PIPE` and auto-clustering `AUTO_CLUSTERING`; the category map keyed the old
+  spellings (`SNOWPIPE`, `AUTOMATIC_CLUSTERING`), so both fell to "Other" and
+  were flagged as coverage gaps. Added the real keys (old kept as aliases).
+- **Replication detail — org-currency fallback.** The native
+  `DATABASE_REPLICATION_USAGE_HISTORY` view is current-account only, but
+  replication + data transfer bill on the secondary/DR account — so the panel
+  claimed "no replication recorded" while the org rate card showed real spend
+  (e.g. PRIMARY_DR REPLICATION). It now falls back to
+  `USAGE_IN_CURRENCY_DAILY` (billing truth, currency as-is) with a note.
+
+Not in this release: the loader's historical MTD_USD split (V061/V062/V064)
+still classifies past CoCo credits as compute — an owner migration re-derives
+that as a follow-up.
+
 ## 4.157.0 - Triage/AI cleanup + jump removal + filter accuracy (2026-08-15)
 
 App-only UI pass from the live-screenshot review. No migration. (Cost

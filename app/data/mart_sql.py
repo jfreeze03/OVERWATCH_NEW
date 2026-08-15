@@ -15,7 +15,13 @@ from app.config import (
     mart_object,
 )
 from app.core.sqlsafe import sql_literal
-from app.data.common import and_where, bounded_days, resolve_effective_window
+from app.data.common import (
+    ai_service_predicate,
+    and_where,
+    bounded_days,
+    not_ai_service_predicate,
+    resolve_effective_window,
+)
 
 
 def _company_filter(company: str) -> str:
@@ -192,10 +198,7 @@ LIMIT 30
 # — the exact one proven in fact_cortex_daily_spend / fact_daily_spend_compute.
 # NULL SERVICE_TYPE evaluates NULL here, so the CASE below routes it to OTHER
 # (compute), matching fact_daily_spend_compute's COALESCE(...,'') NOT ILIKE arm.
-_AI_SERVICE_PRED = (
-    "(SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' "
-    "OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')"
-)
+_AI_SERVICE_PRED = ai_service_predicate()  # v4.158.0: canonical, incl. CoCo/CoWork
 
 
 def _billed_split_cols(credits_col: str = "CREDITS_BILLED") -> str:
@@ -267,9 +270,7 @@ def fact_daily_spend_compute(days: int) -> str:
 SELECT DAY, SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%'
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%'
-  AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'
+  AND {not_ai_service_predicate()}
 GROUP BY DAY
 ORDER BY DAY
 """
@@ -664,9 +665,7 @@ def health_strip() -> str:
     _lim = ("IFF(SOURCE_NAME LIKE '%DAILY%' OR SOURCE_NAME LIKE '%METERING%', "
             f"{THRESHOLDS['stale_daily_fact_hours']}, {THRESHOLDS['stale_fact_hours']})")
     _urgency = f"IFF(LAST_LOAD_TS IS NULL, 1e9, {_age} / {_lim})"
-    _not_ai = ("COALESCE(SERVICE_TYPE, '') NOT ILIKE '%CORTEX%' "
-               "AND COALESCE(SERVICE_TYPE, '') NOT ILIKE 'AI%' "
-               "AND COALESCE(SERVICE_TYPE, '') NOT ILIKE '%INTELLIGENCE%'")
+    _not_ai = not_ai_service_predicate()
     # P1 (perf): this statement runs on the SHELL of every page, so it was the
     # app's most-repeated read — and it used to be nine UNION ALL arms that
     # re-scanned ALERT_EVENTS twice, SOURCE_FRESHNESS_STATE three times and
@@ -1967,7 +1966,7 @@ SELECT
     SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-  AND (SERVICE_TYPE ILIKE '%CORTEX%' OR SERVICE_TYPE ILIKE 'AI%' OR SERVICE_TYPE ILIKE '%INTELLIGENCE%')
+  AND {_AI_SERVICE_PRED}
 GROUP BY 1, 2
 ORDER BY DAY
 """

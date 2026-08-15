@@ -1,4 +1,4 @@
-"""v4.157.0 locks: compact triage toolbar and reliable jump controls."""
+"""v4.158.0 locks: compact triage toolbar and reliable jump controls."""
 
 from pathlib import Path
 
@@ -38,7 +38,7 @@ def test_sidebar_jump_requires_explicit_open_action() -> None:
 
 
 def test_in_page_jump_chips_are_removed() -> None:
-    # v4.157.0: the in-page "JUMP TO" chips could never scroll in
+    # v4.158.0: the in-page "JUMP TO" chips could never scroll in
     # Streamlit-in-Snowflake — section_toc rendered its scroll JS inside a
     # cross-origin components.v1.html iframe, so window.parent.document was a
     # SecurityError and every fallback dead-ended. The chips are gone; the old
