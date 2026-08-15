@@ -64,9 +64,12 @@ def test_org_buckets_use_structured_dimensions():
     import pytest as _pt
     sg = _pt.importorskip("sqlglot")
     sql = cost_sql.org_account_month_usd(3)
-    assert "RATING_TYPE = 'COMPUTE'" in sql          # structured, not USAGE_TYPE string match
+    # rec #29 (v4.160.0): case-insensitive structured match, not USAGE_TYPE string
+    assert "UPPER(RATING_TYPE) = 'COMPUTE'" in sql
     assert "LOWER(USAGE_TYPE) LIKE" not in sql
-    for col in ("COMPUTE_USD", "AI_USD", "STORAGE_USD", "TRANSFER_USD", "ADJUSTMENT_USD", "TOTAL_USD"):
+    # named buckets + OTHER_USD residual sum to TOTAL_USD; ADJUSTMENT_USD orthogonal
+    for col in ("COMPUTE_USD", "AI_USD", "STORAGE_USD", "TRANSFER_USD", "OTHER_USD",
+                "ADJUSTMENT_USD", "TOTAL_USD"):
         assert col in sql
     assert "IS_ADJUSTMENT" in sql
     sg.parse(sql, dialect="snowflake")

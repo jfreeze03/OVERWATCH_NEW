@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.160.0 - Financial truth: CoCo label, org residual, taxonomy canary (2026-08-15)
+
+Gap-audit Wave 2 (first batch). App-only.
+
+- **CoCo tile is a non-additive subset (rec #7).** The Spend tab's "CoCo spend"
+  tile was labeled "billed separately from the metering line" — false since
+  V079: CoCo bills as `SNOWFLAKE_COCO_SNOWSIGHT` *inside* `METERING_DAILY_HISTORY`,
+  so it is already in the Credit-spend / Total-credits tiles. Relabeled
+  "— of which CoCo" with a "do not add to the totals" note.
+- **Org rate-card reconciles to TOTAL (rec #29).** `org_account_month_usd` matched
+  `RATING_TYPE` case-sensitively and had no residual, so a differently-cased or
+  new rating type dropped from every named bucket while still landing in TOTAL.
+  Now `UPPER(RATING_TYPE)` + an explicit `OTHER_USD` (everything not COMPUTE / AI /
+  STORAGE / TRANSFER — marketplace, priority-support/VPS, new types), so the named
+  buckets + OTHER sum to TOTAL exactly. `ADJUSTMENT_USD` documented as an
+  orthogonal flag, never a 6th additive slice (Codex #5).
+- **Taxonomy keys + unknown-service canary (rec #31 / #21).** Added `LOGGING`,
+  `TRUST_CENTER`, `DATA_QUALITY_MONITORING` to `SERVICE_CATEGORY` (they were
+  decaying into "Other"). New `cost_coverage.material_unmapped_services()` flags
+  material "Other" spend at runtime, and `tests/test_cost_coverage_taxonomy.py`
+  is the CI counterpart that fails when a KNOWN service type goes unmapped — the
+  guard that was missing when the v4.158.0 PIPE/AUTO_CLUSTERING typos shipped.
+
+(Wave 2 continues: all-in invoice tile #8, RATE_SHEET_DAILY pricing #9, egress
+dollarization #11 land next.)
+
 ## 4.159.0 - Metric parity: three P0 cross-surface fixes (2026-08-15)
 
 Gap-audit Wave 1. Three headline metrics read as different numbers depending on

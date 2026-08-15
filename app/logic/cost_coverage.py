@@ -31,6 +31,11 @@ SERVICE_CATEGORY: dict[str, str] = {
     "SNOWPARK_CONTAINER_SERVICES": "Serverless",
     "COPY_FILES": "Serverless",
     "OPENFLOW_COMPUTE_SNOWFLAKE": "Serverless",
+    # rec #31: newer serverless meters that previously fell to "Other" and dropped
+    # out of the Serverless total while the exec-board serverless arm counted them.
+    "LOGGING": "Serverless",
+    "TRUST_CENTER": "Serverless",
+    "DATA_QUALITY_MONITORING": "Serverless",
     # Snowflake stopped billing this service separately on 2026-03-01.  It
     # remains in historical windows, so the label must not imply a live fee.
     "HYBRID_TABLE_REQUESTS": "Hybrid requests (historical)",
@@ -168,6 +173,24 @@ def service_coverage_inventory(
     )
     grouped = grouped.rename(columns={"CREDITS_BILLED": "BILLED_CREDITS"})
     return grouped[_COLUMNS].sort_values("BILLED_USD", ascending=False).reset_index(drop=True)
+
+
+def material_unmapped_services(inventory: pd.DataFrame) -> pd.DataFrame:
+    """rec #21: the live half of the unknown-SERVICE_TYPE canary.
+
+    Given a ``service_coverage_inventory`` frame, return the rows that fell to the
+    catch-all "Other" category AND cleared the materiality bar — i.e. real billed
+    spend the taxonomy does not yet name. An empty frame means full coverage; any
+    row is a prompt to add a SERVICE_CATEGORY key (Admin surfaces this, and
+    ``tests/test_cost_coverage_taxonomy.py`` is the CI counterpart that fails on
+    a KNOWN type going unmapped).
+    """
+    if inventory.empty or not {"CATEGORY", "MATERIALITY"}.issubset(inventory.columns):
+        return inventory.iloc[0:0]
+    mask = (inventory["CATEGORY"].astype(str) == "Other") & (
+        inventory["MATERIALITY"].astype(str) == "Material"
+    )
+    return inventory[mask].reset_index(drop=True)
 
 
 def drill_ready_spend_share(frame: pd.DataFrame) -> float:

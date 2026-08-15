@@ -662,16 +662,25 @@ def org_account_month_usd(months: int = 2) -> str:
     account (no overage/free-usage split today).
     """
     months = max(1, min(int(months or 2), 12))
+    # rec #29: UPPER(RATING_TYPE) so a differently-cased value cannot silently drop
+    # from every named bucket while still landing in TOTAL, and an explicit
+    # OTHER_USD residual = everything not in a named rating type (marketplace,
+    # priority support / VPS, and any new rating type Snowflake adds). The four
+    # named buckets + OTHER_USD sum to TOTAL_USD exactly. ADJUSTMENT_USD is
+    # ORTHOGONAL (Codex #5): IS_ADJUSTMENT rows already carry a RATING_TYPE and are
+    # counted inside their bucket, so it is a disclosure, never a 6th additive slice.
     return f"""
 SELECT
     DATE_TRUNC('month', USAGE_DATE)::DATE AS MONTH,
-    SUM(IFF(RATING_TYPE = 'COMPUTE', USAGE_IN_CURRENCY, 0))                        AS COMPUTE_USD,
-    SUM(IFF(RATING_TYPE IN ('AI_COMPUTE', 'AI_INFERENCE'), USAGE_IN_CURRENCY, 0))  AS AI_USD,
-    SUM(IFF(RATING_TYPE IN ('STORAGE', 'BLOCK_STORAGE'), USAGE_IN_CURRENCY, 0))    AS STORAGE_USD,
-    SUM(IFF(RATING_TYPE = 'DATA_TRANSFER', USAGE_IN_CURRENCY, 0))                  AS TRANSFER_USD,
-    SUM(IFF(IS_ADJUSTMENT, USAGE_IN_CURRENCY, 0))                                  AS ADJUSTMENT_USD,
-    SUM(USAGE_IN_CURRENCY)                                                         AS TOTAL_USD,
-    MAX(CURRENCY)                                                                  AS CURRENCY
+    SUM(IFF(UPPER(RATING_TYPE) = 'COMPUTE', USAGE_IN_CURRENCY, 0))                          AS COMPUTE_USD,
+    SUM(IFF(UPPER(RATING_TYPE) IN ('AI_COMPUTE', 'AI_INFERENCE'), USAGE_IN_CURRENCY, 0))    AS AI_USD,
+    SUM(IFF(UPPER(RATING_TYPE) IN ('STORAGE', 'BLOCK_STORAGE'), USAGE_IN_CURRENCY, 0))      AS STORAGE_USD,
+    SUM(IFF(UPPER(RATING_TYPE) = 'DATA_TRANSFER', USAGE_IN_CURRENCY, 0))                    AS TRANSFER_USD,
+    SUM(IFF(UPPER(RATING_TYPE) NOT IN ('COMPUTE', 'AI_COMPUTE', 'AI_INFERENCE', 'STORAGE',
+            'BLOCK_STORAGE', 'DATA_TRANSFER'), USAGE_IN_CURRENCY, 0))                       AS OTHER_USD,
+    SUM(IFF(IS_ADJUSTMENT, USAGE_IN_CURRENCY, 0))                                           AS ADJUSTMENT_USD,
+    SUM(USAGE_IN_CURRENCY)                                                                  AS TOTAL_USD,
+    MAX(CURRENCY)                                                                           AS CURRENCY
 FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
 WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
   AND USAGE_DATE >= DATE_TRUNC('month', DATEADD('month', -{months - 1}, CURRENT_DATE()))

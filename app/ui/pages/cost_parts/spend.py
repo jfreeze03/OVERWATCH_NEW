@@ -159,11 +159,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
          "help": "Billed credits across all services this window (compute + serverless + AI, "
                  "cloud-services rebate applied). Credits are additive; the dollar split is on "
                  "the Credit-spend tile."},
-        {"label": f"CoCo spend, {days}d",
+        {"label": f"— of which CoCo, {days}d",
          "value": format_usd(coco_usd) if coco_usd is not None else "—",
          "help": "Cortex Code (Snowsight + CLI) token credits x the configured AI rate, from "
-                 "FACT_AI_USAGE_DAILY (loaded daily). Billed separately from the metering line "
-                 "on the left; '—' until the fact loads."},
+                 "FACT_AI_USAGE_DAILY (loaded daily). rec #7: a NON-ADDITIVE subset already "
+                 "inside the Credit-spend and Total-credits tiles — post-V079 CoCo bills as "
+                 "SNOWFLAKE_COCO_SNOWSIGHT within METERING_DAILY_HISTORY. Shown here from the "
+                 "near-real-time loader for freshness; do NOT add it to the totals on the left. "
+                 "'—' until the fact loads."},
     ])
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
