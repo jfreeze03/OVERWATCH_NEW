@@ -40,15 +40,20 @@ def test_cost_coverage_uses_service_specific_rates_and_exposes_material_gap():
     unknown = coverage[coverage["SERVICE_TYPE"] == "MYSTERY_SERVICE"].iloc[0]
     assert unknown["DRILL_STATUS"] == "Service total only"
     assert unknown["MATERIALITY"] == "Material"
-    assert round(drill_ready_spend_share(coverage), 2) == 93.75
+    # rec #47: REPLICATION is no longer credited as drillable (it bills on the DR
+    # account and the native per-database view is empty here), so only WAREHOUSE
+    # metering ($40 of $64) counts as drill-ready = 62.5%.
+    replication = coverage[coverage["SERVICE_TYPE"] == "REPLICATION"].iloc[0]
+    assert replication["DRILL_STATUS"] == "Service total only"
+    assert round(drill_ready_spend_share(coverage), 2) == 62.5
 
 
 def test_coco_cortex_code_is_priced_at_the_ai_rate_not_compute():
     # SNOWFLAKE_COCO_SNOWSIGHT (Cortex Code / CoWork) carries neither a CORTEX
     # token nor an AI prefix, so a name-only match priced it at the compute rate
-    # and over-stated it ~67%. It must categorize AI / Cortex and price at ai_rate
-    # — but keep the honest "Service total only" drill (CoCo compute has no
-    # per-user usage history to drill).
+    # and over-stated it ~67%. It must categorize AI / Cortex and price at ai_rate.
+    # rec #48: it IS drillable to user grain (AI Chargeback reads FACT_AI_USAGE_DAILY
+    # via mart27_sql.ai_code_daily), so the coverage table marks it "Drill ready".
     frame = pd.DataFrame({
         "SERVICE_TYPE": ["SNOWFLAKE_COCO_SNOWSIGHT"],
         "CREDITS_BILLED": [100.0],
@@ -56,7 +61,7 @@ def test_coco_cortex_code_is_priced_at_the_ai_rate_not_compute():
     row = service_coverage_inventory(frame, rate=3.68, ai_rate=2.20).iloc[0]
     assert row["CATEGORY"] == "AI / Cortex"
     assert round(float(row["BILLED_USD"]), 2) == 220.0   # 100 * 2.20 (AI), not 368.0 (compute)
-    assert row["DRILL_STATUS"] == "Service total only"
+    assert row["DRILL_STATUS"] == "Drill ready"
 
 
 def test_hybrid_request_label_discloses_that_the_charge_is_historical():

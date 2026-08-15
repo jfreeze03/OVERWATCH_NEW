@@ -44,30 +44,47 @@ SERVICE_CATEGORY: dict[str, str] = {
 }
 
 
+# DRILL_STATUS vocabulary: "Drill ready" (a native per-dimension view is wired and
+# tested), "Object-ledger drill" (a per-object drill ships via the object cost
+# ledger — rec #44), "Service total only" (only the service total is trustworthy).
+# drill_ready_spend_share counts the first two. rec #42/#43/#47: statuses that
+# advertised a drill with no backing query were downgraded to the truth.
 _DRILL_COVERAGE: dict[str, tuple[str, str, str]] = {
     "WAREHOUSE_METERING": ("Warehouse / day", "Warehouse metering", "Drill ready"),
+    # rec #43: no reader-account drill builder exists — do not advertise one.
     "WAREHOUSE_METERING_READER": (
-        "Reader account / warehouse / day",
+        "Reader account (service total)",
         "Reader metering",
-        "Drill ready",
+        "Service total only",
     ),
-    "REPLICATION": ("Database / refresh", "Replication usage", "Drill ready"),
+    # rec #47: DATABASE_REPLICATION_USAGE_HISTORY is empty here (replication bills
+    # on the DR account); the Spend panel already falls back to org currency.
+    "REPLICATION": ("Account (org currency)", "Org rate-card", "Service total only"),
     "SNOWPARK_CONTAINER_SERVICES": (
         "Compute pool / application",
         "Container-services usage",
         "Drill ready",
     ),
-    "CORTEX": ("User / model / warehouse", "Cortex usage", "Drill ready"),
-    "AI": ("User / model / warehouse", "Cortex usage", "Drill ready"),
-    "PIPE": ("Pipe / table", "Pipe usage", "Partial"),
-    "SNOWPIPE": ("Pipe / table", "Pipe usage", "Partial"),
-    "SNOWPIPE_STREAMING": ("Client / table", "Streaming usage", "Partial"),
-    "SERVERLESS_TASK": ("Task / day", "Task history", "Partial"),
-    "AUTO_CLUSTERING": ("Table / day", "Clustering history", "Partial"),
-    "AUTOMATIC_CLUSTERING": ("Table / day", "Clustering history", "Partial"),
-    "MATERIALIZED_VIEW": ("Materialized view / day", "MV refresh history", "Partial"),
-    "SEARCH_OPTIMIZATION": ("Table / day", "Search optimization history", "Partial"),
-    "QUERY_ACCELERATION": ("Query / warehouse", "Query acceleration history", "Partial"),
+    # rec #42: a per-user/model Cortex drill exists, but no warehouse-grain one —
+    # drop "warehouse" from the advertised grain.
+    "CORTEX": ("User / model", "Cortex usage", "Drill ready"),
+    "AI": ("User / model", "Cortex usage", "Drill ready"),
+    # rec #43: no PIPE_USAGE_HISTORY / SNOWPIPE_STREAMING_CLIENT_HISTORY /
+    # QUERY_ACCELERATION_HISTORY is read anywhere, so only the service total holds.
+    "PIPE": ("Service total", "Pipe usage (no per-pipe drill wired)", "Service total only"),
+    "SNOWPIPE": ("Service total", "Pipe usage (no per-pipe drill wired)", "Service total only"),
+    "SNOWPIPE_STREAMING": ("Service total", "Streaming usage (no per-client drill wired)",
+                           "Service total only"),
+    "QUERY_ACCELERATION": ("Service total", "QAS (folded into pattern cost only)",
+                           "Service total only"),
+    # rec #44: each of these has an EXACT native per-object *_HISTORY key AND is
+    # materialized in the object cost ledger (FACT_OBJECT_COST_DAILY /
+    # clustering_by_table / serverless_task_daily) — a real, shipping drill.
+    "SERVERLESS_TASK": ("Task / day", "Task history (object ledger)", "Object-ledger drill"),
+    "AUTO_CLUSTERING": ("Table / day", "Clustering history (object ledger)", "Object-ledger drill"),
+    "AUTOMATIC_CLUSTERING": ("Table / day", "Clustering history (object ledger)", "Object-ledger drill"),
+    "MATERIALIZED_VIEW": ("Materialized view / day", "MV refresh (object ledger)", "Object-ledger drill"),
+    "SEARCH_OPTIMIZATION": ("Table / day", "Search-opt history (object ledger)", "Object-ledger drill"),
 }
 
 _COLUMNS = [
@@ -109,12 +126,21 @@ def service_category(service: object) -> str:
 
 
 def _coverage_for(service: str) -> tuple[str, str, str]:
-    # NOTE: narrower than _is_ai_family on purpose. A CORTEX_* service has a
-    # per-user CORTEX_CODE_*_USAGE_HISTORY drill; CoCo/CoWork COMPUTE does not,
-    # so it must keep the honest "Service total only" default rather than claim
-    # a Cortex drill it cannot deliver. The rate fix (service_category) and the
-    # drill claim are deliberately decoupled.
     normalized = str(service or "").upper()
+    # rec #48: Cortex Code / CoWork (CoCo) IS drilled to USER grain by the AI
+    # Chargeback tab via FACT_AI_USAGE_DAILY (mart27_sql.ai_code_daily). The old
+    # code left it on the "Service total only" default, marking a material AI line
+    # as an un-drillable gap while the app already drilled it.
+    if "COCO" in normalized or "COWORK" in normalized:
+        return ("User / day", "FACT_AI_USAGE_DAILY (Cortex Code)", "Drill ready")
+    # rec #42: AI_SERVICES aggregates Cortex functions PLUS Analyst / Search /
+    # Document AI / Fine-tuning — none with a per-user drill — so it must NOT
+    # inherit the Cortex "Drill ready" grain until per-service views back it.
+    if normalized.startswith("AI_SERVICE"):
+        return ("Service total", "AI services metering (no per-feature drill wired)",
+                "Service total only")
+    # The genuine CORTEX_* functions do have a per-user/model drill (grain fixed
+    # to "User / model" — no warehouse-grain drill exists, rec #42).
     if "CORTEX" in normalized or normalized.startswith("AI") or "INTELLIGENCE" in normalized:
         return _DRILL_COVERAGE["CORTEX"]
     return _DRILL_COVERAGE.get(
@@ -193,13 +219,23 @@ def material_unmapped_services(inventory: pd.DataFrame) -> pd.DataFrame:
     return inventory[mask].reset_index(drop=True)
 
 
+# Statuses that back a real per-dimension drill (native view or object ledger,
+# rec #44) — the billed-dollar share the coverage KPI counts as drillable.
+_DRILLABLE_STATUSES = ("Drill ready", "Object-ledger drill")
+
+
 def drill_ready_spend_share(frame: pd.DataFrame) -> float:
-    """Return billed-dollar share whose status has a native drill path."""
+    """Return billed-dollar share whose status has a real per-object drill path.
+
+    rec #44: counts both native "Drill ready" and "Object-ledger drill" (serverless
+    task/table lines the app already drills via the object cost ledger), so a
+    serverless-heavy account no longer reads artificially low on the KPI.
+    """
     if frame.empty or not {"BILLED_USD", "DRILL_STATUS"}.issubset(frame.columns):
         return 0.0
     total = float(pd.to_numeric(frame["BILLED_USD"], errors="coerce").fillna(0.0).sum())
     if total <= 0:
         return 0.0
-    ready = frame[frame["DRILL_STATUS"].astype(str) == "Drill ready"]
+    ready = frame[frame["DRILL_STATUS"].astype(str).isin(_DRILLABLE_STATUSES)]
     covered = float(pd.to_numeric(ready["BILLED_USD"], errors="coerce").fillna(0.0).sum())
     return covered / total * 100.0

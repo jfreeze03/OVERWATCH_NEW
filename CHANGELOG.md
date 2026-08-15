@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.165.0 - Drill honesty: the coverage table now tells the truth (2026-08-15)
+
+Gap-audit Wave 4 (drill-honesty core). App-only; `cost_coverage.py`.
+
+- **Downgrade drills with no backing query (rec #42/#43/#47).** The coverage table
+  advertised native drills that 404: `WAREHOUSE_METERING_READER`, `PIPE`,
+  `SNOWPIPE_STREAMING`, `QUERY_ACCELERATION`, and `REPLICATION` all claimed a
+  drillable grain with no reader/pipe/streaming/QAS/replication query wired (and
+  replication bills on the DR account). All now read "Service total only". The
+  residual `AI_SERVICES` line no longer inherits the Cortex "Drill ready" grain
+  (it aggregates Analyst / Search / Document AI / Fine-tuning, none per-user
+  drillable), and the Cortex grain dropped the phantom "warehouse" axis.
+- **Credit the drills that DO ship (rec #44).** `SERVERLESS_TASK`, `AUTO_CLUSTERING`,
+  `MATERIALIZED_VIEW`, `SEARCH_OPTIMIZATION` each have an exact native per-object
+  `*_HISTORY` key AND are materialized in the object cost ledger — a real drill.
+  New "Object-ledger drill" status; `drill_ready_spend_share` now counts it, so a
+  serverless-heavy account no longer reads artificially low.
+- **CoCo is drillable (rec #48).** Cortex Code / CoWork is drilled to user grain by
+  the AI Chargeback tab (`FACT_AI_USAGE_DAILY`), so `_coverage_for` marks it "Drill
+  ready" instead of the un-drillable default it fell to.
+
+Gates green: ruff --no-cache, mypy, pytest 2142 passed / 1 skipped (coverage lock
+tests updated for the deliberate status corrections). Wave 4 continues: storage
+hybrid caption #30/#33, query-drill measured-vs-allocated #41, egress #11, Cortex
+source rewire #17.
+
 ## 4.164.0 - Formula honesty: Cortex per-user projection window (2026-08-15)
 
 Gap-audit Wave 3c. App-only.
