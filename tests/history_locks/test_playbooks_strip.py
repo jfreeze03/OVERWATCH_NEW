@@ -24,5 +24,11 @@ def test_health_strip_builder():
     # SOURCE_FRESHNESS_STATE since V040 (r13 #2): the strip reads the 10-min
     # snapshot table, not the 19-aggregate view, every 30s per viewer.
     assert "ALERT_EVENTS" in sql and "SOURCE_FRESHNESS_STATE" in sql and "FACT_METERING_DAILY" in sql
-    assert "SEVERITY = 'CRITICAL'" in sql
-    assert "DATE_TRUNC('month', CURRENT_DATE())" in sql
+    # rec #3 (v4.159.0): still critical-only, but OPEN_CRITICAL now counts OPEN+ACK
+    # to match open_alert_severity_counts / the pages / the score.
+    assert "UPPER(e.SEVERITY) = 'CRITICAL'" in sql
+    assert "STATUS IN ('OPEN', 'ACK')" in sql
+    # rec #2 (v4.159.0): MTD month boundary anchored to the account timezone so it
+    # agrees with the account_today()-anchored Overview MTD, not the session clock.
+    assert "CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())" in sql
+    assert "DATE_TRUNC('month', CURRENT_DATE())" not in sql

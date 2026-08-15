@@ -16,6 +16,7 @@ from app.config import (
 )
 from app.core.sqlsafe import sql_literal
 from app.data.common import (
+    account_month_start_sql,
     ai_service_predicate,
     and_where,
     bounded_days,
@@ -683,22 +684,28 @@ def health_strip() -> str:
     # every VALUE expression is COALESCEd to a non-NULL scalar for that reason.
     return f"""
 WITH crit AS (
-    -- One pass over the OPEN criticals. The delivery check is a LEFT JOIN to
-    -- DISTINCT EVENT_IDs rather than a correlated NOT EXISTS: the anti-join
-    -- cannot be expressed inside COUNT_IF, and DISTINCT keeps the join from
-    -- multiplying rows and inflating OPEN_CRITICAL_N.
+    -- One pass over the open (OPEN or ACK) criticals. rec #3: OPEN_CRITICAL_N
+    -- counts STATUS IN ('OPEN','ACK') to match open_alert_severity_counts (and
+    -- the Brief/Overview/Control-Room tiles + the platform score), which all
+    -- treat ACK as "still open, being worked". Counting OPEN-only made an
+    -- acknowledged critical vanish from the sidebar while every page still
+    -- showed it. The delivery check is a LEFT JOIN to DISTINCT EVENT_IDs rather
+    -- than a correlated NOT EXISTS: the anti-join cannot be expressed inside
+    -- COUNT_IF, and DISTINCT keeps the join from multiplying rows.
     SELECT
-        COUNT_IF(e.SEVERITY = 'CRITICAL') AS OPEN_CRITICAL_N,
-        -- N2: OPEN criticals 30+ min old with NO delivery row — a page that
-        -- reached nobody. Same predicate as delivery_slo_summary's
-        -- UNDELIVERED_CRITICALS_30M, always-on so the morning surfaces cannot
-        -- show green while a critical silently failed to route.
-        COUNT_IF(e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+        COUNT_IF(e.STATUS IN ('OPEN', 'ACK')) AS OPEN_CRITICAL_N,
+        -- N2: OPEN (not yet acknowledged) criticals 30+ min old with NO delivery
+        -- row — a page that reached nobody. Kept OPEN-only: an ACK'd critical was
+        -- seen in-app, so it is not a silent routing failure. Same predicate as
+        -- delivery_slo_summary's UNDELIVERED_CRITICALS_30M, always-on so the
+        -- morning surfaces cannot show green while a critical failed to route.
+        COUNT_IF(e.STATUS = 'OPEN'
+                 AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
                  AND d.EVENT_ID IS NULL) AS UNDELIVERED_N
     FROM {core_object("ALERT_EVENTS")} e
     LEFT JOIN (SELECT DISTINCT EVENT_ID FROM {core_object("ALERT_DELIVERIES")}) d
            ON d.EVENT_ID = e.EVENT_ID
-    WHERE e.STATUS = 'OPEN' AND UPPER(e.SEVERITY) = 'CRITICAL'
+    WHERE e.STATUS IN ('OPEN', 'ACK') AND UPPER(e.SEVERITY) = 'CRITICAL'
 ),
 fresh AS (
     -- STALEST: the single worst source by cadence-ratio (never-loaded ranks above
@@ -728,7 +735,10 @@ mtd AS (
         ROUND(COALESCE(SUM(IFF({_AI_SERVICE_PRED}, CREDITS_BILLED, 0)), 0), 0) AS MTD_AI,
         ROUND(COALESCE(SUM(IFF({_not_ai}, CREDITS_BILLED, 0)), 0), 0) AS MTD_OTHER
     FROM {mart_object("FACT_METERING_DAILY")}
-    WHERE DAY >= DATE_TRUNC('month', CURRENT_DATE())
+    -- rec #2: anchor the MTD month boundary to the ACCOUNT timezone so this strip
+    -- MTD selects the same days as the account_today()-anchored Overview MTD;
+    -- CURRENT_DATE() is session-tz and disagreed near midnight.
+    WHERE DAY >= {account_month_start_sql()}
 ),
 strip AS (SELECT * FROM crit, fresh, mtd)
 SELECT r.value:"m"::VARCHAR AS METRIC,

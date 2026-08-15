@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.159.0 - Metric parity: three P0 cross-surface fixes (2026-08-15)
+
+Gap-audit Wave 1. Three headline metrics read as different numbers depending on
+the page; all three now agree. App-only.
+
+- **Company warehouse spend (rec #1) + per-day average (rec #36).** Overview's
+  "Spend, last N days" summed the exec-board DAILY_SPEND panel *including* today's
+  still-filling row, while the Cost page's "By warehouse (exact usage)" excludes
+  today (`common.resolve_effective_window`). Overview now drops today's partial
+  from both the window total and the "Average per observed day" denominator, so
+  the two pages reconcile; the trend spark keeps the full series for continuity.
+- **MTD account $ month boundary (rec #2).** The sidebar/Brief health strip
+  truncated the month with `DATE_TRUNC('month', CURRENT_DATE())` (Snowflake
+  session tz) while Overview's MTD anchors `account_today()` (America/Chicago),
+  so near midnight the two picked different day sets. New
+  `common.account_month_start_sql()` anchors the strip's MTD to the account tz.
+- **Open criticals (rec #3).** The sidebar badge counted `STATUS='OPEN'` only and
+  account-wide, while every page/score counts `STATUS IN ('OPEN','ACK')` — so an
+  acknowledged critical vanished from the sidebar but stayed on the pages. The
+  strip's `OPEN_CRITICAL_N` now counts OPEN+ACK to match; the undelivered-critical
+  signal stays OPEN-only (an ACK'd critical was seen, not a silent routing miss).
+
 ## V080 (owner migration) - Security change-risk ETL exclusion (2026-08-15)
 
 Stops the Security **Change Risk** queue from flooding on routine ETL truncate-

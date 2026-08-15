@@ -35,6 +35,23 @@ def resolve_effective_window(days: object, column: str = "DAY",
     return eff, frag
 
 
+def account_month_start_sql() -> str:
+    """SQL DATE for the first of THIS month in the ACCOUNT timezone.
+
+    ``CURRENT_DATE()`` resolves in the Snowflake session timezone, but the app's
+    canonical "today" is ``logic.formulas.account_today()`` (America/Chicago).
+    Near a month boundary the two clocks pick different day sets, so a SQL
+    ``DATE_TRUNC('month', CURRENT_DATE())`` MTD disagreed with the
+    ``account_today()``-anchored MTD on the Overview (rec #2). This anchors the
+    SQL month-start to the same account clock so both surfaces select one month.
+    """
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    return (
+        "DATE_TRUNC('month', "
+        f"CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', CURRENT_TIMESTAMP())::DATE)"
+    )
+
+
 def lag_offset_start(days: int, lag_hours: int = 24) -> str:
     """Window start that ends before the ACCOUNT_USAGE completeness horizon.
 

@@ -237,7 +237,18 @@ def render() -> None:
     else:
         daily, trend_source = _live_fallback_daily(company, days, rate)
 
-    window_spend = float(daily["USD"].sum()) if not daily.empty else _board_metric(board, "CREDITS", "VALUE_USD")
+    # rec1/rec36: drop today's still-filling partial row from the headline total and
+    # the per-day average, so "Spend, last N days" uses the today-EXCLUDED convention
+    # the Cost page's "By warehouse (exact usage)" uses (common.resolve_effective_window).
+    # Every other windowed/per-day dollar in the app already excludes today's partial;
+    # Overview's board panel is partial-inclusive, which made the two pages disagree.
+    # The trend spark keeps the full series for visual continuity — only totals change.
+    daily_complete = (
+        daily[pd.to_datetime(daily["DAY"], errors="coerce").dt.date < account_today()]
+        if not daily.empty else daily
+    )
+    window_spend = (float(daily_complete["USD"].sum()) if not daily_complete.empty
+                    else _board_metric(board, "CREDITS", "VALUE_USD"))
     # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
     # This card's value IS credits x rate (warehouse metering), so credits = USD / rate —
     # exact and column-independent (the `daily` frame here is only [DAY, USD], no credits col).
@@ -477,20 +488,24 @@ def render() -> None:
             "spark": _spend_spark,
             "help": "Warehouse metering credits x "
                     f"${rate:.2f}/credit ({settings.get('_source')}) — the "
-                    "company-scopable lens. Serverless/AI and the cloud-services rebate "
-                    "are on Cost & Contract -> Spend & Attribution; Snowsight adds storage and transfer, so it "
-                    "reads higher.",
+                    "company-scopable lens, complete days only (today's partial excluded, "
+                    "so it reconciles with Cost & Contract -> By warehouse). Serverless/AI "
+                    "and the cloud-services rebate are on Cost & Contract -> Spend & "
+                    "Attribution; Snowsight adds storage and transfer, so it reads higher.",
         },
     ]
-    observed_days = int(daily["DAY"].nunique()) if "DAY" in daily.columns else 0
+    # rec36: divide by COMPLETE observed days (today's partial already dropped from
+    # daily_complete), matching window_spend and every other per-day rate in the app.
+    observed_days = int(daily_complete["DAY"].nunique()) if "DAY" in daily_complete.columns else 0
     if observed_days:
         company_kpis.append({
             "label": "Average per observed day",
             "value": format_usd(window_spend / observed_days),
             "method": "metering",
             "scope": "company",
-            "help": "Window warehouse spend divided by days present in the served series. "
-                    "Today may still be partial.",
+            "help": "Window warehouse spend divided by the complete days present in the "
+                    "served series (today's still-filling partial is excluded, matching "
+                    "the window total above).",
         })
     if not driver_view.empty:
         top_driver = driver_view.iloc[0]
