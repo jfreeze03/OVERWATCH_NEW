@@ -360,3 +360,32 @@ def test_aggregate_row_leads_and_never_fires_without_a_budget():
     assert out.iloc[0]["USER_NAME"] == "(all users)"     # headline first
     assert len(out) == len(per_user) + 1
     assert with_aggregate_budget_row(per_user, summary, 0.0).equals(per_user)
+
+
+def test_rec38_per_user_window_and_small_n_guard():
+    # rec #38: each user projects against their OWN observable window, and a
+    # brand-new user (< the small-N floor) never fires the budget ladder.
+    today = account_today()
+    df = pd.DataFrame({
+        "USER_NAME": ["OLD", "NEW_HEAVY", "BRAND_NEW"],
+        "TOTAL_CREDITS": [30.0, 20.0, 10.0],
+        "TOTAL_REQUESTS": [300, 200, 100],
+        "FIRST_USAGE": [
+            pd.Timestamp(today - timedelta(days=29)),  # 30 observable days
+            pd.Timestamp(today - timedelta(days=9)),   # 10 observable days (heavy + new)
+            pd.Timestamp(today - timedelta(days=1)),   # 2 observable days (guarded)
+        ],
+    })
+    enriched = enrich_user_rollup(df, ai_rate_usd=2.20, window_days=30)
+    obs = dict(zip(enriched["USER_NAME"], enriched["OBSERVABLE_DAYS"], strict=True))
+    assert obs == {"OLD": 30, "NEW_HEAVY": 10, "BRAND_NEW": 2}
+    proj = dict(zip(enriched["USER_NAME"], enriched["PROJECTED_30D_CREDITS"], strict=True))
+    # NEW_HEAVY projects on its own 10-day window (20/10*30 = 60), not the scope max
+    # (20/30*30 = 20) — the under-projection the fix removes.
+    assert proj["NEW_HEAVY"] == pytest.approx(60.0)
+    assert proj["OLD"] == pytest.approx(30.0)
+    # budget_credits = 100/2.20 = 45.45: NEW_HEAVY (60) breaches; BRAND_NEW would
+    # project 10/2*30 = 150 but is guarded out for having < 4 observable days.
+    exc = classify_exceptions(enriched, ai_budget_usd=100.0, ai_rate_usd=2.20)
+    breached = set(exc["USER_NAME"]) if not exc.empty else set()
+    assert "NEW_HEAVY" in breached and "BRAND_NEW" not in breached

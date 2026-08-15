@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.164.0 - Formula honesty: Cortex per-user projection window (2026-08-15)
+
+Gap-audit Wave 3c. App-only.
+
+- **Cortex budget projection per-user window (rec #38).** `enrich_user_rollup`
+  divided every user's credits by the SCOPE window (the oldest user's history),
+  so a heavy user new to a mature 30-day scope was projected at ~2 days of credits
+  / 30 (~15x too low) and the budget ladder never flagged the real new breacher.
+  It now projects each user against their OWN `OBSERVABLE_DAYS` (days since that
+  user's first request, clamped to the window), and `classify_exceptions` applies
+  a small-N guard (>= 4 observable days) so a brand-new user's first afternoon
+  can't inflate into a false breach. New test locks both directions.
+
+Gates green: ruff --no-cache, mypy, pytest 2142 passed / 1 skipped. (Wave 3
+continues: forecast bands #15, blended fallback #28, pressure channels #39,
+year-strip proration #40.)
+
 ## 4.163.0 - Formula honesty: capacity confidence + leading budget signal (2026-08-15)
 
 Gap-audit Wave 3b. App-only.

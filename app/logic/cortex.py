@@ -147,18 +147,25 @@ def daily_from_user_daily(user_daily: pd.DataFrame, days: int) -> pd.DataFrame:
     return out.sort_values(["DAY", "SOURCE"]).reset_index(drop=True)
 
 
+# rec #38: minimum per-user observable days before the budget ladder will project
+# a monthly breach — below this the projection is too noisy to trust (a first
+# afternoon must not be extrapolated into a false breach).
+_MIN_OBSERVABLE_DAYS = 4
+
+
 def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
                        window_days: int = 30) -> pd.DataFrame:
     """Add projected-30d credits/cost columns to the SQL rollup.
 
-    Projection basis is the CALENDAR window (TOTAL_CREDITS / window * 30) —
-    the same basis rollup_summary uses. The old basis (active-day average
-    x30) projected a user active 2 of 30 days at 15x their real monthly
-    burn, and the two surfaces on the same page disagreed (review finding
-    #11). AVG_DAILY_CREDITS stays as the intensity-on-active-days metric.
-
-    The window is clamped by effective_window_days so a young scope is not
-    projected against a window it never lived through.
+    Projection basis (rec #38) is each user's OWN observable window —
+    ``TOTAL_CREDITS / OBSERVABLE_DAYS * 30`` where OBSERVABLE_DAYS is the days
+    since that user's first request, clamped to ``[1, window_days]``. The prior
+    basis divided by the SCOPE window (the oldest user's history), which
+    under-projected a heavy user new to a mature scope (2 days of credits / 30 ~=
+    15x too low) so the budget ladder missed the breach. A small-N guard in
+    ``classify_exceptions`` keeps a brand-new user's first afternoon from
+    inflating into a false breach. AVG_DAILY_CREDITS stays the intensity-on-
+    active-days metric; do not confuse it with this monthly projection.
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -167,7 +174,21 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
         if col in out.columns:
             out[col] = out[col].map(safe_float)
     window = effective_window_days(out, window_days)
-    out["PROJECTED_30D_CREDITS"] = out.get("TOTAL_CREDITS", 0.0) / window * 30.0
+    # rec #38: project each user against their OWN observable window (days since
+    # THAT user's first Cortex request), not the scope minimum. A heavy user new to
+    # a mature 30-day scope was divided by the full scope window (2 days of credits
+    # / 30 ~= 15x too low), so a real new breacher never tripped the budget ladder.
+    # OBSERVABLE_DAYS also carries the small-N guard classify_exceptions applies, so
+    # a brand-new user's first afternoon is not inflated into a false breach.
+    cap = max(int(window_days or 30), 1)
+    if "FIRST_USAGE" in out.columns:
+        _first = pd.to_datetime(out["FIRST_USAGE"], errors="coerce", utc=True)
+        _now = pd.Timestamp(account_today()).tz_localize("UTC")
+        _elapsed = (_now - _first).dt.days + 1
+        out["OBSERVABLE_DAYS"] = _elapsed.clip(lower=1, upper=cap).fillna(float(window))
+    else:
+        out["OBSERVABLE_DAYS"] = float(window)
+    out["PROJECTED_30D_CREDITS"] = out.get("TOTAL_CREDITS", 0.0) / out["OBSERVABLE_DAYS"] * 30.0
     rate = safe_float(ai_rate_usd, 2.20)
     out["SPEND_USD"] = (out.get("TOTAL_CREDITS", 0.0) * rate).round(2)
     out["PROJECTED_30D_USD"] = (out["PROJECTED_30D_CREDITS"] * rate).round(2)
@@ -210,7 +231,17 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
         if {"TOTAL_CREDITS", "TOTAL_REQUESTS"}.issubset(agg.columns):
             agg["CREDITS_PER_REQUEST"] = (agg["TOTAL_CREDITS"]
                 / agg["TOTAL_REQUESTS"].where(agg["TOTAL_REQUESTS"] > 0, 1))
+        # rec #38: a user's observable window = the MAX across their rows (earliest
+        # first-usage = most days seen = the most reliable projection basis).
+        if "OBSERVABLE_DAYS" in src.columns:
+            _obs = src.groupby("USER_NAME")["OBSERVABLE_DAYS"].max()
+            agg["OBSERVABLE_DAYS"] = agg["USER_NAME"].map(_obs)
         for _, u in agg.iterrows():
+            # rec #38: skip users with too few observed days — projecting a brand-
+            # new user's first day/two at full intensity would be a false breach.
+            # Absent OBSERVABLE_DAYS (old shape) defaults inert, so nothing is lost.
+            if safe_float(u.get("OBSERVABLE_DAYS", _MIN_OBSERVABLE_DAYS)) < _MIN_OBSERVABLE_DAYS:
+                continue
             proj = safe_float(u.get("PROJECTED_30D_CREDITS"))
             sig: tuple[str, str] | None = None
             for frac, severity, signal in BUDGET_LADDER:
