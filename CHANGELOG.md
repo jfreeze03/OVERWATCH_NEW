@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.163.0 - Formula honesty: capacity confidence + leading budget signal (2026-08-15)
+
+Gap-audit Wave 3b. App-only.
+
+- **Capacity ETA confidence on raw residuals (rec #14).** `capacity.py` fit the
+  pressure trend on a 7-day-median SMOOTH series AND measured R2 / residual MAD /
+  holdout MAE against that same smoothed line — inflating R2, shrinking the band,
+  and overstating ETA confidence. It now fits the slope on the smooth series (for
+  a stable trend) but scores fit quality and the holdout error against the RAW
+  pressure index, so the `r2 >= 0.35` gate and the uncertainty band reflect real
+  forecast error and the ETA range widens honestly.
+- **Budget penalty is a leading signal (rec #37).** The platform score penalized
+  budget only when cumulative MTD crossed 100% — late in the month, after the
+  overrun was locked in. It now drives off the PROJECTED month-end vs budget, so
+  an account on pace for 200% is penalized now. Driver renamed "Over budget" ->
+  "Budget pace" ("Tracking to N% of the monthly budget"); `_SCORE_DRIVER_NAV`
+  updated. (The retro score sparkline stays on the cumulative basis for now.)
+
+Reviewed but NOT changed: rec #40 contract-pace off-by-one — hinges on ambiguous
+END_DATE inclusive/exclusive semantics and would make an on-pace contract show a
+spurious small overage; a hand-verification test documents the current
+convention. Flagged for owner to confirm END_DATE meaning before touching.
+
+Gates green: ruff --no-cache, mypy, pytest 2141 passed / 1 skipped. (Wave 3
+continues: forecast bands #15, blended fallback #28, Cortex window #38, pressure
+channels #39, year-strip proration #40.)
+
 ## 4.162.0 - Formula honesty: size-down saving is a range (2026-08-15)
 
 Gap-audit Wave 3 (first formula fix). App-only.

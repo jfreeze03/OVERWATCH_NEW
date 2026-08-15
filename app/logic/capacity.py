@@ -166,9 +166,14 @@ def capacity_forecasts(
         model = group.dropna(subset=["PRESSURE_SMOOTH"]).copy()
         xs = [(day - model["DAY"].iloc[0]).days for day in model["DAY"]]
         ys = [safe_float(value) for value in model["PRESSURE_SMOOTH"]]
+        # rec #14: fit the trend on the 7-day-median SMOOTH series (a stable slope),
+        # but measure fit quality (R2, residual MAD, and the holdout MAE below)
+        # against the RAW pressure index. Scoring residuals against the smoothed
+        # line inflated R2 and shrank residual_mad, overstating ETA confidence.
+        ys_raw = [safe_float(value) for value in model["PRESSURE_INDEX"]]
         slope, intercept = _theil_sen([float(x) for x in xs], ys)
         predicted = [intercept + slope * x for x in xs]
-        r2, residual_mad = _quality(ys, predicted)
+        r2, residual_mad = _quality(ys_raw, predicted)
         current = max(0.0, ys[-1])
 
         recent = group.tail(14)
@@ -186,7 +191,9 @@ def capacity_forecasts(
             ty = [safe_float(value) for value in train["PRESSURE_SMOOTH"]]
             if len(tx) >= 20:
                 test_x = [(day - train["DAY"].iloc[0]).days for day in holdout["DAY"]]
-                test_y = [safe_float(value) for value in holdout["PRESSURE_SMOOTH"]]
+                # rec #14: holdout error measured against RAW pressure, not the
+                # smoothed line (which understates the true forecast error).
+                test_y = [safe_float(value) for value in holdout["PRESSURE_INDEX"]]
                 test_slope, test_intercept = _theil_sen([float(x) for x in tx], ty)
                 backtest_mae = sum(
                     abs(actual - (test_intercept + test_slope * x))

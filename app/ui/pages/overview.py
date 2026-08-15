@@ -58,7 +58,7 @@ _PAGE = "Overview"
 # N8: each score-deduction driver → the page that lets you act on it. Off-profile
 # targets are clamped to Overview by consume_pending_navigation (B8), so this is safe.
 _SCORE_DRIVER_NAV = {
-    "Over budget": "Cost & Contract",
+    "Budget pace": "Cost & Contract",
     "Critical alerts": "Alerts",
     "High alerts": "Alerts",
     "Query failures": "Operations",
@@ -455,7 +455,15 @@ def render() -> None:
     if budget > 0 and not mtd_source and getattr(_bt_hist, "error_kind", "") != "absent":
         _degraded.add("budget")
     score = scoring.platform_score(signals={
-        "budget_pct": (mtd_spend / budget * 100) if budget > 0 else 0,
+        # rec #37: drive the budget penalty off the PROJECTED month-end vs budget
+        # (a leading signal) rather than cumulative MTD/budget, which only crosses
+        # 100% late in the month once the overspend is already locked in. An account
+        # on pace for 200% now contributes a penalty now, not in week 4. Falls back
+        # to the cumulative ratio when no projection is available.
+        "budget_pct": (
+            (forecast.projected_usd / budget * 100) if (budget > 0 and forecast.ok)
+            else (mtd_spend / budget * 100) if budget > 0 else 0
+        ),
         "critical_alerts": critical_alerts,
         "high_alerts": high_alerts,
         "query_fail_pct": fail_pct,

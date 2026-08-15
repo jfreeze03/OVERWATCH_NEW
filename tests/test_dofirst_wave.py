@@ -522,7 +522,7 @@ def test_n8_score_driver_navigation():
     assert "Investigate →" in ov
     # every live driver name maps to a page
     from app.ui.pages.overview import _SCORE_DRIVER_NAV
-    for driver in ("Over budget", "Critical alerts", "Query failures",
+    for driver in ("Budget pace", "Critical alerts", "Query failures",
                    "Stale telemetry", "Owner queue"):
         assert driver in _SCORE_DRIVER_NAV
 

@@ -129,11 +129,14 @@ def platform_score(signals: dict, weights: dict | None = None,
     w.update(weights or {})
     drivers: list[ScoreDriver] = []
 
+    # rec #37: budget_pct is the PROJECTED month-end vs budget (a leading pace
+    # signal), not cumulative MTD — so the penalty fires when an account is ON PACE
+    # to overrun, not only after it has already crossed the line late in the month.
     budget_pct = safe_float(signals.get("budget_pct"))
     if budget_pct > 100:
         _raw = (budget_pct - 100) * w["SCORE_PTS_BUDGET_PER_PCT"]
-        drivers.append(ScoreDriver("Over budget", _cap(_raw, 20),
-                                   f"Spend at {budget_pct:.0f}% of monthly budget." + _cap_note(_raw, 20)))
+        drivers.append(ScoreDriver("Budget pace", _cap(_raw, 20),
+                                   f"Tracking to {budget_pct:.0f}% of the monthly budget." + _cap_note(_raw, 20)))
 
     critical = safe_float(signals.get("critical_alerts"))
     if critical > 0:
