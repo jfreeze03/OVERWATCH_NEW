@@ -94,6 +94,15 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     # D2: the idle share of today's bill — the money a SUSPEND row is really
     # about. Unlike the x0.5 scenario this is measured, not speculative.
     out["IDLE_MONTHLY_USD"] = (out["MONTHLY_USD_NOW"] * out["IDLE_PCT"].clip(0, 100) / 100).round(0)
+    # rec #13: a size-down saving is a RANGE, not a flat half-the-bill point.
+    # Halving the per-hour rate reliably halves only the IDLE portion; a
+    # compute-bound query on a smaller warehouse runs ~2x longer, so its BUSY
+    # credits stay roughly flat (worst case). Honest bounds:
+    #   LOW  = 0.5 * idle          (busy credits unchanged — the safe floor)
+    #   HIGH = 0.5 * monthly       (busy also halves — the old optimistic point)
+    _busy_monthly = (out["MONTHLY_USD_NOW"] - out["IDLE_MONTHLY_USD"]).clip(lower=0)
+    out["SAVING_LOW_USD"] = (out["IDLE_MONTHLY_USD"] * 0.5).round(0)
+    out["SAVING_HIGH_USD"] = ((out["IDLE_MONTHLY_USD"] + _busy_monthly) * 0.5).round(0)
 
     def _recommend(row) -> tuple[str, str]:
         queued = row["QUEUED_MIN_PER_DAY"]
@@ -143,9 +152,11 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
     out["ACTIONABLE"] = out["RECOMMENDATION"].isin(
         {RECOMMEND_UP, RECOMMEND_SUSPEND, RECOMMEND_DOWN}
     )
+    # rec #13: the HEADLINE saving is the conservative floor (only idle reliably
+    # shrinks) — not the old MONTHLY - 0.5*MONTHLY = 0.5*MONTHLY that assumed every
+    # busy credit halves too. SAVING_LOW_USD / SAVING_HIGH_USD carry the full range.
     out["POTENTIAL_MONTHLY_SAVING_USD"] = out.apply(
-        lambda r: round(r["MONTHLY_USD_NOW"] - r["SCENARIO_DOWN_USD"], 0)
-        if r["RECOMMENDATION"] == RECOMMEND_DOWN else 0.0,
+        lambda r: r["SAVING_LOW_USD"] if r["RECOMMENDATION"] == RECOMMEND_DOWN else 0.0,
         axis=1,
     )
     # D2: SUSPEND outranks DOWN. Tuning a timer is reversible, costs nothing, and
@@ -160,18 +171,25 @@ def size_recommendations(df: pd.DataFrame, credit_rate_usd: float, window_days: 
 
 
 def sizing_summary(out: pd.DataFrame) -> dict:
-    """Counts plus the TWO savings numbers, kept apart on purpose (D2):
-    ``potential_saving_usd`` is the speculative half-rate scenario on size-down
-    candidates; ``idle_saving_usd`` is the measured idle spend on the rows that
-    need an auto-suspend fix. Adding them would mix a model with a measurement.
+    """Counts plus the savings numbers, kept apart on purpose (D2):
+    ``potential_saving_usd`` is the CONSERVATIVE size-down floor (rec #13: only
+    the idle portion reliably shrinks when the rate halves), with
+    ``potential_saving_high_usd`` the optimistic bound where busy credits halve
+    too; ``idle_saving_usd`` is the measured idle spend on the rows that need an
+    auto-suspend fix. Adding potential to idle would mix a model with a
+    measurement, and the size-down floor stays honest about SLA risk.
     """
     if out is None or out.empty:
         return {"up": 0, "down": 0, "suspend": 0, "review": 0, "observe": 0,
-                "potential_saving_usd": 0.0, "idle_saving_usd": 0.0}
+                "potential_saving_usd": 0.0, "potential_saving_high_usd": 0.0,
+                "idle_saving_usd": 0.0}
     rec = out["RECOMMENDATION"]
     idle_usd = 0.0
     if "IDLE_MONTHLY_USD" in out.columns:
         idle_usd = round(float(out.loc[rec == RECOMMEND_SUSPEND, "IDLE_MONTHLY_USD"].sum()), 0)
+    high_usd = 0.0
+    if "SAVING_HIGH_USD" in out.columns:
+        high_usd = round(float(out.loc[rec == RECOMMEND_DOWN, "SAVING_HIGH_USD"].sum()), 0)
     return {
         "up": int((rec == RECOMMEND_UP).sum()),
         "down": int((rec == RECOMMEND_DOWN).sum()),
@@ -179,6 +197,7 @@ def sizing_summary(out: pd.DataFrame) -> dict:
         "review": int((rec == RECOMMEND_CADENCE).sum()),
         "observe": int((rec == RECOMMEND_OBSERVE).sum()),
         "potential_saving_usd": round(float(out["POTENTIAL_MONTHLY_SAVING_USD"].sum()), 0),
+        "potential_saving_high_usd": high_usd,
         "idle_saving_usd": idle_usd,
     }
 

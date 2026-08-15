@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.162.0 - Formula honesty: size-down saving is a range (2026-08-15)
+
+Gap-audit Wave 3 (first formula fix). App-only.
+
+- **Size-down "potential saving" (rec #13).** `sizing.py` reported every
+  size-down candidate's saving as `MONTHLY - 0.5*MONTHLY = 0.5*MONTHLY` — assuming
+  a smaller warehouse halves every credit. It doesn't: halving the per-hour rate
+  reliably halves only the IDLE portion, while a compute-bound query on a smaller
+  warehouse runs ~2x longer so its busy credits stay ~flat (the module's own
+  `simulate_scenario` already bounds this). Now `SAVING_LOW_USD = 0.5*idle`
+  (conservative floor) and `SAVING_HIGH_USD = 0.5*bill` (optimistic), the headline
+  `POTENTIAL_MONTHLY_SAVING_USD` is the floor, `sizing_summary` carries both, and
+  the Optimization KPI shows the range with honest help. Stops overselling the
+  size-down bet against the SLA risk it carries.
+
+Gates green: ruff --no-cache, mypy, pytest. (Wave 3 continues: capacity/forecast
+confidence #14/#15, blended fallback #28, budget-pace #37, Cortex window #38,
+pressure channels #39, year/contract off-by-one #40.)
+
 ## 4.161.0 - Financial truth: all-in invoice tile + contracted rate (2026-08-15)
 
 Gap-audit Wave 2 (second batch). App-only; both new reads degrade quietly when

@@ -382,9 +382,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "help": "Measured idle share of today's bill on the auto-suspend rows — reversible, "
                          "unlike the size-down bet."},
                 {"label": "Size-down candidates", "value": f"{summary['down']}"},
-                {"label": "Potential saving (down)", "value": format_usd(summary["potential_saving_usd"]),
-                 "help": "Speculative: the mechanical half-rate scenario on down candidates only. "
-                         "Model, not a promise — the idle number to its left is measured."},
+                {"label": "Potential saving (down)",
+                 "value": f"{format_usd(summary['potential_saving_usd'])}–{format_usd(summary['potential_saving_high_usd'])}",
+                 "help": "rec #13: a RANGE, not a point. Low = half the measured IDLE (only idle "
+                         "reliably shrinks when the per-hour rate halves); high = half the whole "
+                         "bill (if busy credits halve too — optimistic, since a compute-bound query "
+                         "on a smaller warehouse runs ~2x longer). Model, not a promise; the idle "
+                         "number to its left is measured."},
                 {"label": "Evidence / cadence review",
                  "value": f"{summary['observe'] + summary['review']}",
                  "help": "Resize advice is withheld for episodic evidence, unknown timers, and "

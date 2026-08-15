@@ -84,9 +84,15 @@ def test_scenario_math_and_saving():
     assert row["MONTHLY_USD_NOW"] == round(70 * 3.68 / 7 * 30, 0)
     assert row["SCENARIO_DOWN_USD"] == round(row["MONTHLY_USD_NOW"] * 0.5, 0)
     assert row["SCENARIO_UP_USD"] == round(row["MONTHLY_USD_NOW"] * 2.0, 0)
-    assert row["POTENTIAL_MONTHLY_SAVING_USD"] == row["MONTHLY_USD_NOW"] - row["SCENARIO_DOWN_USD"]
+    # rec #13: headline saving is the conservative floor (only idle reliably shrinks),
+    # not the old 0.5*bill; SAVING_HIGH is the optimistic bound (busy halves too).
+    assert row["SAVING_LOW_USD"] == round(row["IDLE_MONTHLY_USD"] * 0.5, 0)
+    assert row["SAVING_HIGH_USD"] == round(row["MONTHLY_USD_NOW"] * 0.5, 0)
+    assert row["POTENTIAL_MONTHLY_SAVING_USD"] == row["SAVING_LOW_USD"]
+    assert row["SAVING_LOW_USD"] <= row["SAVING_HIGH_USD"]
     summary = sizing_summary(out)
     assert summary["down"] == 1 and summary["potential_saving_usd"] > 0
+    assert summary["potential_saving_high_usd"] >= summary["potential_saving_usd"]
 
 
 def test_resize_advice_is_withheld_for_one_off_pressure_and_savings():
