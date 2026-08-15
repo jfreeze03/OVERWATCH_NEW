@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.166.0 - Storage honesty: per-database excludes hybrid/stage/archive (2026-08-15)
+
+Gap-audit Wave 4b (disclosure). App-only; `spend.py`.
+
+- **Per-database storage disclosure (rec #30 / #33).** The per-database storage
+  panel prices ACTIVE + FAIL-SAFE bytes only, so a hybrid-table-heavy database
+  reads materially low there (hybrid / stage / archive carry no per-database split
+  and live on the account-by-tier panel). The help now discloses that exclusion
+  and reiterates the estimate-vs-org-truth basis, so the number isn't misread as a
+  full per-database storage bill. (The full logic — adding hybrid bytes to the
+  per-DB estimate and reconciling both panels to org STORAGE_USD — remains queued.)
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.165.0 - Drill honesty: the coverage table now tells the truth (2026-08-15)
 
 Gap-audit Wave 4 (drill-honesty core). App-only; `cost_coverage.py`.

@@ -913,7 +913,11 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
              "delta_color": "off",
              "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
                      f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
-                     "basis (binary TiB). Estimate; the org rate-card panel on Contract & Forecast is billing truth."},
+                     "basis (binary TiB). rec #30: per-database covers ACTIVE + FAIL-SAFE only; "
+                     "hybrid-table, stage, and archive storage carry no per-database split, so "
+                     "they are on the account-by-tier panel above, not here — a hybrid-heavy "
+                     "database reads low in this view. rec #33: an estimate at the configured "
+                     "$/TiB; the org rate-card panel on Contract & Forecast is billing truth."},
             {"label": "Prior full month", "value": f"{prior_tib:,.2f} TiB",
              "delta": (f"{mom:+.1f}% MoM" if mom is not None else "no prior data"),
              "delta_color": "off"},
