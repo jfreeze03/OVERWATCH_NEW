@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.161.0 - Financial truth: all-in invoice tile + contracted rate (2026-08-15)
+
+Gap-audit Wave 2 (second batch). App-only; both new reads degrade quietly when
+ORGANIZATION_USAGE is not visible.
+
+- **All-in invoice tile (rec #8).** The Spend headline "Credit spend" is the
+  metering lens only — it structurally omits storage, transfer, and marketplace.
+  New `cost_sql.org_all_in_window_usd(days)` sums `USAGE_IN_CURRENCY_DAILY` for
+  this account over the same window, and a new "All-in billed (org rate card)"
+  tile sits beside the credit-spend tile with the storage / transfer / other
+  breakout in its help, so the headline reconciles to the invoice.
+- **Contracted rate from RATE_SHEET_DAILY (rec #9).** Every dollar keyed off two
+  hand-entered constants; the actual contracted rate was never read. New
+  `cost_sql.org_rate_sheet()` reads `RATE_SHEET_DAILY.EFFECTIVE_RATE`, and the
+  Contract rate-card reconciliation now shows the contracted compute rate beside
+  the configured SETTINGS rate with a drift %. Read-only reconciliation input —
+  pricing still uses the admin-configured rate by design (adopting the contract
+  rate as the pricing source stays an explicit Admin action). NOTE: RATE_SHEET_DAILY
+  column/USAGE_TYPE spellings are account-specific; confirm against Snowsight.
+
+Gates green: ruff --no-cache, mypy, pytest. (Egress dollarization #11 moves to
+Wave 4 as a transfer-type drill panel.)
+
 ## 4.160.0 - Financial truth: CoCo label, org residual, taxonomy canary (2026-08-15)
 
 Gap-audit Wave 2 (first batch). App-only.

@@ -239,6 +239,18 @@ def _rate_card_reconciliation(settings: dict) -> None:
     # with Cortex usage, and the caption invited "fixing" the global rate).
     model_m = run(mart_sql.fact_daily_spend_compute(70), page=_PAGE, key="fact_daily_compute_70",
                   tier="recent", source="FACT_METERING_DAILY (compute only, excl AI/Cortex)")
+    # rec #9: the ACTUAL contracted compute rate from RATE_SHEET_DAILY, a third
+    # anchor beside the configured SETTINGS rate and the realized effective rate.
+    # Read-only reconciliation (not wired into pricing by design); degrades quietly.
+    rate_sheet = run(cost_sql.org_rate_sheet(), page=_PAGE, key="org_rate_sheet",
+                     tier="historical", source="ORGANIZATION_USAGE.RATE_SHEET_DAILY (contracted rate card)")
+    contract_compute_rate = None
+    if rate_sheet.usable() and not rate_sheet.df.empty and "USAGE_TYPE" in rate_sheet.df.columns:
+        _rs = rate_sheet.df.copy()
+        _rs["USAGE_TYPE"] = _rs["USAGE_TYPE"].astype(str).str.upper()
+        _compute_rows = _rs[_rs["USAGE_TYPE"].str.contains("COMPUTE", na=False)]
+        if not _compute_rows.empty:
+            contract_compute_rate = safe_float(_compute_rows.iloc[0].get("EFFECTIVE_RATE"))
     if not org_m.usable():
         st.info("Needs ORGANIZATION_USAGE visibility (the org accounts panel below "
                 "has the grant).")
@@ -277,11 +289,20 @@ def _rate_card_reconciliation(settings: dict) -> None:
         styled_table(pd.DataFrame(rows_rc), column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%"),
             "EFF_RATE": st.column_config.NumberColumn("Effective $/cr", format="$%.3f")})
+        _contract_line = ""
+        if contract_compute_rate:
+            _drift = (100.0 * (rate_now - contract_compute_rate) / contract_compute_rate)
+            _contract_line = (
+                f" **Contracted rate** (RATE_SHEET_DAILY): ${contract_compute_rate:.3f}/credit"
+                f" — configured is {'+' if _drift >= 0 else ''}{_drift:.1f}% vs contract"
+                f"{' (adopt it on Admin → Settings)' if abs(_drift) >= 1.0 else ' (in line)'}."
+            )
         st.caption(
             f"Model = FACT_METERING_DAILY billed credits x ${rate_now:.2f} (SETTINGS). The current "
             "month is partial on both sides; judge the prior full month. The **Effective "
             "rate** column (org compute ÷ billed credits) is the realized per-credit rate — "
             "reconcile CREDIT_PRICE_USD to it on Admin → Settings when the gap is steady."
+            + _contract_line
         )
 
 

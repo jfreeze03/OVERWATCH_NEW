@@ -75,3 +75,17 @@ def test_org_buckets_use_structured_dimensions():
     sg.parse(sql, dialect="snowflake")
     # display pivot moved off USAGE_TYPE too
     assert "SERVICE_TYPE" in cost_sql.org_usage_in_currency(30)
+
+
+def test_org_all_in_window_and_rate_sheet_builders():
+    # rec #8 / #9 (v4.161.0): windowed all-in invoice total + contracted rate card.
+    import pytest as _pt
+    sg = _pt.importorskip("sqlglot")
+    allin = cost_sql.org_all_in_window_usd(30)
+    for col in ("TOTAL_USD", "STORAGE_USD", "TRANSFER_USD", "OTHER_USD", "CURRENCY"):
+        assert col in allin, col
+    assert "CURRENT_ACCOUNT_NAME()" in allin  # scoped to this account
+    sg.parse(allin, dialect="snowflake")
+    rs = cost_sql.org_rate_sheet()
+    assert "RATE_SHEET_DAILY" in rs and "EFFECTIVE_RATE" in rs and "USAGE_TYPE" in rs
+    sg.parse(rs, dialect="snowflake")

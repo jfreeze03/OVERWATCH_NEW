@@ -688,6 +688,55 @@ GROUP BY 1
 ORDER BY 1 DESC
 """
 
+def org_all_in_window_usd(days: int) -> str:
+    """rec #8: this account's ALL-IN billed cost (org rate card) over the last N
+    days — the invoice total the metering credit-spend headline omits (storage,
+    data transfer, marketplace, org adjustments). Same trailing window as the
+    credit-spend tile so the two reconcile side by side. Org data is UTC, lags
+    up to ~72h, and mutates until month close, so it reads a bit behind the
+    credit tile near the trailing edge.
+    """
+    days = bounded_days(days)
+    return f"""
+SELECT
+    SUM(USAGE_IN_CURRENCY)                                                              AS TOTAL_USD,
+    SUM(IFF(UPPER(RATING_TYPE) = 'COMPUTE', USAGE_IN_CURRENCY, 0))                      AS COMPUTE_USD,
+    SUM(IFF(UPPER(RATING_TYPE) IN ('AI_COMPUTE', 'AI_INFERENCE'), USAGE_IN_CURRENCY, 0)) AS AI_USD,
+    SUM(IFF(UPPER(RATING_TYPE) IN ('STORAGE', 'BLOCK_STORAGE'), USAGE_IN_CURRENCY, 0))  AS STORAGE_USD,
+    SUM(IFF(UPPER(RATING_TYPE) = 'DATA_TRANSFER', USAGE_IN_CURRENCY, 0))                AS TRANSFER_USD,
+    SUM(IFF(UPPER(RATING_TYPE) NOT IN ('COMPUTE', 'AI_COMPUTE', 'AI_INFERENCE', 'STORAGE',
+            'BLOCK_STORAGE', 'DATA_TRANSFER'), USAGE_IN_CURRENCY, 0))                   AS OTHER_USD,
+    MAX(CURRENCY)                                                                       AS CURRENCY
+FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
+WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
+  AND USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+"""
+
+
+def org_rate_sheet() -> str:
+    """rec #9: the ACTUAL contracted rate card for this account
+    (ORGANIZATION_USAGE.RATE_SHEET_DAILY.EFFECTIVE_RATE, latest per usage type),
+    so the configured SETTINGS credit price can be reconciled against the contract
+    instead of trusting two hand-entered constants that silently drift at renewal.
+
+    Read-only reconciliation input (not wired into primary pricing — that stays
+    the admin-configured SETTINGS rate by design). Needs ORGANIZATION_USAGE
+    visibility; callers degrade honestly when the role cannot see the view.
+    NOTE: RATE_SHEET_DAILY USAGE_TYPE spellings are account-specific — confirm
+    against Snowsight before relying on a specific bucket.
+    """
+    return """
+SELECT UPPER(USAGE_TYPE)              AS USAGE_TYPE,
+       MAX_BY(EFFECTIVE_RATE, DATE)   AS EFFECTIVE_RATE,
+       MAX_BY(CURRENCY, DATE)         AS CURRENCY,
+       MAX(DATE)                      AS AS_OF
+FROM SNOWFLAKE.ORGANIZATION_USAGE.RATE_SHEET_DAILY
+WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
+GROUP BY 1
+ORDER BY 1
+"""
+
+
 def tag_coverage(days: int, company: str = "ALL", database: str = "",
                  schema_contains: str = "") -> str:
     """Query-tag governance: execution-time-weighted coverage + the top

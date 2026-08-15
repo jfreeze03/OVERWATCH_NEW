@@ -149,10 +149,31 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                        source="FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)")
     if coco_res is not None and coco_res.usable() and "TOTAL_CREDITS" in coco_res.df.columns:
         coco_usd = credits_to_usd(float(coco_res.df["TOTAL_CREDITS"].map(safe_float).sum()), ai_rate)
-    kpi_row([
+    # rec #8: the all-in invoice total (org rate card) for the same window — the
+    # storage / transfer / marketplace / adjustments the metering credit-spend tile
+    # structurally omits, so the headline reconciles to the invoice. Degrades quietly
+    # (org visibility required); org data is UTC and lags ~72h so it trails near today.
+    allin_res = run(cost_sql.org_all_in_window_usd(days), page=_PAGE, key=f"org_allin_{days}",
+                    tier="historical",
+                    source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)")
+    _tiles = [
         {"label": f"Credit spend, {days}d (account)", "value": format_usd(billed_usd),
          "help": "Billed credits x configured rates, including the cloud-services adjustment. "
-                 "Not the full invoice."},
+                 "The metering lens only — storage, transfer, and marketplace are in the "
+                 "all-in tile; see the org rate card for the invoice total."},
+    ]
+    if allin_res.usable() and not allin_res.df.empty:
+        _ar = allin_res.df.iloc[0]
+        _cur = str(_ar.get("CURRENCY") or "USD")
+        _tiles.append({
+            "label": f"All-in billed, {days}d ({_cur})",
+            "value": f"{safe_float(_ar.get('TOTAL_USD')):,.0f} {_cur}",
+            "help": "The invoice total from ORGANIZATION_USAGE (org rate card) for this account "
+                    f"and window — adds storage ({safe_float(_ar.get('STORAGE_USD')):,.0f}), "
+                    f"transfer ({safe_float(_ar.get('TRANSFER_USD')):,.0f}), and marketplace/"
+                    f"other ({safe_float(_ar.get('OTHER_USD')):,.0f}) that the credit-spend tile "
+                    "excludes. Org currency, UTC, lags ~72h so it trails the credit tile near today."})
+    _tiles += [
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
         {"label": f"Total credits, {days}d", "value": format_credits(total_credits),
@@ -167,7 +188,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "SNOWFLAKE_COCO_SNOWSIGHT within METERING_DAILY_HISTORY. Shown here from the "
                  "near-real-time loader for freshness; do NOT add it to the totals on the left. "
                  "'—' until the fact loads."},
-    ])
+    ]
+    kpi_row(_tiles)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
     with st.expander("Why totals differ across pages (and vs Snowsight)"):
