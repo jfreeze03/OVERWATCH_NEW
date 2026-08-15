@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.167.0 - Formula honesty: month-end forecast bands (2026-08-15)
+
+Gap-audit Wave 3d (formula-correctness). App-only; `forecast.py`.
+
+- **Month-end bands no longer over-narrow (rec #15).** Four honesty fixes to
+  `month_end_projection`: (1) the seasonal engine now needs >= 4 weeks and reads a
+  6-week baseline, so each day-of-week mean rests on ~4-6 samples instead of the 2
+  a 14-day window gave; (2) the "Linear" engine finally carries a *robust*
+  (Theil-Sen) daily trend instead of a flat mean — the label was a promise it never
+  kept; (3) bands use `ddof=1` residuals against the fitted line and are inflated
+  for parameter uncertainty and within-week autocorrelation (daily spend is not
+  i.i.d.), so the interval stops pretending future days are independent draws; and
+  (4) the minimum history for any projection rose from 3 days to a full week. A
+  perfectly flat or perfectly linear history still yields a zero band — there is
+  nothing uncertain to widen for.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.166.0 - Storage honesty: per-database excludes hybrid/stage/archive (2026-08-15)
 
 Gap-audit Wave 4b (disclosure). App-only; `spend.py`.

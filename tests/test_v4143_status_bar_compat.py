@@ -63,6 +63,6 @@ def test_status_bar_has_no_newer_icon_position_keyword() -> None:
     body = source.split("def status_bar", 1)[1].split("\ndef ", 1)[0]
     assert "icon_position" not in body
     assert 'icon=":material/arrow_forward:"' in body
-    assert 'APP_VERSION = "4.166.0"' in (
+    assert 'APP_VERSION = "4.167.0"' in (
         _ROOT / "app" / "config.py"
     ).read_text(encoding="utf-8")

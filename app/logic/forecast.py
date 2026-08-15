@@ -10,13 +10,45 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from statistics import median
 
 import pandas as pd
 
 from .formulas import month_days, safe_float
 
-_BASELINE_DAYS = 14
-_MIN_POINTS = 3
+_BASELINE_DAYS = 14              # linear engine: recent daily rate + robust trend
+_SEASONAL_DAYS = 42              # rec#15: >= 6 weeks so each weekday gets ~6 samples
+_MIN_POINTS = 7                  # rec#15: a full week is the floor for any projection
+_MIN_SEASONAL_POINTS = 28        # rec#15: >= 4 samples/weekday before a DOW split is trusted
+_BAND_AUTOCORR_INFLATION = 1.25  # rec#15: daily spend is not i.i.d. within a week
+
+
+def _robust_slope(xs: list[float], ys: list[float]) -> tuple[float, float]:
+    """Theil-Sen slope/intercept — the median pairwise slope, robust to the
+    one-off spikes least squares would chase."""
+    slopes = [
+        (ys[j] - ys[i]) / (xs[j] - xs[i])
+        for i in range(len(xs))
+        for j in range(i + 1, len(xs))
+        if xs[j] != xs[i]
+    ]
+    slope = float(median(slopes)) if slopes else 0.0
+    intercept = float(median([y - slope * x for x, y in zip(xs, ys, strict=True)]))
+    return slope, intercept
+
+
+def _band(resid_std: float, project_days: int, n: int) -> float:
+    """Uncertainty half-width for a ``project_days``-day forward sum (rec#15).
+
+    An i.i.d. sum spreads ``resid_std * sqrt(days)``; real daily spend is
+    autocorrelated within the week and the fitted level/slope are themselves
+    estimated from ``n`` points, so widen for both. A perfectly flat or
+    perfectly periodic history (zero residual) still yields a zero band.
+    """
+    if resid_std <= 0.0 or project_days <= 0:
+        return 0.0
+    param_infl = (1.0 + 1.0 / max(n, 1)) ** 0.5
+    return resid_std * (project_days ** 0.5) * param_infl * _BAND_AUTOCORR_INFLATION
 
 
 @dataclass(frozen=True)
@@ -34,8 +66,11 @@ class MonthEndForecast:
 def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear") -> MonthEndForecast:
     """Project month-end spend from a ``DAY``/``USD`` daily frame.
 
-    projected = MTD actual + recent-daily-average * remaining days.
-    Band: +/- 1 std of the recent daily values * sqrt(remaining days).
+    Linear engine: complete-day MTD + a robust (Theil-Sen) daily trend over the
+    recent baseline — the 'Linear' label finally carries a slope. Seasonal
+    engine: complete-day MTD + per-weekday means over >= 4 weeks. Band: residual
+    std (ddof=1) against the fitted line, scaled by sqrt(remaining days) and
+    inflated for parameter uncertainty and within-week autocorrelation (rec#15).
     """
     if daily is None or daily.empty or not {"DAY", "USD"}.issubset(daily.columns):
         return MonthEndForecast(ok=False, basis="No daily spend history loaded.")
@@ -56,7 +91,8 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
     # N1: today is a PARTIAL day — averaging it into the daily rate biases every
     # projection low (same class as the pace/anomaly partial-day fixes). MTD above
     # keeps today's actual; the forward rate is built only from completed days.
-    baseline = frame[frame["DAY"] < today].tail(_BASELINE_DAYS)
+    complete = frame[frame["DAY"] < today]
+    baseline = complete.tail(_BASELINE_DAYS)
     if len(baseline) < _MIN_POINTS:
         return MonthEndForecast(
             ok=False,
@@ -64,26 +100,28 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
             basis=f"Needs at least {_MIN_POINTS} days of history; have {len(baseline)}.",
         )
 
-    daily_rate = float(baseline["USD"].mean())
-    daily_std = float(baseline["USD"].std(ddof=0))
     _, _, remaining = month_days(today)
     project_days = remaining + 1   # codex#16: today (incomplete) + every day after it
 
-    if engine == "seasonal" and len(baseline) >= 14:
-        # Day-of-week means over the baseline; each remaining calendar day is
-        # projected with its own weekday mean. Band = per-day residual std
-        # against the weekday means, scaled by sqrt(remaining).
-        from datetime import timedelta
-
-        frame_b = baseline.copy()
+    # rec#15: a 14-day window gives day-of-week means only 2 samples each, so the
+    # seasonal band came out over-narrow and over-confident. Widen the seasonal
+    # baseline to 6 weeks and refuse the DOW split below 4 weeks (falls through to
+    # the linear engine), so each weekday mean rests on >= 4 observations.
+    seasonal_baseline = complete.tail(_SEASONAL_DAYS)
+    if engine == "seasonal" and len(seasonal_baseline) >= _MIN_SEASONAL_POINTS:
+        frame_b = seasonal_baseline.copy()
         frame_b["DOW"] = pd.to_datetime(frame_b["DAY"]).map(lambda d: d.weekday())
         dow_mean = frame_b.groupby("DOW")["USD"].mean()
         resid = frame_b["USD"] - frame_b["DOW"].map(dow_mean)
-        resid_std = float(resid.std(ddof=0))
+        resid_std = float(resid.std(ddof=1)) if len(frame_b) > 1 else 0.0
+        fallback_rate = float(seasonal_baseline["USD"].mean())
         future = [today + timedelta(days=i) for i in range(remaining + 1)]  # codex#16: incl TODAY
-        add = sum(float(dow_mean.get(d.weekday(), daily_rate)) for d in future)
-        projected = mtd_complete + add
-        spread = resid_std * (project_days**0.5)
+        add = sum(float(dow_mean.get(d.weekday(), fallback_rate)) for d in future)
+        # month-end is monotonic: it can never fall below spend-to-date (mtd, which
+        # already includes today's partial). Flooring here keeps the point estimate
+        # and its band self-consistent (low <= projected <= high) under any trend.
+        projected = max(mtd_complete + add, mtd)
+        spread = _band(resid_std, project_days, len(frame_b))
         return MonthEndForecast(
             ok=True,
             mtd_usd=round(mtd, 2),
@@ -92,21 +130,37 @@ def month_end_projection(daily: pd.DataFrame, today: date, engine: str = "linear
             high_usd=round(projected + spread, 2),
             daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
             days_remaining=remaining,
-            basis=f"Seasonal engine: day-of-week means over {len(baseline)}d, "
-                  f"today + {remaining} remaining days projected per weekday.",
+            basis=f"Seasonal engine: day-of-week means over {len(frame_b)}d "
+                  f"(>= 4 samples/weekday), today + {remaining} remaining days per weekday.",
         )
 
-    projected = mtd_complete + daily_rate * project_days
-    spread = daily_std * (project_days**0.5)
+    # Linear engine (rec#15): a robust Theil-Sen daily trend, not a flat mean —
+    # future days ride the fitted line from the last complete day (clamped at 0),
+    # and the band uses residuals against THAT line, not the raw scatter.
+    xs = [float(i) for i in range(len(baseline))]
+    ys = [safe_float(value) for value in baseline["USD"]]
+    slope, intercept = _robust_slope(xs, ys)
+    last_x = len(baseline) - 1
+    fitted_future = [max(0.0, intercept + slope * (last_x + k)) for k in range(1, project_days + 1)]
+    add = sum(fitted_future)
+    # rec#15 guard: a steep downward trend can extrapolate below spend-to-date (and
+    # every clamped-to-0 future day drives `add` toward 0). Month-end is monotonic —
+    # it can never be below `mtd` (which counts today's partial) — so floor the point
+    # estimate there. This keeps low <= projected <= high even on a clean decline
+    # (zero residual -> zero band) instead of inverting the interval.
+    projected = max(mtd_complete + add, mtd)
+    resid = [ys[i] - (intercept + slope * xs[i]) for i in range(len(ys))]
+    resid_std = float(pd.Series(resid).std(ddof=1)) if len(resid) > 1 else 0.0
+    spread = _band(resid_std, project_days, len(baseline))
     return MonthEndForecast(
         ok=True,
         mtd_usd=round(mtd, 2),
         projected_usd=round(projected, 2),
         low_usd=round(max(mtd, projected - spread), 2),
         high_usd=round(projected + spread, 2),
-        daily_rate_usd=round(daily_rate, 2),
+        daily_rate_usd=round(add / project_days, 2) if project_days else 0.0,
         days_remaining=remaining,
-        basis=f"Linear engine: complete-day MTD + {_BASELINE_DAYS}d avg daily rate x "
+        basis=f"Linear engine: complete-day MTD + robust {_BASELINE_DAYS}d trend x "
               f"(today + {remaining} remaining) days.",
     )
 

@@ -391,16 +391,16 @@ def test_c15_label_font_floor():
 # N1 — forecasts must exclude today's PARTIAL day from the forward daily rate
 # ---------------------------------------------------------------------------
 def test_n1_forecast_excludes_partial_today_from_rate():
-    days = [date(2026, 7, 9 + i) for i in range(6)]  # six complete days at $100
+    days = [date(2026, 7, 8 + i) for i in range(7)]  # seven complete days at $100 (rec#15 floor)
     rows = [{"DAY": d, "USD": 100.0} for d in days]
     rows.append({"DAY": date(2026, 7, 15), "USD": 10.0})  # today, partial
     f = month_end_projection(pd.DataFrame(rows), date(2026, 7, 15), engine="linear")
     assert f.ok
     # Rate is built from complete days only ($100), NOT dragged down by today's $10
-    # (the old inclusive baseline would have averaged to ~$87).
+    # (the old inclusive baseline would have averaged to ~$89).
     assert f.daily_rate_usd == 100.0
     # MTD still counts today's actual spend.
-    assert f.mtd_usd == 610.0
+    assert f.mtd_usd == 710.0
 
 
 def test_n1_forecast_source_comment_present():
