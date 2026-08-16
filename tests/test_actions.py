@@ -55,6 +55,14 @@ def test_ledger_totals_never_mix_states():
     assert totals["verified_usd"] == 60.0
     assert totals["estimated_count"] == 2
     assert totals["verified_count"] == 1
+    assert totals["verified_estimated_usd"] == 80.0
+    assert totals["realization_pct"] == 75.0        # verified 60 of an 80 estimate
+
+
+def test_ledger_totals_realization_none_without_verified():
+    df = pd.DataFrame([{"STATE": "ESTIMATED", "ESTIMATED_USD": 100, "VERIFIED_USD": None}])
+    totals = ledger_totals(df)
+    assert totals["realization_pct"] is None and totals["verified_estimated_usd"] == 0.0
 
 
 def test_triage_queue_merges_and_ranks():

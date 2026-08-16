@@ -1313,7 +1313,7 @@ def _savings_tab() -> None:
                "(auto-suspend, size, clusters, scaling policy) wherever they were "
                "made — Snowsight included — and settles each against 14 days of "
                "measured actuals. Manual items remain for one-offs.")
-    kpi_row([
+    _kpis = [
         {"label": "Verified savings", "value": format_usd(totals["verified_usd"]),
          "delta": f"{totals['verified_count']} items",
          "help": "Measured post-period proof. This is the number to quote."},
@@ -1321,7 +1321,20 @@ def _savings_tab() -> None:
          "delta": f"{totals['estimated_count']} items", "delta_color": "off",
          "help": "Never added to verified. Auto-booked items settle themselves "
                  "when the 14-day verdict lands; manual items use the verify flow."},
-    ])
+    ]
+    # Cost#9: the track record that calibrates a new estimate.
+    if totals.get("realization_pct") is not None:
+        _kpis.append({
+            "label": "Realization rate",
+            "value": f"{totals['realization_pct']:.0f}%",
+            "delta": f"{format_usd(totals['verified_usd'])} of "
+                     f"{format_usd(totals['verified_estimated_usd'])} estimated",
+            "delta_color": "off",
+            "help": "Of what verified items were originally ESTIMATED to save, how much "
+                    "measured out — the track record for the estimates. ~70% means a fresh "
+                    "$1,000 estimate is worth about $700 in expectation.",
+        })
+    kpi_row(_kpis)
     if res.empty:
         st.info("Nothing booked yet — the autobook task fills this as warehouse "
                 "cost-lever changes are detected (needs migration V038).")

@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.205.0 - Savings realization rate on the Optimization ledger (2026-08-16)
+
+CoCo review, Tier-2 (Cost #9). `logic.actions.ledger_totals` gains a realization rate.
+
+- **The savings ledger now shows its track record, not just two totals.** It reported Verified
+  and Estimated dollars separately but never “of what we verified, how much of the estimate
+  actually measured out.” A new “Realization rate” tile — verified $ as a share of those items'
+  original estimates (e.g. “$8.4k of $12k = 70%”) — calibrates trust in a fresh estimate.
+  App version 4.205.0.
+
 ## 4.204.0 - Show how long the oldest undelivered critical has waited (2026-08-16)
 
 CoCo review, do-first wave (Control Room #4, duration not count). `health_strip`

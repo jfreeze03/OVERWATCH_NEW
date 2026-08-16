@@ -125,20 +125,31 @@ def can_verify(row: dict) -> tuple[bool, str]:
 
 
 def ledger_totals(df: pd.DataFrame) -> dict:
-    """Estimated vs verified totals; never mixes the two."""
+    """Estimated vs verified totals (never mixed), plus the realization rate — the
+    verified dollars as a share of what those verified items were originally
+    estimated to save (Cost #9). realization_pct is None until something is verified."""
+    empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
+             "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None}
     if df is None or df.empty or "STATE" not in df.columns:
-        return {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0, "verified_count": 0}
+        return empty
     view = df.copy()
     view["STATE"] = view["STATE"].astype(str).str.upper()
     est = view[view["STATE"] == LEDGER_ESTIMATED]
     ver = view[view["STATE"] == LEDGER_VERIFIED]
     est_usd = pd.to_numeric(est.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
     ver_usd = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0).sum()
+    # Track record: of what VERIFIED items were originally estimated to save, how much
+    # actually measured out — a fair estimate-vs-actual on verified items only.
+    ver_est_usd = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
+    realization = (round(float(ver_usd) / float(ver_est_usd) * 100, 1)
+                   if ver_est_usd > 0 else None)
     return {
         "estimated_usd": round(float(est_usd), 2),
         "verified_usd": round(float(ver_usd), 2),
         "estimated_count": len(est),
         "verified_count": len(ver),
+        "verified_estimated_usd": round(float(ver_est_usd), 2),
+        "realization_pct": realization,
     }
 
 
