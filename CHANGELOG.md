@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.177.0 - Feature: anomaly root-cause auto-explain (2026-08-15)
+
+Gap-audit Wave 6 (rec #5). App-only; new `logic/anomaly_explain.py` + `spend.py`.
+
+- **Flagged spend days now explain themselves.** The per-warehouse anomaly panel
+  detected outliers but only told you which warehouse and how many z — not WHY.
+  New pure `explain_by_warehouse` decomposes the flagged day's total spend delta
+  across warehouses: each warehouse's flagged-day spend minus its trailing
+  robust-median baseline, ranked by contribution, with the deltas summing to the
+  day's total move by construction (nothing hides in a residual). A brand-new
+  warehouse contributes its whole spend; one that went silent contributes a
+  negative delta. The strongest flag now renders a one-line narrative ("Spend on
+  D was $X — $Y above the recent median; top driver: WH_A, $Z over its usual, 80%
+  of the move") and an expandable contribution waterfall, so triage jumps from
+  "something spiked" to "this warehouse did, that much." Pure and additively
+  self-checking; no new queries (reuses the loaded FACT_WAREHOUSE_DAILY frame).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.176.0 - Feature: wasted-spend board for failed/killed queries (2026-08-15)
 
 Gap-audit Wave 6 (rec #17). App-only; `insights_sql.py`, `operations.py`.

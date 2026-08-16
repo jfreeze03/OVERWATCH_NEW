@@ -25,6 +25,7 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
 )
+from app.logic.anomaly_explain import explain_by_warehouse
 from app.logic.cost_coverage import (
     SERVICE_CATEGORY,
     drill_ready_spend_share,
@@ -838,10 +839,30 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 else:
                     st.warning(f"{h['label']}: daily spend ${h['value']:,.0f}{_on} is a statistical "
                                f"outlier (z {h['z']:+.1f}) — investigate.")
+            # rec#5: don't stop at "something spiked" — decompose the strongest flag's
+            # day into the warehouses that drove it, with a one-line narrative and a
+            # contribution waterfall (the deltas sum to the day's total move).
+            _top = hits[0]
+            if _top.get("day"):
+                exp = explain_by_warehouse(flagged, _top["day"])
+                if exp.ok and exp.drivers:
+                    with st.expander(f"Why did {exp.flagged_day} move? — root-cause waterfall",
+                                     expanded=False):
+                        st.markdown(exp.narrative)
+                        wf = pd.DataFrame([
+                            {"Warehouse": d.name, "Usual $": d.baseline_usd,
+                             "That day $": d.actual_usd, "Delta $": d.delta_usd,
+                             "Share %": d.share_pct}
+                            for d in exp.drivers])
+                        styled_table(wf, column_config={
+                            "Usual $": st.column_config.NumberColumn(format="$%.2f"),
+                            "That day $": st.column_config.NumberColumn(format="$%.2f"),
+                            "Delta $": st.column_config.NumberColumn(format="$%.2f"),
+                            "Share %": st.column_config.NumberColumn(format="%.1f%%")})
             st.caption(
-                "How to investigate a flag: the **By warehouse (exact usage)** table above breaks "
-                "each warehouse's spend by day; then **Operations → Queries** (filter to the "
-                "warehouse, widen the window to the flagged day) shows the queries that drove it."
+                "How to investigate a flag: the waterfall above names the warehouses that moved; "
+                "then **Operations → Queries** (filter to the warehouse, widen to the flagged day) "
+                "and the **Wasted spend** board show the queries that drove it."
             )
         else:
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
