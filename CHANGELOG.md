@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.179.0 - Feature: de-duplicated addressable-savings rollup (2026-08-15)
+
+Gap-audit Wave 6 (rec #16). App-only; new `logic/savings_rollup.py` + `optimize.py`.
+
+- **One honest "total addressable savings" headline.** Each advisor estimated
+  recoverable dollars independently; nothing summed the OPEN opportunities, and a
+  naive sum double-counts because idle-tune and size-down on the SAME warehouse
+  recover the same idle credits. New pure `rollup_savings` de-duplicates overlapping
+  opportunities on the same target (keeps the larger of an idle/resize pair, drops
+  the other) and ranks the rest by confidence x dollars. A "Total addressable
+  savings (de-duplicated)" panel on Optimize > Idle & sizing now shows the net
+  monthly headline, the opportunity count, and how many overlaps were removed —
+  collecting the idle-timer and right-sizing estimates already computed in that
+  section (no new queries). The failed-query Wasted-spend, Serverless-ROI, and
+  storage/clustering levers plug into the same rollup next (disclosed in the panel).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.178.0 - Feature: serverless ROI board — Query Acceleration (2026-08-15)
 
 Gap-audit Wave 6 (rec #6). App-only; `cost_sql.py`, new `logic/serverless_roi.py`,

@@ -41,6 +41,11 @@ from app.logic.insights import (
     storage_movers,
     with_auto_suspend_settings,
 )
+from app.logic.savings_rollup import (
+    SavingsOpportunity,
+    confidence_weight,
+    rollup_savings,
+)
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
@@ -226,6 +231,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     opt_section = lazy_sections(["Idle & sizing", "Queries & patterns", "Storage & waste", "Remediation & ledger"], key="opt_section", deep_link=False)
 
     if opt_section == "Idle & sizing":
+        # rec#16: collect each advisor's OPEN recoverable-$ estimate here, then roll
+        # them into one de-duplicated headline at the end of the section.
+        _savings_opps: list[SavingsOpportunity] = []
         # ---- Idle warehouse advisor ----------------------------------------------
         st.markdown("**Idle warehouse advisor**")
         st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
@@ -250,6 +258,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             flagged = advisor[advisor["FLAGGED"]]
             actionable = advisor[advisor["ACTIONABLE"]]
             total_idle = float(advisor["IDLE_USD"].sum())
+            _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
+                SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
+                                   safe_float(r["ACTIONABLE_MONTHLY_USD"]),
+                                   confidence_weight(r.get("SAVINGS_CONFIDENCE")))
+                for _, r in advisor.iterrows()
+                if safe_float(r["ACTIONABLE_MONTHLY_USD"]) > 0)
             kpi_row([
                 {"label": f"Idle spend ({idle_days}d)", "value": format_usd(total_idle),
                  "help": "Credits billed while no query ran on the warehouse."},
@@ -366,6 +380,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
             )
             sized = size_recommendations(_sizing_df, rate, sizing_days)
+            _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
+                SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
+                                   safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")),
+                                   confidence_weight(r.get("CONFIDENCE")))
+                for _, r in sized.iterrows()
+                if safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")) > 0)
             summary = sizing_summary(sized)
             _sz_cols = ["WAREHOUSE_NAME", "COMPANY", "RECOMMENDATION", "RATIONALE",
                         "CONFIDENCE", "AUTO_SUSPEND", "ACTIVE_QUERY_DAYS", "ACTIVE_DAYS_PER_30D",
@@ -523,6 +543,35 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     qdf[_qcols], height=320, sort_label="QAS $ desc",
                     column_config={"QAS_USD": st.column_config.NumberColumn("QAS $", format="$%.2f")})
                 result_caption(qas, note="eligibility is utilization, not a dollarized compute saving")
+
+        st.divider()
+        # rec#16: one de-duplicated headline across the advisors. Idle-tune and
+        # size-down on the SAME warehouse recover the same idle credits, so summing
+        # them naively double-counts; rollup_savings keeps the larger of the pair.
+        st.markdown("**Total addressable savings (de-duplicated)**")
+        _roll = rollup_savings(_savings_opps)
+        if _roll.items:
+            kpi_row([
+                {"label": "Addressable $/mo (net)", "value": format_usd(_roll.total_monthly_usd),
+                 "help": "Idle-timer + right-sizing opportunities, de-duplicated so a warehouse "
+                         "counted for BOTH idle and resize is not double-counted (the larger wins)."},
+                {"label": "Opportunities", "value": str(len(_roll.items))},
+                {"label": "Overlaps removed", "value": str(len(_roll.dropped)),
+                 "help": "Idle/resize double-counts on the same warehouse dropped from the total."},
+            ])
+            _rdf = pd.DataFrame([
+                {"Source": o.source, "Warehouse / target": o.target,
+                 "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2)}
+                for o in _roll.items])
+            styled_table(_rdf, height=280, sort_label="confidence x dollars",
+                         column_config={"$/mo": st.column_config.NumberColumn(format="$%.2f")})
+            st.caption(
+                "Ranked by confidence x dollars. The failed-query **Wasted spend** board "
+                "(Operations) and the **Serverless ROI** panel above are additional levers not yet "
+                "folded into this total; storage / clustering plug into the same rollup next."
+            )
+        else:
+            st.caption("No open idle or right-sizing opportunities to roll up in this window.")
 
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------
