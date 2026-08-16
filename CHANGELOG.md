@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.168.0 - Formula honesty: capacity channels + growth window (2026-08-15)
+
+Gap-audit Wave 3e (rec #39). App-only; `capacity.py`.
+
+- **Queue and remote-spill are forecast as separate channels.** The pressure
+  index was `max(queue-min/30, spill-GB/1)` with a single Theil-Sen slope fit to
+  that composite — when the two channels cross over the window the slope (and the
+  ETA) matched neither. Each channel is now forecast independently to its own 1.0
+  intervention line, and the ETA comes from whichever breaches *soonest*, with the
+  driving channel named in the row's basis. `CURRENT_PRESSURE_INDEX` stays the
+  `max()` of the two (how close to a threshold you are right now).
+- **The workload-growth gate reads a recent sub-window.** `_growth_pct` compared
+  the head vs the tail of the *entire* (up to 365-day) history, so a warehouse
+  whose demand grew months ago and has since gone flat still corroborated an ETA.
+  It now compares the last 30 days against the prior 30, so only growth that is
+  actually happening now clears the gate.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.167.0 - Formula honesty: month-end forecast bands (2026-08-15)
 
 Gap-audit Wave 3d (formula-correctness). App-only; `forecast.py`.

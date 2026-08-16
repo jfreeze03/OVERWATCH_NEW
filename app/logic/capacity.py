@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import date, timedelta
 from statistics import median
 
@@ -11,6 +12,18 @@ import pandas as pd
 from app.logic.formulas import account_today, safe_float
 
 MAX_CAPACITY_STALE_DAYS = 2
+
+
+@dataclass(frozen=True)
+class _ChannelFit:
+    """One normalized pressure channel's robust forecast (rec#39)."""
+
+    current: float
+    slope: float
+    r2: float
+    residual_mad: float
+    backtest_mae: float | None
+    eta: float | None
 
 _OUTPUT_COLUMNS = [
     "WAREHOUSE_NAME",
@@ -59,16 +72,71 @@ def _quality(ys: list[float], predicted: list[float]) -> tuple[float, float]:
     return r2, mad
 
 
-def _growth_pct(values: pd.Series) -> float:
+def _growth_pct(values: pd.Series, window: int = 30) -> float:
+    """Recent workload growth: last ``window`` days vs the ``window`` before them.
+
+    rec#39: the old head-vs-tail over the FULL (up to 365d) series read big growth
+    for a warehouse whose demand rose months ago and has since gone flat — the
+    growth gate then corroborated an ETA that recent demand no longer supports.
+    A fixed recent sub-window (default last-30 vs prior-30) only fires on growth
+    that is actually happening now.
+    """
     numeric = pd.to_numeric(values, errors="coerce").fillna(0.0)
     if len(numeric) < 14:
         return 0.0
-    width = min(14, max(7, len(numeric) // 3))
-    first = float(numeric.head(width).median())
-    last = float(numeric.tail(width).median())
-    if first <= 0:
-        return 100.0 if last > 0 else 0.0
-    return (last - first) / first * 100.0
+    width = min(window, len(numeric) // 2)   # never let the two windows overlap
+    prior = float(numeric.iloc[-2 * width:-width].median())
+    recent = float(numeric.tail(width).median())
+    if prior <= 0:
+        return 100.0 if recent > 0 else 0.0
+    return (recent - prior) / prior * 100.0
+
+
+def _holdout_mae(xs: list[float], ys_smooth: list[float], ys_raw: list[float]) -> float | None:
+    """7-day holdout MAE: fit on the smoothed train, score against RAW holdout.
+
+    rec#14: the error is measured against the raw pressure the smoothed line
+    understates, so the backtest reflects real forecast error, not fit to noise.
+    """
+    if len(xs) < 30:
+        return None
+    train_x, train_y = xs[:-7], ys_smooth[:-7]
+    if len(train_x) < 20:
+        return None
+    test_x, test_y = xs[-7:], ys_raw[-7:]
+    slope, intercept = _theil_sen(train_x, train_y)
+    return sum(
+        abs(actual - (intercept + slope * x)) for actual, x in zip(test_y, test_x, strict=True)
+    ) / len(test_y)
+
+
+def _fit_channel(days: pd.Series, raw_norm: pd.Series) -> _ChannelFit:
+    """Independently forecast one normalized pressure channel (rec#39).
+
+    ``raw_norm`` is the channel scaled so 1.0 is the intervention line (queue
+    minutes / 30, or remote-spill GB / 1). Fitting the queue and spill channels
+    separately — rather than one Theil-Sen slope through their max()-composite,
+    which is non-physical when the two cross — lets the caller take the sooner,
+    correctly-attributed ETA. Trend fit on the 7-day median, quality against the
+    RAW channel (rec#14). ``eta`` is days for the smoothed level to reach 1.0.
+    """
+    smooth = raw_norm.rolling(7, min_periods=4).median()
+    keep = smooth.notna()
+    ys = [safe_float(value) for value in smooth[keep]]
+    if len(ys) < 2:
+        return _ChannelFit(current=max(0.0, ys[-1]) if ys else 0.0, slope=0.0,
+                           r2=0.0, residual_mad=0.0, backtest_mae=None, eta=None)
+    origin = days[keep].iloc[0]
+    xs = [float((day - origin).days) for day in days[keep]]
+    ys_raw = [safe_float(value) for value in raw_norm[keep]]
+    slope, intercept = _theil_sen(xs, ys)
+    predicted = [intercept + slope * x for x in xs]
+    r2, residual_mad = _quality(ys_raw, predicted)
+    current = max(0.0, ys[-1])
+    backtest_mae = _holdout_mae(xs, ys, ys_raw)
+    eta = (1.0 - current) / slope if slope > 0 else None
+    return _ChannelFit(current=current, slope=slope, r2=r2,
+                       residual_mad=residual_mad, backtest_mae=backtest_mae, eta=eta)
 
 
 def capacity_forecasts(
@@ -159,22 +227,28 @@ def capacity_forecasts(
             rows.append(base)
             continue
 
-        queue = group["QUEUED_MIN"] / 30.0
-        spill = group["SPILL_REMOTE_GB"] / 1.0
-        group["PRESSURE_INDEX"] = pd.concat([queue, spill], axis=1).max(axis=1)
-        group["PRESSURE_SMOOTH"] = group["PRESSURE_INDEX"].rolling(7, min_periods=4).median()
-        model = group.dropna(subset=["PRESSURE_SMOOTH"]).copy()
-        xs = [(day - model["DAY"].iloc[0]).days for day in model["DAY"]]
-        ys = [safe_float(value) for value in model["PRESSURE_SMOOTH"]]
-        # rec #14: fit the trend on the 7-day-median SMOOTH series (a stable slope),
-        # but measure fit quality (R2, residual MAD, and the holdout MAE below)
-        # against the RAW pressure index. Scoring residuals against the smoothed
-        # line inflated R2 and shrank residual_mad, overstating ETA confidence.
-        ys_raw = [safe_float(value) for value in model["PRESSURE_INDEX"]]
-        slope, intercept = _theil_sen([float(x) for x in xs], ys)
-        predicted = [intercept + slope * x for x in xs]
-        r2, residual_mad = _quality(ys_raw, predicted)
-        current = max(0.0, ys[-1])
+        # rec#39: forecast the queue and remote-spill channels INDEPENDENTLY, then
+        # let the one that reaches the 1.0 intervention line SOONEST drive the ETA.
+        # The old max()-composite fit a single Theil-Sen slope to two series that
+        # can cross over the window, yielding a slope — and an ETA — matching
+        # neither. Each channel is scaled so 1.0 == its threshold.
+        channels = {
+            "queue": _fit_channel(group["DAY"], group["QUEUED_MIN"] / 30.0),
+            "remote spill": _fit_channel(group["DAY"], group["SPILL_REMOTE_GB"] / 1.0),
+        }
+        current = max(fit.current for fit in channels.values())   # closest to threshold now
+        rising = {name: fit for name, fit in channels.items()
+                  if fit.slope > 0 and fit.eta is not None and fit.eta > 0}
+        if rising:   # driver = the soonest-to-breach rising channel
+            driver_name = min(rising, key=lambda name: rising[name].eta or math.inf)
+        else:        # nothing rising — keep the strongest slope for reporting; gates refuse it
+            driver_name = max(channels, key=lambda name: channels[name].slope)
+        driver = channels[driver_name]
+        slope = driver.slope
+        r2 = driver.r2
+        residual_mad = driver.residual_mad
+        backtest_mae = driver.backtest_mae
+        driver_current = driver.current
 
         recent = group.tail(14)
         recent_pressure_days = int(
@@ -182,23 +256,6 @@ def capacity_forecasts(
         )
         recent_changes = int(recent["CHANGE_EVENTS"].sum())
         workload_growth = max(_growth_pct(group["QUERY_COUNT"]), _growth_pct(group["CREDITS_TOTAL"]))
-
-        backtest_mae: float | None = None
-        if len(model) >= 30:
-            train = model.iloc[:-7]
-            holdout = model.iloc[-7:]
-            tx = [(day - train["DAY"].iloc[0]).days for day in train["DAY"]]
-            ty = [safe_float(value) for value in train["PRESSURE_SMOOTH"]]
-            if len(tx) >= 20:
-                test_x = [(day - train["DAY"].iloc[0]).days for day in holdout["DAY"]]
-                # rec #14: holdout error measured against RAW pressure, not the
-                # smoothed line (which understates the true forecast error).
-                test_y = [safe_float(value) for value in holdout["PRESSURE_INDEX"]]
-                test_slope, test_intercept = _theil_sen([float(x) for x in tx], ty)
-                backtest_mae = sum(
-                    abs(actual - (test_intercept + test_slope * x))
-                    for actual, x in zip(test_y, test_x, strict=True)
-                ) / len(test_y)
 
         base.update({
             "CURRENT_PRESSURE_INDEX": round(current, 3),
@@ -231,23 +288,24 @@ def capacity_forecasts(
                 "STATUS": "WATCH",
                 "BASIS": "Pressure trends upward, but query/credit demand does not corroborate the trend.",
             })
-        elif backtest_mae is None or r2 < 0.35 or backtest_mae > max(0.20, current * 0.6):
+        elif backtest_mae is None or r2 < 0.35 or backtest_mae > max(0.20, driver_current * 0.6):
             base.update({
                 "STATUS": "WATCH",
                 "BASIS": "Upward pressure is visible, but the 7-day holdout error is too high for an ETA.",
             })
         else:
-            eta = (1.0 - current) / slope if slope > 0 else math.inf
+            eta = driver.eta if driver.eta is not None else math.inf
             uncertainty = 1.96 * 1.4826 * residual_mad + backtest_mae
-            low = max(0.0, (1.0 - current - uncertainty) / slope)
-            high = max(low, (1.0 - current + uncertainty) / slope)
+            low = max(0.0, (1.0 - driver_current - uncertainty) / slope)
+            high = max(low, (1.0 - driver_current + uncertainty) / slope)
             if 0 < eta <= 180 and high <= 365:
                 base.update({
                     "STATUS": "FORECAST",
                     "DAYS_TO_PRESSURE": round(eta),
                     "ETA_LOW_DAYS": round(low),
                     "ETA_HIGH_DAYS": round(high),
-                    "BASIS": "Theil-Sen trend on a 7-day median; interval includes residual and holdout error.",
+                    "BASIS": f"Theil-Sen trend on the {driver_name} channel (7-day median); "
+                             "interval includes residual and holdout error.",
                 })
             else:
                 base.update({
