@@ -1573,6 +1573,46 @@ def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
         on_select(sel)
 
 
+def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
+                     type_col: str | None = None, height: int | None = None,
+                     column_config: dict | None = None, slug: str | None = None,
+                     days: int | None = None, size_note: bool = True,
+                     sort_label: str = "") -> None:
+    """Universal entity drill (UI22): a table whose row click opens that entity
+    in Control Room -> Entity 360.
+
+    Any table whose rows ARE entities becomes a deep-link with one call instead
+    of a hand-rolled ``selectable_nav_table`` + navigation handler at each site.
+    ``entity_type`` is the fixed type for a homogeneous table (every row a
+    WAREHOUSE, USER, TASK, ...); pass ``type_col`` when rows carry their own
+    ENTITY_TYPE (it takes precedence per row, falling back to ``entity_type``).
+    Degrades to a plain ``styled_table`` when ``key_col`` is absent or the
+    runtime has no row selection.
+    """
+    import pandas as pd
+
+    frame = df.reset_index(drop=True) if df is not None else pd.DataFrame()
+    if getattr(frame, "empty", True) or key_col not in getattr(frame, "columns", []):
+        styled_table(frame, height=height, column_config=column_config, slug=slug,
+                     days=days, size_note=size_note, sort_label=sort_label)
+        return
+
+    def _open(index: int) -> None:
+        from app.core.state import request_navigation
+
+        row = frame.iloc[int(index)]
+        per_row = str(row.get(type_col) or "").strip() if type_col and type_col in frame.columns else ""
+        kind = per_row or entity_type
+        entity_key = str(row.get(key_col) or "").strip()
+        if kind and entity_key:
+            request_navigation("Control Room", "Entity 360",
+                               context={"entity_type": kind, "entity_key": entity_key})
+
+    selectable_nav_table(frame, key=key, on_select=_open, height=height,
+                         column_config=column_config, slug=slug, days=days,
+                         size_note=size_note, sort_label=sort_label)
+
+
 def decision_rows(
     df,
     *,

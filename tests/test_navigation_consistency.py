@@ -98,6 +98,65 @@ def test_jump_box_targets_exist():
         assert section in labels, f"jump box: {page!r} lacks section {section!r}"
 
 
+# ---------------------------------------------------------------------------
+# UI22: the universal entity drill (entity_nav_table) points at a real target
+# and its row handler navigates to Entity 360 for the picked row.
+# ---------------------------------------------------------------------------
+
+def test_entity_nav_table_targets_real_section_and_is_adopted():
+    comp_src = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
+    assert 'request_navigation("Control Room", "Entity 360"' in comp_src
+    labels, _ = _lazy_sections_of("control_room.py")
+    assert "Entity 360" in labels           # the drill lands on a real section
+    ops_src = (_PAGES_DIR / "operations.py").read_text(encoding="utf-8")
+    assert ops_src.count("entity_nav_table(") >= 2 and 'entity_type="WAREHOUSE"' in ops_src
+
+
+def test_entity_nav_table_opens_selected_entity(monkeypatch):
+    import pandas as pd
+
+    import app.ui.components as components
+    captured: dict = {}
+    monkeypatch.setattr(components, "selectable_nav_table",
+                        lambda frame, key, on_select, **k: on_select(1))
+    monkeypatch.setattr("app.core.state.request_navigation",
+                        lambda page, section="", filters=None, context=None:
+                        captured.update(page=page, section=section, context=context))
+    df = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A", "WH_B"], "PEAK": [1, 2]})
+    components.entity_nav_table(df, key="t", key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE")
+    assert captured["page"] == "Control Room" and captured["section"] == "Entity 360"
+    assert captured["context"] == {"entity_type": "WAREHOUSE", "entity_key": "WH_B"}
+
+
+def test_entity_nav_table_per_row_type_col_wins(monkeypatch):
+    import pandas as pd
+
+    import app.ui.components as components
+    captured: dict = {}
+    monkeypatch.setattr(components, "selectable_nav_table",
+                        lambda frame, key, on_select, **k: on_select(0))
+    monkeypatch.setattr("app.core.state.request_navigation",
+                        lambda page, section="", filters=None, context=None: captured.update(context=context))
+    df = pd.DataFrame({"ENTITY_TYPE": ["USER"], "ENTITY_KEY": ["JOE"]})
+    components.entity_nav_table(df, key="t2", key_col="ENTITY_KEY",
+                               type_col="ENTITY_TYPE", entity_type="FALLBACK")
+    assert captured["context"] == {"entity_type": "USER", "entity_key": "JOE"}
+
+
+def test_entity_nav_table_degrades_without_key_col(monkeypatch):
+    import pandas as pd
+
+    import app.ui.components as components
+    calls = {"styled": 0, "nav": 0}
+    monkeypatch.setattr(components, "styled_table",
+                        lambda frame, **k: calls.__setitem__("styled", calls["styled"] + 1))
+    monkeypatch.setattr(components, "selectable_nav_table",
+                        lambda *a, **k: calls.__setitem__("nav", calls["nav"] + 1))
+    components.entity_nav_table(pd.DataFrame({"X": [1]}), key="t3",
+                               key_col="MISSING", entity_type="WAREHOUSE")
+    assert calls["styled"] == 1 and calls["nav"] == 0
+
+
 def test_dba_pages_cover_all_routed_pages():
     routable = {p for p, _ in {**_RULE_TARGETS, **FIX_TARGETS}.values()}
     routable |= {p for _, (p, _s) in _FAMILY_DEFAULTS}

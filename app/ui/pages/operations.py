@@ -57,6 +57,7 @@ from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     confirm_gate,
+    entity_nav_table,
     evidence_gate,
     exception_summary,
     export_button,
@@ -1231,8 +1232,10 @@ def _warehouses_tab(company: str, rate: float) -> None:
         st.info("No warehouse load intervals recorded in the last 14 days.")
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
-                   "or split workloads — before users feel it.")
-        styled_table(peaks.df, column_config={
+                   "or split workloads — before users feel it. Select a warehouse to open its "
+                   "Entity 360.")
+        entity_nav_table(peaks.df, key=f"ops_wh_peaks_{company}", key_col="WAREHOUSE_NAME",
+                         entity_type="WAREHOUSE", column_config={
             "PEAK_RUNNING": st.column_config.NumberColumn("Peak Running", format="%.1f"),
             "PEAK_QUEUED": st.column_config.NumberColumn("Peak Queued", format="%.1f"),
         })
@@ -1267,9 +1270,11 @@ def _contention_tab(company: str, days: int) -> None:
                              takeaway=True)
             st.caption("Ranked by **Avg queue per query**, the user-felt stall signal. Query count "
                        "and total queued time remain in the evidence table so sustained materiality "
-                       "is visible beside the rate.")
-            styled_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
-                         if "AVG_QUEUE_SEC" in pdf.columns else pdf)
+                       "is visible beside the rate. Select a warehouse to open its Entity 360.")
+            entity_nav_table(pdf.sort_values("AVG_QUEUE_SEC", ascending=False)
+                             if "AVG_QUEUE_SEC" in pdf.columns else pdf,
+                             key=f"ops_wh_pressure_{company}_{days}", key_col="WAREHOUSE_NAME",
+                             entity_type="WAREHOUSE")
     with right:
         section_header("Lock waits", "info", "warehouse")
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()

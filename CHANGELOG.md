@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.211.0 - Universal entity drill into Entity 360 (2026-08-16)
+
+CoCo review, Tier-2 (UI #22). New `ui.components.entity_nav_table`.
+
+- **Any table of entities can now open the picked one in Entity 360 with one call.** The
+  drill-into-Entity-360 pattern existed (Decision Studio, Action Center, Operations tasks) but
+  each site hand-wrote its own selectable-table + navigation handler, and many entity tables had
+  no drill at all. A shared `entity_nav_table(df, key, key_col=…, entity_type=…)` wraps the
+  selectable-table + navigation so a homogeneous table (every row a warehouse, user, task, …) or
+  a mixed one (per-row `type_col`) becomes a deep-link in one line. First adopters: the
+  Operations → Warehouses concurrency-peaks and queue/spill tables now open a warehouse's Entity
+  360 on row select. (Per-cell hyperlinks stay infeasible in Streamlit-in-Snowflake's
+  canvas-rendered dataframes; row-select is the supported affordance.) App version 4.211.0.
+
 ## 4.210.0 - Credit overlay on the incident-correlation timeline (2026-08-16)
 
 CoCo review, Tier-2 (Control Room #9). New `data.cost_sql.hourly_credits`.
