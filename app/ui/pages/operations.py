@@ -47,7 +47,9 @@ from app.logic.insights import (
     compare_release_periods,
     rank_release_candidates,
     task_release_deltas,
+    with_auto_suspend_settings,
 )
+from app.logic.sizing import size_recommendations, sizing_summary
 from app.logic.task_graph import (
     analyze_task_run,
     canonical_task_name,
@@ -76,6 +78,7 @@ from app.ui.components import (
     section_header,
     selectable_nav_table,
     selectable_table,
+    served_days,
     snowsight_profile_column,
     styled_table,
     with_user_names,
@@ -1187,7 +1190,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
         _task_runs_view(company, days, database, schema_contains)
 
 
-def _warehouses_tab(company: str, rate: float) -> None:
+def _warehouses_tab(company: str, rate: float, days: int) -> None:
     section_header("Warehouse spend & anomalies", "info", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
@@ -1261,6 +1264,82 @@ def _warehouses_tab(company: str, rate: float) -> None:
             "PEAK_QUEUED": st.column_config.NumberColumn("Peak Queued", format="%.1f"),
         })
         result_caption(peaks)
+
+    # O12: warehouse utilization & right-sizing — reuse the Cost-side profile
+    # (idle share, queue/spill, size verdict) here as a DIAGNOSTIC; execution
+    # (the ALTER + savings booking) stays on Cost & Contract -> Optimize.
+    section_header("Utilization & right-sizing", "info", "warehouse", anchor="ops-wh-utilization")
+    if not st.toggle("Load utilization profile (heavy scan)", key="ops_wh_sizing_load",
+                     help="Per-warehouse idle %, queue/spill, p95 and a size verdict over the window."):
+        st.caption("Toggle to profile every warehouse's idle share and right-size verdict on demand.")
+    elif guard((_prof := run_mart_first(
+                    mart27_sql.eff_sizing_profile(days, company),
+                    insights_sql.warehouse_sizing_profile(days, company),
+                    page=_PAGE, key=f"ops_sizing_{company}_{days}", days=days,
+                    mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
+                    live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
+               "No warehouse activity to profile in this window."):
+        import pandas as pd
+        _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
+                   tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        _sized = size_recommendations(
+            with_auto_suspend_settings(
+                _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
+            rate, served_days(_prof, days))
+        _sum = sizing_summary(_sized)
+        kpi_row([
+            {"label": "Size up / add cluster", "value": f"{_sum['up']}",
+             "delta_color": "inverse" if _sum["up"] else "off"},
+            {"label": "Tune auto-suspend first", "value": f"{_sum['suspend']}"},
+            {"label": "Size-down candidates", "value": f"{_sum['down']}"},
+            {"label": "Idle spend on those", "value": format_usd(_sum["idle_saving_usd"])},
+        ])
+        _cols = [c for c in ["WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "IDLE_PCT",
+                             "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "ACTIVE_DAYS_PER_30D",
+                             "P95_ELAPSED_SEC", "MONTHLY_USD_NOW"] if c in _sized.columns]
+        entity_nav_table(_sized[_cols], key=f"ops_wh_sizing_tbl_{company}", key_col="WAREHOUSE_NAME",
+                         entity_type="WAREHOUSE", column_config={
+                             "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+                             "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
+                         })
+        st.caption("Diagnostic only — generate the ALTER and book the saving on "
+                   "Cost & Contract → Optimize → Idle & sizing.")
+
+    # O13: quiet-hours (off-hours schedule opportunity) — the hour-of-day view +
+    # a per-warehouse quiet-window verdict, reusing the Cost-side reader.
+    section_header("Quiet-hours (off-hours schedule opportunity)", "info", "warehouse",
+                   anchor="ops-wh-quiet")
+    if not st.toggle("Run quiet-hours scan (hour-of-day activity)", key="ops_wh_quiet_load",
+                     help="Reads hour-of-day credits vs query activity per warehouse."):
+        st.caption("Toggle to find warehouses burning credits in hours with ~no queries.")
+    elif guard((_hh := run(
+                    insights_sql.warehouse_hourly_activity(days, company), page=_PAGE,
+                    key=f"ops_wh_hourly_{company}_{days}", tier="historical",
+                    source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day activity)")),
+               "No hour-of-day warehouse activity in this window."):
+        import pandas as pd
+        charts.hour_heatmap(_hh.df, "WAREHOUSE_NAME", "HOUR_OF_DAY", "AVG_CREDITS",
+                            title="avg credits/hour")
+        st.caption("Dark cells with credits but no matching query activity are the schedule "
+                   "opportunity. Generate the SUSPEND/RESUME schedule on Cost & Contract → Optimize.")
+        _windows = []
+        for _wh in sorted(_hh.df["WAREHOUSE_NAME"].astype(str).unique()):
+            _p = remediation.propose_quiet_window(
+                _hh.df[_hh.df["WAREHOUSE_NAME"].astype(str) == _wh].to_dict("records"))
+            if _p:
+                _windows.append({
+                    "WAREHOUSE_NAME": _wh,
+                    "QUIET_WINDOW": f"{int(_p['start']):02d}:00–{int(_p['end']):02d}:00",
+                    "HOURS": int(_p["hours"]),
+                    "AVG_CREDITS_PER_DAY": round(safe_float(_p.get("avg_credits_per_day")), 2)})
+        if _windows:
+            st.markdown("**Warehouses with a defensible quiet window (4h+)**")
+            entity_nav_table(pd.DataFrame(_windows), key=f"ops_wh_quiet_tbl_{company}",
+                             key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE", size_note=False)
+        else:
+            st.caption("No warehouse has a recurring 4h+ window burning credits with ~no queries "
+                       "(sparse or all-day-idle profiles route to auto-suspend instead).")
+        result_caption(_hh)
 
 
 def _contention_tab(company: str, days: int) -> None:
@@ -1791,7 +1870,7 @@ def render() -> None:
     elif section == "Tasks":
         _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Warehouses":
-        _warehouses_tab(f["company"], rate)
+        _warehouses_tab(f["company"], rate, f["days"])
         st.divider()
         section_header(
             "Contention (queue, spill & lock waits)",

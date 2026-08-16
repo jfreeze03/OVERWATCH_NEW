@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.218.0 - Warehouse utilization & quiet-hours on Operations (2026-08-16)
+
+CoCo review, Tier-2 (Operations #12/#13). Zero new SQL/logic — reuses the Cost-side readers.
+
+- **The utilization and quiet-hours analytics that lived only on Cost now read on Operations too.**
+  The Warehouses section gains two toggle-gated diagnostic blocks: (1) utilization & right-sizing —
+  per-warehouse idle %, queue/spill, p95 and a size verdict (reusing the sizing profile + logic),
+  and (2) quiet-hours — the hour-of-day credits-vs-activity heatmap plus a per-warehouse "defensible
+  4h+ quiet window" verdict (reusing `propose_quiet_window`). Both are read-only and point to Cost →
+  Optimize for execution; both stay off first paint. App version 4.218.0.
+
 ## 4.217.0 - Experiment state on the savings cards (2026-08-16)
 
 CoCo review, Tier-2 (Cost #10). New pure `logic.workbench.experiment_state_by_key`.
