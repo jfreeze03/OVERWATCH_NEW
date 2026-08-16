@@ -62,6 +62,8 @@ def test_v074_plain_sql_parses() -> None:
         ("evidence_links", lambda: workbench_sql.evidence_links("ACTION", "A'1")),
         ("entity_catalog", lambda: workbench_sql.entity_catalog("TASK", "ETL'ROOT")),
         ("entity_record", lambda: workbench_sql.entity_record("TASK", "DB.S.T")),
+        ("entity_changes_wh", lambda: workbench_sql.entity_recent_changes("WAREHOUSE", "ETL'ROOT")),
+        ("entity_changes_obj", lambda: workbench_sql.entity_recent_changes("TASK", "ETL'ROOT")),
         ("related_actions", lambda: workbench_sql.related_actions("TASK", "DB.S.T")),
         ("related_remediations", lambda: workbench_sql.related_remediations("DB.S.T")),
         ("related_savings", lambda: workbench_sql.related_savings("DB.S.T")),
@@ -75,6 +77,28 @@ def test_workbench_read_builders_parse_and_escape(name: str, builder) -> None:
     assert statement.strip(), name
     sqlglot.parse(statement, dialect="snowflake")
     assert "A'1" not in statement and "ETL'ROOT" not in statement
+
+
+def test_entity_recent_changes_dispatches_by_type() -> None:
+    # CR15: WAREHOUSE reads the warehouse-setting registry, scoped by name.
+    wh = workbench_sql.entity_recent_changes("WAREHOUSE", "WH_ALFA_ETL")
+    assert "WAREHOUSE_CHANGE_REGISTRY" in wh
+    assert "UPPER(WAREHOUSE_NAME) = 'WH_ALFA_ETL'" in wh
+    assert "SETTING" in wh and "CHANGED_AT" in wh
+    assert "DATEADD('day', -90," in wh  # default 90d window, bounded
+    # DATABASE matches every tracked object in it; TASK/OBJECT match by name/FQN.
+    db = workbench_sql.entity_recent_changes("DATABASE", "ALFA_EDW_PRD")
+    assert "OBJECT_CHANGE_REGISTRY" in db
+    assert "UPPER(DATABASE_NAME) = 'ALFA_EDW_PRD'" in db
+    task = workbench_sql.entity_recent_changes("TASK", "DB.S.T")
+    assert "OBJECT_CHANGE_REGISTRY" in task and "OBJECT_NAME" in task
+    # untracked types and a blank key refuse rather than emit a bad scan
+    for kind in ("USER", "ROLE", "QUERY_FINGERPRINT", "DATA_PRODUCT", "ALERT"):
+        assert kind not in workbench_sql.ENTITY_CHANGE_TYPES
+        with pytest.raises(ValueError):
+            workbench_sql.entity_recent_changes(kind, "X")
+    with pytest.raises(ValueError):
+        workbench_sql.entity_recent_changes("WAREHOUSE", "")
 
 
 def test_action_summary_uses_real_non_empty_shape(monkeypatch: pytest.MonkeyPatch) -> None:

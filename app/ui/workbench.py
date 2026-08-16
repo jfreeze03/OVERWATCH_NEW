@@ -604,6 +604,27 @@ def render_entity_360(company: str) -> None:
 
     _render_catalog_editor(kind, key, catalog_row, company)
 
+    # CR15: the "changes" this panel's docstring promises (ownership, work,
+    # CHANGES, savings, evidence). Reuses the change registries the Operations
+    # Change impact tab surfaces; types with no registry get a precise note.
+    st.markdown("**Recent changes**")
+    if kind in workbench_sql.ENTITY_CHANGE_TYPES:
+        changes = run(
+            workbench_sql.entity_recent_changes(kind, key), page=_PAGE,
+            key=f"entity_changes_{kind}_{key}", tier="live",
+            source="OBJECT_CHANGE_REGISTRY / WAREHOUSE_CHANGE_REGISTRY",
+        )
+        if changes.ok and not changes.empty:
+            styled_table(changes.df, height=200)
+        elif changes.ok:
+            empty_state("no_data_yet", "No tracked change in the last 90 days — the "
+                        "change-impact scans fill this (Operations → Change impact).")
+        else:
+            empty_state("needs_setup", "Change tracking needs the change-impact scan (V010).")
+    else:
+        st.caption(f"Change tracking is not defined for {kind} entities — warehouse settings "
+                   "and proc/task deploys are tracked; other types are not.")
+
     related = run(
         workbench_sql.related_actions(kind, key), page=_PAGE,
         key=f"entity_actions_{kind}_{key}", tier="live", source="ACTION_QUEUE",

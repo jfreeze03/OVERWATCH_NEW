@@ -33,6 +33,7 @@ from app.data import (
     ops_sql,
     prefs_sql,
     security_sql,
+    workbench_sql,
 )
 from app.logic import remediation
 
@@ -72,6 +73,8 @@ TARGETS = [
     ("ins.waste.company", lambda p: insights_sql.storage_waste(p)),
     ("ins.hourly.company", lambda p: insights_sql.warehouse_hourly_activity(7, p)),
     ("ins.evidence.wh", lambda p: insights_sql.anomaly_evidence("2026-07-06", p)),
+    ("wb.entity_changes.wh", lambda p: workbench_sql.entity_recent_changes("WAREHOUSE", p)),
+    ("wb.entity_changes.obj", lambda p: workbench_sql.entity_recent_changes("TASK", p)),
     ("chg.registry.company", lambda p: change_impact_sql.change_registry(30, p, "", "")),
     ("chg.registry.db", lambda p: change_impact_sql.change_registry(30, "ALL", p, "")),
     ("chg.registry.schema", lambda p: change_impact_sql.change_registry(30, "ALL", "", p)),

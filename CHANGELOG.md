@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.209.0 - Recent-change panel on Entity 360 (2026-08-16)
+
+CoCo review, Tier-2 (Control Room #15). New `data.workbench_sql.entity_recent_changes`.
+
+- **Entity 360 now shows what recently changed on the thing you're looking at.** The panel's
+  own summary promised "ownership, work, changes, savings, evidence" but had no changes
+  section. It now surfaces recent tracked changes for the entity — warehouse setting deltas
+  (`WAREHOUSE_CHANGE_REGISTRY`) for a warehouse, proc/task deploys (`OBJECT_CHANGE_REGISTRY`)
+  for a database, task, or object — the same registries the Operations → Change impact tab
+  reads, so a stat regression and the change that caused it read together. Entity types with
+  no change feed (users, roles, query fingerprints, data products) show a precise note rather
+  than an empty table. App version 4.209.0.
+
 ## 4.208.0 - Auto-detect deploys for Release compare (2026-08-16)
 
 CoCo review, Tier-2 (Ops #16). New `data.insights_sql.detect_release_days` +

@@ -248,6 +248,62 @@ ORDER BY METRIC
     raise AssertionError("unreachable entity metric type")
 
 
+# CR15: the entity types the change registries actually track — WAREHOUSE
+# settings (WAREHOUSE_CHANGE_REGISTRY) and PROCEDURE/TASK deploys keyed by
+# object or database (OBJECT_CHANGE_REGISTRY). Other Entity 360 types have no
+# change feed; the caller shows a precise note instead of an empty table.
+ENTITY_CHANGE_TYPES = ("WAREHOUSE", "DATABASE", "TASK", "OBJECT")
+
+
+def entity_recent_changes(entity_type: str, entity_key: str, days: int = 90) -> str:
+    """Recent tracked changes affecting one Entity 360 entity (CR15).
+
+    Reads the same change registries the Operations 'Change impact' tab
+    surfaces, normalised to one shape (CHANGED_AT / CHANGE / CHANGED_BY /
+    VERDICT / DETAIL) so the panel renders a single table. WAREHOUSE reads
+    setting deltas; DATABASE/TASK/OBJECT read proc & task DDL (a DATABASE
+    matches every tracked object in it, a TASK/OBJECT matches by name or FQN).
+    Untracked types raise ValueError so the caller shows a 'not tracked' note.
+    """
+    kind = _entity_type(entity_type)
+    if kind not in ENTITY_CHANGE_TYPES:
+        raise ValueError(f"No change tracking is defined for {kind or 'blank'}")
+    key = str(entity_key or "").strip().upper()
+    if not key:
+        raise ValueError("entity_key is required")
+    horizon = bounded_days(days, 180)
+    literal = sql_literal(key, 500)
+    window = f"CHANGE_SEEN_AT >= DATEADD('day', -{horizon}, CURRENT_TIMESTAMP())"
+    if kind == "WAREHOUSE":
+        return f"""
+SELECT
+    CHANGE_SEEN_AT AS CHANGED_AT,
+    SETTING || ': ' || COALESCE(OLD_VALUE, 'unset') || ' -> '
+            || COALESCE(NEW_VALUE, 'unset') AS CHANGE,
+    CHANGED_BY, VERDICT, VERDICT_DETAIL AS DETAIL
+FROM {core_object('WAREHOUSE_CHANGE_REGISTRY')}
+WHERE UPPER(WAREHOUSE_NAME) = {literal}
+  AND {window}
+ORDER BY CHANGE_SEEN_AT DESC
+LIMIT 50
+"""
+    match = (f"UPPER(DATABASE_NAME) = {literal}" if kind == "DATABASE" else
+             f"(UPPER(OBJECT_NAME) = {literal} OR "
+             f"UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || OBJECT_NAME) = {literal})")
+    return f"""
+SELECT
+    CHANGE_SEEN_AT AS CHANGED_AT,
+    OBJECT_TYPE || ' ' || COALESCE(DATABASE_NAME, '') || '.'
+               || COALESCE(SCHEMA_NAME, '') || '.' || OBJECT_NAME AS CHANGE,
+    CHANGED_BY, VERDICT, VERDICT_DETAIL AS DETAIL
+FROM {core_object('OBJECT_CHANGE_REGISTRY')}
+WHERE {match}
+  AND {window}
+ORDER BY CHANGE_SEEN_AT DESC
+LIMIT 50
+"""
+
+
 def workload_portfolio(days: int = 30, company: str = "ALL",
                        limit: int = 200) -> str:
     """Measured recurring-query portfolio with cost and behavior evidence."""
