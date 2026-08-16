@@ -29,6 +29,7 @@ from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
     ANOMALY_MIN_USD,
+    anomaly_markers,
     complete_days_only,
     flag_anomalies,
 )
@@ -1200,8 +1201,11 @@ def _warehouses_tab(company: str, rate: float) -> None:
     flagged = flag_anomalies(complete_days_only(df), "USD", group_col="WAREHOUSE_NAME",
                              min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
     daily = df.groupby("DAY", as_index=False)["USD"].sum()
-    st.caption("Click a day in the trend to break its spend down by warehouse.")
-    picked_day = charts.spend_trend(daily, key=f"ops_wh_spend_day_{company}")
+    st.caption("Click a day in the trend to break its spend down by warehouse. "
+               "Dashed rules flag anomalous warehouse-days.")
+    # UI15: mark the anomalous warehouse-days already scored above on the trend.
+    picked_day = charts.spend_trend(daily, key=f"ops_wh_spend_day_{company}",
+                                    markers=anomaly_markers(flagged, "DAY", "WAREHOUSE_NAME"))
     if picked_day:
         # UI23: the clicked day's per-warehouse breakdown, from the frame already
         # loaded above — no extra scan. Each warehouse row drills to its Entity 360.

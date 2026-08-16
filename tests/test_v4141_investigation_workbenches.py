@@ -223,3 +223,34 @@ def test_spend_trend_without_key_stays_non_clickable(monkeypatch: pytest.MonkeyP
     df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-14", "2026-08-15"]), "USD": [1.0, 2.0]})
     assert charts.spend_trend(df, key=None) is None
     assert seen["on_select"] == 0                              # no on_select wiring without a key
+
+
+def test_spend_trend_overlays_flagged_day_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # UI15/Ov5: markers add a dashed-rule layer carrying the flagged day + label.
+    import json
+
+    rendered = []
+    monkeypatch.setattr(charts.st, "caption", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "altair_chart", lambda c, **k: rendered.append(c))
+    df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-13", "2026-08-14", "2026-08-15"]),
+                       "USD": [100.0, 120.0, 900.0]})
+    markers = pd.DataFrame({"DAY": ["2026-08-15"], "LABEL": ["WH_A, WH_B"]})
+    charts.spend_trend(df, markers=markers)
+    assert "WH_A, WH_B" in json.dumps(rendered[0].to_dict())   # marker label overlaid
+    # no markers -> no marker layer
+    rendered.clear()
+    charts.spend_trend(df)
+    assert "WH_A, WH_B" not in json.dumps(rendered[0].to_dict())
+
+
+def test_spend_trend_click_survives_the_marker_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    # UI15 x UI23: markers make the chart multi-layer (trend + rule). The click
+    # drill must still BUILD (add_params must not throw on the layered chart) and
+    # return the selected day — Operations Warehouses passes both key and markers.
+    monkeypatch.setattr(charts.st, "caption", lambda *a, **k: None)
+    monkeypatch.setattr(
+        charts.st, "altair_chart",
+        lambda *a, **k: {"selection": {"pt": [{"DayStr": "2026-08-15"}]}} if "on_select" in k else None)
+    df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-14", "2026-08-15"]), "USD": [1.0, 900.0]})
+    markers = pd.DataFrame({"DAY": ["2026-08-15"], "LABEL": ["WH_A"]})
+    assert charts.spend_trend(df, key="wh", markers=markers) == "2026-08-15"

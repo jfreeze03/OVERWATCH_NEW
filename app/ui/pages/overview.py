@@ -859,7 +859,22 @@ def render() -> None:
         daily_budget = (budget / month_days(account_today())[0]) if budget > 0 else 0.0
         # Forecast range lives in the Projected month-end KPI — the floating
         # rectangle was the "what does this mean" magnet (owner, twice).
-        charts.spend_trend(daily, daily_budget_usd=daily_budget)
+        # Ov5: flag anomalous spend days (pure robust-z, no scan — scale-invariant,
+        # so it works whether daily carries USD or raw credits) and mark them.
+        from app.logic.anomaly import (
+            ANOMALY_MIN_ACTIVE_DAYS,
+            anomaly_markers,
+            complete_days_only,
+            flag_anomalies,
+        )
+        _dc = daily.columns[0]
+        _uc = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
+                   daily.columns[-1])
+        _flag = flag_anomalies(
+            complete_days_only(daily.rename(columns={_dc: "DAY", _uc: "USD"}), "DAY"),
+            "USD", min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+        charts.spend_trend(daily, daily_budget_usd=daily_budget,
+                           markers=anomaly_markers(_flag, "DAY"))
         activity = run(mart_sql.fact_daily_activity(14, company), page=_PAGE,
                        key="spark_activity", tier="hourly",
                        source="FACT_QUERY_HOURLY (daily)")

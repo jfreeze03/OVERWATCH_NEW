@@ -1,6 +1,35 @@
 import pandas as pd
 
-from app.logic.anomaly import anomaly_summary, flag_anomalies, robust_zscores
+from app.logic.anomaly import (
+    anomaly_markers,
+    anomaly_summary,
+    flag_anomalies,
+    robust_zscores,
+)
+
+
+def test_anomaly_markers_one_row_per_flagged_day_with_entity_labels():
+    df = pd.DataFrame({
+        "DAY": ["2026-08-01", "2026-08-01", "2026-08-02", "2026-08-03"],
+        "WAREHOUSE_NAME": ["WH_A", "WH_B", "WH_A", "WH_C"],
+        "IS_ANOMALY": [True, True, False, True],
+        "Z_SCORE": [5.0, 4.0, 1.0, 6.0],
+    })
+    out = anomaly_markers(df, "DAY", "WAREHOUSE_NAME")
+    assert list(out["DAY"]) == ["2026-08-01", "2026-08-03"]   # 08-02 not flagged
+    assert {"WH_A", "WH_B"} <= set(out.iloc[0]["LABEL"].split(", "))
+    assert out.iloc[1]["LABEL"] == "WH_C"
+
+
+def test_anomaly_markers_count_label_and_empty_cases():
+    df = pd.DataFrame({"DAY": ["2026-08-01", "2026-08-01"],
+                       "IS_ANOMALY": [True, True], "Z_SCORE": [5.0, 4.0]})
+    out = anomaly_markers(df, "DAY")                     # no label_col -> count
+    assert list(out["DAY"]) == ["2026-08-01"] and out.iloc[0]["LABEL"] == "2 anomalies"
+    # nothing flagged / empty / missing column -> empty frame (overlay draws nothing)
+    assert anomaly_markers(pd.DataFrame({"DAY": ["2026-08-01"], "IS_ANOMALY": [False]}), "DAY").empty
+    assert anomaly_markers(pd.DataFrame(), "DAY").empty
+    assert anomaly_markers(pd.DataFrame({"DAY": ["x"]}), "DAY").empty  # no IS_ANOMALY
 
 
 def test_spike_is_flagged():

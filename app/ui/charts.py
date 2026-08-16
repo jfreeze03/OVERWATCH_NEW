@@ -604,6 +604,7 @@ def spend_trend(
     usd_col: str = "USD",
     daily_budget_usd: float = 0.0,
     key: str | None = None,
+    markers: pd.DataFrame | None = None,
 ) -> str | None:
     """Daily spend as bars with a 7-day average line (redesign, 2026-07-09).
 
@@ -620,6 +621,9 @@ def spend_trend(
     selected, None once cleared) so the caller can render that day's breakdown
     inline without it flickering away on the next rerun. Degrades to a plain
     non-clickable chart (returns None) where on_select is unavailable.
+
+    UI15/Ov5: pass ``markers`` (a DAY + LABEL frame, e.g. from
+    ``logic.anomaly.anomaly_markers``) to overlay flagged days as dashed rules.
     """
     data = df[[day_col, usd_col]].copy()
     data.columns = ["Day", "USD"]
@@ -666,6 +670,26 @@ def spend_trend(
                        text=f"budget ${daily_budget_usd:,.0f}/day")
             .encode(y="y:Q", x=alt.value(6))
         )
+    # UI15/Ov5: overlay flagged-day markers as dashed vertical rules on the same
+    # time axis, so an anomaly/deploy reads against the spend it moved.
+    _has_markers = (markers is not None and not getattr(markers, "empty", True)
+                    and "DAY" in getattr(markers, "columns", []))
+    if _has_markers:
+        md = markers.copy()
+        md["Day"] = pd.to_datetime(md["DAY"], errors="coerce")
+        md = md.dropna(subset=["Day"])
+        if "LABEL" not in md.columns:
+            md["LABEL"] = "flagged"
+        if md.empty:
+            _has_markers = False
+        else:
+            layers.append(
+                alt.Chart(md).mark_rule(color=SEV_COLORS["HIGH"], strokeDash=[3, 3],
+                                        opacity=0.75, size=1.5)
+                .encode(x=alt.X("yearmonthdate(Day):T"),
+                        tooltip=[alt.Tooltip("Day:T", title="Day"),
+                                 alt.Tooltip("LABEL:N", title="Flagged")])
+            )
     chart = alt.layer(*layers) if len(layers) > 1 else layers[0]
     picked_day: str | None = None
     if key:
@@ -692,6 +716,8 @@ def spend_trend(
         prior7 = float(complete["USD"].iloc[-14:-7].mean())
         if prior7 > 0:
             note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
+    if _has_markers:
+        note += "; dashed rules mark flagged days (hover for what)"
     st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")
     return picked_day
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.213.0 - Anomaly markers on the spend trend (2026-08-16)
+
+CoCo review, Tier-2 (UI #15 / Overview #5). New `logic.anomaly.anomaly_markers` +
+`ui.charts.spend_trend` markers overlay.
+
+- **Anomalous spend days are now marked right on the trend.** The spend chart showed the shape
+  but not which days were flagged, so a spike and "was that an anomaly?" lived on different
+  surfaces. `spend_trend` gains an optional `markers` overlay (dashed vertical rules, hover for
+  what). Operations → Warehouses marks the anomalous warehouse-days it already scored (no new
+  work); Overview flags its own daily spend with the same robust-z detector (pure, scale-
+  invariant, no scan) and marks those. A new pure `anomaly_markers` helper collapses flagged
+  rows to one labelled marker per day. App version 4.213.0.
+
 ## 4.212.0 - Click a day on the spend trend to break it down (2026-08-16)
 
 CoCo review, Tier-2 (UI #23). `ui.charts.spend_trend` gains an optional click drill.

@@ -146,3 +146,33 @@ def anomaly_summary(df: pd.DataFrame, label_col: str, value_col: str,
         }
         for _, row in hits.head(10).iterrows()
     ]
+
+
+def anomaly_markers(df: pd.DataFrame, day_col: str = "DAY",
+                    label_col: str | None = None) -> pd.DataFrame:
+    """Collapse flagged-anomaly rows to one spend-trend marker per day (UI15/Ov5).
+
+    Returns a ``DAY`` (YYYY-MM-DD) + ``LABEL`` frame for
+    ``charts.spend_trend(..., markers=...)``. With ``label_col`` (e.g.
+    WAREHOUSE_NAME) each day's label lists up to three of that day's flagged
+    entities; without it, the count. Empty frame when nothing is flagged, so the
+    overlay draws no rules."""
+    empty = pd.DataFrame(columns=["DAY", "LABEL"])
+    if df is None or df.empty or "IS_ANOMALY" not in df.columns or day_col not in df.columns:
+        return empty
+    hits = df[df["IS_ANOMALY"].astype(bool)].copy()
+    if hits.empty:
+        return empty
+    hits["DAY"] = pd.to_datetime(hits[day_col], errors="coerce").dt.strftime("%Y-%m-%d")
+    hits = hits.dropna(subset=["DAY"])
+    if hits.empty:
+        return empty
+    if label_col and label_col in hits.columns:
+        out = (hits.groupby("DAY")[label_col]
+               .apply(lambda s: ", ".join(list(dict.fromkeys(map(str, s)))[:3]))
+               .reset_index().rename(columns={label_col: "LABEL"}))
+    else:
+        out = hits.groupby("DAY").size().reset_index(name="_n")
+        out["LABEL"] = out["_n"].map(lambda n: f"{int(n)} anomal" + ("y" if int(n) == 1 else "ies"))
+        out = out[["DAY", "LABEL"]]
+    return out.reset_index(drop=True)

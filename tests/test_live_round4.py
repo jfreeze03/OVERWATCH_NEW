@@ -140,7 +140,7 @@ def test_spend_trend_is_bars_plus_average_not_wash():
 
 def test_spend_trend_callers_dropped_the_band():
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
-    assert "spend_trend(daily, daily_budget_usd=daily_budget)" in ov
+    assert "spend_trend(daily, daily_budget_usd=daily_budget" in ov  # (Ov5 added markers= after)
     stress = (_ROOT / "tests" / "test_stress.py").read_text(encoding="utf-8")
     assert "band=" not in stress.split("spend_trend", 1)[1].split("\n", 1)[0]
 
