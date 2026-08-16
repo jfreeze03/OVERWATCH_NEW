@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.188.0 - Operations: robust-z row-volume data-quality monitor (2026-08-15)
+
+Cost/metric gap audit, Wave 6 (finding #26). App-only; new pure `logic/dq.py`,
+`data/dq_sql.product_row_volume`, Operations "Pipeline SLA" panel.
+
+- **Data-quality monitoring beyond the 50% cliff.** The only volume signal was the
+  PIPE_VOLUME_DROP alert (yesterday <50% of a 7-day average). A new **Row-volume
+  anomalies** panel scores each table's most recent load of rows-added against its own
+  prior loads with a **robust z-score** (median / MAD, floored at 15% of the median so a
+  majority-modal baseline can't blow within-range jitter up to max severity; threshold
+  3.5), so it catches both partial/duplicate loads and upstream volume shifts, resists a
+  single prior outlier, and needs no fixed percentage cliff. Scoped to catalog-registered
+  data products (via ENTITY_CATALOG, resolving an OBJECT entity then its DATABASE) so
+  scans stay bounded and every finding carries its OWNER_NAME for routing.
+- **Business-day safe scope, with disclosed blind spots.** Only days that actually added
+  rows count as loads, so a table is scored against its own load history and is never
+  falsely flagged just because the newest data lands on a weekend. A table is scored only
+  with ≥10 prior loads and a ≥100 rows/day baseline median; a DAYS_STALE column and note
+  mark rows scored on an old load. Whether a load was *expected but didn't run*, a load
+  that ran and inserted 0 rows, and seasonal-but-nonzero tables are left to (or delegated
+  from) the freshness-SLA and Volume-drops panels beside it — all disclosed in the panel.
+  KPIs count monitored tables, low- and high-volume loads, and affected products.
+- Deferred to the owner-migration half: the DQ_BREACH alert routed to the entity owner,
+  plus the null-rate-spike and schema-drift monitors (both need a stored baseline).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.187.0 - Security: least-privilege grant review (2026-08-15)
 
 Cost/metric gap audit, Wave 6 (finding #24). App-only; new pure

@@ -14,7 +14,7 @@ from app.core.query import execute_cancel_query, execute_statement, run, run_bat
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import change_impact_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data import change_impact_sql, dq_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic import remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
@@ -23,6 +23,7 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
 )
+from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.formulas import (
     account_today,
     credits_to_usd,
@@ -463,6 +464,70 @@ def _release_compare_tab(company: str) -> None:
         )
 
 
+def _dq_row_volume_panel() -> None:
+    """rec#26: robust-z row-volume data-quality monitor for registered products.
+
+    Complements the 50%-cliff Volume drops alert with an outlier-resistant
+    (median/MAD) score of yesterday's rows-added vs each table's own trailing
+    baseline, so it catches both spikes and drops on steady movers and routes each
+    finding to the catalog owner. Null-rate / schema-drift monitors (which need a
+    stored baseline) and the DQ_BREACH alert are the deferred owner-migration
+    halves."""
+    section_header("Row-volume anomalies — registered products (robust-z, 28d)", "info", "pipeline")
+    panel_help(
+        "Robust z-score (median / MAD, floored at 15% of the median so a rock-steady table "
+        "doesn't fire on jitter; threshold 3.5) of each table's MOST RECENT load of "
+        "rows-added versus its own prior loads, scoped to catalog-registered data products "
+        "so every finding has an owner. Unlike the 50%-cliff Volume drops alert it flags "
+        "anomalous loads in BOTH directions (partial or duplicate loads, upstream volume "
+        "shifts) and resists a single prior outlier. Only days that actually added rows "
+        "count as loads, so a business-day table is never falsely flagged because the "
+        "newest data lands on a weekend; a table is scored only with >=10 prior loads and "
+        "a baseline median >=100 rows/day. **Not covered here** (by design): a load that "
+        "ran but inserted 0 rows (indistinguishable from an update-only day — freshness is "
+        "the backstop), a table whose weekend loads are legitimately smaller-but-nonzero "
+        "(its own baseline widens), and objects not registered by their exact "
+        "DB.SCHEMA.TABLE name (only the database registration is then used). DAYS_STALE "
+        "marks a row scored on an old load. The DQ_BREACH alert, plus null-rate and "
+        "schema-drift monitors, are the deferred owner-migration half."
+    )
+    rv = run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
+             source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG")
+    if rv.ok and rv.empty:
+        st.info("No registered-product tables added rows in the window. Register data products in the catalog (Decision Studio) to monitor their volume here.")
+        return
+    if not guard(rv, "", setup_hint="Needs TABLE_DML_HISTORY and a populated ENTITY_CATALOG with DATA_PRODUCT."):
+        return
+    anomalies = row_volume_anomalies(rv.df)
+    if anomalies.empty:
+        st.info("No registered-product table has enough load history yet (needs >=10 prior loads and a >=100 rows/day baseline median).")
+        result_caption(rv)
+        return
+    stats = summarize_row_volume(anomalies)
+    kpi_row([
+        {"label": "Tables monitored", "value": f"{stats['monitored']}",
+         "help": "Registered-product tables with >=10 prior loads and a material baseline."},
+        {"label": "Low-volume loads", "value": f"{stats['drops']}",
+         "delta_color": "inverse" if stats["drops"] else "off",
+         "help": "Most recent load added >=3.5 robust-z fewer rows than the table's baseline (partial load)."},
+        {"label": "High-volume loads", "value": f"{stats['spikes']}",
+         "delta_color": "inverse" if stats["spikes"] else "off",
+         "help": "Most recent load added >=3.5 robust-z more rows than baseline (duplicate / backfill)."},
+        {"label": "Products affected", "value": f"{stats['products']}",
+         "help": "Distinct data products with at least one flagged table."},
+    ])
+    if stats["stale"]:
+        st.caption(f"{stats['stale']} monitored table(s) last loaded >=3 days behind the freshest registered load (see DAYS_STALE) — scored on that older load, so the freshness panel above is the live view.")
+    flagged = anomalies[anomalies["FLAGGED"]]
+    if flagged.empty:
+        st.success("Every monitored product table's most recent load is within its normal volume (no robust-z breach).")
+    else:
+        styled_table(flagged, height=280, slug="dq-row-volume",
+                     sort_label="largest robust-z deviation first")
+        st.caption("Each row is a table whose most recent load broke its own volume baseline; LATEST_DAY is when it loaded, OWNER_NAME is who to route the DQ finding to.")
+    result_caption(rv)
+
+
 def _pipeline_sla_tab(is_operator: bool) -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG)."""
     res = run(insights_sql.pipeline_sla_status(), page=_PAGE, key="sla_status", tier="live",
@@ -549,6 +614,8 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
     elif guard(vd, "", setup_hint="Needs TABLE_DML_HISTORY (standard on current accounts)."):
         styled_table(vd.df, height=240)
         result_caption(vd)
+
+    _dq_row_volume_panel()
 
     section_header("Dynamic table refresh health (7d)", "info", "pipeline")
     panel_help(
