@@ -73,9 +73,12 @@ _REACHABLE = {
         "QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY",
         "TABLE_STORAGE_METRICS", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/operations.py": (
+        # rec#17: + WAREHOUSE_METERING_HISTORY — the wasted-spend board
+        # (wasted_query_spend_usd) allocates warehouse-hour credits to non-success
+        # queries, click-gated in the Queries tab.
         "COPY_HISTORY", "DYNAMIC_TABLE_REFRESH_HISTORY", "LOCK_WAIT_HISTORY",
         "QUERY_HISTORY", "TABLE_DML_HISTORY", "TASKS", "TASK_HISTORY", "TASK_VERSIONS",
-        "WAREHOUSE_LOAD_HISTORY"),
+        "WAREHOUSE_LOAD_HISTORY", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/security.py": (
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES", "GRANTS_TO_USERS",
         "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS", "USERS"),

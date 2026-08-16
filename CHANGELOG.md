@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.176.0 - Feature: wasted-spend board for failed/killed queries (2026-08-15)
+
+Gap-audit Wave 6 (rec #17). App-only; `insights_sql.py`, `operations.py`.
+
+- **Failed / killed / aborted queries that consumed compute now surface as $
+  wasted.** Failure waste was computed only for tagged ETL pipelines; there was no
+  account-wide view of money spent on runs that produced nothing. New
+  `wasted_query_spend_usd` builder allocates warehouse-hour credits to non-success
+  queries by the same execution-time hour-share as `expensive_queries_usd` (the
+  denominator counts every query in the hour, so a failed query's share isn't
+  inflated), then rolls up by parameterized fingerprint so a broken query on a
+  retry loop surfaces as repeat waste. A toggle-gated "Wasted spend" board on the
+  Operations Queries tab shows the window total, a monthly-ized figure, repeat
+  offenders (5+ failures), and per-fingerprint waste with the error code. Priced at
+  the compute rate (warehouse metering is compute). Builder canaried; Operations
+  reachable-table pin gains WAREHOUSE_METERING_HISTORY (deliberate).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.175.0 - Consistency: ops metric definitions align (2026-08-15)
 
 Gap-audit Wave 5 (rec #49). App-only; `operations.py`, `mart27_sql.py`.

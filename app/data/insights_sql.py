@@ -681,6 +681,87 @@ LIMIT {limit}
 """
 
 
+def wasted_query_spend_usd(days: int, company: str = "ALL", warehouse_contains: str = "",
+                           user_contains: str = "", database: str = "", schema_contains: str = "",
+                           limit: int = 50) -> str:
+    """rec#17: allocated compute burned on non-success queries — money spent on runs
+    that produced nothing.
+
+    Same hour-share allocation as expensive_queries_usd (a query's execution-time
+    share of its warehouse-hour credits; the denominator ``t`` counts EVERY query in
+    the hour, success or not, so a failed query's share is not inflated), then filtered
+    to EXECUTION_STATUS <> 'SUCCESS' and rolled up by parameterized fingerprint so a
+    broken query on a retry loop surfaces as repeat $ waste. Warehouse metering is
+    compute — the caller prices at the compute rate. Fingerprint-less queries (DDL,
+    etc.) fall back to QUERY_ID so they stay one row each, not one merged bucket.
+    """
+    from app.core.sqlsafe import contains_filter
+
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 50), 200))
+    where_q = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "WAREHOUSE_NAME IS NOT NULL",
+        "COALESCE(EXECUTION_TIME, 0) > 0",
+        companies.warehouse_clause(company),
+    )
+    where_m = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    vis = and_where(
+        "a.EXECUTION_STATUS <> 'SUCCESS'",
+        companies.database_equals_clause(database, "a.DATABASE_NAME"),
+        contains_filter("a.SCHEMA_NAME", schema_contains),
+        contains_filter("a.WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("a.USER_NAME", user_contains),
+    )
+    return f"""
+WITH q AS (
+    SELECT QUERY_ID, USER_NAME, WAREHOUSE_NAME, QUERY_TYPE, EXECUTION_STATUS,
+           DATABASE_NAME, SCHEMA_NAME, ERROR_CODE,
+           QUERY_PARAMETERIZED_HASH AS FINGERPRINT,
+           DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+           COALESCE(EXECUTION_TIME, 0) AS EXEC_MS,
+           LEFT(QUERY_TEXT, 140) AS QUERY_SNIPPET
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where_q}
+),
+m AS (
+    SELECT WAREHOUSE_NAME, START_TIME AS HOUR_TS, SUM(CREDITS_USED) AS HOUR_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+    WHERE {where_m}
+    GROUP BY 1, 2
+),
+t AS (
+    SELECT WAREHOUSE_NAME, HOUR_TS, SUM(EXEC_MS) AS TOTAL_EXEC_MS
+    FROM q GROUP BY 1, 2
+),
+a AS (
+    SELECT q.*, m.HOUR_CREDITS * q.EXEC_MS / NULLIF(t.TOTAL_EXEC_MS, 0) AS ALLOC_CREDITS
+    FROM q
+    JOIN t ON t.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND t.HOUR_TS = q.HOUR_TS
+    JOIN m ON m.WAREHOUSE_NAME = q.WAREHOUSE_NAME AND m.HOUR_TS = q.HOUR_TS
+)
+SELECT
+    COALESCE(a.FINGERPRINT, a.QUERY_ID) AS FINGERPRINT,
+    MAX(a.WAREHOUSE_NAME)   AS WAREHOUSE_NAME,
+    MODE(a.USER_NAME)       AS USER_NAME,
+    MAX(a.QUERY_TYPE)       AS QUERY_TYPE,
+    MAX(a.EXECUTION_STATUS) AS EXECUTION_STATUS,
+    MAX(a.ERROR_CODE)       AS ERROR_CODE,
+    COUNT(DISTINCT a.QUERY_ID) AS FAILED_RUNS,
+    ROUND(SUM(a.ALLOC_CREDITS), 4) AS WASTED_CREDITS,
+    MAX(a.QUERY_SNIPPET)    AS QUERY_SNIPPET
+FROM a
+WHERE {vis}
+GROUP BY 1
+HAVING SUM(a.ALLOC_CREDITS) > 0
+ORDER BY WASTED_CREDITS DESC
+LIMIT {limit}
+"""
+
+
 def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 90) -> str:
     """storage_waste + read evidence: LAST_READ from ACCESS_HISTORY so a table
     can be STALE (no DML) *and* NEVER_READ — the safe-to-archive shortlist.

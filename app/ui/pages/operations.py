@@ -23,7 +23,13 @@ from app.logic.anomaly import (
     complete_days_only,
     flag_anomalies,
 )
-from app.logic.formulas import account_today, credits_to_usd, humanize_duration, safe_float
+from app.logic.formulas import (
+    account_today,
+    credits_to_usd,
+    format_usd,
+    humanize_duration,
+    safe_float,
+)
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.logic.task_graph import (
     analyze_task_run,
@@ -307,6 +313,46 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             source="ACCOUNT_USAGE.QUERY_HISTORY")
     if guard(fails, "No failed queries in this window."):
         styled_table(fails.df)
+
+    # rec#17: failed / killed / aborted queries that consumed warehouse compute produced
+    # zero value — allocate the hour-share credits to non-success queries and rank the
+    # repeat offenders, so a retrier hammering a broken query surfaces as $ wasted.
+    section_header("Wasted spend (failed / killed / aborted)", "warn", "cost")
+    st.caption(
+        "Allocated, not billed: each non-success query's execution-time share of its "
+        "warehouse-hour credits — money spent on runs that produced nothing. Grouped by "
+        "query fingerprint; a repeat-failing fingerprint is usually a broken query on a "
+        "retry loop (raise the timeout, fix the query, or stop the retrier)."
+    )
+    if st.toggle("Run wasted-spend scan (hour-share allocation)", key="ops_waste_toggle",
+                 help="Allocates warehouse-hour credits to non-success queries by execution-time share."):
+        rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+        waste = run(
+            insights_sql.wasted_query_spend_usd(days, company, wh_filter, user_filter,
+                                                database, schema_contains),
+            page=_PAGE, key=f"q_waste_{company}_{days}", tier="historical",
+            source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share, non-success)")
+        if guard(waste, "No failed/killed queries consumed warehouse compute in this window."):
+            wdf = waste.df.copy()
+            wdf["WASTED_USD"] = wdf["WASTED_CREDITS"].map(
+                lambda c: round(credits_to_usd(safe_float(c), rate, round_cents=False), 2))
+            monthly = float(wdf["WASTED_USD"].sum()) / max(days, 1) * 30.0
+            kpi_row([
+                {"label": f"Wasted spend ({days}d)", "value": format_usd(float(wdf["WASTED_USD"].sum())),
+                 "help": "Allocated compute on non-success queries; monthly-ized at right."},
+                {"label": "Monthly-ized", "value": format_usd(monthly)},
+                {"label": "Repeat offenders",
+                 "value": str(int((wdf["FAILED_RUNS"].map(safe_float) >= 5).sum())),
+                 "help": "Fingerprints that failed 5+ times in the window."},
+            ])
+            wdf = with_user_names(wdf, _PAGE)
+            _wcols = [c for c in ["WASTED_USD", "FAILED_RUNS", "USER", "USER_NAME", "WAREHOUSE_NAME",
+                                  "EXECUTION_STATUS", "ERROR_CODE", "QUERY_TYPE", "QUERY_SNIPPET",
+                                  "FINGERPRINT"] if c in wdf.columns]
+            styled_table(
+                wdf[_wcols], height=320, sort_label="wasted $ desc",
+                column_config={"WASTED_USD": st.column_config.NumberColumn("Wasted $", format="$%.2f")})
+            result_caption(waste, note="allocated by execution-second share; non-success queries only")
 
 
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",

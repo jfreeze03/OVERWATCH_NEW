@@ -113,6 +113,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.failed_login_reasons", lambda: security_sql.failed_login_reasons(1, "ALFA")),
     ("security.admin_role_activity", lambda: security_sql.admin_role_activity(1)),
     ("insights.storage_waste", lambda: insights_sql.storage_waste("ALFA")),
+    ("insights.wasted_query_spend_usd", lambda: insights_sql.wasted_query_spend_usd(2, "ALFA")),
     ("insights.warehouse_hourly_activity", lambda: insights_sql.warehouse_hourly_activity(1, "ALFA")),
     ("ops.dynamic_table_health", lambda: ops_sql.dynamic_table_health(1)),
     ("mart.alert_routes", lambda: mart_sql.alert_routes()),
