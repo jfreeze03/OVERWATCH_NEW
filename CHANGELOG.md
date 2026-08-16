@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.190.0 - Decision Studio: unified experiment verify (V081) (2026-08-16)
+
+Decision Studio review, finding #5. Owner migration **V081** (apply in Snowsight
+after V080) + app rewire of `logic/workbench.update_experiment_sql`.
+
+- **Settling an experiment now reconciles the ledger and its action — atomically, both
+  ways.** Settling an optimization experiment used to write
+  `OPTIMIZATION_EXPERIMENTS.VERIFIED_USD` only: it never touched `SAVINGS_LEDGER` and
+  never closed the `ACTION_QUEUE` row the experiment came from, so the two "verified
+  savings" totals drifted apart and a verified experiment left its action OPEN forever.
+  New procedure **`SP_VERIFY_EXPERIMENT`** settles a terminal outcome in one transaction:
+  **VERIFIED** records the verdict, MERGEs the savings ledger keyed on `ACTION_ID`
+  (discriminated by `FINDING_TYPE='EXPERIMENT'` so it upserts exactly the experiment's
+  own row, never an auto-booked / remediation row), and closes the source action;
+  **REJECTED / ROLLED_BACK** clear the verdict and — if the experiment had actually
+  booked a verified row — reverse that ledger row and reopen the action, so a
+  rollback-after-verify can't leave the ledgers diverged or the action stranded. Every
+  path writes an audited `ACTION_ACTIVITY` entry. Modelled on `SP_ACTION_LIFECYCLE`:
+  `EXECUTE AS OWNER`, rollback on any error, `REQUEST_KEY` idempotency.
+- **Scoped and non-regressing.** The ledger + action legs run only when the experiment
+  carries an `ACTION_ID` (a standalone experiment still records its verdict); only the
+  terminal outcomes (`VERIFIED`/`REJECTED`/`ROLLED_BACK`) route through the procedure —
+  in-flight transitions (`PLANNED`/`RUNNING`/`OBSERVING`) stay a plain status update.
+  Known limits (disclosed): the ledger row keys on `ACTION_ID`, so multiple experiments
+  on one action share a single ledger row (experiments are ~1:1 with actions) — a
+  consequence being that rejecting one of several experiments on the same action can
+  reverse another's still-valid booking; and the "verified savings" headline sums all
+  verified ledger rows without cross-source dedup (pre-existing).
+- Authored via the derivation-law generator (`outputs/gen_v081.py`, byte-identical
+  regen test) and reviewed by two adversarial skeptics — the second caught the
+  rollback-after-verify divergence, which the compensating REJECTED/ROLLED_BACK leg now
+  closes. **The app's verify button requires V081 to be applied first** (it CALLs the
+  new procedure); apply V081 before deploying.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.189.0 - Operations: incident routing for task failures (2026-08-16)
 
 Cost/metric gap audit, Wave 6 (finding #27). App-only; new pure `logic/incident.py`,

@@ -27,6 +27,9 @@ ENTITY_TYPES = (
 )
 ACTION_STATUSES = ("OPEN", "IN_PROGRESS", "DONE", "DROPPED")
 EXPERIMENT_STATUSES = ("PLANNED", "RUNNING", "OBSERVING", "VERIFIED", "REJECTED", "ROLLED_BACK")
+# Terminal outcomes that reconcile the savings ledger + source action via
+# SP_VERIFY_EXPERIMENT (DS #5, V081); the rest are in-flight, plain status updates.
+EXPERIMENT_SETTLE_STATUSES = ("VERIFIED", "REJECTED", "ROLLED_BACK")
 CRITICALITIES = ("CRITICAL", "HIGH", "STANDARD", "LOW")
 SLO_METRIC_KEYS = (
     "WAREHOUSE_SUCCESS_PCT",
@@ -309,17 +312,37 @@ SELECT NULLIF({sql_literal(str(action_id or '').strip(), 80)}, ''), {sql_literal
 
 
 def update_experiment_sql(experiment_id: str, *, status: str, result: str,
-                          verified_usd: float | None, actor: str) -> str:
+                          verified_usd: float | None, actor: str,
+                          request_key: str = "") -> str:
     state = str(status or "").strip().upper()
     if state not in EXPERIMENT_STATUSES:
         raise ValueError(f"Unsupported experiment status: {state}")
+    eid = str(experiment_id or "").strip()
+    if not eid:
+        raise ValueError("Experiment ID is required")
     usd = "NULL" if verified_usd is None else sql_number(max(0.0, float(verified_usd)))
+    if state in EXPERIMENT_SETTLE_STATUSES:
+        # DS #5 (V081): a terminal outcome is transactional — SP_VERIFY_EXPERIMENT
+        # records the verdict, and reconciles the savings ledger + source action in one
+        # shot, so the experiment and savings ledgers can't report divergent "verified"
+        # totals. VERIFIED books the ledger and closes the action; REJECTED/ROLLED_BACK
+        # reverse a prior booking and reopen the action. A stable request_key makes a
+        # double-submit idempotent; the uuid default matches update_action_sql.
+        key = str(request_key or f"settle:{eid}:{uuid4()}")[:160]
+        return (
+            f"CALL {core_object('SP_VERIFY_EXPERIMENT')}("
+            f"{sql_literal(eid, 80)}, {sql_literal(state, 30)}, {usd}, "
+            f"{sql_literal(str(result or ''), 4000)}, "
+            f"{sql_literal(str(actor or '').strip(), 200)}, {sql_literal(key, 160)})"
+        )
+    # In-flight transitions (PLANNED/RUNNING/OBSERVING) stay a plain status update —
+    # only the terminal outcomes touch the ledger and the action.
     return f"""
 UPDATE {core_object('OPTIMIZATION_EXPERIMENTS')}
 SET STATUS={sql_literal(state, 30)}, RESULT_NOTE={sql_literal(str(result or ''), 4000)},
     VERIFIED_USD={usd}, UPDATED_AT=CURRENT_TIMESTAMP(),
     UPDATED_BY={sql_literal(str(actor or ''), 200)}
-WHERE EXPERIMENT_ID={sql_literal(str(experiment_id or '').strip(), 80)}
+WHERE EXPERIMENT_ID={sql_literal(eid, 80)}
 """.strip()
 
 

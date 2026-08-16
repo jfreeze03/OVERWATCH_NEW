@@ -96,6 +96,7 @@ snowflake/migrations/V077__app_cost_ledger.sql
 snowflake/migrations/V078__ai_usage_ts_cast.sql
 snowflake/migrations/V079__ai_predicate_coco_historical_split.sql
 snowflake/migrations/V080__security_change_risk_etl_exclusion.sql
+snowflake/migrations/V081__unified_experiment_verify.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

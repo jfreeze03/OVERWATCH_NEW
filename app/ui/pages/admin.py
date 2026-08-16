@@ -222,6 +222,9 @@ _EXPECTED_MIGRATIONS = {
         "(Glue/Informatica/transform, across all environments) so routine "
         "truncate-and-reload stops flooding the queue; GRANT/REVOKE/POLICY and human "
         "drops still surface",
+    81: "Unified experiment verify: SP_VERIFY_EXPERIMENT atomically records an "
+        "experiment's verdict, upserts SAVINGS_LEDGER (keyed on ACTION_ID), and closes "
+        "the source action so the experiment and savings ledgers can't diverge",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1031,6 +1034,7 @@ def _setup_progress_tab() -> None:
         (78, "V078", "AI usage loader unbreak: ai_code TZ->NTZ casts + backfill"),
         (79, "V079", "AI predicate historical split: loader procs count CoCo as AI"),
         (80, "V080", "Security change-risk ETL exclusion: ETL-role DROP/TRUNCATE de-noised"),
+        (81, "V081", "Unified experiment verify: SP_VERIFY_EXPERIMENT books ledger + closes action in one txn"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",
