@@ -551,13 +551,60 @@ svg.dragging { cursor: grabbing; }
 </html>"""
 
 
+def _read_click_selection(event, *, field: str, seen_key: str, param: str = "pt") -> str | None:
+    """Read a single clicked value from an altair on_select event, guarding
+    altair's sticky re-emit so the value is returned only on a NEW click (the
+    rec29 idiom). Defensive across Streamlit/altair versions; returns None on any
+    unreadable shape. Shared by every click-to-drill chart."""
+    picked = None
+    try:  # selection store shape varies across versions; read it defensively
+        store = getattr(event, "selection", None)
+        if store is None and isinstance(event, dict):
+            store = event.get("selection")
+        rows = (store.get(param) if isinstance(store, dict) else getattr(store, param, None)) or []
+        if rows:
+            first = rows[0]
+            picked = first.get(field) if isinstance(first, dict) else first
+    except Exception:  # noqa: BLE001
+        picked = None
+    if picked is None:
+        # No active selection (e.g. navigated away and back — Streamlit GC'd it):
+        # re-arm the guard so the NEXT click of the same value counts as new.
+        st.session_state.pop(seen_key, None)
+        return None
+    if picked != st.session_state.get(seen_key):
+        st.session_state[seen_key] = picked
+        return str(picked)
+    return None
+
+
+def _current_click_value(event, *, field: str, param: str = "pt") -> str | None:
+    """Read the CURRENTLY selected value from an on_select event — persistent:
+    returns it on every run while the point stays selected, None once cleared.
+    Use for an inline panel that must stay visible while a point is selected
+    (vs _read_click_selection's one-shot edge trigger for a fire-once action)."""
+    try:
+        store = getattr(event, "selection", None)
+        if store is None and isinstance(event, dict):
+            store = event.get("selection")
+        rows = (store.get(param) if isinstance(store, dict) else getattr(store, param, None)) or []
+        if rows:
+            first = rows[0]
+            val = first.get(field) if isinstance(first, dict) else first
+            return str(val) if val is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def spend_trend(
     df: pd.DataFrame,
     *,
     day_col: str = "DAY",
     usd_col: str = "USD",
     daily_budget_usd: float = 0.0,
-) -> None:
+    key: str | None = None,
+) -> str | None:
     """Daily spend as bars with a 7-day average line (redesign, 2026-07-09).
 
     The old gradient area read as "abstract wash" — nobody could say what it
@@ -567,6 +614,12 @@ def spend_trend(
     (the question every viewer asked of the old chart). The forecast range
     lives in the Projected month-end KPI, not as a floating rectangle here.
     Dataset embeds ONCE on the layer (most-viewed chart, page-payload rule).
+
+    UI23: pass ``key`` to make the bars click-to-drill — returns the ISO day of
+    the CURRENTLY selected bar (persistent: the same day every run while it stays
+    selected, None once cleared) so the caller can render that day's breakdown
+    inline without it flickering away on the next rerun. Degrades to a plain
+    non-clickable chart (returns None) where on_select is unavailable.
     """
     data = df[[day_col, usd_col]].copy()
     data.columns = ["Day", "USD"]
@@ -575,9 +628,10 @@ def spend_trend(
     data = data.dropna(subset=["Day"]).sort_values("Day")
     if data.empty:
         _empty_note()
-        return
+        return None
     data["AVG7"] = data["USD"].rolling(7, min_periods=3).mean().round(2)
     data["PROVISIONAL"] = data["Day"] == data["Day"].max()
+    data["DayStr"] = data["Day"].dt.strftime("%Y-%m-%d")   # UI23: stable click key
     grad = alt.Gradient(gradient="linear", x1=0, x2=0, y1=1, y2=0,
                         stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
@@ -591,6 +645,9 @@ def spend_trend(
                     y=alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
                     opacity=alt.condition("datum.PROVISIONAL",
                                           alt.value(0.45), alt.value(1.0)),
+                    # UI23: DayStr is 1:1 with Day (no visual change), and encoding it
+                    # guarantees Vega carries it into the click-selection tuple.
+                    detail=alt.Detail("DayStr:N"),
                     tooltip=tip))
     avg = (alt.Chart().mark_line(color=palette.INK_SOFT, strokeWidth=2, interpolate="monotone")
            .encode(x=enc_x, y=alt.Y("AVG7:Q"), tooltip=tip))
@@ -609,7 +666,20 @@ def spend_trend(
                        text=f"budget ${daily_budget_usd:,.0f}/day")
             .encode(y="y:Q", x=alt.value(6))
         )
-    st.altair_chart(alt.layer(*layers), use_container_width=True)
+    chart = alt.layer(*layers) if len(layers) > 1 else layers[0]
+    picked_day: str | None = None
+    if key:
+        # UI23: attach a point selection and read the clicked day back; degrade to
+        # a plain chart on any runtime without on_select.
+        sel = alt.selection_point(fields=["DayStr"], name="pt", on="click", clear="dblclick")
+        try:
+            event = st.altair_chart(chart.add_params(sel), use_container_width=True,
+                                    on_select="rerun", key=key)
+            picked_day = _current_click_value(event, field="DayStr")
+        except Exception:  # noqa: BLE001 - runtime without on_select -> plain chart
+            st.altair_chart(chart, use_container_width=True)
+    else:
+        st.altair_chart(chart, use_container_width=True)
     total = float(data["USD"].sum())
     note = f"Bars = each day's spend (window total ${total:,.0f}); line = 7-day average"
     # r6-bug7: pace over COMPLETE days only. The newest day is PROVISIONAL (metering lags
@@ -623,6 +693,7 @@ def spend_trend(
         if prior7 > 0:
             note += f", pace {(last7 - prior7) / prior7 * 100:+.0f}% vs the prior week"
     st.caption(note + ". Newest day is dimmed: metering lags up to 24h, so it is partial, not a drop.")
+    return picked_day
 
 def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10,
             *, takeaway: bool = False) -> None:
@@ -681,29 +752,7 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
     except Exception:  # noqa: BLE001 - runtime without on_select -> plain chart
         st.altair_chart(plain, use_container_width=True)
         return None
-    picked = None
-    try:  # selection store shape varies across versions; read it defensively
-        store = getattr(event, "selection", None)
-        if store is None and isinstance(event, dict):
-            store = event.get("selection")
-        rows = (store.get("pt") if isinstance(store, dict) else getattr(store, "pt", None)) or []
-        if rows:
-            first = rows[0]
-            picked = first.get("Label") if isinstance(first, dict) else first
-    except Exception:  # noqa: BLE001
-        picked = None
-    seen = f"_ow_barsel_{key}"
-    if picked is None:
-        # Fresh render with no active selection — e.g. the user navigated away on the
-        # last click and returned, so Streamlit GC'd the chart's selection. Re-arm the
-        # guard so the NEXT click of the same bar counts as new instead of a dead repeat
-        # (without this the guard keeps the last label for the whole session).
-        st.session_state.pop(seen, None)
-        return None
-    if picked != st.session_state.get(seen):
-        st.session_state[seen] = picked
-        return str(picked)
-    return None
+    return _read_click_selection(event, field="Label", seen_key=f"_ow_barsel_{key}")
 
 
 def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str = "") -> None:

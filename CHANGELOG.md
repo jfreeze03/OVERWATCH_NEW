@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.212.0 - Click a day on the spend trend to break it down (2026-08-16)
+
+CoCo review, Tier-2 (UI #23). `ui.charts.spend_trend` gains an optional click drill.
+
+- **The spend trend is now a drill-in, not just a picture.** Pass a `key` and its bars become
+  clickable; a click returns that day's date so the caller can break it down. On the Operations →
+  Warehouses tab, clicking a day now shows that day's spend by warehouse — and each warehouse row
+  drills to its Entity 360 (reusing the UI22 helper), from the frame already loaded, so no extra
+  scan. The click-read + sticky-re-emit guard is extracted into one shared `_read_click_selection`
+  used by both this and the existing clickable bar chart. Degrades to a plain chart where the
+  runtime lacks `on_select`. App version 4.212.0.
+
 ## 4.211.0 - Universal entity drill into Entity 360 (2026-08-16)
 
 CoCo review, Tier-2 (UI #22). New `ui.components.entity_nav_table`.

@@ -198,3 +198,28 @@ def test_operational_replay_overlays_credits_on_a_shared_domain(monkeypatch: pyt
     rendered.clear()
     charts.operational_replay(frame, credits=pd.DataFrame())
     assert "USD" not in json.dumps(rendered[0].to_dict())
+
+
+def test_spend_trend_click_returns_the_selected_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    # UI23: a selected bar returns that day's ISO date on EVERY run while it stays
+    # selected (persistent, so the inline breakdown does not flicker away), and
+    # None once the selection is cleared.
+    monkeypatch.setattr(charts.st, "caption", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "altair_chart",
+                        lambda *a, **k: {"selection": {"pt": [{"DayStr": "2026-08-15"}]}})
+    df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-13", "2026-08-14", "2026-08-15"]),
+                       "USD": [100.0, 120.0, 200.0]})
+    assert charts.spend_trend(df, key="wh") == "2026-08-15"   # selected
+    assert charts.spend_trend(df, key="wh") == "2026-08-15"   # persists across reruns
+    monkeypatch.setattr(charts.st, "altair_chart", lambda *a, **k: {"selection": {"pt": []}})
+    assert charts.spend_trend(df, key="wh") is None            # cleared -> breakdown disappears
+
+
+def test_spend_trend_without_key_stays_non_clickable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(charts.st, "caption", lambda *a, **k: None)
+    seen = {"on_select": 0}
+    monkeypatch.setattr(charts.st, "altair_chart",
+                        lambda *a, **k: seen.__setitem__("on_select", seen["on_select"] + ("on_select" in k)))
+    df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-14", "2026-08-15"]), "USD": [1.0, 2.0]})
+    assert charts.spend_trend(df, key=None) is None
+    assert seen["on_select"] == 0                              # no on_select wiring without a key

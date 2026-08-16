@@ -1200,7 +1200,24 @@ def _warehouses_tab(company: str, rate: float) -> None:
     flagged = flag_anomalies(complete_days_only(df), "USD", group_col="WAREHOUSE_NAME",
                              min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
     daily = df.groupby("DAY", as_index=False)["USD"].sum()
-    charts.spend_trend(daily)
+    st.caption("Click a day in the trend to break its spend down by warehouse.")
+    picked_day = charts.spend_trend(daily, key=f"ops_wh_spend_day_{company}")
+    if picked_day:
+        # UI23: the clicked day's per-warehouse breakdown, from the frame already
+        # loaded above — no extra scan. Each warehouse row drills to its Entity 360.
+        # Match DAY via the SAME strftime the chart used for its click key, so a
+        # date/Timestamp representation gap can't blank a valid click.
+        import pandas as pd
+        _day = pd.to_datetime(df["DAY"], errors="coerce").dt.strftime("%Y-%m-%d")
+        day_rows = df[_day == picked_day]
+        if not day_rows.empty:
+            breakdown = (day_rows.groupby("WAREHOUSE_NAME", as_index=False)["USD"].sum()
+                         .sort_values("USD", ascending=False))
+            st.markdown(f"**{picked_day} — spend by warehouse**")
+            entity_nav_table(
+                breakdown, key=f"ops_wh_day_break_{company}", key_col="WAREHOUSE_NAME",
+                entity_type="WAREHOUSE", size_note=False,
+                column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")})
     anomalies = flagged[flagged["IS_ANOMALY"]]
     if anomalies.empty:
         st.success("No per-warehouse daily anomalies (30d, median/MAD z ≥ 3.5).")
