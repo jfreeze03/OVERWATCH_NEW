@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.172.0"
+APP_VERSION = "4.173.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -45,6 +45,12 @@ DEFAULT_SETTINGS = {
     "STORAGE_HYBRID_USD_PER_TB_MONTH": 348.16,   # ~$0.34/GB row store
     "STORAGE_ARCHIVE_COOL_USD_PER_TB_MONTH": 4.00,
     "STORAGE_ARCHIVE_COLD_USD_PER_TB_MONTH": 1.00,
+    # rec#11: fallback egress rate for the data-transfer panel. Cross-region /
+    # cross-cloud transfer OUT is billed per TB (same-region is free); the panel
+    # PREFERS the org rate-card implied rate (TRANSFER_USD / billable TB) and only
+    # falls back to this constant when org billing currency is not visible. AWS
+    # cross-region ballpark — EDIT on Admin to match your rate card.
+    "DATA_TRANSFER_USD_PER_TB": 20.00,
     "MONTHLY_BUDGET_USD": 0.0,       # 0 = not configured; UI must not invent one
     "AI_MONTHLY_BUDGET_USD": 0.0,    # 0 = not configured; gates Cortex user severities
     "CORTEX_MODEL": "llama3.1-8b",   # model for in-app AI evaluations (Admin-editable)

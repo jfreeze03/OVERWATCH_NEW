@@ -204,6 +204,39 @@ ORDER BY CREDITS DESC, BYTES_TRANSFERRED DESC
 """
 
 
+def transfer_egress_priced(days: int) -> str:
+    """rec#11: outbound data-transfer (egress) bytes grouped by source/target
+    cloud+region and transfer type, with a BILLABLE flag.
+
+    Cross-region OR cross-cloud transfer OUT is billed; same-region same-cloud is
+    free — so BILLABLE is the app's cross-boundary estimate (Snowflake owns the
+    exact determination). The IFF reads the BASE columns, not the COALESCE'd
+    display aliases. Account-wide (transfer carries no company grain). Bytes only:
+    the UI dollarizes with the org rate-card implied rate (TRANSFER_USD / billable
+    TB), falling back to the DATA_TRANSFER_USD_PER_TB setting when org currency is
+    not visible — never an inlined rate (house rule d)."""
+    days = bounded_days(days, 365)
+    return f"""
+SELECT
+    COALESCE(SOURCE_CLOUD, '(unknown)')      AS SOURCE_CLOUD,
+    COALESCE(SOURCE_REGION, '(unknown)')     AS SOURCE_REGION,
+    COALESCE(TARGET_CLOUD, '(internal)')     AS TARGET_CLOUD,
+    COALESCE(TARGET_REGION, '(same region)') AS TARGET_REGION,
+    TRANSFER_TYPE,
+    IFF(TARGET_REGION IS NOT NULL
+        AND (COALESCE(TARGET_REGION, '') <> COALESCE(SOURCE_REGION, '')
+             OR COALESCE(TARGET_CLOUD, '') <> COALESCE(SOURCE_CLOUD, '')),
+        TRUE, FALSE)                         AS BILLABLE,
+    ROUND(SUM(BYTES_TRANSFERRED) / POWER(1024, 4), 6) AS TB,
+    SUM(BYTES_TRANSFERRED)                   AS BYTES
+FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3, 4, 5, 6
+HAVING SUM(BYTES_TRANSFERRED) > 0
+ORDER BY BILLABLE DESC, TB DESC
+"""
+
+
 def compute_pool_usage(days: int) -> str:
     """SPCS credits by compute pool and owning application (account-wide)."""
     days = bounded_days(days, 365)

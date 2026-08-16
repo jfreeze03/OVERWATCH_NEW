@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.173.0 - Cost completeness: egress is dollarized (2026-08-15)
+
+Gap-audit Wave 4b (rec #11). App-only; `cost_sql.py`, `formulas.py`, `spend.py`,
+`config.py`.
+
+- **Data transfer / egress now has a priced Cost-page drill.** `DATA_TRANSFER_HISTORY`
+  was tracked only as a bytes signal on Security and never dollarized. A new
+  "Egress / data transfer" section (under Cost > detailed service attribution)
+  breaks transfer down by source/target cloud+region and transfer type, with a
+  BILLABLE flag (cross-region / cross-cloud is billed; same-region is free and
+  priced at $0), priced from the org rate-card implied $/TB and reconciled to the
+  billed `TRANSFER_USD`. New `DATA_TRANSFER_USD_PER_TB` setting is the fallback
+  when org billing truth isn't usable.
+- **Verified with a 2-skeptic workflow before commit.** Both skeptics confirmed a
+  P1 window mismatch (org bill was read over a fixed 30d while egress bytes span
+  the page window) — fixed by reading org truth over the same `days` window via
+  the verified `RATING_TYPE='DATA_TRANSFER'` builder (`org_all_in_window_usd`), not
+  a `SERVICE_TYPE` match. Also fixed: non-USD org currency was rendered with a `$`
+  (now reconciliation engages only when the bill is USD), and an implausibly high
+  implied $/TB (from a BILLABLE under-count) now falls back to the setting instead
+  of presenting a five-figure rate as billing truth. The `transfer_egress_priced`
+  SQL itself was verified clean (no lateral-alias bug, correct cross-boundary
+  logic, binary-TiB units).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.172.0 - rec #10 already fixed in V064: stale docstring corrected (2026-08-15)
 
 Gap-audit Wave 5 (rec #10). App-only; `mart_sql.py` (docstring) + regression test.

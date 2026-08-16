@@ -122,6 +122,32 @@ def blended_credit_rate(credits_other: float, credits_ai: float,
     return blended_billed_usd(credits_other, credits_ai, rate_usd, ai_rate_usd) / total
 
 
+def egress_effective_rate_per_tb(org_transfer_usd: float, billable_tb: float,
+                                 fallback_rate_per_tb: float,
+                                 sanity_multiple: float = 10.0) -> tuple[float, bool]:
+    """The $/TB to price egress with (rec#11).
+
+    Prefer the org rate-card IMPLIED rate — billed TRANSFER_USD divided by the
+    observed billable TB — so the estimate reconciles to billing truth. Fall back
+    to the configured DATA_TRANSFER_USD_PER_TB setting when org currency is not
+    visible, no billable TB was observed, OR the implied rate is implausibly high
+    (> ``sanity_multiple`` x the configured rate): the app's cross-boundary
+    BILLABLE flag can under-count what Snowflake actually bills, and a real org
+    bill over a tiny billable-TB estimate would otherwise present an absurd
+    five-figure $/TB as billing truth. Never an inlined constant (house rule d).
+    Returns (rate_per_tb, used_org_truth).
+    """
+    org = safe_float(org_transfer_usd)
+    tb = safe_float(billable_tb)
+    fallback = safe_float(fallback_rate_per_tb)
+    if org > 0.0 and tb > 0.0:
+        implied = org / tb
+        if fallback > 0.0 and implied > sanity_multiple * fallback:
+            return fallback, False   # BILLABLE under-counts — don't trust the implied rate
+        return implied, True
+    return fallback, False
+
+
 def billed_credits(credits_used: float, cloud_services_adjustment: float = 0.0) -> float:
     """Billed credits = used + adjustment (adjustment is negative or zero).
 

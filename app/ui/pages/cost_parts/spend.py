@@ -35,6 +35,7 @@ from app.logic.directory import resolve_display
 from app.logic.formulas import (
     account_today,
     credits_to_usd,
+    egress_effective_rate_per_tb,
     format_credits,
     format_usd,
     md_dollars,
@@ -47,6 +48,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
+    load_settings,
     panel_help,
     result_caption,
     run_mart_first,
@@ -248,7 +250,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         help="Runs only the selected native service-detail query; off by default for a faster paint.",
     ):
         detail = lazy_sections(
-            ["Replication", "Compute pools & notebooks", "Marketplace"],
+            ["Replication", "Egress / data transfer", "Compute pools & notebooks", "Marketplace"],
             key="cost_service_detail_section",
             deep_link=False,
         )
@@ -381,6 +383,92 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 "Account-wide: these views carry no company key. Notebook credits are a subset of "
                 "SPCS credits and must not be added to the compute-pool total."
             )
+        elif detail == "Egress / data transfer":
+            # rec#11: egress was tracked only as a bytes signal on Security and never
+            # dollarized. Price billable (cross-region / cross-cloud) transfer from the
+            # org rate card's implied $/TB, reconciled to billed TRANSFER_USD; same-
+            # region transfer is free and priced at $0.
+            eg = run(
+                cost_sql.transfer_egress_priced(days),
+                page=_PAGE, key=f"egress_priced_{days}", tier="historical",
+                source="DATA_TRANSFER_HISTORY (egress bytes by source/target, billable flag)",
+            )
+            if eg.ok and eg.empty:
+                empty_state("clean", "No outbound data transfer was recorded in this window.")
+            elif guard(eg, ""):
+                # skeptic-verify (rec#11): org billing TRUTH must be read over the SAME
+                # window as the egress bytes (not a fixed 30d, or the $/TB and the total
+                # skew by 30/days), and via the VERIFIED RATING_TYPE='DATA_TRANSFER' path
+                # (org_all_in_window_usd), not a SERVICE_TYPE string match.
+                org = run(
+                    cost_sql.org_all_in_window_usd(days), page=_PAGE,
+                    key=f"org_transfer_truth_{days}", tier="historical",
+                    source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (data transfer, verified rating type)",
+                    probe=True,
+                )
+                org_transfer, ccy = 0.0, "USD"
+                if org.usable() and not org.df.empty and "TRANSFER_USD" in org.df.columns:
+                    _row = org.df.iloc[0]
+                    org_transfer = safe_float(_row.get("TRANSFER_USD"))
+                    ccy = (str(_row.get("CURRENCY")).upper()
+                           if pd.notna(_row.get("CURRENCY")) else "USD")
+                edf = eg.df.copy()
+                edf["TB"] = pd.to_numeric(edf["TB"], errors="coerce").fillna(0.0)
+                edf["BILLABLE"] = edf["BILLABLE"].astype(bool)
+                billable_tb = float(edf.loc[edf["BILLABLE"], "TB"].sum())
+                free_tb = float(edf.loc[~edf["BILLABLE"], "TB"].sum())
+                fallback = safe_float(load_settings(_PAGE).get("DATA_TRANSFER_USD_PER_TB"), 20.0)
+                # only reconcile to org truth when it is USD — folding a non-USD bill into
+                # $-denominated KPIs would mislabel the currency. The resolver also rejects
+                # an implausibly high implied $/TB (billable under-count) back to the setting.
+                org_usd = org_transfer if ccy == "USD" else 0.0
+                rate_per_tb, used_org = egress_effective_rate_per_tb(org_usd, billable_tb, fallback)
+                edf["EST_USD"] = (edf["TB"] * rate_per_tb).where(edf["BILLABLE"], 0.0).round(2)
+                kpi_row([
+                    {"label": f"Estimated egress ({days}d)",
+                     "value": format_usd(float(edf["EST_USD"].sum())),
+                     "help": "Billable (cross-region / cross-cloud) transfer x the $/TB at right. "
+                             "Same-region transfer is free and priced at $0."},
+                    {"label": "Billable transfer", "value": f"{billable_tb:,.3f} TB",
+                     "sub": f"{free_tb:,.3f} TB free (same region)"},
+                    {"label": "Effective $/TB", "value": format_usd(rate_per_tb),
+                     "method": "org rate card" if used_org else "setting fallback",
+                     "help": ("Implied from billed TRANSFER_USD / billable TB over this window, "
+                              "so the estimate reconciles to the org bill." if used_org else
+                              "DATA_TRANSFER_USD_PER_TB setting — org billing truth in USD was not "
+                              "usable (not visible, non-USD, or an implausibly high implied rate "
+                              "from a billable under-count), so this is a fallback, not billing truth.")},
+                ])
+                styled_table(
+                    edf[["EST_USD", "BILLABLE", "SOURCE_CLOUD", "SOURCE_REGION",
+                         "TARGET_CLOUD", "TARGET_REGION", "TRANSFER_TYPE", "TB"]],
+                    height=320, sort_label="estimated $ desc",
+                    column_config={
+                        "EST_USD": st.column_config.NumberColumn("Est. $", format="$%.2f"),
+                        "TB": st.column_config.NumberColumn("TB", format="%.3f"),
+                    },
+                )
+                if used_org:
+                    st.caption(
+                        f"Reconciliation: billed data transfer ({days}d) is {org_transfer:,.2f} USD "
+                        "on the org rate card; the estimate distributes that across source/target/type "
+                        "by billable bytes. BILLABLE is the app's cross-boundary estimate — Snowflake "
+                        "owns the exact billing determination."
+                    )
+                elif org_transfer > 0.0:
+                    st.caption(
+                        f"Org billed {org_transfer:,.2f} {ccy} for data transfer ({days}d), shown for "
+                        "reference; the USD estimate above uses the DATA_TRANSFER_USD_PER_TB setting "
+                        "(org bill non-USD, or the implied $/TB was implausibly high because the app's "
+                        "cross-boundary billable estimate under-counts). Edit the rate on Admin."
+                    )
+                else:
+                    st.caption(
+                        "Priced from the DATA_TRANSFER_USD_PER_TB setting (org billing truth not "
+                        "visible). BILLABLE is the app's cross-region / cross-cloud estimate; edit the "
+                        "rate on Admin to match your rate card."
+                    )
+                result_caption(eg)
         else:
             market = run(
                 cost_sql.marketplace_paid_usage(days),

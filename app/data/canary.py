@@ -55,6 +55,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.allocated_attribution.db", lambda: cost_sql.allocated_attribution(2, "DATABASE_NAME", "ALFA")),
     ("cost.cortex_daily_spend", lambda: cost_sql.cortex_daily_spend(2)),
     ("cost.replication_by_database", lambda: cost_sql.replication_by_database(2, "ALFA")),
+    ("cost.transfer_egress_priced", lambda: cost_sql.transfer_egress_priced(2)),
     ("cost.compute_pool_usage", lambda: cost_sql.compute_pool_usage(2)),
     ("cost.notebook_container_usage", lambda: cost_sql.notebook_container_usage(2)),
     ("cost.storage_by_database", lambda: cost_sql.storage_by_database(2, "ALFA")),
