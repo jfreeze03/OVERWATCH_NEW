@@ -45,6 +45,7 @@ from app.logic.insights import (
 from app.logic.savings_rollup import (
     SavingsOpportunity,
     confidence_weight,
+    effort_tier,
     rollup_savings,
 )
 from app.logic.serverless_roi import classify_qas_roi
@@ -575,14 +576,18 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             ])
             _rdf = pd.DataFrame([
                 {"Source": o.source, "Warehouse / target": o.target,
-                 "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2)}
+                 "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2),
+                 "Effort": effort_tier(o.source)}
                 for o in _roll.items])
             styled_table(_rdf, height=280, sort_label="confidence x dollars",
                          column_config={"$/mo": st.column_config.NumberColumn(format="$%.2f")})
             st.caption(
-                "Ranked by confidence x dollars. The failed-query **Wasted spend** board "
-                "(Operations) and the **Serverless ROI** panel above are additional levers not yet "
-                "folded into this total; storage / clustering plug into the same rollup next."
+                "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a "
+                "single ALTER (idle timer / size), so sort by it to bank the easy savings "
+                "first even when they're not the biggest number. The failed-query **Wasted "
+                "spend** board (Operations) and the **Serverless ROI** panel above are "
+                "additional levers not yet folded into this total; storage / clustering plug "
+                "into the same rollup next."
             )
         else:
             st.caption("No open idle or right-sizing opportunities to roll up in this window.")

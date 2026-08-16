@@ -6,12 +6,20 @@ idle credits, so they must never both count.
 from app.logic.savings_rollup import (
     SavingsOpportunity,
     confidence_weight,
+    effort_tier,
     rollup_savings,
 )
 
 
 def _opp(source, target, usd, conf=0.6):
     return SavingsOpportunity(source, target, usd, conf)
+
+
+def test_effort_tier_flags_quick_wins():
+    assert effort_tier("IDLE") == "LOW" and effort_tier("RESIZE") == "LOW"
+    assert effort_tier("CLUSTERING") == "HIGH"
+    assert effort_tier("RETENTION") == "MEDIUM"
+    assert effort_tier("something_new") == "MEDIUM"   # unknown -> MEDIUM
 
 
 def test_idle_and_resize_on_the_same_warehouse_do_not_double_count():

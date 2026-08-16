@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.206.0 - Effort tier on the addressable-savings rollup (2026-08-16)
+
+CoCo review, Tier-2 (Cost #8). New `logic.savings_rollup.effort_tier`.
+
+- **Savings opportunities now show effort, so quick wins stand out.** The rollup ranked by
+  confidence × dollars, but the highest-dollar lever isn't always the best next action. Each
+  row now carries an **Effort** tier derived from its source — LOW is a single ALTER (idle
+  timer / size), HIGH is a costly re-cluster — so a DBA can sort the sortable table by Effort
+  and bank the easy savings first. App version 4.206.0.
+
 ## 4.205.0 - Savings realization rate on the Optimization ledger (2026-08-16)
 
 CoCo review, Tier-2 (Cost #9). `logic.actions.ledger_totals` gains a realization rate.

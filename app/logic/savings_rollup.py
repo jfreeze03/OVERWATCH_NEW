@@ -28,6 +28,22 @@ def confidence_weight(label: object) -> float:
     return _CONFIDENCE_WEIGHT.get(str(label).upper(), 0.3)
 
 
+# Effort proxy from the advisor source: a single ALTER (IDLE/RESIZE) vs a costly
+# re-cluster (CLUSTERING). Lets the panel flag quick wins a dollar ranking hides.
+_EFFORT_TIER = {
+    "IDLE": "LOW", "RESIZE": "LOW",
+    "WASTE": "MEDIUM", "STORAGE": "MEDIUM", "RETENTION": "MEDIUM", "LEDGER": "MEDIUM",
+    "CLUSTERING": "HIGH",
+}
+
+
+def effort_tier(source: object) -> str:
+    """Rough implementation effort for an advisor source (Cost #8) — the quick-win
+    signal a dollar ranking hides. IDLE/RESIZE are one ALTER; CLUSTERING is a costly
+    re-cluster. Unknown sources default to MEDIUM."""
+    return _EFFORT_TIER.get(str(source).upper(), "MEDIUM")
+
+
 @dataclass(frozen=True)
 class SavingsOpportunity:
     source: str            # IDLE | RESIZE | STORAGE | RETENTION | CLUSTERING | WASTE | LEDGER
