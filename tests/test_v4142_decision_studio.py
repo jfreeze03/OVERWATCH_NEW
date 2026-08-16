@@ -96,6 +96,24 @@ def test_product_economics_scopes_the_catalog_by_company() -> None:
     assert "UPPER(COMPANY)" not in all_cat
 
 
+def test_product_criticality_ranks_by_severity_not_lexically() -> None:
+    # DS Wave-2 #12: MAX(CRITICALITY) returned 'STANDARD' for a product that contained a
+    # CRITICAL entity (alphabetically S > C), masking it. Rank by severity (MIN rank).
+    sql = workbench_sql.data_product_economics(30, "ALL")
+    assert "MAX(CRITICALITY)" not in sql
+    assert "WHEN 'CRITICAL' THEN 1" in sql and "WHEN 1 THEN 'CRITICAL'" in sql
+    # ambiguous ownership (entities with different owners) is flagged, not hidden by MAX
+    assert "COUNT(DISTINCT NULLIF(TRIM(OWNER_NAME), '')) > 1 AS OWNER_CONFLICT" in sql
+
+
+def test_products_board_surfaces_owner_conflict() -> None:
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app" / "ui"
+           / "decision_studio.py").read_text(encoding="utf-8")
+    assert '"OWNER_CONFLICT"' in src      # displayed column
+    assert "Owner conflicts" in src       # KPI
+
+
 def test_mark_watched_flags_watchlist_by_type_case_insensitively() -> None:
     from app.logic.workbench import mark_watched
     frame = pd.DataFrame({"FINGERPRINT": ["abc", "def", "ghi"]})

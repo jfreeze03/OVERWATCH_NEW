@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.193.0 - Decision Studio: product criticality rank + owner conflict (2026-08-16)
+
+Decision Studio review, Wave 2 (finding #12). App-only; `data/workbench_sql.py`
+`data_product_economics`, Products board in `ui/decision_studio.py`.
+
+- **A critical data product no longer reads as standard.** The product rollup took
+  `MAX(CRITICALITY)` across a product's catalog entities — but that's *lexical*, and
+  alphabetically `STANDARD > CRITICAL`, so a product containing a CRITICAL entity showed
+  as STANDARD. It now ranks by **severity** (CRITICAL > HIGH > STANDARD > LOW) and reports
+  the most-severe.
+- **Ambiguous ownership is flagged, not hidden.** When a product's entities carry
+  different owners, `MAX(OWNER_NAME)` silently picked one. A new `OWNER_CONFLICT` flag +
+  KPIs surfaces those products so ownership gets resolved in the catalog (the displayed
+  `OWNER_NAME` is one of several).
+
+App version 4.193.0. Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.192.0 - Decision Studio: SLO cockpit trust fixes (2026-08-16)
 
 Decision Studio review, Wave 2 (findings #9, #10, #11). App-only; `data/workbench_sql.py`

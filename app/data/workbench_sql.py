@@ -416,7 +416,19 @@ WITH catalog AS (
       {catalog_company}
 ), products AS (
     SELECT DATA_PRODUCT, MAX(TEAM) AS TEAM, MAX(OWNER_NAME) AS OWNER_NAME,
-           MAX(CRITICALITY) AS CRITICALITY, COUNT(*) AS CATALOG_ENTITIES
+           -- #12: rank by SEVERITY, not lexically. A plain MAX() over the label returned
+           -- 'STANDARD' for a product that contained a CRITICAL entity (alphabetically
+           -- S > C), so a critical data product read as standard. Take the most-severe
+           -- (MIN rank) instead.
+           CASE MIN(CASE UPPER(TRIM(CRITICALITY))
+                          WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+                          WHEN 'STANDARD' THEN 3 WHEN 'LOW' THEN 4 ELSE 3 END)
+             WHEN 1 THEN 'CRITICAL' WHEN 2 THEN 'HIGH'
+             WHEN 3 THEN 'STANDARD' WHEN 4 THEN 'LOW' END AS CRITICALITY,
+           -- #12: a product whose entities carry different owners has ambiguous
+           -- ownership; MAX(OWNER_NAME) hides it, so flag it for the operator to resolve.
+           COUNT(DISTINCT NULLIF(TRIM(OWNER_NAME), '')) > 1 AS OWNER_CONFLICT,
+           COUNT(*) AS CATALOG_ENTITIES
     FROM catalog GROUP BY DATA_PRODUCT
 ), object_map AS (
     SELECT ENTITY_KEY, DATA_PRODUCT FROM catalog WHERE ENTITY_TYPE = 'OBJECT'
@@ -453,7 +465,7 @@ WITH catalog AS (
     WHERE t.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
     GROUP BY c.DATA_PRODUCT
 )
-SELECT p.DATA_PRODUCT, p.TEAM, p.OWNER_NAME, p.CRITICALITY, p.CATALOG_ENTITIES,
+SELECT p.DATA_PRODUCT, p.TEAM, p.OWNER_NAME, p.OWNER_CONFLICT, p.CRITICALITY, p.CATALOG_ENTITIES,
        ROUND(COALESCE(o.OBJECT_CREDITS, 0), 4) AS MEASURED_OBJECT_CREDITS,
        COALESCE(o.COSTED_OBJECTS, 0) AS COSTED_OBJECTS,
        ROUND(COALESCE(w.WAREHOUSE_CREDITS, 0), 4) AS METERED_WAREHOUSE_CREDITS,

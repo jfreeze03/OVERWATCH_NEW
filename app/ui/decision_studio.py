@@ -300,6 +300,11 @@ def _products(company: str, days: int, rate: float) -> None:
          "help": "Measured query and maintenance cost at object grain."},
         {"label": "Warehouse cost", "value": format_usd(frame["METERED_WAREHOUSE_USD"].sum()),
          "help": "Metered warehouse cost; separate because it can overlap object-attributed compute."},
+        {"label": "Owner conflicts",
+         "value": f"{int(frame['OWNER_CONFLICT'].astype(bool).sum()):,}",
+         "severity": "warn" if bool(frame["OWNER_CONFLICT"].astype(bool).any()) else "",
+         "help": "Data products whose catalog entities carry different owners — ambiguous "
+                 "ownership to resolve; the OWNER_NAME shown is one of several."},
     ])
 
     def open_product(index: int) -> None:
@@ -307,9 +312,9 @@ def _products(company: str, days: int, rate: float) -> None:
 
     selectable_nav_table(
         frame[[
-            "DATA_PRODUCT", "TEAM", "OWNER_NAME", "CRITICALITY", "CATALOG_ENTITIES",
-            "MEASURED_OBJECT_USD", "METERED_WAREHOUSE_USD", "COSTED_OBJECTS",
-            "WAREHOUSES", "TASK_RUNS", "TASK_FAILURES", "TASK_FAIL_PCT",
+            "DATA_PRODUCT", "TEAM", "OWNER_NAME", "OWNER_CONFLICT", "CRITICALITY",
+            "CATALOG_ENTITIES", "MEASURED_OBJECT_USD", "METERED_WAREHOUSE_USD",
+            "COSTED_OBJECTS", "WAREHOUSES", "TASK_RUNS", "TASK_FAILURES", "TASK_FAIL_PCT",
         ]],
         key="decision_product_table", on_select=open_product, height=390,
         column_config={
@@ -327,6 +332,10 @@ def _products(company: str, days: int, rate: float) -> None:
                      "A SEPARATE lens from Object-attributed $ — the two overlap and are "
                      "NOT additive; never sum them."),
             "TASK_FAIL_PCT": st.column_config.NumberColumn("Task fail %", format="%.2f%%"),
+            "OWNER_CONFLICT": st.column_config.CheckboxColumn(
+                "Owner conflict?",
+                help="This product's catalog entities carry more than one owner — the "
+                     "OWNER_NAME shown is one of several. Resolve ownership in the catalog."),
         },
         sort_label="measured object cost, then metered warehouse cost",
     )
