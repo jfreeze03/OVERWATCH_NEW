@@ -668,11 +668,15 @@ def render() -> None:
                         context={"action_id": _action_id} if _action_id else {},
                     )
 
+                _ov_action_cols = [c for c in ("SEVERITY", "TITLE", "OWNER", "DUE_DATE",
+                                               "ESTIMATED_USD", "PERIOD")
+                                   if c in ranked.columns]
                 selectable_nav_table(
-                    ranked[["SEVERITY", "TITLE", "OWNER", "DUE_DATE", "ESTIMATED_USD"]],
+                    ranked[_ov_action_cols],
                     key="ov_actions_sel", slug="top-actions",
                     on_select=_open_action,
-                    column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f")})
+                    column_config={"ESTIMATED_USD": st.column_config.NumberColumn("Est. $", format="$%.0f"),
+                                   "PERIOD": st.column_config.TextColumn("Basis")})
                 # D1: say what "top" means. The ranking is severity, then overdue,
                 # then estimated dollars, then age — an executive reading a top-5
                 # otherwise assumes it is sorted by money, which it is not (money

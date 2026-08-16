@@ -277,14 +277,18 @@ def render() -> None:
         else:
             for _, a in ranked.iterrows():
                 est = safe_float(a.get("ESTIMATED_USD"))
+                # DS #7: disclose the estimate's time basis inline so a monthly run-rate
+                # and a one-time saving don't read as the same number.
+                _basis = {"MONTHLY": "/mo", "ANNUAL": "/yr", "ONE_TIME": " one-time"}.get(
+                    str(a.get("PERIOD") or "").strip().upper(), "")
                 brief_action_lines.append(
                     f"[{a['SEVERITY']}] {a['TITLE']} - owner {a.get('OWNER') or 'unassigned'}"
-                    + (f" - about {format_usd(est)}" if est > 0 else "")
+                    + (f" - about {format_usd(est)}{_basis}" if est > 0 else "")
                 )
                 # $-escape: TITLE is data — a '$' in it pairs with format_usd's '$'
                 st.markdown(md_dollars(f"- **[{a['SEVERITY']}]** {a['TITLE']} — owner "
                             f"{a.get('OWNER') or 'unassigned'}"
-                            + (f" · ~{format_usd(est)}" if est > 0 else "")))
+                            + (f" · ~{format_usd(est)}{_basis}" if est > 0 else "")))
             # D1: the top three, by WHAT? Severity first, dollars only as a tiebreak
             # inside a band — without this line a reader takes a $-annotated list for
             # a $-ordered one and asks why the biggest number is not on top.

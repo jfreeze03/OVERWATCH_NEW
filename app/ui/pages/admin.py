@@ -229,6 +229,10 @@ _EXPECTED_MIGRATIONS = {
         "regrained to (DAY, QUERY_HASH, COMPANY) so query-family boards scope on the "
         "real company instead of the ANY_VALUE(DATABASE_NAME) heuristic; mart cleared, "
         "owner re-runs the HOURLY backfill",
+    83: "Action estimate time-basis (DS #7): ACTION_QUEUE gains a nullable PERIOD "
+        "column labeling the time basis of ESTIMATED_USD (MONTHLY / ANNUAL / ONE_TIME; "
+        "NULL = unspecified) so authored estimates on different clocks are no longer "
+        "summed as one number; the app stamps it at both writers and surfaces it",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1040,6 +1044,7 @@ def _setup_progress_tab() -> None:
         (80, "V080", "Security change-risk ETL exclusion: ETL-role DROP/TRUNCATE de-noised"),
         (81, "V081", "Unified experiment verify: SP_VERIFY_EXPERIMENT books ledger + closes action in one txn"),
         (82, "V082", "Query-family company regrain: MART_QUERY_FAMILY_DAILY gains COMPANY (per-company grain)"),
+        (83, "V083", "Action estimate time-basis: ACTION_QUEUE gains PERIOD labeling ESTIMATED_USD (DS #7)"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",

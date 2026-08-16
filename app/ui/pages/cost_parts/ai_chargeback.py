@@ -251,11 +251,14 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 # codex#39: idempotent insert. Keyed on COMPANY + TITLE (TITLE already encodes
                 # signal+user+source) + this month + open status, so a double-click or a
                 # partial-failure retry is a no-op instead of duplicating the action row.
+                # DS #7: ESTIMATED_USD here is PROJECTED_30D_USD -- a 30-day (monthly-
+                # equivalent) figure -- so stamp PERIOD='MONTHLY'. Without the label it
+                # was summed on the Workbench KPI beside one-time operator estimates.
                 statements.append(
-                    f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD)\n"
+                    f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD, PERIOD)\n"
                     f"SELECT {sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
                     f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
-                    f"{sql_number(r['PROJECTED_30D_USD'])}\n"
+                    f"{sql_number(r['PROJECTED_30D_USD'])}, 'MONTHLY'\n"
                     f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
                     f"WHERE q.COMPANY = {sql_literal(company)} AND q.TITLE = {sql_literal(title)} "
                     f"AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS') "

@@ -306,7 +306,11 @@ def render_action_center(company: str) -> None:
              "severity": "warn" if summary["overdue"] else "ok"},
             {"label": "Unassigned", "value": f"{summary['unassigned']:,.0f}"},
             {"label": "Estimated opportunity", "value": format_usd(summary["estimated_usd"]),
-             "help": "Open estimates only; never mixed with verified savings."},
+             "help": "Sum of open ESTIMATED_USD. Each estimate may carry a time basis "
+                     "(the PERIOD column below; NULL = unspecified): monthly run-rates, "
+                     "one-time savings, and unlabeled figures are added at face value, so "
+                     "read the per-row basis before trusting the total. Never mixed with "
+                     "verified savings."},
         ])
         display = frame.reset_index(drop=True)
         if not include_closed:
@@ -323,7 +327,7 @@ def render_action_center(company: str) -> None:
             owner_col="OWNER",
             status_col="STATUS",
             next_col="DUE_DATE",
-            context_cols=("SEVERITY", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
+            context_cols=("SEVERITY", "PERIOD", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
             height=340,
             sort_label="severity, overdue, estimated value, then age",
             impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate these "
@@ -372,13 +376,26 @@ def render_action_center(company: str) -> None:
                                    f"{entity_type} {entity_key.strip()} — open one from the queue "
                                    "above instead of duplicating, or continue if this is separate.")
             confidence = st.slider("Confidence", 0.0, 1.0, 0.7, 0.05, key="action_new_conf")
-            estimated = st.number_input("Estimated USD", min_value=0.0, step=50.0, key="action_new_usd")
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                estimated = st.number_input("Estimated USD", min_value=0.0, step=50.0, key="action_new_usd")
+            with ec2:
+                # DS #7: label the estimate's time basis so it is never summed with a
+                # different clock. Defaults to Monthly (the common optimization run-rate);
+                # "Unspecified" stores NULL for a genuinely unlabeled figure.
+                period_label = st.selectbox(
+                    "Estimate basis", ("Monthly", "One-time", "Annual", "Unspecified"),
+                    key="action_new_period",
+                    help="How to read the dollar figure: a monthly run-rate, a one-time "
+                         "saving, an annual figure, or unspecified (no stated basis).")
             if title and entity_key:
                 insert_sql = create_action_sql(
                     title=title, detail=detail, company=company, severity=severity,
                     owner=owner, due_date=due, source="Action Center",
                     entity_type=entity_type, entity_key=entity_key,
                     confidence=confidence, estimated_usd=estimated,
+                    period={"Monthly": "MONTHLY", "One-time": "ONE_TIME",
+                            "Annual": "ANNUAL", "Unspecified": ""}[period_label],
                 )
                 st.code(insert_sql, language="sql")
                 if st.button("Create work item", key="action_new_exec"):

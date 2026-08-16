@@ -492,7 +492,10 @@ def _scenarios(company: str) -> None:
     ])
     st.caption(
         "Open action estimates are de-duplicated by entity, then adoption and realization "
-        "haircuts are applied. Verified savings never enter the projection."
+        "haircuts are applied. Estimates are summed at face value across time bases "
+        "(monthly, one-time, annual, or unlabeled — see each action's PERIOD), so read the "
+        "projection as an order-of-magnitude opportunity, not a strict run-rate. "
+        "Verified savings never enter the projection."
     )
     if not actions.empty:
         # DS #1: pin actions on watched entities to the top WITHIN their severity band, so a
@@ -515,7 +518,7 @@ def _scenarios(company: str) -> None:
         styled_table(
             adf[[column for column in (
                 "WATCHED", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
-                "CONFIDENCE", "ESTIMATED_USD", "OWNER", "DUE_DATE",
+                "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
             ) if column in adf.columns]],
             height=320, sort_label="action priority order",
         )

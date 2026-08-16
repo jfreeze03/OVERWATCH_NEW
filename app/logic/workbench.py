@@ -26,6 +26,11 @@ ENTITY_TYPES = (
     "ACTION",
 )
 ACTION_STATUSES = ("OPEN", "IN_PROGRESS", "DONE", "DROPPED")
+# The time basis of ESTIMATED_USD on an ACTION_QUEUE row (V083, DS #7). '' means
+# unspecified and is stored NULL -- the honest default when a writer states a dollar
+# figure with no declared clock. Deliberately small: a labeled basis is only useful
+# if readers can reason about it, and these are the three bases the app authors.
+ACTION_ESTIMATE_PERIODS = ("MONTHLY", "ANNUAL", "ONE_TIME", "")
 EXPERIMENT_STATUSES = ("PLANNED", "RUNNING", "OBSERVING", "VERIFIED", "REJECTED", "ROLLED_BACK")
 # Terminal outcomes that reconcile the savings ledger + source action via
 # SP_VERIFY_EXPERIMENT (DS #5, V081); the rest are in-flight, plain status updates.
@@ -99,6 +104,7 @@ def create_action_sql(
     entity_key: str,
     confidence: float | None = None,
     estimated_usd: float | None = None,
+    period: str = "",
 ) -> str:
     clean_title = str(title or "").strip()
     if not clean_title:
@@ -107,17 +113,23 @@ def create_action_sql(
     if sev not in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
         raise ValueError(f"Unsupported severity: {sev}")
     kind = normalize_entity_type(entity_type)
+    per = str(period or "").strip().upper()
+    if per not in ACTION_ESTIMATE_PERIODS:
+        raise ValueError(f"Unsupported estimate period: {per}")
     conf_sql = "NULL" if confidence is None else sql_number(max(0.0, min(float(confidence), 1.0)))
     usd_sql = "NULL" if estimated_usd is None else sql_number(max(0.0, float(estimated_usd)))
+    # PERIOD labels the time basis of ESTIMATED_USD (DS #7). NULL when unstated so
+    # readers can tell "unspecified" from a real basis instead of assuming monthly.
+    period_sql = "NULL" if not per else sql_literal(per, 20)
     return f"""
 INSERT INTO {core_object('ACTION_QUEUE')}
     (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, DUE_DATE, SOURCE,
-     SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD)
+     SOURCE_ENTITY_TYPE, SOURCE_ENTITY_KEY, CONFIDENCE, ESTIMATED_USD, PERIOD)
 SELECT {sql_literal(str(company or 'ALL'), 40)}, {sql_literal(sev, 20)},
        {sql_literal(clean_title, 300)}, {sql_literal(str(detail or ''), 2000)},
        {sql_literal(str(owner or 'DBA'), 200)}, 'OPEN', {_date_sql(due_date)},
        {sql_literal(str(source or 'Action Center'), 120)}, {sql_literal(kind, 40)},
-       {sql_literal(str(entity_key or '').strip(), 500)}, {conf_sql}, {usd_sql}
+       {sql_literal(str(entity_key or '').strip(), 500)}, {conf_sql}, {usd_sql}, {period_sql}
 """.strip()
 
 

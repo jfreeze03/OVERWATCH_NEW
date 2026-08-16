@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.196.0 - Decision Studio: label the time basis of action estimates (V083) (2026-08-16)
+
+Decision Studio review, Wave 2 (finding #7). Migration V083 + app rewire.
+
+- **Action estimates now carry a time basis.** `ACTION_QUEUE.ESTIMATED_USD` mixed
+  clocks — the AI-chargeback queue insert stored a 30-day (monthly) projection while the
+  Action Center create form stored an operator-typed figure with no stated basis — and the
+  Workbench "Estimated opportunity" KPI and the Decision Studio scenario projection summed
+  them as if identical. V083 adds a nullable `PERIOD` column (MONTHLY / ANNUAL / ONE_TIME;
+  NULL = unspecified). The app stamps it at both writers (AI chargeback = MONTHLY; the
+  Action Center create form takes an operator-chosen basis) and surfaces it in every reader —
+  the Action Center table + KPI help, the Decision Studio actions table + projection caption,
+  the Overview top-actions table, and the Brief — so estimates on different bases are no
+  longer read as one number.
+- **Scope note.** Normalizing the scenario projection's math across bases (how to fold a
+  one-time saving into a monthly run-rate) is left as a follow-up modeling decision; the
+  projection now discloses that it sums estimates at face value.
+- Owner applies V083 in Snowsight after V082 **before deploying the app** — the
+  action-queue readers select `PERIOD` by name. App version 4.196.0.
+
 ## 4.195.0 - Decision Studio: real data-product detail view (2026-08-16)
 
 Decision Studio review, Wave 2 (finding #14). App-only; new

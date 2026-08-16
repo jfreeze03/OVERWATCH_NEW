@@ -98,6 +98,7 @@ snowflake/migrations/V079__ai_predicate_coco_historical_split.sql
 snowflake/migrations/V080__security_change_risk_etl_exclusion.sql
 snowflake/migrations/V081__unified_experiment_verify.sql
 snowflake/migrations/V082__query_family_company_regrain.sql
+snowflake/migrations/V083__action_estimate_period.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
