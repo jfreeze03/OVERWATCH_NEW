@@ -14,6 +14,7 @@ from app.logic.security import (
     domain_posture,
     escalation_flags,
     fact_coverage_complete,
+    grant_anomaly_flags,
     security_change_risk,
 )
 from app.ui.security_center import _cell_text
@@ -205,6 +206,59 @@ def test_security_center_wires_escalation_scoring() -> None:
     assert 'SELF_ESCALATE=("SELF_ESCALATION", "any")' in center
 
 
+def test_admin_grant_context_reads_admin_grants_with_time_context() -> None:
+    sqlglot = pytest.importorskip("sqlglot")
+    sql = security_sql.admin_grant_context(90, "ALFA")
+    sqlglot.parse(sql, dialect="snowflake")
+    for col in ("ADMIN_ROLE", "USER_NAME", "GRANTED_AT", "PRIOR_GRANTS",
+                "DOW_ISO", "HOUR_OF_DAY"):
+        assert col in sql, col
+    assert "SNOW_ACCOUNTADMINS" in sql and "ACCOUNTADMIN" in sql
+    # First-time detection reads the SAME grant history (retains revoked rows),
+    # so a re-grant is not miscounted as a first-ever elevation.
+    assert "p.CREATED_ON < g.CREATED_ON" in sql
+    assert "COMPANY_FOR_USER" in sql and "'ALFA'" in sql   # company-scoped
+    # Account-wide scope carries no user filter.
+    assert "COMPANY_FOR_USER" not in security_sql.admin_grant_context(90, "ALL")
+
+
+def test_grant_anomaly_flags_scores_first_time_and_off_hours() -> None:
+    frame = pd.DataFrame(
+        {
+            "ADMIN_ROLE": ["ACCOUNTADMIN"] * 4,
+            "USER_NAME": ["A", "B", "C", "D"],
+            "PRIOR_GRANTS": [0, 3, 2, 0],
+            "DOW_ISO": [3, 6, 2, 2],       # 6 = Saturday
+            "HOUR_OF_DAY": [10, 14, 3, 11],  # 3 = pre-business
+        }
+    )
+    flagged = grant_anomaly_flags(frame)
+    # A: first-ever grant on a weekday afternoon -> FIRST_TIME (HIGH), anomalous.
+    assert bool(flagged.loc[0, "FIRST_TIME"]) is True
+    assert flagged.loc[0, "SEVERITY"] == "HIGH"
+    # B: renewal (prior grants) but on a Saturday -> off-hours only (MEDIUM).
+    assert bool(flagged.loc[1, "FIRST_TIME"]) is False
+    assert bool(flagged.loc[1, "OFF_HOURS"]) is True
+    assert flagged.loc[1, "SEVERITY"] == "MEDIUM"
+    # C: renewal at 3am weekday -> off-hours (MEDIUM), not first-time.
+    assert bool(flagged.loc[2, "OFF_HOURS"]) is True
+    assert flagged.loc[2, "SEVERITY"] == "MEDIUM"
+    # D: first-ever during business hours -> HIGH regardless of clock.
+    assert flagged.loc[3, "SEVERITY"] == "HIGH"
+    # Empty frame returns the columns without raising.
+    empty = grant_anomaly_flags(pd.DataFrame())
+    for col in ("FIRST_TIME", "OFF_HOURS", "ANOMALY", "SEVERITY", "REASON"):
+        assert col in empty.columns
+
+
+def test_security_center_wires_admin_grant_timing() -> None:
+    center = _read("app/ui/security_center.py")
+    page = _read("app/ui/pages/security.py")
+    assert "grant_anomaly_flags(result.df" in center
+    assert "First-ever elevations" in center
+    assert "render_admin_grant_anomalies(company)" in page
+
+
 def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     sqlglot = pytest.importorskip("sqlglot")
     builders = (
@@ -368,7 +422,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.221.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.222.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )

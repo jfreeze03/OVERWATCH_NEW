@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.222.0 - Admin-grant timing check on Security (2026-08-16)
+
+CoCo review, Tier-3 (Security #2, the time-context half). New
+`data.security_sql.admin_grant_context` + `logic.security.grant_anomaly_flags`.
+
+- **Admin-role grants now carry their timing context, not just a count.** A count of
+  admin grants is volume; the delta a reviewer acts on is *who* and *when*. A new
+  toggle-gated Access panel reads admin-role grants over 90 days and flags two things the
+  bare grant list can't: a **first-ever elevation** (the grantee has no prior grant of that
+  role on record — computed from the same `GRANTS_TO_USERS` history, which retains revoked
+  rows, so a grant→revoke→re-grant is *not* miscounted), and an **off-hours / weekend grant**
+  (landed outside business hours account-local, i.e. outside a normal deploy window).
+  Surfaced as First-ever / Off-hours KPIs plus a severity-ranked table with a plain-English
+  reason. Evidence only; no alert fires. Read-only, off first paint. Complements v4.221.0's
+  structural self-escalation scoring — that answers "who *can* escalate," this answers "who
+  just got a suspicious grant." App version 4.222.0.
+
 ## 4.221.0 - Self-escalation scoring on effective-access paths (2026-08-16)
 
 CoCo review, Tier-3 (Security #2). New `logic.security.escalation_flags`;

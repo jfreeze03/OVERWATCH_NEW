@@ -45,6 +45,7 @@ from app.ui.components import (
     with_user_names,
 )
 from app.ui.security_center import (
+    render_admin_grant_anomalies,
     render_effective_access,
     render_security_overview,
 )
@@ -290,6 +291,7 @@ def _access_tab(company: str, days: int) -> None:
         result_caption(res)
 
     render_effective_access(company)
+    render_admin_grant_anomalies(company)
 
 
 def _egress_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:

@@ -440,6 +440,46 @@ LIMIT 2000
 """
 
 
+def admin_grant_context(days: int = 90, company: str = "ALL") -> str:
+    """Admin-role grants in the window with the *time-context* for triage (Sec2).
+
+    'WHO gained admin roles' already surfaces via grant_changes/break-glass
+    activity; this adds the delta a reviewer actually acts on:
+
+      * PRIOR_GRANTS — how many earlier grants of *this* role to *this* user are
+        on record. Zero means a first-ever admin elevation (the strongest
+        escalation signal), not a renewal of standing access.
+      * DOW_ISO / HOUR_OF_DAY — when the grant landed (account-local), so a
+        weekend or off-hours grant outside a normal deploy window stands out.
+
+    Scoped to the admin roles this account actually uses (SNOW_* pair) plus the
+    standard admin roles, defensively. The prior-grant count is a correlated
+    read of the same GRANTS_TO_USERS history (retains revoked rows), so a role
+    granted, revoked, and re-granted is NOT counted as first-time.
+    """
+    days = bounded_days(days, 180)
+    date_pred = f"g.CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    where = and_where(
+        "g.ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS', 'ACCOUNTADMIN', "
+        "'SECURITYADMIN', 'SYSADMIN')",
+        date_pred,
+        companies.user_clause(company, "g.GRANTEE_NAME"),
+    )
+    return f"""
+SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
+       g.CREATED_ON AS GRANTED_AT, g.GRANTED_BY,
+       (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS p
+         WHERE p.ROLE = g.ROLE AND p.GRANTEE_NAME = g.GRANTEE_NAME
+           AND p.CREATED_ON < g.CREATED_ON) AS PRIOR_GRANTS,
+       DAYOFWEEKISO(g.CREATED_ON) AS DOW_ISO,
+       HOUR(g.CREATED_ON) AS HOUR_OF_DAY
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
+WHERE {where}
+ORDER BY g.CREATED_ON DESC
+LIMIT 500
+"""
+
+
 # ---------------------------------------------------------------------------
 # rec#24: least-privilege — held table grants vs. what queries actually touched.
 # Both builders bridge GRANTS_TO_ROLES -> TABLE_STORAGE_METRICS (by UPPER name)

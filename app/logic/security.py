@@ -160,3 +160,59 @@ def escalation_flags(
     return df
 
 
+def _grant_reason(first_time: bool, off_hours: bool, weekend: bool) -> str:
+    parts: list[str] = []
+    if first_time:
+        parts.append("first admin grant on record for this user")
+    if off_hours:
+        parts.append("weekend grant" if weekend else "off-hours grant")
+    return "; ".join(parts) if parts else "within normal pattern"
+
+
+def grant_anomaly_flags(
+    frame: pd.DataFrame,
+    *,
+    business_start_hour: int = 7,
+    business_end_hour: int = 19,
+) -> pd.DataFrame:
+    """Flag admin-role grants whose *timing* is anomalous (Sec2 time-context).
+
+    Two deltas turn a bare 'X gained ACCOUNTADMIN' event into a triage signal:
+      * ``FIRST_TIME`` — the grantee has no prior grant of this role on record,
+        so this is a first-ever elevation, not a renewal of standing access.
+      * ``OFF_HOURS`` — the grant landed on a weekend or outside business hours
+        (account-local), i.e. outside a normal change/deploy window.
+
+    Adds ``FIRST_TIME``, ``OFF_HOURS``, ``ANOMALY`` (either), ``SEVERITY``
+    (HIGH if first-time, else MEDIUM if off-hours, else INFO) and a human
+    ``REASON``. Returns a copy; safe on empty or absent columns.
+    """
+    df = frame.copy() if frame is not None else pd.DataFrame()
+    if df.empty:
+        for col in ("FIRST_TIME", "OFF_HOURS", "ANOMALY"):
+            df[col] = pd.Series(dtype=bool)
+        df["SEVERITY"] = pd.Series(dtype=object)
+        df["REASON"] = pd.Series(dtype=object)
+        return df
+    prior = pd.to_numeric(df.get("PRIOR_GRANTS"), errors="coerce").fillna(0.0)
+    dow = pd.to_numeric(df.get("DOW_ISO"), errors="coerce").fillna(0.0)
+    hour = pd.to_numeric(df.get("HOUR_OF_DAY"), errors="coerce").fillna(12.0)
+    start = int(business_start_hour)
+    end = int(business_end_hour)
+    first_time = prior <= 0
+    weekend = dow.isin([6, 7])
+    off_hours = weekend | (hour < start) | (hour >= end)
+    df["FIRST_TIME"] = first_time
+    df["OFF_HOURS"] = off_hours
+    df["ANOMALY"] = first_time | off_hours
+    df["SEVERITY"] = [
+        "HIGH" if ft else ("MEDIUM" if oh else "INFO")
+        for ft, oh in zip(first_time, off_hours, strict=True)
+    ]
+    df["REASON"] = [
+        _grant_reason(bool(ft), bool(oh), bool(wk))
+        for ft, oh, wk in zip(first_time, off_hours, weekend, strict=True)
+    ]
+    return df
+
+

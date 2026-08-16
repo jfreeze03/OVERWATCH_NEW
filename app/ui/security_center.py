@@ -20,6 +20,7 @@ from app.logic.formulas import account_today, safe_float
 from app.logic.security import (
     domain_posture,
     escalation_flags,
+    grant_anomaly_flags,
 )
 from app.logic.workbench import create_action_sql
 from app.ui.components import (
@@ -328,6 +329,58 @@ def render_effective_access(company: str) -> None:
             "Control Room", "Entity 360", context={"entity_type": "USER", "entity_key": user}
         )
     styled_table(one, height=300, sort_label="risk then path")
+    result_caption(result)
+
+
+def render_admin_grant_anomalies(company: str) -> None:
+    """Sec2 time-context: admin-role grants flagged by when + to whom they landed."""
+    section_header("Admin grants — timing check", "warn", "admin", anchor="sec-admin-grants")
+    panel_help(
+        "A count of admin grants is volume; the *context* is what matters. This flags a "
+        "grant of an admin role to a user who has none on record (a first-ever elevation) "
+        "and grants that landed on a weekend or outside business hours — outside a normal "
+        "deploy window. Evidence only; no alert fires from here."
+    )
+    if not st.toggle("Load admin-grant timing check", key="sec_admin_grant_ctx_on"):
+        return
+    result = run(
+        security_sql.admin_grant_context(90, company),
+        page=_PAGE,
+        key=f"sec_admin_grant_ctx_{company}",
+        tier="metadata",
+        source="admin-role grants + prior-tenure history (on demand)",
+    )
+    if result.ok and result.empty:
+        empty_state("clean", "No admin-role grants landed in the last 90 days for this scope.")
+        return
+    if not result.usable():
+        empty_state("no_data_yet", "Admin-grant evidence did not resolve for this scope.")
+        return
+    frame = grant_anomaly_flags(result.df.copy().reset_index(drop=True))
+    first_time = int(frame["FIRST_TIME"].sum())
+    off_hours = int(frame["OFF_HOURS"].sum())
+    kpi_row([
+        {"label": "Admin grants (90d)", "value": f"{len(frame):,}"},
+        {
+            "label": "First-ever elevations",
+            "value": f"{first_time:,}",
+            "help": "Grantee had no prior grant of this role on record.",
+            "delta_color": "inverse" if first_time else "off",
+        },
+        {
+            "label": "Off-hours / weekend",
+            "value": f"{off_hours:,}",
+            "help": "Landed outside business hours (account-local) or on a weekend.",
+            "delta_color": "inverse" if off_hours else "off",
+        },
+    ])
+    display = frame.sort_values(
+        ["ANOMALY", "FIRST_TIME", "GRANTED_AT"], ascending=[False, False, False]
+    ).reset_index(drop=True)
+    display = display[[
+        "SEVERITY", "ADMIN_ROLE", "USER_NAME", "GRANTED_AT", "GRANTED_BY", "REASON",
+    ]]
+    styled_table(display, height=300, sort_label="anomaly then most recent")
     result_caption(result)
 
 
