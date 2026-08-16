@@ -104,3 +104,59 @@ def security_change_risk(query_type: object, role: object = "", database: object
     return score, level, family
 
 
+def escalation_flags(
+    frame: pd.DataFrame,
+    *,
+    depth_weight: float = 4.0,
+    admin_bump: float = 25.0,
+    self_escalate_bump: float = 40.0,
+) -> pd.DataFrame:
+    """Sharpen the raw privilege RISK_SCORE into an escalation risk (Sec2).
+
+    ``RISK_SCORE`` counts *object* privileges (ownership, sensitive grants) but is
+    blind to admin-role membership, so a path that inherits ACCOUNTADMIN while
+    holding few listed object grants can score low despite being god-mode. Two
+    facts correct that:
+      * ``REACHES_ADMIN`` — the path inherits an admin role, a standing exposure.
+      * ``MANAGE_GRANTS`` — the effective role holds the MANAGE GRANTS privilege,
+        which lets it grant *any* role (including admin) to anyone. That is the
+        textbook self-escalation surface: the holder can grant themselves admin.
+
+    ``SELF_ESCALATION`` flags any path whose effective role can manage grants —
+    evaluated per row (not AND-ed with ``REACHES_ADMIN``), because the privilege
+    that lets you climb and the role that already sits at the top can be reached
+    by different paths. ``ESCALATION_SCORE`` folds in path depth (a long inherited
+    chain is harder to audit than a direct grant) plus admin-reach and
+    self-escalation bumps. Returns a copy with ``REACHES_ADMIN``,
+    ``SELF_ESCALATION`` (bool) and ``ESCALATION_SCORE`` (0-100 int) added; safe on
+    empty or absent columns.
+    """
+    df = frame.copy() if frame is not None else pd.DataFrame()
+    if df.empty:
+        if "REACHES_ADMIN" not in df:
+            df["REACHES_ADMIN"] = pd.Series(dtype=bool)
+        df["SELF_ESCALATION"] = pd.Series(dtype=bool)
+        df["ESCALATION_SCORE"] = pd.Series(dtype="int64")
+        return df
+    risk = pd.to_numeric(df.get("RISK_SCORE"), errors="coerce").fillna(0.0)
+    depth = pd.to_numeric(df.get("DEPTH"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    manage = pd.to_numeric(df.get("MANAGE_GRANTS"), errors="coerce").fillna(0.0)
+    reaches_raw = df.get("REACHES_ADMIN")
+    reaches = (
+        reaches_raw.fillna(False).astype(bool)
+        if reaches_raw is not None
+        else pd.Series(False, index=df.index)
+    )
+    self_escalation = manage > 0
+    score = (
+        risk
+        + depth * float(depth_weight)
+        + reaches.astype(float) * float(admin_bump)
+        + self_escalation.astype(float) * float(self_escalate_bump)
+    ).clip(lower=0.0, upper=100.0)
+    df["REACHES_ADMIN"] = reaches
+    df["SELF_ESCALATION"] = self_escalation
+    df["ESCALATION_SCORE"] = score.round().astype(int)
+    return df
+
+

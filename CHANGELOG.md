@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.221.0 - Self-escalation scoring on effective-access paths (2026-08-16)
+
+CoCo review, Tier-3 (Security #2). New `logic.security.escalation_flags`;
+`data.security_sql.effective_access` now publishes `REACHES_ADMIN`.
+
+- **The effective-access graph now scores escalation, not just static privilege.** `RISK_SCORE`
+  counts object privileges but is blind to admin-role membership, so a path that inherits
+  ACCOUNTADMIN while holding few listed grants can score low despite being god-mode. A recursive
+  path that inherits an admin role (`ACCOUNTADMIN` / `SECURITYADMIN` / `SNOW_*ADMINS`) is now
+  flagged `REACHES_ADMIN`, and a new pure scorer (`logic.security.escalation_flags`) folds path
+  depth and admin-reach into an `ESCALATION_SCORE`. A path whose effective role holds MANAGE
+  GRANTS — the privilege that can grant any role (including admin) to anyone, i.e. grant itself
+  higher — is flagged `SELF_ESCALATION` and counted in a new "Can self-escalate to admin" KPI.
+  (Self-escalation is judged per path on MANAGE GRANTS, not AND-ed with admin-reach, so a
+  non-admin who can grant themselves admin is still caught.) The user list now ranks by escalation
+  risk, and the path graph marks admin-reaching roles and self-escalation users in red. Read-only,
+  toggle-gated, off first paint. App version 4.221.0.
+
 ## 4.220.0 - Incident lifecycle Gantt on Control Room (2026-08-16)
 
 CoCo review, Tier-3 (Control Room #5). New `data.mart_sql.incident_gantt` + `ui.charts.incident_gantt`.

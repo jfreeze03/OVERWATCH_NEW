@@ -19,6 +19,7 @@ from app.data import security_sql, workbench_sql
 from app.logic.formulas import account_today, safe_float
 from app.logic.security import (
     domain_posture,
+    escalation_flags,
 )
 from app.logic.workbench import create_action_sql
 from app.ui.components import (
@@ -251,25 +252,35 @@ def render_effective_access(company: str) -> None:
     if not result.usable():
         empty_state("no_data_yet", "Effective-access evidence did not resolve for this scope.")
         return
-    frame = result.df.copy().reset_index(drop=True)
+    frame = escalation_flags(result.df.copy().reset_index(drop=True))
     summary = (
         frame.groupby("USER_NAME", as_index=False)
         .agg(
             DIRECT_ROLES=("DIRECT_ROLE", "nunique"),
             EFFECTIVE_ROLES=("EFFECTIVE_ROLE", "nunique"),
             MAX_RISK=("RISK_SCORE", "max"),
+            MAX_ESCALATION=("ESCALATION_SCORE", "max"),
+            SELF_ESCALATE=("SELF_ESCALATION", "any"),
             SENSITIVE_PRIVILEGES=("SENSITIVE_PRIVILEGES", "sum"),
         )
-        .sort_values(["MAX_RISK", "EFFECTIVE_ROLES"], ascending=False)
+        .sort_values(["MAX_ESCALATION", "MAX_RISK", "EFFECTIVE_ROLES"], ascending=False)
         .reset_index(drop=True)
     )
+    self_escalators = int(summary["SELF_ESCALATE"].sum())
     kpi_row([
         {"label": "Users", "value": f"{len(summary):,}"},
         {"label": "Effective paths", "value": f"{len(frame):,}"},
         {"label": "High-risk users", "value": f"{int((summary['MAX_RISK'] >= 70).sum()):,}", "delta_color": "inverse"},
+        {
+            "label": "Can self-escalate to admin",
+            "value": f"{self_escalators:,}",
+            "help": "Holds MANAGE GRANTS on some effective role — the privilege that "
+            "can grant any role (including admin) to anyone, including itself.",
+            "delta_color": "inverse" if self_escalators else "off",
+        },
     ])
     selection = selectable_table(
-        summary, key="sec_effective_users", height=260, sort_label="maximum privilege risk"
+        summary, key="sec_effective_users", height=260, sort_label="escalation risk"
     )
     if selection is not None:
         try:
@@ -286,14 +297,32 @@ def render_effective_access(company: str) -> None:
     one = frame[frame["USER_NAME"].astype(str) == user].head(80)
     dot = ["digraph access {", "rankdir=LR;", 'node [shape=box, style="rounded"];']
     dot.append(f'"{_dot_text(user)}" [shape=ellipse];')
+    admin_nodes: set[str] = set()
+    self_escalates = False
     for _, row in one.iterrows():
         direct = _dot_text(row.get("DIRECT_ROLE"))
         effective = _dot_text(row.get("EFFECTIVE_ROLE"))
         dot.append(f'"{_dot_text(user)}" -> "{direct}";')
         if direct != effective:
             dot.append(f'"{direct}" -> "{effective}";')
+        if bool(row.get("REACHES_ADMIN")):
+            admin_nodes.add(effective)
+        if bool(row.get("SELF_ESCALATION")):
+            self_escalates = True
+    # Admin-reaching effective roles are the escalation surface — mark them.
+    dot.extend(
+        f'"{node}" [style="rounded,filled", fillcolor="#f8d7da", color="#c0392b"];'
+        for node in sorted(admin_nodes)
+    )
+    if self_escalates:
+        dot.append(f'"{_dot_text(user)}" [shape=ellipse, color="#c0392b", penwidth=2];')
     dot.append("}")
     st.graphviz_chart("\n".join(dot), use_container_width=True)
+    if self_escalates:
+        st.caption(
+            "⚠ This user holds MANAGE GRANTS on an effective role — it can grant itself "
+            "any role, including admin (a self-escalation surface)."
+        )
     if st.button("Open user in Entity 360", key="sec_effective_entity"):
         request_navigation(
             "Control Room", "Entity 360", context={"entity_type": "USER", "entity_key": user}

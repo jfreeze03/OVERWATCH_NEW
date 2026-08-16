@@ -12,6 +12,7 @@ from app.core.result import QueryResult
 from app.data import mart_sql, security_sql
 from app.logic.security import (
     domain_posture,
+    escalation_flags,
     fact_coverage_complete,
     security_change_risk,
 )
@@ -155,6 +156,53 @@ def test_change_risk_is_monotonic_for_sensitive_context() -> None:
     assert low == (30, "LOW", "CREATE")
     assert destructive == (100, "CRITICAL", "DESTRUCTIVE")
     assert drop_user == (90, "CRITICAL", "DESTRUCTIVE")
+
+
+def test_effective_access_exposes_admin_reach() -> None:
+    # Sec2: the recursive path reader must publish whether it inherits an admin
+    # role, so the escalation scorer can flag self-escalation surfaces.
+    sql = security_sql.effective_access("ALFA")
+    assert "AS REACHES_ADMIN" in sql
+    assert "'ACCOUNTADMIN'" in sql and "'SECURITYADMIN'" in sql
+    assert "AS RISK_SCORE" in sql
+
+
+def test_escalation_flags_scores_self_escalation_paths() -> None:
+    frame = pd.DataFrame(
+        {
+            "USER_NAME": ["A", "A", "B", "C"],
+            "RISK_SCORE": [50, 30, 10, 0],
+            "DEPTH": [3, 1, 0, 2],
+            "MANAGE_GRANTS": [2, 0, 0, 1],
+            "REACHES_ADMIN": [True, True, False, False],
+        }
+    )
+    scored = escalation_flags(frame)
+    # MANAGE GRANTS on the effective role IS the self-escalation privilege.
+    # Row 0: reaches admin AND manages grants -> flagged.
+    assert bool(scored.loc[0, "SELF_ESCALATION"]) is True
+    # Row 1: reaches admin but holds no MANAGE GRANTS -> cannot self-grant here.
+    assert bool(scored.loc[1, "SELF_ESCALATION"]) is False
+    # Row 3: never reaches admin today, but MANAGE GRANTS lets it grant itself
+    # admin -> flagged. (The bug this replaces AND-ed the two facts row-wise and
+    # would have missed this genuine escalation surface.)
+    assert bool(scored.loc[3, "SELF_ESCALATION"]) is True
+    # Depth + admin + self-escalate bumps lift the score but stay clipped to 100.
+    assert 0 <= int(scored.loc[0, "ESCALATION_SCORE"]) <= 100
+    assert int(scored.loc[0, "ESCALATION_SCORE"]) == 100
+    assert int(scored.loc[0, "ESCALATION_SCORE"]) > int(scored.loc[1, "ESCALATION_SCORE"])
+    # A pathless frame returns the columns without raising.
+    empty = escalation_flags(pd.DataFrame())
+    for col in ("REACHES_ADMIN", "SELF_ESCALATION", "ESCALATION_SCORE"):
+        assert col in empty.columns
+
+
+def test_security_center_wires_escalation_scoring() -> None:
+    center = _read("app/ui/security_center.py")
+    assert "escalation_flags(result.df" in center
+    assert "Can self-escalate to admin" in center
+    assert 'MAX_ESCALATION=("ESCALATION_SCORE", "max")' in center
+    assert 'SELF_ESCALATE=("SELF_ESCALATION", "any")' in center
 
 
 def test_new_readers_parse_and_preserve_expected_shapes() -> None:
@@ -320,7 +368,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.220.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.221.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
