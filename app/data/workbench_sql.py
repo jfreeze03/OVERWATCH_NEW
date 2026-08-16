@@ -368,6 +368,11 @@ SELECT o.SLO_ID, o.NAME, o.ENTITY_TYPE, o.ENTITY_KEY, o.METRIC_KEY,
        o.OWNER_NAME, o.NOTES, m.CURRENT_VALUE, m.AS_OF,
        CASE
          WHEN m.CURRENT_VALUE IS NULL THEN 'NO_DATA'
+         -- #11: don't call an objective MET/BREACH off stale evidence. AS_OF is the
+         -- newest mart DAY in the window; a healthy loader stamps yesterday, so a
+         -- value older than 2 days means the loader stalled -- report STALE, not a
+         -- stale verdict.
+         WHEN m.AS_OF < DATEADD('day', -2, CURRENT_DATE()) THEN 'STALE'
          WHEN o.COMPARATOR = '>=' AND m.CURRENT_VALUE >= o.TARGET_VALUE THEN 'MET'
          WHEN o.COMPARATOR = '<=' AND m.CURRENT_VALUE <= o.TARGET_VALUE THEN 'MET'
          ELSE 'BREACH'
@@ -377,7 +382,7 @@ SELECT o.SLO_ID, o.NAME, o.ENTITY_TYPE, o.ENTITY_KEY, o.METRIC_KEY,
                  / NULLIF(o.ERROR_BUDGET_PCT, 0), 2), NULL) AS BURN_MULTIPLE
 FROM objectives o
 LEFT JOIN measured m ON m.SLO_ID = o.SLO_ID
-ORDER BY CASE STATUS WHEN 'BREACH' THEN 0 WHEN 'NO_DATA' THEN 1 ELSE 2 END,
+ORDER BY CASE STATUS WHEN 'BREACH' THEN 0 WHEN 'STALE' THEN 1 WHEN 'NO_DATA' THEN 2 ELSE 3 END,
          BURN_MULTIPLE DESC NULLS LAST, o.NAME
 """
 

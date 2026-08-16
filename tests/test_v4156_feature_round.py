@@ -34,7 +34,9 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     assert "No query denominator" in control
     assert "health cannot be cleared" in control
     assert 'if _thr.usable() and queries > 0:' in overview
-    assert '"value": f"{summary[\'worst_burn\']:,.2f}x" if measured_objectives else "No evidence"' in studio
+    # Wave-2 #10: worst-burn KPI reads n/a when no objective has an applicable burn
+    # (latency/P95 only), never a misleading healthy 0.00x.
+    assert '(f"{summary[\'worst_burn\']:,.2f}x" if summary["has_burn"] else "n/a")' in studio
     assert 'verified_value = format_usd(verified) if ledger.ok else "Unavailable"' in studio
     assert 'if has_candidates else "No evidence"' in studio
     assert _optional_number(None, "%") == "n/a"

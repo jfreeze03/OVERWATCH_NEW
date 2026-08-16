@@ -139,15 +139,22 @@ def scenario_projection(actions: pd.DataFrame | None, *, adoption_pct: float,
 def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
     if frame is None or frame.empty:
         return {"total": 0.0, "met": 0.0, "breach": 0.0, "no_data": 0.0,
-                "worst_burn": 0.0}
+                "stale": 0.0, "worst_burn": 0.0, "has_burn": 0.0}
     status = frame.get("STATUS", pd.Series("NO_DATA", index=frame.index)).astype(str).str.upper()
-    burn = pd.to_numeric(
-        frame.get("BURN_MULTIPLE", pd.Series(0.0, index=frame.index)), errors="coerce"
-    ).fillna(0.0)
+    raw_burn = pd.to_numeric(
+        frame.get("BURN_MULTIPLE", pd.Series(dtype="float64")), errors="coerce"
+    )
+    burn = raw_burn.fillna(0.0)
     return {
         "total": float(len(frame)),
         "met": float(status.eq("MET").sum()),
         "breach": float(status.eq("BREACH").sum()),
         "no_data": float(status.eq("NO_DATA").sum()),
+        # #11: objectives evaluated off stale mart evidence are neither met nor breached.
+        "stale": float(status.eq("STALE").sum()),
         "worst_burn": round(float(burn.max()), 2),
+        # #10: error-budget burn only applies to SUCCESS_PCT objectives (NULL for
+        # latency/P95). has_burn is False when no objective carries a burn, so the UI
+        # shows "n/a" instead of a misleading 0.00x.
+        "has_burn": float(raw_burn.notna().any()),
     }

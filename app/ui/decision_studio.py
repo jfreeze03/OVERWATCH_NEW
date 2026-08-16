@@ -204,6 +204,13 @@ def _slos() -> None:
     summary = slo_summary(result.df)
     measured_objectives = int(summary["met"] + summary["breach"])
     read_model_caption("slo_cockpit")
+    st.caption(
+        "P95 objectives evaluate the **worst daily P95** over the window — a day-granular "
+        "check (the objective holds only if *every* day stayed under target), not a single "
+        "window percentile. STALE = the newest mart day is >2 days old, so the verdict is "
+        "withheld rather than read off stale evidence. Error-budget burn applies to "
+        "success-rate objectives only; latency/P95 objectives show n/a."
+    )
     if not result.empty:
         exceptions = []
         if summary["breach"]:
@@ -218,6 +225,13 @@ def _slos() -> None:
                 "label": "Missing evidence",
                 "value": f"{summary['no_data']:,.0f}",
                 "detail": "The objective cannot be evaluated from its current mart window.",
+                "severity": "warn",
+            })
+        if summary["stale"]:
+            exceptions.append({
+                "label": "Stale evidence",
+                "value": f"{summary['stale']:,.0f}",
+                "detail": "Newest mart day is >2 days old — the loader may have stalled; verdict withheld.",
                 "severity": "warn",
             })
         if summary["worst_burn"] > 1:
@@ -236,9 +250,13 @@ def _slos() -> None:
          "severity": "bad" if summary["breach"] else ("ok" if measured_objectives else "")},
         {"label": "No evidence", "value": f"{summary['no_data']:,.0f}",
          "severity": "warn" if summary["no_data"] else ("ok" if summary["total"] else "")},
+        {"label": "Stale", "value": f"{summary['stale']:,.0f}",
+         "severity": "warn" if summary["stale"] else ("ok" if summary["total"] else ""),
+         "help": "Objectives whose newest mart day is >2 days old; the verdict is withheld."},
         {"label": "Worst burn",
-         "value": f"{summary['worst_burn']:,.2f}x" if measured_objectives else "No evidence",
-         "severity": ("bad" if summary["worst_burn"] > 1 else "ok") if measured_objectives else ""},
+         "value": (f"{summary['worst_burn']:,.2f}x" if summary["has_burn"] else "n/a"),
+         "severity": ("bad" if summary["worst_burn"] > 1 else "ok") if summary["has_burn"] else "",
+         "help": "Error-budget consumption; success-rate objectives only (latency/P95 show n/a)."},
     ])
     if result.empty:
         empty_state("no_data_yet", "No active objectives are configured.")

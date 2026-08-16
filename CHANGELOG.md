@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.192.0 - Decision Studio: SLO cockpit trust fixes (2026-08-16)
+
+Decision Studio review, Wave 2 (findings #9, #10, #11). App-only; `data/workbench_sql.py`
+`slo_cockpit`, `logic/decision.py` `slo_summary`, and the SLOs board in
+`ui/decision_studio.py`.
+
+- **A stalled loader no longer reads as MET.** An objective was evaluated off whatever
+  the mart last held, so a metric board that stopped loading could still show MET/BREACH
+  from days-old data. The status now returns **STALE** when the newest mart day (`AS_OF`)
+  is more than 2 days old — the verdict is withheld rather than asserted off stale
+  evidence — with its own KPI and exception. (#11)
+- **Latency objectives show n/a for burn, not 0.00x.** Error-budget burn only applies to
+  success-rate objectives; latency/P95 objectives carry no burn. The "Worst burn" KPI now
+  reads **n/a** when no objective has an applicable burn, instead of a misleading 0.00x
+  (via a new `has_burn` signal in `slo_summary`). (#10)
+- **P95 objectives are disclosed as worst-daily-P95.** The P95 metrics are `MAX` of the
+  daily P95 over the window — a day-granular check (holds only if *every* day stayed under
+  target), not a single window percentile. The board now says so, so the value isn't
+  misread. (#9)
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.191.0 - Decision Studio: query-family company regrain (V082) (2026-08-16)
 
 Decision Studio review, finding #3 (company-scope leaks). Owner migration **V082**

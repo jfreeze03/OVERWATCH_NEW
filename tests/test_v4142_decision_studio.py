@@ -179,7 +179,9 @@ def test_slo_summary_keeps_breach_and_missing_evidence_distinct() -> None:
         "met": 1.0,
         "breach": 1.0,
         "no_data": 1.0,
+        "stale": 0.0,       # Wave-2 #11: stale evidence is a distinct verdict
         "worst_burn": 3.2,
+        "has_burn": 1.0,    # Wave-2 #10: a success objective carries a burn
     }
 
 
