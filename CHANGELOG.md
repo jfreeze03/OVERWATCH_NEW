@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.178.0 - Feature: serverless ROI board — Query Acceleration (2026-08-15)
+
+Gap-audit Wave 6 (rec #6). App-only; `cost_sql.py`, new `logic/serverless_roi.py`,
+`optimize.py`.
+
+- **Query Acceleration now shows ROI, not just spend.** Serverless features were
+  tracked as spend only; the benefit side was never read (`QUERY_ACCELERATION_ELIGIBLE`
+  was absent from the whole app). New `qas_roi` builder FULL-OUTER-JOINs QAS credits
+  spent (`QUERY_ACCELERATION_HISTORY`) against the eligible acceleration workload
+  (`QUERY_ACCELERATION_ELIGIBLE`) per warehouse, and a pure `classify_qas_roi` labels
+  each: **drop candidate** (paying for QAS with little eligible workload — it rarely
+  helps), **enable candidate** (eligible workload with QAS off — a possible speedup),
+  working, or minimal. A toggle-gated "Serverless ROI — Query Acceleration" panel on
+  Optimize > Idle & sizing shows the spend, drop/enable counts, and per-warehouse
+  verdicts. Eligibility is honestly framed as a utilization signal, not a dollarized
+  compute saving. Optimize reachable-table pin gains the two QAS views (deliberate);
+  not canaried (QAS eligibility can be edition-sensitive — the panel degrades
+  gracefully).
+- **Scope:** this ships the QAS arm — the one serverless feature with a real
+  Snowflake benefit signal. Search-opt / MV-refresh / auto-clustering credits are
+  already tracked under Storage & waste and the object ledger; their true benefit
+  needs query-level correlation and stays queued.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.177.0 - Feature: anomaly root-cause auto-explain (2026-08-15)
 
 Gap-audit Wave 6 (rec #5). App-only; new `logic/anomaly_explain.py` + `spend.py`.

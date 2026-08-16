@@ -237,6 +237,49 @@ ORDER BY BILLABLE DESC, TB DESC
 """
 
 
+def qas_roi(days: int, company: str = "ALL") -> str:
+    """rec#6: Query Acceleration Service ROI per warehouse — QAS credits SPENT
+    (QUERY_ACCELERATION_HISTORY) beside the eligible acceleration workload
+    (QUERY_ACCELERATION_ELIGIBLE, the benefit side the app never read).
+
+    A FULL OUTER JOIN so both regimes surface: a warehouse PAYING for QAS with
+    little eligible workload (drop candidate) and one with meaningful eligible
+    workload but QAS off (enable candidate). Eligibility is a utilization signal,
+    not a dollarized benefit — Snowflake reports eligible query time, not the
+    compute it would save. Account-wide unless scoped to a company's warehouses.
+    """
+    days = bounded_days(days, 365)
+    wc = companies.warehouse_clause(company)
+    return f"""
+WITH elig AS (
+    SELECT WAREHOUSE_NAME,
+           COUNT(DISTINCT QUERY_ID) AS ELIGIBLE_QUERIES,
+           ROUND(SUM(COALESCE(ELIGIBLE_QUERY_ACCELERATION_TIME, 0)), 1) AS ELIGIBLE_SEC,
+           MAX(UPPER_LIMIT_SCALE_FACTOR) AS MAX_SCALE_FACTOR
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_ELIGIBLE
+    WHERE {and_where(f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())", wc)}
+    GROUP BY 1
+),
+used AS (
+    SELECT WAREHOUSE_NAME, SUM(COALESCE(CREDITS_USED, 0)) AS QAS_CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_HISTORY
+    WHERE {and_where(f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())", wc)}
+    GROUP BY 1
+)
+SELECT
+    COALESCE(e.WAREHOUSE_NAME, u.WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+    ROUND(COALESCE(u.QAS_CREDITS, 0), 4)         AS QAS_CREDITS,
+    COALESCE(e.ELIGIBLE_QUERIES, 0)              AS ELIGIBLE_QUERIES,
+    COALESCE(e.ELIGIBLE_SEC, 0)                  AS ELIGIBLE_SEC,
+    e.MAX_SCALE_FACTOR                           AS MAX_SCALE_FACTOR
+FROM elig e
+FULL OUTER JOIN used u ON e.WAREHOUSE_NAME = u.WAREHOUSE_NAME
+WHERE COALESCE(u.QAS_CREDITS, 0) > 0 OR COALESCE(e.ELIGIBLE_QUERIES, 0) > 0
+ORDER BY QAS_CREDITS DESC, ELIGIBLE_SEC DESC
+LIMIT 200
+"""
+
+
 def compute_pool_usage(days: int) -> str:
     """SPCS credits by compute pool and owning application (account-wide)."""
     days = bounded_days(days, 365)

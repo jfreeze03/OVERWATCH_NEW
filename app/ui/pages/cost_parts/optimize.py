@@ -41,6 +41,7 @@ from app.logic.insights import (
     storage_movers,
     with_auto_suspend_settings,
 )
+from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -480,6 +481,48 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
 
         st.divider()
         _capacity_forecast_panel(company)
+
+        st.divider()
+        # rec#6: serverless ROI — Query Acceleration. The app tracked QAS SPEND but
+        # never the benefit side; QUERY_ACCELERATION_ELIGIBLE names the eligible
+        # workload, so a warehouse paying for QAS that rarely helps (or missing an
+        # acceleration opportunity) finally surfaces.
+        st.markdown("**Serverless ROI — Query Acceleration (QAS)**")
+        st.caption(
+            "QAS credits spent vs the queries ELIGIBLE for acceleration (Snowflake's own "
+            "eligibility signal). Eligibility is utilization, not a dollarized saving. "
+            "Search-opt / MV-refresh / auto-clustering credits are tracked under Storage & waste "
+            "and the object ledger; their true benefit needs query-level correlation (queued)."
+        )
+        if st.toggle("Run QAS ROI scan", key="opt_qas_roi_toggle",
+                     help="Reads QUERY_ACCELERATION_ELIGIBLE + QUERY_ACCELERATION_HISTORY."):
+            qas = run(cost_sql.qas_roi(days, company), page=_PAGE,
+                      key=f"qas_roi_{company}_{days}", tier="historical",
+                      source="QUERY_ACCELERATION_ELIGIBLE x QUERY_ACCELERATION_HISTORY (QAS ROI)")
+            if qas.ok and qas.empty:
+                empty_state("clean", "No Query Acceleration spend or eligible workload in this window.")
+            elif guard(qas, ""):
+                qdf = qas.df.copy()
+                qdf["QAS_USD"] = qdf["QAS_CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
+                verdicts = [classify_qas_roi(u, e)
+                            for u, e in zip(qdf["QAS_USD"], qdf["ELIGIBLE_QUERIES"], strict=False)]
+                qdf["VERDICT"] = [v.verdict for v in verdicts]
+                _drop = sum(1 for v in verdicts if v.action == "drop")
+                _enable = sum(1 for v in verdicts if v.action == "enable")
+                kpi_row([
+                    {"label": f"QAS spend ({days}d)", "value": format_usd(float(qdf["QAS_USD"].sum()))},
+                    {"label": "Drop candidates", "value": str(_drop),
+                     "severity": "warn" if _drop else "",
+                     "help": "Paying for QAS with little eligible workload — acceleration rarely helps."},
+                    {"label": "Enable candidates", "value": str(_enable),
+                     "help": "Eligible acceleration workload with QAS off — a possible speedup."},
+                ])
+                _qcols = [c for c in ["WAREHOUSE_NAME", "QAS_USD", "ELIGIBLE_QUERIES", "ELIGIBLE_SEC",
+                                      "MAX_SCALE_FACTOR", "VERDICT"] if c in qdf.columns]
+                styled_table(
+                    qdf[_qcols], height=320, sort_label="QAS $ desc",
+                    column_config={"QAS_USD": st.column_config.NumberColumn("QAS $", format="$%.2f")})
+                result_caption(qas, note="eligibility is utilization, not a dollarized compute saving")
 
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------

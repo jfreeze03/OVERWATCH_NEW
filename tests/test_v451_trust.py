@@ -69,9 +69,12 @@ _REACHABLE = {
     "app/ui/pages/cost_parts/optimize.py": (
         # rec#41: + QUERY_ATTRIBUTION_HISTORY — the measured-cost lens (measured_query_costs)
         # now offered on the Optimize expensive-queries panel, not just the Unit-costs tab.
+        # rec#6: + QUERY_ACCELERATION_ELIGIBLE + QUERY_ACCELERATION_HISTORY — the QAS ROI board
+        # (cost_sql.qas_roi) pairs QAS spend with the eligible-workload benefit signal.
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
-        "QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY",
-        "TABLE_STORAGE_METRICS", "WAREHOUSE_METERING_HISTORY"),
+        "QUERY_ACCELERATION_ELIGIBLE", "QUERY_ACCELERATION_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
+        "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
+        "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/operations.py": (
         # rec#17: + WAREHOUSE_METERING_HISTORY — the wasted-spend board
         # (wasted_query_spend_usd) allocates warehouse-hour credits to non-success
