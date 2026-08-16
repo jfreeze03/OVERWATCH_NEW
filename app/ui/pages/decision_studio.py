@@ -42,12 +42,25 @@ def render() -> None:
         ["Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
         key="decision_section",
     )
-    section_filter_contract(
-        f,
-        applies=("company", "days"),
-        note=("Portfolio, product economics and Cost Truth use Company and Window; SLO "
-              "and experiment records keep their own objective windows."),
-    )
+    # #13: each section declares which of the page filters it actually honors, instead
+    # of one blanket "Company + Window" contract that overclaimed for the sections that
+    # ignore them (SLO objectives carry their own windows; experiments are account-wide;
+    # Scenarios scopes by Company only, with the horizon chosen in-panel).
+    _contracts = {
+        "Portfolio": {"applies": ("company", "days"),
+                      "note": "Recurring-query portfolio scoped to Company and Window."},
+        "SLOs": {"applies": (),
+                 "note": "Objectives evaluate against their own configured windows; the page Company/Window do not apply."},
+        "Products": {"applies": ("company", "days"),
+                     "note": "Data-product economics scoped to Company and Window."},
+        "Cost Truth": {"applies": ("company", "days"),
+                       "note": "Billed/metered/measured/allocated inventory scoped to Company and Window."},
+        "Scenarios": {"applies": ("company",),
+                      "note": "Scenario projections scope to Company; the horizon is chosen inside the panel."},
+        "Experiments": {"applies": (),
+                        "note": "Experiment records are account-wide; the page Company/Window do not apply."},
+    }
+    section_filter_contract(f, **_contracts[section])
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
     if section == "Portfolio":
         _portfolio(company, days, rate)

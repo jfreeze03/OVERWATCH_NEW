@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.194.0 - Decision Studio: honest scope + truncation disclosure (2026-08-16)
+
+Decision Studio review, Wave 2 (findings #13, #15). App-only; `ui/pages/decision_studio.py`
+and `ui/decision_studio.py`.
+
+- **Per-section filter contracts.** The page carried one blanket "Company + Window"
+  contract, but SLOs and Experiments ignore both (objectives keep their own windows;
+  experiments are account-wide) and Scenarios scopes by Company only. Each section now
+  declares exactly which page filters it honors, so the scope note stops overclaiming. (#13)
+- **Top-N truncation is disclosed.** The Portfolio board caps at the top 200 query
+  families by measured credits, but the app's row-truncation banner only fires at the
+  5000 fetch cap — so the smaller cap truncated silently. The board now says "showing the
+  top 200… more exist" when the cap is hit, so "N families" isn't misread as the whole
+  population. (#15)
+
+App version 4.194.0. Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.193.0 - Decision Studio: product criticality rank + owner conflict (2026-08-16)
 
 Decision Studio review, Wave 2 (finding #12). App-only; `data/workbench_sql.py`

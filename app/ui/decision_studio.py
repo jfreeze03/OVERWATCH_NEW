@@ -46,9 +46,12 @@ def _open_entity(kind: str, key: str) -> None:
     )
 
 
+_PORTFOLIO_CAP = 200
+
+
 def _portfolio(company: str, days: int, rate: float) -> None:
     result = run(
-        workbench_sql.workload_portfolio(days, company, 200), page=_PAGE,
+        workbench_sql.workload_portfolio(days, company, _PORTFOLIO_CAP), page=_PAGE,
         key=f"decision_portfolio_{company}_{days}", tier="historical",
         source="MART_PATTERN_COST_DAILY + MART_QUERY_FAMILY_DAILY",
     )
@@ -70,6 +73,15 @@ def _portfolio(company: str, days: int, rate: float) -> None:
                                   ascending=[True, False, False])
                      .drop(columns="_LR").reset_index(drop=True))
     read_model_caption("workload_portfolio")
+    # #15: the board caps at the top _PORTFOLIO_CAP families by measured credits; the
+    # app's row-truncation banner only fires at the 5000 fetch cap, so this smaller cap
+    # would truncate silently. Disclose when the cap is hit so "N families" isn't misread
+    # as the whole population.
+    if len(portfolio) >= _PORTFOLIO_CAP:
+        st.caption(
+            f"Showing the top {_PORTFOLIO_CAP} query families by measured credits — more "
+            "exist in this scope; narrow the Window or Company to surface the rest."
+        )
     act_now = portfolio[portfolio["LANE"].eq("ACT NOW")]
     failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
     validate = portfolio[portfolio["CONFIDENCE"].lt(0.5)]
