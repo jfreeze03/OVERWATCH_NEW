@@ -367,6 +367,18 @@ def show_databases_sql() -> str:
     return "SHOW DATABASES LIMIT 500"
 
 
+def show_shares_sql() -> str:
+    """rec#25: outbound/inbound share inventory — the data-exposure surface.
+
+    SHOW-based like SHOW WAREHOUSES/DATABASES: this account has no ACCOUNT_USAGE
+    shares view, and SHOW SHARES is the one read that names every share, its KIND
+    (OUTBOUND=we expose / INBOUND=we consume), the database it exposes, the
+    consumer accounts (``to``), and any marketplace listing. Columns are parsed
+    client-side by logic/exposure.classify_share_exposure; LIMIT keeps the
+    row-cap rewrite away."""
+    return "SHOW SHARES LIMIT 500"
+
+
 def role_privilege_matrix() -> str:
     """Auditor sheet: privileges per role aggregated by object type."""
     return """

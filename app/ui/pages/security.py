@@ -14,6 +14,7 @@ from app.core.query import cache_scope, run, run_batch
 from app.core.state import filters
 from app.data import insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
+from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.logic.security import (
@@ -321,6 +322,69 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
                      sort_label="day then GB written")
         st.caption("Every name here should have a business reason to move data out. New names are the finding.")
         result_caption(unl)
+
+
+def _exposure_tab() -> None:
+    """rec#25: outbound data-exposure governance — who can see our data.
+
+    One metadata read (SHOW SHARES) answers "which objects are exposed to whom":
+    OUTBOUND shares are the exposure surface, ``to`` names the consumer accounts,
+    and a marketplace LISTING is broad by construction. Company scoping doesn't
+    apply — shares are an account-wide object with no company grain. The alert on
+    *new/broadened* exposure (SEC_NEW_EXPOSURE) and the per-object SHOW GRANTS TO
+    SHARE drill are the owner-migration / next-slice halves of this finding."""
+    st.caption("Outbound shares are the surface where this account's data leaves it. Every consumer here should be a known partner.")
+    shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",
+                 tier="metadata", source="SHOW SHARES", max_rows=0)
+    if shares.ok and shares.empty:
+        st.info(
+            "No shares are visible to the current role. That can mean none are defined, "
+            "or the role can't list them (needs MANAGE SHARE / IMPORT SHARE) — an empty "
+            "result here is not proof that nothing is exposed."
+        )
+        result_caption(shares)
+        return
+    if not guard(shares, "", setup_hint="Needs a role that can run SHOW SHARES (typically ACCOUNTADMIN or a role granted the MANAGE SHARE / IMPORT SHARE privilege)."):
+        return
+    classified = classify_share_exposure(shares.df)
+    if classified.empty:
+        st.info(
+            "No shares are visible to the current role. That can mean none are defined, "
+            "or the role can't list them (needs MANAGE SHARE / IMPORT SHARE) — an empty "
+            "result here is not proof that nothing is exposed."
+        )
+        result_caption(shares)
+        return
+    stats = summarize_exposure(classified)
+    kpi_row([
+        {"label": "Outbound shares", "value": f"{stats['outbound']}",
+         "help": "Shares that expose this account's data to other accounts. INBOUND shares (data we consume) are excluded."},
+        {"label": "Consumer accounts", "value": f"{stats['consumer_accounts']}",
+         "help": "Distinct accounts reached across all outbound shares. An unexpected account is the finding."},
+        {"label": "Marketplace listings", "value": f"{stats['listings']}",
+         "delta_color": "inverse" if stats["listings"] else "off",
+         "help": "Shares published as a listing are broad by construction — reachable beyond a named consumer list."},
+        {"label": "Broad shares", "value": f"{stats['broad']}",
+         "delta_color": "inverse" if stats["broad"] else "off",
+         "help": "Outbound shares reaching 3+ consumer accounts directly."},
+    ])
+    panel_help(
+        "EXPOSURE: LISTING = published to the marketplace/org (potentially public); "
+        "BROAD = 3+ direct consumer accounts; DIRECT = shared to at least one account; "
+        "NO CONSUMERS = outbound but granted to nobody yet (hygiene, latent surface); "
+        "INBOUND = data we consume, shown only so the surface count stays honest."
+    )
+    outbound_first = classified[classified["KIND"] != "INBOUND"]
+    if not outbound_first.empty:
+        section_header("Outbound exposure (who can see our data)", "warn", "security")
+        styled_table(outbound_first, height=320, slug="share-exposure",
+                     sort_label="most-exposing first, then consumer count")
+    inbound = classified[classified["KIND"] == "INBOUND"]
+    if not inbound.empty:
+        section_header("Inbound shares (data we consume)", "info", "security")
+        styled_table(inbound, height=200, slug="share-inbound")
+    st.caption("New consumer accounts or a newly-published listing are the findings to chase. Alerting on *changes* to this surface is the next slice.")
+    result_caption(shares)
 
 
 def _trust_center_tab() -> None:
@@ -777,7 +841,7 @@ def render() -> None:
         "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
     section = lazy_sections(
-        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Trust Center"],
+        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Exposure", "Trust Center"],
         key="sec_section",
     )
     _contracts = {
@@ -801,6 +865,10 @@ def render() -> None:
         "Egress": {
             "applies": ("company", "days", "database", "schema_contains"),
             "note": "Transfer and unload evidence where object grain is available.",
+        },
+        "Exposure": {
+            "applies": (),
+            "note": "Shares are account-wide objects with no company grain; the exposure inventory is account-wide.",
         },
         "Trust Center": {
             "applies": (),
@@ -827,5 +895,7 @@ def render() -> None:
         _clients_tab(f["company"], f["days"])
     elif section == "Egress":
         _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+    elif section == "Exposure":
+        _exposure_tab()
     else:
         _trust_center_tab()

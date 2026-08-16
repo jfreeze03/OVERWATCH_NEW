@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.186.0 - Security: outbound data-exposure inventory (2026-08-15)
+
+Cost/metric gap audit, Wave 6 (finding #25). App-only; new pure
+`logic/exposure.py`, `data/security_sql.show_shares_sql`, Security "Exposure" tab.
+
+- **Who can see our data is no longer invisible.** The Security page had no view of
+  outbound shares or listings — "which objects are exposed to whom" and "which shares
+  reach many accounts" were unanswerable on a shared account. A new **Exposure** tab
+  reads `SHOW SHARES` (one metadata query, mirroring the existing SHOW WAREHOUSES /
+  DATABASES inventory) and classifies each share by reach: **LISTING** (published to
+  the marketplace/org, broad by construction), **BROAD** (3+ direct consumer
+  accounts), **DIRECT** (>=1 consumer), **NO CONSUMERS** (outbound but granted to
+  nobody yet), and **INBOUND** (data we consume, shown only so the surface count is
+  honest). KPIs count outbound shares, distinct consumer accounts, listings, and broad
+  shares; the table is sorted most-exposing first.
+- **Honest degradation.** A missing `to` column reads as unknown reach (DIRECT), never
+  a false "no consumers"; column names are matched case-insensitively; an account with
+  no shares reads as "nothing exposed outbound".
+- Deferred to follow-up slices: the per-object `SHOW GRANTS TO SHARE` drill, the
+  ORGANIZATION_USAGE.LISTING_* last-access staleness lens, and the SEC alert on
+  *new/broadened* exposure (owner migration).
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.185.0 - Decision Studio: Watch pins actions in the Action Center (2026-08-15)
 
 Decision Studio review, Wave 1 (finding #1, slice 2). App-only;
