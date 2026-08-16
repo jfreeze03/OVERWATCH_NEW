@@ -1071,7 +1071,8 @@ def workload_portfolio(df: pd.DataFrame) -> None:
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
-                      title: str = "", rule_date: object = None) -> None:
+                      title: str = "", rule_date: object = None,
+                      *, takeaway: bool = True) -> None:
     """Single daily metric as a line; optional vertical rule (e.g. change date)."""
     data = df[[day_col, value_col]].copy()
     data.columns = ["Day", "Value"]
@@ -1092,6 +1093,15 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
         )
         chart = chart + rule
     st.altair_chart(chart.properties(height=CHART_H_SM), use_container_width=True)
+    # rec35 / CoCo UI#14: name the peak day so the line leads with a conclusion.
+    if takeaway and not data.empty:
+        _v = pd.to_numeric(data["Value"], errors="coerce").dropna()
+        if not _v.empty and float(_v.max()) > 0:
+            _peak = float(_v.max())
+            _pday = pd.to_datetime(data.loc[_v.idxmax(), "Day"], errors="coerce")
+            _ds = _pday.strftime("%b %d") if pd.notna(_pday) else str(data.loc[_v.idxmax(), "Day"])
+            _pf = f"{_peak:,.0f}" if abs(_peak) >= 100 else f"{_peak:,.1f}"
+            st.caption(f"Peak {_pf} on {_ds}.")
 
 
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY",
@@ -1131,7 +1141,7 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
 
 def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                         usd_col: str, partial_month: str = "",
-                        top_n: int = 5) -> None:
+                        top_n: int = 5, *, takeaway: bool = True) -> None:
     """The boss chart: monthly spend stacked by warehouse. The in-flight
     month renders dimmed (partial, not a drop) — same honesty rule as the
     daily spend trend. Top-N categories + "Other" (owner report 2026-07-11:
@@ -1163,6 +1173,9 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
     ))
     st.altair_chart(bars, use_container_width=True)
+    # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
+    if takeaway and float(totals.sum()) > 0:
+        st.caption(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum())))
 
 
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,

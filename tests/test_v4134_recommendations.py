@@ -131,6 +131,37 @@ def test_ranked_bar_takeaway_is_opt_in(monkeypatch):
     assert captions == ["Top: A $75 (75% of $100)."]
 
 
+def test_boss_chart_takeaway_names_top_spender(monkeypatch):
+    captions: list[str] = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "caption", captions.append)
+    frame = pd.DataFrame({
+        "MONTH": ["2026-07", "2026-07", "2026-08", "2026-08"],
+        "WH": ["WH_A", "WH_B", "WH_A", "WH_B"],
+        "USD": [60.0, 20.0, 90.0, 30.0],
+    })
+    charts.monthly_stacked_usd(frame, "MONTH", "WH", "USD")     # WH_A = 150 of 200
+    assert captions == ["Top: WH_A $150 (75% of $200)."]
+    captions.clear()
+    charts.monthly_stacked_usd(frame, "MONTH", "WH", "USD", takeaway=False)
+    assert captions == []
+
+
+def test_metric_line_takeaway_names_peak_day(monkeypatch):
+    captions: list[str] = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda *a, **k: None)
+    monkeypatch.setattr(charts.st, "caption", captions.append)
+    frame = pd.DataFrame({
+        "DAY": ["2026-08-10", "2026-08-11", "2026-08-12"],
+        "QUERIES": [120.0, 340.0, 90.0],
+    })
+    charts.daily_metric_line(frame, "DAY", "QUERIES", "Queries")
+    assert captions == ["Peak 340 on Aug 11."]
+    captions.clear()
+    charts.daily_metric_line(frame, "DAY", "QUERIES", "Queries", takeaway=False)
+    assert captions == []
+
+
 def test_shared_executive_model_renders_projector_print_slides_and_csv_safely():
     view = ExecutiveSummaryView(
         company="ALFA <prod>",

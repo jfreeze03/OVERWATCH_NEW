@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.201.0 - Chart takeaways on the boss chart and metric lines (2026-08-16)
+
+CoCo review, do-first wave (UI #14). Extends the existing `_share_note`
+“lead-with-the-conclusion” idiom to two bare charts.
+
+- **The boss chart and daily metric lines now state their conclusion.** `monthly_stacked_usd`
+  (monthly spend by warehouse) captions its top spender (“Top: WH_X $Y (Z% of total)”), and
+  `daily_metric_line` names its peak day — matching the takeaway the other charts already
+  carry. A chart with a conclusion is information, not homework. App version 4.201.0.
+
 ## 4.200.0 - Oldest-unacked-critical age on the Brief (2026-08-16)
 
 CoCo review, do-first wave (duration, not count). New pure
