@@ -726,6 +726,68 @@ LIMIT 200
 """
 
 
+def dormant_reawakening(dormant_gap_days: int = 45, recent_days: int = 7,
+                        baseline_days: int = 365, company: str = "ALL") -> str:
+    """Sec5: a long-dormant account that JUST logged in — the signal
+    LAST_SUCCESS_LOGIN structurally cannot express.
+
+    ACCOUNT_USAGE.USERS keeps only the most-recent login, so a woken dormant
+    account reads as freshly active there. This reads successful LOGIN_HISTORY
+    over ``baseline_days`` and flags a user whose login inside the last
+    ``recent_days`` followed a >= ``dormant_gap_days`` gap — a real gap between
+    consecutive logins (LAG), or a first-in-window login for an account created
+    long before (the deep-dormant case, since LOGIN_HISTORY retains ~365 days, so
+    a >365d silence leaves a single login here whose gap is measured from
+    CREATED_ON). Company scope is user-role only (LOGIN_HISTORY has no object
+    grain). Read-only review — service accounts legitimately log in rarely and
+    will surface; no auto-alert is raised."""
+    baseline_days = bounded_days(baseline_days, 365)
+    recent_days = max(1, min(int(recent_days), 90))
+    gap = max(7, min(int(dormant_gap_days), 365))
+    where = and_where(
+        f"L.EVENT_TIMESTAMP >= DATEADD('day', -{baseline_days}, CURRENT_TIMESTAMP())",
+        "L.IS_SUCCESS = 'YES'",
+        companies.user_clause(company, "L.USER_NAME"),
+    )
+    return f"""
+WITH logins AS (
+    SELECT L.USER_NAME, L.EVENT_TIMESTAMP,
+           COALESCE(L.CLIENT_IP, '(none)') AS CLIENT_IP,
+           L.FIRST_AUTHENTICATION_FACTOR AS AUTH_FACTOR,
+           LAG(L.EVENT_TIMESTAMP) OVER (
+               PARTITION BY L.USER_NAME ORDER BY L.EVENT_TIMESTAMP) AS PREV_LOGIN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY L
+    WHERE {where}
+),
+roles AS (
+    SELECT GRANTEE_NAME, COUNT(*) AS ROLE_COUNT,
+           LISTAGG(ROLE, ', ') WITHIN GROUP (ORDER BY ROLE) AS ROLES
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE DELETED_ON IS NULL
+    GROUP BY GRANTEE_NAME
+),
+woke AS (
+    SELECT l.USER_NAME, l.EVENT_TIMESTAMP AS WAKE_LOGIN, l.CLIENT_IP, l.AUTH_FACTOR,
+           l.PREV_LOGIN AS LAST_ACTIVE_BEFORE, u.EMAIL, u.CREATED_ON,
+           DATEDIFF('day', COALESCE(l.PREV_LOGIN, u.CREATED_ON), l.EVENT_TIMESTAMP) AS GAP_DAYS
+    FROM logins l
+    JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS u
+      ON u.NAME = l.USER_NAME AND u.DELETED_ON IS NULL
+    WHERE l.EVENT_TIMESTAMP >= DATEADD('day', -{recent_days}, CURRENT_TIMESTAMP())
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY l.USER_NAME ORDER BY GAP_DAYS DESC) = 1
+)
+SELECT w.USER_NAME, w.EMAIL, w.LAST_ACTIVE_BEFORE, w.WAKE_LOGIN, w.GAP_DAYS,
+       w.CLIENT_IP, w.AUTH_FACTOR, w.CREATED_ON,
+       COALESCE(r.ROLE_COUNT, 0) AS ROLE_COUNT,
+       LEFT(COALESCE(r.ROLES, ''), 300) AS ROLES
+FROM woke w
+LEFT JOIN roles r ON r.GRANTEE_NAME = w.USER_NAME
+WHERE w.GAP_DAYS >= {gap}
+ORDER BY w.GAP_DAYS DESC, ROLE_COUNT DESC
+LIMIT 200
+"""
+
+
 def egress_daily(days: int = 30) -> str:
     """r25 #7a (owner pick): outbound bytes by day and destination — the
     exfil canary and the surprise-transfer-bill canary are the same chart."""

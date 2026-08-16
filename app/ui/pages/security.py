@@ -16,7 +16,7 @@ from app.data import insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
-from app.logic.insights import dormant_severity
+from app.logic.insights import dormant_severity, reawakening_severity
 from app.logic.least_privilege import (
     classify_grant_scopes,
     recommend_for_sheet,
@@ -230,6 +230,39 @@ def _access_tab(company: str, days: int) -> None:
             )
             st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
             result_caption(res)
+
+    # Sec5: the transition LAST_SUCCESS_LOGIN can't express — a long-dormant
+    # account that just logged in. Toggle-gated (off first paint), read-only.
+    section_header("Dormant accounts that just woke up (long-gap logins)", "warn", "security",
+                   anchor="sec-reawakening")
+    _wake_on = st.toggle("Run dormant-reawakening scan (365 days of login history)",
+                         key="sec_reawakening_toggle",
+                         help="Flags a user whose recent login followed a long silence — the signal "
+                              "LAST_SUCCESS_LOGIN can't show (it keeps only the latest login).")
+    if _wake_on:
+        wres = run(security_sql.dormant_reawakening(company=company), page=_PAGE,
+                   key=f"reawakening_{company}", tier="historical",
+                   source="ACCOUNT_USAGE.LOGIN_HISTORY (login-gap scan)")
+        if wres.ok and wres.empty:
+            st.success("No dormant account woke up in the last 7 days in this scope.")
+        elif guard(wres, ""):
+            wranked = reawakening_severity(wres.df)
+            whigh = wranked[wranked["SEVERITY"] == "High"]
+            kpi_row([
+                {"label": "Reawakened accounts", "value": f"{len(wranked)}"},
+                {"label": "High severity", "value": f"{len(whigh)}",
+                 "help": "180+ day silence, or 5+ roles still held.",
+                 "delta_color": "inverse" if len(whigh) else "off"},
+            ])
+            styled_table(
+                with_user_names(wranked, _PAGE)[[
+                    "SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
+                    "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
+                    "ROLE_COUNT", "ROLES"]],
+            )
+            st.caption("Review with the owner; service accounts may log in rarely by design, and a "
+                       ">365-day silence shows a single login here (gap measured from account creation).")
+            result_caption(wres)
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.

@@ -461,3 +461,20 @@ def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     return out
+
+
+def reawakening_severity(df: pd.DataFrame) -> pd.DataFrame:
+    """Sec5: rank dormant-then-active users — the longer the silence and the more
+    roles they hold, the more a sudden login warrants a look."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["GAP_DAYS"] = out["GAP_DAYS"].map(safe_float)
+    out["ROLE_COUNT"] = out["ROLE_COUNT"].map(safe_float)
+    out["SEVERITY"] = out.apply(
+        lambda r: "High" if r["GAP_DAYS"] >= 180 or r["ROLE_COUNT"] >= 5
+        else "Medium" if r["GAP_DAYS"] >= 90
+        else "Low",
+        axis=1,
+    )
+    return out

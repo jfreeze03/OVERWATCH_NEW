@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.219.0 - Dormant-then-active detection on Security (2026-08-16)
+
+CoCo review, Tier-2 (Security #5). New `data.security_sql.dormant_reawakening` +
+`logic.insights.reawakening_severity`.
+
+- **A long-dormant account that suddenly logs in now surfaces on Security.** `LAST_SUCCESS_LOGIN`
+  structurally can't show this — `ACCOUNT_USAGE.USERS` keeps only the most-recent login, so a
+  woken account reads as freshly active. A new toggle-gated Access panel reads successful
+  `LOGIN_HISTORY` and flags a user whose recent login followed a long silence — a real gap between
+  consecutive logins (LAG), or a first-in-window login for an account created long before (the
+  deep-dormant case, measured from creation since login history retains ~365 days). Ranked by gap
+  length + roles held; read-only (service accounts log in rarely by design, so no auto-alert).
+  Off first paint. App version 4.219.0.
+
 ## 4.218.0 - Warehouse utilization & quiet-hours on Operations (2026-08-16)
 
 CoCo review, Tier-2 (Operations #12/#13). Zero new SQL/logic — reuses the Cost-side readers.

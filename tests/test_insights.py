@@ -422,3 +422,15 @@ def test_dormant_severity():
     ])
     out = insights.dormant_severity(df)
     assert list(out["SEVERITY"]) == ["High", "Medium", "High"]
+
+
+def test_reawakening_severity():
+    # Sec5: dormant-then-active ranked by silence length + roles held.
+    df = pd.DataFrame([
+        {"USER_NAME": "A", "GAP_DAYS": 400, "ROLE_COUNT": 1},   # long silence -> High
+        {"USER_NAME": "B", "GAP_DAYS": 100, "ROLE_COUNT": 2},   # 90-179d -> Medium
+        {"USER_NAME": "C", "GAP_DAYS": 60, "ROLE_COUNT": 8},    # many roles -> High
+        {"USER_NAME": "D", "GAP_DAYS": 50, "ROLE_COUNT": 1},    # short + few roles -> Low
+    ])
+    assert list(insights.reawakening_severity(df)["SEVERITY"]) == ["High", "Medium", "High", "Low"]
+    assert insights.reawakening_severity(pd.DataFrame()).empty

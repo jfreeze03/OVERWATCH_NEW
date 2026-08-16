@@ -23,6 +23,27 @@ def test_new_network_logins_contract():
     assert "FIRST_SEEN >= DATEADD('day', -90," in security_sql.new_network_logins(9999)  # clamp
 
 
+def test_dormant_reawakening_contract():
+    import pytest
+
+    from app.data import security_sql
+    sql = security_sql.dormant_reawakening(company="ALFA")
+    assert "SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY" in sql
+    assert "SNOWFLAKE.ACCOUNT_USAGE.USERS" in sql and "GRANTS_TO_USERS" in sql
+    assert "L.IS_SUCCESS = 'YES'" in sql                          # successful logins only
+    assert "LAG(L.EVENT_TIMESTAMP)" in sql                         # gap between consecutive logins
+    assert "COALESCE(l.PREV_LOGIN, u.CREATED_ON)" in sql           # deep-dormant edge -> since creation
+    assert "GAP_DAYS" in sql and "WAKE_LOGIN" in sql and "LAST_ACTIVE_BEFORE" in sql
+    assert "w.GAP_DAYS >= 45" in sql                              # default gap threshold
+    assert "QUALIFY ROW_NUMBER()" in sql                          # biggest-gap login per user
+    assert "COMPANY_FOR_USER(L.USER_NAME) = 'ALFA'" in sql        # user-role company scope
+    # baseline clamps to LOGIN_HISTORY's 365d retention; the gap clamps to <= 365
+    assert "DATEADD('day', -365," in security_sql.dormant_reawakening(baseline_days=9999)
+    assert "w.GAP_DAYS >= 365" in security_sql.dormant_reawakening(dormant_gap_days=9999)
+    sqlglot = pytest.importorskip("sqlglot")
+    sqlglot.parse(sql, dialect="snowflake")
+
+
 def test_egress_builders_contract():
     from app.data import security_sql
     e = security_sql.egress_daily(30)
