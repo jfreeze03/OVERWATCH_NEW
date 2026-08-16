@@ -325,9 +325,16 @@ def metric_card_html(item: dict) -> str:
     _sub = str(item.get("sub", "") or "")
     if _sub:
         sub = f'<div class="ow-card__meta">{html.escape(_sub)}</div>'
+    # Ov15: an optional 'as of <date>' freshness watermark under the value — the
+    # data-through stamp for a $ figure (metering lags up to 24h). Muted, reuses
+    # .ow-card__meta; empty -> nothing, so cards without it are byte-unchanged.
+    as_of = ""
+    _asof = str(item.get("as_of", "") or "")
+    if _asof:
+        as_of = f'<div class="ow-card__meta">as of {html.escape(_asof)}</div>'
     return (f'<div class="{cls}" style="min-height:96px">'
             f'<div class="ow-card__title">{label}{help_html}{chips}</div>'
-            f'<div class="ow-card__value">{value}</div>{sub}{delta}{spark}</div>')
+            f'<div class="ow-card__value">{value}</div>{sub}{as_of}{delta}{spark}</div>')
 
 
 # Global dimension chips a MIXED-scope panel may or may not honor. Kept in one

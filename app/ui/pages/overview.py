@@ -513,10 +513,23 @@ def render() -> None:
         if not drivers.empty
         else pd.DataFrame(columns=["DIMENSION", "VALUE_USD"])
     )
+    # Ov15: 'as of <date>' watermarks for the $ KPIs, from frames already in
+    # memory (no query). The last COMPLETE day behind window spend, and the last
+    # metering day behind MTD/projected — the honest data-through, not today.
+    def _asof_of(df, col="DAY"):
+        if df is None or getattr(df, "empty", True) or col not in getattr(df, "columns", []):
+            return None
+        ts = pd.to_datetime(df[col], errors="coerce").max()
+        return ts.strftime("%Y-%m-%d") if pd.notna(ts) else None
+
+    _ov_asof_company = _asof_of(daily_complete)
+    _ov_asof_meter = _asof_of(_bt_hist.df) if _bt_hist.usable() else None
+
     company_kpis = [
         {
             "label": f"Spend, {str(f['window_label']).lower()} ({company})",
             "value": format_usd(window_spend),
+            "as_of": _ov_asof_company,
             "sub": f"{format_credits(_win_credits)} cr" if _win_credits is not None else None,  # rec28
             "method": "metering", "scope": "company",  # rec 13: warehouse metering, company-scoped
             "spark": _spend_spark,
@@ -596,6 +609,11 @@ def render() -> None:
                           "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
+    # Ov15: stamp the two headline $ account cards with the last metering day.
+    if _ov_asof_meter and mtd_source:
+        account_kpis[0]["as_of"] = _ov_asof_meter
+    if _ov_asof_meter and forecast.ok:
+        account_kpis[1]["as_of"] = _ov_asof_meter
 
     # CoCo do-first #1: a page-level "should I worry?" opener from signals already
     # computed above (platform score band, open alerts, budget pace) — no new query.

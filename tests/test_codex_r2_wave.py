@@ -235,6 +235,17 @@ def test_rec28_card_sub_slot_is_optional_secondary_line():
     assert "ow-card__meta" not in metric_card_html({"label": "Spend", "value": "$45,200"})
 
 
+def test_ov15_as_of_watermark_is_optional_and_after_sub():
+    from app.ui.components import metric_card_html
+    # Ov15: an optional "as_of" renders a muted "as of <date>" line under the value.
+    h = metric_card_html({"label": "MTD", "value": "$45,200", "as_of": "2026-08-15"})
+    assert '<div class="ow-card__meta">as of 2026-08-15</div>' in h
+    bare = metric_card_html({"label": "MTD", "value": "$45,200"})
+    assert "as of" not in bare and "ow-card__meta" not in bare      # absent -> nothing
+    both = metric_card_html({"label": "MTD", "value": "$45,200", "sub": "12,300 cr", "as_of": "2026-08-15"})
+    assert both.index("12,300 cr") < both.index("as of 2026-08-15")  # as_of sits AFTER sub
+
+
 def test_rec28_window_credits_derive_from_usd_not_a_missing_column():
     from pathlib import Path
     ov = Path(__file__).resolve().parents[1].joinpath(

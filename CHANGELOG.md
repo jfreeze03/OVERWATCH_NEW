@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.215.0 - As-of watermark on the Overview dollar KPIs (2026-08-16)
+
+CoCo review, Tier-2 (Overview #15). `ui.components.metric_card_html` gains an optional `as_of`.
+
+- **The Overview dollar figures now say what day they're through.** Metering lags up to 24h, so a
+  $ KPI without a date invites "is this today's number?". The window-spend card and the MTD /
+  projected cards now carry a muted "as of <date>" watermark — the last complete/metering day
+  behind the figure, read from frames already in memory (no query). App version 4.215.0.
+
 ## 4.214.0 - "Since your last visit" on the Cost page (2026-08-16)
 
 CoCo review, Tier-2 (Cost #3). New `data.mart_sql.since_last_visit` +
