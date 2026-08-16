@@ -221,6 +221,35 @@ def mark_watched(frame: pd.DataFrame | None, watchlist: pd.DataFrame | None,
     return frame[key_col].astype(str).str.strip().str.upper().isin(keys)
 
 
+def mark_watched_pairs(frame: pd.DataFrame | None, watchlist: pd.DataFrame | None,
+                       type_col: str, key_col: str) -> pd.Series:
+    """Boolean Series: is each row's (``type_col``, ``key_col``) pair on the watchlist?
+
+    Unlike ``mark_watched`` (one entity type), this matches each row's OWN entity type +
+    key against the (ENTITY_TYPE, ENTITY_KEY) pairs on the watchlist — for surfaces like
+    the Action Center where each row carries its source entity (DS #1). Same graceful,
+    case-insensitive behavior; empty/absent inputs yield all-false.
+    """
+    if frame is None:
+        return pd.Series(dtype=bool)
+    if frame.empty or type_col not in frame.columns or key_col not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    if (watchlist is None or watchlist.empty
+            or not {"ENTITY_TYPE", "ENTITY_KEY"}.issubset(watchlist.columns)):
+        return pd.Series(False, index=frame.index)
+    watched = set(zip(
+        watchlist["ENTITY_TYPE"].astype(str).str.strip().str.upper(),
+        watchlist["ENTITY_KEY"].astype(str).str.strip().str.upper(),
+        strict=False,
+    ))
+    pairs = zip(
+        frame[type_col].astype(str).str.strip().str.upper(),
+        frame[key_col].astype(str).str.strip().str.upper(),
+        strict=False,
+    )
+    return pd.Series([pair in watched for pair in pairs], index=frame.index)
+
+
 def watchlist_sql(viewer: str, entity_type: str, entity_key: str,
                   label: str = "", *, remove: bool = False) -> str:
     name = str(viewer or "").strip()

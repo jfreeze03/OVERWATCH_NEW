@@ -120,6 +120,28 @@ def test_portfolio_surfaces_and_pins_watched_families() -> None:
     assert '"WATCHED", "EFFORT_PROXY"' in ds                # WATCHED leads the context columns
 
 
+def test_mark_watched_pairs_matches_type_and_key_pair() -> None:
+    from app.logic.workbench import mark_watched_pairs
+    frame = pd.DataFrame({
+        "SOURCE_ENTITY_TYPE": ["WAREHOUSE", "QUERY_FINGERPRINT", "WAREHOUSE"],
+        "SOURCE_ENTITY_KEY": ["WH_A", "abc", "WH_B"],
+    })
+    wl = pd.DataFrame({
+        "ENTITY_TYPE": ["WAREHOUSE", "QUERY_FINGERPRINT"],
+        "ENTITY_KEY": ["wh_a", "xyz"],       # WH_A matches (case-insensitive); abc/WH_B don't
+    })
+    out = mark_watched_pairs(frame, wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")
+    assert out.tolist() == [True, False, False]
+    assert (mark_watched_pairs(frame, None, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY").tolist()
+            == [False, False, False])
+
+
+def test_action_center_pins_watched_actions_within_severity() -> None:
+    ds = _source("app/ui/decision_studio.py")
+    assert 'mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")' in ds
+    assert '["_SR", "WATCHED"]' in ds        # pinned within severity band, not above CRITICAL
+
+
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
     actions = pd.DataFrame(
         {

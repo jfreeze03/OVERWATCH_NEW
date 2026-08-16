@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.185.0 - Decision Studio: Watch pins actions in the Action Center (2026-08-15)
+
+Decision Studio review, Wave 1 (finding #1, slice 2). App-only;
+`logic/workbench.py`, `decision_studio.py`.
+
+- **Watched entities now surface in the Scenarios action queue too.** New pure
+  `mark_watched_pairs` matches each action's own `(SOURCE_ENTITY_TYPE,
+  SOURCE_ENTITY_KEY)` against the watchlist, so an action on a watched warehouse /
+  query family / product gets a `WATCHED` flag and is pinned to the top *within its
+  severity band* (a watched LOW never jumps a CRITICAL), with a caption counting the
+  pinned actions. Same graceful degradation as slice 1. Watch-rules (notify on state
+  transitions) remain the last Watch slice, queued.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.184.0 - Decision Studio: Watch surfaces on the Portfolio (2026-08-15)
 
 Decision Studio review, Wave 1 (finding #1, first slice). App-only;

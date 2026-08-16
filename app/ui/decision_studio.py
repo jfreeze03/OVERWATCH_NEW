@@ -17,6 +17,7 @@ from app.logic.workbench import (
     SLO_METRIC_KEYS,
     create_slo_objective_sql,
     mark_watched,
+    mark_watched_pairs,
     update_experiment_sql,
 )
 from app.ui import charts
@@ -455,11 +456,28 @@ def _scenarios(company: str) -> None:
         "haircuts are applied. Verified savings never enter the projection."
     )
     if not actions.empty:
+        # DS #1: pin actions on watched entities to the top WITHIN their severity band, so a
+        # watched entity's action surfaces first without burying a CRITICAL under a watched LOW.
+        _viewer = viewer_name()
+        _wl_res = run(workbench_sql.watchlist(_viewer), page=_PAGE,
+                      key="decision_scenario_watchlist", tier="live", source="USER_WATCHLIST"
+                      ) if _viewer else None
+        _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
+        adf = actions.df.copy()
+        adf["WATCHED"] = mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")
+        if bool(adf["WATCHED"].any()):
+            _sev_rank = adf["SEVERITY"].astype(str).str.upper().map(
+                {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}).fillna(4)
+            adf = (adf.assign(_SR=_sev_rank)
+                   .sort_values(["_SR", "WATCHED"], ascending=[True, False], kind="stable")
+                   .drop(columns="_SR").reset_index(drop=True))
+            st.caption(f"★ {int(adf['WATCHED'].sum())} action(s) on your watched entities, "
+                       "pinned to the top of their severity band.")
         styled_table(
-            actions.df[[column for column in (
-                "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
+            adf[[column for column in (
+                "WATCHED", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
                 "CONFIDENCE", "ESTIMATED_USD", "OWNER", "DUE_DATE",
-            ) if column in actions.df.columns]],
+            ) if column in adf.columns]],
             height=320, sort_label="action priority order",
         )
 
