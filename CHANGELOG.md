@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.207.0 - RECOMMEND column on the auditor export pack (2026-08-16)
+
+CoCo review, Tier-2 (Sec #17). New `logic.least_privilege.recommend_for_sheet`.
+
+- **The access-review pack now says what to do, not just what exists.** The ten CSVs were raw
+  evidence; the actionable sheets (unused roles, dormant users, MFA gaps, expiring credentials,
+  break-glass holders) now lead with a RECOMMEND column — revoke / review / enable MFA / rotate
+  — so an access review completes in hours instead of re-deciding every row. Evidence-only
+  sheets stay raw. App version 4.207.0.
+
 ## 4.206.0 - Effort tier on the addressable-savings rollup (2026-08-16)
 
 CoCo review, Tier-2 (Cost #8). New `logic.savings_rollup.effort_tier`.

@@ -124,6 +124,31 @@ def revoke_statements(frame: pd.DataFrame | None) -> list[str]:
     return statements
 
 
+# Per-sheet auditor recommendation for the access-review export (Sec #17). Each
+# actionable sheet gets one leading RECOMMEND column; evidence-only sheets (role
+# matrix, grant diff, failed logins, ...) stay raw evidence.
+_ACCESS_REVIEW_RECOMMEND = {
+    "unused_roles_90d": "REVOKE — role unused by any query in 90d",
+    "dormant_users": "REVIEW / disable — no activity in 90d",
+    "mfa_gaps_password_login": "ENABLE MFA — password login without MFA",
+    "expiring_credentials_10d": "ROTATE — credential expires within 10 days",
+    "break_glass_holders": "REVIEW — standing privileged access",
+}
+
+
+def recommend_for_sheet(sheet: str, frame: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Add a leading RECOMMEND column to an actionable access-review sheet so the
+    auditor pack says what to DO, not just what exists (Sec #17). Evidence-only
+    sheets, empty frames, and error frames pass through unchanged. Pure."""
+    rec = _ACCESS_REVIEW_RECOMMEND.get(sheet)
+    if (rec is None or frame is None or getattr(frame, "empty", True)
+            or "ERROR" in getattr(frame, "columns", [])):
+        return frame
+    out = frame.copy()
+    out.insert(0, "RECOMMEND", rec)
+    return out
+
+
 def summarize_scopes(frame: pd.DataFrame | None) -> dict[str, int]:
     """KPI counts over a classified scope frame (from classify_grant_scopes)."""
     empty = {"roles": 0, "scopes": 0, "unused": 0, "over_broad": 0, "unused_tables": 0}

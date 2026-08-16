@@ -19,6 +19,7 @@ from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
 from app.logic.least_privilege import (
     classify_grant_scopes,
+    recommend_for_sheet,
     revoke_statements,
     summarize_scopes,
 )
@@ -681,7 +682,8 @@ def _export_pack(company: str, days: int, window_label: str) -> None:
     section_header("Auditor export pack", "info", "security")
     st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
                "audit sheets (failed logins, credentials, role matrix, unused roles, 90d grant diff). "
-               "The manifest labels company-scoped and account-wide sheets separately.")
+               "The manifest labels company-scoped and account-wide sheets separately; actionable "
+               "sheets carry a leading RECOMMEND column (revoke / review / enable MFA / rotate).")
     pack_key = f"{company}|{days}|{window_label}|{cache_scope()}"
     cached_value = st.session_state.get("_ow_security_pack")
     cached = cached_value if isinstance(cached_value, dict) else {}
@@ -731,6 +733,9 @@ def _export_pack(company: str, days: int, window_label: str) -> None:
                         failures[name] = str(res.error or "Unknown read failure")
                         frame = pd.DataFrame({"ERROR": [failures[name]]})
                         rows_written[name] = 0
+                    # Sec#17: actionable sheets carry a leading RECOMMEND column so
+                    # the auditor pack says what to DO, not just what exists.
+                    frame = recommend_for_sheet(name, frame)
                     bundle.writestr(f"{name}.csv", frame.to_csv(index=False))
                     progress.progress(index / len(sheets), text=f"Writing {name}.csv")
                 manifest_lines = [
