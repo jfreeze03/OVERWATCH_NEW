@@ -15,12 +15,14 @@ from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
 from app.logic.formulas import humanize_duration, safe_float
+from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
     load_settings,
     page_header,
+    page_verdict_line,
     result_caption,
     run_mart_first,
     section_filter_contract,
@@ -62,6 +64,19 @@ def render() -> None:
     is_operator = _is_operator()
     # Six grouped sections instead of eight pills (CoCo density fix): each
     # group renders its related sub-panels under labeled section headers.
+    # CoCo do-first #1: a page-level "should I worry?" opener. Contract runway is the
+    # forward-looking cost signal; a cheap recent-tier (cached, mart-first) read.
+    _exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="cost_verdict_exhaustion",
+               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
+    _vsig = []
+    if _exh.usable() and safe_float(_exh.df.iloc[0].get("TOTAL")) > 0:
+        _dl = safe_float(_exh.df.iloc[0].get("DAYS_LEFT"), -1.0)
+        if 0 <= _dl <= 30:
+            _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn"))
+        elif 0 <= _dl <= 90:
+            _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn"))
+    page_verdict_line(page_verdict(
+        _vsig, healthy="contract on track at the current burn — open a section for detail"))
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
          "Unit costs", "Compare", "Optimization & Savings"], key="cost_section")

@@ -36,6 +36,7 @@ from app.logic.formulas import (
     pct_delta,
     safe_float,
 )
+from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     confirm_gate,
@@ -47,6 +48,7 @@ from app.ui.components import (
     localize_timestamps,
     nested_sections,
     page_header,
+    page_verdict_line,
     panel_help,
     read_model_caption,
     result_caption,
@@ -312,6 +314,22 @@ def render() -> None:
     # the shell fetched (zero extra queries), same precedent as Alerts "Open events (N)".
     # rec8: Decision Studio moved out to its own Analyze page — Control Room is now the
     # pure triage console (Entity 360 stays; it is the drill target for cross-jumps).
+    # CoCo do-first #1: a page-level "should I worry?" opener from the health strip
+    # the shell already fetched (zero extra queries) + the scoped critical count.
+    _vsig = []
+    if _crit_known and _open_crit:
+        _vsig.append(Signal("bad", f"{_open_crit} open critical alert(s)"))
+    _und_n = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
+    if _und_n:
+        _vsig.append(Signal("bad", f"{_und_n} critical(s) reached nobody"))
+    _stale_n = int(safe_float(_sv.get("STALE_SOURCES", "0")))
+    if _stale_n:
+        _vsig.append(Signal("warn", f"{_stale_n} stale telemetry source(s)"))
+    if not (_strip.ok and not _strip.empty):
+        _vsig.append(Signal("warn", "health telemetry unavailable"))
+    page_verdict_line(page_verdict(
+        _vsig, healthy="no open criticals, delivery clear, telemetry fresh"))
+
     section = lazy_sections(["Action Center", "Pulse", "Incidents & triage",
                              "Timeline & movers", "Freshness & replay", "Entity 360"],
                             key="cr_section",

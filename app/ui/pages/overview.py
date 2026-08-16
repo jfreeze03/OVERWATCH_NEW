@@ -36,6 +36,7 @@ from app.logic.formulas import (
     month_days,
     safe_float,
 )
+from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     download_text_button,
@@ -43,6 +44,7 @@ from app.ui.components import (
     kpi_row,
     load_settings,
     page_header,
+    page_verdict_line,
     panel_help,
     result_caption,
     run_mart_first,
@@ -592,6 +594,26 @@ def render() -> None:
                           "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
     ]
+
+    # CoCo do-first #1: a page-level "should I worry?" opener from signals already
+    # computed above (platform score band, open alerts, budget pace) — no new query.
+    _vsig = []
+    if _score_incomplete:
+        _vsig.append(Signal("warn", "platform health incomplete — inputs unavailable"))
+    elif score.score < 70:
+        _vsig.append(Signal("bad", f"platform score {score.score}/100 ({score.state})"))
+    elif score.score < 85:
+        _vsig.append(Signal("warn", f"platform score {score.score}/100 ({score.state})"))
+    if alerts_res.ok and critical_alerts:
+        _vsig.append(Signal("bad", f"{critical_alerts} open critical alert(s)"))
+    elif alerts_res.ok and high_alerts:
+        _vsig.append(Signal("warn", f"{high_alerts} open high alert(s)"))
+    if budget > 0 and forecast.ok and forecast.projected_usd > budget:
+        _over = (forecast.projected_usd / budget - 1) * 100
+        _vsig.append(Signal("bad" if _over >= 15 else "warn",
+                            f"projected month-end {_over:,.0f}% over budget"))
+    page_verdict_line(page_verdict(
+        _vsig, healthy="platform score healthy and no open critical alerts"))
 
     section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
     section_filter_contract(

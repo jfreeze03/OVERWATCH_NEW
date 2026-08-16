@@ -41,8 +41,9 @@ def test_ok_blank_and_none_signals_are_ignored():
     assert v["level"] == "ok" and v["body"] == "clear"
 
 
-def test_the_brief_renders_a_computed_verdict():
-    # the first surface wired to the primitive
-    brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "page_verdict(" in brief and "page_verdict_line(" in brief
-    assert "from app.logic.verdict import" in brief
+def test_verdict_line_is_wired_across_the_do_first_surfaces():
+    # the primitive leads the Brief, Overview, Control Room, and Cost pages
+    for rel in ("brief.py", "overview.py", "control_room.py", "cost.py"):
+        src = (_ROOT / "app" / "ui" / "pages" / rel).read_text(encoding="utf-8")
+        assert "page_verdict(" in src and "page_verdict_line(" in src, rel
+        assert "from app.logic.verdict import" in src, rel

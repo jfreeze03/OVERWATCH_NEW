@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.198.0 - Verdict line on Overview, Cost, and Control Room (2026-08-16)
+
+CoCo review, do-first wave (finding #1, continued). The page-verdict primitive
+(v4.197.0) now leads four surfaces.
+
+- **Overview, Cost & Contract, and Control Room now open with a computed verdict.** Each
+  composes a worst-first Healthy / Watch / Attention-needed line from signals it already
+  had on hand — Overview from the platform-score band, open alerts, and budget pace;
+  Control Room from the health strip (open criticals, undelivered criticals, stale sources)
+  at zero extra queries; Cost from contract runway (one cheap mart read). Reuses the shared
+  `page_verdict` / `page_verdict_line` primitive. App version 4.198.0.
+
 ## 4.197.0 - Computed “should I worry?” verdict line on the Brief (2026-08-16)
 
 CoCo review, do-first wave (finding #1). New pure `logic/verdict.py` + shared
