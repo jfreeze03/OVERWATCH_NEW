@@ -57,7 +57,10 @@ LIMIT {limit}
 
 def role_hourly(days: int, company: str = "ALL") -> str:
     days = bounded_days(days, 400)
-    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+    # rec#49: anchor on CURRENT_DATE (midnight-aligned) to match the live query
+    # summary (_query_scope), not CURRENT_TIMESTAMP — the rolling-24h vs day-aligned
+    # mismatch made the ops-diag windows disagree with the summary a DBA reads beside it.
+    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
                       _company_arm(company))
     return f"""
 SELECT HOUR_TS, ROLE_NAME, WAREHOUSE_NAME, COMPANY, QUERIES, FAILS, EXEC_SEC
@@ -70,7 +73,7 @@ LIMIT 20000
 
 def schema_hourly(days: int, company: str = "ALL", database: str = "") -> str:
     days = bounded_days(days, 400)
-    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",   # rec#49: day-aligned, matches the summary
              _company_arm(company)]
     if str(database or "").strip():
         parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")

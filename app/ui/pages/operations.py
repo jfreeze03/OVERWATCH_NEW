@@ -143,7 +143,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
              "delta": f"{failed:,.0f} failed" if fail_pct is not None else "No query denominator",
              "delta_color": "off", "spark": f_spark,
-             "severity": "warn" if failed else ("ok" if fail_pct is not None else "")},
+             # rec#49: warn only above the 2% materiality threshold Control Room
+             # (> 0.02) and the platform score already use — not on any single
+             # failed query, which made this tile alarm while the others stayed calm.
+             "severity": ("warn" if (fail_pct is not None and fail_pct > 2.0)
+                          else ("ok" if fail_pct is not None else ""))},
             {"label": "p95 runtime" + (" (peak hourly)" if used_mart else ""),
              "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s"),
              "help": "Highest hourly p95 from the fact table — a peak, not the "

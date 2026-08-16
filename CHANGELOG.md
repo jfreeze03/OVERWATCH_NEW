@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.175.0 - Consistency: ops metric definitions align (2026-08-15)
+
+Gap-audit Wave 5 (rec #49). App-only; `operations.py`, `mart27_sql.py`.
+
+- **Fail-rate tile now uses the 2% materiality threshold.** The Operations
+  fail-rate KPI warned on any single failed query, while Control Room (`> 0.02`)
+  and the platform score use a 2% threshold — so the same account read "warn" on
+  one page and "ok" on another. The tile now warns only above 2%.
+- **Ops-diag hourly windows are day-aligned.** `role_hourly` / `schema_hourly`
+  anchored `HOUR_TS` on `CURRENT_TIMESTAMP` (rolling 24h) while the live query
+  summary anchors `CURRENT_DATE` (midnight-aligned); the two disagreed by up to a
+  day. The diag marts now anchor `CURRENT_DATE` to match.
+- **Failure taxonomy was already aligned in V062** (not a new fix): both the live
+  summary and the mart `FAILED_COUNT` count `EXECUTION_STATUS <> 'SUCCESS'`. The
+  audit's suggestion to switch the app to `= 'FAIL'` would have *broken* that
+  parity, so it was deliberately not applied; a test now locks the `<> 'SUCCESS'`
+  parity on both sides.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.174.0 - Consistency: AI dollars reconcile to org AI_USD (2026-08-15)
 
 Gap-audit Wave 5 (rec #32). App-only; `contract.py`.
