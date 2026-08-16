@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.203.0 - Alert drawer shows how the rule was resolved last time (2026-08-16)
+
+CoCo review, do-first wave (Alerts #26). New `mart_sql.resolutions_for_rule`; wired
+into the alert drawer.
+
+- **Opening an alert now shows how the same rule was closed before.** The drawer listed raw
+  recent events but not the resolution. It adds a “How this was resolved before” panel — the
+  last few RESOLVED events for the rule with their kind (ACTIONED / NOISE / EXPECTED) and
+  note, from `ALERT_EVENTS` — a playbook this alert has earned from your own history.
+  Rendered as a table so a note can't inject formatting. App version 4.203.0.
+
 ## 4.202.0 - Persistent contract-runway bar on Overview and Brief (2026-08-16)
 
 CoCo review, do-first wave (Overview #20 / Cost #4). New pure

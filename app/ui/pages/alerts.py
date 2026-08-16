@@ -460,6 +460,18 @@ def _open_events_section(events, is_operator: bool) -> None:
             if hist.usable() and len(hist.df) > 1:
                 with st.expander(f"This rule recently ({len(hist.df)} events)"):
                     styled_table(hist.df, height=220)
+            # rec26: how was this resolved last time? The kind + note from the account's
+            # own history is a playbook this exact alert has earned. styled_table (not
+            # markdown) so a note can't inject formatting.
+            _res = run(mart_sql.resolutions_for_rule(str(row["RULE_ID"])), page=_PAGE,
+                       key=f"resolved_rule_{event_id[:8]}", tier="recent",
+                       source="ALERT_EVENTS (resolved, this rule)")
+            if _res.usable():
+                with st.expander(f"How this was resolved before ({len(_res.df)})"):
+                    styled_table(_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
+                                 height=180, slug="rule-resolutions")
+                    st.caption("The last few times this rule was closed — kind and note from "
+                               "your own history, the playbook this alert has earned.")
             target = investigation_target(str(row["RULE_ID"]),
                                           f"{row['TITLE']} {detail_text}")
             fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")

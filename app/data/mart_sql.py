@@ -1016,6 +1016,32 @@ ORDER BY RAISED_AT DESC
 LIMIT 20
 """
 
+
+def resolutions_for_rule(rule_id: str, days: int = 180, limit: int = 5) -> str:
+    """rec26 / CoCo Alerts #26: how the SAME rule was resolved before — the last few
+    RESOLVED events for this rule with their resolution kind + note, newest first, so
+    the drawer offers a playbook from the account's own history instead of generic
+    guidance. SUPERSEDED closes are excluded (they carry no human decision). Rule id
+    validated (identifier allowlist)."""
+    import re as _re
+
+    rid = str(rule_id or "").strip().upper()
+    if not _re.match(r"^[A-Z0-9_]{1,60}$", rid):
+        raise ValueError(f"Invalid rule id: {rule_id!r}")
+    days = bounded_days(days, 365)
+    cap = max(1, min(int(limit), 20))
+    return f"""
+SELECT RESOLVED_AT, RESOLUTION_KIND, COMPANY, TITLE, RESOLUTION_NOTE
+FROM {core_object("ALERT_EVENTS")}
+WHERE RULE_ID = {sql_literal(rid)}
+  AND STATUS = 'RESOLVED'
+  AND COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED'
+  AND RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+ORDER BY RESOLVED_AT DESC
+LIMIT {cap}
+"""
+
+
 def rule_precision(days: int = 90) -> str:
     """Per-rule alert precision from resolution kinds (V021).
 
