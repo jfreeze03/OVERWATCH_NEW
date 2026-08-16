@@ -439,6 +439,140 @@ ORDER BY CHANGED_AT DESC
 LIMIT 2000
 """
 
+
+# ---------------------------------------------------------------------------
+# rec#24: least-privilege — held table grants vs. what queries actually touched.
+# Both builders bridge GRANTS_TO_ROLES -> TABLE_STORAGE_METRICS (by UPPER name)
+# -> ACCESS_HISTORY (by numeric object id, NOT the DB.SCHEMA.TABLE string, per
+# the D4 audit lesson in insights_sql), and count a table "touched" if ANY query
+# read OR modified it in the window (object-level, so a grant exercised only
+# through role inheritance still counts as used — never a false "unused"). Needs
+# Enterprise-edition ACCESS_HISTORY; the page degrades via guard(). Deliberately
+# NOT canaried (Standard edition would be permanent alert noise).
+# ---------------------------------------------------------------------------
+
+_TOUCHED_CTE = """touched AS (
+    SELECT DISTINCT f.value:"objectId"::NUMBER AS OBJECT_ID
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND f.value:"objectId" IS NOT NULL
+    UNION
+    SELECT DISTINCT f.value:"objectId"::NUMBER AS OBJECT_ID
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.OBJECTS_MODIFIED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND f.value:"objectId" IS NOT NULL
+)"""
+
+_TBL_CTE = """tbl AS (
+    SELECT ID AS OBJECT_ID,
+           UPPER(TABLE_CATALOG) AS C, UPPER(TABLE_SCHEMA) AS S, UPPER(TABLE_NAME) AS N,
+           TABLE_CATALOG || '.' || TABLE_SCHEMA || '.' || TABLE_NAME AS FQN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS
+    WHERE DELETED = FALSE
+)"""
+
+# Only privileges whose exercise ACCESS_HISTORY actually records: SELECT shows in
+# BASE_OBJECTS_ACCESSED, INSERT/UPDATE/DELETE in OBJECTS_MODIFIED. REFERENCES
+# (exercised by FK DDL) and TRUNCATE (metadata) leave no ACCESS_HISTORY trace, so
+# they would ALWAYS read as "unused" — excluded so the tool never emits a false
+# revoke signal for a privilege it structurally cannot observe.
+_DATA_PRIVS = "('SELECT', 'INSERT', 'UPDATE', 'DELETE')"
+
+
+def access_evidence_days() -> str:
+    """rec#24: DENSITY and recency of ACCESS_HISTORY over the last 90 days.
+
+    Least-privilege verdicts are only trustworthy when history is both deep and
+    current. COVERAGE_DAYS counts DISTINCT days that actually carry access rows —
+    density, so a handful of stray old rows can't inflate it the way MIN(timestamp)
+    span would (an account briefly on Enterprise 85 days ago then thin since would
+    otherwise report "85 days" and flag genuinely-used tables as unused).
+    LATEST_DAYS_AGO is how stale the newest row is — recency, because if
+    ACCESS_HISTORY stopped being populated (e.g. an edition downgrade) recent usage
+    isn't captured and every recent grant would falsely read as unused. COVERAGE_DAYS
+    is 0 and LATEST_DAYS_AGO NULL when the view is empty or absent."""
+    return """
+SELECT COUNT(DISTINCT DATE(a.QUERY_START_TIME)) AS COVERAGE_DAYS,
+       DATEDIFF('day', MAX(a.QUERY_START_TIME), CURRENT_TIMESTAMP()) AS LATEST_DAYS_AGO
+FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a
+WHERE a.QUERY_START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+"""
+
+
+def grant_scope_usage(days: int = 90, limit: int = 500) -> str:
+    """rec#24: per (role, database, schema) — how many granted tables were used.
+
+    GRANTED_TABLES = distinct tables (by name) the role holds a data privilege on
+    in that schema; TOUCHED_TABLES = how many were read or modified in the window.
+    Usage is collapsed to the table NAME first (MAX over its object ids), so a
+    drop->recreate that leaves two DELETED=FALSE ids for one name can neither
+    double-count nor split a used table into a used+unused pair. The Python layer
+    (logic/least_privilege.classify_grant_scopes) labels UNUSED / OVER-BROAD /
+    FOCUSED from the two counts. Worst (most unused) first."""
+    days = bounded_days(days, 90)
+    return f"""
+WITH {_TOUCHED_CTE.format(days=days)},
+{_TBL_CTE},
+grants AS (
+    SELECT DISTINCT GRANTEE_NAME AS ROLE_NAME,
+           UPPER(TABLE_CATALOG) AS C, UPPER(TABLE_SCHEMA) AS S, UPPER(NAME) AS N
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE DELETED_ON IS NULL AND GRANTED_ON = 'TABLE'
+      AND PRIVILEGE IN {_DATA_PRIVS}
+      AND TABLE_CATALOG IS NOT NULL AND TABLE_SCHEMA IS NOT NULL
+),
+grant_tbl AS (
+    -- one row per (role, table name); touched if ANY of the name's ids was touched
+    SELECT g.ROLE_NAME, g.C, g.S, g.N,
+           MAX(IFF(u.OBJECT_ID IS NULL, 0, 1)) AS TOUCHED
+    FROM grants g
+    JOIN tbl t ON t.C = g.C AND t.S = g.S AND t.N = g.N
+    LEFT JOIN touched u ON u.OBJECT_ID = t.OBJECT_ID
+    GROUP BY 1, 2, 3, 4
+)
+SELECT ROLE_NAME,
+       C AS DATABASE_NAME, S AS SCHEMA_NAME,
+       COUNT(*) AS GRANTED_TABLES,
+       SUM(TOUCHED) AS TOUCHED_TABLES
+FROM grant_tbl
+GROUP BY 1, 2, 3
+HAVING COUNT(*) >= 1
+ORDER BY (COUNT(*) - SUM(TOUCHED)) DESC, GRANTED_TABLES DESC
+LIMIT {limit}
+"""
+
+
+def unused_table_grants(days: int = 90, limit: int = 500) -> str:
+    """rec#24: the revoke shortlist — table grants on tables no query has read or
+    modified in the window. One row per (role, privilege, table name); a name is
+    listed only when NONE of its object ids was touched (MAX over ids), so a
+    drop->recreate that leaves a stale untouched id can never surface a live,
+    in-use table's name as a revoke candidate. Review before revoking."""
+    days = bounded_days(days, 90)
+    return f"""
+WITH {_TOUCHED_CTE.format(days=days)},
+{_TBL_CTE},
+grants AS (
+    SELECT GRANTEE_NAME AS ROLE_NAME, PRIVILEGE,
+           UPPER(TABLE_CATALOG) AS C, UPPER(TABLE_SCHEMA) AS S, UPPER(NAME) AS N
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE DELETED_ON IS NULL AND GRANTED_ON = 'TABLE'
+      AND PRIVILEGE IN {_DATA_PRIVS}
+      AND TABLE_CATALOG IS NOT NULL AND TABLE_SCHEMA IS NOT NULL
+)
+SELECT g.ROLE_NAME, g.PRIVILEGE, ANY_VALUE(t.FQN) AS OBJECT_NAME
+FROM grants g
+JOIN tbl t ON t.C = g.C AND t.S = g.S AND t.N = g.N
+LEFT JOIN touched u ON u.OBJECT_ID = t.OBJECT_ID
+GROUP BY g.ROLE_NAME, g.PRIVILEGE, t.C, t.S, t.N
+HAVING MAX(IFF(u.OBJECT_ID IS NULL, 0, 1)) = 0
+ORDER BY g.ROLE_NAME, OBJECT_NAME, g.PRIVILEGE
+LIMIT {limit}
+"""
+
+
 def client_drivers(days: int = 30, company: str = "ALL") -> str:
     """Driver/version inventory from ACCOUNT_USAGE.SESSIONS: which driver,
     which version, reported by which program, used by whom — the "when do

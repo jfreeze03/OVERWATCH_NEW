@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.187.0 - Security: least-privilege grant review (2026-08-15)
+
+Cost/metric gap audit, Wave 6 (finding #24). App-only; new pure
+`logic/least_privilege.py`, `data/security_sql.grant_scope_usage` +
+`unused_table_grants`, Security "Least privilege" tab.
+
+- **Held table grants are now measured against what queries actually used.** The
+  Security page counted grants but never asked whether they were exercised. A new
+  **Least privilege** tab joins each role's *observable* table data-privileges
+  (SELECT / INSERT / UPDATE / DELETE — the ones ACCESS_HISTORY records) to the objects
+  queries actually read or modified (ACCESS_HISTORY), rolled up per role×schema and
+  labelled **UNUSED** (touched none of its granted tables — revoke the scope),
+  **OVER-BROAD** (used a third or fewer — narrow it), or **FOCUSED**. A toggle reveals
+  the per-table revoke shortlist.
+- **Built around three correctness traps.** Access is matched through the numeric object
+  id (TABLE_STORAGE_METRICS.ID), not the `DB.SCHEMA.TABLE` string, so mixed-case /
+  quoted identifiers can't fake a "never used" verdict (the D4 lesson); usage is
+  attributed at the OBJECT level (touched by *any* query), so a grant exercised only
+  through role inheritance still counts as used; and usage is collapsed to the table
+  NAME (touched if *any* of its object ids was touched), so a drop→recreate that leaves
+  two live ids can't surface an in-use table as a revoke candidate. The analysis can
+  under-report an unused grant but never falsely flags a used one.
+- **Coverage safeguard (density + recency).** Verdicts are gated on how many of the
+  last 90 days actually carry ACCESS_HISTORY activity (distinct-day density, so a stray
+  old row can't fake depth) *and* on how fresh the newest row is (recency, so history
+  that stopped populating after an edition change can't make recent grants read as
+  unused). No history, thin history (<28 active days), or stale history (>7 days quiet)
+  each suppresses verdicts with a warning; the covered window is disclosed on the panel
+  and in the shortlist captions. Privileges ACCESS_HISTORY can't observe (REFERENCES via
+  FK DDL, TRUNCATE) are excluded entirely, and the method panel discloses that FUTURE /
+  schema / database grants and hybrid-table reads are out of scope.
+- Deferred to the owner-migration half: emitting revoke items to ACTION_QUEUE and the
+  SEC_UNUSED_GRANT alert.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.186.0 - Security: outbound data-exposure inventory (2026-08-15)
 
 Cost/metric gap audit, Wave 6 (finding #25). App-only; new pure

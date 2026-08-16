@@ -83,8 +83,11 @@ _REACHABLE = {
         "QUERY_HISTORY", "TABLE_DML_HISTORY", "TASKS", "TASK_HISTORY", "TASK_VERSIONS",
         "WAREHOUSE_LOAD_HISTORY", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/security.py": (
-        "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES", "GRANTS_TO_USERS",
-        "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS", "USERS"),
+        # v4.187: + ACCESS_HISTORY & TABLE_STORAGE_METRICS for the least-privilege
+        # tab (rec#24) — held table grants vs. objects queries actually touched.
+        "ACCESS_HISTORY", "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
+        "GRANTS_TO_USERS", "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS",
+        "TABLE_STORAGE_METRICS", "USERS"),
     "app/ui/pages/alerts.py": (),
     # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
     # maintenance-arm source histories, click-gated on the Canary tab.

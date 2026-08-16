@@ -17,6 +17,7 @@ from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
+from app.logic.least_privilege import classify_grant_scopes, summarize_scopes
 from app.logic.security import (
     fact_coverage_complete,
 )
@@ -385,6 +386,114 @@ def _exposure_tab() -> None:
         styled_table(inbound, height=200, slug="share-inbound")
     st.caption("New consumer accounts or a newly-published listing are the findings to chase. Alerting on *changes* to this surface is the next slice.")
     result_caption(shares)
+
+
+def _least_privilege_tab() -> None:
+    """rec#24: least privilege — held table grants vs. what queries actually used.
+
+    Over 90 days, join each role's table data-privileges to the objects queries
+    actually read or modified (ACCESS_HISTORY), bridged through the numeric object
+    id so mixed-case identifiers can't fake a "never used" verdict, and attributed
+    at the OBJECT level so a grant exercised only through role inheritance still
+    counts as used. Account-wide: grants have no company grain. The write halves —
+    emitting revoke items to ACTION_QUEUE and the SEC_UNUSED_GRANT alert — are the
+    owner-migration part of this finding and are not done here."""
+    st.caption("Table privileges a role holds but its queries never exercise are revoke candidates. This reports; it revokes nothing.")
+    panel_help(
+        "Method: GRANTS_TO_ROLES direct table privileges (SELECT / INSERT / UPDATE / "
+        "DELETE — the ones ACCESS_HISTORY can observe) joined to ACCESS_HISTORY "
+        "reads+writes, bridged via TABLE_STORAGE_METRICS object id so mixed-case "
+        "identifiers can't fake a verdict, and attributed at the OBJECT level so role "
+        "inheritance never causes a false 'unused'. NOT covered — so verdicts never "
+        "claim to: SELECT ON FUTURE / schema / database grants (OVER-BROAD 'narrow it' "
+        "therefore applies to direct table grants only), REFERENCES/TRUNCATE (no "
+        "ACCESS_HISTORY trace), and object types with incomplete read capture (e.g. "
+        "hybrid/Unistore point lookups). Needs Enterprise-edition ACCESS_HISTORY. "
+        "Always verify before revoking."
+    )
+    # Verdicts are only as trustworthy as the history behind them. Probe how many days
+    # ACCESS_HISTORY actually covers BEFORE the expensive joins: no rows (no Enterprise
+    # ACCESS_HISTORY) or a thin window (recently enabled) makes "unused" indistinguishable
+    # from "not yet observed", so a grant used before the window opened would read as
+    # revocable. Suppress rather than mislead.
+    cov = run(security_sql.access_evidence_days(), page=_PAGE, key="sec_lp_cov",
+              tier="historical", source="ACCESS_HISTORY (coverage probe)")
+    if not guard(cov, "", setup_hint="Needs Enterprise-edition SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY."):
+        return
+
+    def _cov_scalar(col: str) -> float | None:
+        raw = (pd.to_numeric(cov.df[col], errors="coerce").dropna()
+               if not cov.empty and col in cov.df.columns else pd.Series(dtype="float64"))
+        return float(raw.iloc[0]) if len(raw) else None
+
+    coverage_days = int(_cov_scalar("COVERAGE_DAYS") or 0)
+    _latest = _cov_scalar("LATEST_DAYS_AGO")
+    latest_days_ago = int(_latest) if _latest is not None else None
+    _MIN_COVERAGE_DAYS = 28     # distinct days that must carry access rows
+    _MAX_STALENESS_DAYS = 7     # newest access row must be at least this fresh
+    if coverage_days < 1:
+        st.warning(
+            "ACCESS_HISTORY has no access rows in the last 90 days — this account almost "
+            "certainly lacks the Enterprise-edition ACCESS_HISTORY least-privilege needs, "
+            "so 'unused' can't be told from 'no usage data'. Verdicts are suppressed."
+        )
+        return
+    if coverage_days < _MIN_COVERAGE_DAYS:
+        st.warning(
+            f"Only {coverage_days} of the last 90 days carry ACCESS_HISTORY activity — too "
+            f"little history to call a grant 'unused' (a table used on an unobserved day "
+            f"would look untouched). Verdicts are suppressed until at least "
+            f"{_MIN_COVERAGE_DAYS} days do."
+        )
+        return
+    if latest_days_ago is None or latest_days_ago > _MAX_STALENESS_DAYS:
+        st.warning(
+            f"ACCESS_HISTORY has no activity in the last {_MAX_STALENESS_DAYS} days — it "
+            "appears to have stopped being populated (e.g. an edition change), so recent "
+            "usage isn't captured and grants would falsely read as unused. Verdicts are "
+            "suppressed."
+        )
+        return
+    st.caption(f"{coverage_days} of the last 90 days carry ACCESS_HISTORY activity (newest ~{latest_days_ago}d ago); a grant reads as 'unused' only relative to that evidence.")
+
+    scopes = run(security_sql.grant_scope_usage(90), page=_PAGE, key="sec_lp_scopes",
+                 tier="historical",
+                 source="ACCESS_HISTORY x GRANTS_TO_ROLES x TABLE_STORAGE_METRICS")
+    have_evidence = False
+    if scopes.ok and scopes.empty:
+        st.info("No direct table data-privilege grants resolve to a live table — nothing to review here.")
+    elif guard(scopes, "", setup_hint="Needs GRANTS_TO_ROLES and TABLE_STORAGE_METRICS alongside ACCESS_HISTORY."):
+        classified = classify_grant_scopes(scopes.df)
+        have_evidence = True
+        stats = summarize_scopes(classified)
+        kpi_row([
+            {"label": "Roles reviewed", "value": f"{stats['roles']}"},
+            {"label": "Unused scopes", "value": f"{stats['unused']}",
+             "delta_color": "inverse" if stats["unused"] else "off",
+             "help": f"Role×schema footprints where the role touched none of its granted tables in the covered {coverage_days}d."},
+            {"label": "Over-broad scopes", "value": f"{stats['over_broad']}",
+             "delta_color": "inverse" if stats["over_broad"] else "off",
+             "help": "Granted many tables in a schema but exercised a third or fewer — narrow the grant."},
+            {"label": "Unused table grants", "value": f"{stats['unused_tables']:,}",
+             "help": "Total granted tables (by name) that saw no read or write in the covered window."},
+        ])
+        section_header("Over-broad grant scopes (role × schema)", "warn", "security")
+        styled_table(classified, height=340, slug="lp-scopes",
+                     sort_label="most unused tables first")
+        st.caption("VERDICT: UNUSED = touched none of its grants (revoke the scope); OVER-BROAD = used a third or fewer (narrow it); FOCUSED = mostly used.")
+        result_caption(scopes)
+
+    if have_evidence and st.toggle("Show the per-table revoke shortlist", key="sec_lp_unused_on"):
+        unused = run(security_sql.unused_table_grants(90), page=_PAGE, key="sec_lp_unused",
+                     tier="historical",
+                     source="ACCESS_HISTORY x GRANTS_TO_ROLES x TABLE_STORAGE_METRICS")
+        if unused.ok and unused.empty:
+            st.success("Every granted table was read or modified within the covered window.")
+        elif guard(unused, ""):
+            section_header("Untouched table grants — review before revoking", "warn", "security")
+            styled_table(unused.df, height=320, slug="lp-unused", sort_label="role then object")
+            st.caption(f"Each row is a privilege on a table no query has touched in the covered ~{coverage_days}d window. Confirm the object isn't seasonal before revoking.")
+            result_caption(unused)
 
 
 def _trust_center_tab() -> None:
@@ -841,7 +950,8 @@ def render() -> None:
         "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
     section = lazy_sections(
-        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Exposure", "Trust Center"],
+        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Exposure",
+         "Least privilege", "Trust Center"],
         key="sec_section",
     )
     _contracts = {
@@ -870,6 +980,10 @@ def render() -> None:
             "applies": (),
             "note": "Shares are account-wide objects with no company grain; the exposure inventory is account-wide.",
         },
+        "Least privilege": {
+            "applies": (),
+            "note": "Role grants and 90-day access are account-wide; the window is fixed at 90 days (ACCESS_HISTORY horizon).",
+        },
         "Trust Center": {
             "applies": (),
             "note": "Account-wide scanner posture and change since the prior snapshot.",
@@ -897,5 +1011,7 @@ def render() -> None:
         _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Exposure":
         _exposure_tab()
+    elif section == "Least privilege":
+        _least_privilege_tab()
     else:
         _trust_center_tab()

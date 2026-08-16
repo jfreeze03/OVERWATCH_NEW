@@ -42,7 +42,7 @@ def test_egress_builders_contract():
 
 def test_egress_section_and_new_network_panel_wired():
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
-    assert '"Clients", "Egress", "Exposure", "Trust Center"' in sec   # its own lazy section
+    assert '"Clients", "Egress", "Exposure",' in sec   # its own lazy section
     assert "def _egress_tab(" in sec
     assert '"key": "newnet"' in sec                           # rides the Access batch round-trip
     assert "New networks for privileged users" in sec
