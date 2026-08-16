@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.183.0 - Decision Studio: Product Economics honors Company (2026-08-15)
+
+Decision Studio review, Wave 1 (finding #4-part / #3 app-only half). App-only;
+`workbench_sql.py`.
+
+- **Products, entity counts, and task health are now company-scoped.** Only the
+  object/warehouse dollar CTEs were company-filtered; the driving `catalog` CTE and
+  `task_health` were account-wide, so a selected company still showed other
+  companies' products, inflated "Data products / Catalog entities" KPI counts, and
+  cross-company task-run/failure numbers. The `catalog` CTE is now filtered on
+  `ENTITY_CATALOG.COMPANY` — because it drives the product list, the object/database
+  maps, warehouse cost, and task health, scoping it there is the only way to
+  company-scope tasks (`MART_TASK_NODE_DAILY` has no COMPANY column). The fact-level
+  filters remain as belt-and-suspenders. (The lexical-`MAX(CRITICALITY)` and the
+  account-grain family mart are separate findings.)
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.182.0 - Decision Studio: Cost Truth stops fabricating zeroes (2026-08-15)
 
 Decision Studio review, Wave 1 (finding #4). App-only; `decision_studio.py`.

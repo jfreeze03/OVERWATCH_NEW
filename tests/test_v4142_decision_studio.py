@@ -84,6 +84,18 @@ def test_cost_truth_renders_no_evidence_not_a_fabricated_zero() -> None:
     assert 'present.get("MEASURED")\n' in ct or "present.get(\"MEASURED\")" in ct
 
 
+def test_product_economics_scopes_the_catalog_by_company() -> None:
+    # DS #3: the catalog CTE drives the product list, maps, warehouse_cost AND task_health,
+    # so company-filtering it is the only way to scope tasks + the product list, not just cost.
+    scoped = workbench_sql.data_product_economics(30, "Trexis")
+    cat = scoped.split("WITH catalog AS (", 1)[1].split("), products AS (", 1)[0]
+    assert "UPPER(COMPANY)" in cat and "TREXIS" in cat.upper()
+    # ALL scope adds no catalog predicate
+    all_cat = (workbench_sql.data_product_economics(30, "ALL")
+               .split("WITH catalog AS (", 1)[1].split("), products AS (", 1)[0])
+    assert "UPPER(COMPANY)" not in all_cat
+
+
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
     actions = pd.DataFrame(
         {

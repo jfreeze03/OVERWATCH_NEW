@@ -391,11 +391,21 @@ def data_product_economics(days: int = 30, company: str = "ALL") -> str:
         "" if company_value == "ALL"
         else f"AND UPPER(w.COMPANY) = {sql_literal(company_value, 40)}"
     )
+    # DS #3: scope the CATALOG itself by company. The catalog drives the product list,
+    # the object/database maps, warehouse_cost and task_health, so filtering here is the
+    # only way to company-scope TASK health (MART_TASK_NODE_DAILY has no COMPANY column)
+    # AND the product list + entity counts — the fact-level l/w.COMPANY filters below then
+    # become belt-and-suspenders. ENTITY_CATALOG.COMPANY exists (see entity_catalog).
+    catalog_company = (
+        "" if company_value == "ALL"
+        else f"AND UPPER(COMPANY) = {sql_literal(company_value, 40)}"
+    )
     return f"""
 WITH catalog AS (
     SELECT ENTITY_TYPE, ENTITY_KEY, DATA_PRODUCT, TEAM, OWNER_NAME, CRITICALITY
     FROM {core_object('ENTITY_CATALOG')}
     WHERE NULLIF(TRIM(DATA_PRODUCT), '') IS NOT NULL
+      {catalog_company}
 ), products AS (
     SELECT DATA_PRODUCT, MAX(TEAM) AS TEAM, MAX(OWNER_NAME) AS OWNER_NAME,
            MAX(CRITICALITY) AS CRITICALITY, COUNT(*) AS CATALOG_ENTITIES
