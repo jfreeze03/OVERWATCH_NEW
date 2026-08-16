@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.204.0 - Show how long the oldest undelivered critical has waited (2026-08-16)
+
+CoCo review, do-first wave (Control Room #4, duration not count). `health_strip`
+gains `UNDELIVERED_OLDEST_MIN`.
+
+- **The “reached nobody” banners now show the age, not just the count.** A count says a
+  critical failed to route; the age says whether it's been minutes or hours. The shared
+  health strip now carries the oldest undelivered-critical's age, so both the Control Room
+  and Brief banners read “… (30+ min, no delivery, oldest 4h 12m)” — with zero extra queries
+  (the same strip both pages already load). App version 4.204.0.
+
 ## 4.203.0 - Alert drawer shows how the rule was resolved last time (2026-08-16)
 
 CoCo review, do-first wave (Alerts #26). New `mart_sql.resolutions_for_rule`; wired

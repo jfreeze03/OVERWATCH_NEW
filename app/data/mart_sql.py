@@ -701,7 +701,13 @@ WITH crit AS (
         -- morning surfaces cannot show green while a critical failed to route.
         COUNT_IF(e.STATUS = 'OPEN'
                  AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
-                 AND d.EVENT_ID IS NULL) AS UNDELIVERED_N
+                 AND d.EVENT_ID IS NULL) AS UNDELIVERED_N,
+        -- CoCo CR#4: age (minutes) of the OLDEST undelivered critical, so the banner
+        -- can show how long nobody has been paged — a count hides a 4h silent failure.
+        MAX(IFF(e.STATUS = 'OPEN'
+                AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+                AND d.EVENT_ID IS NULL,
+                DATEDIFF('minute', e.RAISED_AT, CURRENT_TIMESTAMP()), NULL)) AS UNDELIVERED_OLDEST_MIN
     FROM {core_object("ALERT_EVENTS")} e
     LEFT JOIN (SELECT DISTINCT EVENT_ID FROM {core_object("ALERT_DELIVERIES")}) d
            ON d.EVENT_ID = e.EVENT_ID
@@ -752,6 +758,8 @@ FROM strip s,
         OBJECT_CONSTRUCT('m', 'UNDELIVERED_CRITICAL',
                          'v', TO_VARCHAR(s.UNDELIVERED_N),
                          's', IFF(s.UNDELIVERED_N > 0, 'BAD', 'OK')),
+        OBJECT_CONSTRUCT('m', 'UNDELIVERED_OLDEST_MIN',
+                         'v', TO_VARCHAR(COALESCE(s.UNDELIVERED_OLDEST_MIN, 0)), 's', 'INFO'),
         OBJECT_CONSTRUCT('m', 'STALEST_SOURCE_H',
                          'v', TO_VARCHAR(s.WORST_AGE_H),
                          's', CASE WHEN s.SOURCE_N = 0 THEN 'MUTED'

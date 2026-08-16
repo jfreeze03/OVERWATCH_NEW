@@ -282,8 +282,11 @@ def render() -> None:
     # N2: a critical that paged nobody hides behind a green board — call it out
     # on the one surface a half-awake on-call actually reads.
     _und = int(safe_float(vals.get("UNDELIVERED_CRITICAL", "0"))) if strip_up else 0
-    if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody — check delivery →",
-                          key="brief_undelivered", type="primary", use_container_width=True):
+    _und_age = safe_float(vals.get("UNDELIVERED_OLDEST_MIN", "0")) if strip_up else 0.0
+    _und_age_txt = f", oldest {humanize_duration(_und_age, 'min')}" if _und_age > 0 else ""
+    if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody{_und_age_txt} — "
+                          "check delivery →", key="brief_undelivered", type="primary",
+                          use_container_width=True):
         request_navigation("Alerts", "Native delivery")
 
     section_header("Fires", "warn", "alerts")

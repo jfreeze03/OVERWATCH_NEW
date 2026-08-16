@@ -293,9 +293,11 @@ def render() -> None:
     if _strip.ok and not _strip.empty:
         _sv = {str(r["METRIC"]): str(r["VALUE"]) for _, r in _strip.df.iterrows()}
         _und = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
-        if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery) — "
-                              "check delivery →", key="cr_undelivered", type="primary",
-                              use_container_width=True):
+        _und_age = safe_float(_sv.get("UNDELIVERED_OLDEST_MIN", "0"))
+        _und_age_txt = f", oldest {humanize_duration(_und_age, 'min')}" if _und_age > 0 else ""
+        if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery"
+                              f"{_und_age_txt}) — check delivery →", key="cr_undelivered",
+                              type="primary", use_container_width=True):
             request_navigation("Alerts", "Native delivery")
     # The shell strip is intentionally account-wide. The page badge must match the
     # company-scoped incident/alert queue it opens (company + account-level events).
