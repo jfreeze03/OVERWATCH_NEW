@@ -18,6 +18,7 @@ from app.logic.formulas import (
     ExecutiveSummaryView,
     account_now,
     blended_billed_usd,
+    contract_runway,
     executive_slide_bullets,
     executive_summary_csv,
     executive_summary_html,
@@ -29,6 +30,7 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 from app.ui import charts
 from app.ui.components import (
+    contract_runway_bar,
     download_text_button,
     empty_state,
     export_button,
@@ -248,6 +250,7 @@ def render() -> None:
                 _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
     page_verdict_line(page_verdict(
         _vsig, healthy="no open criticals or incidents, and contract runway is comfortable"))
+    contract_runway_bar(contract_runway(exh.df.iloc[0]) if exh.usable() else None)
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the "
         "top asks. A dash (—) means telemetry was unreachable, not zero. When a figure "

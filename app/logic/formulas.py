@@ -11,8 +11,10 @@ import html as _html
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import StringIO
+
+import pandas as pd
 
 DEFAULT_CREDIT_PRICE_USD = 3.68
 DEFAULT_AI_CREDIT_PRICE_USD = 2.20
@@ -68,6 +70,60 @@ def safe_float(value: object, default: float = 0.0) -> float:
     if math.isnan(number) or math.isinf(number):
         return default
     return number
+
+
+def _coerce_date(value: object) -> date | None:
+    """Best-effort date from a mart cell (date, datetime/Timestamp, or ISO string)."""
+    if isinstance(value, datetime):   # pandas Timestamp is a datetime subclass
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def contract_runway(row: pd.Series | None, *, lead_days: int = 30) -> dict | None:
+    """Contract-runway summary for the persistent countdown bar (CoCo Overview #20 /
+    Cost #4).
+
+    From a contract_exhaustion row (TOTAL, CONSUMED, DAILY_BURN, DAYS_LEFT,
+    EXHAUST_DATE): the percent of the commitment consumed, days left, the exhaust
+    date, and a 'decide-by' date (exhaust minus a procurement lead time, so renewal
+    talks can start before the runway ends). Colour by runway: <=30 days left = bad,
+    <=90 = warn, else ok. Returns None when no contract is configured (TOTAL <= 0)
+    so callers render nothing. Pure — the dates come from the row, not a clock.
+    """
+    if row is None:
+        return None
+    total = safe_float(row.get("TOTAL"))
+    if total <= 0:
+        return None
+    consumed = max(0.0, safe_float(row.get("CONSUMED")))
+    days_left = safe_float(row.get("DAYS_LEFT"), -1.0)
+    pct = round(min(consumed / total * 100.0, 100.0), 1)
+    exhaust = _coerce_date(row.get("EXHAUST_DATE"))
+    decide_by = exhaust - timedelta(days=max(0, int(lead_days))) if exhaust else None
+    if days_left < 0:
+        # exhausted/overrun (pct at the cap), or burn couldn't be computed — surface it
+        severity = "bad" if pct >= 100 else "warn"
+    elif days_left <= 30:
+        severity = "bad"
+    elif days_left <= 90:
+        severity = "warn"
+    else:
+        severity = "ok"
+    return {
+        "pct_consumed": pct,
+        "days_left": days_left,
+        "exhaust_date": exhaust.isoformat() if exhaust else None,
+        "decide_by": decide_by.isoformat() if decide_by else None,
+        "severity": severity,
+        "lead_days": int(lead_days),
+    }
 
 
 def safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:

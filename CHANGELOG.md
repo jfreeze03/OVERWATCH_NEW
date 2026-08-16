@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.202.0 - Persistent contract-runway bar on Overview and Brief (2026-08-16)
+
+CoCo review, do-first wave (Overview #20 / Cost #4). New pure
+`logic/formulas.contract_runway` + shared `components.contract_runway_bar`.
+
+- **The most important committed-spend number now rides above the fold.** Overview had no
+  contract element at all; both Overview and the Brief now show a thin, colour-banded bar —
+  “% of contract consumed · N days left (exhausts DATE · decide by DATE)” — from the
+  `contract_exhaustion` mart. The “decide-by” date backs a 30-day procurement lead time off
+  the exhaustion date, so renewal talks start before the runway ends. The Brief reuses its
+  existing read (no new query); Overview adds one cheap cached read. App version 4.202.0.
+
 ## 4.201.0 - Chart takeaways on the boss chart and metric lines (2026-08-16)
 
 CoCo review, do-first wave (UI #14). Extends the existing `_share_note`

@@ -26,6 +26,7 @@ from app.logic.formulas import (
     account_now,
     account_today,
     blended_billed_usd,
+    contract_runway,
     credits_to_usd,
     executive_slide_bullets,
     executive_summary_csv,
@@ -39,6 +40,7 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
+    contract_runway_bar,
     download_text_button,
     export_button,
     kpi_row,
@@ -614,6 +616,11 @@ def render() -> None:
                             f"projected month-end {_over:,.0f}% over budget"))
     page_verdict_line(page_verdict(
         _vsig, healthy="platform score healthy and no open critical alerts"))
+    # CoCo Overview #20: the contract runway is the one committed-spend number an exec
+    # needs on every visit — a persistent %-consumed bar (cheap cached mart read).
+    _rw = run(mart_sql.contract_exhaustion(), page=_PAGE, key="ov_contract_runway",
+              tier="recent", source="SETTINGS + FACT_METERING_DAILY")
+    contract_runway_bar(contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
 
     section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
     section_filter_contract(

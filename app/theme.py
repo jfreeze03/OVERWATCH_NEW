@@ -143,6 +143,14 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-verdict--warn .ow-verdict__label { color:var(--ow-warn); }
 .ow-verdict--bad { border-left-color:var(--ow-bad); background:var(--ow-bad-dim); }
 .ow-verdict--bad .ow-verdict__label { color:var(--ow-bad); }
+/* persistent contract-runway bar (CoCo Overview #20 / Cost #4) */
+.ow-runway { margin:0 0 14px; }
+.ow-runway__track { height:8px; border-radius:6px; background:var(--ow-info-dim); overflow:hidden; }
+.ow-runway__fill { height:100%; border-radius:6px; background:var(--ow-info); min-width:2px; transition:width .3s ease; }
+.ow-runway__label { margin-top:5px; font-size:0.8rem; color:var(--ow-ink); opacity:.82; }
+.ow-runway--ok .ow-runway__fill { background:var(--ow-ok); }
+.ow-runway--warn .ow-runway__fill { background:var(--ow-warn); }
+.ow-runway--bad .ow-runway__fill { background:var(--ow-bad); }
 .ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
 .ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
   font-variant-numeric:tabular-nums; }

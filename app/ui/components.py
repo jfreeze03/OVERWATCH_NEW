@@ -484,6 +484,34 @@ def page_verdict_line(verdict: dict) -> None:
     )
 
 
+def contract_runway_bar(runway: dict | None) -> None:
+    """Persistent contract-runway bar (CoCo Overview #20 / Cost #4): a thin,
+    colour-banded %-consumed bar with days-left, exhaust, and a 'decide-by' date.
+    `runway` is the dict from logic.formulas.contract_runway, or None (renders
+    nothing). Runway is the single most important committed-spend number, so it
+    rides above the fold on every visit rather than hiding in a conditional KPI."""
+    if not runway:
+        return
+    sev = str(runway.get("severity", "") or "")
+    cls = f" ow-runway--{sev}" if sev in ("ok", "warn", "bad") else ""
+    pct = max(0.0, min(float(runway.get("pct_consumed") or 0.0), 100.0))
+    days_left = runway.get("days_left")
+    left = (f"{float(days_left):,.0f} days left"
+            if isinstance(days_left, (int, float)) and days_left >= 0 else "runway n/a")
+    exhaust = runway.get("exhaust_date") or "—"
+    decide_by = runway.get("decide_by")
+    decide = f" · decide by {decide_by}" if decide_by else ""
+    label = html.escape(
+        f"{pct:.0f}% of contract consumed · {left} (exhausts {exhaust}{decide})")
+    st.markdown(
+        f'<div class="ow-runway{cls}">'
+        f'<div class="ow-runway__track">'
+        f'<div class="ow-runway__fill" style="width:{pct:.1f}%"></div></div>'
+        f'<div class="ow-runway__label">{label}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
                   key: str | None = None, help: str = "", disabled: bool = False,
                   use_container_width: bool = False) -> bool:
