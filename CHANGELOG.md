@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.197.0 - Computed “should I worry?” verdict line on the Brief (2026-08-16)
+
+CoCo review, do-first wave (finding #1). New pure `logic/verdict.py` + shared
+`ui.components.page_verdict_line`; wired first into the Brief.
+
+- **The morning read now opens with a one-line verdict.** The Brief led with a static
+  description; it now computes a worst-first **Healthy / Watch / Attention needed** line
+  above the numbers — from open criticals, open incidents, and contract runway, all
+  signals already on the page (no new query). The shared primitive (`page_verdict` +
+  `page_verdict_line`) is built to extend to Overview, Cost, and Control Room next.
+  App version 4.197.0.
+
 ## 4.196.0 - Decision Studio: label the time basis of action estimates (V083) (2026-08-16)
 
 Decision Studio review, Wave 2 (finding #7). Migration V083 + app rewire.

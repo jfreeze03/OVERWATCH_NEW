@@ -26,6 +26,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
+from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     download_text_button,
@@ -34,6 +35,7 @@ from app.ui.components import (
     kpi_row,
     load_settings,
     page_header,
+    page_verdict_line,
     panel_help,
     section_filter_contract,
     section_header,
@@ -209,6 +211,27 @@ def render() -> None:
             "help": "Lifecycle objects — declared or auto-declared CRITICALs. "
                     "The Control Room owns the queue; this is the executive glance.",
         })
+    # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
+    # numbers — built from signals already on the page (no new query).
+    _vsig = []
+    if not strip_up:
+        _vsig.append(Signal("warn", "telemetry marts unreachable — figures withheld"))
+    if scoped_crit is None:
+        _vsig.append(Signal("warn", "open-critical count unavailable"))
+    elif scoped_crit > 0:
+        _vsig.append(Signal("bad", f"{scoped_crit} open critical alert(s)"))
+    if _inc.ok and len(_inc.df) > 0:
+        _vsig.append(Signal("bad", f"{len(_inc.df)} open incident(s)"))
+    if exh.usable():
+        _erow = exh.df.iloc[0]
+        if safe_float(_erow.get("TOTAL")) > 0:
+            _dl = safe_float(_erow.get("DAYS_LEFT"), -1.0)
+            if 0 <= _dl <= 30:
+                _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days"))
+            elif 0 <= _dl <= 90:
+                _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days"))
+    page_verdict_line(page_verdict(
+        _vsig, healthy="no open criticals or incidents, and contract runway is comfortable"))
     panel_help(
         "Your one-scroll morning read: the headline numbers, then open fires, then the "
         "top asks. A dash (—) means telemetry was unreachable, not zero. When a figure "

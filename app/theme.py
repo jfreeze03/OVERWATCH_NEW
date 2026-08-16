@@ -132,6 +132,17 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-exception:last-child { border-bottom:0; }
 .ow-exception--bad { border-left-color:var(--ow-bad); background:rgba(248,113,113,0.06); }
 .ow-exception--ok { border-left-color:var(--ow-ok); background:rgba(52,211,153,0.045); }
+/* page verdict line — one 'should I worry?' opener above a page (CoCo do-first #1) */
+.ow-verdict { display:flex; flex-wrap:wrap; gap:6px 10px; align-items:baseline;
+  padding:9px 13px; margin:0 0 12px; border-left:3px solid var(--ow-info);
+  border-radius:8px; background:var(--ow-info-dim); font-size:0.94rem; line-height:1.45; }
+.ow-verdict__label { font-weight:700; letter-spacing:.01em; white-space:nowrap; color:var(--ow-info); }
+.ow-verdict--ok { border-left-color:var(--ow-ok); background:var(--ow-ok-dim); }
+.ow-verdict--ok .ow-verdict__label { color:var(--ow-ok); }
+.ow-verdict--warn { border-left-color:var(--ow-warn); background:var(--ow-warn-dim); }
+.ow-verdict--warn .ow-verdict__label { color:var(--ow-warn); }
+.ow-verdict--bad { border-left-color:var(--ow-bad); background:var(--ow-bad-dim); }
+.ow-verdict--bad .ow-verdict__label { color:var(--ow-bad); }
 .ow-exception__label { color:var(--ow-ink); font-size:0.78rem; font-weight:700; }
 .ow-exception__value { color:var(--ow-ink); font-size:0.84rem; font-weight:750;
   font-variant-numeric:tabular-nums; }

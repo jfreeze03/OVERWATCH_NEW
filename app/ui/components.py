@@ -467,6 +467,23 @@ def section_header(title: str, health: str = "", icon_name: str = "",
     )
 
 
+def page_verdict_line(verdict: dict) -> None:
+    """One severity-striped 'should I worry?' line above a page's content (CoCo
+    do-first #1). `verdict` is the dict from app.logic.verdict.page_verdict —
+    keys severity ('ok'|'warn'|'bad'), label, body. No new query: pages feed it
+    signals they already computed."""
+    sev = str(verdict.get("severity", "") or "")
+    cls = f" ow-verdict--{sev}" if sev in ("ok", "warn", "bad") else ""
+    label = html.escape(str(verdict.get("label", "")))
+    body = html.escape(str(verdict.get("body", "")))
+    st.markdown(
+        f'<div class="ow-verdict{cls}" role="status">'
+        f'<span class="ow-verdict__label">{label}</span>'
+        f'<span class="ow-verdict__body">{body}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
                   key: str | None = None, help: str = "", disabled: bool = False,
                   use_container_width: bool = False) -> bool:
