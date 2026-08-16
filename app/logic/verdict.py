@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pandas as pd
+
 # Mirrors the app's severity vocabulary (kpi_row / section_header: ok|warn|bad).
 _RANK = {"bad": 3, "warn": 2, "ok": 1, "": 0}
 _LABEL = {"bad": "Attention needed", "warn": "Watch", "ok": "Healthy"}
@@ -55,3 +57,30 @@ def page_verdict(signals, *, healthy: str) -> dict:
     label = _LABEL[worst]
     return {"level": worst, "severity": worst, "label": label,
             "body": body, "sentence": f"{label} — {body}"}
+
+
+def oldest_open_hours(
+    frame: pd.DataFrame | None,
+    *,
+    now,
+    severity: str | None = None,
+    time_col: str = "RAISED_AT",
+    severity_col: str = "SEVERITY",
+) -> float | None:
+    """Hours since the oldest still-open row was raised (CoCo do-first: duration,
+    not count — the MTTR-pressure signal a raw count hides).
+
+    Optionally filters to `severity` (case-insensitive). `now` is an account-time
+    timestamp the caller supplies — this stays pure, with no clock of its own.
+    Returns None when the frame is empty/absent or carries no parseable timestamp
+    in `time_col`.
+    """
+    if frame is None or getattr(frame, "empty", True) or time_col not in frame.columns:
+        return None
+    view = frame
+    if severity is not None and severity_col in frame.columns:
+        view = frame[frame[severity_col].astype(str).str.upper() == severity.upper()]
+    raised = pd.to_datetime(view.get(time_col), errors="coerce").dropna()
+    if raised.empty:
+        return None
+    return max(0.0, (pd.Timestamp(now) - raised.min()).total_seconds() / 3600.0)

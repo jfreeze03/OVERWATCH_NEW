@@ -26,7 +26,7 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
-from app.logic.verdict import Signal, page_verdict
+from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 from app.ui import charts
 from app.ui.components import (
     download_text_button,
@@ -126,6 +126,12 @@ def render() -> None:
     scoped_crit: int | None = None
     if alert_counts is not None and alert_counts.usable():
         scoped_crit = int(safe_float(alert_counts.df.iloc[0].get("CRIT")))
+    # CoCo do-first (duration, not count): the oldest still-open CRITICAL drives MTTR
+    # urgency a raw count hides. Reuse the events already fetched in the batch — no query.
+    _ev = _b_live.get("events")
+    _oldest_crit_h = oldest_open_hours(
+        _ev.df if (_ev is not None and _ev.usable()) else None,
+        now=account_now(), severity="CRITICAL")
     # Honesty contract: when telemetry is unreachable the Brief says SO —
     # a zero here reads as "we spent nothing", which is a lie (review #5).
     kpis = [
@@ -150,6 +156,14 @@ def render() -> None:
          "value": _stalest_label(vals) if strip_up else "unknown",
          "severity": "" if strip_up else "warn"},
     ]
+    if _oldest_crit_h is not None:
+        kpis.append({
+            "label": "Oldest unacked critical",
+            "value": humanize_duration(_oldest_crit_h, "h"),
+            "severity": "bad" if _oldest_crit_h >= 24 else "warn",
+            "help": "Time since the oldest still-open CRITICAL alert was raised — the "
+                    "responsiveness signal a raw count hides. Work the Fires below.",
+        })
     if not strip_up:
         st.warning("Telemetry marts unreachable — the Brief refuses to invent numbers. "
                    + (strip.error or ""))
@@ -219,7 +233,9 @@ def render() -> None:
     if scoped_crit is None:
         _vsig.append(Signal("warn", "open-critical count unavailable"))
     elif scoped_crit > 0:
-        _vsig.append(Signal("bad", f"{scoped_crit} open critical alert(s)"))
+        _age = (f", oldest {humanize_duration(_oldest_crit_h, 'h')}"
+                if _oldest_crit_h is not None else "")
+        _vsig.append(Signal("bad", f"{scoped_crit} open critical alert(s){_age}"))
     if _inc.ok and len(_inc.df) > 0:
         _vsig.append(Signal("bad", f"{len(_inc.df)} open incident(s)"))
     if exh.usable():

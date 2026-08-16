@@ -1,7 +1,9 @@
 """Locks for the page-verdict primitive (CoCo do-first #1)."""
 from pathlib import Path
 
-from app.logic.verdict import Signal, page_verdict
+import pandas as pd
+
+from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,3 +49,20 @@ def test_verdict_line_is_wired_across_the_do_first_surfaces():
         src = (_ROOT / "app" / "ui" / "pages" / rel).read_text(encoding="utf-8")
         assert "page_verdict(" in src and "page_verdict_line(" in src, rel
         assert "from app.logic.verdict import" in src, rel
+
+
+def test_oldest_open_hours_filters_severity_and_handles_empty():
+    now = pd.Timestamp("2026-08-16 12:00:00")
+    frame = pd.DataFrame({
+        "SEVERITY": ["CRITICAL", "HIGH", "CRITICAL"],
+        "RAISED_AT": ["2026-08-15 12:00:00", "2026-08-14 00:00:00", "2026-08-16 06:00:00"],
+    })
+    assert oldest_open_hours(frame, now=now, severity="CRITICAL") == 24.0  # oldest CRITICAL
+    assert oldest_open_hours(frame, now=now) == 60.0                       # oldest overall
+    assert oldest_open_hours(None, now=now, severity="CRITICAL") is None
+    assert oldest_open_hours(pd.DataFrame(), now=now) is None
+
+
+def test_brief_surfaces_oldest_unacked_critical():
+    brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
+    assert "oldest_open_hours(" in brief and "Oldest unacked critical" in brief

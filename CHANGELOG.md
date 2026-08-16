@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.200.0 - Oldest-unacked-critical age on the Brief (2026-08-16)
+
+CoCo review, do-first wave (duration, not count). New pure
+`logic/verdict.oldest_open_hours`; wired into the Brief.
+
+- **The Brief now shows how long the oldest critical has been open, not just how many.**
+  A count measures volume; an age measures responsiveness. From the alert events the Brief
+  already loads (no new query), it surfaces an “Oldest unacked critical” KPI (red past 24h)
+  and folds the age into the verdict line (“2 open critical alert(s), oldest 47h”). The
+  helper is reusable for the Control Room and Operations duration signals next. App version
+  4.200.0.
+
 ## 4.199.0 - Generate REVOKE SQL from the least-privilege shortlist (2026-08-16)
 
 CoCo review, do-first wave (Security #11). New pure `logic/least_privilege.revoke_statements`;
