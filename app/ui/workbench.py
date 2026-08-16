@@ -436,6 +436,40 @@ def _render_catalog_editor(kind: str, key: str, row: pd.Series | None, company: 
             notify(ok, msg)
 
 
+def _render_data_product_detail(product: str) -> None:
+    """#14: a real Entity 360 view for a data product — its constituent catalog
+    entities and a rollup — instead of the empty catalog-record page it used to show
+    (DATA_PRODUCT is a catalog attribute, not an entity type)."""
+    detail = run(
+        workbench_sql.product_detail(product), page=_PAGE,
+        key=f"product_detail_{product}", tier="live",
+        source="ENTITY_CATALOG (by data product)",
+    )
+    if not detail.ok:
+        empty_state("needs_setup", "V074 is required for the ownership catalog.")
+        return
+    if detail.empty:
+        empty_state("no_data_yet",
+                    f"No catalog entities are mapped to the '{product}' data product yet.")
+        return
+    df = detail.df
+    crit = str(df.iloc[0].get("CRITICALITY") or "STANDARD")   # ORDERed most-severe first
+    owners = sorted({str(o).strip() for o in df["OWNER_NAME"].dropna() if str(o).strip()})
+    owner_label = owners[0] if len(owners) == 1 else (", ".join(owners) if owners else "unassigned")
+    status_chips([
+        (f"Data product: {product}", ""),
+        (f"{len(df)} entities", ""),
+        (crit, "bad" if crit.upper() == "CRITICAL" else ""),
+        (f"Owner: {owner_label}", "warn" if len(owners) > 1 else ""),
+    ])
+    if len(owners) > 1:
+        st.caption("This product spans multiple owners — resolve ownership in the catalog "
+                   "(Decision Studio > Products flags the conflict).")
+    st.markdown("**Constituent entities**")
+    styled_table(df, height=360, slug="product-detail",
+                 sort_label="most-severe criticality, then type")
+
+
 def render_entity_360(company: str) -> None:
     """One context surface for ownership, work, changes, savings and evidence."""
     _seed_entity_context()
@@ -477,6 +511,12 @@ def render_entity_360(company: str) -> None:
             styled_table(catalog.df, height=320)
         else:
             empty_state("no_data_yet", "Choose an entity or open one from an action, table, or universal search.")
+        return
+
+    if kind == "DATA_PRODUCT":
+        # #14: a data product isn't a catalog entity — render its constituents, not an
+        # empty ownership record.
+        _render_data_product_detail(key)
         return
 
     record = run(

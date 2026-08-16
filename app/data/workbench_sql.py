@@ -482,6 +482,27 @@ ORDER BY MEASURED_OBJECT_CREDITS DESC, METERED_WAREHOUSE_CREDITS DESC
 """
 
 
+def product_detail(data_product: str) -> str:
+    """#14: the constituent catalog entities of one data product, most-severe first.
+
+    DATA_PRODUCT is an ENTITY_CATALOG attribute, not an entity type, so Entity 360's
+    catalog-record path finds nothing for it. This lists the objects/warehouses/tasks
+    mapped to the product with their ownership and criticality, so opening a product
+    from the Products board shows what it's made of instead of an empty record."""
+    key = str(data_product or "").strip()
+    return f"""
+SELECT ENTITY_TYPE, ENTITY_KEY, LABEL, TEAM, OWNER_NAME, CRITICALITY, SLO_NAME
+FROM {core_object('ENTITY_CATALOG')}
+WHERE NULLIF(TRIM(DATA_PRODUCT), '') IS NOT NULL
+  AND UPPER(TRIM(DATA_PRODUCT)) = UPPER({sql_literal(key, 300)})
+ORDER BY CASE UPPER(TRIM(CRITICALITY))
+              WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+              WHEN 'STANDARD' THEN 2 WHEN 'LOW' THEN 3 ELSE 2 END,
+         ENTITY_TYPE, ENTITY_KEY
+LIMIT 500
+"""
+
+
 def cost_truth(days: int = 30, company: str = "ALL") -> str:
     """One non-additive inventory of billed, metered, measured and allocated credits."""
     horizon = bounded_days(days, 400)

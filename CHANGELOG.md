@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.195.0 - Decision Studio: real data-product detail view (2026-08-16)
+
+Decision Studio review, Wave 2 (finding #14). App-only; new
+`data/workbench_sql.product_detail`, Entity 360 branch in `ui/workbench.py`.
+
+- **Opening a data product now shows what it's made of.** DATA_PRODUCT is an
+  ENTITY_CATALOG *attribute*, not an entity type, so clicking a product from the Products
+  board fell into Entity 360's catalog-record path and rendered an empty "no ownership
+  record / no metric snapshot" page. Entity 360 now detects DATA_PRODUCT and renders a
+  real detail view: a rollup (entity count, most-severe criticality, owner — flagged when
+  the product spans several) plus the product's constituent catalog entities
+  (objects/warehouses/tasks) with their ownership and criticality, most-severe first.
+
+App version 4.195.0. Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.194.0 - Decision Studio: honest scope + truncation disclosure (2026-08-16)
 
 Decision Studio review, Wave 2 (findings #13, #15). App-only; `ui/pages/decision_studio.py`
