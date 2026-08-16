@@ -101,6 +101,33 @@ ORDER BY CREDITS_CURRENT DESC
 """
 
 
+def hourly_credits(hours: int, company: str = "ALL") -> str:
+    """Per-hour compute credits over the last N hours, company-scoped (CR9).
+
+    Feeds the credit overlay on the Control Room incident-correlation timeline,
+    so a spend spike and the events around it read on one time axis. HOUR_TS is
+    derived the SAME way the timeline events derive their AT column
+    (``::TIMESTAMP_NTZ``), so the two align under the shared display-timezone
+    conversion instead of drifting by the session-vs-account offset.
+    """
+    hours = max(1, min(int(hours), 168))  # <= 7 days, matching the timeline windows
+    where = and_where(
+        f"START_TIME >= DATEADD('hour', -{hours}, CURRENT_TIMESTAMP())",
+        companies.warehouse_clause(company),
+    )
+    return f"""
+SELECT
+    DATE_TRUNC('hour', START_TIME)::TIMESTAMP_NTZ AS HOUR_TS,
+    SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY
+WHERE {where}
+  AND WAREHOUSE_ID > 0
+GROUP BY 1
+HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
+ORDER BY 1
+"""
+
+
 def allocated_attribution(days: int, dimension: str, company: str = "ALL",
                           database: str = "", schema_contains: str = "") -> str:
     """Elapsed-time-share attribution by USER_NAME or DATABASE_NAME.

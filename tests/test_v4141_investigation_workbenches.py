@@ -142,8 +142,10 @@ def test_fingerprint_profile_and_operational_replay_are_wired() -> None:
     charts = _source("app/ui/charts.py")
     assert '"entity_type": "QUERY_FINGERPRINT"' in optimize
     assert "selectable_nav_table(" in optimize
-    assert "charts.operational_replay(tdf)" in control
+    assert "charts.operational_replay(tdf" in control   # wired (CR9: now carries a credit overlay)
+    assert "credits=" in control                          # CR9: hourly spend passed to the overlay
     assert "selection_interval" in charts and "alt.vconcat(focus, overview" in charts
+    assert "alt.vconcat(spend, focus" in charts           # CR9: spend panel layered above events
 
 
 def test_operational_replay_compiles_real_lane_data(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,3 +166,35 @@ def test_operational_replay_compiles_real_lane_data(monkeypatch: pytest.MonkeyPa
     assert len(rendered) == 1
     spec = rendered[0].to_dict()
     assert "vconcat" in spec and len(spec["vconcat"]) == 2
+
+
+def test_operational_replay_overlays_credits_on_a_shared_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CR9: a supplied credit series adds a spend panel that shares ONE explicit
+    # x-domain with the events, so the two align on first paint without a brush.
+    import json
+
+    rendered = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda chart, **_kwargs: rendered.append(chart))
+    frame = pd.DataFrame(
+        {
+            "AT": pd.to_datetime(["2026-08-03 08:00", "2026-08-03 12:00"]),  # wide event span
+            "EVENT_TYPE": ["Alert", "Task failure"],
+            "SEVERITY": ["CRITICAL", "HIGH"],
+            "LABEL": ["Spend spike", "Loader failed"],
+            "REF_ID": ["event-1", "query-1"],
+        }
+    )
+    credits = pd.DataFrame(  # narrower credit span — must be widened to the union
+        {"HOUR_TS": pd.to_datetime(["2026-08-03 09:00", "2026-08-03 10:00"]), "USD": [12.5, 41.0]}
+    )
+    charts.operational_replay(frame, credits=credits)
+    spec = json.dumps(rendered[0].to_dict())
+    assert "USD" in spec                                        # spend overlay present
+    # both panels pin to the union extent [08:00, 12:00] — the fix for the
+    # empty-brush independent-domain misalignment the review caught
+    assert "2026-08-03T08:00:00" in spec and "2026-08-03T12:00:00" in spec
+
+    # an empty / column-less credit frame overlays nothing (no USD) and never crashes
+    rendered.clear()
+    charts.operational_replay(frame, credits=pd.DataFrame())
+    assert "USD" not in json.dumps(rendered[0].to_dict())

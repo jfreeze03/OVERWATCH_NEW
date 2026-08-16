@@ -974,8 +974,15 @@ def event_timeline(df: pd.DataFrame) -> None:
                     use_container_width=True)
 
 
-def operational_replay(df: pd.DataFrame) -> None:
-    """Multi-lane event replay with a persistent overview brush."""
+def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:
+    """Multi-lane event replay with a persistent overview brush.
+
+    CR9: when ``credits`` (columns HOUR_TS + USD) is supplied, an hourly-spend
+    bar panel is layered above the events on ONE explicit shared time domain, so
+    a cost spike and the events around it line up on first paint (the brush-zoom
+    is reserved for the no-overlay view). HOUR_TS must already be in the same
+    display timezone as the events' AT column (the caller localizes both).
+    """
     data = df.copy()
     if data is None or data.empty:
         _empty_note("No operational events to replay in this window.")
@@ -988,7 +995,6 @@ def operational_replay(df: pd.DataFrame) -> None:
     domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     colors = [SEV_COLORS[level] for level in domain]
     shapes = ["circle", "diamond", "triangle-up", "square", "cross"]
-    brush = alt.selection_interval(encodings=["x"], name="replay_window")
     tooltip = [
         alt.Tooltip("AT:T", title="At"),
         alt.Tooltip("EVENT_TYPE:N", title="Lane"),
@@ -996,24 +1002,64 @@ def operational_replay(df: pd.DataFrame) -> None:
         alt.Tooltip("LABEL:N", title="Event"),
         alt.Tooltip("REF_ID:N", title="Reference"),
     ]
-    focus = (
-        alt.Chart(data)
-        .mark_point(size=125, filled=True, stroke=palette.BG, strokeWidth=0.7)
-        .encode(
-            x=alt.X("AT:T", title=None, scale=alt.Scale(domain=brush)),
-            y=alt.Y("EVENT_TYPE:N", title=None, sort="-x"),
-            color=alt.Color(
-                "SEVERITY:N", scale=alt.Scale(domain=domain, range=colors),
-                legend=alt.Legend(orient="top", title=None),
-            ),
-            shape=alt.Shape(
-                "SEVERITY:N", scale=alt.Scale(domain=domain, range=shapes),
-                legend=alt.Legend(orient="top", title=None),
-            ),
-            tooltip=tooltip,
+
+    def _focus(xscale):
+        return (
+            alt.Chart(data)
+            .mark_point(size=125, filled=True, stroke=palette.BG, strokeWidth=0.7)
+            .encode(
+                x=alt.X("AT:T", title=None, scale=xscale),
+                y=alt.Y("EVENT_TYPE:N", title=None, sort="-x"),
+                color=alt.Color(
+                    "SEVERITY:N", scale=alt.Scale(domain=domain, range=colors),
+                    legend=alt.Legend(orient="top", title=None),
+                ),
+                shape=alt.Shape(
+                    "SEVERITY:N", scale=alt.Scale(domain=domain, range=shapes),
+                    legend=alt.Legend(orient="top", title=None),
+                ),
+                tooltip=tooltip,
+            )
+            .properties(height=225)
         )
-        .properties(height=225)
-    )
+
+    # CR9: an optional hourly-spend series overlays as a panel above the events.
+    credit_data = None
+    if credits is not None and not getattr(credits, "empty", True):
+        cd = credits.copy()
+        cd["HOUR_TS"] = pd.to_datetime(cd.get("HOUR_TS"), errors="coerce")
+        cd = cd.dropna(subset=["HOUR_TS"])
+        if not cd.empty and "USD" in cd.columns:
+            credit_data = cd
+
+    if credit_data is not None:
+        # Alignment: alt.vconcat resolves x scales INDEPENDENTLY per panel, and an
+        # empty brush would fall back to each panel's OWN data extent — dense
+        # credits span the whole window, sparse events a narrower range, so the
+        # spend would not sit above the event at the same instant until the user
+        # brushed. Pin both panels to ONE explicit shared domain so they align on
+        # first paint. A bar mark (not area) leaves idle hours as gaps instead of
+        # interpolating filled spend across hours that metered nothing.
+        span = pd.concat([data["AT"], credit_data["HOUR_TS"]])
+        xdom = alt.Scale(domain=[span.min().isoformat(), span.max().isoformat()])
+        spend = (
+            alt.Chart(credit_data)
+            .mark_bar(color=palette.ACCENT, opacity=0.55)
+            .encode(
+                x=alt.X("HOUR_TS:T", title=None, scale=xdom),
+                y=alt.Y("USD:Q", title="Spend $/hr", axis=alt.Axis(format="$,.0f")),
+                tooltip=[alt.Tooltip("HOUR_TS:T", title="Hour"),
+                         alt.Tooltip("USD:Q", title="Spend", format="$,.2f")],
+            )
+            .properties(height=70)
+        )
+        focus = _focus(xdom)
+        st.altair_chart(alt.vconcat(spend, focus, spacing=8), use_container_width=True)
+        return
+
+    # No overlay: the persistent overview brush zooms the event focus.
+    brush = alt.selection_interval(encodings=["x"], name="replay_window")
+    focus = _focus(alt.Scale(domain=brush))
     overview = (
         alt.Chart(data)
         .mark_tick(thickness=2, size=24)

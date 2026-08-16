@@ -67,7 +67,7 @@ def test_validate_matches_the_repo_tip():
 _LIVE_SCAN_BUDGETS = {
     "app/ui/pages/brief.py": 0,
     "app/ui/pages/overview.py": 1,  # v4.36/V041: only _live_fallback_daily remains (score inputs went mart-first)
-    "app/ui/pages/control_room.py": 3,    # restored v4.45 (owner correction) — pulse/movers/task live fallbacks
+    "app/ui/pages/control_room.py": 4,    # restored v4.45 (owner correction) — pulse/movers/task live fallbacks; +1 v4.210 (CoCo CR9): hourly-credit overlay on the incident timeline (WAREHOUSE_METERING_HISTORY already reachable per test_v451_trust; lazy Timeline & movers section, non-first-paint, beside the timeline + movers live fallbacks)
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).

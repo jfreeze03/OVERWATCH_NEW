@@ -46,6 +46,7 @@ _SQL_MODULES = (
 # fail loudly and be taught the new argument, never silently skip the builder.
 _REQUIRED_ARGS: dict[str, object] = {
     "days": 7,
+    "hours": 48,   # cost_sql.hourly_credits (CR9): timeline-window hours, not days
     "day": "2026-06-14",
     "dimension": "USER",
     "a_start": "2026-06-01", "a_end": "2026-06-07",

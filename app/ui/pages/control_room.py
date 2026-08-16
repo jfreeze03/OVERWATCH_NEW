@@ -806,7 +806,20 @@ def render() -> None:
             if tz_note and not st.session_state.get("_ow_tz_note_shown"):  # rec34: once per page
                 st.caption(tz_note)
                 st.session_state["_ow_tz_note_shown"] = True
-            charts.operational_replay(tdf)
+            # CR9: overlay hourly spend on the same time axis so a cost spike and
+            # the events around it read together. Same window as the timeline;
+            # HOUR_TS is localized the same way as AT so the two cannot drift.
+            tl_hours = 48 if tl_win.startswith("48h") else tl_days * 24
+            cred = run(cost_sql.hourly_credits(tl_hours, _tl_company), page=_PAGE,
+                       key=f"cr_tl_credits_{_tl_company}_{tl_hours}", tier="recent",
+                       source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (hourly credits)")
+            credits_df = None
+            if cred.usable():
+                cdf = cred.df.copy()
+                cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                cdf, _ = localize_timestamps(cdf, ["HOUR_TS"])
+                credits_df = cdf
+            charts.operational_replay(tdf, credits=credits_df)
             sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
             if sel_tl is not None:
                 anchor = tdf.iloc[sel_tl]

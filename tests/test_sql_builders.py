@@ -18,6 +18,7 @@ LIVE_BUILDERS = [
     lambda: cost_sql.metering_daily_by_service(7),
     lambda: cost_sql.warehouse_daily_credits(7, "ALFA"),
     lambda: cost_sql.warehouse_window_vs_prior(7, "Trexis"),
+    lambda: cost_sql.hourly_credits(48, "ALFA"),
     lambda: cost_sql.allocated_attribution(7, "USER_NAME", "ALFA"),
     lambda: cost_sql.cortex_daily_spend(7),
     lambda: cost_sql.storage_by_database(7, "ALFA"),
@@ -45,6 +46,21 @@ def test_day_windows_are_clamped():
     assert "-90," in sql.replace(" ", "")  # MAX_LIVE_WINDOW_DAYS
     sql = ops_sql.lock_contention(10_000)
     assert "-7," in sql.replace(" ", "")   # v4.14: week cap (56GB/run at 14d)
+
+
+def test_hourly_credits_grain_scope_and_clamp():
+    # CR9: hourly compute credits for the incident-timeline overlay.
+    sql = cost_sql.hourly_credits(48, "ALFA")
+    assert "WAREHOUSE_METERING_HISTORY" in sql
+    # HOUR_TS is derived exactly like the timeline events' AT (::TIMESTAMP_NTZ)
+    # so the overlay aligns under the shared display-timezone conversion.
+    assert "DATE_TRUNC('hour', START_TIME)::TIMESTAMP_NTZ AS HOUR_TS" in sql
+    assert "DATEADD('hour', -48," in sql
+    assert "WAREHOUSE_ID > 0" in sql          # exclude the cloud-services pseudo-warehouse
+    assert "WH!_ALFA!_%" in sql               # company-scoped by warehouse
+    # window clamps to 7 days of hours and never below one hour
+    assert "DATEADD('hour', -168," in cost_sql.hourly_credits(10_000, "ALL")
+    assert "DATEADD('hour', -1," in cost_sql.hourly_credits(0, "ALL")
 
 
 def test_company_scope_present_when_requested():

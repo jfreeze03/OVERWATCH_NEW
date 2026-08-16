@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.210.0 - Credit overlay on the incident-correlation timeline (2026-08-16)
+
+CoCo review, Tier-2 (Control Room #9). New `data.cost_sql.hourly_credits`.
+
+- **The replay timeline now shows spend alongside the events.** The Control Room incident-
+  correlation timeline plotted alerts, task failures, and DDL on one axis but not the money —
+  so "did that change cost anything?" meant leaving for the Cost page. An hourly-spend bar panel
+  now layers above the events on one shared time axis (48h or 7d), so a cost spike and the events
+  around it line up on first paint. The credit timestamps are derived exactly like the events'
+  (`::TIMESTAMP_NTZ`) and localized the same way, so the two axes cannot drift; idle hours stay
+  gaps (bars, not an interpolated area) rather than reading as sustained spend. The scan reuses
+  `WAREHOUSE_METERING_HISTORY` (already reachable from this page) on the lazy Timeline & movers
+  section — no first-paint cost. Control Room live-scan budget 3→4. App version 4.210.0.
+
 ## 4.209.0 - Recent-change panel on Entity 360 (2026-08-16)
 
 CoCo review, Tier-2 (Control Room #15). New `data.workbench_sql.entity_recent_changes`.
