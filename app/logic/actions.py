@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.logic.formulas import account_now
+from app.logic.formulas import account_now, safe_float
 
 SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 OPEN_STATUSES = ("OPEN", "IN_PROGRESS")
@@ -151,6 +151,28 @@ def ledger_totals(df: pd.DataFrame) -> dict:
         "verified_estimated_usd": round(float(ver_est_usd), 2),
         "realization_pct": realization,
     }
+
+
+def since_last_visit_summary(new_alerts: object, new_crit: object,
+                             new_high: object, new_actions: object) -> dict:
+    """One-line 'what changed since your last visit' text + severity (Cost3).
+
+    ``quiet`` is True when nothing alert- or action-worthy landed while the
+    viewer was away, so the caller renders a calm note rather than an alarm.
+    Severity escalates to ``bad`` on a new critical, ``warn`` on a new high or
+    any new alert, else ``ok``."""
+    na, nc = int(safe_float(new_alerts)), int(safe_float(new_crit))
+    nh, nac = int(safe_float(new_high)), int(safe_float(new_actions))
+    if na <= 0 and nac <= 0:
+        return {"severity": "ok", "quiet": True, "text": "nothing new while you were away"}
+    parts: list[str] = []
+    if na > 0:
+        extra = f" ({nc} critical)" if nc > 0 else (f" ({nh} high)" if nh > 0 else "")
+        parts.append(f"{na} new alert{'' if na == 1 else 's'}{extra}")
+    if nac > 0:
+        parts.append(f"{nac} new action{'' if nac == 1 else 's'}")
+    severity = "bad" if nc > 0 else "warn" if (nh > 0 or na > 0) else "ok"
+    return {"severity": severity, "quiet": False, "text": "; ".join(parts)}
 
 
 def _dedupe_alert_feed(alerts: pd.DataFrame) -> pd.DataFrame:

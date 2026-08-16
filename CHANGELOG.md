@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.214.0 - "Since your last visit" on the Cost page (2026-08-16)
+
+CoCo review, Tier-2 (Cost #3). New `data.mart_sql.since_last_visit` +
+`logic.actions.since_last_visit_summary`.
+
+- **The Cost page now greets you with what changed while you were away.** A one-line opener under
+  the verdict reads the viewer's own `APP_USAGE` trail to find their last visit (their most recent
+  activity before a 30-minute gap, matched to the same identity the app stamps), then counts the
+  alerts (by severity) and actions raised since — "Since your last visit (2 hours ago): 3 new
+  alerts (1 critical); 2 new actions", or a calm "nothing new" when it was quiet. All timestamps
+  compare as account-time NTZ so the buffered/stored stamps line up; reads OVERWATCH's own tables
+  (no Account Usage scan, no migration — `APP_USAGE` has existed since V016). App version 4.214.0.
+
 ## 4.213.0 - Anomaly markers on the spend trend (2026-08-16)
 
 CoCo review, Tier-2 (UI #15 / Overview #5). New `logic.anomaly.anomaly_markers` +

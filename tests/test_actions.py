@@ -8,9 +8,26 @@ from app.logic.actions import (
     can_verify,
     ledger_totals,
     rank_actions,
+    since_last_visit_summary,
     triage_queue,
 )
 from app.logic.formulas import account_today
+
+
+def test_since_last_visit_summary_quiet_and_severity():
+    # Cost3: nothing new -> quiet/ok note.
+    quiet = since_last_visit_summary(0, 0, 0, 0)
+    assert quiet["quiet"] and quiet["severity"] == "ok" and "nothing new" in quiet["text"]
+    # a new critical escalates to bad and names the critical count.
+    bad = since_last_visit_summary(3, 1, 0, 2)
+    assert bad["severity"] == "bad" and "3 new alerts (1 critical)" in bad["text"]
+    assert "2 new actions" in bad["text"]
+    # highs (no crit) -> warn, and singular/plural render correctly.
+    warn = since_last_visit_summary(1, 0, 1, 0)
+    assert warn["severity"] == "warn" and warn["text"] == "1 new alert (1 high)"
+    # actions only (no alerts) -> warn on new actions is off; alerts drive it.
+    acts = since_last_visit_summary(0, 0, 0, 1)
+    assert acts["severity"] == "ok" and acts["text"] == "1 new action" and not acts["quiet"]
 
 
 def test_rank_actions_severity_then_overdue():

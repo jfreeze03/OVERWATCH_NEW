@@ -63,6 +63,26 @@ def test_hourly_credits_grain_scope_and_clamp():
     assert "DATEADD('hour', -1," in cost_sql.hourly_credits(0, "ALL")
 
 
+def test_since_last_visit_reader_shape_and_scope():
+    # Cost3: last visit from APP_USAGE + what changed (alerts/actions) since.
+    sql = mart_sql.since_last_visit("ALFA")
+    for obj in ("APP_USAGE", "ALERT_EVENTS", "ACTION_QUEUE"):
+        assert obj in sql
+    assert "USER_NAME = CURRENT_USER()" in sql        # no test session -> CURRENT_USER identity
+    assert "DATEADD('minute', -30," in sql            # default visit gap
+    assert "::TIMESTAMP_NTZ" in sql                    # every stamp compared as account-time NTZ
+    assert "MINUTES_AGO" in sql and "NEW_CRIT" in sql
+    # only a GENUINE idle gap counts as a last visit — mid-session activity suppresses it
+    assert "N_RECENT" in sql and "r.N_RECENT = 0" in sql
+    assert "IN ('ALFA', 'ALL')" in sql                 # company-scoped (ALL-company events kept)
+    assert "e.COMPANY" not in mart_sql.since_last_visit("ALL")  # ALL scope -> no company filter
+
+
+def test_since_last_visit_gap_is_clamped():
+    assert "DATEADD('minute', -1440," in mart_sql.since_last_visit("ALL", gap_minutes=99999)
+    assert "DATEADD('minute', -5," in mart_sql.since_last_visit("ALL", gap_minutes=1)
+
+
 def test_company_scope_present_when_requested():
     alfa = cost_sql.warehouse_daily_credits(7, "ALFA")
     trexis = cost_sql.warehouse_daily_credits(7, "Trexis")

@@ -14,7 +14,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
-from app.logic.formulas import humanize_duration, safe_float
+from app.logic.formulas import humanize_duration, humanize_minutes_ago, safe_float
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     guard,
@@ -77,6 +77,30 @@ def render() -> None:
             _vsig.append(Signal("warn", f"contract runway {_dl:,.0f} days at current burn"))
     page_verdict_line(page_verdict(
         _vsig, healthy="contract on track at the current burn — open a section for detail"))
+    # Cost3: a "what changed since your last visit" opener from the viewer's own
+    # APP_USAGE trail + the alerts/actions raised while they were away.
+    from app.core.identity import viewer_name
+    from app.logic.actions import since_last_visit_summary
+    if viewer_name():
+        _slv = run(mart_sql.since_last_visit(f["company"]), page=_PAGE,
+                   key="cost_since_last_visit", tier="recent",
+                   source="APP_USAGE + ALERT_EVENTS + ACTION_QUEUE")
+        if _slv.usable():
+            import pandas as pd
+            _lvrow = _slv.df.iloc[0]
+            if pd.notna(_lvrow.get("LAST_VISIT")):
+                _slv_sum = since_last_visit_summary(
+                    _lvrow.get("NEW_ALERTS"), _lvrow.get("NEW_CRIT"),
+                    _lvrow.get("NEW_HIGH"), _lvrow.get("NEW_ACTIONS"))
+                _ago = humanize_minutes_ago(_lvrow.get("MINUTES_AGO"))
+                _slv_msg = f"Since your last visit ({_ago}): {_slv_sum['text']}."
+                _slv_sev = _slv_sum["severity"]
+                if _slv_sev == "bad":
+                    st.warning(_slv_msg)
+                elif _slv_sev == "warn":
+                    st.info(_slv_msg)          # new highs/actions stay visible, not a muted caption
+                else:
+                    st.caption(_slv_msg)
     section = lazy_sections(
         ["Spend & Attribution", "Contract & Forecast", "Chargeback & AI",
          "Unit costs", "Compare", "Optimization & Savings"], key="cost_section")

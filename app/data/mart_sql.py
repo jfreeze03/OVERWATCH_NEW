@@ -514,6 +514,76 @@ ORDER BY DAY
 """
 
 
+# A >= this-many-minute gap in a viewer's own APP_USAGE activity marks the
+# boundary of a new visit (Cost3). This render's own usage row is still buffered
+# (main.py flushes at end-of-render), so it cannot count as the last visit.
+SINCE_LAST_VISIT_GAP_MIN = 30
+
+
+def since_last_visit(company: str = "ALL", gap_minutes: int = SINCE_LAST_VISIT_GAP_MIN) -> str:
+    """This viewer's last visit + what changed since — new alerts (by severity)
+    and new actions (Cost3, 'what changed since your last visit').
+
+    'Last visit' requires a GENUINE >=gap_minutes idle break: if the viewer has
+    ANY activity in the last gap_minutes they are mid-session (the current
+    render's own row is still buffered), so LAST_VISIT resolves to NULL and the
+    caller suppresses the opener — it only greets a real return, never a rolling
+    window during a long session. Otherwise LAST_VISIT is their most recent prior
+    activity. Identity matches the writer (identity_sql); everything compares in
+    TIMESTAMP_NTZ so the account-time stamps line up. Company-scoped like the page
+    (ALL-company events included); NULL last-visit yields zero counts."""
+    from app.core.identity import identity_sql
+
+    gap = max(5, min(int(gap_minutes), 1440))
+    who = identity_sql()
+    comp = str(company or "ALL")
+    alert_scope = ("" if comp.upper() == "ALL"
+                   else f"AND UPPER(e.COMPANY) IN ({sql_literal(comp.upper())}, 'ALL')")
+    action_scope = ("" if comp.upper() == "ALL"
+                    else f"AND UPPER(a.COMPANY) IN ({sql_literal(comp.upper())}, 'ALL')")
+    return f"""
+WITH recent AS (
+    SELECT COUNT(*) AS N_RECENT
+    FROM {core_object("APP_USAGE")}
+    WHERE USER_NAME = {who}
+      AND AT >= DATEADD('minute', -{gap}, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ
+),
+lv AS (
+    -- Only a real idle gap counts: mid-session activity (N_RECENT > 0) forces
+    -- LAST_VISIT to NULL, so the opener greets a genuine return, not a rolling
+    -- 30-min window during a continuous session.
+    SELECT MAX(u.AT) AS LAST_VISIT
+    FROM {core_object("APP_USAGE")} u
+    CROSS JOIN recent r
+    WHERE u.USER_NAME = {who}
+      AND u.AT < DATEADD('minute', -{gap}, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ
+      AND r.N_RECENT = 0
+),
+al AS (
+    SELECT
+        COUNT(*) AS NEW_ALERTS,
+        COUNT_IF(UPPER(e.SEVERITY) = 'CRITICAL') AS NEW_CRIT,
+        COUNT_IF(UPPER(e.SEVERITY) = 'HIGH') AS NEW_HIGH
+    FROM {core_object("ALERT_EVENTS")} e
+    CROSS JOIN lv
+    WHERE lv.LAST_VISIT IS NOT NULL
+      AND e.RAISED_AT::TIMESTAMP_NTZ > lv.LAST_VISIT {alert_scope}
+),
+ac AS (
+    SELECT COUNT(*) AS NEW_ACTIONS
+    FROM {core_object("ACTION_QUEUE")} a
+    CROSS JOIN lv
+    WHERE lv.LAST_VISIT IS NOT NULL
+      AND a.CREATED_AT::TIMESTAMP_NTZ > lv.LAST_VISIT {action_scope}
+)
+SELECT
+    lv.LAST_VISIT,
+    DATEDIFF('minute', lv.LAST_VISIT, CURRENT_TIMESTAMP()::TIMESTAMP_NTZ) AS MINUTES_AGO,
+    al.NEW_ALERTS, al.NEW_CRIT, al.NEW_HIGH, ac.NEW_ACTIONS
+FROM lv, al, ac
+"""
+
+
 def alert_mttr(days: int = 90) -> str:
     """Weekly MTTA/MTTR from alert lifecycle timestamps."""
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)

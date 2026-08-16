@@ -351,6 +351,22 @@ def humanize_age(value: object, now: object = None) -> str:
     return f"{round(secs / 86_400)}d ago"
 
 
+def humanize_minutes_ago(minutes: object) -> str:
+    """'just now' / 'Nm ago' / 'Nh ago' / 'Nd ago' from a minutes-since count.
+
+    Day-aware (unlike humanize_duration, which caps at hours), and safe to feed a
+    minutes value computed in SQL (DATEDIFF) so the relative age stays in one
+    timezone basis instead of mixing a SQL stamp with a Python clock."""
+    m = safe_float(minutes)
+    if m < 1:
+        return "just now"
+    if m < 60:
+        return f"{round(m)}m ago"
+    if m < 1440:
+        return f"{round(m / 60)}h ago"
+    return f"{round(m / 1440)}d ago"
+
+
 def _spark_polyline(values, width: int = 240, height: int = 40, color: str = "#0891b2") -> str:
     """rec20: a self-contained inline-SVG sparkline for the HTML export — pure, no
     Streamlit dependency, so `exec_summary_html` stays in the logic layer and the
