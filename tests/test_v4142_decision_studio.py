@@ -45,6 +45,32 @@ def test_portfolio_ranks_impact_confidence_effort_and_next_move() -> None:
     assert result.loc["hot", "IMPACT_USD_30D"] == 368.0
 
 
+def test_portfolio_gates_missing_behavioral_evidence() -> None:
+    # Decision-Studio #2: a top-priority, high-confidence family whose cache/P95/fails are
+    # all NULL (a family-mart join miss) must NOT be coerced to 0 and driven to ACT NOW /
+    # "Cache or materialize". The evidence gate forces VALIDATE instead.
+    frame = pd.DataFrame(
+        {
+            "FINGERPRINT": ["blind", "filler"],
+            "RUNS": [300, 10],
+            "FAILS": [None, 0],
+            "CREDITS": [1000, 5],
+            "ACTIVE_DAYS": [30, 5],
+            "DATABASES": [1, 1],
+            "USERS": [2, 1],
+            "AVG_CACHE_PCT": [None, 50.0],
+            "P95_SEC": [None, 3.0],
+        }
+    )
+    result = prioritize_workloads(frame, 3.68, 30).set_index("FINGERPRINT")
+    # blind is the top-priority row with confidence >= 0.65 (so it would be ACT NOW), but
+    # it carries NO behavioral evidence — the gate sends it to VALIDATE, not the ACT lane.
+    assert result.loc["blind", "CONFIDENCE"] >= 0.65
+    assert result.loc["blind", "LANE"] == "VALIDATE"
+    assert result.loc["blind", "NEXT_MOVE"] == "Validate evidence"
+    assert result.loc["blind", "EVIDENCE_COVERAGE"] == 0.0
+
+
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
     actions = pd.DataFrame(
         {

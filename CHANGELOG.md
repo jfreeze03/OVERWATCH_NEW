@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.181.0 - Decision Studio: Portfolio stops acting on missing evidence (2026-08-15)
+
+Decision Studio review, Wave 1 (finding #2). App-only; `decision.py`, `decision_studio.py`.
+
+- **A blank measurement is no longer treated as a measured zero.** In
+  `prioritize_workloads`, a NULL cache % / P95 (a query family that missed the
+  family mart via a join miss or its 2000/day cap) was coerced to `0.0`, so a
+  high-cost family with zero behavioral evidence could reach `CONFIDENCE=1.0`,
+  `ACT NOW`, and "Cache or materialize" — with the cache cell rendered blank. Now
+  presence is tracked from the raw columns: the caching and latency recommendations
+  are gated on the measurement actually existing, a family with no behavioral
+  evidence at all is held at `VALIDATE` (never ACT NOW) with a "Validate evidence"
+  next move, and a new `EVIDENCE_COVERAGE` column (0–1) surfaces on the Portfolio
+  table so a blank cell reads as missing data, not a measured zero. The lane-rule
+  caption states the gate. (The deeper cause — the account-grain family mart that
+  produces the join misses — is finding #3, a migration, and stays queued.)
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.180.0 - Feature: fleet consolidation recommender (2026-08-15)
 
 Gap-audit Wave 6 (rec #20). App-only; new `logic/consolidation.py` + `optimize.py`.

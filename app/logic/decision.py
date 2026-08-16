@@ -25,6 +25,24 @@ def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
     cache = pd.to_numeric(out.get("AVG_CACHE_PCT", 0), errors="coerce").fillna(0.0)
     p95 = pd.to_numeric(out.get("P95_SEC", 0), errors="coerce").fillna(0.0)
 
+    # Decision-Studio #2: a MISSING measurement is not a measured 0. Family behavioral
+    # evidence (cache %, P95, fails) is absent whenever a cost fingerprint missed the
+    # family mart (join miss, or below its 2000/day cap); coercing NULL->0 made a blind
+    # row look like 0% cache + instant queries and drove a "Cache this / ACT NOW" call
+    # with the cache column rendered blank. Track presence from the RAW columns and never
+    # recommend an action, or reach ACT NOW, from an absent measurement.
+    def _present(col: str) -> pd.Series:
+        if col not in out.columns:
+            return pd.Series(False, index=out.index)
+        return pd.to_numeric(out[col], errors="coerce").notna()
+    has_cache = _present("AVG_CACHE_PCT")
+    has_latency = _present("P95_SEC")
+    has_fails = _present("FAILS")
+    has_behavior = has_cache | has_latency | has_fails
+    out["EVIDENCE_COVERAGE"] = (
+        (has_cache.astype(float) + has_latency.astype(float) + has_fails.astype(float)) / 3
+    ).round(2)
+
     out["IMPACT_USD_30D"] = (credits * max(safe_float(rate), 0.0) / horizon * 30).round(2)
     out["FAIL_PCT"] = (fails / runs.replace(0, pd.NA) * 100).fillna(0.0).round(2)
     run_evidence = (runs / 30).clip(upper=1.0)
@@ -49,13 +67,19 @@ def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
     out["LANE"] = "PLAN"
     out.loc[out["CONFIDENCE"] < 0.5, "LANE"] = "VALIDATE"
     out.loc[(percentile >= 0.8) & (out["CONFIDENCE"] >= 0.65), "LANE"] = "ACT NOW"
+    # #2: with no behavioral evidence we cannot know WHAT to do, so a high-cost-but-blind
+    # family must never reach ACT NOW off cost signals alone — send it to VALIDATE.
+    out.loc[~has_behavior, "LANE"] = "VALIDATE"
     out["NEXT_MOVE"] = "Profile and tune"
-    cache_candidate = (cache <= 25) & (runs / horizon * 30 >= 10)
+    # #2: gate the caching and latency recommendations on the measurement actually being
+    # present, so a NULL-fill (cache=0, p95=0) can no longer trigger them.
+    cache_candidate = has_cache & (cache <= 25) & (runs / horizon * 30 >= 10)
     out.loc[cache_candidate, "NEXT_MOVE"] = "Cache or materialize"
     out.loc[out["FAIL_PCT"] >= 2, "NEXT_MOVE"] = "Stabilize failures"
-    out.loc[(p95 < 5) & (out["FAIL_PCT"] < 2) & ~cache_candidate, "NEXT_MOVE"] = (
+    out.loc[(p95 < 5) & has_latency & (out["FAIL_PCT"] < 2) & ~cache_candidate, "NEXT_MOVE"] = (
         "Reduce recurrence"
     )
+    out.loc[~has_behavior, "NEXT_MOVE"] = "Validate evidence"
     return out.sort_values(
         ["LANE", "PRIORITY_SCORE"],
         ascending=[True, False],

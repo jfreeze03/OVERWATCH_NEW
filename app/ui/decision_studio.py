@@ -104,7 +104,8 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         impact_col="IMPACT_USD_30D",
         confidence_col="CONFIDENCE",
         status_col="LANE",
-        context_cols=("EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC"),
+        context_cols=("EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC",
+                      "EVIDENCE_COVERAGE"),
         on_select=open_profile,
         height=370,
         sort_label="decision lane, then evidence-weighted priority",
@@ -119,7 +120,9 @@ def _portfolio(company: str, days: int, rate: float) -> None:
     st.caption(
         "Impact $, runs, fail % and cache are **measured**; confidence, priority and lane are "
         "**evidence-weighted heuristics** for ordering, not guarantees. Lane rule: ACT NOW = "
-        "top-20% priority AND confidence ≥ 0.65; VALIDATE = confidence < 0.5; otherwise PLAN."
+        "top-20% priority AND confidence ≥ 0.65; VALIDATE = confidence < 0.5; otherwise PLAN. "
+        "A family with no measured cache/latency/failure evidence (coverage 0) is held at "
+        "VALIDATE and never told to cache — a blank cell is missing data, not a measured zero."
     )
     result_caption(result, note="credits are measured; effort is a users + databases proxy")
 
