@@ -15,9 +15,27 @@ from app.logic.workbench import (
     confidence_state,
     create_action_sql,
     entity_catalog_merge_sql,
+    experiment_state_by_key,
     investigation_target,
     watchlist_sql,
 )
+
+
+def test_experiment_state_by_key_active_first_and_graceful() -> None:
+    # Cost10: surface the most-active experiment per warehouse on a savings card.
+    frame = pd.DataFrame({"Warehouse / target": ["wh_a", "WH_B", "WH_C"]})
+    exps = pd.DataFrame({
+        "ENTITY_TYPE": ["WAREHOUSE", "WAREHOUSE", "warehouse", "DATABASE"],
+        "ENTITY_KEY": ["WH_A", "WH_A", "wh_b", "WH_C"],   # WH_A twice (active-first), wh_b, WH_C as a DB
+        "STATUS": ["RUNNING", "VERIFIED", "PLANNED", "OBSERVING"],
+    })
+    out = experiment_state_by_key(frame, exps, "WAREHOUSE", "Warehouse / target")
+    assert out.iloc[0] == "RUNNING"   # first row wins (reader orders active-first) over later VERIFIED
+    assert out.iloc[1] == "PLANNED"   # case-insensitive key + type match (wh_b / warehouse)
+    assert out.iloc[2] == ""          # WH_C only has a DATABASE experiment -> no warehouse match
+    # graceful: no experiments / None / missing column -> all-'' (never raises)
+    assert (experiment_state_by_key(frame, pd.DataFrame(), "WAREHOUSE", "Warehouse / target") == "").all()
+    assert experiment_state_by_key(None, exps, "WAREHOUSE", "Warehouse / target").empty
 
 sqlglot = pytest.importorskip("sqlglot")
 

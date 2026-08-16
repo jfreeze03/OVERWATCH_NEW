@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.217.0 - Experiment state on the savings cards (2026-08-16)
+
+CoCo review, Tier-2 (Cost #10). New pure `logic.workbench.experiment_state_by_key`.
+
+- **A saving already under test no longer reads as a fresh opportunity.** The Cost →
+  Optimization addressable-savings table now shows an **Experiment** column — the most-active
+  optimization experiment (PLANNED/RUNNING/OBSERVING/VERIFIED) on that warehouse, matched
+  case-insensitively by entity key, reusing the `experiments` reader. The column appears only
+  when a listed warehouse is actually under test, and degrades away when V074 isn't applied.
+  App version 4.217.0.
+
 ## 4.216.0 - Vs-prior-period deltas on KPIs (2026-08-16)
 
 CoCo review, Tier-2 (Overview #19 / Control Room #3). Reuses `logic.formulas.pct_delta`.

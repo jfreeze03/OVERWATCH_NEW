@@ -265,6 +265,33 @@ def mark_watched_pairs(frame: pd.DataFrame | None, watchlist: pd.DataFrame | Non
     return pd.Series([pair in watched for pair in pairs], index=frame.index)
 
 
+def experiment_state_by_key(frame: pd.DataFrame | None, experiments: pd.DataFrame | None,
+                            entity_type: str, key_col: str) -> pd.Series:
+    """STATUS Series: the most-active optimization experiment on each row's entity (Cost10).
+
+    Scopes ``experiments`` to ``entity_type`` (case-insensitive), collapses to the
+    most-active experiment per ENTITY_KEY (the reader already orders PLANNED/RUNNING/
+    OBSERVING first, so keep='first' wins), and maps each row's ``key_col`` to that
+    STATUS — '' where no experiment exists. Empty/absent inputs or a missing column
+    yield an all-'' Series, never a raise (same graceful contract as mark_watched)."""
+    if frame is None:
+        return pd.Series(dtype=str)
+    if frame.empty or key_col not in frame.columns:
+        return pd.Series("", index=frame.index, dtype=str)
+    if (experiments is None or experiments.empty
+            or not {"ENTITY_TYPE", "ENTITY_KEY", "STATUS"}.issubset(experiments.columns)):
+        return pd.Series("", index=frame.index, dtype=str)
+    kind = str(entity_type or "").strip().upper()
+    scoped = experiments[experiments["ENTITY_TYPE"].astype(str).str.upper() == kind].copy()
+    if scoped.empty:
+        return pd.Series("", index=frame.index, dtype=str)
+    scoped["_KEY"] = scoped["ENTITY_KEY"].astype(str).str.strip().str.upper()
+    scoped = scoped.drop_duplicates(subset="_KEY", keep="first")   # active-first per reader order
+    status_by_key = dict(zip(scoped["_KEY"], scoped["STATUS"].astype(str), strict=False))
+    return (frame[key_col].astype(str).str.strip().str.upper()
+            .map(status_by_key).fillna("").astype(str))
+
+
 def watchlist_sql(viewer: str, entity_type: str, entity_key: str,
                   label: str = "", *, remove: bool = False) -> str:
     name = str(viewer or "").strip()

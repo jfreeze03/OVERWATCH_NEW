@@ -25,7 +25,7 @@ from app.core.query import execute_statement, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
-from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.data.common import bounded_days
 from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
@@ -50,6 +50,7 @@ from app.logic.savings_rollup import (
 )
 from app.logic.serverless_roi import classify_qas_roi
 from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
+from app.logic.workbench import experiment_state_by_key
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
@@ -564,6 +565,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # size-down on the SAME warehouse recover the same idle credits, so summing
         # them naively double-counts; rollup_savings keeps the larger of the pair.
         st.markdown("**Total addressable savings (de-duplicated)**")
+        # Cost10: the most-active optimization experiment per warehouse, so a saving
+        # already under test isn't re-booked as a fresh opportunity. Read-once,
+        # usable()-gated (OPTIMIZATION_EXPERIMENTS is account-wide, no COMPANY col).
+        _exp = run(workbench_sql.experiments(entity_type="WAREHOUSE"), page=_PAGE,
+                   key=f"opt_experiments_{company}", tier="recent", source="OPTIMIZATION_EXPERIMENTS")
+        _exp_df = _exp.df if _exp.usable() else pd.DataFrame()
         _roll = rollup_savings(_savings_opps)
         if _roll.items:
             kpi_row([
@@ -579,8 +586,18 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                  "$/mo": round(o.monthly_usd, 2), "Confidence": round(o.confidence, 2),
                  "Effort": effort_tier(o.source)}
                 for o in _roll.items])
+            # Cost10: add the Experiment column only when a warehouse here is under test.
+            _exp_col = experiment_state_by_key(_rdf, _exp_df, "WAREHOUSE", "Warehouse / target")
+            if _exp_col.astype(bool).any():
+                _rdf["Experiment"] = _exp_col
             styled_table(_rdf, height=280, sort_label="confidence x dollars",
-                         column_config={"$/mo": st.column_config.NumberColumn(format="$%.2f")})
+                         column_config={
+                             "$/mo": st.column_config.NumberColumn(format="$%.2f"),
+                             "Experiment": st.column_config.TextColumn(
+                                 "Experiment",
+                                 help="Most-active optimization experiment on this warehouse — a "
+                                      "saving already under test is not a fresh opportunity to re-book."),
+                         })
             st.caption(
                 "Ranked by confidence x dollars. **Effort** flags the quick wins — LOW is a "
                 "single ALTER (idle timer / size), so sort by it to bank the easy savings "
