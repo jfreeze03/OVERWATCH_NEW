@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.169.0 - Formula honesty: year-strip prorates today's remainder (2026-08-15)
+
+Gap-audit Wave 3f (rec #40, year-strip only). App-only; `contract.py`.
+
+- **The calendar-year projection no longer runs low all day.** The year strip
+  projected `YTD + trailing-burn x days-after-today`, but YTD already includes
+  today's partial while today's REMAINING hours were never re-estimated — so the
+  year-end figure crept up all day as today filled in. It now adds today's
+  prorated remainder (`burn x fraction-of-day-left`), which makes the projection
+  constant through the day: today's partial-so-far plus its prorated remainder
+  equals exactly one full projected day at the trailing burn. (The `contract_pace`
+  off-by-one in the same rec stays declined — ambiguous inclusive/exclusive
+  END_DATE semantics, pending owner confirmation.)
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.168.0 - Formula honesty: capacity channels + growth window (2026-08-15)
 
 Gap-audit Wave 3e (rec #39). App-only; `capacity.py`.

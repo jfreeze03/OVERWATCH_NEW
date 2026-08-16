@@ -18,6 +18,7 @@ from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, security_sql
 from app.logic import contract_planner, steering
 from app.logic.forecast import contract_pace
 from app.logic.formulas import (
+    account_now,
     account_today,
     blended_billed_usd,
     blended_credit_rate,
@@ -171,6 +172,19 @@ def _org_truth_panel() -> bool:
     return True
 
 
+def _year_end_credits(ytd: float, burn: float, frac_left: float, days_left: int) -> float:
+    """Straight-line calendar-year projection (rec#40).
+
+    ``ytd`` already includes today's PARTIAL actual; the old projection added
+    only the days AFTER today (``burn * days_left``), so today's remaining hours
+    were never estimated and the year-end number ran low all day. Add today's
+    prorated remainder (``burn * frac_left``) so the projection stays constant
+    through the day: today's partial-so-far plus its prorated remainder equals
+    exactly one full projected day at the trailing burn.
+    """
+    return ytd + burn * (frac_left + days_left)
+
+
 def _year_projection_strip(settings: dict) -> None:
     """Calendar-year framing (COST_DB recon R9): the exec asks "what will
     this YEAR total?" Straight-line here, honestly labeled — the
@@ -201,9 +215,14 @@ def _year_projection_strip(settings: dict) -> None:
     burn_other = float(tail[other_col].map(safe_float).sum()) / n_tail
     burn_ai = (float(tail[ai_col].map(safe_float).sum()) / n_tail) if ai_col else 0.0
     days_left = (date(today.year, 12, 31) - today).days
+    # N1/rec#40: today is a partial day. YTD keeps its actual, but the projection
+    # must re-estimate today's REMAINING hours (prorated at the trailing burn) so
+    # the year-end figure does not run low all day.
+    now = account_now()
+    frac_left = max(0.0, min(1.0, 1.0 - (now.hour * 3600 + now.minute * 60 + now.second) / 86400.0))
     ytd = ytd_other + ytd_ai
-    proj_other = ytd_other + burn_other * days_left
-    proj_ai = ytd_ai + burn_ai * days_left
+    proj_other = _year_end_credits(ytd_other, burn_other, frac_left, days_left)
+    proj_ai = _year_end_credits(ytd_ai, burn_ai, frac_left, days_left)
     projected = proj_other + proj_ai
     kpi_row([
         {"label": f"{today.year} YTD (billed)", "value": f"{ytd:,.0f} cr",
@@ -212,11 +231,11 @@ def _year_projection_strip(settings: dict) -> None:
         {"label": f"Projected {today.year} total", "value": f"{projected:,.0f} cr",
          "delta": format_usd(blended_billed_usd(proj_other, proj_ai, rate_now, ai_rate)),
          "delta_color": "off",
-         "help": "Straight-line: YTD billed credits + trailing-30d daily burn x "
-                 f"{days_left} days remaining (early in a year the burn basis is "
-                 "YTD itself). AI/Cortex credits price at the AI rate, the rest at "
-                 "the compute rate. Seasonality-aware month-end projections live on "
-                 "Overview; contract pacing below is term-aware."},
+         "help": "Straight-line: YTD billed credits + today's prorated remainder + "
+                 f"trailing-30d daily burn x {days_left} days remaining (early in a "
+                 "year the burn basis is YTD itself). AI/Cortex credits price at the "
+                 "AI rate, the rest at the compute rate. Seasonality-aware month-end "
+                 "projections live on Overview; contract pacing below is term-aware."},
     ])
 
 
