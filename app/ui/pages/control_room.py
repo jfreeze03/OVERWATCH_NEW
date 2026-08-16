@@ -403,6 +403,19 @@ def render() -> None:
         _activity_ready = act.usable() and _activity_cols.issubset(act.df.columns)
         q_spark = act.df["QUERIES"].tolist() if _activity_ready else None
         f_spark = act.df["FAILS"].tolist() if _activity_ready else None
+        # CR3: day-over-day vs-prior delta on the Queries tile, from the already-
+        # loaded activity frame (no new query). Complete days only, so it is
+        # full-day-over-full-day (the tile value is the partial since-yday pulse);
+        # hidden when the prior day is zero (pct_delta -> None).
+        _q_delta = None
+        if _activity_ready:
+            from app.logic.formulas import account_today
+            _ca = act.df[pd.to_datetime(act.df["DAY"], errors="coerce").dt.date < account_today()]
+            if len(_ca) >= 2:
+                _qd = pct_delta(safe_float(_ca["QUERIES"].iloc[-1]),
+                                safe_float(_ca["QUERIES"].iloc[-2]))
+                if _qd is not None:
+                    _q_delta = f"{_qd:+,.0f}% vs prior day"
         if pulse.usable():
             row = pulse.df.iloc[0]
             qcount = safe_float(row.get("QUERY_COUNT"))
@@ -448,8 +461,10 @@ def render() -> None:
             )
             kpi_row([
                 {"label": "Queries (since yday)", "value": f"{qcount:,.0f}", "spark": q_spark,
+                 "delta": _q_delta, "delta_color": "off",   # CR3: day-over-day, neutral direction
                  "help": "Midnight-anchored: yesterday 00:00 to now (24-48h depending on "
-                         "time of day) — the same span on the mart and live paths."},
+                         "time of day) — the same span on the mart and live paths. Delta = "
+                         "last complete day vs the one before."},
                 {"label": "Failed", "value": f"{failed:,.0f}",
                  "delta": f"{fail_pct:.1f}%" if fail_pct is not None else "No query denominator",
                  "delta_color": "inverse" if _fail_bad else "off",

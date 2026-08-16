@@ -35,6 +35,7 @@ from app.logic.formulas import (
     format_usd,
     md_dollars,
     month_days,
+    pct_delta,
     safe_float,
 )
 from app.logic.verdict import Signal, page_verdict
@@ -525,11 +526,27 @@ def render() -> None:
     _ov_asof_company = _asof_of(daily_complete)
     _ov_asof_meter = _asof_of(_bt_hist.df) if _bt_hist.usable() else None
 
+    # Ov19: vs-prior-period delta on the flagship spend tile. Mart-only (keeps
+    # overview's live-scan budget at 1); hidden when the mart is absent or the
+    # prior window is zero (pct_delta returns None — never a fabricated 0%).
+    _ov_spend_delta = None
+    _vp = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
+              key=f"ov_spend_vs_prior_{company}_{days}", tier="recent",
+              source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+    if _vp.usable():
+        _cur = float(_vp.df["CREDITS_CURRENT"].map(safe_float).sum())
+        _prior = float(_vp.df["CREDITS_PRIOR"].map(safe_float).sum())
+        _pct = pct_delta(_cur, _prior)
+        if _pct is not None:
+            _ov_spend_delta = f"{_pct:+,.0f}% vs prior {days}d"
+
     company_kpis = [
         {
             "label": f"Spend, {str(f['window_label']).lower()} ({company})",
             "value": format_usd(window_spend),
             "as_of": _ov_asof_company,
+            "delta": _ov_spend_delta,
+            "delta_color": "inverse",   # spend up = red
             "sub": f"{format_credits(_win_credits)} cr" if _win_credits is not None else None,  # rec28
             "method": "metering", "scope": "company",  # rec 13: warehouse metering, company-scoped
             "spark": _spend_spark,

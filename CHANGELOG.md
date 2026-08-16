@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.216.0 - Vs-prior-period deltas on KPIs (2026-08-16)
+
+CoCo review, Tier-2 (Overview #19 / Control Room #3). Reuses `logic.formulas.pct_delta`.
+
+- **The headline KPIs now say which way they moved.** The Overview spend tile gains a
+  vs-prior-window delta (mart-only, from `fact_warehouse_window_vs_prior`; spend up = red), and
+  the Control Room "Queries" pulse tile gains a day-over-day delta computed from the activity
+  frame it already loads — no new query on either. Both hide the delta when the prior period is
+  zero (no fabricated 0%) and use complete-day bases so a partial day never fakes a swing.
+  App version 4.216.0.
+
 ## 4.215.0 - As-of watermark on the Overview dollar KPIs (2026-08-16)
 
 CoCo review, Tier-2 (Overview #15). `ui.components.metric_card_html` gains an optional `as_of`.
