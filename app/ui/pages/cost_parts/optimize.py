@@ -31,6 +31,7 @@ from app.logic import remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
+from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
@@ -234,6 +235,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # rec#16: collect each advisor's OPEN recoverable-$ estimate here, then roll
         # them into one de-duplicated headline at the end of the section.
         _savings_opps: list[SavingsOpportunity] = []
+        # rec#20: idle-tail $ and size class per warehouse, for the consolidation scan.
+        _idle_by_wh: dict[str, float] = {}
+        _size_by_wh: dict[str, str] = {}
         # ---- Idle warehouse advisor ----------------------------------------------
         st.markdown("**Idle warehouse advisor**")
         st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
@@ -264,6 +268,16 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                    confidence_weight(r.get("SAVINGS_CONFIDENCE")))
                 for _, r in advisor.iterrows()
                 if safe_float(r["ACTIONABLE_MONTHLY_USD"]) > 0)
+            # rec#20: idle-tail $ per warehouse (for the consolidation saving estimate)
+            _idle_by_wh = {str(r["WAREHOUSE_NAME"]).strip().upper():
+                           safe_float(r["PROJECTED_MONTHLY_IDLE_USD"])
+                           for _, r in advisor.iterrows()}
+            if _whs.ok and not _whs.empty:
+                _sw = _whs.df.copy()
+                _sw.columns = [str(c).lower() for c in _sw.columns]
+                if {"name", "size"}.issubset(_sw.columns):
+                    _size_by_wh = {str(n).strip().upper(): str(s).upper()
+                                   for n, s in zip(_sw["name"], _sw["size"], strict=False)}
             kpi_row([
                 {"label": f"Idle spend ({idle_days}d)", "value": format_usd(total_idle),
                  "help": "Credits billed while no query ran on the warehouse."},
@@ -572,6 +586,52 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             )
         else:
             st.caption("No open idle or right-sizing opportunities to roll up in this window.")
+
+        st.divider()
+        # rec#20: fleet consolidation — same-size warehouses in this scope whose active
+        # hours barely overlap can plausibly share one warehouse, retiring the mostly-
+        # idle one. Review-only: it names the pair and a conservative saving, proposes
+        # nothing. (Multi-cluster scale-in — lowering MAX_CLUSTER_COUNT on rarely-
+        # saturated warehouses — is the other half of this rec and stays queued.)
+        st.markdown("**Fleet consolidation candidates (review-only)**")
+        st.caption(
+            "Same size class, current company scope, active hours that barely overlap → the two "
+            "workloads plausibly fit on one warehouse. Estimated saving is the retired warehouse's "
+            "monthly idle tail (conservative). Verify concurrency and ownership before merging."
+        )
+        if st.toggle("Run consolidation scan (hour-of-day activity)", key="opt_consolidation_toggle",
+                     help="Reads WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY hour-of-day activity."):
+            act = run(insights_sql.warehouse_hourly_activity(days, company), page=_PAGE,
+                      key=f"wh_hourly_consol_{company}_{days}", tier="historical",
+                      source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day activity)")
+            if guard(act, "No hour-of-day warehouse activity in this window."):
+                adf = act.df.copy()
+                profiles = []
+                for wh, group in adf.groupby("WAREHOUSE_NAME"):
+                    key = str(wh).strip().upper()
+                    hours = frozenset(
+                        int(h) for h, qc in zip(group["HOUR_OF_DAY"], group["AVG_QUERIES"], strict=False)
+                        if safe_float(qc) >= 1.0)
+                    if hours and _size_by_wh.get(key):   # need a known size class to merge safely
+                        profiles.append(WarehouseProfile(
+                            name=str(wh), size_class=_size_by_wh[key], owner=str(company),
+                            active_hours=hours, monthly_idle_usd=_idle_by_wh.get(key, 0.0)))
+                cands = consolidation_candidates(profiles)
+                if cands:
+                    kpi_row([
+                        {"label": "Consolidation candidates", "value": str(len(cands))},
+                        {"label": "Est. addressable $/mo",
+                         "value": format_usd(sum(c.est_monthly_saving_usd for c in cands)),
+                         "help": "Sum of the retired warehouses' idle tails (conservative)."},
+                    ])
+                    cdf = pd.DataFrame([
+                        {"Keep": c.keep, "Retire": c.retire, "Size": c.size_class,
+                         "Shared active hours": c.shared_hours, "Est. $/mo": c.est_monthly_saving_usd}
+                        for c in cands])
+                    styled_table(cdf, height=280, sort_label="estimated saving",
+                                 column_config={"Est. $/mo": st.column_config.NumberColumn(format="$%.2f")})
+                else:
+                    st.caption("No same-size warehouses with non-overlapping activity in this scope.")
 
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------

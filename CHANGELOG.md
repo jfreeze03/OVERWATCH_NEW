@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.180.0 - Feature: fleet consolidation recommender (2026-08-15)
+
+Gap-audit Wave 6 (rec #20). App-only; new `logic/consolidation.py` + `optimize.py`.
+
+- **The fleet is now scanned for warehouses that could share one.** The sizing
+  simulator only scaled a warehouse up/down in isolation; nothing looked across the
+  fleet. New pure `consolidation_candidates` pairs same-size-class, same-scope
+  warehouses whose hour-of-day active windows barely overlap (no concurrency
+  collision) — the two workloads plausibly fit on one warehouse — retiring the
+  mostly-idle one and saving its idle tail. Candidates are ranked by saving and
+  assigned greedily so each warehouse appears in at most one merge. A toggle-gated
+  "Fleet consolidation candidates (review-only)" panel on Optimize > Idle & sizing
+  reads hour-of-day activity and reuses the section's idle-tail $ and SHOW
+  WAREHOUSES size class (no new ACCOUNT_USAGE table). Strictly review-only: it names
+  the keep/retire pair and a conservative estimate, proposes nothing.
+- **Scope:** the multi-cluster scale-in half of this rec (lowering MAX_CLUSTER_COUNT
+  on rarely-saturated warehouses) needs cluster-count-over-time data that
+  WAREHOUSE_LOAD_HISTORY does not cleanly expose, so it stays queued rather than
+  shipping an ambiguous recommendation.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.179.0 - Feature: de-duplicated addressable-savings rollup (2026-08-15)
 
 Gap-audit Wave 6 (rec #16). App-only; new `logic/savings_rollup.py` + `optimize.py`.
