@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.208.0 - Auto-detect deploys for Release compare (2026-08-16)
+
+CoCo review, Tier-2 (Ops #16). New `data.insights_sql.detect_release_days` +
+`logic.insights.rank_release_candidates`.
+
+- **Release compare no longer starts with a blank date guess.** The Operations → Release
+  compare tab required the owner to remember the deploy date. It now auto-detects candidate
+  deploy days from schema-change DDL (CREATE/ALTER/DROP) in `ACCOUNT_USAGE.QUERY_HISTORY` —
+  excluding CTAS/session ops and OVERWATCH's own maintenance — and offers them in a picker,
+  labelled with the change count and top actor, newest notable deploy pre-selected. Manual
+  date entry stays as the escape hatch and the fallback when nothing deploy-like is found.
+  A heuristic, not a definitive release log, and disclosed as such. App version 4.208.0.
+
 ## 4.207.0 - RECOMMEND column on the auditor export pack (2026-08-16)
 
 CoCo review, Tier-2 (Sec #17). New `logic.least_privilege.recommend_for_sheet`.

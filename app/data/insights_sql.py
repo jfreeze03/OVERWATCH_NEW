@@ -270,6 +270,53 @@ LIMIT 1000
 """
 
 
+# O16: a release date is guesswork unless the owner remembers the deploy. A
+# release shows up in ACCOUNT_USAGE as a burst of schema-change DDL, so counting
+# that DDL per day surfaces the likely deploy days for the compare picker.
+_RELEASE_DDL_PREDICATE = (
+    "(QUERY_TYPE ILIKE 'CREATE%' OR QUERY_TYPE ILIKE 'ALTER%' "
+    "OR QUERY_TYPE ILIKE 'DROP%')"
+)
+# CREATE_TABLE_AS_SELECT is ETL data-loading and ALTER_SESSION is per-connection
+# setup (SET QUERY_TAG/timezone) — both are high-volume non-deploys that would
+# swamp the deploy signal, so they are excluded from the count.
+_RELEASE_DDL_NOISE = "QUERY_TYPE NOT IN ('CREATE_TABLE_AS_SELECT', 'ALTER_SESSION')"
+
+
+def detect_release_days(days: int, company: str = "ALL") -> str:
+    """Candidate deploy days for the Release compare auto-detect (O16).
+
+    Counts successful schema-change DDL (CREATE/ALTER/DROP of tables, views,
+    procs, tasks, ...) per day; the biggest days are the likely deploys.
+    Excludes CTAS / session ops (ETL & connection noise, not deploys) and
+    OVERWATCH's own maintenance DDL (its QUERY_TAG), and scopes by the touched
+    DATABASE_NAME. A heuristic — evidence to pre-fill the picker, never a
+    definitive release log.
+    """
+    days = bounded_days(days, 180)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "EXECUTION_STATUS = 'SUCCESS'",
+        _RELEASE_DDL_PREDICATE,
+        _RELEASE_DDL_NOISE,
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        companies.database_clause(company, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATE_TRUNC('day', START_TIME)::DATE AS DAY,
+    COUNT(*) AS DDL_COUNT,
+    COUNT(DISTINCT USER_NAME) AS ACTORS,
+    MODE(USER_NAME) AS TOP_ACTOR,
+    COUNT(DISTINCT DATABASE_NAME) AS DATABASES
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1
+ORDER BY DAY DESC
+LIMIT 200
+"""
+
+
 # ---------------------------------------------------------------------------
 # 5. Task failure detail (root-cause timeline)
 # ---------------------------------------------------------------------------

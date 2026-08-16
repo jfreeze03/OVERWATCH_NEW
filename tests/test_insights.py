@@ -16,6 +16,7 @@ from app.logic import insights
     lambda: insights_sql.storage_growth_by_database(30, "ALFA"),
     lambda: insights_sql.release_query_compare("2026-07-01", 7, "ALFA"),
     lambda: insights_sql.release_task_compare("2026-07-01", 7, "ALFA"),
+    lambda: insights_sql.detect_release_days(90, "ALFA"),
     lambda: insights_sql.task_failure_details(7, "ALFA"),
     lambda: insights_sql.dormant_users(90, "ALFA"),
 ])
@@ -319,6 +320,52 @@ def test_task_release_deltas_flags_regressions():
     assert bool(t1["GOT_WORSE"]) and t1["NEW_FAILURES"] == 3
     assert not bool(t2["GOT_WORSE"])
     assert out.iloc[0]["TASK_NAME"] == "T1"  # regressions first
+
+
+# ---- 4b. Release auto-detect (O16) --------------------------------------------
+
+def test_detect_release_days_scans_ddl_excludes_noise_and_scopes():
+    sql = insights_sql.detect_release_days(90, "ALFA")
+    assert "SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY" in sql
+    # the deploy signal is CREATE/ALTER/DROP DDL
+    for frag in ("QUERY_TYPE ILIKE 'CREATE%'", "QUERY_TYPE ILIKE 'ALTER%'",
+                 "QUERY_TYPE ILIKE 'DROP%'"):
+        assert frag in sql
+    # CTAS / session ops are high-volume non-deploys and must not swamp the count
+    assert "CREATE_TABLE_AS_SELECT" in sql and "ALTER_SESSION" in sql
+    # the app's own maintenance DDL is excluded by its query tag
+    assert "NOT LIKE 'OVERWATCH%'" in sql
+    # company-scoped by the touched database (database_clause form)
+    assert "LIKE 'ALFA%'" in sql
+    assert "GROUP BY 1" in sql and "DDL_COUNT" in sql
+
+
+def test_detect_release_days_clamped_to_180():
+    sql = insights_sql.detect_release_days(9999, "ALL")
+    assert "-180," in sql.replace(" ", "")
+
+
+def test_rank_release_candidates_keeps_biggest_days_recent_first():
+    df = pd.DataFrame([
+        {"DAY": "2026-08-01", "DDL_COUNT": 40, "TOP_ACTOR": "DEPLOYER"},
+        {"DAY": "2026-08-10", "DDL_COUNT": 5, "TOP_ACTOR": "X"},
+        {"DAY": "2026-08-05", "DDL_COUNT": 60, "TOP_ACTOR": "Y"},
+        {"DAY": "2026-08-09", "DDL_COUNT": 0, "TOP_ACTOR": "Z"},   # no DDL -> dropped
+    ])
+    out = insights.rank_release_candidates(df, limit=2)
+    # top-2 by count are 08-05 (60) and 08-01 (40); shown newest-first so the
+    # default pick is the latest notable deploy
+    assert list(out["DAY"]) == ["2026-08-05", "2026-08-01"]
+
+
+def test_rank_release_candidates_normalises_day_and_handles_empty():
+    assert insights.rank_release_candidates(pd.DataFrame()).empty
+    # a timestamp DAY normalises to YYYY-MM-DD, the exact shape the release
+    # readers validate before embedding — round-trips without raising
+    df = pd.DataFrame([{"DAY": pd.Timestamp("2026-08-03 12:00:00"), "DDL_COUNT": 3}])
+    out = insights.rank_release_candidates(df)
+    assert out.iloc[0]["DAY"] == "2026-08-03"
+    insights_sql.release_query_compare(out.iloc[0]["DAY"], 7, "ALFA")  # no ValueError
 
 
 # ---- 5. failure timeline ------------------------------------------------------------

@@ -41,7 +41,12 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.logic.incident import route_incidents, summarize_incidents
-from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
+from app.logic.insights import (
+    build_failure_timeline,
+    compare_release_periods,
+    rank_release_candidates,
+    task_release_deltas,
+)
 from app.logic.task_graph import (
     analyze_task_run,
     canonical_task_name,
@@ -467,14 +472,48 @@ def _release_compare_tab(company: str) -> None:
         "Pick the deploy date; each side compares the same number of days before and after. "
         "ACCOUNT_USAGE lag means very recent releases under-count the AFTER side."
     )
-    col_date, col_window = st.columns([1.2, 1.0])
-    with col_date:
-        release_day = st.date_input("Release date", value=account_today() - timedelta(days=1),
-                                    key="ops_release_date")
+    # O16: auto-detect candidate deploy days (schema-change DDL) so the owner
+    # picks a real release instead of guessing. Manual entry stays as the escape
+    # hatch (and the only path when nothing deploy-like is detected).
+    det = run(insights_sql.detect_release_days(90, company), page=_PAGE,
+              key=f"rel_detect_{company}", tier="historical",
+              source="ACCOUNT_USAGE.QUERY_HISTORY (CREATE/ALTER/DROP)")
+    candidates = rank_release_candidates(det.df) if det.ok else None
+
+    _MANUAL = "Custom date…"
+    col_pick, col_window = st.columns([1.6, 1.0])
     with col_window:
         window = st.select_slider("Compare window (days each side)", options=[1, 2, 3, 5, 7, 14],
                                   value=3, key="ops_release_window")
-    release_iso = release_day.isoformat()
+    with col_pick:
+        if candidates is not None and not candidates.empty:
+            labels: list[str] = []
+            label_to_iso: dict[str, str] = {}
+            for _, cand in candidates.iterrows():
+                day = str(cand["DAY"])
+                actor = cand.get("TOP_ACTOR")
+                actor_note = f" · {actor}" if isinstance(actor, str) and actor.strip() else ""
+                label = f"{day} — {int(safe_float(cand['DDL_COUNT']))} object change(s){actor_note}"
+                labels.append(label)
+                label_to_iso[label] = day
+            choice = st.selectbox(
+                "Detected deploys (last 90d)", [*labels, _MANUAL], key="ops_release_pick",
+                help="Days with the most CREATE/ALTER/DROP activity — the likely deploys. "
+                     "Excludes CTAS/session ops and OVERWATCH's own maintenance; a heuristic, "
+                     "not a definitive release log. Pick 'Custom date…' to enter your own.")
+            release_iso = (
+                st.date_input("Release date", value=account_today() - timedelta(days=1),
+                              key="ops_release_date").isoformat()
+                if choice == _MANUAL else label_to_iso[choice]
+            )
+        else:
+            st.caption(
+                "No deploy-like DDL detected in the last 90 days — enter the date manually."
+                if candidates is not None
+                else "Deploy auto-detect unavailable — enter the date manually.")
+            release_iso = st.date_input(
+                "Release date", value=account_today() - timedelta(days=1),
+                key="ops_release_date").isoformat()
 
     q_res = run(insights_sql.release_query_compare(release_iso, window, company), page=_PAGE,
                 key=f"rel_q_{company}_{release_iso}_{window}", tier="historical",

@@ -351,6 +351,30 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
     return rows
 
 
+# O16: auto-detect deploy days for the Release compare picker. Deploys show up
+# as DDL spikes, so the biggest-count days are the candidates.
+RELEASE_CANDIDATE_LIMIT = 8
+
+
+def rank_release_candidates(df: pd.DataFrame, limit: int = RELEASE_CANDIDATE_LIMIT) -> pd.DataFrame:
+    """Rank detected deploy days (one row per day with DDL_COUNT) for the picker.
+
+    Keep the top ``limit`` days by DDL volume (the notable deploys), then order
+    them most-recent-first so the default pick is the latest notable deploy.
+    Days with no DDL are dropped. DAY is normalised to a ``YYYY-MM-DD`` string —
+    the release-compare readers validate exactly that shape before embedding it.
+    """
+    if df is None or df.empty or "DDL_COUNT" not in df.columns or "DAY" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    out["DDL_COUNT"] = out["DDL_COUNT"].map(safe_float)
+    out["DAY"] = pd.to_datetime(out["DAY"], errors="coerce").dt.strftime("%Y-%m-%d")
+    out = out[(out["DDL_COUNT"] > 0) & out["DAY"].notna()]
+    if out.empty:
+        return pd.DataFrame()
+    out = out.sort_values("DDL_COUNT", ascending=False).head(max(1, int(limit)))
+    return out.sort_values("DAY", ascending=False).reset_index(drop=True)
+
 
 _ERROR_FAMILIES = (
     ("Permission / auth", r"not authorized|insufficient privilege|does not exist or not authorized|access denied"),

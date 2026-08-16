@@ -78,7 +78,7 @@ _LIVE_SCAN_BUDGETS = {
     # honesty note above). The t_rca tier fix added one explanatory COMMENT naming
     # ACCOUNT_USAGE.TASK_HISTORY's ~45-min lag and one `source=` label naming the same view.
     # The builder-level gate (test_v451_trust) confirms the reachable table set is UNCHANGED.
-    "app/ui/pages/operations.py": 25,  # v4.188 (gap-audit #26): +1 for the robust-z row-volume DQ monitor (lazy Pipeline SLA section, beside the existing TABLE_DML_HISTORY volume-drops read)
+    "app/ui/pages/operations.py": 26,  # v4.188 (gap-audit #26): +1 for the robust-z row-volume DQ monitor (lazy Pipeline SLA section, beside the existing TABLE_DML_HISTORY volume-drops read); +1 v4.208 (CoCo Tier-2 O16): release auto-detect DDL scan (lazy Release compare section; QUERY_HISTORY is already reachable per test_v451_trust — non-first-paint, cached, beside the existing before/after release scans)
     "app/ui/pages/cost_parts/unit_costs.py": 0,
     "app/ui/pages/cost_parts/compare.py": 0,   # compare is mart-only by design (r11/Compare Phase 1)
     "app/ui/pages/security.py": 22,  # +4 v4.41/r25 (owner picked #6+#7): new-network batch rider on Access + Egress lazy section (DATA_TRANSFER_HISTORY, UNLOAD scan) — zero first-paint cost, all click-gated
