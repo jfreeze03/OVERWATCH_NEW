@@ -16,6 +16,7 @@ from app.logic.workbench import (
     EXPERIMENT_STATUSES,
     SLO_METRIC_KEYS,
     create_slo_objective_sql,
+    mark_watched,
     update_experiment_sql,
 )
 from app.ui import charts
@@ -53,6 +54,20 @@ def _portfolio(company: str, days: int, rate: float) -> None:
     if not guard(result, "No measured recurring-query cost exists in this scope."):
         return
     portfolio = prioritize_workloads(result.df, rate, days)
+    # DS #1: make Watch more than a bookmark — a watched query family gets a WATCHED flag
+    # here and is pinned to the top WITHIN its lane (so an ACT NOW item is never buried
+    # under a watched PLAN item). Degrades to no-pin if the watchlist read is unavailable.
+    _viewer = viewer_name()
+    _wl_res = run(workbench_sql.watchlist(_viewer), page=_PAGE, key="decision_watchlist",
+                  tier="live", source="USER_WATCHLIST") if _viewer else None
+    _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
+    portfolio["WATCHED"] = mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")
+    if bool(portfolio["WATCHED"].any()):
+        _lane_rank = portfolio["LANE"].map({"ACT NOW": 0, "PLAN": 1, "VALIDATE": 2}).fillna(3)
+        portfolio = (portfolio.assign(_LR=_lane_rank)
+                     .sort_values(["_LR", "WATCHED", "PRIORITY_SCORE"],
+                                  ascending=[True, False, False])
+                     .drop(columns="_LR").reset_index(drop=True))
     read_model_caption("workload_portfolio")
     act_now = portfolio[portfolio["LANE"].eq("ACT NOW")]
     failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
@@ -91,6 +106,9 @@ def _portfolio(company: str, days: int, rate: float) -> None:
          "value": format_usd(portfolio["IMPACT_USD_30D"].sum()),
          "help": "Measured pattern credits normalized to 30 days; observed cost, not promised savings."},
         {"label": "High-confidence", "value": f"{portfolio['CONFIDENCE'].ge(0.8).sum():,}"},
+        {"label": "Watching", "value": f"{int(portfolio['WATCHED'].sum()):,}",
+         "help": "Query families on your personal watchlist — pinned to the top of their lane. "
+                 "Watch or unwatch a family from its Entity 360 (open one below)."},
     ])
     charts.workload_portfolio(portfolio)
     def open_profile(index: int) -> None:
@@ -104,7 +122,7 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         impact_col="IMPACT_USD_30D",
         confidence_col="CONFIDENCE",
         status_col="LANE",
-        context_cols=("EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC",
+        context_cols=("WATCHED", "EFFORT_PROXY", "RUNS", "FAIL_PCT", "AVG_CACHE_PCT", "P95_SEC",
                       "EVIDENCE_COVERAGE"),
         on_select=open_profile,
         height=370,
@@ -122,7 +140,8 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         "**evidence-weighted heuristics** for ordering, not guarantees. Lane rule: ACT NOW = "
         "top-20% priority AND confidence ≥ 0.65; VALIDATE = confidence < 0.5; otherwise PLAN. "
         "A family with no measured cache/latency/failure evidence (coverage 0) is held at "
-        "VALIDATE and never told to cache — a blank cell is missing data, not a measured zero."
+        "VALIDATE and never told to cache — a blank cell is missing data, not a measured zero. "
+        "WATCHED families (starred from an Entity 360) are pinned to the top of their lane."
     )
     result_caption(result, note="credits are measured; effort is a users + databases proxy")
 

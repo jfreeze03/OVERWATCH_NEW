@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.184.0 - Decision Studio: Watch surfaces on the Portfolio (2026-08-15)
+
+Decision Studio review, Wave 1 (finding #1, first slice). App-only;
+`logic/workbench.py`, `decision_studio.py`.
+
+- **Watch is no longer an inert bookmark.** Adding a query family to your watchlist
+  only ever populated a buried Entity-360 sub-tab — nothing else read it. Now the
+  Portfolio (the primary decision table) reads your watchlist, flags watched
+  families with a `WATCHED` column, counts them in a new "Watching" KPI, and pins
+  them to the top *within their lane* — so a watched family surfaces first without
+  burying an unwatched ACT NOW item beneath a watched PLAN one. New pure
+  `mark_watched` helper does the case-insensitive, type-scoped match (empty/absent
+  inputs degrade to all-false, never a raise), and the watchlist read degrades
+  gracefully when USER_WATCHLIST is unavailable. USER_WATCHLIST is an app object,
+  so no ACCOUNT_USAGE scan-surface change.
+- **Next for Watch:** the same pin on the Action Center, and watch-rules that notify
+  on state transitions — both queued.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.183.0 - Decision Studio: Product Economics honors Company (2026-08-15)
 
 Decision Studio review, Wave 1 (finding #4-part / #3 app-only half). App-only;

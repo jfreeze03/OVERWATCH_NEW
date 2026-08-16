@@ -96,6 +96,30 @@ def test_product_economics_scopes_the_catalog_by_company() -> None:
     assert "UPPER(COMPANY)" not in all_cat
 
 
+def test_mark_watched_flags_watchlist_by_type_case_insensitively() -> None:
+    from app.logic.workbench import mark_watched
+    frame = pd.DataFrame({"FINGERPRINT": ["abc", "def", "ghi"]})
+    wl = pd.DataFrame({
+        "ENTITY_TYPE": ["QUERY_FINGERPRINT", "WAREHOUSE", "query_fingerprint"],
+        "ENTITY_KEY": ["ABC", "abc", "ghi"],   # case-insensitive; WAREHOUSE 'abc' is a diff type
+    })
+    watched = mark_watched(frame, wl, "QUERY_FINGERPRINT", "FINGERPRINT")
+    assert watched.tolist() == [True, False, True]
+    # graceful on empty / absent inputs — never raises
+    assert mark_watched(frame, None, "QUERY_FINGERPRINT", "FINGERPRINT").tolist() == [False, False, False]
+    assert mark_watched(None, wl, "QUERY_FINGERPRINT", "FINGERPRINT").empty
+
+
+def test_portfolio_surfaces_and_pins_watched_families() -> None:
+    # DS #1: Watch now does something on the primary decision table — a WATCHED flag,
+    # a "Watching" count, and a within-lane pin (lane primary, watched secondary).
+    ds = _source("app/ui/decision_studio.py")
+    assert 'mark_watched(portfolio, _wl, "QUERY_FINGERPRINT", "FINGERPRINT")' in ds
+    assert '"label": "Watching"' in ds
+    assert '["_LR", "WATCHED", "PRIORITY_SCORE"]' in ds     # pinned within lane, not above it
+    assert '"WATCHED", "EFFORT_PROXY"' in ds                # WATCHED leads the context columns
+
+
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
     actions = pd.DataFrame(
         {

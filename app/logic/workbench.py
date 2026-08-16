@@ -199,6 +199,28 @@ VALUES
 """.strip()
 
 
+def mark_watched(frame: pd.DataFrame | None, watchlist: pd.DataFrame | None,
+                 entity_type: str, key_col: str) -> pd.Series:
+    """Boolean Series: is each row's ``key_col`` on the viewer's watchlist (DS #1)?
+
+    Case-insensitive ENTITY_KEY match within ``entity_type`` (the same upper-case match
+    the Entity-360 Watch button uses), so a watched query family / warehouse / product
+    surfaces on the surface that lists it. Empty or absent inputs, a missing key column,
+    or a watchlist without the expected columns all yield all-False — never a raise.
+    """
+    if frame is None:
+        return pd.Series(dtype=bool)
+    if frame.empty or key_col not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    if (watchlist is None or watchlist.empty
+            or not {"ENTITY_TYPE", "ENTITY_KEY"}.issubset(watchlist.columns)):
+        return pd.Series(False, index=frame.index)
+    kind = str(entity_type or "").strip().upper()
+    scoped = watchlist[watchlist["ENTITY_TYPE"].astype(str).str.upper() == kind]
+    keys = set(scoped["ENTITY_KEY"].astype(str).str.strip().str.upper())
+    return frame[key_col].astype(str).str.strip().str.upper().isin(keys)
+
+
 def watchlist_sql(viewer: str, entity_type: str, entity_key: str,
                   label: str = "", *, remove: bool = False) -> str:
     name = str(viewer or "").strip()
