@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.182.0 - Decision Studio: Cost Truth stops fabricating zeroes (2026-08-15)
+
+Decision Studio review, Wave 1 (finding #4). App-only; `decision_studio.py`.
+
+- **An absent cost basis now reads "No evidence", not $0.00.** `cost_truth` is four
+  un-grouped scalar aggregates, so it always returns four rows even over an empty
+  window — an empty basis arrives as NULL credits, and `safe_float` turned that into
+  a measured-looking `$0.00`. Most misleading on a per-company view, where the three
+  company-scoped bases (metered / measured / allocated) can be legitimately empty
+  while account-wide Billed shows real dollars — reading as verified-zero cost. The
+  render now tracks presence from the raw column and shows "No evidence" per absent
+  basis, and the metered-ratio caption is skipped unless the bases are actually
+  present. The AI-aware billed dollarization and the non-additive labels are
+  unchanged.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.181.0 - Decision Studio: Portfolio stops acting on missing evidence (2026-08-15)
 
 Decision Studio review, Wave 1 (finding #2). App-only; `decision.py`, `decision_studio.py`.

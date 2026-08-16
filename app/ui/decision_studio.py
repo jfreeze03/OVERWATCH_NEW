@@ -303,6 +303,15 @@ def _cost_truth(company: str, days: int) -> None:
     if not guard(result, "No cost facts exist in this window."):
         return
     frame = result.df.copy()
+    # DS #4: cost_truth ALWAYS returns four rows (un-grouped scalar aggregates), so an
+    # empty basis arrives as NULL CREDITS, not a missing row — and safe_float would turn
+    # that into a measured-looking $0.00. Track presence and render "No evidence" per basis
+    # instead, most importantly on per-company views where the three company-scoped bases
+    # can be legitimately empty while account-wide BILLED shows real dollars.
+    present = {
+        str(row.get("BASIS")): bool(pd.notna(row.get("CREDITS")))
+        for _, row in frame.iterrows()
+    }
     values = {
         str(row.get("BASIS")): safe_float(row.get("CREDITS"))
         for _, row in frame.iterrows()
@@ -333,15 +342,24 @@ def _cost_truth(company: str, days: int) -> None:
         billed_usd = credits_to_usd(billed, rate)
         _billed_help = ("Account-wide billing basis; Company does not apply. AI/OTHER split "
                         "unavailable — priced at the flat compute rate (AI slightly overstated).")
+    # DS #4: billed is account-wide (the cost_truth row OR the account-wide split); the
+    # other three are company-scoped and can be legitimately absent. "No evidence" != $0.
+    _billed_present = present.get("BILLED", False) or split.usable()
+    _no_ev = "No evidence"
     kpi_row([
-        {"label": "Billed credits (modeled $)", "value": format_usd(billed_usd),
-         "delta": f"{billed:,.0f} cr", "delta_color": "off", "help": _billed_help},
-        {"label": "Metered warehouse", "value": format_usd(credits_to_usd(metered, rate)),
-         "delta": f"{metered:,.0f} cr", "delta_color": "off"},
-        {"label": "Measured object-query", "value": format_usd(credits_to_usd(measured, rate)),
-         "delta": f"{measured:,.0f} cr", "delta_color": "off"},
-        {"label": "Allocated to users", "value": format_usd(credits_to_usd(allocated, rate)),
-         "delta": f"{allocated:,.0f} cr", "delta_color": "off"},
+        {"label": "Billed credits (modeled $)",
+         "value": format_usd(billed_usd) if _billed_present else _no_ev,
+         "delta": f"{billed:,.0f} cr" if _billed_present else "—",
+         "delta_color": "off", "help": _billed_help},
+        {"label": "Metered warehouse",
+         "value": format_usd(credits_to_usd(metered, rate)) if present.get("METERED") else _no_ev,
+         "delta": f"{metered:,.0f} cr" if present.get("METERED") else "—", "delta_color": "off"},
+        {"label": "Measured object-query",
+         "value": format_usd(credits_to_usd(measured, rate)) if present.get("MEASURED") else _no_ev,
+         "delta": f"{measured:,.0f} cr" if present.get("MEASURED") else "—", "delta_color": "off"},
+        {"label": "Allocated to users",
+         "value": format_usd(credits_to_usd(allocated, rate)) if present.get("ALLOCATED") else _no_ev,
+         "delta": f"{allocated:,.0f} cr" if present.get("ALLOCATED") else "—", "delta_color": "off"},
     ])
     styled_table(frame, height=300, sort_label="semantic basis order")
     st.caption(
@@ -351,7 +369,9 @@ def _cost_truth(company: str, days: int) -> None:
         "measured excludes idle; "
         "allocated redistributes warehouse usage."
         + (f" Measured is {measured / metered * 100:,.0f}% and allocated "
-           f"{allocated / metered * 100:,.0f}% of metered." if metered else "")
+           f"{allocated / metered * 100:,.0f}% of metered."
+           if (present.get("METERED") and metered and present.get("MEASURED")
+               and present.get("ALLOCATED")) else "")
     )
 
 

@@ -71,6 +71,19 @@ def test_portfolio_gates_missing_behavioral_evidence() -> None:
     assert result.loc["blind", "EVIDENCE_COVERAGE"] == 0.0
 
 
+def test_cost_truth_renders_no_evidence_not_a_fabricated_zero() -> None:
+    # DS #4: cost_truth always returns 4 rows; an empty basis is NULL CREDITS. The render
+    # must show "No evidence" per absent basis, not safe_float(...)-> $0.00.
+    ct = _source("app/ui/decision_studio.py").split("def _cost_truth", 1)[1].split("\ndef ", 1)[0]
+    assert 'pd.notna(row.get("CREDITS"))' in ct          # presence from the raw column
+    assert "No evidence" in ct
+    assert 'if present.get("METERED")' in ct             # KPI value gated on presence
+    assert 'if present.get("MEASURED")' in ct
+    assert 'if present.get("ALLOCATED")' in ct
+    # the metered-ratio caption is skipped unless the bases are actually present
+    assert 'present.get("MEASURED")\n' in ct or "present.get(\"MEASURED\")" in ct
+
+
 def test_scenario_deduplicates_entities_and_separates_closed_work() -> None:
     actions = pd.DataFrame(
         {
