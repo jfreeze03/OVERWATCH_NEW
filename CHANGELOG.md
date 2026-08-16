@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.172.0 - rec #10 already fixed in V064: stale docstring corrected (2026-08-15)
+
+Gap-audit Wave 5 (rec #10). App-only; `mart_sql.py` (docstring) + regression test.
+
+- **No V081 was needed — the COST_CONTRACT_BREACH burn was aligned in V064.** The
+  audit re-flagged the paging alert's `DAILY_BURN` as still dividing by a literal
+  `/30`, but the authoritative alert proc (`SP_ALERT_SCAN_DAILY`) was fixed to the
+  canonical `SUM / NULLIF(COUNT(DISTINCT DAY), 0)` over `today-30 .. today-1` back
+  in **V064** ("rec20a"), and every later re-derivation (V065/V066/V079, all
+  applied) carries it. The false positive came from (a) the immutable `/30` in the
+  pre-V064 migration history and (b) a stale `contract_exhaustion` docstring still
+  claiming the alert "carries the OLD math — align it in the V065 owner migration".
+  That docstring is corrected, and a regression test now locks the authoritative
+  burn to `COUNT(DISTINCT DAY)` so a future proc re-derivation can't reintroduce
+  the `/30`.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.171.0 - Drill honesty: measured query costs on the Optimize panel (2026-08-15)
 
 Gap-audit Wave 4b (rec #41). App-only; `optimize.py`.

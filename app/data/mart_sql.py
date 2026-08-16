@@ -930,8 +930,11 @@ def contract_exhaustion() -> str:
     so the Brief runway can't contradict the Contract page. The old form summed a
     31-date span that INCLUDED today's partial and divided by a literal 30, biasing
     burn low, overstating days-left, and potentially suppressing COST_CONTRACT_BREACH.
-    n/a until configured. NOTE: the COST_CONTRACT_BREACH alert block (SP_ALERT_SCAN_
-    DAILY, V062 C9) still carries the OLD math — align it in the V065 owner migration."""
+    n/a until configured. The COST_CONTRACT_BREACH paging alert (SP_ALERT_SCAN_DAILY)
+    was aligned to THIS exact burn in V064 — SUM / NULLIF(COUNT(DISTINCT DAY), 0) over
+    DAY BETWEEN today-30 AND today-1 — so the alert and this KPI now byte-match and no
+    divergence remains (gap-audit rec #10; the earlier "align it in V065" note was
+    stale, and is why the audit re-flagged an already-fixed alert — no V081 needed)."""
     return f"""
 SELECT TOTAL, CONSUMED, DAILY_BURN,
        CEIL((TOTAL - CONSUMED) / NULLIF(DAILY_BURN, 0)) AS DAYS_LEFT,
