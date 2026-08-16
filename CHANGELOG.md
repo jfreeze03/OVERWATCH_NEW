@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.174.0 - Consistency: AI dollars reconcile to org AI_USD (2026-08-15)
+
+Gap-audit Wave 5 (rec #32). App-only; `contract.py`.
+
+- **The billing-truth reconciliation now models the AI/Cortex bucket too.** The
+  "Billing truth vs app model" table checked the compute bucket against org
+  COMPUTE_USD but only *displayed* org AI_USD — the app's AI dollars (AI credits x
+  the AI rate) were never checked against it, so a wrong AI rate or missed AI spend
+  produced a silent error. Two columns are added — modeled AI $ and AI drift % vs
+  org AI_USD — aligned to the same monthly grain as the compute recon (so a
+  boundary month partly outside the window drifts identically, no window mismatch).
+  A steady AI drift now flags that AI_CREDIT_PRICE_USD is mis-set, the same way the
+  compute drift flags CREDIT_PRICE_USD.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.173.0 - Cost completeness: egress is dollarized (2026-08-15)
 
 Gap-audit Wave 4b (rec #11). App-only; `cost_sql.py`, `formulas.py`, `spend.py`,

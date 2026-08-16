@@ -248,8 +248,10 @@ def _rate_card_reconciliation(settings: dict) -> None:
     st.markdown("**Billing truth vs app model (this account)**")
     st.caption(
         "Org rate-card dollars for THIS account vs the app's credits x configured rate. "
-        "The compute bucket should track closely; the residual is rate-card reality "
-        "(storage, transfer, serverless, discounts), not a bug in either number."
+        "The compute AND AI/Cortex buckets should each track closely (AI credits price at "
+        "the AI rate vs org AI_USD, rec#32); a steady drift in either means that rate is "
+        "mis-set. The remaining residual is rate-card reality (storage, transfer, serverless, "
+        "discounts), not a bug in either number."
     )
     org_m = run(cost_sql.org_account_month_usd(2), page=_PAGE, key="org_month_this",
                 tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account)")
@@ -258,6 +260,12 @@ def _rate_card_reconciliation(settings: dict) -> None:
     # with Cortex usage, and the caption invited "fixing" the global rate).
     model_m = run(mart_sql.fact_daily_spend_compute(70), page=_PAGE, key="fact_daily_compute_70",
                   tier="recent", source="FACT_METERING_DAILY (compute only, excl AI/Cortex)")
+    # rec#32: model the AI/Cortex side too (AI credits x the AI rate) so that bucket
+    # reconciles to org AI_USD instead of only being displayed. Same monthly grain as
+    # the compute recon, so no window mismatch — a boundary month partly outside the
+    # 70d window drifts exactly like the compute side already does.
+    ai_model = run(mart_sql.fact_daily_spend(70), page=_PAGE, key="fact_daily_ai_70",
+                   tier="recent", source="FACT_METERING_DAILY (AI/Cortex credits, for the AI recon)")
     # rec #9: the ACTUAL contracted compute rate from RATE_SHEET_DAILY, a third
     # anchor beside the configured SETTINGS rate and the realized effective rate.
     # Read-only reconciliation (not wired into pricing by design); degrades quietly.
@@ -280,6 +288,13 @@ def _rate_card_reconciliation(settings: dict) -> None:
         mdf = model_m.df.copy()
         mdf["MONTH"] = pd.to_datetime(mdf["DAY"], errors="coerce").dt.to_period("M").dt.to_timestamp()
         model_by_month = mdf.groupby("MONTH")["CREDITS_BILLED"].sum() * rate_now
+        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+        ai_by_month: dict = {}
+        if ai_model.usable() and "CREDITS_BILLED_AI" in ai_model.df.columns:
+            adf = ai_model.df.copy()
+            adf["MONTH"] = pd.to_datetime(adf["DAY"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+            ai_by_month = (adf.groupby("MONTH")["CREDITS_BILLED_AI"]
+                           .apply(lambda s: s.map(safe_float).sum()).mul(ai_rate)).to_dict()
         odf = org_m.df.copy()
         odf["MONTH"] = pd.to_datetime(odf["MONTH"], errors="coerce")
         rows_rc = []
@@ -288,6 +303,10 @@ def _rate_card_reconciliation(settings: dict) -> None:
             model_usd = float(model_by_month.get(month, 0.0))
             org_usd = safe_float(orow.get("COMPUTE_USD"))
             drift = (100.0 * (model_usd - org_usd) / org_usd) if org_usd else None
+            # rec#32: AI/Cortex bucket recon — modeled AI $ (credits x ai_rate) vs org AI_USD
+            model_ai_usd = float(ai_by_month.get(month, 0.0))
+            org_ai_usd = safe_float(orow.get("AI_USD"))
+            ai_drift = (100.0 * (model_ai_usd - org_ai_usd) / org_ai_usd) if org_ai_usd else None
             # Effective realized rate = what the org actually charged per billed
             # compute credit this month. This is the number to reconcile
             # CREDIT_PRICE_USD (SETTINGS) against when the model-vs-org gap is steady.
@@ -299,7 +318,9 @@ def _rate_card_reconciliation(settings: dict) -> None:
                 "APP_MODEL_USD": round(model_usd, 2),
                 "DELTA_PCT": round(drift, 2) if drift is not None else None,
                 "EFF_RATE": round(eff_rate, 3) if eff_rate is not None else None,
-                "ORG_AI_USD": round(safe_float(orow.get("AI_USD")), 2),
+                "ORG_AI_USD": round(org_ai_usd, 2),
+                "APP_MODEL_AI_USD": round(model_ai_usd, 2),
+                "AI_DELTA_PCT": round(ai_drift, 2) if ai_drift is not None else None,
                 "ORG_STORAGE_USD": round(safe_float(orow.get("STORAGE_USD")), 2),
                 "ORG_TRANSFER_USD": round(safe_float(orow.get("TRANSFER_USD")), 2),
                 "ORG_ADJUSTMENT_USD": round(safe_float(orow.get("ADJUSTMENT_USD")), 2),
@@ -307,6 +328,7 @@ def _rate_card_reconciliation(settings: dict) -> None:
             })
         styled_table(pd.DataFrame(rows_rc), column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%"),
+            "AI_DELTA_PCT": st.column_config.NumberColumn("AI model vs org %", format="%.2f%%"),
             "EFF_RATE": st.column_config.NumberColumn("Effective $/cr", format="$%.3f")})
         _contract_line = ""
         if contract_compute_rate:
