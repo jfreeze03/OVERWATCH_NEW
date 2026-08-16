@@ -65,9 +65,11 @@ _REACHABLE = {
     # retention the estimate has to scale by, so this is a DELIBERATE scan-surface change
     # buying a correct dollar figure (metadata view; no history scan).
     "app/ui/pages/cost_parts/optimize.py": (
+        # rec#41: + QUERY_ATTRIBUTION_HISTORY — the measured-cost lens (measured_query_costs)
+        # now offered on the Optimize expensive-queries panel, not just the Unit-costs tab.
         "ACCESS_HISTORY", "AUTOMATIC_CLUSTERING_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
-        "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
-        "WAREHOUSE_METERING_HISTORY"),
+        "QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY", "TABLES", "TABLE_DML_HISTORY",
+        "TABLE_STORAGE_METRICS", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/operations.py": (
         "COPY_HISTORY", "DYNAMIC_TABLE_REFRESH_HISTORY", "LOCK_WAIT_HISTORY",
         "QUERY_HISTORY", "TABLE_DML_HISTORY", "TASKS", "TASK_HISTORY", "TASK_VERSIONS",

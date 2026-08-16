@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.171.0 - Drill honesty: measured query costs on the Optimize panel (2026-08-15)
+
+Gap-audit Wave 4b (rec #41). App-only; `optimize.py`.
+
+- **The exact measured lens now sits beside the allocated estimate.** The
+  Optimize "most expensive queries" panel priced queries only by hour-share
+  allocation (`expensive_queries_usd`) — which spreads the whole warehouse-hour
+  bill, idle included, and distorts on an idle-heavy warehouse — while the exact
+  `QUERY_ATTRIBUTION_HISTORY` attribution (`measured_query_costs`, idle excluded)
+  was siloed on the separate Unit-costs tab. A new toggle-gated "Most expensive
+  queries (measured $, exact attribution)" panel offers the measured lens right
+  there, clearly labelled measured-vs-allocated (measured reads below allocated
+  because idle time is excluded), honoring the same database / schema / warehouse
+  filters. Reuses the existing canaried builder — no new SQL.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.170.0 - Formula honesty: blended-fallback badge (2026-08-15)
 
 Gap-audit Wave 3g (rec #28). App-only; `overview.py`.

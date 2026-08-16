@@ -520,6 +520,54 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
                 st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
+        # rec#41: the exact complement of the allocated estimate above, offered right
+        # here instead of siloed on the Unit-costs tab — QUERY_ATTRIBUTION_HISTORY bills
+        # each query its OWN attributed credits (idle warehouse time excluded), so on an
+        # idle-heavy warehouse the allocated panel above distorts and this one does not.
+        st.markdown("**Most expensive queries (measured $, exact attribution)**")
+        st.caption(
+            "Measured, not allocated: exact QUERY_ATTRIBUTION_HISTORY credits for running "
+            "each query, with warehouse idle time excluded (the allocated panel spreads the "
+            "whole warehouse-hour bill, idle included). ~8h attribution lag; queries with no "
+            "attributed credits are omitted, so the measured total reads below the allocated one."
+        )
+        if st.toggle("Run measured-cost scan (exact QAH attribution)", key="cost_measq_toggle",
+                     help="Bills each query its own attributed compute + QAS credits — the "
+                          "measured truth behind the hour-share estimate above."):
+            with st.spinner("Reading measured query attribution…"):
+                measq = run(insights_sql.measured_query_costs(
+                                days, company,
+                                database=st.session_state.get("flt_database", ""),
+                                schema_contains=st.session_state.get("flt_schema_contains", ""),
+                                warehouse_contains=st.session_state.get("flt_warehouse_contains", ""),
+                                limit=50),
+                            page=_PAGE, key=f"measq_{company}_{days}", tier="historical",
+                            source="QUERY_ATTRIBUTION_HISTORY x QUERY_HISTORY (measured, idle excluded)")
+            if guard(measq, "No measured query attribution in this window (~8h view lag)."):
+                mdf_q = measq.df.copy()
+                mdf_q["MEASURED_USD"] = mdf_q["CREDITS"].map(lambda c: round(safe_float(c) * rate, 2))
+                kpi_row([
+                    {"label": "Top-50 measured spend", "value": format_usd(float(mdf_q["MEASURED_USD"].sum())),
+                     "help": "Exact per-query attributed credits (idle excluded), so this reads "
+                             "below the allocated Top-50 — the allocated lens carries idle time."},
+                    {"label": "Costliest single query",
+                     "value": format_usd(float(mdf_q["MEASURED_USD"].max())) if len(mdf_q) else "$0"},
+                ])
+                _mq, _mq_cfg = snowsight_profile_column(mdf_q, _PAGE)
+                _mq = with_user_names(_mq, _PAGE)
+                _mq_cols = [c for c in ["MEASURED_USD", "USER", "USER_NAME", "WAREHOUSE_NAME",
+                                        "DATABASE_NAME", "QUERY_TYPE", "EXECUTION_STATUS",
+                                        "ELAPSED_SEC", "START_TIME", "QUERY_SNIPPET", "QUERY_ID"]
+                            if c in _mq.columns]
+                if "PROFILE" in _mq.columns and "PROFILE" not in _mq_cols:
+                    _mq_cols.append("PROFILE")
+                styled_table(
+                    _mq[_mq_cols],
+                    column_config={"MEASURED_USD": st.column_config.NumberColumn("Measured $", format="$%.2f"),
+                                   **_mq_cfg},
+                )
+                result_caption(measq, note="exact QUERY_ATTRIBUTION_HISTORY credits, warehouse idle excluded")
+
         st.markdown("**Recurring cost patterns (same query, run all day)**")
         # $-escape: the $9/$300 pair would render " query run 400x outranks one " as math
         st.caption(md_dollars("Grouped by parameterized fingerprint: a $9 query run 400x outranks "
