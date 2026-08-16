@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.170.0 - Formula honesty: blended-fallback badge (2026-08-15)
+
+Gap-audit Wave 3g (rec #28). App-only; `overview.py`.
+
+- **The MTD credit-spend KPI discloses when it can't split AI from compute.**
+  When a refresh carries only the bare `CREDITS_BILLED` total (a pre-split cache
+  or a live shape without the AI/OTHER columns), `_billed_usd_series` prices every
+  credit at the compute rate — overstating AI/Cortex-heavy spend by
+  `(compute_rate - ai_rate) x AI credits`. That fallback was silent. A new shared
+  `_billed_split_available` helper now drives a `flat-rate est.` method badge (in
+  place of `billed`) and a help note on the Overview MTD KPI whenever the split is
+  missing, so the degraded number is disclosed rather than trusted as billed.
+  Every mart builder emits the split, so the badge only appears on the degraded
+  path.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.169.0 - Formula honesty: year-strip prorates today's remainder (2026-08-15)
 
 Gap-audit Wave 3f (rec #40, year-strip only). App-only; `contract.py`.

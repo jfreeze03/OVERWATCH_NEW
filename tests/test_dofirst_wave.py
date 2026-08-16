@@ -93,7 +93,10 @@ def test_c11_account_wide_badges_on_metering_kpis():
     # billed figures (3 MTD returns in _mtd_pace_kpi + the MTD fallback +
     # Projected month-end) now carry scope, not badge.
     assert ov.count('"scope": "account-wide"') >= 5
-    assert ov.count('"method": "billed"') >= 5   # the same billed KPIs name their method
+    # rec#28: two MTD returns now derive method from _method (billed by default,
+    # 'flat-rate est.' when the AI/OTHER split is unavailable on the refresh).
+    assert ov.count('"method": "billed"') + ov.count('"method": _method') >= 5
+    assert '_method = "billed" if _split_ok else "flat-rate est."' in ov
 
 
 def test_n7_storage_transfer_disclosure_on_overview_and_brief():

@@ -111,11 +111,24 @@ def _live_fallback_daily(company: str, days: int, rate: float) -> tuple[pd.DataF
     return daily[["DAY", "USD"]], res
 
 
+def _billed_split_available(frame: pd.DataFrame) -> bool:
+    """True when the AI/OTHER split columns are present (rec#28).
+
+    Every mart builder emits the split, so this is normally True. When it is
+    False — a pre-split cached frame or a live shape carrying only the bare
+    CREDITS_BILLED total — `_billed_usd_series` cannot split and prices every
+    credit at the compute rate, overstating AI/Cortex-heavy spend. Callers read
+    this to surface a 'flat-rate est.' badge instead of a silent overstatement.
+    """
+    return {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"}.issubset(frame.columns)
+
+
 def _billed_usd_series(frame: pd.DataFrame, rate: float, ai_rate: float) -> pd.Series:
     """Per-day billed USD from the AI/OTHER split (C1): AI credits price at the
     AI rate, the rest at the compute rate. Falls back to the flat rate on the
-    total when a frame predates the split columns (live fallback / old cache)."""
-    if "CREDITS_BILLED_OTHER" in frame.columns and "CREDITS_BILLED_AI" in frame.columns:
+    total when a frame predates the split columns (live fallback / old cache);
+    callers disclose that fallback via _billed_split_available (rec#28)."""
+    if _billed_split_available(frame):
         return (frame["CREDITS_BILLED_OTHER"].map(safe_float) * rate
                 + frame["CREDITS_BILLED_AI"].map(safe_float) * ai_rate)
     return frame["CREDITS_BILLED"].map(safe_float) * rate
@@ -134,7 +147,7 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
     mtd = frame[frame["DAY"] >= month_start]
-    if "CREDITS_BILLED_OTHER" in mtd.columns and "CREDITS_BILLED_AI" in mtd.columns:
+    if _billed_split_available(mtd):
         spend = blended_billed_usd(mtd["CREDITS_BILLED_OTHER"].map(safe_float).sum(),
                                    mtd["CREDITS_BILLED_AI"].map(safe_float).sum(),
                                    rate, ai_rate)
@@ -180,6 +193,14 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
                 "help": "Credit-billed services at configured rates, including the "
                         "cloud-services adjustment. Storage and transfer are separate."}
     frame = hist.df.copy()
+    # rec#28: if this refresh lacks the AI/OTHER split, _billed_usd_series prices
+    # every credit at the compute rate — overstating AI/Cortex spend. Badge the
+    # method 'flat-rate est.' and disclose it in help, rather than reading 'billed'.
+    _split_ok = _billed_split_available(frame)
+    _method = "billed" if _split_ok else "flat-rate est."
+    _split_note = ("" if _split_ok else
+                   " Note: the AI/compute rate split is unavailable on this refresh, so every "
+                   "credit is priced at the compute rate — AI/Cortex-heavy spend may read high.")
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
     mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
     _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
@@ -188,18 +209,19 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
     if pct is None:
         return {"label": "MTD credit spend", "value": format_usd(mtd),
                 "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
-                "method": "billed", "scope": "account-wide",
+                "method": _method, "scope": "account-wide",
                 "help": "Pace vs last month appears once the prior month has "
-                        "daily facts (backfill_365.sql loads the year)." + budget_note}
+                        "daily facts (backfill_365.sql loads the year)." + budget_note + _split_note}
     return {"label": "MTD credit spend vs last month",
             "value": format_usd(mtd),
             "sub": f"{format_credits(_mtd_credits)} cr" if _mtd_credits is not None else None,
-            "method": "billed", "scope": "account-wide",
+            "method": _method, "scope": "account-wide",
             "delta": f"{pct:+,.0f}% vs {format_usd(prior)}",
             "delta_color": "inverse",
             "help": "Credit-billed services, account-wide, at configured rates. The value is "
                     "this month to date; the pace delta compares the same number "
-                    "of days both months share. Storage and transfer are separate." + budget_note}
+                    "of days both months share. Storage and transfer are separate."
+                    + budget_note + _split_note}
 
 
 @safe_page(_PAGE)

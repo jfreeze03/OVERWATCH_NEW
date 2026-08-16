@@ -257,7 +257,9 @@ def test_rec13_overview_billed_kpis_carry_method_and_scope():
     # account-wide billed KPIs name BOTH how (billed) and scope (account-wide);
     # the company window-spend names metering + company. Distinct, never colliding.
     assert ov.count('"scope": "account-wide"') >= 5
-    assert ov.count('"method": "billed"') >= 5
+    # rec#28: two MTD returns derive method from _method (billed, or 'flat-rate est.'
+    # when the split is unavailable) — count both the literal and the conditional.
+    assert ov.count('"method": "billed"') + ov.count('"method": _method') >= 5
     assert '"method": "metering", "scope": "company"' in ov
 
 
