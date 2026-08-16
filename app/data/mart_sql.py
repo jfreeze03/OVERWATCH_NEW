@@ -1989,6 +1989,30 @@ LIMIT {limit}
 """
 
 
+def incident_gantt(days: int = 14, company: str = "ALL") -> str:
+    """CR5: per-incident lifecycle spans for a Gantt view — DETECTED_AT to
+    RESOLVED_AT (or to now for an open incident). Includes RESOLVED incidents so
+    completed spans render, not just the open queue. ACK/MITIGATE timestamps are
+    not consistently written, so the bar is the detected->resolved span."""
+    days = bounded_days(days, 90)
+    comp = ("" if str(company or "ALL").upper() == "ALL"
+            else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    return f"""
+SELECT
+    INCIDENT_ID,
+    LEFT(COALESCE(TITLE, 'incident ' || INCIDENT_ID), 60) AS TITLE,
+    UPPER(COALESCE(SEVERITY, 'INFO')) AS SEVERITY,
+    STATUS,
+    DETECTED_AT::TIMESTAMP_NTZ AS STARTED,
+    COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS ENDED,
+    DATEDIFF('minute', DETECTED_AT, COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())) AS DURATION_MIN
+FROM {core_object("INCIDENTS")}
+WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){comp}
+ORDER BY DETECTED_AT DESC
+LIMIT 60
+"""
+
+
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate over
     the owner-decided 14-day window, storm compression, change-correlated %."""

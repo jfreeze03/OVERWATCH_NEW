@@ -93,6 +93,12 @@ def test_incident_readers_shapes():
                 "REOPEN_PCT", "COMPRESSION", "CHANGE_PCT"):
         assert col in met, col
     assert "('WH_CHANGE', 'DEPLOY')" in met                   # the IaC payoff metric
+    gantt = mart_sql.incident_gantt(14, "ALFA")               # CR5 lifecycle-span reader
+    for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE"):
+        assert col in gantt, col
+    assert "COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())" in gantt   # open bars run to now
+    assert "DATEADD('day', -14," in gantt                         # 14d window
+    assert "(COMPANY = 'ALFA'" in gantt                           # company arm (incl. account-level)
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     for name in ("open_incidents", "incident_members_detail", "incident_proposals",
                  "incident_metrics"):
@@ -111,6 +117,8 @@ def test_control_room_incidents_section():
     assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
     assert "mart_sql.open_incidents(50, company)" in _CR
+    assert "mart_sql.incident_gantt(14, company)" in _CR        # CR5 lifecycle Gantt wired
+    assert "charts.incident_gantt(" in _CR
     assert "nothing groups silently" in _CR                   # proposals expander says so
 
 

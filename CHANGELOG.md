@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.220.0 - Incident lifecycle Gantt on Control Room (2026-08-16)
+
+CoCo review, Tier-3 (Control Room #5). New `data.mart_sql.incident_gantt` + `ui.charts.incident_gantt`.
+
+- **Recent incidents now read as a Gantt, not just an open-queue table.** The Control Room
+  Incidents section gains a 14-day lifecycle chart — one severity-colored bar per incident from
+  detected to resolved (an open incident's bar reaches now), so the shape of the week (how long
+  things ran, what overlapped, what's still open) is visible at a glance. Includes resolved
+  incidents (the open-queue table shows only open/mitigated). App version 4.220.0. Note: ack/
+  mitigate timestamps aren't consistently written, so the bar is the detected→resolved span.
+
 ## 4.219.0 - Dormant-then-active detection on Security (2026-08-16)
 
 CoCo review, Tier-2 (Security #5). New `data.security_sql.dormant_reawakening` +

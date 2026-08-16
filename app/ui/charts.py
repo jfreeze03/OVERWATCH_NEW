@@ -1151,6 +1151,43 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
     st.altair_chart(alt.vconcat(focus, overview, spacing=8), use_container_width=True)
 
 
+def incident_gantt(df: pd.DataFrame) -> None:
+    """CR5: per-incident detected->resolved bars, colored by severity — the
+    lifecycle shape (and what's still running, its bar reaching now) at a glance."""
+    if df is None or df.empty:
+        _empty_note("No incidents to chart in this window.")
+        return
+    data = df.copy()
+    data["STARTED"] = pd.to_datetime(data["STARTED"], errors="coerce")
+    data["ENDED"] = pd.to_datetime(data["ENDED"], errors="coerce")
+    data = data.dropna(subset=["STARTED", "ENDED"])
+    if data.empty:
+        _empty_note("No timestamped incidents to chart.")
+        return
+    domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    colors = [SEV_COLORS[level] for level in domain]
+    chart = (
+        alt.Chart(data)
+        .mark_bar(cornerRadius=2, stroke=palette.BG, strokeWidth=0.5)
+        .encode(
+            x=alt.X("STARTED:T", title=None),
+            x2="ENDED:T",
+            y=alt.Y("TITLE:N", title=None,
+                    sort=alt.EncodingSortField("STARTED", order="descending")),
+            color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=domain, range=colors),
+                            legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("TITLE:N", title="Incident"),
+                     alt.Tooltip("SEVERITY:N", title="Severity"),
+                     alt.Tooltip("STATUS:N", title="Status"),
+                     alt.Tooltip("STARTED:T", title="Detected"),
+                     alt.Tooltip("ENDED:T", title="Resolved / now"),
+                     alt.Tooltip("DURATION_MIN:Q", title="Duration (min)", format=",.0f")],
+        )
+        .properties(height=max(_HEIGHT, 22 * len(data)))
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def workload_portfolio(df: pd.DataFrame) -> None:
     """Impact x confidence portfolio; size is the measured blast-radius proxy."""
     if df is None or df.empty:

@@ -564,6 +564,15 @@ def render() -> None:
                  "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
                          "Alerts -> History."},
             ])
+        # CR5: a lifecycle Gantt — detected->resolved spans (open runs to now), so
+        # the shape of the last 14 days of incidents reads at a glance.
+        _ig = run(mart_sql.incident_gantt(14, company), page=_PAGE,
+                  key=f"incident_gantt_{company}", tier="recent",
+                  source="INCIDENTS (14d lifecycle spans)")
+        if _ig.usable():
+            st.caption("Recent incidents (14d) — bar = detected → resolved; an open incident's bar "
+                       "reaches now. Account time.")
+            charts.incident_gantt(_ig.df)
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")

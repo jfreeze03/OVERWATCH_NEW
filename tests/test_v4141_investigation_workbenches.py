@@ -254,3 +254,28 @@ def test_spend_trend_click_survives_the_marker_overlay(monkeypatch: pytest.Monke
     df = pd.DataFrame({"DAY": pd.to_datetime(["2026-08-14", "2026-08-15"]), "USD": [1.0, 900.0]})
     markers = pd.DataFrame({"DAY": ["2026-08-15"], "LABEL": ["WH_A"]})
     assert charts.spend_trend(df, key="wh", markers=markers) == "2026-08-15"
+
+
+def test_incident_gantt_renders_lifecycle_bars(monkeypatch: pytest.MonkeyPatch) -> None:
+    # CR5: detected->resolved span bars, colored by severity.
+    import json
+
+    rendered = []
+    monkeypatch.setattr(charts.st, "altair_chart", lambda c, **k: rendered.append(c))
+    monkeypatch.setattr(charts, "_empty_note", lambda *a, **k: None)
+    df = pd.DataFrame({
+        "INCIDENT_ID": ["i1", "i2"],
+        "TITLE": ["Loader stall", "Spend spike"],
+        "SEVERITY": ["CRITICAL", "HIGH"],
+        "STATUS": ["RESOLVED", "OPEN"],
+        "STARTED": pd.to_datetime(["2026-08-14 01:00", "2026-08-15 09:00"]),
+        "ENDED": pd.to_datetime(["2026-08-14 03:30", "2026-08-15 12:00"]),
+        "DURATION_MIN": [150, 180],
+    })
+    charts.incident_gantt(df)
+    spec = json.dumps(rendered[0].to_dict())
+    assert '"x2"' in spec                              # a span bar (start -> end), not a point
+    assert "Loader stall" in spec and "SEVERITY" in spec
+    rendered.clear()
+    charts.incident_gantt(pd.DataFrame())              # empty -> nothing rendered, no crash
+    assert rendered == []
