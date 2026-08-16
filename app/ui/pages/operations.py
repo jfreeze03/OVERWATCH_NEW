@@ -14,7 +14,16 @@ from app.core.query import execute_cancel_query, execute_statement, run, run_bat
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import change_impact_sql, dq_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql
+from app.data import (
+    change_impact_sql,
+    dq_sql,
+    insights_sql,
+    mart27_sql,
+    mart_sql,
+    ops_sql,
+    security_sql,
+    workbench_sql,
+)
 from app.logic import remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
@@ -31,6 +40,7 @@ from app.logic.formulas import (
     humanize_duration,
     safe_float,
 )
+from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import build_failure_timeline, compare_release_periods, task_release_deltas
 from app.logic.task_graph import (
     analyze_task_run,
@@ -394,6 +404,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
                    "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
     )
     result_caption(res)
+    _incident_routing_panel(timeline)
     ai_evaluation_panel(
         key=f"task_failures_{company}",
         prompt=task_failure_prompt(timeline, company),
@@ -401,6 +412,53 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
         page=_PAGE,
         subject="diagnose these task failures",
     )
+
+
+def _incident_routing_panel(timeline) -> None:
+    """rec#27: stitch each root-cause failure to an owner + first response.
+
+    Reuses the already-classified failure timeline (no new failure scan) and joins
+    the entity catalog for owner/on-call, so an incident carries a name and a next
+    move. Routing to ACTION_QUEUE / Teams and ack-timeout escalation from an on-call
+    rotation are the deferred owner-migration half."""
+    section_header("Incident routing — owner + first response (root causes)", "warn", "alerts")
+    panel_help(
+        "Each root-cause failure is matched to a first-response remediation by its error "
+        "family (classify_task_error) and to an owner/on-call resolved from the catalog "
+        "(the task's own TASK entry, else the database it lives in). Cascades are excluded "
+        "so only the failure to fix pages someone. ROUTED_TO is unassigned when the task "
+        "isn't in the catalog — register its owner in Decision Studio. Actually opening a "
+        "routed ACTION_QUEUE item / Teams mention and escalating on an ack timeout from an "
+        "on-call rotation are the deferred owner-migration half."
+    )
+    cat = run(workbench_sql.entity_catalog(limit=1000), page=_PAGE, key="incident_catalog",
+              tier="hourly", source="ENTITY_CATALOG (owner / on-call)")
+    if not cat.ok:
+        st.warning(
+            "Owner lookup unavailable — the catalog read failed, so the incidents below are "
+            f"shown UNROUTED for that reason (owners may well be registered). {cat.error or ''}"
+        )
+    catalog_df = cat.df if cat.ok else None
+    incidents = route_incidents(timeline, catalog_df)
+    if incidents.empty:
+        st.info("No root-cause failures to route.")
+        return
+    stats = summarize_incidents(incidents)
+    kpi_row([
+        {"label": "Incidents", "value": f"{stats['incidents']}",
+         "help": "Distinct failing tasks (root cause), collapsed to one incident each."},
+        {"label": "High severity", "value": f"{stats['critical']}",
+         "delta_color": "inverse" if stats["critical"] else "off",
+         "help": "CRITICAL or HIGH by the owning entity's catalog criticality."},
+        {"label": "Unrouted", "value": f"{stats['unrouted']}",
+         "delta_color": "inverse" if stats["unrouted"] else "off",
+         "help": "No owner/on-call in the catalog — register the task to route it."},
+    ])
+    if cat.ok and cat.empty:
+        st.caption("The entity catalog is empty, so every incident is unassigned — register owners in Decision Studio to route them.")
+    styled_table(incidents, height=280, slug="incident-routing",
+                 sort_label="most severe, then most failures")
+    st.caption("ROUTED_TO is the on-call (else owner) to page; REMEDIATION is the first move for that error family.")
 
 
 def _release_compare_tab(company: str) -> None:

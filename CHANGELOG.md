@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.189.0 - Operations: incident routing for task failures (2026-08-16)
+
+Cost/metric gap audit, Wave 6 (finding #27). App-only; new pure `logic/incident.py`,
+Operations "Failure root-cause timeline" panel.
+
+- **Task failures now arrive with an owner and a first move.** The pieces existed but
+  sat disconnected — `classify_task_error` names the error family and
+  `build_failure_timeline` marks root-cause vs cascade, yet nothing attached a
+  remediation or an owner. A new **Incident routing** panel (under the failure timeline)
+  stitches each root-cause failure to a first-response remediation keyed to its error
+  family (permission, timeout, missing object, data quality, …) and to an owner/on-call
+  resolved from ENTITY_CATALOG (the task's own TASK entry, else the database it lives in),
+  so an incident carries a name and a next step. Cascades are excluded so only the failure
+  to fix pages someone; repeated failures collapse to one incident with a count; severity
+  comes from the owning entity's catalog criticality (CRITICAL/HIGH/STANDARD/LOW, a notch
+  lower for a cascade).
+- **Honest routing.** `ROUTED_TO` reads `unassigned` when the task isn't in the catalog
+  (with a prompt to register it), and the panel reuses the already-loaded failure
+  timeline — no new failure scan, just one catalog read.
+- Deferred to the owner-migration half: actually opening a routed ACTION_QUEUE item /
+  Teams mention, and ack-timeout escalation from an ON_CALL_SCHEDULE rotation table.
+
+Gates green: ruff --no-cache, mypy, pytest.
+
 ## 4.188.0 - Operations: robust-z row-volume data-quality monitor (2026-08-15)
 
 Cost/metric gap audit, Wave 6 (finding #26). App-only; new pure `logic/dq.py`,
