@@ -93,6 +93,37 @@ def classify_grant_scopes(
     return out[list(SCOPE_COLUMNS)].reset_index(drop=True)
 
 
+# The data privileges the unused-grants shortlist can observe (ACCESS_HISTORY
+# traces reads/writes only); mirrors security_sql._DATA_PRIVS. Any other value in
+# a row is skipped rather than emitted as a REVOKE we can't stand behind.
+_REVOKABLE_PRIVS = ("SELECT", "INSERT", "UPDATE", "DELETE", "REFERENCES", "TRUNCATE")
+
+
+def revoke_statements(frame: pd.DataFrame | None) -> list[str]:
+    """Format copy-paste REVOKE statements from the unused-table-grants shortlist.
+
+    Input columns (from security_sql.unused_table_grants): ROLE_NAME, PRIVILEGE,
+    OBJECT_NAME (a fully-qualified DB.SCHEMA.TABLE from the catalog). One statement
+    per row, in the frame's own order (role then object). Rows missing a field or
+    carrying an unrecognized privilege are skipped so a malformed REVOKE is never
+    emitted. Identifiers pass through as the catalog reports them — this is a
+    review-then-run script (the app never executes it), so the caller wraps it with
+    a 'verify before revoking' header. Empty/None -> []."""
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    if not {"ROLE_NAME", "PRIVILEGE", "OBJECT_NAME"}.issubset(frame.columns):
+        return []
+    statements: list[str] = []
+    for _, row in frame.iterrows():
+        role = str(row.get("ROLE_NAME") or "").strip()
+        priv = str(row.get("PRIVILEGE") or "").strip().upper()
+        obj = str(row.get("OBJECT_NAME") or "").strip()
+        if not role or not obj or priv not in _REVOKABLE_PRIVS:
+            continue
+        statements.append(f"REVOKE {priv} ON TABLE {obj} FROM ROLE {role};")
+    return statements
+
+
 def summarize_scopes(frame: pd.DataFrame | None) -> dict[str, int]:
     """KPI counts over a classified scope frame (from classify_grant_scopes)."""
     empty = {"roles": 0, "scopes": 0, "unused": 0, "over_broad": 0, "unused_tables": 0}

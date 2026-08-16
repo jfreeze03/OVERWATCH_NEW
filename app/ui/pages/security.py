@@ -17,7 +17,11 @@ from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
 from app.logic.insights import dormant_severity
-from app.logic.least_privilege import classify_grant_scopes, summarize_scopes
+from app.logic.least_privilege import (
+    classify_grant_scopes,
+    revoke_statements,
+    summarize_scopes,
+)
 from app.logic.security import (
     fact_coverage_complete,
 )
@@ -494,6 +498,21 @@ def _least_privilege_tab() -> None:
             styled_table(unused.df, height=320, slug="lp-unused", sort_label="role then object")
             st.caption(f"Each row is a privilege on a table no query has touched in the covered ~{coverage_days}d window. Confirm the object isn't seasonal before revoking.")
             result_caption(unused)
+            # CoCo Security #11: turn the shortlist into copy-paste REVOKEs — the DBA's
+            # bottleneck is writing the statements, not knowing they're needed. The app
+            # still revokes nothing; this is a reviewed, run-it-yourself script.
+            _revokes = revoke_statements(unused.df)
+            if _revokes:
+                with st.expander(f"Generate REVOKE statements ({len(_revokes)})"):
+                    _script = (
+                        "-- Least-privilege revoke shortlist — REVIEW before running.\n"
+                        "-- Each line revokes a table privilege no query exercised in the\n"
+                        f"-- covered ~{coverage_days}d window. Confirm the object isn't seasonal,\n"
+                        "-- then run as a role that manages these grants (e.g. SECURITYADMIN).\n"
+                        + "\n".join(_revokes)
+                    )
+                    st.code(_script, language="sql")
+                    st.caption("This app never runs these — copy, review, and execute them yourself.")
 
 
 def _trust_center_tab() -> None:

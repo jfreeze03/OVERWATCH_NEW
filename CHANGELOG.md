@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.199.0 - Generate REVOKE SQL from the least-privilege shortlist (2026-08-16)
+
+CoCo review, do-first wave (Security #11). New pure `logic/least_privilege.revoke_statements`;
+wired into the Security “Least privilege” tab.
+
+- **The unused-grant shortlist can now emit copy-paste REVOKEs.** The tab already found
+  table privileges no query exercised, but “reported; revoked nothing.” It now offers a
+  reviewed `REVOKE <priv> ON TABLE <obj> FROM ROLE <role>;` script built from the shortlist
+  rows — the DBA's bottleneck was writing the statements, not knowing they were needed. The
+  app still executes nothing; malformed rows (unknown privilege, blank field) are skipped.
+  App version 4.199.0.
+
 ## 4.198.0 - Verdict line on Overview, Cost, and Control Room (2026-08-16)
 
 CoCo review, do-first wave (finding #1, continued). The page-verdict primitive

@@ -14,6 +14,7 @@ from app.data import security_sql
 from app.logic.least_privilege import (
     SCOPE_COLUMNS,
     classify_grant_scopes,
+    revoke_statements,
     summarize_scopes,
 )
 
@@ -27,6 +28,37 @@ def _scopes(rows):
         columns=["ROLE_NAME", "DATABASE_NAME", "SCHEMA_NAME",
                  "GRANTED_TABLES", "TOUCHED_TABLES"],
     )
+
+
+# --- CoCo Security #11: copy-paste REVOKE generation --------------------------
+
+def test_revoke_statements_format_exact_revokes():
+    frame = pd.DataFrame(
+        [["ETL_ROLE", "SELECT", "DB.SALES.ORDERS"],
+         ["ETL_ROLE", "insert", "DB.SALES.ORDERS"],
+         ["APP_RO", "SELECT", "DB.PUBLIC.LOOKUP"]],
+        columns=["ROLE_NAME", "PRIVILEGE", "OBJECT_NAME"],
+    )
+    assert revoke_statements(frame) == [
+        "REVOKE SELECT ON TABLE DB.SALES.ORDERS FROM ROLE ETL_ROLE;",
+        "REVOKE INSERT ON TABLE DB.SALES.ORDERS FROM ROLE ETL_ROLE;",
+        "REVOKE SELECT ON TABLE DB.PUBLIC.LOOKUP FROM ROLE APP_RO;",
+    ]
+
+
+def test_revoke_statements_skip_bad_empty_and_missing_columns():
+    assert revoke_statements(None) == []
+    assert revoke_statements(pd.DataFrame()) == []
+    # unknown privilege / blank role / blank object are dropped, never emitted malformed
+    frame = pd.DataFrame(
+        [["R", "OWNERSHIP", "DB.S.T"], ["", "SELECT", "DB.S.T"], ["R", "SELECT", ""]],
+        columns=["ROLE_NAME", "PRIVILEGE", "OBJECT_NAME"],
+    )
+    assert revoke_statements(frame) == []
+
+
+def test_security_tab_offers_the_revoke_script():
+    assert "revoke_statements(" in _SEC and "Generate REVOKE statements" in _SEC
 
 
 # --- classify_grant_scopes -------------------------------------------------
