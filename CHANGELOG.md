@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.191.0 - Decision Studio: query-family company regrain (V082) (2026-08-16)
+
+Decision Studio review, finding #3 (company-scope leaks). Owner migration **V082**
+(apply in Snowsight after V081) + app rewire of `data/workbench_sql.py` and
+`data/mart27_sql.py`.
+
+- **Query families are now scoped by the real company, not a database guess.**
+  `MART_QUERY_FAMILY_DAILY` was the only loader arm with no company attribution: its
+  grain was `(DAY, QUERY_HASH)` with an `ANY_VALUE(DATABASE_NAME)` representative, so a
+  family that ran under both companies collapsed to one account-wide row. The app then
+  faked company scope off that representative database — `workload_portfolio` joined the
+  family mart on `DATABASE_NAME`, and `family_compile_heavy` / `family_repeat_fingerprints`
+  filtered with `database_clause` — a lossy heuristic that dropped or mixed a company's
+  families. V082 re-derives `SP_LOAD_MARTS_V27` (from V078) with the query-family arm
+  regrained to per-company rows: `COMPANY = COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME)`,
+  `GROUP BY (DAY, QUERY_HASH, COMPANY)`, top-2000/day **per company**, `MERGE` keyed on
+  `+COMPANY`. All other loader arms are byte-identical to V078. The three app readers now
+  scope on the exact `COMPANY` column.
+- **One-time grain reset + backfill.** The mart gains a `COMPANY` column and is cleared
+  once (the grain changed, so old account-grain rows would double-count under any GROUP
+  BY reader). It's fully rebuildable from `OW_QH_EXTRACT`. **Owner: after applying, re-run
+  the backfill** — `CALL SP_LOAD_QH_EXTRACT(90)` then `CALL SP_LOAD_MARTS_V27('HOURLY', 90)`
+  (widen to 365 for full history). Until then the family boards read empty or fall back to
+  their live `QUERY_HISTORY` twins. No alert scan reads this mart, so there's no
+  alert-layer ripple; `SP_NIGHTLY_RECONCILE` deletes by DAY only and is untouched.
+- Authored via the derivation-law generator (`outputs/gen_v082.py`, byte-identical regen
+  test — the ~790-line proc is re-emitted with a single-point arm swap) and reviewed by two
+  adversarial skeptics. The first caught a P2 (the qfam arm originally grouped *by* the
+  `COMPANY_FOR_WAREHOUSE` UDF — a correlated subquery in a GROUP BY key, the exact shape
+  that logged `mart_load_failed` hourly after V027 until V029); it now derives COMPANY in an
+  inner projection and groups the outer on the plain column, and the one-time DELETE is
+  guarded so a re-apply can't wipe a backfilled mart. Disclosed limits: ALL-view
+  `MAX(USERS)/MAX(WAREHOUSES)` in the family boards become per-company peaks (understate a
+  cross-company family's distinct counts — a pre-existing peak-day proxy), and
+  `workload_portfolio` has no live fallback, so its family metrics read as no-evidence
+  between the DELETE and the backfill (routed to the VALIDATE lane) and the board errors if
+  the app is deployed before V082 is applied. **The app depends on V082's `COMPANY` column
+  — apply V082 before deploying.**
+
 ## 4.190.0 - Decision Studio: unified experiment verify (V081) (2026-08-16)
 
 Decision Studio review, finding #5. Owner migration **V081** (apply in Snowsight

@@ -200,7 +200,10 @@ def test_workload_company_scope_applies_to_behavior_and_cost() -> None:
     statement = workbench_sql.workload_portfolio(30, "Trexis")
     assert statement.count("p.COMPANY = 'Trexis'") == 2
     assert "JOIN scoped_families" in statement
-    assert "s.DATABASE_NAME = f.DATABASE_NAME" in statement
+    # V082 (DS #3): the family mart now carries COMPANY at row grain, so the behavior
+    # side scopes on the real company, not the lossy ANY_VALUE(DATABASE_NAME) heuristic.
+    assert "s.COMPANY = f.COMPANY" in statement
+    assert "s.DATABASE_NAME = f.DATABASE_NAME" not in statement
 
 
 def test_cost_truth_and_product_economics_refuse_false_additivity() -> None:

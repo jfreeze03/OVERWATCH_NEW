@@ -45,7 +45,7 @@ def query_families(days: int, limit: int = 200) -> str:
     days = bounded_days(days, 400)
     limit = max(10, min(int(limit or 200), 2000))
     return f"""
-SELECT DAY, QUERY_HASH, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES,
+SELECT DAY, QUERY_HASH, COMPANY, SAMPLE_TEXT, RUNS, FAILS, USERS, WAREHOUSES,
        DATABASE_NAME, SCHEMA_NAME, TOTAL_EXEC_SEC, MEDIAN_S, P95_S,
        COMPILE_MS_AVG, GB_SCANNED_AVG, CACHE_PCT_AVG, TAGGED_RUNS
 FROM {mart_object("MART_QUERY_FAMILY_DAILY")}
@@ -250,14 +250,15 @@ LIMIT 100
 
 def family_compile_heavy(days: int, company: str = "ALL") -> str:
     """cost_sql.compile_heavy_families contract from the family mart.
-    Company scoping is database-heuristic (the mart has no user grain);
-    averages are run-weighted across days. Every column is QUALIFIED (f.) —
-    Snowflake resolved the bare RUNS inside later aggregates to the
-    SUM(RUNS) AS RUNS alias and raised 'aggregate functions cannot be
-    nested' (live, 2026-07-10). Qualified references cannot be shadowed."""
+    Company scoping is EXACT via the mart's COMPANY column (V082 regrain) —
+    was a lossy ANY_VALUE(DATABASE_NAME) heuristic before. Averages are
+    run-weighted across days. Every column is QUALIFIED (f.) — Snowflake
+    resolved the bare RUNS inside later aggregates to the SUM(RUNS) AS RUNS
+    alias and raised 'aggregate functions cannot be nested' (live, 2026-07-10).
+    Qualified references cannot be shadowed."""
     days = bounded_days(days, 400)
     where = and_where(f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-                      companies.database_clause(company, "f.DATABASE_NAME"))
+                      _company_arm(company, "f.COMPANY"))
     return f"""
 SELECT
     f.QUERY_HASH AS QUERY_PARAMETERIZED_HASH,
@@ -292,7 +293,7 @@ def family_repeat_fingerprints(days: int, company: str = "ALL", min_runs: int = 
     days = bounded_days(days, 400)
     min_runs = max(2, min(int(min_runs or 10), 1000))
     parts = [f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-             companies.database_clause(company, "f.DATABASE_NAME"),
+             _company_arm(company, "f.COMPANY"),   # V082: exact company scope, not the DB heuristic
              contains_filter("f.SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
         parts.append(f"UPPER(f.DATABASE_NAME) = {sql_literal(str(database).upper())}")

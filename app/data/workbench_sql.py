@@ -271,7 +271,10 @@ WITH costs AS (
       {company_clause}
     GROUP BY p.QUERY_HASH
 ), scoped_families AS (
-    SELECT DISTINCT p.QUERY_HASH, p.DATABASE_NAME
+    -- DS #3 (V082): the family mart now carries COMPANY at row grain, so scope on
+    -- the real company instead of the lossy ANY_VALUE(DATABASE_NAME) heuristic that
+    -- dropped a family whose representative database wasn't in the company's set.
+    SELECT DISTINCT p.QUERY_HASH, p.COMPANY
     FROM {core_object('MART_PATTERN_COST_DAILY')} p
     WHERE p.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
       {company_clause}
@@ -285,7 +288,7 @@ WITH costs AS (
            ANY_VALUE(f.SAMPLE_TEXT) AS QUERY_PREVIEW
     FROM {core_object('MART_QUERY_FAMILY_DAILY')} f
     JOIN scoped_families s
-      ON s.QUERY_HASH = f.QUERY_HASH AND s.DATABASE_NAME = f.DATABASE_NAME
+      ON s.QUERY_HASH = f.QUERY_HASH AND s.COMPANY = f.COMPANY
     WHERE f.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
     GROUP BY f.QUERY_HASH
 )

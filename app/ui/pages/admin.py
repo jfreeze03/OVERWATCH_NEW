@@ -225,6 +225,10 @@ _EXPECTED_MIGRATIONS = {
     81: "Unified experiment verify: SP_VERIFY_EXPERIMENT atomically records an "
         "experiment's verdict, upserts SAVINGS_LEDGER (keyed on ACTION_ID), and closes "
         "the source action so the experiment and savings ledgers can't diverge",
+    82: "Query-family company regrain: MART_QUERY_FAMILY_DAILY gains COMPANY and is "
+        "regrained to (DAY, QUERY_HASH, COMPANY) so query-family boards scope on the "
+        "real company instead of the ANY_VALUE(DATABASE_NAME) heuristic; mart cleared, "
+        "owner re-runs the HOURLY backfill",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -1035,6 +1039,7 @@ def _setup_progress_tab() -> None:
         (79, "V079", "AI predicate historical split: loader procs count CoCo as AI"),
         (80, "V080", "Security change-risk ETL exclusion: ETL-role DROP/TRUNCATE de-noised"),
         (81, "V081", "Unified experiment verify: SP_VERIFY_EXPERIMENT books ledger + closes action in one txn"),
+        (82, "V082", "Query-family company regrain: MART_QUERY_FAMILY_DAILY gains COMPANY (per-company grain)"),
     ):
         _add(f"{_label} — {_feature}", done=_v in applied,
              detail="applied" if _v in applied else "not applied",
