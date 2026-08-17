@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.240.0 - Security: recent grant-changes feed (2026-08-17)
+
+Owner ask: "show the most recent grant changes to roles/users/objects — who changed
+what to whom and at what time, ordered by recent." The Changes section had an
+*aggregated* DDL/DCL view (statements/day, by user) but no granular, time-ordered
+grant log, and the one existing builder covered only role→user grants.
+
+- **`Security ▸ Changes ▸ Recent grant changes`** (top of the section). A newest-first
+  feed where each row is ONE change event: **When · Change (granted/revoked) · Type
+  (role→user / privilege→role) · Granted by · To (grantee) · What (the role, or the
+  privilege on an object)**. Unions `GRANTS_TO_USERS` (role→user) and `GRANTS_TO_ROLES`
+  (privilege→role on objects); a grant and its later revoke are two rows at their own
+  timestamps. A 7/30/90/180-day window selector; KPIs for total / granted / revoked.
+- Honest attribution: `GRANTED_BY` is the acting **role** Snowflake records natively;
+  the DDL/DCL panel below still shows the **user** who ran a GRANT statement.
+- New builder `security_sql.recent_grant_changes`. The Changes section is not first
+  paint and the read is hourly-cached; live-scan budget +1 (justified).
+
+App version 4.240.0.
+
 ## 4.239.0 - V088: change-risk exclusion, data-validated (2026-08-17)
 
 The security change-risk diagnostic (v4.236.0) did its job: the owner's screenshot

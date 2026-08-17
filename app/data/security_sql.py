@@ -440,6 +440,53 @@ LIMIT 2000
 """
 
 
+def recent_grant_changes(days: int = 30, limit: int = 500) -> str:
+    """Most-recent grant/revoke CHANGES across roles, users, and objects — the
+    "who changed what for whom, and when" access-change feed (owner ask 2026-08-17).
+
+    Each row is ONE change event at its own time: a role granted to a user, a
+    privilege granted on an object to a role, or either revoked. Sourced from
+    ACCOUNT_USAGE.GRANTS_TO_USERS (role -> user) and GRANTS_TO_ROLES (privilege ->
+    role); a grant and its later revoke are two rows at their own timestamps, so a
+    same-window grant+revoke both show. GRANTED_BY is the actor ('(system)' when
+    Snowflake-internal). Newest first. Account-wide — grants have no company grain."""
+    days = bounded_days(days, 365)
+    limit = max(10, min(int(limit or 500), 2000))
+    cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    return f"""
+WITH changes AS (
+    SELECT CREATED_ON AS CHANGED_AT, 'GRANTED' AS CHANGE, 'Role -> user' AS GRANT_TYPE,
+           GRANTED_BY AS CHANGED_BY, GRANTEE_NAME AS GRANTEE, ROLE AS WHAT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE CREATED_ON >= {cutoff}
+    UNION ALL
+    SELECT DELETED_ON, 'REVOKED', 'Role -> user',
+           GRANTED_BY, GRANTEE_NAME, ROLE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+    WHERE DELETED_ON >= {cutoff}
+    UNION ALL
+    SELECT CREATED_ON, 'GRANTED', 'Privilege -> role',
+           GRANTED_BY, GRANTEE_NAME,
+           PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE CREATED_ON >= {cutoff}
+    UNION ALL
+    SELECT DELETED_ON, 'REVOKED', 'Privilege -> role',
+           GRANTED_BY, GRANTEE_NAME,
+           PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
+    FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+    WHERE DELETED_ON >= {cutoff}
+)
+SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
+       COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,
+       GRANTEE, WHAT
+FROM changes
+WHERE CHANGED_AT IS NOT NULL
+ORDER BY CHANGED_AT DESC
+LIMIT {limit}
+"""
+
+
 def admin_grant_context(days: int = 90, company: str = "ALL") -> str:
     """Admin-role grants in the window with the *time-context* for triage (Sec2).
 

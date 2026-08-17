@@ -904,6 +904,45 @@ def _clients_tab(company: str, days: int) -> None:
 
 
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+    # Recent grant changes feed (owner ask 2026-08-17): the granular "who granted
+    # what to whom, and when" access-change log, newest first — one row per grant or
+    # revoke across role->user and privilege->object, from GRANTS_TO_USERS/ROLES.
+    section_header("Recent grant changes", "info", "security", anchor="sec-grant-changes")
+    _gc_days = st.selectbox("Window", [7, 30, 90, 180], index=1, key="sec_grant_days",
+                            format_func=lambda d: f"last {d} days")
+    gc = run(security_sql.recent_grant_changes(int(_gc_days)), page=_PAGE,
+             key=f"grant_changes_feed_{_gc_days}", tier="hourly",
+             source="ACCOUNT_USAGE.GRANTS_TO_USERS + GRANTS_TO_ROLES")
+    if gc.ok and gc.empty:
+        st.success(f"No grant or revoke changes in the last {_gc_days} days.")
+    elif guard(gc, ""):
+        _g = gc.df.copy()
+        _chg = _g["CHANGE"].astype(str)
+        kpi_row([
+            {"label": f"Grant changes, {_gc_days}d", "value": f"{len(_g):,}",
+             "help": "Grant + revoke events across roles, users, and object privileges, newest first."},
+            {"label": "Granted", "value": f"{int((_chg == 'GRANTED').sum()):,}"},
+            {"label": "Revoked", "value": f"{int((_chg == 'REVOKED').sum()):,}", "delta_color": "off"},
+        ])
+        _cols = [c for c in ("CHANGED_AT", "CHANGE", "GRANT_TYPE", "CHANGED_BY", "GRANTEE", "WHAT")
+                 if c in _g.columns]
+        styled_table(_g[_cols], height=360, column_config={
+            "CHANGED_AT": st.column_config.DatetimeColumn("When", format="MMM DD, YYYY HH:mm"),
+            "CHANGE": st.column_config.Column("Change"),
+            "GRANT_TYPE": st.column_config.Column("Type"),
+            "CHANGED_BY": st.column_config.Column("Granted by (role)"),
+            "GRANTEE": st.column_config.Column("To (grantee)"),
+            "WHAT": st.column_config.Column("What"),
+        })
+        st.caption(
+            "Newest first. **To** = the user/role that received it; **What** = the role, or the "
+            "privilege on an object. **Granted by** is the acting role Snowflake records (its "
+            "native attribution) — for the user who ran a GRANT statement, see the DDL/DCL panel "
+            "below. Account-wide from GRANTS_TO_USERS + GRANTS_TO_ROLES (Snowflake's grant history "
+            "lags up to ~2h)."
+        )
+        result_caption(gc)
+    st.divider()
     # r23 #4 (the Access-tab pattern): the tab's two independent live reads
     # submit server-side async in one shot; any failure falls back to the
     # serial per-query calls below, unchanged.
