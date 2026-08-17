@@ -253,6 +253,14 @@ _EXPECTED_MIGRATIONS = {
         "raises every enabled rule carrying a METRIC_NAME when its newest "
         "MART_SECURITY_POSTURE_DAILY reading is at/over THRESHOLD_NUM. Operators generate "
         "such rules from a Security finding (generate-INSERT UI); arm count 15->16",
+    88: "Security change-risk ETL exclusion broadened (owner diagnostic 2026-08-17: "
+        "94% of DESTRUCTIVE events are TF_* roles, 0% unattributed): "
+        "V_SECURITY_EXCEPTION_QUEUE CHANGE RISK arm now excludes DESTRUCTIVE events by "
+        "any Terraform service role (TF_* pattern, generalizing V080's fixed 18-role "
+        "list that the flood outran) and on the app's own DBA_MAINT_DB.PUBLIC (narrowed "
+        "to PUBLIC so audit-table drops stay visible). Still DESTRUCTIVE-only and "
+        "NULL-safe; GRANT/REVOKE/POLICY and any non-TF DROP still surface; rows stay in "
+        "FACT_SECURITY_CHANGE for audit. View-only, no reload",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
