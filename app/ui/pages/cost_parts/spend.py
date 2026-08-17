@@ -40,6 +40,7 @@ from app.logic.formulas import (
     egress_effective_rate_per_tb,
     format_credits,
     format_usd,
+    humanize_bytes,
     md_dollars,
     pct_delta,
     safe_float,
@@ -429,9 +430,16 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                            if pd.notna(_row.get("CURRENCY")) else "USD")
                 edf = eg.df.copy()
                 edf["TB"] = pd.to_numeric(edf["TB"], errors="coerce").fillna(0.0)
+                edf["BYTES"] = pd.to_numeric(edf["BYTES"], errors="coerce").fillna(0.0)
                 edf["BILLABLE"] = edf["BILLABLE"].astype(bool)
-                billable_tb = float(edf.loc[edf["BILLABLE"], "TB"].sum())
-                free_tb = float(edf.loc[~edf["BILLABLE"], "TB"].sum())
+                billable_tb = float(edf.loc[edf["BILLABLE"], "TB"].sum())  # rate math is $/TB
+                # Owner finding 2026-08-17: TB at 3 decimals rendered sub-GB transfer as
+                # "0.000 TB" and there was no TOTAL to reconcile against Snowsight's
+                # headline (which sums ALL bytes, billable + free). Humanize + total.
+                total_bytes = float(edf["BYTES"].sum())
+                billable_bytes = float(edf.loc[edf["BILLABLE"], "BYTES"].sum())
+                free_bytes = float(edf.loc[~edf["BILLABLE"], "BYTES"].sum())
+                edf["VOLUME"] = edf["BYTES"].map(humanize_bytes)
                 fallback = safe_float(load_settings(_PAGE).get("DATA_TRANSFER_USD_PER_TB"), 20.0)
                 # only reconcile to org truth when it is USD — folding a non-USD bill into
                 # $-denominated KPIs would mislabel the currency. The resolver also rejects
@@ -440,12 +448,19 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 rate_per_tb, used_org = egress_effective_rate_per_tb(org_usd, billable_tb, fallback)
                 edf["EST_USD"] = (edf["TB"] * rate_per_tb).where(edf["BILLABLE"], 0.0).round(2)
                 kpi_row([
+                    {"label": f"Total transferred ({days}d)",
+                     "value": humanize_bytes(total_bytes),
+                     "help": "ALL outbound + cross-region bytes, billable and free — the figure "
+                             "that reconciles to Snowsight ▸ Cost Management ▸ Consumption ▸ Data "
+                             "Transfer for this account. Most of it is usually free same-region "
+                             "transfer; only the billable slice below carries a $."},
                     {"label": f"Estimated egress ({days}d)",
                      "value": format_usd(float(edf["EST_USD"].sum())),
                      "help": "Billable (cross-region / cross-cloud) transfer x the $/TB at right. "
-                             "Same-region transfer is free and priced at $0."},
-                    {"label": "Billable transfer", "value": f"{billable_tb:,.3f} TB",
-                     "sub": f"{free_tb:,.3f} TB free (same region)"},
+                             "Same-region transfer is free and priced at $0 — so this is often "
+                             "near $0 even when total transfer is large."},
+                    {"label": "Billable transfer", "value": humanize_bytes(billable_bytes),
+                     "sub": f"{humanize_bytes(free_bytes)} free (same region)"},
                     {"label": "Effective $/TB", "value": format_usd(rate_per_tb),
                      "method": "org rate card" if used_org else "setting fallback",
                      "help": ("Implied from billed TRANSFER_USD / billable TB over this window, "
@@ -456,11 +471,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 ])
                 styled_table(
                     edf[["EST_USD", "BILLABLE", "SOURCE_CLOUD", "SOURCE_REGION",
-                         "TARGET_CLOUD", "TARGET_REGION", "TRANSFER_TYPE", "TB"]],
+                         "TARGET_CLOUD", "TARGET_REGION", "TRANSFER_TYPE", "VOLUME", "BYTES"]],
                     height=320, sort_label="estimated $ desc",
                     column_config={
                         "EST_USD": st.column_config.NumberColumn("Est. $", format="$%.2f"),
-                        "TB": st.column_config.NumberColumn("TB", format="%.3f"),
+                        "VOLUME": st.column_config.TextColumn("Volume"),
+                        # raw bytes kept for true numeric sort + CSV; Volume is the display.
+                        "BYTES": st.column_config.NumberColumn("Bytes", format="%d"),
                     },
                 )
                 if used_org:

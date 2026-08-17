@@ -329,6 +329,23 @@ def humanize_duration(value: object, unit: str = "s") -> str:
     return f"{sign}{seconds}s"
 
 
+def humanize_bytes(value: object) -> str:
+    """Render a raw byte count as a compact binary unit — "3.6 TB", "891.3 MB",
+    "512 B" — so sub-TB transfer (hundreds of MB) reads as itself instead of
+    rounding to "0.000 TB". Binary (1024) TiB/GiB/MiB, the unit Snowflake bills
+    on; Snowsight's Cost Management shows the same scale. NaN/garbage -> em-dash."""
+    v = safe_float(value, default=float("nan"))
+    if v != v:
+        return "—"
+    sign = "-" if v < 0 else ""
+    n = abs(float(v))
+    for unit, factor in (("TB", 1024 ** 4), ("GB", 1024 ** 3),
+                         ("MB", 1024 ** 2), ("KB", 1024)):
+        if n >= factor:
+            return f"{sign}{n / factor:,.1f} {unit}"   # 1 decimal, Snowsight style
+    return f"{sign}{n:,.0f} B"
+
+
 def humanize_age(value: object, now: object = None) -> str:
     """rec27: compact 'how stale' for a past timestamp — "just now" / "5m ago" /
     "3h ago" / "2d ago". A DISPLAY-ONLY companion to a real timestamp column (which

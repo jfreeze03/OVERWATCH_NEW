@@ -460,6 +460,14 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
     u_scope = companies.user_clause(company, "GRANTEE_NAME")   # grantee is a user
     r_scope = companies.role_clause(company, "GRANTEE_NAME")   # grantee is a role
+    # Owner finding 2026-08-17: every object CREATE (incl. the TMP_* stages/formats
+    # procs make per run) records an OWNERSHIP grant BY the creating role TO itself
+    # — object-lifecycle noise, not an access change, and it buried the feed (500-row
+    # cap full of self-OWNERSHIP on TMP_ objects). A real ownership TRANSFER has a
+    # different grantor and still shows. NULL-safe: an unattributed grantor never
+    # matches the grantee, so it stays visible.
+    self_own = ("NOT (PRIVILEGE = 'OWNERSHIP' "
+                "AND COALESCE(GRANTED_BY, '') = GRANTEE_NAME)")
     return f"""
 WITH changes AS (
     SELECT CREATED_ON AS CHANGED_AT, 'GRANTED' AS CHANGE, 'Role -> user' AS GRANT_TYPE,
@@ -476,13 +484,13 @@ WITH changes AS (
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE {and_where(f"CREATED_ON >= {cutoff}", r_scope)}
+    WHERE {and_where(f"CREATED_ON >= {cutoff}", r_scope, self_own)}
     UNION ALL
     SELECT DELETED_ON, 'REVOKED', 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE {and_where(f"DELETED_ON >= {cutoff}", r_scope)}
+    WHERE {and_where(f"DELETED_ON >= {cutoff}", r_scope, self_own)}
 )
 SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,

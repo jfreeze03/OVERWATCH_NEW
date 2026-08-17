@@ -359,6 +359,13 @@ SELECT c.QUERY_HASH AS FINGERPRINT, c.RUNS, f.FAILS AS FAILS,
 FROM costs c
 LEFT JOIN families f ON f.QUERY_HASH = c.QUERY_HASH
 WHERE c.RUNS > 0 AND c.CREDITS > 0
+  -- Owner finding 2026-08-17: the portfolio ranked OVERWATCH's OWN runtime
+  -- ("execute streamlit ... OVERWATCH_APP()") as the #1 ACT-NOW — the monitoring
+  -- tool telling you to optimize the monitoring tool. Exclude the app's own
+  -- Streamlit-runtime family. COALESCE guards the LEFT-JOIN miss (Codex #1): a
+  -- NULL preview must read as "not the app", i.e. stay IN the portfolio.
+  AND UPPER(COALESCE(f.QUERY_PREVIEW, '')) NOT LIKE 'EXECUTE STREAMLIT%'
+  AND UPPER(COALESCE(f.QUERY_PREVIEW, '')) NOT LIKE '%OVERWATCH_APP%'
 ORDER BY c.CREDITS DESC
 LIMIT {cap}
 """

@@ -1028,7 +1028,9 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             "role, or the privilege on an object. **Granted by** is the acting role Snowflake "
             "records (its native attribution) — for the user who ran a GRANT statement, see the "
             "DDL/DCL panel below. From GRANTS_TO_USERS + GRANTS_TO_ROLES (Snowflake's grant "
-            "history lags up to ~2h)."
+            "history lags up to ~2h). Object-lifecycle noise excluded: every CREATE (incl. "
+            "procs' TMP_* objects) records an OWNERSHIP self-grant by the creating role — "
+            "filtered out; ownership TRANSFERS (different grantor) still show."
         )
         result_caption(gc)
     st.divider()

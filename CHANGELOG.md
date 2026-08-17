@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.248.0 - Live-screenshot fixes: grant noise, data-transfer units, DS self-rank (2026-08-17)
+
+Three app-only fixes from owner screenshots (the backup-clone fix is V089; the Alerts
+000904 needs its full error text).
+
+- **Grant-changes feed: object-lifecycle noise removed.** Every object a stored proc
+  creates (TMP_* stages, file formats, procedures) records an `OWNERSHIP` grant by the
+  creating role to *itself* — that flooded the feed (500 rows of `TF_..SYSADMIN →
+  TF_..SYSADMIN OWNERSHIP ON STAGE TMP_*`). Now excluded on both role arms (NULL-safe);
+  a real ownership **transfer** (different grantor) still shows. Disclosed in the caption.
+- **Data transfer reconciles to Snowsight.** The Egress panel led with *billable* transfer
+  (genuinely ~$0) in **TB at 3 decimals**, so 891 MB read `0.000 TB`. New `humanize_bytes`
+  (MB/GB/TB, Snowsight scale) + a **Total transferred** KPI (all bytes, billable + free)
+  that ties to Snowsight ▸ Cost Management ▸ Data Transfer; the table shows a humanized
+  Volume (raw bytes kept for sort/CSV).
+- **Decision Studio stops ranking itself.** The workload portfolio's #1 ACT-NOW was
+  OVERWATCH's own runtime (`execute streamlit … OVERWATCH_APP()`). The app's Streamlit
+  family is now excluded (COALESCE-guarded so a family-mart join miss stays in).
+
+App version 4.248.0.
+
 ## 4.247.0 - Repo-review wave 2: second opinions, coverage maps, token economics (2026-08-17)
 
 Four adoptions from the external-repo review, every read probe-gated with an honest
