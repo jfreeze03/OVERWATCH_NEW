@@ -261,6 +261,11 @@ _EXPECTED_MIGRATIONS = {
         "to PUBLIC so audit-table drops stay visible). Still DESTRUCTIVE-only and "
         "NULL-safe; GRANT/REVOKE/POLICY and any non-TF DROP still surface; rows stay in "
         "FACT_SECURITY_CHANGE for audit. View-only, no reload",
+    89: "SP_BACKUP_OPERATOR_TABLES clones to a TRANSIENT *_BAK_LAST target (was "
+        "permanent): transient operator tables (ALERT_EVENTS, ACTION_QUEUE, ...) cannot "
+        "clone into a permanent object, so those weekly backups failed every run (owner "
+        "error log 2026-08-17, clone_failed x3). TRANSIENT works for both source kinds "
+        "and needs no Fail-safe; proc re-derived from V075, no reload",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

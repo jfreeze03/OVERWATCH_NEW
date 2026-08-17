@@ -104,6 +104,7 @@ snowflake/migrations/V085__slo_breach_alert.sql
 snowflake/migrations/V086__alert_snooze.sql
 snowflake/migrations/V087__security_posture_rule.sql
 snowflake/migrations/V088__security_change_risk_etl_exclusion_broadened.sql
+snowflake/migrations/V089__backup_transient_clone.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
