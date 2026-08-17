@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.242.0 - Honest account-wide scope notes (company-filter audit, bucket B) (2026-08-17)
+
+The company-filter audit (v4.241.0) found the *scopable* sections and fixed them; this
+closes the honesty gaps on the sections that are account-wide **by necessity** (no
+company grain), so a picked company never makes one look narrowed. One-line disclosure
+notes added to: Overview **Contract runway**, **Morning AI digest**, **Forecast-accuracy**
+backtest; Control Room **"reached nobody"** banner (now says "account-wide"); Cost
+**Egress**; **Savings ledger** "Verified savings" ("the number to quote" — now states it's
+account-wide); Unit-cost **AI spend** KPI; Security **Unused roles** header ("(account-wide)");
+Security **Change-risk noise** diagnostic; Decision Studio **Realization**. No data changes —
+these sections have no company dimension to filter by; the fix is to say so.
+
+App version 4.242.0.
+
 ## 4.241.0 - Company filter: make triage filters actually apply (2026-08-17)
 
 Owner ask: "we need to filter between company — the triage filters need to apply …

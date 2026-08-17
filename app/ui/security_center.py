@@ -116,9 +116,10 @@ def _render_change_risk_diagnostic() -> None:
              "help": "Events on DBA_MAINT_DB (OVERWATCH's own database)."},
         ])
         st.caption(
-            "Raw evidence behind the CHANGE RISK score — decide the exact exclusion from it: "
-            "if a few named roles dominate, exclude those roles; if it's TF_*-dominated a pattern "
-            "works; unattributed and human drops on real data should stay visible."
+            "Account-wide (regardless of the company filter) — this tunes the account-level "
+            "TF_* / role exclusion, which is not per-company. Raw evidence behind the CHANGE RISK "
+            "score: if a few named roles dominate, exclude those roles; if it's TF_*-dominated a "
+            "pattern works; unattributed and human drops on real data should stay visible."
         )
         styled_table(df, height=300)
         result_caption(res)

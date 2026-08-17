@@ -657,6 +657,7 @@ def render() -> None:
     _rw = run(mart_sql.contract_exhaustion(), page=_PAGE, key="ov_contract_runway",
               tier="recent", source="SETTINGS + FACT_METERING_DAILY")
     contract_runway_bar(contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
+    st.caption("Whole-account contract commitment — not narrowed by the company filter.")
 
     section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
     section_filter_contract(
@@ -938,7 +939,8 @@ def render() -> None:
             _best = _mae.idxmin()
             st.caption("Forecast quality (3-month backtest): "
                        + " · ".join(f"{eng} ±{err:.1f}%" for eng, err in _mae.items())
-                       + f" — '{_best}' most reliable; running '{engine}'.")
+                       + f" — '{_best}' most reliable; running '{engine}'. "
+                       "Account-wide backtest — metering has no company grain.")
         with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
             if not _bt_hist.usable() or len(_bt_hist.df) < 50:
                 st.info("Needs ~2 months of daily facts before a backtest says anything.")
@@ -997,7 +999,8 @@ def render() -> None:
         with st.expander(f"Morning AI digest — {row.get('DIGEST_DATE')} ({row.get('MODEL')})",
                          expanded=False):
             st.markdown(str(row.get("BODY") or ""))
-            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts only.")
+            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
+                       "only. Account-wide narrative — does not change with the company filter.")
 
     # ---- Executive summary download -----------------------------------------
     # rec 5: export the SAME honest view-model the screen shows. An Incomplete score

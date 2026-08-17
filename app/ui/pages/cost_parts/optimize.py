@@ -1338,7 +1338,8 @@ def _savings_tab() -> None:
     _kpis = [
         {"label": "Verified savings", "value": format_usd(totals["verified_usd"]),
          "delta": f"{totals['verified_count']} items",
-         "help": "Measured post-period proof. This is the number to quote."},
+         "help": "Measured post-period proof. This is the number to quote. Account-wide — "
+                 "SAVINGS_LEDGER has no company grain, so the company filter does not narrow it."},
         {"label": "Estimated (unverified)", "value": format_usd(totals["estimated_usd"]),
          "delta": f"{totals['estimated_count']} items", "delta_color": "off",
          "help": "Never added to verified. Auto-booked items settle themselves "

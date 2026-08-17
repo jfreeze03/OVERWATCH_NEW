@@ -396,6 +396,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 "SPCS credits and must not be added to the compute-pool total."
             )
         elif detail == "Egress / data transfer":
+            st.caption("Account-wide — DATA_TRANSFER_HISTORY is region-to-region byte metering "
+                       "with no company/warehouse grain, so the company filter does not narrow this.")
             # rec#11: egress was tracked only as a bytes signal on Security and never
             # dollarized. Price billable (cross-region / cross-cloud) transfer from the
             # org rate card's implied $/TB, reconciled to billed TRANSFER_USD; same-

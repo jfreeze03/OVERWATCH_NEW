@@ -527,6 +527,8 @@ def _scenarios(company: str) -> None:
     # long verification takes. This is the director-facing proof the loop closes; the data
     # already exists in the ledger (realization_pct shipped for Cost #9).
     st.markdown("**Realization — the savings track record**")
+    st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
+               "not narrow to the Company filter (mirrors the Cost Truth BILLED card).")
     if not ledger.ok:
         empty_state("no_data_yet", f"Savings ledger read failed: {ledger.error}")
     else:

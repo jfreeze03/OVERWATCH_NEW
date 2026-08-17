@@ -138,7 +138,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         kpis.append({"label": "AI spend (window)",
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
-                     "delta_color": "off"})
+                     "delta_color": "off",
+                     "help": "Account-wide — the AI usage view carries no company/database grain "
+                             "(unlike the query-cost KPIs beside it); per-user attribution is on "
+                             "Chargeback & AI."})
     if kpis:
         kpi_row(kpis)
 

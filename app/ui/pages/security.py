@@ -267,7 +267,7 @@ def _access_tab(company: str, days: int) -> None:
 
     # Moved from Changes (v4.49): entitlement hygiene — who still holds access
     # nobody uses — reads with dormant users, not with DDL evidence.
-    section_header("Unused roles (90d) — revoke candidates", "info", "admin")
+    section_header("Unused roles (90d) — revoke candidates (account-wide)", "info", "admin")
     ur = run_mart_first(
         mart27_sql.unused_roles_via_fact(90), security_sql.unused_roles(90),
         page=_PAGE, key="unused_roles",

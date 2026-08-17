@@ -295,8 +295,8 @@ def render() -> None:
         _und = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
         _und_age = safe_float(_sv.get("UNDELIVERED_OLDEST_MIN", "0"))
         _und_age_txt = f", oldest {humanize_duration(_und_age, 'min')}" if _und_age > 0 else ""
-        if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (30+ min, no delivery"
-                              f"{_und_age_txt}) — check delivery →", key="cr_undelivered",
+        if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (account-wide; 30+ min, "
+                              f"no delivery{_und_age_txt}) — check delivery →", key="cr_undelivered",
                               type="primary", use_container_width=True):
             request_navigation("Alerts", "Native delivery")
     # The shell strip is intentionally account-wide. The page badge must match the
