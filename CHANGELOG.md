@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.252.0 - Reconciliation audit: non-USD currency guards on the billing panels (2026-08-17)
+
+Two org-billing panels compared or labeled USAGE_IN_CURRENCY dollars as USD without
+checking the currency (the audit's currency-mismatch findings). Latent on this USD
+account; correctness for any non-USD one. Both now guard, matching org_accounts_spend.
+
+- **Rate-card reconciliation** (the "billing truth vs app model" panel): the org side is
+  USAGE_IN_CURRENCY, the model side is credits x the USD rate. On a non-USD account the
+  Model-vs-org %, AI-model-vs-org %, and Effective $/cr are now suppressed (they'd be
+  FX-corrupted), a warning names the real currency, and the $/cr header/format drop '$'.
+- **Contract balance / burn / runway**: `remaining_balance_summary` now surfaces the
+  ledger currency; the panel formats balance/burn/on-demand in that currency (not a
+  hardcoded '$') and the title reads the real currency.
+
+App version 4.252.0.
+
+
 ## 4.251.0 - Decision Studio flagship: the ROI / realization story, front and center (2026-08-17)
 
 The savings ledger already tracked estimated->verified with proof, but the realization

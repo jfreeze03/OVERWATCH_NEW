@@ -65,9 +65,16 @@ def remaining_balance_summary(df: pd.DataFrame, burn_window_days: int = 14) -> d
     non_topup_days = int((deltas <= 0).sum())
     burn = float(drops.sum()) / non_topup_days if non_topup_days else 0.0
     runway = (remaining / burn) if burn > 0 and remaining > 0 else None
+    # Currency guard (recon audit 2026-08-17): REMAINING_BALANCE_DAILY is org rate-card
+    # currency, which can be non-USD. Surface it so the UI labels balance/burn in the
+    # real currency instead of a hardcoded '$' (matches org_accounts_spend).
+    currency = "USD"
+    if "CURRENCY" in getattr(df, "columns", ()) and df["CURRENCY"].notna().any():
+        currency = str(df["CURRENCY"].dropna().iloc[0]).upper()
     return {
         "ok": True,
         "as_of": as_of,
+        "currency": currency,
         "remaining_usd": remaining,
         "on_demand_usd": on_demand,
         "burn_per_day_usd": burn,

@@ -124,17 +124,21 @@ def _org_truth_panel() -> bool:
         ends = pd.to_datetime(items.df["END_DATE"], errors="coerce").dropna()
         if len(ends):
             end_note = str(ends.max().date())
-    st.markdown("**Contract balance — billing truth (Snowflake org rate card, $)**")
+    # Currency guard (recon audit 2026-08-17): balance is org rate-card currency; label
+    # in the real currency instead of a hardcoded '$' when it isn't USD.
+    _ccy = str(summary.get("currency", "USD")).upper()
+    _fmt = format_usd if _ccy == "USD" else (lambda v: f"{safe_float(v):,.0f} {_ccy}")
+    st.markdown(f"**Contract balance — billing truth (Snowflake org rate card, {_ccy})**")
     burn = safe_float(summary.get("burn_per_day_usd"))
     runway = summary.get("runway_days")
     kpis = [
-        {"label": "Remaining balance", "value": format_usd(summary["remaining_usd"]),
+        {"label": "Remaining balance", "value": _fmt(summary["remaining_usd"]),
          "delta": f"as of {summary['as_of']}", "delta_color": "off"},
         # E1: the delta must name the number the burn actually divides by.
         # burn = total draw-down / non-top-up days, but this said "avg of N burn
         # day(s)" using the DROP-day count — on a weekend-idle account those two
         # differ by ~2x, so the caption claimed a burn the KPI had not computed.
-        {"label": "Burn / day", "value": format_usd(burn) if burn > 0 else "n/a",
+        {"label": "Burn / day", "value": _fmt(burn) if burn > 0 else "n/a",
          "delta": (f"avg over {summary.get('burn_basis_days', 0)} non-top-up day(s)"
                    if burn > 0 else "no burn days observed"),
          "delta_color": "off",
@@ -155,7 +159,7 @@ def _org_truth_panel() -> bool:
     ]
     on_demand = safe_float(summary.get("on_demand_usd"))
     if on_demand < 0:
-        kpis.append({"label": "On-demand overrun", "value": format_usd(-on_demand),
+        kpis.append({"label": "On-demand overrun", "value": _fmt(-on_demand),
                      "severity": "warn",
                      "help": "Usage past the capacity commitment, billed on demand."})
     kpi_row(kpis)
@@ -297,21 +301,30 @@ def _rate_card_reconciliation(settings: dict) -> None:
                            .apply(lambda s: s.map(safe_float).sum()).mul(ai_rate)).to_dict()
         odf = org_m.df.copy()
         odf["MONTH"] = pd.to_datetime(odf["MONTH"], errors="coerce")
+        # Currency guard (recon audit 2026-08-17): the org side is USAGE_IN_CURRENCY, which
+        # can be non-USD; the model side is credits x the USD SETTINGS rate. On a non-USD
+        # account the drift % and effective $/cr compare across currencies (FX-corrupted)
+        # and the '$' labels are wrong — suppress those three and warn. This is the very
+        # panel whose job is billing truth, so it must not silently mislabel currency.
+        _rc_ccy = "USD"
+        if "CURRENCY" in odf.columns and odf["CURRENCY"].notna().any():
+            _rc_ccy = str(odf["CURRENCY"].dropna().iloc[0]).upper()
+        _rc_usd = _rc_ccy == "USD"
         rows_rc = []
         for _, orow in odf.iterrows():
             month = orow["MONTH"]
             model_usd = float(model_by_month.get(month, 0.0))
             org_usd = safe_float(orow.get("COMPUTE_USD"))
-            drift = (100.0 * (model_usd - org_usd) / org_usd) if org_usd else None
+            drift = (100.0 * (model_usd - org_usd) / org_usd) if (org_usd and _rc_usd) else None
             # rec#32: AI/Cortex bucket recon — modeled AI $ (credits x ai_rate) vs org AI_USD
             model_ai_usd = float(ai_by_month.get(month, 0.0))
             org_ai_usd = safe_float(orow.get("AI_USD"))
-            ai_drift = (100.0 * (model_ai_usd - org_ai_usd) / org_ai_usd) if org_ai_usd else None
+            ai_drift = (100.0 * (model_ai_usd - org_ai_usd) / org_ai_usd) if (org_ai_usd and _rc_usd) else None
             # Effective realized rate = what the org actually charged per billed
             # compute credit this month. This is the number to reconcile
             # CREDIT_PRICE_USD (SETTINGS) against when the model-vs-org gap is steady.
             credits_month = (model_usd / rate_now) if rate_now else 0.0
-            eff_rate = (org_usd / credits_month) if credits_month else None
+            eff_rate = (org_usd / credits_month) if (credits_month and _rc_usd) else None
             rows_rc.append({
                 "MONTH": month.strftime("%Y-%m") if pd.notna(month) else "?",
                 "ORG_COMPUTE_USD": round(org_usd, 2),
@@ -326,10 +339,19 @@ def _rate_card_reconciliation(settings: dict) -> None:
                 "ORG_ADJUSTMENT_USD": round(safe_float(orow.get("ADJUSTMENT_USD")), 2),
                 "ORG_TOTAL_USD": round(safe_float(orow.get("TOTAL_USD")), 2),
             })
+        if not _rc_usd:
+            st.warning(
+                f"This account bills in {_rc_ccy}, not USD. The app model side is USD "
+                "(credits x the configured rate), so Model-vs-org %, AI model-vs-org %, and "
+                f"Effective $/cr are suppressed — they can't be compared across currencies. "
+                f"The org columns are {_rc_ccy}; set CREDIT_PRICE_USD in {_rc_ccy} terms if you "
+                "want this reconciliation to work.")
         styled_table(pd.DataFrame(rows_rc), column_config={
             "DELTA_PCT": st.column_config.NumberColumn("Model vs org %", format="%.2f%%"),
             "AI_DELTA_PCT": st.column_config.NumberColumn("AI model vs org %", format="%.2f%%"),
-            "EFF_RATE": st.column_config.NumberColumn("Effective $/cr", format="$%.3f")})
+            "EFF_RATE": st.column_config.NumberColumn(
+                "Effective $/cr" if _rc_usd else f"Effective {_rc_ccy}/cr",
+                format="$%.3f" if _rc_usd else "%.3f")})
         _contract_line = ""
         if contract_compute_rate:
             _drift = (100.0 * (rate_now - contract_compute_rate) / contract_compute_rate)
