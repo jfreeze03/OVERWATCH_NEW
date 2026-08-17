@@ -308,6 +308,21 @@ def experiment_age_days(frame: pd.DataFrame | None, now: object) -> pd.Series:
     return age.fillna(0).clip(lower=0).astype("int64")
 
 
+def stale_planning(frame: pd.DataFrame | None, now: object, days: int = 30) -> pd.Series:
+    """Bool Series: has each open action gone untouched for >= ``days`` (DS #34)?
+
+    Stale planning is an open action whose UPDATED_AT is older than the window — the plan
+    was made and then forgotten, so its estimate is decaying. Aligned to ``frame``; all-False
+    on empty/absent UPDATED_AT, never a raise."""
+    if frame is None or frame.empty:
+        return pd.Series(dtype=bool)
+    if "UPDATED_AT" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    updated = pd.to_datetime(frame["UPDATED_AT"], errors="coerce")
+    cutoff = pd.Timestamp(now) - pd.Timedelta(days=int(days))
+    return (updated < cutoff).fillna(False)
+
+
 def watchlist_threshold_status(
     watchlist: pd.DataFrame | None,
     objectives: pd.DataFrame | None,

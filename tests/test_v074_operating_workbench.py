@@ -18,6 +18,7 @@ from app.logic.workbench import (
     experiment_age_days,
     experiment_state_by_key,
     investigation_target,
+    stale_planning,
     watchlist_sql,
     watchlist_threshold_status,
 )
@@ -52,6 +53,19 @@ def test_experiment_age_days_running_duration() -> None:
     # graceful: empty -> empty; missing column -> aligned zeros (UI-safe), never raises
     assert experiment_age_days(pd.DataFrame(), now).empty
     assert experiment_age_days(pd.DataFrame({"X": [1, 2]}), now).tolist() == [0, 0]
+
+
+def test_stale_planning_flags_untouched_actions() -> None:
+    # DS #34: an open action untouched for 30+ days is stale planning.
+    now = pd.Timestamp("2026-08-17 12:00:00")
+    frame = pd.DataFrame({
+        "TITLE": ["old", "fresh", "no-date"],
+        "UPDATED_AT": ["2026-07-01", "2026-08-15", None],   # 47d, 2d, missing
+    })
+    assert stale_planning(frame, now, days=30).tolist() == [True, False, False]
+    # graceful: empty -> empty; missing column -> all-False; never raises
+    assert stale_planning(pd.DataFrame(), now).empty
+    assert stale_planning(pd.DataFrame({"X": [1, 2]}), now).tolist() == [False, False]
 
 
 def test_watchlist_threshold_status_badges_breaching_entities() -> None:

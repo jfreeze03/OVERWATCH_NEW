@@ -26,6 +26,7 @@ from app.logic.workbench import (
     experiment_age_days,
     mark_watched,
     mark_watched_pairs,
+    stale_planning,
     update_experiment_sql,
 )
 from app.ui import charts
@@ -546,6 +547,13 @@ def _scenarios(company: str) -> None:
         _wl = _wl_res.df if (_wl_res is not None and _wl_res.usable()) else None
         adf = actions.df.copy()
         adf["WATCHED"] = mark_watched_pairs(adf, _wl, "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY")
+        # DS #34: flag open actions untouched for 30+ days — the plan was made and forgotten,
+        # so its estimate is decaying. A prompt to re-estimate, act, or close.
+        adf["STALE"] = stale_planning(adf, account_now())
+        _n_stale = int(adf["STALE"].sum())
+        if _n_stale:
+            st.caption(f"⚠ {_n_stale} open action(s) not touched in 30+ days — re-estimate, "
+                       "act, or close them; a stale plan's estimate is decaying.")
         if bool(adf["WATCHED"].any()):
             _sev_rank = adf["SEVERITY"].astype(str).str.upper().map(
                 {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}).fillna(4)
@@ -556,8 +564,8 @@ def _scenarios(company: str) -> None:
                        "pinned to the top of their severity band.")
         styled_table(
             adf[[column for column in (
-                "WATCHED", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY",
-                "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
+                "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
+                "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
             ) if column in adf.columns]],
             height=320, sort_label="action priority order",
         )

@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.231.0 - Decision Studio: stale-planning flag (2026-08-17)
+
+CoCo DS review (§6), cheap win #34. App-only.
+
+- **Open actions that have gone stale now stand out.** The Scenarios action table gains a
+  **STALE** flag (open action whose `UPDATED_AT` is 30+ days old — the plan was made and then
+  forgotten, so its estimate is decaying) plus a banner counting them, a prompt to re-estimate,
+  act, or close. New pure `logic.workbench.stale_planning`. App version 4.231.0.
+
 ## 4.230.0 - Decision Studio: experiment duration (2026-08-17)
 
 CoCo DS review (§6), cheap win #24. App-only.
