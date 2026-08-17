@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.249.0 - Snowsight reconciliation: humanize every byte surface (2026-08-17)
+
+A 7-agent audit checked 48 user-facing numbers against their Snowsight equivalents:
+**zero high-severity gaps** (the data-transfer bug was the worst of its kind), but the
+same unit-hiding root cause recurred on ~10 byte surfaces. Fixed systemically.
+
+- **`_auto_formats` humanizes every `_GB`/`_TB`/`_MB` table column** (token-based, so
+  `SPILL_REMOTE_GB`, `TB_SCANNED`, and bare `GB` all match; a `PER` token excludes rates
+  like `SPILL_GB_PER_DAY`). Display-only (the frame stays numeric — sort/CSV keep the raw
+  value), matching the Snowsight MB/GB/TB scale. Verified all 28 matched columns are byte
+  magnitudes, no false positives. New `humanize_gb` covers the KPI values.
+- **Sites fixed:** Security ▸ Egress KPI + table; Operations query-drill "Scanned"/"Spill"
+  + the window remote-spill KPI; the poor-pruning `TB_SCANNED` and `TOTAL_TB_SCANNED`
+  tables; and **Control Room's Pulse — which literally flagged "Remote spill: 0.0 GB"** as
+  an exception (fires on `>0` but rounded to `0.0`); now shows e.g. "30.7 MB".
+- **Per-table storage `$`** now shows cents (`$%.2f`, was `$%.0f` hiding sub-dollar tails).
+
+The audit's remaining findings are all medium/low (labeling + latent non-USD currency
+guards on the rate-card panel) — deferred, not shipped here.
+
+App version 4.249.0.
+
 ## 4.248.0 - Live-screenshot fixes: grant noise, data-transfer units, DS self-rank (2026-08-17)
 
 Three app-only fixes from owner screenshots (the backup-clone fix is V089; the Alerts

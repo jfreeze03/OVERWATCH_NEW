@@ -40,6 +40,7 @@ from app.logic.formulas import (
     credits_to_usd,
     format_usd,
     humanize_duration,
+    humanize_gb,
     safe_float,
 )
 from app.logic.incident import route_incidents, summarize_incidents
@@ -183,7 +184,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                      "whole-window p95."
                      if used_mart else None},
             {"label": "Queued", "value": humanize_duration(row.get("QUEUED_SEC"), "s")},
-            {"label": "Remote spill", "value": f"{safe_float(row.get('SPILL_REMOTE_GB')):,.1f} GB"},
+            {"label": "Remote spill", "value": humanize_gb(row.get("SPILL_REMOTE_GB"))},
         ])
         result_caption(summary)
 
@@ -309,12 +310,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     {"label": "Elapsed", "value": humanize_duration(row.get("ELAPSED_SEC"), "s"),
                      "delta": f"queued {humanize_duration(row.get('QUEUED_SEC'), 's')}",
                      "delta_color": "off"},
-                    {"label": "Scanned", "value": f"{safe_float(row.get('GB_SCANNED')):,.2f} GB",
+                    {"label": "Scanned", "value": humanize_gb(row.get("GB_SCANNED")),
                      "delta": f"{safe_float(row.get('CACHE_PCT')):,.0f}% cache", "delta_color": "off"},
                     {"label": "Partitions", "value": (f"{int(safe_float(row.get('PARTITIONS_SCANNED'))):,}"
                                                       f"/{int(safe_float(row.get('PARTITIONS_TOTAL'))):,}"),
                      "help": "Scanned vs total — a high ratio means the query reads almost the whole table."},
-                    {"label": "Spill", "value": f"{safe_float(row.get('REMOTE_SPILL_GB')):,.2f} GB remote"},
+                    {"label": "Spill", "value": f"{humanize_gb(row.get('REMOTE_SPILL_GB'))} remote"},
                     {"label": "Status", "value": str(row.get("EXECUTION_STATUS", "?"))},
                 ])
                 st.code(str(row.get("QUERY_TEXT") or ""), language="sql")

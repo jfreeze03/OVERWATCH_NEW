@@ -1222,7 +1222,15 @@ def _auto_formats(df, skip: set) -> dict:
             fmts[col] = "${:,.2f}"
         elif "CREDITS" in c:
             fmts[col] = "{:,.2f}"
-        elif c.endswith(("_PCT", "_SHARE", "_GB", "_TB", "_MB", "_HOURS")) or c == "HIT_PCT":
+        elif _byte_unit_for_column(col):
+            # Reconciliation fix (2026-08-17): a byte column shown as fixed-decimal
+            # GB/TB hid sub-unit values ("0.0 GB", "0.000 TB") and never matched
+            # Snowsight's MB/GB/TB scale. Humanize like durations (Styler = display
+            # only; the frame stays numeric so sort/CSV keep the raw value).
+            from app.logic.formulas import humanize_bytes
+            _factor = _byte_unit_for_column(col)[1]
+            fmts[col] = lambda v, _f=_factor: humanize_bytes(safe_float(v) * _f)
+        elif c.endswith(("_PCT", "_SHARE", "_HOURS")) or c == "HIT_PCT":
             fmts[col] = "{:,.1f}"
         elif c.endswith(_COUNT_SUFFIXES):
             fmts[col] = "{:,.0f}"
@@ -1306,6 +1314,25 @@ def _prettify_header(col: object) -> str:
     return " ".join(words) + unit_suffix
 
 
+_BYTE_UNIT_FACTOR = {"MB": 1024 ** 2, "GB": 1024 ** 3, "TB": 1024 ** 4,
+                     "TIB": 1024 ** 4, "GIB": 1024 ** 3}
+
+
+def _byte_unit_for_column(col: object) -> tuple[str, int] | None:
+    """('GB', 1024**3) for a byte MAGNITUDE column, else None. Token-based, not
+    suffix-based, so both SPILL_REMOTE_GB (suffix) and TB_SCANNED / bare GB
+    (prefix) are caught. A 'PER' token means a RATE (SPILL_GB_PER_DAY, $/TiB) —
+    never humanized as a magnitude. Drives the Styler humanizer + the large-frame
+    printf fallback. (_USD/_PRICE/CREDITS are matched earlier in _auto_formats.)"""
+    tokens = str(col).upper().split("_")
+    if "PER" in tokens:
+        return None
+    for tok in tokens:
+        if tok in _BYTE_UNIT_FACTOR:
+            return tok, _BYTE_UNIT_FACTOR[tok]
+    return None
+
+
 def _duration_display_format(col: object) -> str:
     """rec26: the large-frame (>400 row) Arrow path can't render humanized H/M/S
     (NumberColumn takes a printf, not a callable). Carry the RAW value with its unit
@@ -1314,6 +1341,16 @@ def _duration_display_format(col: object) -> str:
     unit = _duration_unit_for_column(col)
     return {"ms": "%.0f ms", "s": "%.1f s", "min": "%.1f min", "h": "%.1f h"}.get(
         unit, "%.1f s")
+
+
+def _callable_display_format(col: object) -> str:
+    """Large-frame printf fallback for a humanizer callable — a byte column keeps
+    its raw value WITH its unit at higher precision ("%.2f GB", better than the
+    old "0.0"); everything else falls to the duration formats."""
+    byte_unit = _byte_unit_for_column(col)
+    if byte_unit:
+        return f"%.2f {byte_unit[0]}"
+    return _duration_display_format(col)
 
 
 def _export_filename(seq: int, slug: str | None) -> str:
@@ -1396,7 +1433,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 try:
                     cfg[col] = st.column_config.NumberColumn(
                         _dlabel if _dlabel != str(col) else None,
-                        format=_duration_display_format(col), **_kwargs)
+                        format=_callable_display_format(col), **_kwargs)
                 except Exception:  # noqa: BLE001
                     pass
             elif fmt in _PRINTF_EQUIV:

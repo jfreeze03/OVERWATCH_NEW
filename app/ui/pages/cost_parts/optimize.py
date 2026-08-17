@@ -843,7 +843,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _rq_cfg = {
                     "TOTAL_ELAPSED_HOURS": st.column_config.Column("Total elapsed"),
                     "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%.0f%%"),
-                    "TOTAL_TB_SCANNED": st.column_config.NumberColumn("TB scanned", format="%.3f"),
+                    # TOTAL_TB_SCANNED left unconfigured so _auto_formats humanizes the
+                    # _TB column to MB/GB/TB (was "%.3f" -> "0.003" for 3 GB).
                 }
                 _rq_priced = "EST_CREDITS" in _rq_df.columns
                 if _rq_priced:

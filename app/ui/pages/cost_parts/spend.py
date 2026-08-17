@@ -1056,7 +1056,9 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
     ])
     show_cols = ["SCHEMA_NAME", "TABLE_NAME", "Active $", "Time-travel $", "Fail-safe $",
                  "Clone $", "Total $", "STATUS", "RETENTION_DAYS", "LAST_DML"]
-    cfg = {c: st.column_config.NumberColumn(c, format="$%.0f")
+    # $%.2f (cents): a per-table storage $ is often sub-dollar, and $%.0f rendered
+    # the whole tail as "$0" (reconciliation fix 2026-08-17).
+    cfg = {c: st.column_config.NumberColumn(c, format="$%.2f")
            for c in ("Active $", "Time-travel $", "Fail-safe $", "Clone $", "Total $")}
     styled_table(t[[c for c in show_cols if c in t.columns]], height=340, column_config=cfg)
     result_caption(res)

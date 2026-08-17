@@ -33,6 +33,7 @@ from app.logic.formulas import (
     format_usd,
     humanize_age,
     humanize_duration,
+    humanize_gb,
     md_dollars,
     pct_delta,
     safe_float,
@@ -452,7 +453,7 @@ def render() -> None:
             if remote_spill_gb > 0:
                 exceptions.append({
                     "label": "Remote spill",
-                    "value": f"{remote_spill_gb:,.1f} GB",
+                    "value": humanize_gb(remote_spill_gb),
                     "detail": "Queries spilled beyond local storage in this scope.",
                     "severity": "warn",
                 })
@@ -474,7 +475,7 @@ def render() -> None:
                 {"label": "p95 runtime" + (" (peak hourly)" if pulse_from_mart else ""),
                  "value": humanize_duration(row.get("P95_ELAPSED_SEC"), "s")},
                 {"label": "Queued", "value": humanize_duration(queue_sec, "s")},
-                {"label": "Remote spill", "value": f"{remote_spill_gb:,.1f} GB"},
+                {"label": "Remote spill", "value": humanize_gb(remote_spill_gb)},
             ])
             result_caption(pulse)
         elif not pulse.ok:

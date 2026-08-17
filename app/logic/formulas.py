@@ -346,6 +346,16 @@ def humanize_bytes(value: object) -> str:
     return f"{sign}{n:,.0f} B"
 
 
+def humanize_gb(value: object) -> str:
+    """Humanize a value already in binary GiB (the unit most OVERWATCH byte
+    columns carry) to auto MB/GB/TB via humanize_bytes — so a 0.03 GB spill
+    reads "30.7 MB", not the "0.0 GB" that fixed-decimal formatting produced."""
+    v = safe_float(value, default=float("nan"))
+    if v != v:
+        return "—"
+    return humanize_bytes(v * 1024 ** 3)
+
+
 def humanize_age(value: object, now: object = None) -> str:
     """rec27: compact 'how stale' for a past timestamp — "just now" / "5m ago" /
     "3h ago" / "2d ago". A DISPLAY-ONLY companion to a real timestamp column (which

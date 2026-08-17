@@ -306,10 +306,13 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     if xfer.ok and xfer.empty:
         st.success("No cross-cloud or cross-region transfer in this window.")
     elif guard(xfer, "", setup_hint="Needs the ACCOUNT_USAGE.DATA_TRANSFER_HISTORY view."):
+        from app.logic.formulas import humanize_gb
         xdf = xfer.df.copy()
         _by_tgt = xdf.groupby("TARGET_REGION")["GB"].sum().sort_values(ascending=False)
         kpi_row([
-            {"label": f"Egress GB · {days}d", "value": f"{float(xdf['GB'].sum()):,.1f}"},
+            {"label": f"Egress · {days}d", "value": humanize_gb(xdf["GB"].sum()),
+             "help": "Total outbound bytes; same MB/GB/TB scale as Snowsight Cost "
+                     "Management ▸ Data Transfer and the Cost ▸ Spend egress panel."},
             {"label": "Top destination", "value": str(_by_tgt.index[0]) if len(_by_tgt) else "—",
              "help": "Region receiving the most bytes. An unexpected destination is the finding."},
             {"label": "Destinations", "value": f"{int((_by_tgt > 0).sum())}"},
