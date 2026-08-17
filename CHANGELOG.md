@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.243.0 - Fix: portfolio FAILS coalesced to 0 defeated evidence-presence (Codex #1) (2026-08-17)
+
+Ground-truthing a 50-item external review confirmed its flagship defect. Decision
+Studio's portfolio logic (`decision.py:28-40`) is *built* to treat a missing behavioral
+measurement as absent (NULL), not a measured 0 — it tracks presence via `notna()` on
+`FAILS`/`AVG_CACHE_PCT`/`P95_SEC` so a blind family can't reach an ACT-NOW call. But the
+SQL (`workbench_sql.py:351`) `COALESCE(f.FAILS, 0)` on the family-mart LEFT JOIN meant
+`FAILS` was **never** NULL, so `has_fails`/`has_behavior` were always true and
+`EVIDENCE_COVERAGE` floored at 0.33 for a genuinely-unmeasured family — inflating the
+"Evidence coverage" KPI and silently disarming the `~has_behavior` guards.
+
+- **Fix:** emit `f.FAILS` raw (NULL on a join miss), matching its already-raw siblings
+  `AVG_CACHE_PCT`/`P95_SEC`. `decision.py` already tolerates it (`fillna(0)` keeps
+  `FAIL_PCT` correct; `notna()` now reads true absence). One-line SQL change; the logic
+  gate was already tested — added a builder test so it can't regress.
+
+App version 4.243.0.
+
 ## 4.242.0 - Honest account-wide scope notes (company-filter audit, bucket B) (2026-08-17)
 
 The company-filter audit (v4.241.0) found the *scopable* sections and fixed them; this

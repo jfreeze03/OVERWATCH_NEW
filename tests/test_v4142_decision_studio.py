@@ -226,6 +226,17 @@ def test_workload_company_scope_applies_to_behavior_and_cost() -> None:
     assert "s.DATABASE_NAME = f.DATABASE_NAME" not in statement
 
 
+def test_workload_portfolio_keeps_fails_raw_for_evidence_presence() -> None:
+    # Codex #1 (confirmed): FAILS must stay RAW (NULL on a family-mart join miss), NOT
+    # COALESCE(,0) — else decision.py's notna() presence-tracking (see the
+    # test_portfolio_gates_missing_behavioral_evidence gate) can't tell a blind family from
+    # a measured 0, so has_behavior is always true and EVIDENCE_COVERAGE floors at 0.33.
+    sql = workbench_sql.workload_portfolio(30, "ALFA")
+    assert "f.FAILS AS FAILS" in sql
+    assert "COALESCE(f.FAILS" not in sql
+    assert "f.AVG_CACHE_PCT" in sql and "f.P95_SEC" in sql  # the raw-NULL siblings it matches
+
+
 def test_cost_truth_and_product_economics_refuse_false_additivity() -> None:
     truth = workbench_sql.cost_truth(30, "Trexis")
     products = workbench_sql.data_product_economics(30, "Trexis")

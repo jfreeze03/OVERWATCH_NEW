@@ -348,7 +348,11 @@ WITH costs AS (
     WHERE f.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
     GROUP BY f.QUERY_HASH
 )
-SELECT c.QUERY_HASH AS FINGERPRINT, c.RUNS, COALESCE(f.FAILS, 0) AS FAILS,
+-- FAILS stays RAW (NULL on a family-mart join miss), like AVG_CACHE_PCT/P95_SEC below:
+-- decision.py tracks evidence PRESENCE from notna(FAILS), so coalescing to 0 made a blind
+-- family look measured (has_behavior always true, EVIDENCE_COVERAGE floored at 0.33).
+-- fillna(0) in decision.py keeps FAIL_PCT correct. (Codex #1, confirmed)
+SELECT c.QUERY_HASH AS FINGERPRINT, c.RUNS, f.FAILS AS FAILS,
        ROUND(c.CREDITS, 4) AS CREDITS, c.ACTIVE_DAYS, c.DATABASES, c.USERS,
        ROUND(COALESCE(f.TOTAL_ELAPSED_SEC, 0) / 3600, 2) AS TOTAL_ELAPSED_HOURS,
        f.AVG_CACHE_PCT, f.P95_SEC, c.LAST_SEEN, f.QUERY_PREVIEW
