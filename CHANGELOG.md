@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.229.0 - Decision Studio: the realization / ROI story (2026-08-17)
+
+CoCo Decision-Studio review (§6), the flagship (#40 + #31 + #19). App-only — no
+migration.
+
+- **Decision Studio now surfaces the savings ledger's track record, not just a verified
+  total.** The Scenarios tab gains a **"Realization — the savings track record"** panel: verified
+  savings all-time, **verified this quarter**, the **realization rate** (verified dollars as a
+  share of what those verified items were originally estimated to save — the honest
+  estimate-vs-actual, never mixing estimated and verified dollars), and **average time to
+  verify** (booking → verification). This is the director-facing proof that the decision loop
+  closes, and the data was already in the ledger — `realization_pct` shipped for Cost #9;
+  `logic.actions.ledger_totals` now also computes `verified_qtd_usd` (current calendar quarter,
+  from `VERIFIED_AT`) and `avg_days_to_verify`. A failed ledger read shows a no-data state, and
+  realization reads "—" until something is verified — never a misleading healthy $0. The old
+  single "Verified separately" projection KPI is replaced by this fuller panel. App version
+  4.229.0.
+
 ## 4.228.0 - V087: security finding → monitored rule (2026-08-17)
 
 CoCo review, Tier-3 (Sec35) — the last of the alert-migration set. New owner-applied

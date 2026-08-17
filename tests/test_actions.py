@@ -80,6 +80,28 @@ def test_ledger_totals_realization_none_without_verified():
     df = pd.DataFrame([{"STATE": "ESTIMATED", "ESTIMATED_USD": 100, "VERIFIED_USD": None}])
     totals = ledger_totals(df)
     assert totals["realization_pct"] is None and totals["verified_estimated_usd"] == 0.0
+    # DS flagship: the timing/QTD fields are None/0 with nothing verified, never a raise.
+    assert totals["avg_days_to_verify"] is None and totals["verified_qtd_usd"] == 0.0
+
+
+def test_ledger_totals_realization_story(monkeypatch):
+    # DS #40/#31/#19: verified-QTD + avg time-to-verify from VERIFIED_AT.
+    import app.logic.actions as actions_mod
+    monkeypatch.setattr(actions_mod, "account_now", lambda: pd.Timestamp("2026-08-17 12:00:00"))
+    # Q3 2026 starts 2026-07-01. A verify on 2026-07-15 counts to QTD; one on 2026-06-20 does not.
+    df = pd.DataFrame([
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 100, "VERIFIED_USD": 90,
+         "CREATED_AT": "2026-07-01", "VERIFIED_AT": "2026-07-15"},   # 14 days, in-quarter
+        {"STATE": "VERIFIED", "ESTIMATED_USD": 50, "VERIFIED_USD": 40,
+         "CREATED_AT": "2026-06-10", "VERIFIED_AT": "2026-06-20"},   # 10 days, prior quarter
+        {"STATE": "ESTIMATED", "ESTIMATED_USD": 200, "VERIFIED_USD": None,
+         "CREATED_AT": "2026-08-01", "VERIFIED_AT": None},
+    ])
+    t = ledger_totals(df)
+    assert t["verified_usd"] == 130.0                          # 90 + 40 (all-time)
+    assert t["verified_qtd_usd"] == 90.0                       # only the in-quarter verify
+    assert t["avg_days_to_verify"] == 12.0                     # (14 + 10) / 2
+    assert t["realization_pct"] == round(130 / 150 * 100, 1)   # 130 verified of a 150 estimate
 
 
 def test_triage_queue_merges_and_ranks():

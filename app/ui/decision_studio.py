@@ -10,6 +10,7 @@ from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
+from app.logic.actions import ledger_totals
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
 from app.logic.formulas import blended_billed_usd, credits_to_usd, format_usd, safe_float
 from app.logic.workbench import (
@@ -473,9 +474,6 @@ def _scenarios(company: str) -> None:
         mart_sql.savings_ledger(), page=_PAGE, key="decision_scenario_ledger",
         tier="recent", source="SAVINGS_LEDGER",
     )
-    verified = (safe_float(ledger.df.get("VERIFIED_USD", pd.Series(dtype=float)).sum())
-                if ledger.ok and not ledger.empty else 0.0)
-    verified_value = format_usd(verified) if ledger.ok else "Unavailable"
     kpi_row([
         {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
         {"label": "Gross authored estimate",
@@ -485,10 +483,6 @@ def _scenarios(company: str) -> None:
          "delta": (f"{format_usd(projection['low_capture'])} to "
                    f"{format_usd(projection['high_capture'])}") if has_candidates else None,
          "delta_color": "off"},
-        {"label": "Verified separately", "value": verified_value,
-         "severity": "ok" if ledger.ok else "warn",
-         "help": ("Verified savings ledger total." if ledger.ok
-                  else f"Savings ledger read failed: {ledger.error}")},
     ])
     st.caption(
         "Open action estimates are de-duplicated by entity, then adoption and realization "
@@ -497,6 +491,44 @@ def _scenarios(company: str) -> None:
         "projection as an order-of-magnitude opportunity, not a strict run-rate. "
         "Verified savings never enter the projection."
     )
+
+    # DS flagship (#40/#31/#19): the realization story — the ledger's TRACK RECORD, not
+    # just a verified total. What was actually verified (all-time + this quarter), how
+    # that compares to what those items were estimated to save (realization rate), and how
+    # long verification takes. This is the director-facing proof the loop closes; the data
+    # already exists in the ledger (realization_pct shipped for Cost #9).
+    st.markdown("**Realization — the savings track record**")
+    if not ledger.ok:
+        empty_state("no_data_yet", f"Savings ledger read failed: {ledger.error}")
+    else:
+        totals = ledger_totals(ledger.df)
+        _real = totals["realization_pct"]
+        _avgd = totals["avg_days_to_verify"]
+        kpi_row([
+            {"label": "Verified savings (all time)",
+             "value": format_usd(totals["verified_usd"]),
+             "severity": "ok" if totals["verified_usd"] else ""},
+            {"label": "Verified this quarter",
+             "value": format_usd(totals["verified_qtd_usd"])},
+            {"label": "Realization rate",
+             "value": (f"{_real:,.0f}%" if _real is not None else "—"),
+             "delta": (f"{format_usd(totals['verified_usd'])} of "
+                       f"{format_usd(totals['verified_estimated_usd'])} estimated"
+                       if _real is not None else "nothing verified yet"),
+             "delta_color": "off",
+             "help": "Verified dollars as a share of what those verified items were "
+                     "originally estimated to save — the ledger's estimate-vs-actual "
+                     "track record (never mixes estimated and verified dollars)."},
+            {"label": "Avg time to verify",
+             "value": (f"{_avgd:g} d" if _avgd is not None else "—"),
+             "help": "Mean days from a savings item being booked to being verified."},
+        ])
+        st.caption(
+            f"The ledger has verified {totals['verified_count']:,} item(s) "
+            f"({format_usd(totals['verified_usd'])}) against {totals['estimated_count']:,} "
+            "still estimated. Realization is measured on verified items only — the honest "
+            "estimate-vs-actual — so a rate near 100% means the estimates held up."
+        )
     if not actions.empty:
         # DS #1: pin actions on watched entities to the top WITHIN their severity band, so a
         # watched entity's action surfaces first without burying a CRITICAL under a watched LOW.

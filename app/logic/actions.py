@@ -125,11 +125,14 @@ def can_verify(row: dict) -> tuple[bool, str]:
 
 
 def ledger_totals(df: pd.DataFrame) -> dict:
-    """Estimated vs verified totals (never mixed), plus the realization rate — the
-    verified dollars as a share of what those verified items were originally
-    estimated to save (Cost #9). realization_pct is None until something is verified."""
+    """Estimated vs verified totals (never mixed), plus the realization story — the
+    verified dollars as a share of what those verified items were originally estimated
+    to save (Cost #9), how much was verified THIS QUARTER, and the average time from
+    booking to verification (DS #40/#31/#19, the ROI/track-record the ledger already
+    holds). realization_pct / avg_days_to_verify are None until something is verified."""
     empty = {"estimated_usd": 0.0, "verified_usd": 0.0, "estimated_count": 0,
-             "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None}
+             "verified_count": 0, "verified_estimated_usd": 0.0, "realization_pct": None,
+             "verified_qtd_usd": 0.0, "avg_days_to_verify": None}
     if df is None or df.empty or "STATE" not in df.columns:
         return empty
     view = df.copy()
@@ -137,12 +140,25 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     est = view[view["STATE"] == LEDGER_ESTIMATED]
     ver = view[view["STATE"] == LEDGER_VERIFIED]
     est_usd = pd.to_numeric(est.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
-    ver_usd = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0).sum()
+    ver_usd_col = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0)
+    ver_usd = ver_usd_col.sum()
     # Track record: of what VERIFIED items were originally estimated to save, how much
     # actually measured out — a fair estimate-vs-actual on verified items only.
     ver_est_usd = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
     realization = (round(float(ver_usd) / float(ver_est_usd) * 100, 1)
                    if ver_est_usd > 0 else None)
+    # This-quarter capture + booking->verify latency, both from VERIFIED_AT. Default to an
+    # index-aligned NaT Series so a ledger read missing these columns stays a Series (not a
+    # scalar NaT) and the comparisons below never raise.
+    _nat = pd.Series(pd.NaT, index=ver.index)
+    verified_at = pd.to_datetime(ver.get("VERIFIED_AT", _nat), errors="coerce")
+    created_at = pd.to_datetime(ver.get("CREATED_AT", _nat), errors="coerce")
+    now = pd.Timestamp(account_now())
+    q_start = pd.Timestamp(year=now.year, month=((now.month - 1) // 3) * 3 + 1, day=1)
+    qtd = float(ver_usd_col[verified_at >= q_start].sum())
+    days = (verified_at - created_at).dt.total_seconds() / 86400.0
+    days = days[days.notna() & (days >= 0)]
+    avg_days = round(float(days.mean()), 1) if not days.empty else None
     return {
         "estimated_usd": round(float(est_usd), 2),
         "verified_usd": round(float(ver_usd), 2),
@@ -150,6 +166,8 @@ def ledger_totals(df: pd.DataFrame) -> dict:
         "verified_count": len(ver),
         "verified_estimated_usd": round(float(ver_est_usd), 2),
         "realization_pct": realization,
+        "verified_qtd_usd": round(qtd, 2),
+        "avg_days_to_verify": avg_days,
     }
 
 
