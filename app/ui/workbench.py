@@ -26,6 +26,7 @@ from app.logic.workbench import (
     entity_catalog_merge_sql,
     evidence_link_sql,
     watchlist_sql,
+    watchlist_threshold_status,
 )
 from app.ui.components import (
     confidence_badge,
@@ -678,6 +679,25 @@ def render_watchlist() -> None:
     if not guard(result, "No entities are on your watchlist yet."):
         return
     frame = result.df.reset_index(drop=True)
+    # CR16 (surfacing half): reuse the already-evaluated SLO objectives so a watched
+    # entity that has crossed its configured threshold reads as such here, not only
+    # in Decision Studio. Probe-gated — degrades to the plain list before V074 or
+    # when no objective covers a watched entity. slo_cockpit reads core marts, not
+    # ACCOUNT_USAGE, and this is a nested non-first-paint sub-tab.
+    slo = run(
+        workbench_sql.slo_cockpit(), page=_PAGE, key="watchlist_slo",
+        tier="recent", source="SLO_OBJECTIVES + metric marts", probe=True,
+    )
+    if slo.usable() and not slo.empty:
+        annotated = watchlist_threshold_status(frame, slo.df)
+        crossed = int(annotated["BREACHING"].sum())
+        frame = annotated.drop(columns=["BREACHING"])
+        if crossed:
+            st.warning(
+                f"{crossed} watched "
+                + ("entity has" if crossed == 1 else "entities have")
+                + " crossed a configured threshold (an SLO objective is in breach)."
+            )
     selected = selectable_table(frame, key="watchlist_table", height=260, sort_label="newest watched")
     # BUGFIX (infinite-rerun): navigate ONLY on a CHANGED selection. A sticky
     # st.dataframe selection re-fired request_navigation every rerun; the target

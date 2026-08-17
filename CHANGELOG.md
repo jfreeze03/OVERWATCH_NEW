@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.223.0 - Crossed-threshold badge on the watchlist (2026-08-16)
+
+CoCo review, Tier-3 (Control Room #16, the surfacing half). New pure
+`logic.workbench.watchlist_threshold_status`.
+
+- **The watchlist now shows which watched entities have crossed a threshold.** CoCo's CR16
+  asks to turn the passive watchlist into per-entity threshold alerts — the full feature
+  needs a threshold table + evaluation job + notify path (an owner migration,
+  `SP_SLO_BREACH_SCAN`, tracked separately as CR16-push). The read-only surfacing half is
+  buildable today: `SLO_OBJECTIVES` already *is* a per-entity threshold table and
+  `slo_cockpit` already evaluates it to MET/BREACH/STALE/NO_DATA. A new pure joiner annotates
+  each watched entity (by ENTITY_TYPE + ENTITY_KEY, worst-status wins) with a `THRESHOLD`
+  badge — **⚠ Crossed threshold** when an objective is breaching — plus a banner counting how
+  many watched entities have crossed. Probe-gated: degrades to the plain list before V074 or
+  when no objective covers a watched entity; reads core marts (no ACCOUNT_USAGE, no budget
+  impact) on the nested non-first-paint Watchlist sub-tab. App version 4.223.0.
+
 ## 4.222.0 - Admin-grant timing check on Security (2026-08-16)
 
 CoCo review, Tier-3 (Security #2, the time-context half). New

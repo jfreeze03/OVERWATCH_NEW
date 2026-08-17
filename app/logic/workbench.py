@@ -292,6 +292,57 @@ def experiment_state_by_key(frame: pd.DataFrame | None, experiments: pd.DataFram
             .map(status_by_key).fillna("").astype(str))
 
 
+def watchlist_threshold_status(
+    watchlist: pd.DataFrame | None,
+    objectives: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Annotate watched entities with their live objective status (CR16 badge).
+
+    The watchlist is passive, but ``SLO_OBJECTIVES`` already defines a per-entity
+    threshold and ``slo_cockpit`` already evaluates it to MET / BREACH / STALE /
+    NO_DATA. Join the two on (ENTITY_TYPE, ENTITY_KEY) so a watched warehouse
+    whose objective is breaching shows a "crossed threshold" badge without leaving
+    the watchlist. Worst status wins when an entity has several objectives.
+
+    Adds ``THRESHOLD`` (label) and ``BREACHING`` (bool). Returns a copy; a
+    watchlist without the join columns, or no objectives, yields an all-"—"
+    THRESHOLD and all-False BREACHING — never a raise (mirrors mark_watched's
+    graceful contract). This is the read-only surfacing half of CR16; the
+    evaluate-and-notify half is an owner migration (SP_SLO_BREACH_SCAN).
+    """
+    wl = watchlist.copy() if watchlist is not None else pd.DataFrame()
+    if wl.empty or not {"ENTITY_TYPE", "ENTITY_KEY"}.issubset(wl.columns):
+        wl["THRESHOLD"] = pd.Series(dtype=object)
+        wl["BREACHING"] = pd.Series(dtype=bool)
+        return wl
+    obj = objectives.copy() if objectives is not None else pd.DataFrame()
+    status_by_key: dict[tuple[str, str], set[str]] = {}
+    if not obj.empty and {"ENTITY_TYPE", "ENTITY_KEY", "STATUS"}.issubset(obj.columns):
+        for _, r in obj.iterrows():
+            key = (str(r["ENTITY_TYPE"]).strip().upper(), str(r["ENTITY_KEY"]).strip().upper())
+            status_by_key.setdefault(key, set()).add(str(r["STATUS"]).strip().upper())
+    labels: list[str] = []
+    breaching: list[bool] = []
+    for _, row in wl.iterrows():
+        key = (str(row["ENTITY_TYPE"]).strip().upper(), str(row["ENTITY_KEY"]).strip().upper())
+        statuses = status_by_key.get(key)
+        if not statuses:
+            labels.append("—")
+            breaching.append(False)
+        elif "BREACH" in statuses:
+            labels.append("⚠ Crossed threshold")
+            breaching.append(True)
+        elif "MET" in statuses:
+            labels.append("Within target")
+            breaching.append(False)
+        else:  # STALE / NO_DATA only — an objective exists but has no live verdict
+            labels.append("No verdict")
+            breaching.append(False)
+    wl["THRESHOLD"] = labels
+    wl["BREACHING"] = breaching
+    return wl
+
+
 def watchlist_sql(viewer: str, entity_type: str, entity_key: str,
                   label: str = "", *, remove: bool = False) -> str:
     name = str(viewer or "").strip()

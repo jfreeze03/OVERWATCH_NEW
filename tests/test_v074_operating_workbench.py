@@ -18,6 +18,7 @@ from app.logic.workbench import (
     experiment_state_by_key,
     investigation_target,
     watchlist_sql,
+    watchlist_threshold_status,
 )
 
 
@@ -36,6 +37,41 @@ def test_experiment_state_by_key_active_first_and_graceful() -> None:
     # graceful: no experiments / None / missing column -> all-'' (never raises)
     assert (experiment_state_by_key(frame, pd.DataFrame(), "WAREHOUSE", "Warehouse / target") == "").all()
     assert experiment_state_by_key(None, exps, "WAREHOUSE", "Warehouse / target").empty
+
+
+def test_watchlist_threshold_status_badges_breaching_entities() -> None:
+    # CR16 (surfacing half): a watched entity whose SLO objective is in breach
+    # reads as "crossed threshold" without leaving the watchlist.
+    watchlist = pd.DataFrame({
+        "ENTITY_TYPE": ["WAREHOUSE", "warehouse", "TASK", "WAREHOUSE"],
+        "ENTITY_KEY": ["WH_A", "wh_b", "DB.SCH.T1", "WH_UNCOVERED"],
+    })
+    objectives = pd.DataFrame({
+        "ENTITY_TYPE": ["WAREHOUSE", "WAREHOUSE", "WAREHOUSE", "TASK"],
+        "ENTITY_KEY": ["WH_A", "WH_A", "WH_B", "DB.SCH.T1"],
+        # WH_A has one MET and one BREACH -> worst (BREACH) wins; WH_B MET; T1 STALE
+        "STATUS": ["MET", "BREACH", "MET", "STALE"],
+    })
+    out = watchlist_threshold_status(watchlist, objectives)
+    assert out.loc[0, "THRESHOLD"] == "⚠ Crossed threshold"   # WH_A worst-status wins
+    assert bool(out.loc[0, "BREACHING"]) is True
+    assert out.loc[1, "THRESHOLD"] == "Within target"          # wh_b MET (case-insensitive)
+    assert out.loc[2, "THRESHOLD"] == "No verdict"             # T1 objective exists but STALE
+    assert out.loc[3, "THRESHOLD"] == "—"                       # no objective covers WH_UNCOVERED
+    assert int(out["BREACHING"].sum()) == 1
+    # graceful: no objectives / None / missing columns -> all-"—", never raises
+    none_obj = watchlist_threshold_status(watchlist, pd.DataFrame())
+    assert (none_obj["THRESHOLD"] == "—").all()
+    assert not bool(none_obj["BREACHING"].any())
+    empty = watchlist_threshold_status(pd.DataFrame(), objectives)
+    assert "THRESHOLD" in empty.columns and empty.empty
+
+
+def test_workbench_watchlist_wires_threshold_badge() -> None:
+    ui = (Path(__file__).resolve().parents[1] / "app" / "ui" / "workbench.py").read_text(encoding="utf-8")
+    assert "watchlist_threshold_status(frame, slo.df)" in ui
+    assert "workbench_sql.slo_cockpit()" in ui
+    assert "crossed a configured threshold" in ui
 
 sqlglot = pytest.importorskip("sqlglot")
 
