@@ -74,6 +74,56 @@ def _action_entity_type(value: object) -> str:
     }.get(kind, "OBJECT")
 
 
+def _render_change_risk_diagnostic() -> None:
+    """Diagnostic expander: the actors/objects behind the CHANGE RISK DESTRUCTIVE
+    flood (owner 2026-08-17). Reads FACT_SECURITY_CHANGE directly so it's visible
+    exactly which roles/databases drive the noise — and whether a TF_* service-role
+    exclusion would clear it — before any change-risk exclusion is written."""
+    with st.expander("Change-risk noise — what's actually driving the DESTRUCTIVE flood"):
+        res = _optional_result(
+            security_sql.change_risk_destructive_breakdown(7),
+            "sec_change_risk_breakdown",
+            "FACT_SECURITY_CHANGE (DESTRUCTIVE, risk>=70, 7d)",
+        )
+        if not res.ok:
+            _setup_state("The change-risk breakdown")
+            return
+        if res.empty:
+            empty_state("clean", "No DESTRUCTIVE change-risk events over threshold in the last 7 days.")
+            return
+        df = res.df.copy()
+        total = int(df["EVENTS"].sum())
+
+        def _events_where(mask: pd.Series) -> int:
+            return int(df.loc[mask, "EVENTS"].sum()) if total else 0
+
+        def _pct(n: int) -> str:
+            return f"{(100.0 * n / total):.0f}%" if total else "0%"
+
+        tf = _events_where(df["ROLE_CLASS"] == "TF_* service")
+        no_role = _events_where(df["ROLE_NAME"] == "(no role attributed)")
+        app_db = _events_where(df["DATABASE_NAME"] == "DBA_MAINT_DB")
+        kpi_row([
+            {"label": "Destructive events (7d)", "value": f"{total:,}",
+             "help": "DROP/TRUNCATE at RISK_SCORE>=70 — the rows the CHANGE RISK queue counts."},
+            {"label": "By TF_* roles", "value": _pct(tf), "delta": f"{tf:,} events",
+             "help": "Share attributable to Terraform service roles. If this is most of the "
+                     "flood a TF_* exclusion clears it; if it's small, the drivers are elsewhere."},
+            {"label": "No role attributed", "value": _pct(no_role), "delta_color": "off",
+             "help": "Unattributed drops. These stay visible on purpose — a security queue must "
+                     "not silently hide an actor-less destructive event."},
+            {"label": "On app's own DB", "value": _pct(app_db), "delta": f"{app_db:,} events",
+             "help": "Events on DBA_MAINT_DB (OVERWATCH's own database)."},
+        ])
+        st.caption(
+            "Raw evidence behind the CHANGE RISK score — decide the exact exclusion from it: "
+            "if a few named roles dominate, exclude those roles; if it's TF_*-dominated a pattern "
+            "works; unattributed and human drops on real data should stay visible."
+        )
+        styled_table(df, height=300)
+        result_caption(res)
+
+
 def render_security_overview(company: str) -> None:
     """Exceptions-first domain posture with Action Center and Entity 360 drills."""
     section_header("Security decision queue", "warn", "security")
@@ -113,6 +163,10 @@ def render_security_overview(company: str) -> None:
         "its affected-entity count increases that deduction up to 3x. Unknown and "
         "on-demand domains do not silently receive a perfect score."
     )
+
+    # Owner diagnostic (2026-08-17): when CHANGE RISK is flooded by routine DESTRUCTIVE
+    # DDL, surface WHO/WHAT actually drives it so any exclusion is precise, not a guess.
+    _render_change_risk_diagnostic()
 
     if not queue.ok:
         empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")

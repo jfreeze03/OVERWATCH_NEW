@@ -918,6 +918,34 @@ LIMIT {limit}
 """
 
 
+def change_risk_destructive_breakdown(days: int = 7) -> str:
+    """Diagnostic (owner 2026-08-17): the ACTUAL actors and objects behind the
+    CHANGE RISK "DESTRUCTIVE" flood, so an exclusion can be precise instead of a
+    guess. Groups exactly the rows the exception queue's CHANGE RISK arm counts
+    (CHANGE_KIND='DESTRUCTIVE', RISK_SCORE>=70, trailing window) by role / database
+    / schema, and flags whether each role matches the Terraform service-role
+    convention (TF_*) so it's visible at a glance whether a TF_* exclusion would
+    actually clear the noise or whether the drivers are something else."""
+    days = bounded_days(days, 30)
+    return f"""
+SELECT
+    COALESCE(NULLIF(TRIM(ROLE_NAME), ''), '(no role attributed)') AS ROLE_NAME,
+    COALESCE(NULLIF(TRIM(DATABASE_NAME), ''), '(no database)') AS DATABASE_NAME,
+    COALESCE(NULLIF(TRIM(SCHEMA_NAME), ''), '(none)') AS SCHEMA_NAME,
+    IFF(UPPER(COALESCE(ROLE_NAME, '')) LIKE 'TF~_%' ESCAPE '~', 'TF_* service', 'other') AS ROLE_CLASS,
+    COUNT(*) AS EVENTS,
+    COUNT(DISTINCT USER_NAME) AS USERS,
+    MAX(EVENT_TS) AS LAST_SEEN
+FROM {core_object('FACT_SECURITY_CHANGE')}
+WHERE CHANGE_KIND = 'DESTRUCTIVE'
+  AND RISK_SCORE >= 70
+  AND EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1, 2, 3, 4
+ORDER BY EVENTS DESC
+LIMIT 200
+"""
+
+
 def security_domain_coverage() -> str:
     """Coverage/freshness contract for the five Security risk domains."""
     return f"""

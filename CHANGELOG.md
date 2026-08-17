@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.236.0 - Security: change-risk noise diagnostic (2026-08-17)
+
+Bug follow-up (owner "still have that destructive issue"): V080 excluded the
+CHANGE RISK DESTRUCTIVE flood from a fixed 18-role list and it still floods, so
+the driving roles aren't in the list. Rather than broaden the exclusion on an
+unverified guess — adversarial review found a `TF_*` pattern both risks
+over-suppression (a claimable class; blinds OVERWATCH's own audit tables) and
+may not even match the real drivers — this ships the **evidence first**.
+
+- **`Security ▸ Change-risk noise` diagnostic.** A new expander on the Security
+  decision queue reads `FACT_SECURITY_CHANGE` directly and groups exactly the rows
+  the CHANGE RISK arm counts (`DESTRUCTIVE`, `RISK_SCORE>=70`, 7d) by role /
+  database / schema, flagging whether each role matches the Terraform service
+  convention (`TF_*`). Headline KPIs: total events, % by `TF_*` roles, % with no
+  attributed role, % on the app's own DB — so it's immediately visible whether a
+  `TF_*` exclusion would clear the flood or whether the drivers are something else.
+- The precise exclusion (a follow-up migration) is deferred until this diagnostic
+  identifies the actual roles — no blind change to security monitoring.
+
+App version 4.236.0.
+
 ## 4.235.0 - AI evaluation grounded in per-alert-family evidence (2026-08-17)
 
 Bug (owner report): the Alerts "Explain with AI" evaluation summarized data
