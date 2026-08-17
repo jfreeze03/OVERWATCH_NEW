@@ -611,6 +611,56 @@ LIMIT 50
 """
 
 
+def table_storage_breakdown(company: str = "ALL", database: str = "", limit: int = 50) -> str:
+    """Per-table storage split (active / time-travel / fail-safe bytes) for the
+    Storage-tab drill (owner ask 2026-08-17: "drill down to the table level and
+    calculate"). Ordered by TOTAL on-disk bytes so the biggest cost drivers lead
+    (storage_waste orders by time-travel+fail-safe for the waste lens — a different
+    question). STALE = no DML in 90 days; RETENTION_DAYS is the current
+    DATA_RETENTION_TIME_IN_DAYS so a reduce-retention decision is one glance away.
+    Dollars are applied in the UI at the configured $/TiB."""
+    limit = max(5, min(int(limit or 50), 500))
+    where = and_where(
+        "m.DELETED = FALSE",
+        "m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES > 0",
+        companies.database_clause(company, "m.TABLE_CATALOG"),
+        companies.database_equals_clause(database, "m.TABLE_CATALOG"),
+    )
+    return f"""
+SELECT
+    m.TABLE_CATALOG AS DATABASE_NAME,
+    m.TABLE_SCHEMA AS SCHEMA_NAME,
+    m.TABLE_NAME,
+    ROUND(m.ACTIVE_BYTES / POWER(1024, 3), 2) AS ACTIVE_GB,
+    ROUND(m.TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
+    ROUND(m.FAILSAFE_BYTES / POWER(1024, 3), 2) AS FAILSAFE_GB,
+    -- clone-retained bytes still bill after the source rows are deleted; the
+    -- per-database card includes them, so the drill must too or it under-sums
+    -- and hides a real driver (reviewer 2026-08-17).
+    ROUND(COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0) / POWER(1024, 3), 2) AS CLONE_GB,
+    ROUND((m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES
+           + COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0)) / POWER(1024, 3), 2) AS TOTAL_GB,
+    rt.RETENTION_DAYS,
+    d.LAST_DML,
+    IFF(d.LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS,
+    -- a dropped-but-still-retained table keeps billing until it ages out; the
+    -- retention ALTER can't target it, so flag it so the UI drops it as a candidate.
+    IFF(rt.RETENTION_DAYS IS NULL, TRUE, FALSE) AS DROPPED
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_STORAGE_METRICS m
+LEFT JOIN (
+    SELECT TABLE_ID, MAX(END_TIME) AS LAST_DML
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY
+    WHERE START_TIME >= DATEADD('day', -90, CURRENT_TIMESTAMP())
+    GROUP BY 1
+) d ON d.TABLE_ID = m.ID
+{_RETENTION_JOIN_SQL}
+WHERE {where}
+ORDER BY m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES
+         + COALESCE(m.RETAINED_FOR_CLONE_BYTES, 0) DESC
+LIMIT {limit}
+"""
+
+
 def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
     """Hour-of-day credits vs query activity per warehouse — the input to
     the off-hours schedule advisor (credits with no queries = waste).

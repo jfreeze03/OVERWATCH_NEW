@@ -46,11 +46,16 @@ _REACHABLE = {
         # (the live 3-way join fallback behind the toggle).
         # rec#11: + DATA_TRANSFER_HISTORY — the egress $ panel (transfer_egress_priced),
         # click-gated in the detailed-service-attribution section.
+        # v4.237.0 storage table drill (owner ask): + TABLE_STORAGE_METRICS +
+        # TABLE_DML_HISTORY + TABLES (table_storage_breakdown) — the per-table
+        # active/time-travel/fail-safe breakdown under the Storage detail toggle,
+        # the same tables storage_waste reaches on Optimization.
         "DATABASE_REPLICATION_USAGE_HISTORY", "DATABASE_STORAGE_USAGE_HISTORY",
         "DATA_TRANSFER_HISTORY", "METERING_DAILY_HISTORY",
         "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "SESSIONS", "SNOWPARK_CONTAINER_SERVICES_HISTORY",
-        "STORAGE_USAGE", "WAREHOUSE_METERING_HISTORY"),
+        "STORAGE_USAGE", "TABLES", "TABLE_DML_HISTORY", "TABLE_STORAGE_METRICS",
+        "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/cost_parts/contract.py": ("QUERY_HISTORY", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/cost_parts/ai_chargeback.py": (
         "CORTEX_AI_FUNCTIONS_USAGE_HISTORY", "CORTEX_CODE_CLI_USAGE_HISTORY",

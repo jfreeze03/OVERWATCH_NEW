@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.237.0 - Storage: table-level drill with dollars + retention candidates (2026-08-17)
+
+Owner ask: "a breakdown of what's driving the storage costs … drill down to the
+table level and calculate … adjust time travel options or purge tables." The
+table-level view existed only on Optimization & Savings, disconnected from the
+Storage tab.
+
+- **`Cost ▸ Spend ▸ Storage ▸ Drill to tables`.** Under the storage detail toggle,
+  the per-database bars now drill to the table level: pick a database and see its
+  tables (top 50 by on-disk size) with **active / time-travel / fail-safe priced
+  in dollars** at the configured $/TiB, plus total and reclaimable columns, current
+  `RETENTION_DAYS`, and a STALE flag (no DML in 90 days = the clearest
+  reduce-retention / purge candidate). Headline KPIs: total table storage, the
+  time-travel + fail-safe portion, and how much of that sits on STALE tables.
+- **Act on it.** Pick a table and a target retention to get the exact
+  `ALTER TABLE … SET DATA_RETENTION_TIME_IN_DAYS` (copy-run; the tracked execute +
+  savings-ledger booking stays on Optimization & Savings). Captions state the honest
+  mechanics: this is a point-in-time snapshot (won't sum to the MTD-average card
+  above), lowering retention frees time-travel, dropping recovers active +
+  time-travel, and fail-safe (permanent tables) only ages out over 7 days.
+- New builder `insights_sql.table_storage_breakdown` (total-ordered, the driver
+  lens — distinct from `storage_waste`'s waste ordering). Cost page scan surface
+  gains TABLE_STORAGE_METRICS / TABLE_DML_HISTORY / TABLES (trust pin updated).
+
+App version 4.237.0.
+
 ## 4.236.0 - Security: change-risk noise diagnostic (2026-08-17)
 
 Bug follow-up (owner "still have that destructive issue"): V080 excluded the
