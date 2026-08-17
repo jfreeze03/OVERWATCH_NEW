@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.253.0 - Wave-3: adaptive-compute candidacy score (2026-08-17)
+
+Repo-review "What to Borrow" wave 3 (efficiency lenses). Which warehouses would
+benefit from adaptive / auto-scaling compute? A new Operations > Warehouses panel
+scores each warehouse 0-100 from the hour-of-day load profile it already reports
+(no new scan).
+
+- Score = burstiness (peak-to-mean of the daily credit profile) x material volume
+  x an idle discount. Bursty + material-volume warehouses gain from adding clusters
+  at the peak and dropping them off-peak; a flat warehouse is fine at a fixed size;
+  a heavy-idle one is flagged **auto-suspend first** (the steadier lever).
+- Pure logic app/logic/adaptive.py; KPIs (scored / strong / consider) + a ranked
+  table with the peak-to-mean, credits/day, idle %, and a rationale per warehouse.
+- Adversarial review pre-commit caught a verdict-inverting bug: the metering feed
+  is SPARSE (no row for a suspended hour), so a metered-hours mean read a
+  nightly-batch (maximally bursty) warehouse as flat. The mean now divides the
+  metered sum by a full 24 hours; a production-shaped sparse test locks it. Also
+  fixed the too-weak idle discount (now a hard override at >=50% idle) and the low
+  volume floor (2 -> 10 cr/day, so a trivial single-blip can't score 100).
+
+App version 4.253.0.
+
+
 ## 4.252.0 - Reconciliation audit: non-USD currency guards on the billing panels (2026-08-17)
 
 Two org-billing panels compared or labeled USAGE_IN_CURRENCY dollars as USD without

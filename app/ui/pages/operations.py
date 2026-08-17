@@ -1397,6 +1397,54 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
         result_caption(_hh)
 
     _monitor_coverage_panel()
+    _adaptive_candidacy_panel(company, days)
+
+
+def _adaptive_candidacy_panel(company: str, days: int) -> None:
+    """Adaptive-compute candidacy (repo review wave 3): which warehouses would
+    benefit from auto-scaling compute — bursty, material-volume load — vs those a
+    fixed size or auto-suspend serves better. Scored from the hour-of-day profile
+    already read for the off-hours advisor (cached), no new scan."""
+    from app.logic.adaptive import adaptive_compute_candidacy, candidacy_summary
+
+    section_header("Adaptive-compute candidacy", "info", "operations")
+    # Both feeds share ONE window (review #4): warehouse_hourly_activity caps at 30d,
+    # so cap idle to match — else the idle discount would cover a longer span than the
+    # burst profile it modifies.
+    _win = min(int(days), 30)
+    hourly = run(insights_sql.warehouse_hourly_activity(_win, company), page=_PAGE,
+                 key=f"ops_wh_hourly_{company}_{_win}", tier="hourly",
+                 source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day)")
+    idle = run(insights_sql.idle_warehouse_analysis(_win, company), page=_PAGE,
+               key=f"ops_wh_idle_{company}_{_win}", tier="hourly",
+               source="WAREHOUSE_METERING_HISTORY (idle credits)")
+    if not guard(hourly, "Needs hour-of-day warehouse metering to score candidacy."):
+        return
+    scored = adaptive_compute_candidacy(hourly.df, idle.df if idle.ok else None)
+    if scored.empty:
+        st.caption("No warehouse has a material, varying load profile to score in this window.")
+        return
+    k = candidacy_summary(scored)
+    kpi_row([
+        {"label": "Warehouses scored", "value": f"{k['warehouses']:,}"},
+        {"label": "Strong candidates", "value": f"{k['strong']:,}",
+         "severity": "ok" if k["strong"] else "",
+         "help": "Bursty (peak >> average), material-volume warehouses where adding clusters "
+                 "at the peak and dropping them off-peak pays off."},
+        {"label": "Worth considering", "value": f"{k['consider']:,}"},
+    ])
+    styled_table(scored, height=300, column_config={
+        "SCORE": st.column_config.NumberColumn("Score", format="%d"),
+        "PEAK_TO_MEAN": st.column_config.NumberColumn("Peak÷mean", format="%.1fx"),
+        "DAILY_CREDITS": st.column_config.NumberColumn("Credits/day", format="%.1f"),
+        "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+    })
+    st.caption("Score 0-100 = burstiness (peak-to-mean of the hour-of-day credit profile) × "
+               "material volume × an idle discount. High burst + volume ⇒ adaptive scaling "
+               "helps; a heavy-idle warehouse is flagged **auto-suspend first** (the steadier "
+               "lever); flat load ⇒ a fixed size is fine. An ordering heuristic — the rationale "
+               "shows the inputs.")
+    result_caption(hourly)
 
 
 def _monitor_coverage_panel() -> None:
