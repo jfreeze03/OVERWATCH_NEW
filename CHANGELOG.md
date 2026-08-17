@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.226.0 - V085: SLO-breach proactive alert (2026-08-16)
+
+CoCo review, Tier-3 (Control Room #16, the evaluate+notify half). New owner-applied
+migration `snowflake/migrations/V085__slo_breach_alert.sql`. **No app-code change —
+owner applies V085 in Snowsight (after V084); breaches then raise server-side and show
+up on the existing Alerts page.**
+
+- **A breaching SLO objective now pages, not just badges the watchlist.** v4.223.0 shipped
+  the read half of CR16 — the watchlist shows a "crossed threshold" badge by reading the
+  already-evaluated SLO objectives. V085 is the evaluate+notify half: a new raiser
+  `SP_SLO_BREACH_SCAN` evaluates the configured `SLO_OBJECTIVES` against the warehouse/task/
+  family marts (the same logic the app's `slo_cockpit` renders) and raises a HIGH alert for
+  each objective whose measured value is in **BREACH**. It seeds a PERFORMANCE rule
+  `PERF_SLO_BREACH` via the house idempotent MERGE, and runs from a new task
+  `TASK_SLO_BREACH_SCAN` serialized *after* the hourly mart load (fresh marts; the V075
+  task-graph law). STALE / NO_DATA objectives are excluded, so a stalled loader never
+  manufactures a breach; deduped per objective per day — an SLO breach is a persistent
+  condition, so a daily "still breaching" reminder, not a discrete event. The scanner is not
+  fired at apply time and self-corrects on its schedule. This is the SLO-alerting migration
+  of the set. App version 4.226.0.
+
 ## 4.225.0 - V084: SEC_NEW_EXPOSURE proactive alert (2026-08-16)
 
 CoCo review, Tier-3 (Security #36). New owner-applied migration

@@ -237,6 +237,11 @@ _EXPECTED_MIGRATIONS = {
         "arm [20] to SP_ALERT_SCAN that raises a HIGH alert when a new privilege was "
         "granted to PUBLIC in the last 24h (inherited by every role), reading "
         "GRANTS_TO_ROLES; re-derives SP_ALERT_SCAN from V079 (no table/task change)",
+    85: "SLO-breach proactive alert (CoCo Control Room #16, notify half): seeds a "
+        "PERFORMANCE rule PERF_SLO_BREACH and adds SP_SLO_BREACH_SCAN (a new raiser) "
+        "+ a task serialized after the hourly mart load, which evaluates the configured "
+        "SLO_OBJECTIVES and raises a HIGH alert per objective in breach (STALE/NO_DATA "
+        "excluded, deduped per objective per day)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

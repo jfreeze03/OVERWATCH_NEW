@@ -100,6 +100,7 @@ snowflake/migrations/V081__unified_experiment_verify.sql
 snowflake/migrations/V082__query_family_company_regrain.sql
 snowflake/migrations/V083__action_estimate_period.sql
 snowflake/migrations/V084__security_new_exposure_alert.sql
+snowflake/migrations/V085__slo_breach_alert.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
