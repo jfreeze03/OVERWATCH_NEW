@@ -848,7 +848,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 if exp.ok and exp.drivers:
                     with st.expander(f"Why did {exp.flagged_day} move? — root-cause waterfall",
                                      expanded=False):
-                        st.markdown(exp.narrative)
+                        # md_dollars: the narrative carries several $ amounts; unescaped,
+                        # Streamlit renders everything between two $ as serif-italic LaTeX math.
+                        st.markdown(md_dollars(exp.narrative))
                         wf = pd.DataFrame([
                             {"Warehouse": d.name, "Usual $": d.baseline_usd,
                              "That day $": d.actual_usd, "Delta $": d.delta_usd,

@@ -22,7 +22,6 @@ st.set_page_config(
 
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
-    APP_VERSION,
     DEFAULT_DAY_WINDOW,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
@@ -88,21 +87,21 @@ _RENDERERS = {
 def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -> str:
     """Navigation-only sidebar; scope filters live in the top bar (original-app layout)."""
     with st.sidebar:
+        # Branding, pronounced. Version lives on Admin (App version); the connected role
+        # is operator detail that belongs off the primary chrome, not the sidebar.
         st.markdown(
             '<div class="ow-brand"><span class="ow-brand-dot"></span>'
-            '<span class="ow-kicker">OVERWATCH</span></div>',
+            '<span class="ow-brand-word">OVERWATCH</span></div>'
+            '<div class="ow-brand-sub">Snowflake Command Center</div>',
             unsafe_allow_html=True,
-        )
-        st.markdown(f"**Snowflake Command Center** · v{APP_VERSION}")
-        st.caption(
-            (f"Connected · role {role or 'unknown'} · {profile} view")
-            if connected else "Not connected to Snowflake"
         )
         if connected:
             from app.ui.components import last_refreshed_note
             st.markdown(
-                f'<div style="font-size:0.72rem;color:var(--ow-ink-mute);margin-top:2px">'
+                f'<div style="font-size:0.72rem;color:var(--ow-ink-mute);margin-top:8px">'
                 f'{icon("refresh", 11)} {last_refreshed_note()}</div>', unsafe_allow_html=True)
+        else:
+            st.caption("Not connected to Snowflake")
         st.divider()
 
         # rec14: workflow-grouped nav. st.radio has no native section headers, so each

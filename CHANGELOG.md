@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.233.0 - Sidebar polish, $-font fix, visible query drill-through (2026-08-17)
+
+Live-app punch-list, UI batch (app-only). Chrome + Operations.
+
+- **Sidebar, pronounced.** OVERWATCH now renders as a prominent wordmark (1.55rem, tracked,
+  gradient) over a "Snowflake Command Center" subtitle. The `· v{APP_VERSION}` line and the
+  "Connected · {role} view" caption are gone from the sidebar — version already lives on
+  Admin ▸ App version; a quieter "last refreshed" note replaces the role caption.
+- **$-font fix.** The Cost ▸ Spend root-cause waterfall narrative carries several dollar
+  amounts; unescaped, Streamlit rendered everything between two `$` as serif-italic LaTeX.
+  Wrapped in `md_dollars()` (the escape the rest of the page already uses).
+- **Visible query drill-through.** Operations ▸ Queries "Heaviest queries" now shows the
+  `QUERY_ID` column, and clicking a row fills the "Paste any query ID" box with that id — the
+  click now has a visible effect and the drill target is always identifiable.
+
+App version 4.233.0.
+
 ## 4.232.0 - Decision Studio: portfolio coverage % + per-lane cost (2026-08-17)
 
 CoCo DS review (§6), cheap wins #2 + #1. App-only, Portfolio tab.

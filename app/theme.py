@@ -202,9 +202,11 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
   box-shadow:0 0 10px rgba(96,165,250,0.72),0 0 2px rgba(45,212,191,0.82); animation:ow-pulse 2.8s ease-in-out infinite; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
-.ow-brand-word { font-weight:800; letter-spacing:0.02em;
+.ow-brand-word { font-weight:850; letter-spacing:0.08em; font-size:1.55rem; line-height:1.02;
   background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
   -webkit-text-fill-color:transparent; background-clip:text; }
+.ow-brand-sub { font-size:0.72rem; font-weight:600; color:var(--ow-ink-mute);
+  letter-spacing:0.04em; margin:1px 0 0 20px; text-transform:uppercase; }
 
 /* Native segmented controls (stButtonGroup) wrap every option and retain a
    visible keyboard focus ring. The role/label rules below are the old-radio

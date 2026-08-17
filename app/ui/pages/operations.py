@@ -230,8 +230,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # (owner ask — the drill's single link earned its keep).
         _tp, _tp_cfg = snowsight_profile_column(top.df, _PAGE)
         _tp = with_user_names(_tp, _PAGE)
-        _tp_cols = ["START_TIME", "USER", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC", "QUEUED_SEC",
-                    "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]
+        # QUERY_ID leads so the drill target is visible (owner ask: "I don't know the query
+        # id to select"); a row click also fills the drill field with it (below).
+        _tp_cols = ["QUERY_ID", "START_TIME", "USER", "USER_NAME", "WAREHOUSE_NAME", "ELAPSED_SEC",
+                    "QUEUED_SEC", "SPILL_REMOTE_GB", "EXECUTION_STATUS", "QUERY_PREVIEW"]
         if "PROFILE" in _tp.columns:
             _tp_cols.append("PROFILE")
         sel_q = selectable_table(
@@ -262,6 +264,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             st.session_state["_ops_top_sel_last"] = sel_q
             clicked_qid = str(top.df.iloc[int(sel_q)]["QUERY_ID"])
             st.session_state["_ops_drill_target"] = clicked_qid
+            # Surface the clicked id in the paste box so the click has a VISIBLE effect
+            # (owner ask: "when I click to drilldown it does nothing"). Set before the
+            # text_input renders below, mirroring the nav_query handoff at the top.
+            st.session_state["ops_drill_manual"] = clicked_qid
     except (KeyError, IndexError, ValueError, TypeError):
         clicked_qid = ""
     # r10 #14: the drill no longer vanishes when the table is empty —
