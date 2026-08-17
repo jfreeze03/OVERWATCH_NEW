@@ -12,11 +12,18 @@ from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
 from app.logic.actions import ledger_totals
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
-from app.logic.formulas import blended_billed_usd, credits_to_usd, format_usd, safe_float
+from app.logic.formulas import (
+    account_now,
+    blended_billed_usd,
+    credits_to_usd,
+    format_usd,
+    safe_float,
+)
 from app.logic.workbench import (
     EXPERIMENT_STATUSES,
     SLO_METRIC_KEYS,
     create_slo_objective_sql,
+    experiment_age_days,
     mark_watched,
     mark_watched_pairs,
     update_experiment_sql,
@@ -569,9 +576,18 @@ def _experiments() -> None:
         return
     frame = result.df.reset_index(drop=True)
     status = frame["STATUS"].astype(str).str.upper()
+    # DS #24: show how long each experiment has existed — a long-running active one is a
+    # stale-experiment signal ("RUNNING 38d") worth a look, not silent progress.
+    frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
+    _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
+    _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
     kpi_row([
         {"label": "Experiments", "value": f"{len(frame):,}"},
         {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
+        {"label": "Oldest active", "value": (f"{_oldest_active:,} d" if _oldest_active else "—"),
+         "severity": "warn" if _oldest_active >= 30 else "",
+         "help": "Longest-running planned/running/observing experiment (days since it was "
+                 "created). A long-lived active experiment may be stuck — verify or close it."},
         {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
         {"label": "Verified value", "value": format_usd(frame["VERIFIED_USD"].map(safe_float).sum())},
     ])

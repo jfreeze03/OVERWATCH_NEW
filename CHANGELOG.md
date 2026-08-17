@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.230.0 - Decision Studio: experiment duration (2026-08-17)
+
+CoCo DS review (§6), cheap win #24. App-only.
+
+- **The Experiments tab now shows how long each experiment has been active.** A new `AGE_DAYS`
+  column (days since `CREATED_AT`) plus an **"Oldest active"** KPI (the longest-running
+  planned/running/observing experiment, amber at ≥ 30 days) make a stuck experiment visible —
+  "RUNNING 38d" reads as a prompt to verify or close it, not silent progress. New pure
+  `logic.workbench.experiment_age_days`. App version 4.230.0.
+
 ## 4.229.0 - Decision Studio: the realization / ROI story (2026-08-17)
 
 CoCo Decision-Studio review (§6), the flagship (#40 + #31 + #19). App-only — no

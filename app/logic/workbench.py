@@ -292,6 +292,22 @@ def experiment_state_by_key(frame: pd.DataFrame | None, experiments: pd.DataFram
             .map(status_by_key).fillna("").astype(str))
 
 
+def experiment_age_days(frame: pd.DataFrame | None, now: object) -> pd.Series:
+    """Days each optimization experiment has existed (now - CREATED_AT), DS #24.
+
+    For an active experiment (PLANNED / RUNNING / OBSERVING) this is its running duration;
+    a long-lived active experiment is a stale-experiment signal ("RUNNING 38d"). Returns an
+    int Series aligned to ``frame`` (0 for a missing/bad CREATED_AT, never negative);
+    empty/absent inputs yield an empty Series, never a raise."""
+    if frame is None or frame.empty:
+        return pd.Series(dtype="int64")
+    if "CREATED_AT" not in frame.columns:
+        return pd.Series(0, index=frame.index, dtype="int64")   # aligned zeros, UI-safe
+    created = pd.to_datetime(frame["CREATED_AT"], errors="coerce")
+    age = (pd.Timestamp(now) - created).dt.days
+    return age.fillna(0).clip(lower=0).astype("int64")
+
+
 def watchlist_threshold_status(
     watchlist: pd.DataFrame | None,
     objectives: pd.DataFrame | None,

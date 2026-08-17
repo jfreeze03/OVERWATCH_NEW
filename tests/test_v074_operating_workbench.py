@@ -15,6 +15,7 @@ from app.logic.workbench import (
     confidence_state,
     create_action_sql,
     entity_catalog_merge_sql,
+    experiment_age_days,
     experiment_state_by_key,
     investigation_target,
     watchlist_sql,
@@ -37,6 +38,20 @@ def test_experiment_state_by_key_active_first_and_graceful() -> None:
     # graceful: no experiments / None / missing column -> all-'' (never raises)
     assert (experiment_state_by_key(frame, pd.DataFrame(), "WAREHOUSE", "Warehouse / target") == "").all()
     assert experiment_state_by_key(None, exps, "WAREHOUSE", "Warehouse / target").empty
+
+
+def test_experiment_age_days_running_duration() -> None:
+    # DS #24: days since CREATED_AT — the running duration of an active experiment.
+    now = pd.Timestamp("2026-08-17 12:00:00")
+    frame = pd.DataFrame({
+        "STATUS": ["RUNNING", "VERIFIED", "PLANNED"],
+        "CREATED_AT": ["2026-07-10", "2026-08-01", None],
+    })
+    ages = experiment_age_days(frame, now)
+    assert ages.tolist() == [38, 16, 0]   # 38d, 16d, and 0 for a missing CREATED_AT
+    # graceful: empty -> empty; missing column -> aligned zeros (UI-safe), never raises
+    assert experiment_age_days(pd.DataFrame(), now).empty
+    assert experiment_age_days(pd.DataFrame({"X": [1, 2]}), now).tolist() == [0, 0]
 
 
 def test_watchlist_threshold_status_badges_breaching_entities() -> None:
