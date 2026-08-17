@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.251.0 - Decision Studio flagship: the ROI / realization story, front and center (2026-08-17)
+
+The savings ledger already tracked estimated->verified with proof, but the realization
+"here's the money we saved" story was buried at the bottom of the Scenarios section. It's
+now a first-class **ROI** section (the DS landing), turning four buried KPIs into a
+director-facing narrative.
+
+- **New "ROI" section** (first in Decision Studio): a hero line — "OVERWATCH has verified
+  $X across N items, realizing Y% of estimates, closing the loop in Z days" — over KPIs for
+  verified savings (all-time + this quarter), realization rate, and the **open pipeline**
+  (estimated $ still awaiting proof, the opportunity ahead).
+- **Run-rate trend** — verified savings by month (proof the loop keeps closing) — and a
+  **by-lever breakdown** (FINDING_TYPE) showing where the realized money comes from, each
+  lever's verified $ and its own realization rate.
+- Pure logic: `savings_by_month` + `savings_by_lever` in actions.py (verified-only,
+  estimate-vs-actual). `savings_ledger` builder gains `FINDING_TYPE`. Scenarios now points
+  to ROI instead of duplicating the block. No new data source.
+
+App version 4.251.0.
+
+
 ## 4.250.0 - Error-log fixes: 3 SQL-compilation errors from the live log (2026-08-17)
 
 The owner pulled the full `APP_ERROR_LOG` messages. Three distinct SQL-compilation

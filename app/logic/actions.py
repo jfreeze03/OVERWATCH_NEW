@@ -171,6 +171,49 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     }
 
 
+def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
+    """Verified savings per calendar month (the run-rate the ROI story needs) —
+    VERIFIED items only, bucketed by VERIFIED_AT, most recent ``months`` months,
+    oldest-first for a time-ordered chart. Columns MONTH (YYYY-MM), VERIFIED_USD.
+    Empty in, empty out."""
+    cols = ["MONTH", "VERIFIED_USD"]
+    if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
+    if ver.empty:
+        return pd.DataFrame(columns=cols)
+    ver["_AT"] = pd.to_datetime(ver.get("VERIFIED_AT"), errors="coerce")
+    ver = ver.dropna(subset=["_AT"])
+    if ver.empty:
+        return pd.DataFrame(columns=cols)
+    ver["MONTH"] = ver["_AT"].dt.strftime("%Y-%m")
+    ver["VERIFIED_USD"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
+    out = (ver.groupby("MONTH", as_index=False)["VERIFIED_USD"].sum()
+           .sort_values("MONTH"))
+    return out.tail(max(1, int(months))).reset_index(drop=True)[cols]
+
+
+def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
+    """Verified savings by lever (FINDING_TYPE) — where the realized money comes
+    from, most-valuable first. Columns LEVER, VERIFIED_USD, ITEMS, REALIZATION_PCT
+    (verified vs what those items were estimated to save). Empty in, empty out."""
+    cols = ["LEVER", "VERIFIED_USD", "ITEMS", "REALIZATION_PCT"]
+    if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    ver = df[df["STATE"].astype(str).str.upper() == LEDGER_VERIFIED].copy()
+    if ver.empty:
+        return pd.DataFrame(columns=cols)
+    ver["LEVER"] = ver.get("FINDING_TYPE", "unclassified").astype(str)
+    ver["_V"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
+    ver["_E"] = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0.0)
+    grp = ver.groupby("LEVER").agg(VERIFIED_USD=("_V", "sum"), ITEMS=("_V", "size"),
+                                   _EST=("_E", "sum")).reset_index()
+    grp["REALIZATION_PCT"] = (grp["VERIFIED_USD"] / grp["_EST"].where(grp["_EST"] > 0)
+                              * 100).round(0)
+    grp["VERIFIED_USD"] = grp["VERIFIED_USD"].round(2)
+    return grp.sort_values("VERIFIED_USD", ascending=False).reset_index(drop=True)[cols]
+
+
 def since_last_visit_summary(new_alerts: object, new_crit: object,
                              new_high: object, new_actions: object) -> dict:
     """One-line 'what changed since your last visit' text + severity (Cost3).

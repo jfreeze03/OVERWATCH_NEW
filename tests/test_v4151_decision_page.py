@@ -24,7 +24,7 @@ def test_decision_studio_is_a_top_level_analyze_page():
     assert "Decision Studio" not in PAGES_BY_PROFILE["EXECUTIVE"]
     assert PAGE_SECTION_KEYS["Decision Studio"] == "decision_section"
     assert PAGE_SECTION_LABELS["Decision Studio"] == [
-        "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"]
+        "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"]
 
 
 def test_decision_studio_registered_in_main_with_a_page_shell():

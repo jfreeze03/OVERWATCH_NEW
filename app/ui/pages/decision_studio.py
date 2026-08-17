@@ -21,6 +21,7 @@ from app.ui.decision_studio import (
     _experiments,
     _portfolio,
     _products,
+    _roi,
     _scenarios,
     _slos,
 )
@@ -39,7 +40,7 @@ def render() -> None:
         scope_note=f"{f['company']} · {f['window_label']}",
     )
     section = lazy_sections(
-        ["Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
+        ["ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
         key="decision_section",
     )
     # #13: each section declares which of the page filters it actually honors, instead
@@ -47,6 +48,9 @@ def render() -> None:
     # ignore them (SLO objectives carry their own windows; experiments are account-wide;
     # Scenarios scopes by Company only, with the horizon chosen in-panel).
     _contracts = {
+        "ROI": {"applies": (),
+                "note": "The savings ledger (verified $, realization, run-rate) is account-wide; "
+                        "the page Company/Window do not apply."},
         "Portfolio": {"applies": ("company", "days"),
                       "note": "Recurring-query portfolio scoped to Company and Window."},
         "SLOs": {"applies": (),
@@ -62,7 +66,9 @@ def render() -> None:
     }
     section_filter_contract(f, **_contracts[section])
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
-    if section == "Portfolio":
+    if section == "ROI":
+        _roi(company)
+    elif section == "Portfolio":
         _portfolio(company, days, rate)
     elif section == "SLOs":
         _slos()

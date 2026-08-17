@@ -10,13 +10,14 @@ from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
-from app.logic.actions import ledger_totals
+from app.logic.actions import ledger_totals, savings_by_lever, savings_by_month
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
 from app.logic.formulas import (
     account_now,
     blended_billed_usd,
     credits_to_usd,
     format_usd,
+    md_dollars,
     safe_float,
 )
 from app.logic.workbench import (
@@ -40,6 +41,7 @@ from app.ui.components import (
     notify,
     read_model_caption,
     result_caption,
+    section_header,
     selectable_nav_table,
     selectable_table,
     styled_table,
@@ -495,6 +497,69 @@ def _cost_truth(company: str, days: int) -> None:
     )
 
 
+def _roi(company: str) -> None:
+    """DS flagship (#40/#31/#19): the ROI / realization story, front and center — what
+    OVERWATCH has verifiably saved, how well the estimates held up, the monthly run-rate,
+    and which levers produced it. The director-facing proof that the loop closes. All from
+    the SAVINGS_LEDGER the app already books (no new source)."""
+    section_header("Return on OVERWATCH — verified savings", "info", "target")
+    st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
+               "not narrow to the Company filter.")
+    ledger = run(mart_sql.savings_ledger(), page=_PAGE, key="decision_roi_ledger",
+                 tier="recent", source="SAVINGS_LEDGER")
+    if not ledger.ok:
+        empty_state("needs_setup", "Apply the action layer (V051+) to book and verify savings.")
+        return
+    totals = ledger_totals(ledger.df)
+    _real = totals["realization_pct"]
+    _avgd = totals["avg_days_to_verify"]
+    kpi_row([
+        {"label": "Verified savings (all time)", "value": format_usd(totals["verified_usd"]),
+         "severity": "ok" if totals["verified_usd"] else "",
+         "help": "Measured, proof-backed savings booked to the ledger — never mixes in estimates."},
+        {"label": "Verified this quarter", "value": format_usd(totals["verified_qtd_usd"])},
+        {"label": "Realization rate",
+         "value": (f"{_real:,.0f}%" if _real is not None else "—"),
+         "delta": (f"{format_usd(totals['verified_usd'])} of "
+                   f"{format_usd(totals['verified_estimated_usd'])} estimated"
+                   if _real is not None else "nothing verified yet"),
+         "delta_color": "off",
+         "help": "Verified $ as a share of what those items were estimated to save — the honest "
+                 "estimate-vs-actual (verified items only). Near 100% means the estimates held up."},
+        {"label": "Open pipeline", "value": format_usd(totals["estimated_usd"]),
+         "delta": f"{totals['estimated_count']:,} item(s) awaiting proof", "delta_color": "off",
+         "help": "Estimated savings still unverified — the opportunity ahead. Verify them on "
+                 "Experiments (below) or Cost ▸ Optimize."},
+    ])
+    if totals["verified_usd"] > 0:
+        st.markdown(md_dollars(
+            f"OVERWATCH has verified **{format_usd(totals['verified_usd'])}** in savings across "
+            f"**{totals['verified_count']:,}** item(s)"
+            + (f", realizing **{_real:,.0f}%** of what they were estimated to save"
+               if _real is not None else "")
+            + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
+            + f" **{format_usd(totals['estimated_usd'])}** more is estimated, awaiting proof."))
+    else:
+        st.info(f"No savings verified yet — {format_usd(totals['estimated_usd'])} is estimated across "
+                f"{totals['estimated_count']:,} item(s). Verify optimizations on Experiments (below) "
+                "or Cost ▸ Optimize to start the track record.")
+
+    month_df = savings_by_month(ledger.df, 12)
+    lever_df = savings_by_lever(ledger.df)
+    if not month_df.empty:
+        st.markdown("**Verified-savings run-rate — by month**")
+        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "verified $ / month")
+    if not lever_df.empty:
+        st.markdown("**Where the realized savings come from — by lever**")
+        charts.bar_usd(lever_df, "LEVER", "VERIFIED_USD", "verified $ by lever", top_n=10)
+        styled_table(lever_df, height=220, column_config={
+            "VERIFIED_USD": st.column_config.NumberColumn("Verified $", format="$%.2f"),
+            "REALIZATION_PCT": st.column_config.NumberColumn("Realization %", format="%.0f%%"),
+            "ITEMS": st.column_config.NumberColumn("Items", format="%d"),
+        })
+    result_caption(ledger)
+
+
 def _scenarios(company: str) -> None:
     actions = run(
         workbench_sql.action_center(company, False, 500), page=_PAGE,
@@ -531,10 +596,6 @@ def _scenarios(company: str) -> None:
         confidence_floor=confidence,
     )
     has_candidates = projection["candidates"] > 0
-    ledger = run(
-        mart_sql.savings_ledger(), page=_PAGE, key="decision_scenario_ledger",
-        tier="recent", source="SAVINGS_LEDGER",
-    )
     kpi_row([
         {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
         {"label": "Gross authored estimate",
@@ -552,46 +613,10 @@ def _scenarios(company: str) -> None:
         "projection as an order-of-magnitude opportunity, not a strict run-rate. "
         "Verified savings never enter the projection."
     )
-
-    # DS flagship (#40/#31/#19): the realization story — the ledger's TRACK RECORD, not
-    # just a verified total. What was actually verified (all-time + this quarter), how
-    # that compares to what those items were estimated to save (realization rate), and how
-    # long verification takes. This is the director-facing proof the loop closes; the data
-    # already exists in the ledger (realization_pct shipped for Cost #9).
-    st.markdown("**Realization — the savings track record**")
-    st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
-               "not narrow to the Company filter (mirrors the Cost Truth BILLED card).")
-    if not ledger.ok:
-        empty_state("no_data_yet", f"Savings ledger read failed: {ledger.error}")
-    else:
-        totals = ledger_totals(ledger.df)
-        _real = totals["realization_pct"]
-        _avgd = totals["avg_days_to_verify"]
-        kpi_row([
-            {"label": "Verified savings (all time)",
-             "value": format_usd(totals["verified_usd"]),
-             "severity": "ok" if totals["verified_usd"] else ""},
-            {"label": "Verified this quarter",
-             "value": format_usd(totals["verified_qtd_usd"])},
-            {"label": "Realization rate",
-             "value": (f"{_real:,.0f}%" if _real is not None else "—"),
-             "delta": (f"{format_usd(totals['verified_usd'])} of "
-                       f"{format_usd(totals['verified_estimated_usd'])} estimated"
-                       if _real is not None else "nothing verified yet"),
-             "delta_color": "off",
-             "help": "Verified dollars as a share of what those verified items were "
-                     "originally estimated to save — the ledger's estimate-vs-actual "
-                     "track record (never mixes estimated and verified dollars)."},
-            {"label": "Avg time to verify",
-             "value": (f"{_avgd:g} d" if _avgd is not None else "—"),
-             "help": "Mean days from a savings item being booked to being verified."},
-        ])
-        st.caption(
-            f"The ledger has verified {totals['verified_count']:,} item(s) "
-            f"({format_usd(totals['verified_usd'])}) against {totals['estimated_count']:,} "
-            "still estimated. Realization is measured on verified items only — the honest "
-            "estimate-vs-actual — so a rate near 100% means the estimates held up."
-        )
+    # The realized track record (verified $, realization rate, run-rate, levers) is now
+    # its own first-class **ROI** section — Scenarios stays focused on the forward projection.
+    st.caption("→ Realized savings and the estimate-vs-actual track record are in the **ROI** "
+               "section (top of Decision Studio).")
     if not actions.empty:
         # DS #1: pin actions on watched entities to the top WITHIN their severity band, so a
         # watched entity's action surfaces first without burying a CRITICAL under a watched LOW.
