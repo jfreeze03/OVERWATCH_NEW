@@ -248,6 +248,11 @@ _EXPECTED_MIGRATIONS = {
         "un-snoozes early) so it leaves the triage feed with no read-path change; a wake "
         "step in the re-derived SP_ALERT_SCAN (from V084) returns expired snoozes to their "
         "prior status",
+    87: "Security finding -> monitored rule (CoCo Sec35): ALTER ALERT_CONFIG ADD "
+        "METRIC_NAME; SP_ALERT_SCAN re-derived from V086 with a generic arm [21] that "
+        "raises every enabled rule carrying a METRIC_NAME when its newest "
+        "MART_SECURITY_POSTURE_DAILY reading is at/over THRESHOLD_NUM. Operators generate "
+        "such rules from a Security finding (generate-INSERT UI); arm count 15->16",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

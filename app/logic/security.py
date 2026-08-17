@@ -7,7 +7,22 @@ from datetime import timedelta
 
 import pandas as pd
 
+from app.core.sqlsafe import sql_literal, sql_number
 from app.logic.formulas import account_today, safe_float
+
+# MART_SECURITY_POSTURE_DAILY metrics an operator can monitor (Sec35). All are counts
+# of problems (higher = worse), so a monitor fires on VALUE >= threshold.
+POSTURE_METRICS = (
+    "MFA_GAP_USERS",
+    "EXPIRED_CRED",
+    "EXPIRING_CRED_10D",
+    "ADMIN_STMTS_24H",
+    "GRANT_CHANGES_24H",
+    "UNUSED_ROLES_90D",
+    "BREAKGLASS_GRANTS_30D",
+    "WH_NO_MONITOR",
+    "WH_NO_AUTOSUSPEND",
+)
 
 SECURITY_DOMAINS = (
     "IDENTITY",
@@ -102,6 +117,47 @@ def security_change_risk(query_type: object, role: object = "", database: object
     score = min(100, score)
     level = "CRITICAL" if score >= 90 else ("HIGH" if score >= 70 else ("MEDIUM" if score >= 45 else "LOW"))
     return score, level, family
+
+
+def posture_alert_rule_sql(
+    metric: str, threshold: float, severity: str = "HIGH", owner: str = "DBA"
+) -> str:
+    """Generate an ALERT_CONFIG upsert that monitors a posture metric (Sec35).
+
+    The rule is raised by SP_ALERT_SCAN's generic posture arm (V087) whenever the
+    metric's newest MART_SECURITY_POSTURE_DAILY reading is at or over ``threshold``
+    (posture counts are higher = worse). This is an explicit operator action, so it is
+    an UPSERT: re-running with a new threshold/severity for the same metric UPDATES the
+    existing rule (and re-enables it) rather than silently no-op-ing — a WHEN-NOT-MATCHED
+    -only MERGE would report success while changing nothing. Raises ValueError on an
+    unknown metric or a non-positive threshold rather than emitting a malformed or
+    never-firing rule.
+    """
+    metric = str(metric or "").strip().upper()
+    if metric not in POSTURE_METRICS:
+        raise ValueError(f"unknown posture metric: {metric!r}")
+    thr = float(threshold)
+    if thr <= 0:
+        raise ValueError("threshold must be positive (posture metrics are counts)")
+    sev = str(severity or "HIGH").strip().upper()
+    if sev not in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"):
+        sev = "HIGH"
+    rule_id = f"SEC_POSTURE_{metric}"
+    name = f"Posture monitor: {metric} at/over {thr:g}"
+    return (
+        "MERGE INTO DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG t\n"
+        f"USING (SELECT {sql_literal(rule_id)} AS RULE_ID, 'SECURITY' AS FAMILY, "
+        f"{sql_literal(name)} AS NAME, TRUE AS ENABLED, {sql_literal(sev)} AS SEVERITY, "
+        f"{sql_number(thr)} AS THRESHOLD_NUM, 24 AS WINDOW_HOURS, "
+        f"{sql_literal(owner)} AS OWNER, {sql_literal(metric)} AS METRIC_NAME) s\n"
+        "ON t.RULE_ID = s.RULE_ID\n"
+        "WHEN MATCHED THEN UPDATE SET THRESHOLD_NUM = s.THRESHOLD_NUM, "
+        "SEVERITY = s.SEVERITY, NAME = s.NAME, ENABLED = TRUE, UPDATED_AT = CURRENT_TIMESTAMP()\n"
+        "WHEN NOT MATCHED THEN INSERT (RULE_ID, FAMILY, NAME, ENABLED, SEVERITY, "
+        "THRESHOLD_NUM, WINDOW_HOURS, OWNER, METRIC_NAME)\n"
+        "VALUES (s.RULE_ID, s.FAMILY, s.NAME, s.ENABLED, s.SEVERITY, s.THRESHOLD_NUM, "
+        "s.WINDOW_HOURS, s.OWNER, s.METRIC_NAME);"
+    )
 
 
 def escalation_flags(

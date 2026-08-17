@@ -18,9 +18,11 @@ from app.core.state import request_navigation
 from app.data import security_sql, workbench_sql
 from app.logic.formulas import account_today, safe_float
 from app.logic.security import (
+    POSTURE_METRICS,
     domain_posture,
     escalation_flags,
     grant_anomaly_flags,
+    posture_alert_rule_sql,
 )
 from app.logic.workbench import create_action_sql
 from app.ui.components import (
@@ -225,6 +227,33 @@ def render_security_overview(company: str) -> None:
                 # the only cue suppressing that).
                 if ok:
                     st.rerun()
+
+    if is_operator():
+        with st.expander("Monitor as a posture rule (Sec35)"):
+            st.caption(
+                "Turn this finding into a self-monitoring rule: pick the posture metric to "
+                "watch and a threshold, and generate an ALERT_CONFIG rule. The hourly scan "
+                "then re-alerts whenever that metric is at or over the threshold — so posture "
+                "degrading again pages, instead of relying on a one-off review. Upsert: "
+                "re-running for the same metric updates its threshold/severity."
+            )
+            _pm = st.selectbox("Posture metric", POSTURE_METRICS, key="sec_posture_metric")
+            _pt = st.number_input("Alert when the count is at or over", min_value=1, value=1,
+                                  step=1, key="sec_posture_threshold")
+            _psev = st.selectbox("Severity", ("HIGH", "CRITICAL", "MEDIUM", "LOW"),
+                                 index=0, key="sec_posture_sev")
+            try:
+                _prule = posture_alert_rule_sql(_pm, float(_pt), severity=_psev)
+            except ValueError as exc:
+                st.warning(str(exc))
+            else:
+                st.code(_prule, language="sql")
+                if is_operator() and st.button("Create posture monitor rule",
+                                               key="sec_posture_create"):
+                    ok, message = execute_statement(_prule, page=_PAGE)
+                    notify(ok, message)
+                    if ok:
+                        st.rerun()
 
 
 def _dot_text(value: object) -> str:
