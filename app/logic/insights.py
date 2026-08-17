@@ -7,7 +7,7 @@ from math import ceil
 
 import pandas as pd
 
-from .formulas import humanize_duration, safe_div, safe_float
+from .formulas import credits_to_usd, humanize_duration, safe_div, safe_float
 
 # ---- 1. Idle warehouse advisor ---------------------------------------------
 
@@ -54,6 +54,33 @@ def with_auto_suspend_settings(idle: pd.DataFrame, warehouses: pd.DataFrame) -> 
     out["AUTO_SUSPEND"] = pd.to_numeric(mapped, errors="coerce").astype("Float64")
     out["AUTO_SUSPEND_KNOWN"] = out["AUTO_SUSPEND"].notna()
     return out
+
+
+def idle_waste_summary(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> dict:
+    """Account/company roll-up of idle warehouse waste (repo review wave 3) — the
+    single headline "$ burned in warehouse-hours with zero queries" number, priced.
+
+    ``df`` is the RAW idle frame (idle_warehouse_analysis / eff_idle_analysis):
+    TOTAL_CREDITS + IDLE_CREDITS per warehouse. GROSS idle $ (never call it
+    "savings" — the recoverable net, after the resume/suspend tail, is idle_advisor's
+    ACTIONABLE). ``window_days`` should be served_days(res, days) so the /day*30
+    projection isn't ~4x low when the live path clamped to 90d. Cheap + testable."""
+    empty = {"IDLE_USD": 0.0, "IDLE_SHARE_PCT": 0.0, "PROJECTED_MONTHLY_USD": 0.0,
+             "TOTAL_USD": 0.0, "WAREHOUSES": 0}
+    if df is None or df.empty:
+        return empty
+    idle_cr = float(pd.to_numeric(df.get("IDLE_CREDITS"), errors="coerce").fillna(0).sum())
+    total_cr = float(pd.to_numeric(df.get("TOTAL_CREDITS"), errors="coerce").fillna(0).sum())
+    rate = safe_float(credit_rate_usd, 3.68)
+    days = max(int(window_days or 1), 1)
+    idle_usd = round(credits_to_usd(idle_cr, rate), 2)
+    return {
+        "IDLE_USD": idle_usd,
+        "IDLE_SHARE_PCT": round(safe_div(idle_cr, total_cr) * 100, 1),
+        "PROJECTED_MONTHLY_USD": round(idle_usd / days * 30, 2),
+        "TOTAL_USD": round(credits_to_usd(total_cr, rate), 2),
+        "WAREHOUSES": len(df),
+    }
 
 
 def idle_advisor(df: pd.DataFrame, credit_rate_usd: float, window_days: int) -> pd.DataFrame:

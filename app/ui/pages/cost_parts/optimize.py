@@ -38,6 +38,7 @@ from app.logic.insights import (
     flag_repeat_candidates,
     idle_advisor,
     idle_suspend_sql,
+    idle_waste_summary,
     repeat_min_runs,
     storage_movers,
     with_auto_suspend_settings,
@@ -231,6 +232,31 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     """Optimization insights: idle/right-sizing advisors, expensive queries and
     patterns, the object-cost ledger, efficiency/storage/clustering scans, and
     guarded remediation."""
+    # Wave 3: the idle-credit-waste HEADLINE — the single account/company "$ burned in
+    # zero-query warehouse-hours" number, above the sub-tabs (per-WH detail is in Idle &
+    # sizing below; the identical SQL shares one cached scan). GROSS idle, never "savings".
+    _idle_head = run_mart_first(
+        mart27_sql.eff_idle_analysis(days, company),
+        insights_sql.idle_warehouse_analysis(days, company),
+        page=_PAGE, key=f"idle_{company}_{days}", days=days,
+        mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
+        live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
+    if _idle_head.ok and not _idle_head.empty:
+        _iw_days = served_days(_idle_head, days)
+        _iw = idle_waste_summary(_idle_head.df, rate, _iw_days)
+        kpi_row([
+            {"label": f"Idle credit waste ({_iw_days}d)", "value": format_usd(_iw["IDLE_USD"]),
+             "severity": "warn" if _iw["IDLE_SHARE_PCT"] >= 20 else "",
+             "help": "Credits billed in warehouse-hours with ZERO queries, priced at the configured "
+                     "rate — the account-level auto-suspend opportunity. GROSS idle (the recoverable "
+                     "net, after the resume/suspend tail, is 'Actionable via timer' in Idle & sizing "
+                     "below). This is the SAME figure as 'Idle spend' inside Idle & sizing — the "
+                     "headline, detailed there. Top-100 warehouses by idle."},
+            {"label": "Idle share of WH credits", "value": f"{_iw['IDLE_SHARE_PCT']:.1f}%",
+             "help": "Idle credits / total warehouse credits this window."},
+            {"label": "Projected monthly", "value": format_usd(_iw["PROJECTED_MONTHLY_USD"]),
+             "help": "Gross idle, monthly-ized. Recoverable/actionable net is in Idle & sizing."},
+        ])
     opt_section = lazy_sections(["Idle & sizing", "Queries & patterns", "Storage & waste", "Remediation & ledger"], key="opt_section", deep_link=False)
 
     if opt_section == "Idle & sizing":

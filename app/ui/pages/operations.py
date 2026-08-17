@@ -1337,11 +1337,19 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
         import pandas as pd
         _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="jump_wh",
                    tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+        from app.logic.cost_peers import cost_per_query_peers
+        from app.logic.wh_health import warehouse_health
         _sized = size_recommendations(
             with_auto_suspend_settings(
                 _prof.df, _whs.df if _whs.ok and not _whs.empty else pd.DataFrame()),
             rate, served_days(_prof, days))
         _sum = sizing_summary(_sized)
+        # Wave 3: per-warehouse health chip — a transparent 0-100 grade (base 100 minus
+        # capped queue/spill/runtime/low-util penalties) joined onto the sizing table.
+        _health = warehouse_health(_sized)
+        if not _health.empty:
+            _sized = _sized.merge(_health[["WAREHOUSE_NAME", "SCORE", "GRADE", "WHY"]],
+                                  on="WAREHOUSE_NAME", how="left")
         kpi_row([
             {"label": "Size up / add cluster", "value": f"{_sum['up']}",
              "delta_color": "inverse" if _sum["up"] else "off"},
@@ -1349,16 +1357,47 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
             {"label": "Size-down candidates", "value": f"{_sum['down']}"},
             {"label": "Idle spend on those", "value": format_usd(_sum["idle_saving_usd"])},
         ])
-        _cols = [c for c in ["WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "IDLE_PCT",
-                             "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "ACTIVE_DAYS_PER_30D",
-                             "P95_ELAPSED_SEC", "MONTHLY_USD_NOW"] if c in _sized.columns]
+        _cols = [c for c in ["WAREHOUSE_NAME", "SCORE", "GRADE", "RECOMMENDATION", "WHY",
+                             "IDLE_PCT", "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY",
+                             "ACTIVE_DAYS_PER_30D", "P95_ELAPSED_SEC", "MONTHLY_USD_NOW"]
+                 if c in _sized.columns]
         entity_nav_table(_sized[_cols], key=f"ops_wh_sizing_tbl_{company}", key_col="WAREHOUSE_NAME",
                          entity_type="WAREHOUSE", column_config={
+                             "SCORE": st.column_config.NumberColumn("Health", format="%d"),
+                             "WHY": st.column_config.TextColumn("Health penalties"),
                              "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
                              "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
                          })
-        st.caption("Diagnostic only — generate the ALTER and book the saving on "
-                   "Cost & Contract → Optimize → Idle & sizing.")
+        st.caption("Health = 100 − capped penalties for queueing, remote spill, long p95 runtime, "
+                   "and low utilization (evidence-gated). On the mart path p95 is the PEAK-DAY "
+                   "value (one bad day penalizes), not the window p95. Diagnostic only — generate "
+                   "the ALTER and book the saving on Cost & Contract → Optimize → Idle & sizing.")
+
+        # Wave 3: cost-per-query outliers — cross-sectional (peer) z-score of $/query
+        # against the fleet, from the same cached profile (no new scan).
+        _peers = cost_per_query_peers(_prof.df, rate)
+        if not _peers.empty:
+            _out = _peers[_peers["IS_OUTLIER"]]
+            section_header("Cost-per-query outliers (vs the fleet)", "info", "warehouse",
+                           anchor="ops-wh-peers")
+            kpi_row([
+                {"label": "Warehouses compared", "value": f"{len(_peers):,}"},
+                {"label": "Cost-per-query outliers", "value": f"{len(_out):,}",
+                 "severity": "warn" if len(_out) else "",
+                 "help": "Warehouses whose $/query is a robust-z outlier (≥3.5, median/MAD) vs their "
+                         "company's fleet — 'costs far more per query than its peers'. Materiality "
+                         "floor: ≥100 queries and ≥1 credit. Needs ≥5 material warehouses to z-score; "
+                         "on a smaller fleet nothing flags — read the × fleet-median column instead."},
+            ])
+            styled_table(_peers.head(50), height=260, column_config={
+                "USD_PER_QUERY": st.column_config.NumberColumn("$/query", format="$%.4f"),
+                "MULT_OF_MEDIAN": st.column_config.NumberColumn("× fleet median", format="%.1fx"),
+                "Z_SCORE": st.column_config.NumberColumn("Peer z", format="%.1f"),
+                "QUERY_COUNT": st.column_config.NumberColumn("Queries", format="%d"),
+            })
+            st.caption("Cross-sectional (not temporal): each warehouse's $/query vs its company "
+                       "fleet's median. A high multiple points at an oversized or under-utilized "
+                       "warehouse for its workload — cross-check the right-size verdict above.")
 
     # O13: quiet-hours (off-hours schedule opportunity) — the hour-of-day view +
     # a per-warehouse quiet-window verdict, reusing the Cost-side reader.

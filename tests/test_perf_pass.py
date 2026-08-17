@@ -19,12 +19,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 def test_idle_scan_runs_once_per_hour_not_twice():
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    # v4.35.0 (r20 #1): BOTH sites use run_mart_first with the IDENTICAL
-    # builder pair — mart and live reads each share one cache identity, so
-    # the advisor's fetch serves the remediation block too.
-    assert src.count("mart27_sql.eff_idle_analysis(days, company)") == 2
-    assert src.count("insights_sql.idle_warehouse_analysis(days, company)") == 2
-    assert src.count("idle_warehouse_analysis(") == 2
+    # v4.35.0 (r20 #1) + v4.254 wave-3: THREE sites (advisor, remediation, and the
+    # idle-waste headline above the sub-tabs) use run_mart_first with the IDENTICAL
+    # builder pair — mart and live reads each share one cache identity, so the whole
+    # tab pays for ONE idle scan per hour no matter how many sites read it.
+    assert src.count("mart27_sql.eff_idle_analysis(days, company)") == 3
+    assert src.count("insights_sql.idle_warehouse_analysis(days, company)") == 3
+    assert src.count("idle_warehouse_analysis(") == 3
 
 
 # ---------------------------------------------------------------------------

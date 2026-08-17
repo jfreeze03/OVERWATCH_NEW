@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.254.0 - Wave-3 remainder: idle-waste KPI, per-WH health chip, peer z-score (2026-08-17)
+
+The last three repo-review efficiency lenses, all reusing already-cached warehouse
+reads (no new scans). Scouted + designed by a 3-agent workflow; the two novel scorers
+adversarially reviewed pre-commit.
+
+- **Idle-credit-waste headline** (Cost > Optimize, above the sub-tabs): the single
+  account/company "$ burned in zero-query warehouse-hours" number, priced, with idle
+  share and a monthly projection. Promotes what was buried in the Idle & sizing sub-tab.
+- **Per-warehouse health chip** (Operations > Warehouses): a transparent 0-100 grade =
+  100 − capped penalties for queueing / remote spill / long p95 runtime / low utilization
+  (evidence-gated), naming which penalty fired. New app/logic/wh_health.py.
+- **Cost-per-query peer z-score** (Operations > Warehouses): cross-sectional (within-
+  company) robust z-score of $/query vs the fleet — "this warehouse costs 3.4x the
+  fleet median per query". New app/logic/cost_peers.py; a materiality floor drops
+  trivial warehouses.
+- Review fixes: an integration test now pipes real size_recommendations output through
+  the health chip (locks the column contract so a rename can't silently disarm a
+  penalty); peer table sorts by multiple-of-median as a small-fleet fallback (z needs
+  >=5); disclosed the mart peak-daily p95 and the >=5-warehouse z requirement.
+
+App version 4.254.0.
+
+
 ## 4.253.0 - Wave-3: adaptive-compute candidacy score (2026-08-17)
 
 Repo-review "What to Borrow" wave 3 (efficiency lenses). Which warehouses would
