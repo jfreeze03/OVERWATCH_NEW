@@ -13,8 +13,8 @@
 -- that ran and stopped), which is the real dead-man signal on re-runs / DR.
 
 WITH checks AS (
-    SELECT 'V001..V083 applied' AS CHECK_NAME,
-           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 83) = 83,
+    SELECT 'V001..V084 applied' AS CHECK_NAME,
+           IFF((SELECT COUNT(DISTINCT VERSION) FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION BETWEEN 1 AND 84) = 84,
                'OK', 'FAIL: run missing migrations') AS RESULT
     UNION ALL
     SELECT 'Settings seeded',
@@ -126,8 +126,9 @@ WITH checks AS (
                'OK', 'FAIL: an enabled route has no integration — alerts drop silently')
     UNION ALL
     -- 29 = full seeded rule set across V001..V072 (V004 seeds 7; V007/V009/
-    -- V010/V011/V012/V014/V016/V017/V024/V043/V061 add rules; V034 retires
-    -- SEC_BREAK_GLASS_USE). Floor, not exact, so a future rule cannot break CI.
+    -- V010/V011/V012/V014/V016/V017/V024/V043/V061 add rules; V084 adds
+    -- SEC_NEW_EXPOSURE; V034 retires SEC_BREAK_GLASS_USE). Floor, not exact, so a
+    -- future rule cannot break CI.
     SELECT 'ALERT_CONFIG rule count >= 29 (full seed)',
            IFF((SELECT COUNT(*) FROM DBA_MAINT_DB.OVERWATCH.ALERT_CONFIG) >= 29,
                'OK', 'FAIL: expected >= 29 rules — seed incomplete')
@@ -171,7 +172,7 @@ DECLARE
     n_procs      INT;
     freshness_sla_days INT DEFAULT 3;   -- loader dead-man SLA (ACCOUNT_USAGE lag-aware)
 
-    e_migrations  EXCEPTION (-20011, 'VALIDATE FAIL: V001..V083 migration floor not met — run missing migrations');
+    e_migrations  EXCEPTION (-20011, 'VALIDATE FAIL: V001..V084 migration floor not met — run missing migrations');
     e_rate_pos    EXCEPTION (-20012, 'VALIDATE FAIL: CREDIT_PRICE_USD is <= 0 or non-numeric — everything prices to $0');
     e_rate_368    EXCEPTION (-20013, 'VALIDATE FAIL: CREDIT_PRICE_USD != 3.68 and no CREDIT_PRICE_OVERRIDE flag — seed SETTINGS(''CREDIT_PRICE_OVERRIDE'',''TRUE'') to run a non-default rate on purpose');
     e_meter_fresh EXCEPTION (-20014, 'VALIDATE FAIL: FACT_METERING_DAILY newest DAY older than the freshness SLA — the metering loader has stalled (empty passes: nothing loaded yet)');
@@ -180,11 +181,11 @@ DECLARE
     e_alert_cfg   EXCEPTION (-20017, 'VALIDATE FAIL: ALERT_CONFIG rule count below the expected floor (29) — the rule seed is incomplete');
     e_procs       EXCEPTION (-20018, 'VALIDATE FAIL: a key platform/security proc is missing');
 BEGIN
-    -- (a) migration floor: V001..V083 all applied.
+    -- (a) migration floor: V001..V084 all applied.
     SELECT COUNT(DISTINCT VERSION) INTO :n_versions
       FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION
-     WHERE VERSION BETWEEN 1 AND 83;
-    IF (n_versions < 83) THEN RAISE e_migrations; END IF;
+     WHERE VERSION BETWEEN 1 AND 84;
+    IF (n_versions < 84) THEN RAISE e_migrations; END IF;
 
     -- (b) credit rate is a positive number.
     SELECT TRY_TO_DOUBLE(VALUE) INTO :v_rate

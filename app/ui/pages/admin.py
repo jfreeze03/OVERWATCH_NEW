@@ -233,6 +233,10 @@ _EXPECTED_MIGRATIONS = {
         "column labeling the time basis of ESTIMATED_USD (MONTHLY / ANNUAL / ONE_TIME; "
         "NULL = unspecified) so authored estimates on different clocks are no longer "
         "summed as one number; the app stamps it at both writers and surfaces it",
+    84: "SEC_NEW_EXPOSURE proactive alert (CoCo Sec36): seeds a SECURITY rule and adds "
+        "arm [20] to SP_ALERT_SCAN that raises a HIGH alert when a new privilege was "
+        "granted to PUBLIC in the last 24h (inherited by every role), reading "
+        "GRANTS_TO_ROLES; re-derives SP_ALERT_SCAN from V079 (no table/task change)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
