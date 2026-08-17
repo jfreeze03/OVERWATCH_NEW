@@ -84,9 +84,11 @@ _REACHABLE = {
         # rec#17: + WAREHOUSE_METERING_HISTORY — the wasted-spend board
         # (wasted_query_spend_usd) allocates warehouse-hour credits to non-success
         # queries, click-gated in the Queries tab.
+        # v4.247 (repo wave-2): + QUERY_INSIGHTS — Snowflake-authored suggestion
+        # feed on the Queries tab (probe-gated optional view, historical-cached).
         "COPY_HISTORY", "DYNAMIC_TABLE_REFRESH_HISTORY", "LOCK_WAIT_HISTORY",
-        "QUERY_HISTORY", "TABLE_DML_HISTORY", "TASKS", "TASK_HISTORY", "TASK_VERSIONS",
-        "WAREHOUSE_LOAD_HISTORY", "WAREHOUSE_METERING_HISTORY"),
+        "QUERY_HISTORY", "QUERY_INSIGHTS", "TABLE_DML_HISTORY", "TASKS", "TASK_HISTORY",
+        "TASK_VERSIONS", "WAREHOUSE_LOAD_HISTORY", "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/security.py": (
         # v4.187: + ACCESS_HISTORY & TABLE_STORAGE_METRICS for the least-privilege
         # tab (rec#24) — held table grants vs. objects queries actually touched.

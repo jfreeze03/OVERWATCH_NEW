@@ -995,8 +995,10 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     section_header("Recent grant changes", "info", "security", anchor="sec-grant-changes")
     _gc_days = st.selectbox("Window", [7, 30, 90, 180], index=1, key="sec_grant_days",
                             format_func=lambda d: f"last {d} days")
+    # tier=historical (owner telemetry 2026-08-17: this union scans GRANTS_TO_ROLES
+    # twice and measured 1-2 min — the long-TTL cache tier, not hourly).
     gc = run(security_sql.recent_grant_changes(int(_gc_days), company), page=_PAGE,
-             key=f"grant_changes_feed_{company}_{_gc_days}", tier="hourly",
+             key=f"grant_changes_feed_{company}_{_gc_days}", tier="historical",
              source="ACCOUNT_USAGE.GRANTS_TO_USERS + GRANTS_TO_ROLES")
     if gc.ok and gc.empty:
         st.success(f"No grant or revoke changes in the last {_gc_days} days.")

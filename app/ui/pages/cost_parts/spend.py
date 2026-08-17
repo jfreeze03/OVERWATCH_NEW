@@ -895,6 +895,30 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:
         st.caption("Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
+    # Repo review wave 2: Snowflake's managed ML anomaly feed as an INDEPENDENT
+    # second opinion beside the z-score sweep above. Optional (SNOWFLAKE.LOCAL),
+    # probe-gated; schema renders as-is on purpose (raw honesty over guessed cols).
+    # TOGGLE, not expander (review #2 + cost.py's own rule): an expander body runs
+    # every rerun, and a failed probe is never cached — an account without the
+    # feed would pay a failing round-trip on every default-paint rerun.
+    if st.toggle("Second opinion — Snowflake's native anomaly feed", key="native_anom_toggle",
+                 help="Reads SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS (Snowflake's managed "
+                      "cost-anomaly model) on demand, beside the z-score sweep above."):
+        na = run(cost_sql.native_anomaly_insights(), page=_PAGE, key="native_anomalies",
+                 tier="historical", source="SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS", probe=True)
+        if not na.ok:
+            st.caption("The native ANOMALY_INSIGHTS feed isn't available on this account yet "
+                       "(it appears once Snowflake's cost-anomaly detection is active). The "
+                       "z-score sweep above still runs.")
+        elif na.empty:
+            st.success("Snowflake's native model reports no cost anomalies.")
+        else:
+            styled_table(na.df, height=240)
+            st.caption("Snowflake's own ML anomaly verdicts, raw. A day flagged by BOTH this "
+                       "feed and the z-score sweep above is high-confidence; native-only rows "
+                       "catch multi-factor/seasonal shifts the z-score misses; z-score-only "
+                       "flags are tuning candidates.")
+            result_caption(na)
 
 
 def _account_storage_tiers(company: str, days: int, settings: dict) -> None:

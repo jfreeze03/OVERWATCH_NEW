@@ -1207,7 +1207,14 @@ f_q AS (
     FROM {core_object("FACT_QUERY_HOURLY")}
     WHERE HOUR_TS >= DATEADD('day', -9, CURRENT_DATE())
       AND HOUR_TS <  DATEADD('day', -2, CURRENT_DATE())
-      AND WAREHOUSE_NAME IS NOT NULL
+      -- Hardened vs BOTH warehouse-less conventions (owner screenshot 2026-08-17:
+      -- +93.13% BAD): repo loaders write NULL here (excluded by NOT IN's NULL
+      -- semantics, same as the old IS NOT NULL), while sibling facts/backfills
+      -- use the STRING 'NONE' — if any such fill ever touched this table, IS NOT
+      -- NULL excluded nothing. Root cause of the observed drift is UNCONFIRMED
+      -- from repo code alone; if it persists past this hardening, the fact side
+      -- is genuinely over-counting (dedup/overlap) — investigate the loader.
+      AND UPPER(WAREHOUSE_NAME) NOT IN ('NONE', 'CLOUD_SERVICES_ONLY')
 ),
 l_q AS (
     SELECT COUNT(*) AS V

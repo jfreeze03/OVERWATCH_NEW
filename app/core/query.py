@@ -205,6 +205,12 @@ def _classify_error(exc: object) -> str:
         return "absent"
     if "unknown function" in s:
         return "unknown_function"
+    # wave-2 review #3: an optional COLUMN missing on an EXISTING view (the
+    # documented degrade path for TOKENS_GRANULAR / QUERY_INSIGHTS schema drift)
+    # is a compilation "invalid identifier" — a probe read must treat it like
+    # an absent object, not error-log it on every render.
+    if "invalid identifier" in s:
+        return "missing_column"
     if "statement reached its statement or warehouse timeout" in s or "timeout" in s:
         return "timeout"
     return "other"
@@ -961,7 +967,7 @@ def run(
     except Exception as exc:
         elapsed = (time.perf_counter() - started) * 1000
         kind = _classify_error(exc)
-        _expected_absence = probe and kind in ("absent", "unknown_function")
+        _expected_absence = probe and kind in ("absent", "unknown_function", "missing_column")
         if not _expected_absence:
             _telemetry(page, tier, key, elapsed, 0, ok=False)
             record_error(page, exc, context=f"query key={key} tier={tier}")

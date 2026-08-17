@@ -383,6 +383,30 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 column_config={"WASTED_USD": st.column_config.NumberColumn("Wasted $", format="$%.2f")})
             result_caption(waste, note="allocated by execution-second share; non-success queries only")
 
+    _query_insights_panel()
+
+
+def _query_insights_panel() -> None:
+    """Snowflake-authored query improvement suggestions (repo review wave 2:
+    QUERY_INSIGHTS) — free, vendor-written fixes beside our own heuristics.
+    Optional view: probe-gated, honest not-available state."""
+    section_header("Query insights (Snowflake-authored)", "info", "search")
+    qi = run(insights_sql.query_insights_feed(7), page=_PAGE, key="query_insights_7",
+             tier="historical", source="ACCOUNT_USAGE.QUERY_INSIGHTS", probe=True)
+    if not qi.ok:
+        st.caption("QUERY_INSIGHTS isn't available on this account/edition yet — "
+                   "when Snowflake exposes it, its own per-query suggestions appear "
+                   "here automatically.")
+        return
+    if qi.empty:
+        st.success("Snowflake recorded no query-improvement insights in the last 7 days.")
+        return
+    styled_table(qi.df, height=260)
+    st.caption("Snowflake's OWN analysis of your queries (account-wide, 7d) — each row is a "
+               "repeated improvement opportunity the engine itself identified; treat the "
+               "sample message as the fix hint. Complements the family heuristics above.")
+    result_caption(qi)
+
 
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
                               known_failures: float | None = None) -> None:
@@ -1370,6 +1394,51 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
             st.caption("No warehouse has a recurring 4h+ window burning credits with ~no queries "
                        "(sparse or all-day-idle profiles route to auto-suspend instead).")
         result_caption(_hh)
+
+    _monitor_coverage_panel()
+
+
+def _monitor_coverage_panel() -> None:
+    """Resource-monitor coverage map (repo review wave 2): the app can't CREATE
+    monitors (read-only), but it CAN show which warehouses run with NO spend cap
+    at all — the governance blind spot Snowsight never rolls up."""
+    from app.logic.wave2 import monitor_coverage
+
+    section_header("Resource-monitor coverage", "warn", "cost")
+    _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="rmcov_wh",
+               tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
+    _mons = run(ops_sql.show_resource_monitors_sql(), page=_PAGE, key="rmcov_mons",
+                tier="metadata", source="SHOW RESOURCE MONITORS", max_rows=0, probe=True)
+    if not _whs.ok:
+        st.caption("SHOW WAREHOUSES failed — coverage can't be assessed this pass.")
+        return
+    cov = monitor_coverage(_whs.df, _mons.df if _mons.ok else None)
+    # Review #4: a LEVEL=ACCOUNT monitor caps every warehouse — per-warehouse
+    # non-assignment is then a detail, not an "uncapped" alarm.
+    _acct = bool(cov.get("account_monitor"))
+    _unc_label = ("No dedicated monitor (account cap applies)" if _acct
+                  else "No monitor — uncapped")
+    kpi_row([
+        {"label": "Warehouses with a monitor", "value": f"{cov['covered']:,}"},
+        {"label": _unc_label, "value": f"{cov['uncovered']:,}",
+         "delta_color": "off" if _acct else ("inverse" if cov["uncovered"] else "off"),
+         "help": ("An ACCOUNT-level monitor caps all warehouses; these just lack a "
+                  "dedicated per-warehouse quota." if _acct else
+                  "No resource monitor = no credit quota, no suspend threshold — a runaway "
+                  "workload on these has no automatic ceiling. Monitors are created by an "
+                  "admin in Snowsight; this map is the coverage picture for monitors this "
+                  "role can see.")},
+    ])
+    if cov["uncovered_names"] and not _acct:
+        st.warning("Uncapped warehouses: " + ", ".join(cov["uncovered_names"][:20])
+                   + (" …" if len(cov["uncovered_names"]) > 20 else ""))
+    if not cov["monitors_df"].empty:
+        st.markdown("**Existing monitors — quota consumed**")
+        styled_table(cov["monitors_df"], height=200)
+    elif _mons.ok:
+        st.caption("No resource monitors are visible to this role (SHOW returns only "
+                   "monitors it can MONITOR) — none may exist, or the grant is missing.")
+    result_caption(_whs)
 
 
 def _contention_tab(company: str, days: int) -> None:

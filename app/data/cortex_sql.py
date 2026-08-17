@@ -245,3 +245,34 @@ WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1
 ORDER BY DAY
 """
+
+
+def cortex_code_token_types(days: int = 30) -> str:
+    """Per-user token-TYPE decomposition (repo review wave 2: TOKENS_GRANULAR)
+    — input / output / cache_read / cache_write — the prompt-cache-efficiency
+    lens raw token totals can't show.
+
+    OPTIONAL column (newer view versions; VARIANT shape may drift) — callers
+    MUST pass probe=True and degrade honestly to the token-total view."""
+    days = bounded_days(days)
+    return f"""
+WITH combined AS (
+    SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
+    WHERE USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    UNION ALL
+    SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
+    FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
+    WHERE USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+)
+SELECT
+    COALESCE(U.NAME, 'UNKNOWN (' || C.USER_ID || ')') AS USER_NAME,
+    LOWER(F.VALUE:token_type::VARCHAR) AS TOKEN_TYPE,
+    SUM(COALESCE(TRY_TO_NUMBER(TO_VARCHAR(F.VALUE:tokens)), 0)) AS TOKENS
+FROM combined C,
+     LATERAL FLATTEN(INPUT => C.TOKENS_GRANULAR) F
+LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U ON C.USER_ID = U.USER_ID
+GROUP BY 1, 2
+ORDER BY USER_NAME, TOKEN_TYPE
+LIMIT 20000
+"""

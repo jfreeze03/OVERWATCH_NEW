@@ -275,6 +275,49 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
+    _token_economics_panel()
+
+
+def _token_economics_panel() -> None:
+    """Prompt-cache economics (repo review wave 2: TOKENS_GRANULAR) — the lever
+    raw token totals can't show. Optional column on newer view versions: the
+    toggle keeps the flatten off the default paint, and a schema miss degrades
+    to an honest not-available note."""
+    from app.logic.wave2 import fleet_cache_hit_pct, token_economics
+
+    if not st.toggle("Load token economics (cache efficiency)", key="cortex_tok_econ",
+                     help="Flattens TOKENS_GRANULAR (input / output / cache-read / "
+                          "cache-write) per user — on demand; needs the newer view shape."):
+        return
+    te_res = run(cortex_sql.cortex_code_token_types(30), page=_PAGE, key="cortex_token_types",
+                 tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
+                 probe=True)
+    if not te_res.ok:
+        st.caption("TOKENS_GRANULAR isn't available on this account's Cortex Code views yet — "
+                   "token-type economics appear here automatically once the column exists.")
+        return
+    econ = token_economics(te_res.df)
+    if econ.empty:
+        st.info("No token-type rows in the last 30 days.")
+        return
+    _fleet = fleet_cache_hit_pct(econ)
+    kpi_row([
+        {"label": "Fleet cache-hit", "value": f"{_fleet:.1f}%",
+         "delta_color": "normal" if _fleet >= 50 else "off",
+         "help": "cache_read / (cache_read + input), token-weighted across users — the share "
+                 "of prompt context served from cache instead of re-sent (cached reads bill "
+                 "far cheaper than fresh input)."},
+        {"label": "Users measured", "value": f"{len(econ):,}"},
+    ])
+    styled_table(with_user_names(econ, _PAGE), height=300, column_config={
+        "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
+    })
+    st.caption("Low cache-hit heavy users are the efficiency lever: repeated context re-sent "
+               "as fresh input tokens that caching would serve at a fraction of the price. "
+               "30d, account-wide token grain.")
+    result_caption(te_res)
+
+
 @st.fragment
 def _statement_export(company: str, rate: float) -> None:
     """Fragment: month picks and the zip build rerun this block only."""

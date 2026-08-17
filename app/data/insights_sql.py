@@ -1404,3 +1404,26 @@ GROUP BY 1
 ORDER BY CREDITS DESC
 LIMIT 25
 """
+
+
+def query_insights_feed(days: int = 7) -> str:
+    """Snowflake's OWN per-query improvement suggestions (repo review wave 2:
+    QUERY_INSIGHTS) rolled up by insight type — free, vendor-authored fixes for
+    repeated anti-patterns, beside our home-grown family heuristics.
+
+    OPTIONAL view (newer accounts/editions; schema may drift) — callers MUST
+    pass probe=True and degrade honestly. Columns kept minimal on purpose."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    INSIGHT_TYPE_ID AS INSIGHT_TYPE,
+    COUNT(*) AS OCCURRENCES,
+    COUNT(DISTINCT QUERY_ID) AS QUERIES,
+    ANY_VALUE(MESSAGE) AS SAMPLE_MESSAGE,
+    MAX(START_TIME) AS LAST_SEEN
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_INSIGHTS
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1
+ORDER BY OCCURRENCES DESC
+LIMIT 50
+"""

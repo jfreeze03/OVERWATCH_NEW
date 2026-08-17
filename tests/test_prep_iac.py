@@ -85,7 +85,7 @@ def test_admin_panel_degrades_honestly_without_flyway():
     q = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
     # r10 #4 evolution: markers live in ONE raw-text classifier now — the
     # friendly formatter had erased them for downstream string checks.
-    assert 'kind in ("absent", "unknown_function")' in q           # probe uses typed kinds
+    assert 'kind in ("absent", "unknown_function", "missing_column")' in q  # probe uses typed kinds (v4.247: +missing_column)
     cls = q.split("def _classify_error", 1)[1].split("\ndef ", 1)[0]
     assert "does not exist or not authorized" in cls
     assert "unknown function" in cls                               # gated-view class (002139)

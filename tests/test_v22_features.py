@@ -108,10 +108,12 @@ def test_mart_recon_two_checks():
     assert sql.count("DRIFT_PCT") >= 1 and "UNION ALL" in sql
     assert "METERING_DAILY_HISTORY" in sql and "FACT_METERING_DAILY" in sql
     assert "FACT_QUERY_HOURLY" in sql
-    # v4.147: both query-count sides count warehouse-bound queries only. The
-    # hourly fact retains warehouse-less USE/SHOW/DESCRIBE rows; without matching
-    # the live side's filter the check read a permanent ~+97% false drift.
-    assert sql.count("WAREHOUSE_NAME IS NOT NULL") == 2
+    # v4.147/v4.247: both query-count sides count warehouse-bound queries only.
+    # The fact side is hardened vs BOTH warehouse-less conventions (NULL from the
+    # repo loaders, the STRING 'NONE' from sibling fills) — see mart_vs_live_recon;
+    # the +93% drift's root cause is unconfirmed from repo code alone.
+    assert sql.count("WAREHOUSE_NAME IS NOT NULL") == 1        # live side
+    assert "UPPER(WAREHOUSE_NAME) NOT IN ('NONE', 'CLOUD_SERVICES_ONLY')" in sql  # fact side
 
 
 def test_fleet_stats_clamps():

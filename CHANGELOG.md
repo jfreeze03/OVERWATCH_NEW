@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.247.0 - Repo-review wave 2: second opinions, coverage maps, token economics (2026-08-17)
+
+Four adoptions from the external-repo review, every read probe-gated with an honest
+degrade (all four sources are optional or schema-uncertain on this account), plus the
+mart-recon false-drift fix and review hardenings.
+
+- **Cost ▸ Spend — native anomaly second opinion** (toggle). Snowflake's managed ML
+  cost-anomaly feed (`SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS`) beside our z-score sweep:
+  both-flag = high confidence; native-only = what the z-score misses; ours-only = a
+  tuning candidate. Raw render on purpose (schema-uncertain).
+- **Operations ▸ Queries — Snowflake-authored query insights.** `QUERY_INSIGHTS` rolled
+  up by insight type — the engine's own repeated improvement suggestions beside our
+  family heuristics.
+- **Operations ▸ Warehouses — resource-monitor coverage.** Which warehouses run with NO
+  spend cap (and each monitor's % consumed). Understands ACCOUNT-level monitors (an
+  account cap suppresses the "uncapped" alarm) and the SHOW-privilege caveat.
+- **Cost ▸ Chargeback & AI — token economics** (toggle). `TOKENS_GRANULAR` flattened to
+  input / output / cache-read / cache-write per user, with a token-weighted **fleet
+  cache-hit %** and per-user cache efficiency — the CoCo cost lever raw totals can't show.
+- **Mart-recon false drift fixed.** The owner's +93% "BAD" query-count drift: the fact
+  side now excludes both warehouse-less conventions (`NULL` and the string `'NONE'`);
+  root cause honestly documented as unconfirmed — if drift persists, investigate the loader.
+- **Review hardenings:** new `missing_column` error kind so probe-gated optional-COLUMN
+  reads degrade quietly instead of error-logging every render; the second-opinion panel
+  is a toggle (not an expander) per the Cost page's own deferral rule; the grant-changes
+  feed moved to the long-TTL cache tier (owner telemetry: 1–2 min scans).
+
+App version 4.247.0.
+
 ## 4.246.0 - AI guardrails, known-spike calendar, critical veto (2026-08-17)
 
 Repo-review wave 1 (owner: "we need them now — CoCo spend is 13% of total and growing").

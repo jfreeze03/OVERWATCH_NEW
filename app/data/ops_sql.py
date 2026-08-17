@@ -621,3 +621,10 @@ GROUP BY USER_NAME
 ORDER BY ELAPSED_SEC DESC
 LIMIT 25
 """
+
+
+def show_resource_monitors_sql() -> str:
+    """Resource monitors with quota/used/state (repo review wave 2: the
+    coverage map needs which monitors exist; SHOW WAREHOUSES carries the
+    per-warehouse linkage). LIMIT keeps the row-cap rewrite off SHOW."""
+    return "SHOW RESOURCE MONITORS LIMIT 200"

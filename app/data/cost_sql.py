@@ -968,3 +968,19 @@ SELECT CHECK_NAME,
 FROM checks
 ORDER BY CHECK_NAME
 """
+
+
+def native_anomaly_insights() -> str:
+    """Snowflake's managed ML cost-anomaly feed (repo review wave 2) — an
+    INDEPENDENT second opinion beside the app's z-score sweep. SNOWFLAKE.LOCAL
+    schema, fires daily when the native model flags account/org spend.
+
+    OPTIONAL and schema-uncertain — SELECT * on purpose (rendering whatever the
+    feed carries is the honest MVP; guessing columns would land wrong data, a
+    worse failure than a raw table). Callers MUST pass probe=True; LIMIT bounds
+    the read."""
+    return """
+SELECT *
+FROM SNOWFLAKE.LOCAL.ANOMALY_INSIGHTS
+LIMIT 200
+"""
