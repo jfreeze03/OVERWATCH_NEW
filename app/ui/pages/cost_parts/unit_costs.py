@@ -193,7 +193,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         _pd_df["USD"] = _pd_df["CREDITS"].map(safe_float) * rate
         _pd_df["USD_PER_RUN"] = _pd_df["CREDITS_PER_RUN"].map(safe_float) * rate
         styled_table(_pd_df[["SAMPLE_TEXT", "RUNS", "USD", "USD_PER_RUN", "USERS"]],
-                     height=260)
+                     height=260, column_config={
+                         "USD": st.column_config.NumberColumn("$", format="$%.2f"),
+                         "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
         st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare.")
@@ -430,7 +432,10 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         "SUCCESS_PCT": st.column_config.NumberColumn("Success %", format="%.1f%%"),
     })
     with st.expander("Daily detail (per pipeline per day)"):
-        styled_table(daily.sort_values(["DAY", "USD"], ascending=[False, False]), height=280)
+        styled_table(daily.sort_values(["DAY", "USD"], ascending=[False, False]), height=280,
+                     column_config={
+                         "USD": st.column_config.NumberColumn("$", format="$%.2f"),
+                         "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
     result_caption(res, note="TREND compares $/run between window halves (±10% = FLAT). "
                              "Pipeline label = the graph's root task.")
 

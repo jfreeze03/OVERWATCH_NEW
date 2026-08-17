@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.238.0 - Number formatting: dollars as $, durations humanized (2026-08-17)
+
+Owner ask: "make sure costs are dollars and time is in Hr/min/sec/ms." A parallel
+audit swept the metric-heavy UI; six real mis-formats fixed (rest already correct).
+
+- **Costs render as `$`, not `N USD` / raw floats.** Spend ▸ "All-in billed"
+  (`4,775 USD` → `$4,775`) and its help; the Replication fallback KPI (`229.33` →
+  `$229.33`) and its `Spend` table column (raw 6-decimal floats → `$%.2f`); the
+  data-transfer reconciliation caption. All currency-aware — `$` for USD, currency
+  code preserved for a non-USD org rate card.
+- **Per-run dollars formatted.** The query-pattern and pipeline "Daily detail"
+  tables gave `USD_PER_RUN` no column config, so it rendered as a bare `0.0034`
+  beside a `$`-formatted `USD` column; both now carry `$/run` (`$%.4f`).
+- **p95 change KPI humanized.** The warehouse-change before/after KPI showed the
+  p95 metric as a bare second count (`1800 → 5400`); it now humanizes only that
+  metric (`30m → 1h 30m`) while credits/queue/spill/fail keep their units.
+  `wh_change.change_deltas` gained a `col` field so the UI formats by native unit.
+
+App version 4.238.0.
+
 ## 4.237.0 - Storage: table-level drill with dollars + retention candidates (2026-08-17)
 
 Owner ask: "a breakdown of what's driving the storage costs … drill down to the

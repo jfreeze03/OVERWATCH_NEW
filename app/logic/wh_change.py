@@ -46,6 +46,7 @@ def change_deltas(row: dict) -> list[dict]:
                          else "better" if delta_pct < -5.0 else "flat")
         out.append({
             "metric": label,
+            "col": col,          # source column, so the UI can format by native unit (P95_S = seconds)
             "base": round(base_v, nd),
             "after": round(after_v, nd),
             "delta_pct": delta_pct,

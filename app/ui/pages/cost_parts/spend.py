@@ -169,13 +169,18 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     if allin_res.usable() and not allin_res.df.empty:
         _ar = allin_res.df.iloc[0]
         _cur = str(_ar.get("CURRENCY") or "USD")
+
+        def _cur_fmt(v: object) -> str:
+            # $ for USD (the common case); currency code suffix otherwise (format_usd is $-only).
+            return format_usd(safe_float(v)) if _cur.upper() == "USD" else f"{safe_float(v):,.0f} {_cur}"
+
         _tiles.append({
             "label": f"All-in billed, {days}d ({_cur})",
-            "value": f"{safe_float(_ar.get('TOTAL_USD')):,.0f} {_cur}",
+            "value": _cur_fmt(_ar.get("TOTAL_USD")),
             "help": "The invoice total from ORGANIZATION_USAGE (org rate card) for this account "
-                    f"and window — adds storage ({safe_float(_ar.get('STORAGE_USD')):,.0f}), "
-                    f"transfer ({safe_float(_ar.get('TRANSFER_USD')):,.0f}), and marketplace/"
-                    f"other ({safe_float(_ar.get('OTHER_USD')):,.0f}) that the credit-spend tile "
+                    f"and window — adds storage ({_cur_fmt(_ar.get('STORAGE_USD'))}), "
+                    f"transfer ({_cur_fmt(_ar.get('TRANSFER_USD'))}), and marketplace/"
+                    f"other ({_cur_fmt(_ar.get('OTHER_USD'))}) that the credit-spend tile "
                     "excludes. Org currency, UTC, lags ~72h so it trails the credit tile near today."})
     _tiles += [
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
@@ -291,15 +296,20 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                         by = (o.groupby(["ACCOUNT_NAME", "SERVICE_TYPE"], as_index=False)
                                 ["USAGE_IN_CURRENCY"].sum()
                                 .sort_values("USAGE_IN_CURRENCY", ascending=False))
-                        by.columns = ["Account", "Service", f"Spend ({ccy})"]
+                        _is_usd = ccy.upper() == "USD"
+                        _spend_col = f"Spend ({ccy})"
+                        by.columns = ["Account", "Service", _spend_col]
                         kpi_row([
-                            {"label": f"Replication (30d, {ccy})", "value": f"{rep_amt:,.2f}",
+                            {"label": f"Replication (30d, {ccy})",
+                             "value": format_usd(rep_amt) if _is_usd else f"{rep_amt:,.2f} {ccy}",
                              "help": "Org rate-card billing truth. The native per-database credits "
                                      "view is empty because replication bills on the secondary/DR "
                                      "account, not this one."},
                             {"label": "Accounts", "value": str(by["Account"].nunique())},
                         ])
-                        styled_table(by, height=240, sort_label=f"spend ({ccy}) desc")
+                        styled_table(by, height=240, sort_label=f"spend ({ccy}) desc",
+                                     column_config={_spend_col: st.column_config.NumberColumn(
+                                         _spend_col, format="$%.2f" if _is_usd else "%.2f")})
                         st.caption(
                             "Replication and data transfer bill on the secondary/DR account "
                             "(e.g. PRIMARY_DR); the native per-database credits view only sees the "
@@ -452,7 +462,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 )
                 if used_org:
                     st.caption(
-                        f"Reconciliation: billed data transfer ({days}d) is {org_transfer:,.2f} USD "
+                        f"Reconciliation: billed data transfer ({days}d) is {format_usd(org_transfer)} "
                         "on the org rate card; the estimate distributes that across source/target/type "
                         "by billable bytes. BILLABLE is the app's cross-boundary estimate — Snowflake "
                         "owns the exact billing determination."

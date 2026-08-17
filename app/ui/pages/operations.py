@@ -1482,9 +1482,16 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
             if _verdict_detail:
                 st.caption(f"**{row.get('VERDICT')}** — {_verdict_detail}")
             if deltas:
+                def _wc_val(d: dict) -> str:
+                    # P95_S is an elapsed time in seconds — humanize it (30m, 1h 30m),
+                    # not a bare "1800". The other four metrics are rates/counts/%.
+                    if d.get("col") == "P95_S":
+                        return f"{humanize_duration(d['base'], 's')} → {humanize_duration(d['after'], 's')}"
+                    return f"{d['base']:g} → {d['after']:g}"
+
                 kpi_row([{
-                    "label": d["metric"],
-                    "value": f"{d['base']:g} → {d['after']:g}",
+                    "label": "p95" if d.get("col") == "P95_S" else d["metric"],
+                    "value": _wc_val(d),
                     "delta": (f"{d['delta_pct']:+.1f}%"
                               if d["delta_pct"] is not None else "new load"),
                     "delta_color": ("inverse" if d["direction"] == "worse"
