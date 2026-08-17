@@ -698,6 +698,98 @@ LIMIT 15
 """
 
 
+def metering_service_history(days: int, service: str) -> str:
+    """Daily billed credits for ONE metering SERVICE_TYPE — the evidence behind a
+    COST_ANOMALY_SWEEP (which day spiked) or COST_SERVERLESS_CREEP (week-over-week
+    growth) alert. Scoped to the named service so the AI reasons about the metric
+    that fired, not warehouse query latency."""
+    from app.core.sqlsafe import sql_literal
+
+    days = bounded_days(days)
+    svc = str(service or "").strip().upper()
+    return f"""
+SELECT
+    USAGE_DATE AS DAY,
+    UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
+    ROUND(SUM(COALESCE(CREDITS_USED, 0)), 2) AS CREDITS_USED,
+    ROUND(SUM(COALESCE(CREDITS_USED_COMPUTE, 0)), 2) AS CREDITS_COMPUTE,
+    ROUND(SUM(COALESCE(CREDITS_USED_CLOUD_SERVICES, 0)), 2) AS CREDITS_CLOUD_SERVICES
+FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
+WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) = {sql_literal(svc)}
+GROUP BY 1, 2
+ORDER BY DAY
+"""
+
+
+def query_family_drift_history(days: int, family_text: str, warehouse: str = "") -> str:
+    """Daily runs and p50/p95 latency for the query family behind a
+    PERF_FINGERPRINT_DRIFT alert. Matched by the statement sample the alert
+    title carries so the drift the alert reported is visible over time — not
+    whatever family is heaviest account-wide.
+
+    The sample is real SQL (it starts with CALL/SELECT/...), so it can't go
+    through the UI contains-filter sanitizer (that strips SQL keywords). It is
+    matched as a literal LIKE instead: sql_literal quotes it safely and ~ escapes
+    LIKE metacharacters so an underscore in a proc name stays literal.
+    """
+    from app.core.sqlsafe import sql_literal
+
+    days = bounded_days(days)
+    clauses = [
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "QUERY_PARAMETERIZED_HASH IS NOT NULL",
+    ]
+    like = str(family_text or "").strip()
+    if like:
+        esc = like.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+        clauses.append(
+            f"UPPER(QUERY_TEXT) LIKE UPPER({sql_literal('%' + esc + '%', 300)}) ESCAPE '~'")
+    wh = str(warehouse or "").strip()
+    if wh:
+        clauses.append(f"WAREHOUSE_NAME = {sql_literal(wh)}")
+    where = and_where(*clauses)
+    return f"""
+SELECT
+    DATE(START_TIME) AS DAY,
+    COUNT(*) AS RUNS,
+    ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.5), 1) AS P50_SEC,
+    ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95), 1) AS P95_SEC,
+    ANY_VALUE(WAREHOUSE_NAME) AS WAREHOUSE_NAME,
+    ANY_VALUE(LEFT(QUERY_TEXT, 90)) AS SAMPLE_TEXT
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY 1
+HAVING COUNT(*) > 0
+ORDER BY DAY
+"""
+
+
+def warehouse_queue_by_hour(days: int, warehouse: str) -> str:
+    """The worst queueing hours on ONE warehouse — the evidence behind a
+    PERF_QUEUED_MINUTES alert (when it queues, how busy, and p95 latency), so
+    the AI can point at concurrency windows rather than generic latency."""
+    from app.core.sqlsafe import sql_literal
+
+    days = bounded_days(days)
+    wh = str(warehouse or "").strip()
+    return f"""
+SELECT
+    DATE_TRUNC('hour', START_TIME) AS HOUR_TS,
+    COUNT(*) AS RUNS,
+    ROUND(SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)
+              + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 60000.0, 1) AS QUEUED_MIN,
+    ROUND(APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95), 1) AS P95_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND WAREHOUSE_NAME = {sql_literal(wh)}
+GROUP BY 1
+HAVING SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) > 0
+ORDER BY QUEUED_MIN DESC
+LIMIT 24
+"""
+
+
 def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
                           database: str = "", schema_contains: str = "") -> str:
     """Top queries by ALLOCATED credits — warehouse-hour credits split across

@@ -128,3 +128,51 @@ def anomaly_explain_prompt(title: str, detail: str, evidence: pd.DataFrame,
         "inconclusive' if the rows do not explain the spike. Max 150 words. Never invent "
         "queries, warehouses, or numbers not shown."
     )
+
+
+# Per-alert-family evidence shaping. Each entry names the evidence columns to
+# serialize and the one-line framing that tells the model what the rows MEAN —
+# so a cloud-services-ratio alert is explained with cloud-services credits, a
+# Cortex-spend alert with daily Cortex credits, etc. (See app.logic.alert_evidence.)
+_EVIDENCE_COLUMNS: dict[str, list[str]] = {
+    "cloud_svc": ["SAMPLE_TEXT", "QUERY_TYPE", "RUNS", "CS_CREDITS",
+                  "CS_PER_1K_RUNS", "AVG_EXEC_S", "AVG_CACHE_PCT"],
+    "cortex": ["DAY", "SERVICE_TYPE", "CREDITS_BILLED"],
+    "metering_service": ["DAY", "SERVICE_TYPE", "CREDITS_USED",
+                         "CREDITS_COMPUTE", "CREDITS_CLOUD_SERVICES"],
+    "query_family": ["DAY", "RUNS", "P50_SEC", "P95_SEC", "WAREHOUSE_NAME", "SAMPLE_TEXT"],
+    "queueing": ["HOUR_TS", "RUNS", "QUEUED_MIN", "P95_SEC"],
+    "generic": ["SAMPLE_TEXT", "WAREHOUSE_NAME", "RUNS_DAY", "ELAPSED_H_DAY", "ELAPSED_H_PRIOR_AVG"],
+}
+
+_EVIDENCE_FRAMING: dict[str, str] = {
+    "cloud_svc": ("Top query shapes by cloud-services credits on the warehouse "
+                  "(higher CS_PER_1K_RUNS = more metadata/compile overhead per run)"),
+    "cortex": "Daily AI/Cortex billed credits by service type",
+    "metering_service": "Daily billed credits for this service type",
+    "query_family": "This query family's daily run count and p50/p95 latency in seconds",
+    "queueing": "The warehouse's worst queueing hours (queued minutes and p95 latency)",
+    "generic": ("Query families by elapsed hours on the anomalous day vs their "
+                "prior-7-day average"),
+}
+
+
+def alert_evidence_prompt(kind: str, title: str, detail: str,
+                          evidence: pd.DataFrame, window_label: str) -> str:
+    """Grounded 'explain this alert' prompt whose evidence framing matches the
+    alert family (kind). Evidence rows only — no invitation to speculate beyond
+    them. See app.logic.alert_evidence for how kind/columns are resolved."""
+    columns = _EVIDENCE_COLUMNS.get(kind, _EVIDENCE_COLUMNS["generic"])
+    framing = _EVIDENCE_FRAMING.get(kind, _EVIDENCE_FRAMING["generic"])
+    rows = _serialize_rows(evidence, columns, max_rows=20)
+    return (
+        "You are a Snowflake cost & performance analyst. An automated sweep raised this alert:\n"
+        f"ALERT: {str(title)[:300]}\n"
+        f"DETAIL: {str(detail)[:500]}\n\n"
+        f"{framing} ({window_label}):\n"
+        f"{rows}\n\n"
+        "Using ONLY the evidence above: (1) name the 1-2 most likely drivers with the "
+        "numbers that support them, (2) state what to check or change next, (3) say "
+        "'evidence is inconclusive' if the rows do not explain the alert. Max 150 words. "
+        "Never invent queries, warehouses, services, or numbers not shown."
+    )

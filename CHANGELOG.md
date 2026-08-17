@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.235.0 - AI evaluation grounded in per-alert-family evidence (2026-08-17)
+
+Bug (owner report): the Alerts "Explain with AI" evaluation summarized data
+unrelated to the selected alert. Root cause — every COST_*/PERF_* alert was fed
+ONE evidence pack (query families by elapsed-hours on a title-scraped warehouse),
+so a cloud-services-ratio, Cortex-spend, serverless-creep, or fingerprint-drift
+alert got query-latency rows that don't explain its metric (and, with no warehouse
+in the title, went account-wide).
+
+- **Per-family evidence.** A new resolver (`app.logic.alert_evidence`) maps each
+  alert to the evidence shape that explains it, and a dispatcher
+  (`app.data.alert_evidence_sql`) assembles it: cloud-services ratio → CS credits
+  by query shape on the warehouse; AI creep → daily Cortex credits; serverless
+  creep / metering anomaly → the named service's daily credits; fingerprint drift
+  → that exact family's p50/p95 latency history (matched by the statement sample,
+  which — being real SQL — bypasses the keyword-stripping UI filter); queued
+  minutes → the warehouse's worst queueing hours. Query-latency anomalies without
+  a bespoke pack keep the original elapsed-hours pack.
+- **Matching framing.** `alert_evidence_prompt` frames each pack for its metric so
+  Cortex reasons about credits/latency/queueing as appropriate — still evidence-only,
+  still "never invent numbers." When scope can't be resolved, the affordance is
+  withheld rather than showing off-topic evidence.
+
+App version 4.235.0.
+
 ## 4.234.0 - Unmapped entities: $ at stake + one-click company mapping (2026-08-17)
 
 Live-app punch-list, data batch. Cost ▸ Spend & Attribution ▸ Unmapped entities.

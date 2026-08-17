@@ -19,9 +19,10 @@ from app.core.query import execute_action, execute_statement, run
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import insights_sql, mart_sql, recheck_sql
+from app.data import alert_evidence_sql, mart_sql, recheck_sql
 from app.logic import remediation, tuning
-from app.logic.ai_prompts import anomaly_explain_prompt
+from app.logic.ai_prompts import alert_evidence_prompt
+from app.logic.alert_evidence import plan_for_alert
 from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
@@ -618,36 +619,34 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         st.caption("ESTIMATED flips to VERIFIED when verified on the Savings "
                                    "ledger (proof + measured amount). Warehouse-setting changes "
                                    "also get a separate change-scan row that settles itself (V038).")
-            rid_u = str(row["RULE_ID"]).upper()
-            if rid_u.startswith(("COST_", "PERF_")):
-                import re as _re
-
-                m_day = _re.search(r"\d{4}-\d{2}-\d{2}", str(row["TITLE"]))
-                event_day = m_day.group(0) if m_day else str(row["RAISED_AT"])[:10]
+            # Per-family evidence: each alert gets the evidence pack that matches
+            # the metric it fired on, not one query-latency pack for everything
+            # (which fed cost/serverless/Cortex alerts unrelated latency rows).
+            plan = plan_for_alert(str(row["RULE_ID"]), str(row["TITLE"]),
+                                  detail_text, str(row["RAISED_AT"]))
+            if plan is not None:
+                _scope = plan.scope_note
                 st.caption(
-                    f"Explain with AI — evidence window: {event_day} vs its prior 7 days"
-                    + (f" · warehouse filter {target['filters'].get('warehouse_contains')}"
-                       if target["filters"].get("warehouse_contains") else ""))
-                # The evidence pack is a historical ACCOUNT_USAGE query, so it stays
-                # button-gated (unchanged behavior); once assembled, the shared
-                # ai_evaluation_panel owns the AI run, cost disclosure, grounding
-                # popover, download, and the operator-only save-to-event hook.
+                    f"Explain with AI — evidence: {plan.label} · {plan.window_label}"
+                    + (f" · {_scope}" if _scope else ""))
+                # The evidence pack is a historical ACCOUNT_USAGE/mart query, so it
+                # stays button-gated; once assembled, the shared ai_evaluation_panel
+                # owns the AI run, cost disclosure, grounding popover, download, and
+                # the operator-only save-to-event hook.
                 _expl_prompt_key = f"_ai_expl_prompt_{event_id}"
-                if st.button("Assemble the day's evidence", key=f"ai_expl_go_{event_id[:8]}",
-                             help="Runs the historical evidence pack for that day/scope, then "
-                                  "unlocks a grounded AI evaluation over exactly those rows."):
-                    ev = run(insights_sql.anomaly_evidence(
-                                 event_day, target["filters"].get("warehouse_contains", "")),
-                             page=_PAGE, key=f"ai_ev_{event_day}", tier="historical",
-                             source="ACCOUNT_USAGE.QUERY_HISTORY (evidence pack)")
+                if st.button("Assemble the evidence", key=f"ai_expl_go_{event_id[:8]}",
+                             help="Runs the evidence pack that matches THIS alert's metric, "
+                                  "then unlocks a grounded AI evaluation over exactly those rows."):
+                    ev = run(alert_evidence_sql.build(plan),
+                             page=_PAGE, key=f"ai_ev_{plan.kind}_{event_id[:8]}", tier="historical",
+                             source="ACCOUNT_USAGE / marts (per-alert evidence)")
                     if not ev.ok or ev.empty:
                         st.session_state.pop(_expl_prompt_key, None)
-                        st.info("No query-family evidence found for that day/scope — "
-                                "the driver may be serverless or storage rather than queries.")
+                        st.info("No evidence rows for this alert's scope — the driver may be "
+                                "outside the window, or the family/service label didn't match.")
                     else:
-                        st.session_state[_expl_prompt_key] = anomaly_explain_prompt(
-                            str(row["TITLE"]), detail_text, ev.df, None,
-                            f"{event_day} vs prior 7d")
+                        st.session_state[_expl_prompt_key] = alert_evidence_prompt(
+                            plan.kind, str(row["TITLE"]), detail_text, ev.df, plan.window_label)
                 _expl_prompt = st.session_state.get(_expl_prompt_key)
                 if _expl_prompt:
                     def _append_hypothesis(answer: str) -> tuple[bool, str]:
