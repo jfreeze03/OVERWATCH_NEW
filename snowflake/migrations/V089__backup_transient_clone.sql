@@ -11,7 +11,7 @@
 -- Owner applies in Snowsight after V088. This file never runs from the app.
 
 EXECUTE IMMEDIATE
-$_v089_$
+$$
 DECLARE
     v NUMBER;
     not_ready EXCEPTION (-20089, 'V089 requires V088 first - apply migrations in order.');
@@ -21,7 +21,7 @@ BEGIN
         RAISE not_ready;
     END IF;
 END;
-$_v089_$;
+$$;
 
 -- >>> derived:SP_BACKUP_OPERATOR_TABLES  (TRANSIENT clone target, from V075)
 CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_BACKUP_OPERATOR_TABLES()

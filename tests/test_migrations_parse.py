@@ -151,3 +151,24 @@ def test_every_registered_builder_parses():
         except sqlglot.errors.ParseError as exc:
             failures.append(f"{name}: {str(exc)[:160]}")
     assert not failures, f"{len(failures)} builder(s) failed: {failures[:5]}"
+
+
+def test_no_migration_uses_a_tagged_dollar_quote():
+    """Snowflake dollar-quoting is ONLY ``$$`` — it does NOT support PostgreSQL
+    tagged quotes like ``$tag$ ... $tag$``. V089 shipped with ``$_v089_$`` around
+    its EXECUTE IMMEDIATE guard; sqlglot accepted it (lenient) but Snowsight
+    rejected it, and the owner had to hand-edit it to ``$$`` to apply the
+    migration (2026-08-17). This gate keeps a non-``$$`` dollar-quote out of every
+    file we hand Snowsight to run."""
+    import re
+    # a dollar-quote delimiter with at least one char between the dollars.
+    tagged = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\$")
+    offenders = []
+    for path in _FILES:
+        if not path.exists():
+            continue
+        offenders.extend(f"{path.name}: {m.group(0)}"
+                         for m in tagged.finditer(path.read_text(encoding="utf-8")))
+    assert not offenders, (
+        "Snowflake only supports $$ dollar-quoting, not tagged $tag$ quotes — "
+        f"replace with $$: {offenders}")
