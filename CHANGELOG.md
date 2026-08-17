@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.232.0 - Decision Studio: portfolio coverage % + per-lane cost (2026-08-17)
+
+CoCo DS review (§6), cheap wins #2 + #1. App-only, Portfolio tab.
+
+- **#2 — evidence-coverage KPI.** A new "Evidence coverage" KPI shows the portfolio-wide
+  average share of the three evidence signals (cache, latency, fail-rate) present per family
+  (amber below 80%), so it's visible at a glance how much of the board's recommendations rest
+  on complete vs partial evidence — the per-row `EVIDENCE_COVERAGE` shows which.
+- **#1 — per-lane cost subtotals.** A caption under the chart breaks the measured 30-day cost
+  across the ACT NOW / PLAN / VALIDATE lanes, so the cost concentration reads at a glance —
+  labeled as observed cost, not promised savings.
+
+App version 4.232.0.
+
 ## 4.231.0 - Decision Studio: stale-planning flag (2026-08-17)
 
 CoCo DS review (§6), cheap win #34. App-only.

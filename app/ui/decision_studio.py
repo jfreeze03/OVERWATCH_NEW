@@ -128,11 +128,31 @@ def _portfolio(company: str, days: int, rate: float) -> None:
          "value": format_usd(portfolio["IMPACT_USD_30D"].sum()),
          "help": "Measured pattern credits normalized to 30 days; observed cost, not promised savings."},
         {"label": "High-confidence", "value": f"{portfolio['CONFIDENCE'].ge(0.8).sum():,}"},
+        # DS #2: how much of the board's recommendations rest on COMPLETE evidence. Low
+        # coverage = more calls made on partial signals; per-row EVIDENCE_COVERAGE shows which.
+        {"label": "Evidence coverage",
+         "value": (f"{portfolio['EVIDENCE_COVERAGE'].mean() * 100:,.0f}%" if len(portfolio) else "—"),
+         "severity": (("ok" if portfolio["EVIDENCE_COVERAGE"].mean() >= 0.8 else "warn")
+                      if len(portfolio) else ""),
+         "help": "Average share of the three evidence signals (cache, latency, fail-rate) "
+                 "present per family. Low coverage means more of the board's recommendations "
+                 "rest on partial evidence — the per-row EVIDENCE_COVERAGE column shows which."},
         {"label": "Watching", "value": f"{int(portfolio['WATCHED'].sum()):,}",
          "help": "Query families on your personal watchlist — pinned to the top of their lane. "
                  "Watch or unwatch a family from its Entity 360 (open one below)."},
     ])
     charts.workload_portfolio(portfolio)
+    # DS #1: where does the measured 30-day cost concentrate? A per-lane subtotal so the
+    # ACT NOW / PLAN / VALIDATE cost split reads at a glance (measured COST, not savings).
+    _lane_cost = portfolio.groupby("LANE")["IMPACT_USD_30D"].sum()
+    _lane_bits = " · ".join(
+        f"{_lane}: {format_usd(float(_lane_cost.get(_lane, 0.0)))}"
+        for _lane in ("ACT NOW", "PLAN", "VALIDATE") if _lane in _lane_cost.index
+    )
+    if _lane_bits:
+        st.caption(f"30-day measured cost by lane — {_lane_bits} "
+                   "(observed cost concentration, not promised savings).")
+
     def open_profile(index: int) -> None:
         _open_entity("QUERY_FINGERPRINT", str(portfolio.iloc[int(index)]["FINGERPRINT"]))
 
