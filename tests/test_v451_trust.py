@@ -146,7 +146,7 @@ def test_reachable_account_usage_tables_per_page():
 def test_alert_audit_inserts_stamp_the_viewer():
     src = _read("app/ui/pages/alerts.py")
     inserts = re.findall(r"INSERT INTO \{core_object\('ALERT_AUDIT'\)\} \(([^)]+)\)", src)
-    assert len(inserts) == 2
+    assert len(inserts) == 4   # ack/resolve single + bulk + V086 snooze + un-snooze
     for cols in inserts:
         assert "ACTED_BY" in cols, "ALERT_AUDIT insert lets CURRENT_USER() default record the owner"
     assert "the table has no" not in src                 # the false r27 comment stays dead

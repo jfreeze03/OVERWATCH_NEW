@@ -483,6 +483,26 @@ LIMIT {limit}
 """
 
 
+def snoozed_alert_events(limit: int = 100, company: str = "ALL") -> str:
+    """V086: currently-snoozed events + their wake times — the Snoozed view and the
+    early un-snooze surface. Same company scope as the open feed. References the V086
+    SNOOZE_* columns, so callers probe-gate it (it degrades to empty pre-V086, where
+    no SNOOZED rows exist anyway); the main triage feed is unchanged."""
+    limit = max(1, min(int(limit), 500))
+    where = ["STATUS = 'SNOOZED'"]
+    comp = str(company or "ALL").strip()
+    if comp.upper() != "ALL":
+        where.append(f"(COMPANY = {sql_literal(comp)} OR UPPER(COMPANY) = 'ALL')")
+    return f"""
+SELECT EVENT_ID, RULE_ID, RAISED_AT, COMPANY, SEVERITY, TITLE,
+       SNOOZED_UNTIL, SNOOZE_BY, SNOOZE_REASON
+FROM {core_object("ALERT_EVENTS")}
+WHERE {and_where(*where)}
+ORDER BY SNOOZED_UNTIL
+LIMIT {limit}
+"""
+
+
 def open_alert_severity_counts(company: str = "ALL") -> str:
     """C4/C7: TRUE open+ack counts by severity in ONE aggregate row, so the Alerts
     KPI tiles never undercount when a storm exceeds the 500-row feed cap. Same

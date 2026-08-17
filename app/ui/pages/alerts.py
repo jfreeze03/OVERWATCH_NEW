@@ -63,6 +63,16 @@ _SETUP_HINT = "Alerting is not installed yet — an admin can verify on Admin �
 
 RESOLUTION_KINDS = ("ACTIONED", "NOISE", "EXPECTED")
 
+# V086 per-event snooze: label -> hours. The server computes the wake time from the
+# duration (DATEADD in SP_ALERT_SNOOZE), so the app never reasons about the clock.
+SNOOZE_PRESETS = {
+    "1 hour": 1.0,
+    "4 hours": 4.0,
+    "1 day": 24.0,
+    "3 days": 72.0,
+    "1 week": 168.0,
+}
+
 
 def _lifecycle_sql(event_id: str, action: str, note: str, kind: str = "") -> str:
     """Joined display form of _lifecycle_stmts (kept for the SQL preview + tests)."""
@@ -108,6 +118,53 @@ def _lifecycle_stmts(event_id: str, action: str, note: str, kind: str = "") -> l
         f"VALUES ({sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(audit_note)}, {identity_sql()});"
     )
     return [update, audit]
+
+
+def _snooze_stmts(event_id: str, hours: float, reason: str = "") -> list[str]:
+    """Per-event snooze as UPDATE + audit — the SQL preview and the legacy fallback
+    for SP_ALERT_SNOOZE (V086). Moves an OPEN/ACK event to STATUS='SNOOZED' with a
+    server-computed wake time; the hourly scanner returns it to OPEN when it expires."""
+    hours = float(hours)
+    reason = str(reason or "")
+    audit_note = f"snooze {hours:g}h" + (f" — {reason}" if reason else "")
+    if viewer_name():
+        audit_note = f"{audit_note} — by {viewer_name()}"
+    update = (
+        f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'SNOOZED', "
+        f"SNOOZED_UNTIL = DATEADD('minute', {round(hours * 60)}, CURRENT_TIMESTAMP()), "
+        f"SNOOZE_BY = {identity_sql()}, SNOOZE_REASON = {sql_literal(reason[:1000])} "
+        f"WHERE EVENT_ID = {sql_literal(event_id)} AND STATUS IN ('OPEN', 'ACK');"
+    )
+    audit = (
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
+        f"VALUES ({sql_literal(event_id)}, 'SNOOZE', {sql_literal(audit_note)}, {identity_sql()});"
+    )
+    return [update, audit]
+
+
+def _unsnooze_stmts(event_ids: list[str]) -> list[str]:
+    """Early un-snooze (bulk) — the fallback + SQL preview for SP_ALERT_SNOOZE(..., 0, ...).
+    Restores each SNOOZED event to its TRUE prior status now (ACK if it was acked, else
+    OPEN) — the exact transition the hourly wake step performs — plus an audit row."""
+    ids = ", ".join(sql_literal(str(e)) for e in event_ids)
+    audit_note = "un-snooze (early)"
+    if viewer_name():
+        audit_note = f"{audit_note} — by {viewer_name()}"
+    # Audit BEFORE the update: the audit SELECTs the STATUS='SNOOZED' rows, so it must
+    # run while they still match (the proc audits-before-update for the same reason). The
+    # atomic proc is preferred; this legacy pair is only the fallback + SQL preview.
+    audit = (
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
+        f"SELECT EVENT_ID, 'UNSNOOZE', {sql_literal(audit_note)}, {identity_sql()} "
+        f"FROM {core_object('ALERT_EVENTS')} WHERE EVENT_ID IN ({ids}) AND STATUS = 'SNOOZED';"
+    )
+    update = (
+        f"UPDATE {core_object('ALERT_EVENTS')} "
+        f"SET STATUS = IFF(ACK_AT IS NOT NULL, 'ACK', 'OPEN'), "
+        f"SNOOZED_UNTIL = NULL, SNOOZE_BY = NULL, SNOOZE_REASON = NULL "
+        f"WHERE EVENT_ID IN ({ids}) AND STATUS = 'SNOOZED';"
+    )
+    return [audit, update]
 
 
 def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str = "") -> tuple[str, str]:
@@ -337,7 +394,7 @@ def _delivery_status() -> None:
 
 
 @st.fragment
-def _open_events_section(events, is_operator: bool) -> None:
+def _open_events_section(events, is_operator: bool, company: str = "ALL") -> None:
     """Fragment: drawer/bulk interactions rerun this section only, not the page."""
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT):
@@ -631,16 +688,27 @@ def _open_events_section(events, is_operator: bool) -> None:
                                           "scope applied — generate, confirm, execute, audited."):
                     request_navigation(fix["page"], fix["section"], fix["filters"])
             with c_act:
-                action = st.radio("Action", ["ACK", "RESOLVE"], horizontal=True, key=f"alert_action_{event_id[:8]}")
+                action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
+                                  key=f"alert_action_{event_id[:8]}")
             note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}", max_chars=500)
             kind = ""
+            snooze_hours = 0.0
             if action == "RESOLVE":
                 kind = st.radio(
                     "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}",
                     help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
                          "on the Rules section.")
-            stmts = _lifecycle_stmts(event_id, action, note, kind)
+            elif action == "SNOOZE":
+                snooze_hours = SNOOZE_PRESETS[st.selectbox(
+                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}",
+                    help="The event leaves the triage feed now and returns to it automatically "
+                         "when the timer expires — no ack, no resolve. The underlying rule keeps "
+                         "firing for other entities.")]
+            if action == "SNOOZE":
+                stmts = _snooze_stmts(event_id, snooze_hours, note)
+            else:
+                stmts = _lifecycle_stmts(event_id, action, note, kind)
             with st.container(border=True):
                 with st.expander("SQL that will run"):
                     st.code("\n".join(stmts), language="sql")
@@ -651,7 +719,9 @@ def _open_events_section(events, is_operator: bool) -> None:
                     # per-rule precision score — so it is the consequential write and
                     # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
                     # confirm field nor the button state carries across events.
-                    if action == "ACK":
+                    # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
+                    # one click; RESOLVE classifies the event, so it keeps the confirm gate.
+                    if action in ("ACK", "SNOOZE"):
                         _fire = st.button("Execute with audit row", type="primary",
                                           use_container_width=True,
                                           key=f"alert_exec_ack_{event_id[:8]}")
@@ -660,20 +730,26 @@ def _open_events_section(events, is_operator: bool) -> None:
                                              key=f"alert_exec_{event_id[:8]}",
                                              prompt=f"Type {action} to confirm execution")
                     if _fire:
-                        # V051: one atomic proc (update + audit in a transaction);
-                        # the pre-V051 legacy path is the split script, unchanged.
-                        call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
-                                f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
-                                f"{sql_literal(kind)}, {identity_sql()}, "
-                                f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
+                        # V051/V086: one atomic proc (update + audit in a transaction);
+                        # the legacy path is the split script, unchanged.
+                        if action == "SNOOZE":
+                            call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
+                                    f"{sql_literal(event_id)}, {snooze_hours}, {sql_literal(note)}, "
+                                    f"{identity_sql()}, "
+                                    f"{sql_literal(idempotency_key('ALERT_SNOOZE', event_id))})")
+                        else:
+                            call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                                    f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
+                                    f"{sql_literal(kind)}, {identity_sql()}, "
+                                    f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
                         # codex#9: pass the structured statement list straight through — a ';'
                         # inside the note no longer fractures the legacy fallback.
                         ok, msg = execute_action(call, stmts, page=_PAGE)
                         notify(ok, msg)
                         if ok:
                             from app.ui.components import log_ui_event
-                            log_ui_event("alert_resolve" if action == "RESOLVE" else "alert_ack",
-                                         page=_PAGE)
+                            _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
+                            log_ui_event(_ev, page=_PAGE)
                 else:
                     st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
 
@@ -713,6 +789,36 @@ def _open_events_section(events, is_operator: bool) -> None:
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
                                  page=_PAGE)
+
+        # V086: snoozed events are hidden from the feed above until their wake time.
+        # Surface them so a snooze is never a black hole, with an early un-snooze.
+        _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
+                   key=f"alert_snoozed_{company}", tier="live",
+                   source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
+        if _snz.usable() and not _snz.empty:
+            with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
+                styled_table(_snz.df[["SEVERITY", "TITLE", "SNOOZED_UNTIL", "SNOOZE_BY", "SNOOZE_REASON"]])
+                if is_operator:
+                    _snz_opts = {
+                        f"[{r['SEVERITY']}] {str(r['TITLE'])[:60]} (wakes {r['SNOOZED_UNTIL']})": str(r["EVENT_ID"])
+                        for _, r in _snz.df.iterrows()
+                    }
+                    _snz_pick = st.multiselect("Wake now (un-snooze early)", list(_snz_opts),
+                                               key="alert_unsnooze_pick")
+                    _uids = [_snz_opts[c] for c in _snz_pick]
+                    if st.button("Wake selected now", key="alert_unsnooze_exec",
+                                 disabled=not _uids, type="primary"):
+                        # hours=0 tells SP_ALERT_SNOOZE to un-snooze now (restore prior status).
+                        call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
+                                f"{sql_literal(','.join(str(e) for e in _uids))}, 0, '', {identity_sql()}, "
+                                f"{sql_literal(idempotency_key('ALERT_UNSNOOZE', ''.join(_uids)))})")
+                        ok_s, msg_s = execute_action(call, _unsnooze_stmts(_uids), page=_PAGE)
+                        notify(ok_s, f"Un-snooze: {len(_uids)} event(s) — {msg_s}")
+                        if ok_s:
+                            from app.ui.components import log_ui_event
+                            log_ui_event("alert_unsnooze", page=_PAGE)
+                else:
+                    st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
 
 @safe_page(_PAGE)
@@ -797,7 +903,7 @@ def render() -> None:
             ])
         _delivery_status()
         _last_delivery_card()
-        _open_events_section(events, is_operator)
+        _open_events_section(events, is_operator, company)
     elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",
                     source="ALERT_CONFIG")

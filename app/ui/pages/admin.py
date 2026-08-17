@@ -242,6 +242,12 @@ _EXPECTED_MIGRATIONS = {
         "+ a task serialized after the hourly mart load, which evaluates the configured "
         "SLO_OBJECTIVES and raises a HIGH alert per objective in breach (STALE/NO_DATA "
         "excluded, deduped per objective per day)",
+    86: "Per-event alert snooze (CoCo Alerts29): ALTER ALERT_EVENTS ADD SNOOZED_UNTIL/"
+        "SNOOZE_BY/SNOOZE_REASON; SP_ALERT_SNOOZE moves an OPEN/ACK event to "
+        "STATUS='SNOOZED' with a server-computed wake time (audited, idempotent; hours=0 "
+        "un-snoozes early) so it leaves the triage feed with no read-path change; a wake "
+        "step in the re-derived SP_ALERT_SCAN (from V084) returns expired snoozes to their "
+        "prior status",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

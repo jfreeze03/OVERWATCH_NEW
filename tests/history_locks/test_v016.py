@@ -91,7 +91,7 @@ def test_round3_ux_builders_and_wiring():
     assert "_global_jump" in main_src and "_log_usage" in main_src
     assert '"Brief": brief.render,' in main_src
     alerts_src = (root / "app" / "ui" / "pages" / "alerts.py").read_text(encoding="utf-8")
-    assert "@st.fragment" in alerts_src and "_open_events_section(events, is_operator)" in alerts_src
+    assert "@st.fragment" in alerts_src and "_open_events_section(events, is_operator, company)" in alerts_src
     # v4.50: the emergency fragment (admin's only @st.fragment) moved to
     # Operations with the Emergency console; the fragment contract rides along.
     ops_src = (root / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")

@@ -125,8 +125,10 @@ def test_exec_sites_show_reverse_and_log_the_event():
     assert 'reverse_hint("RESIZE"' in _OPT
     assert _ALERTS.count('log_ui_event("remediation_exec"') == 1
     assert "remediation.reverse_hint(" in _ALERTS
-    # lifecycle actions log too — single + bulk paths
-    assert _ALERTS.count('log_ui_event("alert_resolve" if') == 2
+    # lifecycle actions log too — single path is now dict-mapped (incl. V086 snooze),
+    # the bulk path keeps the resolve/ack ternary.
+    assert "log_ui_event(_ev, page=_PAGE)" in _ALERTS                 # single path
+    assert _ALERTS.count('log_ui_event("alert_resolve" if') == 1     # bulk path
 
 
 def test_incident_object_design_doc_exists():

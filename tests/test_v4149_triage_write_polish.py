@@ -75,7 +75,7 @@ def test_open_triage_routes_identity_section_and_scope():
 def test_ack_one_click_resolve_typed():
     body = _src("app/ui/pages/alerts.py")
     seg = body.split('if is_operator:', 1)[1].split("execute_action", 1)[0]
-    assert 'if action == "ACK":' in seg
+    assert 'if action in ("ACK", "SNOOZE"):' in seg           # ACK + SNOOZE = one click (V086)
     assert 'st.button("Execute with audit row"' in seg       # ACK = one click
     assert "confirm_gate(action" in seg                        # RESOLVE keeps the gate
 
