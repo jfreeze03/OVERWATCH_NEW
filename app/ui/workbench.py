@@ -257,7 +257,8 @@ def render_action_center(company: str) -> None:
         frame = extended_res.df.copy()
     else:
         base = run(
-            mart_sql.action_queue(500), page=_PAGE, key="action_center_legacy",
+            mart_sql.action_queue(500, company), page=_PAGE,
+            key=f"action_center_legacy_{company}",
             tier="live", source="ACTION_QUEUE (legacy shape)",
         )
         if not base.ok:

@@ -153,11 +153,11 @@ def test_c18_operations_panel_wired_mart_only():
 def test_n4_overview_batches_live_first_paint_reads():
     ov = _src("app/ui/pages/overview.py")
     assert "run_batch(" in ov
-    assert 'alert_counts_{company}' in ov and '"key": "action_queue"' in ov  # A-score-1: uncapped leg
+    assert 'alert_counts_{company}' in ov and '"key": f"action_queue_{company}"' in ov  # A-score-1: uncapped leg (v4.241: company-scoped)
     # health_strip stays OUT of the batch (shared shell cache, r15 #14)
     assert 'run_batch' in ov and 'health_strip' not in ov.split("run_batch(", 1)[1].split("], page", 1)[0]
     # the batched action_queue result is reused, not re-read blindly
-    assert '_live_pf.get("action_queue")' in ov
+    assert '_live_pf.get(f"action_queue_{company}")' in ov
 
 
 # ---------------------------------------------------------------------------

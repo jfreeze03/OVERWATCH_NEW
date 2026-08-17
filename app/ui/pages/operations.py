@@ -637,8 +637,11 @@ def _dq_row_volume_panel() -> None:
     result_caption(rv)
 
 
-def _pipeline_sla_tab(is_operator: bool) -> None:
-    """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG)."""
+def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
+    """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG).
+
+    Owner ask 2026-08-17: the DB-grain diagnostics honor the company filter; the
+    SLA-horizon config/forecast is account-wide (thresholds are account policy)."""
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:
@@ -708,8 +711,8 @@ def _pipeline_sla_tab(is_operator: bool) -> None:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
     section_header("File-load failures (COPY / Snowpipe, 7d)", "warn", "pipeline")
-    cpf = run(ops_sql.copy_load_failures(7, "ALL"), page=_PAGE,
-              key="copy_fails", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
+    cpf = run(ops_sql.copy_load_failures(7, company), page=_PAGE,
+              key=f"copy_fails_{company}", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
     if cpf.ok and cpf.empty:
         st.success("No failed or partial file loads in the last 7 days.")
     elif guard(cpf, ""):
@@ -1881,7 +1884,10 @@ def render() -> None:
         },
         "Pipeline SLA": {
             "applies": (),
-            "note": "Account-wide fixed SLA horizons.",
+            "partial": ("company",),
+            "note": "SLA horizons are account-wide policy; the file-load-failure panel "
+                    "narrows to the selected Company. (Volume/DT/row-volume panels remain "
+                    "account-wide — a follow-up will scope them.)",
         },
         "Release compare": {
             "applies": ("company",),
@@ -1911,7 +1917,7 @@ def render() -> None:
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":
-        _pipeline_sla_tab(is_operator)
+        _pipeline_sla_tab(is_operator, f["company"])
     elif section == "Emergency":
         section_header("Emergency levers", "warn", "warehouse")
         _emergency_fragment(is_operator)

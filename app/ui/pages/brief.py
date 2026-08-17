@@ -89,7 +89,7 @@ def render() -> None:
          "source": f"ALERT_EVENTS counts ({company} + account-level)"},
         {"key": "events", "sql": mart_sql.open_alert_events(50, company),
          "source": "ALERT_EVENTS"},
-        {"key": "acts", "sql": mart_sql.action_queue(100), "source": "ACTION_QUEUE"},
+        {"key": f"acts_{company}", "sql": mart_sql.action_queue(100, company), "source": "ACTION_QUEUE"},
     ], page=_PAGE, tier="live")
     _b_rec = run_batch([
         {"key": "exh", "sql": mart_sql.contract_exhaustion(),
@@ -313,8 +313,8 @@ def render() -> None:
 
     section_header("Asks", "info", "bolt")
     brief_action_lines: list[str] = []
-    actions = _b_live.get("acts") or run(mart_sql.action_queue(100), page=_PAGE, key="brief_actions", tier="live",
-                  source="ACTION_QUEUE")
+    actions = _b_live.get(f"acts_{company}") or run(mart_sql.action_queue(100, company), page=_PAGE,
+                  key=f"brief_actions_{company}", tier="live", source="ACTION_QUEUE")
     if actions.ok and not actions.empty:
         ranked = rank_actions(actions.df, limit=3)
         if ranked.empty:

@@ -910,8 +910,8 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     section_header("Recent grant changes", "info", "security", anchor="sec-grant-changes")
     _gc_days = st.selectbox("Window", [7, 30, 90, 180], index=1, key="sec_grant_days",
                             format_func=lambda d: f"last {d} days")
-    gc = run(security_sql.recent_grant_changes(int(_gc_days)), page=_PAGE,
-             key=f"grant_changes_feed_{_gc_days}", tier="hourly",
+    gc = run(security_sql.recent_grant_changes(int(_gc_days), company), page=_PAGE,
+             key=f"grant_changes_feed_{company}_{_gc_days}", tier="hourly",
              source="ACCOUNT_USAGE.GRANTS_TO_USERS + GRANTS_TO_ROLES")
     if gc.ok and gc.empty:
         st.success(f"No grant or revoke changes in the last {_gc_days} days.")
@@ -934,12 +934,14 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             "GRANTEE": st.column_config.Column("To (grantee)"),
             "WHAT": st.column_config.Column("What"),
         })
+        _scope_txt = ("Account-wide." if str(company or "ALL").upper() == "ALL"
+                      else f"Scoped to **{company}** by grantee (user classification / %TRXS% role heuristic).")
         st.caption(
-            "Newest first. **To** = the user/role that received it; **What** = the role, or the "
-            "privilege on an object. **Granted by** is the acting role Snowflake records (its "
-            "native attribution) — for the user who ran a GRANT statement, see the DDL/DCL panel "
-            "below. Account-wide from GRANTS_TO_USERS + GRANTS_TO_ROLES (Snowflake's grant history "
-            "lags up to ~2h)."
+            f"Newest first. {_scope_txt} **To** = the user/role that received it; **What** = the "
+            "role, or the privilege on an object. **Granted by** is the acting role Snowflake "
+            "records (its native attribution) — for the user who ran a GRANT statement, see the "
+            "DDL/DCL panel below. From GRANTS_TO_USERS + GRANTS_TO_ROLES (Snowflake's grant "
+            "history lags up to ~2h)."
         )
         result_caption(gc)
     st.divider()

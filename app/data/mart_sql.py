@@ -634,7 +634,7 @@ ORDER BY FAMILY, RULE_ID
 """
 
 
-def action_queue(limit: int = 200) -> str:
+def action_queue(limit: int = 200, company: str = "ALL") -> str:
     """Newest OPEN actions (r19 #5): status filters in SQL so an old open
     critical can never age out of the newest-N fetch window. Ranking stays
     in logic.rank_actions — one place; the literals here mirror
@@ -643,13 +643,20 @@ def action_queue(limit: int = 200) -> str:
     codex#23: order by SEVERITY before the LIMIT so the cap keeps the top-severity
     open actions. The old CREATED_AT-only sort could truncate an old open CRITICAL out
     of the newest-N window when >N actions are open; rank_actions re-ranks the fetched
-    set, but only over rows that survive this cap."""
+    set, but only over rows that survive this cap.
+
+    ``company`` (owner ask 2026-08-17: the triage filter must apply) scopes to that
+    company's actions PLUS account-level ('ALL') actions that apply to everyone.
+    'ALL' is a no-op — the full queue, same as before."""
     limit = max(1, min(int(limit), 1000))
+    comp = str(company or "ALL").strip()
+    company_clause = ("" if comp.upper() == "ALL"
+                      else f"\n  AND UPPER(COALESCE(COMPANY, 'ALL')) IN ('ALL', {sql_literal(comp.upper())})")
     return f"""
 SELECT ACTION_ID, CREATED_AT, COMPANY, SEVERITY, TITLE, DETAIL, OWNER, STATUS, DUE_DATE,
        SOURCE, PROOF_SQL, ESTIMATED_USD, PERIOD, UPDATED_AT
 FROM {core_object("ACTION_QUEUE")}
-WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS')
+WHERE UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'){company_clause}
 ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
               WHEN 'MEDIUM' THEN 2 ELSE 3 END, CREATED_AT DESC
 LIMIT {limit}

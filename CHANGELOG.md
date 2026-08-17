@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.241.0 - Company filter: make triage filters actually apply (2026-08-17)
+
+Owner ask: "we need to filter between company — the triage filters need to apply …
+scan the app so we're selecting appropriately." A 7-agent audit swept every page:
+**zero silent-mislead bugs** (the app already declares account-wide scope where data
+has no company grain). The real work was making the *scopable* sections honor the pill.
+
+- **Owner/triage `ACTION_QUEUE` now honors company.** `mart_sql.action_queue` gains a
+  `company` param (that company's actions PLUS account-level 'ALL' ones; 'ALL' = no-op,
+  backward compatible). Wired into every page that reads it: Overview "Top actions"
+  (contract updated `applies=("company",)`), Control Room "Action Center" fallback,
+  Decision Studio "Scenarios" fallback, and the Brief. So picking ALFA/Trexis narrows
+  the work queue everywhere it appears.
+- **Recent grant changes** (v4.240.0 feed) now scopes by grantee — user grants via user
+  classification, object/role grants via the `%TRXS%` role heuristic.
+- **Operations ▸ Pipeline SLA**: the file-load-failure panel now narrows to the company
+  (the builder already supported it, hardcoded 'ALL'); the contract declares the partial
+  scope honestly. (Volume/DT/row-volume panels stay account-wide pending a follow-up.)
+- The remaining audit findings are genuinely account-wide sections (metering, org billing,
+  posture, savings ledger) where the correct fix is a disclosure note, not fake filtering —
+  itemized for the owner to direct.
+
+App version 4.241.0.
+
 ## 4.240.0 - Security: recent grant-changes feed (2026-08-17)
 
 Owner ask: "show the most recent grant changes to roles/users/objects — who changed

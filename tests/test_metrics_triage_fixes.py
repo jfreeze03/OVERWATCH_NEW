@@ -115,8 +115,8 @@ def test_triage3_live_score_gets_all_nine_signals():
     assert '"stale_sources": stale_sources,' in ov
     assert '"open_high_actions": open_high_actions,' in ov
     assert 'key="health_strip"' in ov                              # shared cache entry
-    assert ov.count('key="action_queue"') == 1                     # hoisted, not duplicated
-    assert ov.index('key="action_queue"') < ov.index("scoring.platform_score")
+    assert ov.count('key=f"action_queue_{company}"') == 1          # hoisted, not duplicated (v4.241: company-scoped)
+    assert ov.index('key=f"action_queue_{company}"') < ov.index("scoring.platform_score")
     hs = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
     assert "'STALE_SOURCES'" in hs                                  # new health-strip arm
     # the strip's SQL cadence rule mirrors the Control Room freshness board

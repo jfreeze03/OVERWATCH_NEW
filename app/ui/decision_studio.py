@@ -472,7 +472,8 @@ def _scenarios(company: str) -> None:
     if not actions.ok:
         empty_state("needs_setup", "Apply V074 to model confidence-aware action scenarios.")
         legacy = run(
-            mart_sql.action_queue(500), page=_PAGE, key="decision_scenario_legacy",
+            mart_sql.action_queue(500, company), page=_PAGE,
+            key=f"decision_scenario_legacy_{company}",
             tier="live", source="ACTION_QUEUE (legacy read-only shape)",
         )
         if legacy.ok and not legacy.empty:

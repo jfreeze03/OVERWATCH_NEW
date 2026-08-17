@@ -41,6 +41,19 @@ def security_grant_sql(days: int) -> str:
     return security_sql.recent_grant_changes(days)
 
 
+def test_feed_scopes_by_company_via_grantee():
+    # owner ask 2026-08-17: the triage company filter must apply here.
+    trxs = security_sql.recent_grant_changes(30, "Trexis")
+    assert "LIKE '%TRXS%'" in trxs          # role-grantee heuristic (role_clause)
+    assert "COMPANY_FOR_USER" in trxs        # user-grantee classification (user_clause)
+    account_wide = security_sql.recent_grant_changes(30, "ALL")
+    assert "TRXS" not in account_wide and "COMPANY_FOR_USER" not in account_wide  # ALL = no-op
+    # the UI passes the active company filter (cache key includes it).
+    src = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
+    assert "recent_grant_changes(int(_gc_days), company)" in src
+    assert "grant_changes_feed_{company}_" in src
+
+
 def test_feed_is_wired_into_the_changes_section():
     src = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     assert "recent_grant_changes(" in src

@@ -306,7 +306,8 @@ def render() -> None:
     _live_pf = run_batch([
         {"key": f"alert_counts_{company}", "sql": mart_sql.open_alert_severity_counts(company),
          "source": "ALERT_EVENTS (COUNT_IF by severity, uncapped)"},
-        {"key": "action_queue", "sql": mart_sql.action_queue(200), "source": "ACTION_QUEUE"},
+        {"key": f"action_queue_{company}", "sql": mart_sql.action_queue(200, company),
+         "source": "ACTION_QUEUE"},
     ], page=_PAGE, tier="live") or {}
     alerts_res, critical_alerts, high_alerts = _open_alert_counts(
         company, prefetched=_live_pf.get(f"alert_counts_{company}"))
@@ -450,8 +451,8 @@ def render() -> None:
         _srow = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]
         if not _srow.empty:
             stale_sources = int(safe_float(_srow.iloc[0]["VALUE"]))
-    actions_res = _live_pf.get("action_queue") or run(
-        mart_sql.action_queue(200), page=_PAGE, key="action_queue",
+    actions_res = _live_pf.get(f"action_queue_{company}") or run(
+        mart_sql.action_queue(200, company), page=_PAGE, key=f"action_queue_{company}",
         tier="live", source="ACTION_QUEUE")  # N4: reuse the first-paint batch
     open_high_actions = 0
     if actions_res.ok and not actions_res.empty:
@@ -699,8 +700,9 @@ def render() -> None:
         section_header("Top actions")
         section_filter_contract(
             f,
-            applies=(),
-            note="Account-wide owner queue, ranked by operational priority.",
+            applies=("company",),
+            note="Owner queue ranked by operational priority; Company narrows to that "
+                 "company's actions plus account-level ones.",
         )
         panel_help(
             "The real ACTION_QUEUE — the work waiting on an owner — ranked by severity, then "

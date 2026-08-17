@@ -440,7 +440,7 @@ LIMIT 2000
 """
 
 
-def recent_grant_changes(days: int = 30, limit: int = 500) -> str:
+def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500) -> str:
     """Most-recent grant/revoke CHANGES across roles, users, and objects — the
     "who changed what for whom, and when" access-change feed (owner ask 2026-08-17).
 
@@ -449,33 +449,40 @@ def recent_grant_changes(days: int = 30, limit: int = 500) -> str:
     ACCOUNT_USAGE.GRANTS_TO_USERS (role -> user) and GRANTS_TO_ROLES (privilege ->
     role); a grant and its later revoke are two rows at their own timestamps, so a
     same-window grant+revoke both show. GRANTED_BY is the actor ('(system)' when
-    Snowflake-internal). Newest first. Account-wide — grants have no company grain."""
+    Snowflake-internal). Newest first.
+
+    ``company`` scopes by the GRANTEE (owner ask 2026-08-17): a role granted to a
+    Trexis user or a privilege granted to a %TRXS% role is Trexis. Role-grain grants
+    use the role heuristic (role_clause); user-grain grants use user classification.
+    'ALL' = account-wide (both clauses collapse to no-op)."""
     days = bounded_days(days, 365)
     limit = max(10, min(int(limit or 500), 2000))
     cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    u_scope = companies.user_clause(company, "GRANTEE_NAME")   # grantee is a user
+    r_scope = companies.role_clause(company, "GRANTEE_NAME")   # grantee is a role
     return f"""
 WITH changes AS (
     SELECT CREATED_ON AS CHANGED_AT, 'GRANTED' AS CHANGE, 'Role -> user' AS GRANT_TYPE,
            GRANTED_BY AS CHANGED_BY, GRANTEE_NAME AS GRANTEE, ROLE AS WHAT
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
-    WHERE CREATED_ON >= {cutoff}
+    WHERE {and_where(f"CREATED_ON >= {cutoff}", u_scope)}
     UNION ALL
     SELECT DELETED_ON, 'REVOKED', 'Role -> user',
            GRANTED_BY, GRANTEE_NAME, ROLE
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
-    WHERE DELETED_ON >= {cutoff}
+    WHERE {and_where(f"DELETED_ON >= {cutoff}", u_scope)}
     UNION ALL
     SELECT CREATED_ON, 'GRANTED', 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE CREATED_ON >= {cutoff}
+    WHERE {and_where(f"CREATED_ON >= {cutoff}", r_scope)}
     UNION ALL
     SELECT DELETED_ON, 'REVOKED', 'Privilege -> role',
            GRANTED_BY, GRANTEE_NAME,
            PRIVILEGE || ' ON ' || GRANTED_ON || ' ' || COALESCE(NAME, '')
     FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
-    WHERE DELETED_ON >= {cutoff}
+    WHERE {and_where(f"DELETED_ON >= {cutoff}", r_scope)}
 )
 SELECT CHANGED_AT, CHANGE, GRANT_TYPE,
        COALESCE(NULLIF(TRIM(CHANGED_BY), ''), '(system)') AS CHANGED_BY,
