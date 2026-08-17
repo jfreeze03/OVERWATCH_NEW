@@ -45,6 +45,7 @@ from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import (
     build_failure_timeline,
     compare_release_periods,
+    pipeline_sla_forecast,
     rank_release_candidates,
     task_release_deltas,
     with_auto_suspend_settings,
@@ -632,30 +633,45 @@ def _dq_row_volume_panel() -> None:
 
 def _pipeline_sla_tab(is_operator: bool) -> None:
     """Metadata-driven table freshness SLAs (config in PIPELINE_SLA_CONFIG)."""
-    res = run(insights_sql.pipeline_sla_status(), page=_PAGE, key="sla_status", tier="live",
-              source="PIPELINE_SLA_STATUS")
+    res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
+              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:
         st.info("Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
         return
     if res.empty:
         st.info("No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
     else:
-        df = res.df.copy()
+        # O10: fold each table's refresh cadence into a forward-looking tier so the
+        # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
+        df = pipeline_sla_forecast(res.df.copy())
         met = int(df["SLA_MET"].fillna(False).astype(bool).sum())
         total = len(df)
+        overdue = int((df["FORECAST"] == "Overdue").sum())
+        at_risk = int((df["FORECAST"] == "At risk").sum())
         kpi_row([
             {"label": "SLA compliance", "value": f"{met / total * 100:,.1f}%",
              "delta": f"{met}/{total} tables", "delta_color": "off"},
-            {"label": "Breaching", "value": f"{total - met}",
+            {"label": "Breaching now", "value": f"{total - met}",
              "delta_color": "inverse" if total - met else "off"},
+            {"label": "Trending to miss", "value": f"{overdue + at_risk}",
+             "delta": f"{overdue} overdue · {at_risk} at risk", "delta_color": "off",
+             "help": "Meets SLA now but overdue vs its own refresh cadence, or within "
+                     "one refresh cycle of the deadline — a leading indicator, not a miss yet."},
         ])
+        _fcols = ["DATABASE_NAME", "SCHEMA_NAME", "TABLE_NAME", "OWNER", "FORECAST",
+                  "DETAIL", "HOURS_SINCE", "MAX_AGE_HOURS"]
+        forecast_rows = df[df["FORECAST"].isin(["Overdue", "At risk"])]
+        if not forecast_rows.empty:
+            st.warning("Forecast — registered tables trending toward a miss (still within SLA now):")
+            styled_table(forecast_rows[_fcols], sort_label="soonest to miss")
         breaching = df[~df["SLA_MET"].fillna(False).astype(bool)]
         if not breaching.empty:
             st.warning("Tables past their freshness SLA:")
-            styled_table(breaching)
+            styled_table(breaching[_fcols])
         with st.expander("All registered tables"):
             styled_table(df)
-        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag up to ~2h).")
+        result_caption(res, note="Freshness from ACCOUNT_USAGE.TABLES.LAST_ALTERED (metadata lag "
+                                  "up to ~2h); refresh cadence from TABLE_DML_HISTORY over 14 days.")
 
     with st.expander("Register a table"):
         # rec43 NOT applied here: st.form would freeze the live SQL preview until

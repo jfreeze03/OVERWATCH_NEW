@@ -480,6 +480,52 @@ ORDER BY DATABASE_NAME, SCHEMA_NAME, TABLE_NAME
 """
 
 
+def pipeline_sla_forecast(days: int = 14) -> str:
+    """Registered freshness SLAs + each table's refresh cadence (O10 predictor).
+
+    pipeline_sla_status is purely reactive — SLA_MET is a right-now verdict. This
+    joins every registered table to its typical refresh cadence: the median gap
+    (minutes) between successive DML events over the window, from
+    TABLE_DML_HISTORY. Paired with the runway to the deadline (MAX_AGE_HOURS -
+    HOURS_SINCE), the pure scorer (`logic.insights.pipeline_sla_forecast`) can
+    then forecast the tables trending toward a miss — 'overdue vs its own
+    cadence' or 'deadline within one refresh cycle' — instead of only the ones
+    that already missed. Tables never observed refreshing in the window carry a
+    NULL cadence and fall back to a runway-proximity check downstream.
+    """
+    days = max(3, min(int(days or 14), 90))
+    return f"""
+WITH intervals AS (
+    SELECT UPPER(DATABASE_NAME) AS DB, UPPER(SCHEMA_NAME) AS SCH,
+           UPPER(TABLE_NAME) AS TBL,
+           DATEDIFF('minute',
+                    LAG(START_TIME) OVER (
+                        PARTITION BY UPPER(DATABASE_NAME), UPPER(SCHEMA_NAME),
+                                     UPPER(TABLE_NAME)
+                        ORDER BY START_TIME),
+                    START_TIME) AS GAP_MIN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+), cadence AS (
+    SELECT DB, SCH, TBL,
+           MEDIAN(GAP_MIN) AS MEDIAN_GAP_MIN,
+           COUNT(*) AS REFRESHES
+    FROM intervals
+    WHERE GAP_MIN IS NOT NULL AND GAP_MIN > 0
+    GROUP BY DB, SCH, TBL
+)
+SELECT s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.OWNER,
+       s.MAX_AGE_HOURS, s.HOURS_SINCE, s.SLA_MET,
+       c.MEDIAN_GAP_MIN, c.REFRESHES,
+       ROUND(s.MAX_AGE_HOURS - s.HOURS_SINCE, 2) AS RUNWAY_HOURS
+FROM {core_object("PIPELINE_SLA_STATUS")} s
+LEFT JOIN cadence c
+  ON c.DB = UPPER(s.DATABASE_NAME) AND c.SCH = UPPER(s.SCHEMA_NAME)
+ AND c.TBL = UPPER(s.TABLE_NAME)
+ORDER BY s.SLA_MET, RUNWAY_HOURS
+"""
+
+
 # ---------------------------------------------------------------------------
 # 7. Dormant users & grant review
 # ---------------------------------------------------------------------------

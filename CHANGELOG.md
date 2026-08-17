@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.224.0 - Predictive pipeline-SLA on Operations (2026-08-16)
+
+CoCo review, Tier-3 (Operations #10). New `data.insights_sql.pipeline_sla_forecast`
++ `logic.insights.pipeline_sla_forecast`.
+
+- **The pipeline-SLA tab now warns before a miss, not only after.** The freshness SLA view
+  was purely reactive — `SLA_MET` is a right-now verdict. A new reader joins every registered
+  table to its typical refresh cadence (median gap between DML events over 14 days, from
+  `TABLE_DML_HISTORY`) beside its runway to the deadline (`MAX_AGE_HOURS − HOURS_SINCE`), and a
+  pure scorer folds them into a forward-looking tier: **Overdue** (meets SLA now, but it has
+  been more than ~1.5× its own median refresh gap since the last update — a stalled pipeline is
+  the likely cause), **At risk** (the deadline sits within one typical refresh cycle, so a
+  single skipped refresh breaches it; tables with no cadence history fall back to a
+  runway-proximity check), plus Breached/On-track. A "Trending to miss" KPI and a forecast
+  table surface the tables sliding toward a miss while they still meet SLA. The tab's read moved
+  from the reactive `PIPELINE_SLA_STATUS` mart to the cadence-joined reader (Operations live-scan
+  budget 26→27; `TABLE_DML_HISTORY` already reachable; nested non-first-paint tab, tier=recent).
+  App version 4.224.0.
+
 ## 4.223.0 - Crossed-threshold badge on the watchlist (2026-08-16)
 
 CoCo review, Tier-3 (Control Room #16, the surfacing half). New pure

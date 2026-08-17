@@ -134,6 +134,65 @@ def test_pipeline_readers_target_overwatch_objects():
     assert "DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_CONFIG" in insights_sql.pipeline_sla_config()
 
 
+def test_pipeline_sla_forecast_joins_cadence_to_status():
+    sqlglot = pytest.importorskip("sqlglot")
+    sql = insights_sql.pipeline_sla_forecast(14)
+    sqlglot.parse(sql, dialect="snowflake")
+    assert "DBA_MAINT_DB.OVERWATCH.PIPELINE_SLA_STATUS" in sql
+    assert "SNOWFLAKE.ACCOUNT_USAGE.TABLE_DML_HISTORY" in sql
+    assert "MEDIAN(GAP_MIN)" in sql                    # per-table refresh cadence
+    assert "LAG(START_TIME)" in sql                    # gap between successive DML
+    for col in ("MEDIAN_GAP_MIN", "RUNWAY_HOURS", "HOURS_SINCE", "SLA_MET"):
+        assert col in sql, col
+    assert "DATEADD('day', -14," in sql                # bounded window
+    # floor clamp keeps the window sane
+    assert "-90," in insights_sql.pipeline_sla_forecast(9999)
+
+
+def test_pipeline_sla_forecast_tiers_by_cadence_and_runway():
+    df = pd.DataFrame([
+        # already missed -> Breached
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "BREACHED",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 30, "SLA_MET": False,
+         "MEDIAN_GAP_MIN": 60, "RUNWAY_HOURS": -6},
+        # meets SLA but refresh is 5h late vs a ~1h cadence -> Overdue
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "OVERDUE",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 5, "SLA_MET": True,
+         "MEDIAN_GAP_MIN": 60, "RUNWAY_HOURS": 19},
+        # refreshes ~once/day (20h cadence): 23h stale is NOT overdue vs its own
+        # cadence, but the deadline is within one refresh cycle -> At risk
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "ATRISK",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 23, "SLA_MET": True,
+         "MEDIAN_GAP_MIN": 1200, "RUNWAY_HOURS": 1},
+        # meets SLA, fresh, comfortably inside -> On track
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "OK",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 2, "SLA_MET": True,
+         "MEDIAN_GAP_MIN": 120, "RUNWAY_HOURS": 22},
+    ])
+    out = insights.pipeline_sla_forecast(df, overdue_k=1.5)
+    by_table = dict(zip(out["TABLE_NAME"], out["FORECAST"], strict=True))
+    assert by_table["BREACHED"] == "Breached"
+    assert by_table["OVERDUE"] == "Overdue"
+    assert by_table["ATRISK"] == "At risk"
+    assert by_table["OK"] == "On track"
+    # No cadence history -> Overdue never fires; falls back to runway proximity.
+    no_cadence = pd.DataFrame([
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "NEAR",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 22, "SLA_MET": True,
+         "MEDIAN_GAP_MIN": None, "RUNWAY_HOURS": 2},   # 2h <= 15% of 24h = 3.6h
+    ])
+    assert insights.pipeline_sla_forecast(no_cadence).iloc[0]["FORECAST"] == "At risk"
+    assert insights.pipeline_sla_forecast(pd.DataFrame()).empty
+
+
+def test_operations_pipeline_sla_tab_wires_forecast():
+    from pathlib import Path
+    ops = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
+    assert "insights_sql.pipeline_sla_forecast(14)" in ops
+    assert "pipeline_sla_forecast(res.df.copy())" in ops
+    assert "Trending to miss" in ops
+
+
 # ---- 1. idle advisor ----------------------------------------------------------
 
 def test_idle_advisor_math_and_flag():

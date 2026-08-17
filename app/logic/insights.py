@@ -478,3 +478,76 @@ def reawakening_severity(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
     return out
+
+
+def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.DataFrame:
+    """Turn the reactive freshness SLA into a forward-looking tier (O10).
+
+    ``pipeline_sla_status`` answers 'is this table fresh right now?'. Given each
+    table's runway to its deadline (MAX_AGE_HOURS - HOURS_SINCE) and its typical
+    refresh cadence (MEDIAN_GAP_MIN), forecast the ones trending toward a miss.
+    Adds ``FORECAST``, ``SEVERITY`` and a human ``DETAIL``. Rules, worst-first:
+
+      * Breached — SLA_MET is already false (reactive; kept for context).
+      * Overdue  — meets SLA now, but it has been more than ``overdue_k`` x its
+        own median refresh gap since the last update: the refresh is materially
+        late, so a stalled pipeline is the likely cause.
+      * At risk  — meets SLA now, but the deadline is within one typical refresh
+        cycle, so a single skipped refresh breaches it. Tables with no cadence
+        history fall back to a runway-proximity check (deadline within 15% of the
+        SLA horizon).
+      * On track — comfortably fresh.
+
+    Returns a copy; empty in -> empty out, never raises.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy().reset_index(drop=True)
+    met_col = out.get("SLA_MET")
+    met = (met_col.fillna(False).astype(bool)
+           if met_col is not None else pd.Series(False, index=out.index))
+    hours_since = pd.to_numeric(out.get("HOURS_SINCE"), errors="coerce")
+    max_age = pd.to_numeric(out.get("MAX_AGE_HOURS"), errors="coerce")
+    runway = pd.to_numeric(out.get("RUNWAY_HOURS"), errors="coerce")
+    if runway.isna().all():
+        runway = max_age - hours_since
+    median_gap = pd.to_numeric(out.get("MEDIAN_GAP_MIN"), errors="coerce")
+    k = float(overdue_k)
+
+    forecasts: list[str] = []
+    severities: list[str] = []
+    details: list[str] = []
+    for i in range(len(out)):
+        is_met = bool(met.iloc[i])
+        hs = safe_float(hours_since.iloc[i])
+        rw_raw = runway.iloc[i]
+        rw = safe_float(rw_raw)
+        gap_raw = median_gap.iloc[i]
+        has_cadence = bool(pd.notna(gap_raw)) and safe_float(gap_raw) > 0
+        cycle_hours = safe_float(gap_raw) / 60.0 if has_cadence else None
+        if not is_met:
+            forecasts.append("Breached")
+            severities.append("High")
+            details.append(f"already {hs:.1f}h old (past its {safe_float(max_age.iloc[i]):.0f}h limit)")
+            continue
+        if has_cadence and hs * 60.0 > k * safe_float(gap_raw):
+            forecasts.append("Overdue")
+            severities.append("High")
+            details.append(
+                f"last refresh {hs:.1f}h ago vs ~{cycle_hours:.1f}h typical — refresh is late"
+            )
+            continue
+        proximity = cycle_hours if cycle_hours is not None else safe_float(max_age.iloc[i]) * 0.15
+        if bool(pd.notna(rw_raw)) and rw <= proximity:
+            forecasts.append("At risk")
+            severities.append("Medium")
+            eta = f"breaches in ~{rw:.1f}h" if rw > 0 else "at the limit now"
+            details.append(eta + (f"; ~{cycle_hours:.1f}h typical cadence" if has_cadence else ""))
+            continue
+        forecasts.append("On track")
+        severities.append("OK")
+        details.append(f"~{rw:.1f}h runway" if bool(pd.notna(rw_raw)) else "fresh")
+    out["FORECAST"] = forecasts
+    out["SEVERITY"] = severities
+    out["DETAIL"] = details
+    return out
