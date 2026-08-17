@@ -542,6 +542,27 @@ ORDER BY MEASURED_OBJECT_CREDITS DESC, METERED_WAREHOUSE_CREDITS DESC
 """
 
 
+def product_mapping_totals(days: int = 30, company: str = "ALL") -> str:
+    """Coverage denominators for the product-economics view (Codex #20): the WHOLE
+    account's object cost and catalog-entity counts, so the mapped share and the
+    unmapped residual are explicit — an operator can tell whether product economics
+    covers 90% or 12% of spend. Same DAY/company basis as data_product_economics;
+    TOTAL_OBJECT_CREDITS drops the DATA_PRODUCT predicate that view applies."""
+    horizon = bounded_days(days, 400)
+    cv = str(company or "ALL").upper()
+    obj_co = "" if cv == "ALL" else f"AND UPPER(COMPANY) = {sql_literal(cv, 40)}"
+    cat_co = "" if cv == "ALL" else f"AND UPPER(COMPANY) = {sql_literal(cv, 40)}"
+    return f"""
+SELECT
+    (SELECT ROUND(COALESCE(SUM(CREDITS), 0), 4)
+       FROM {core_object('FACT_OBJECT_COST_DAILY')}
+      WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {obj_co}) AS TOTAL_OBJECT_CREDITS,
+    (SELECT COUNT(*) FROM {core_object('ENTITY_CATALOG')} WHERE 1 = 1 {cat_co}) AS TOTAL_ENTITIES,
+    (SELECT COUNT(*) FROM {core_object('ENTITY_CATALOG')}
+      WHERE NULLIF(TRIM(DATA_PRODUCT), '') IS NOT NULL {cat_co}) AS MAPPED_ENTITIES
+"""
+
+
 def product_detail(data_product: str) -> str:
     """#14: the constituent catalog entities of one data product, most-severe first.
 

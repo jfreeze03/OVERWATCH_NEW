@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.245.0 - Codex #20: product-mapping coverage (2026-08-17)
+
+Decision Studio's Products board showed mapped product $ but no denominator — an
+operator couldn't tell whether product economics covered 90% or 12% of spend, and
+the unmapped residual was invisible.
+
+- New `workbench_sql.product_mapping_totals` returns the WHOLE-account object cost and
+  catalog-entity counts (same DAY/company basis as the product view; the TOTAL drops the
+  `DATA_PRODUCT` predicate the mapped view applies).
+- The Products board now leads with a **coverage** KPI row: **Product-mapped object cost**
+  (as a % of account object cost, red under 50%), **Unmapped object cost** (the residual —
+  invisible to the board), and **Entity coverage** (mapped/total catalog entities), plus a
+  caption to read the per-product totals as a floor until coverage is high.
+
+App version 4.245.0.
+
 ## 4.244.0 - Codex wave-1: verify-proof gate, storage label, filter-test coverage (2026-08-17)
 
 Three confirmed items from the ground-truthed Codex review (#22, #17, #37).

@@ -348,6 +348,38 @@ def _products(company: str, days: int, rate: float) -> None:
                  "ownership to resolve; the OWNER_NAME shown is one of several."},
     ])
 
+    # Codex #20: coverage is the trust anchor for the whole board — mapped vs total
+    # account object cost and mapped vs total catalog entities, with the unmapped residual.
+    _cov = run(workbench_sql.product_mapping_totals(days, company), page=_PAGE,
+               key=f"product_coverage_{company}_{days}", tier="recent",
+               source="FACT_OBJECT_COST_DAILY + ENTITY_CATALOG", probe=True)
+    if _cov.usable():
+        _cr = _cov.df.iloc[0]
+        _total_obj = credits_to_usd(safe_float(_cr.get("TOTAL_OBJECT_CREDITS")), rate)
+        _mapped_obj = float(frame["MEASURED_OBJECT_USD"].sum())
+        _unmapped = max(0.0, _total_obj - _mapped_obj)
+        _cov_pct = (_mapped_obj / _total_obj * 100.0) if _total_obj > 0 else 0.0
+        _tot_e = int(safe_float(_cr.get("TOTAL_ENTITIES")))
+        _map_e = int(safe_float(_cr.get("MAPPED_ENTITIES")))
+        kpi_row([
+            {"label": "Product-mapped object cost", "value": format_usd(_mapped_obj),
+             "delta": f"{_cov_pct:.0f}% of account object cost",
+             "delta_color": "normal" if _cov_pct >= 80 else "inverse" if _cov_pct < 50 else "off",
+             "help": "Object cost attributable to a mapped data product, as a share of the whole "
+                     "account's object cost. Low coverage = the board below sees only a slice."},
+            {"label": "Unmapped object cost", "value": format_usd(_unmapped),
+             "delta_color": "inverse" if _unmapped > 0 else "off",
+             "help": "Object cost on entities with NO data-product mapping — invisible to the "
+                     "per-product board. Map them in the catalog to close the gap."},
+            {"label": "Entity coverage", "value": f"{_map_e:,}/{_tot_e:,}",
+             "delta": (f"{_map_e / _tot_e * 100:.0f}% mapped" if _tot_e else "no catalog"),
+             "delta_color": "off",
+             "help": "Catalog entities mapped to a data product vs all catalog entities."},
+        ])
+        st.caption("Coverage first: the per-product economics below covers only the mapped share "
+                   "above, so read its totals as a floor — not the whole account — until coverage "
+                   "is high.")
+
     def open_product(index: int) -> None:
         _open_entity("DATA_PRODUCT", str(frame.iloc[int(index)]["DATA_PRODUCT"]))
 

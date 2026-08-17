@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.data import workbench_sql
+
 _ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -34,6 +36,21 @@ def test_experiment_verify_is_gated_on_proof():
     assert "result evidence" in ds
     assert "verified $ amount above 0" in ds
     assert "observation window to close" in ds
+
+
+def test_product_mapping_coverage_is_exposed():
+    # Codex #20: product economics must show mapped-vs-total coverage + unmapped residual,
+    # not just mapped $ (else an operator can't tell it covers 90% or 12% of spend).
+    sql = workbench_sql.product_mapping_totals(30, "Trexis")
+    assert "FACT_OBJECT_COST_DAILY" in sql and "ENTITY_CATALOG" in sql
+    for col in ("TOTAL_OBJECT_CREDITS", "TOTAL_ENTITIES", "MAPPED_ENTITIES"):
+        assert col in sql, col
+    # the TOTAL denominator drops the DATA_PRODUCT predicate; only MAPPED_ENTITIES keeps it.
+    assert sql.count("NULLIF(TRIM(DATA_PRODUCT)") == 1
+    assert "UPPER(COMPANY) = 'TREXIS'" in sql          # company-scoped
+    ds = _src("app/ui/decision_studio.py")
+    assert "product_mapping_totals(" in ds
+    assert "Unmapped object cost" in ds and "Entity coverage" in ds
 
 
 def test_filter_matrix_auto_discovers_sql_modules():
