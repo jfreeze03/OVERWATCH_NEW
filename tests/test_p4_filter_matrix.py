@@ -27,19 +27,24 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import pathlib
 from collections.abc import Callable
 
 import pytest
 
+import app.data as _app_data
 from app.companies import COMPANIES
 
 sqlglot = pytest.importorskip("sqlglot")
 
-_SQL_MODULES = (
-    "change_impact_sql", "chargeback_sql", "cortex_sql", "cost_sql", "etl_sql",
-    "graph_sql", "insights_sql", "mart27_sql", "mart_sql", "ops_sql",
-    "prefs_sql", "recheck_sql", "security_sql",
-)
+# Codex #37: auto-discover EVERY app/data/*_sql.py module rather than hand-listing
+# them (the old fixed tuple silently omitted alert_evidence_sql, app_cost_sql,
+# directory_sql, dq_sql, and workbench_sql — including Decision Studio's
+# company-taking builders). A new *_sql module is now in the matrix on the next run.
+_SQL_MODULES = tuple(sorted(
+    p.stem for p in pathlib.Path(_app_data.__file__).parent.glob("*_sql.py")
+    if not p.stem.startswith("_")
+))
 
 # Valid values for every REQUIRED non-company argument. A builder that grows a
 # new required argument raises KeyError here — deliberately. The matrix should

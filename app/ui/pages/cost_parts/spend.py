@@ -1124,9 +1124,10 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
              # r6-bug15: a monthly cost estimate is not a favorable move — neutral, like
              # the "Prior full month" sibling below (else a rising cost shows green up).
              "delta_color": "off",
-             "help": f"Month-to-date average of daily (active + fail-safe) bytes x "
+             "help": f"Month-to-date average of daily (active + Time Travel + fail-safe) bytes x "
                      f"${rate_tb:.2f}/TiB/mo (SETTINGS) — Snowflake's calendar-month billing "
-                     "basis (binary TiB). rec #30: per-database covers ACTIVE + FAIL-SAFE only; "
+                     "basis (binary TiB). rec #30: per-database covers ACTIVE + TIME-TRAVEL "
+                     "+ FAIL-SAFE (AVERAGE_DATABASE_BYTES already includes Time Travel); "
                      "hybrid-table, stage, and archive storage carry no per-database split, so "
                      "they are on the account-by-tier panel above, not here — a hybrid-heavy "
                      "database reads low in this view. rec #33: an estimate at the configured "

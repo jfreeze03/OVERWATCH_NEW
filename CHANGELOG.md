@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.244.0 - Codex wave-1: verify-proof gate, storage label, filter-test coverage (2026-08-17)
+
+Three confirmed items from the ground-truthed Codex review (#22, #17, #37).
+
+- **#22 — experiment verify requires proof.** A `VERIFIED` experiment books
+  `SAVINGS_LEDGER` and feeds the director-facing "Verified savings / Realization"
+  headline, but the Save button accepted a blank result note, `$0`, and an open
+  observation window. It's now gated on: non-empty result evidence, verified `$ > 0`,
+  and the observation window having closed — with a message naming what's missing.
+  (Proc-level enforcement in `SP_VERIFY_EXPERIMENT` is a recommended follow-up.)
+- **#17 — storage label accuracy.** `AVERAGE_DATABASE_BYTES` already includes Time
+  Travel, so the per-DB card + `metric_registry` "active + fail-safe" wording
+  under-counted; now reads "active + Time Travel + fail-safe."
+- **#37 — filter-matrix auto-discovery.** `test_p4_filter_matrix` hand-listed 13 SQL
+  modules and silently omitted 5 (`workbench_sql`, `dq_sql`, `app_cost_sql`,
+  `directory_sql`, `alert_evidence_sql`) — including Decision Studio's company-taking
+  builders. It now globs every `app/data/*_sql.py`; the newly-covered builders all pass
+  the scoping/injection/clamp invariants (test count +18).
+
+App version 4.244.0.
+
 ## 4.243.0 - Fix: portfolio FAILS coalesced to 0 defeated evidence-presence (Codex #1) (2026-08-17)
 
 Ground-truthing a 50-item external review confirmed its flagship defect. Decision

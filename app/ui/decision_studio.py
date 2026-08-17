@@ -652,6 +652,20 @@ def _experiments() -> None:
             "Verified USD", min_value=0.0, value=safe_float(row.get("VERIFIED_USD")),
             step=25.0, key=f"experiment_value_{experiment_id}",
         )
+        # Codex #22: a VERIFIED experiment books SAVINGS_LEDGER and feeds the director-
+        # facing "Verified savings / Realization" headline, so it must be evidence-backed.
+        # Gate the Save button on real proof (the SQL preview still renders so the operator
+        # sees what would run). Proc-level enforcement in SP_VERIFY_EXPERIMENT is a follow-up.
+        _proof_gaps: list[str] = []
+        if update_status == "VERIFIED":
+            if not str(result_note or "").strip():
+                _proof_gaps.append("result evidence")
+            if not (safe_float(verified_value) > 0):
+                _proof_gaps.append("a verified $ amount above 0")
+            _obs_end = pd.to_datetime(row.get("OBSERVATION_END"), errors="coerce")
+            if pd.notna(_obs_end) and _obs_end.date() > account_now().date():
+                _proof_gaps.append(
+                    f"the observation window to close (ends {str(row.get('OBSERVATION_END'))[:10]})")
         statement = update_experiment_sql(
             experiment_id, status=update_status, result=result_note,
             verified_usd=verified_value if update_status == "VERIFIED" else None,
@@ -659,7 +673,12 @@ def _experiments() -> None:
         )
         with st.expander("SQL preview"):
             st.code(statement, language="sql")
-        if st.button("Save experiment", key=f"experiment_save_{experiment_id}", type="primary"):
+        if _proof_gaps:
+            st.warning("Can't verify without proof — still needs: " + ", ".join(_proof_gaps)
+                       + ". A verified experiment books the savings ledger and feeds the "
+                       "'Verified savings' headline, so it must be evidence-backed.")
+        if st.button("Save experiment", key=f"experiment_save_{experiment_id}",
+                     type="primary", disabled=bool(_proof_gaps)):
             ok, message = execute_statement(statement, page=_PAGE)
             notify(ok, message)
             if ok:

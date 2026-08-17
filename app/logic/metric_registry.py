@@ -173,11 +173,12 @@ METRICS: tuple[Metric, ...] = (
            "database / calendar month",
            "FACT_STORAGE_DAILY (MTD + prior-month daily average) x rate",
            ACCOUNT_TZ, "daily load", "items 3 & 7",
-           "Active + fail-safe bytes, binary TiB, x $/TiB SETTING. Calendar-month basis. "
-           "Estimate — org rate-card is billing truth.",
+           "Active + Time Travel + fail-safe bytes (AVERAGE_DATABASE_BYTES includes Time "
+           "Travel), binary TiB, x $/TiB SETTING. Calendar-month basis. Estimate — org "
+           "rate-card is billing truth.",
            window="calendar-month", partial_day="included", unit="USD",
            filters=("company", "database"), required_sources=("FACT_STORAGE_DAILY",),
-           coverage="active + fail-safe bytes x rate; estimate", owner="platform"),
+           coverage="active + Time Travel + fail-safe bytes x rate; estimate", owner="platform"),
     Metric("account_tier_storage", "Account storage by tier $", ESTIMATED,
            "account / tier",
            "FACT_STORAGE_ACCOUNT_DAILY / ACCOUNT_USAGE.STORAGE_USAGE x tier rates",
