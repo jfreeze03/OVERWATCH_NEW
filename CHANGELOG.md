@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.250.0 - Error-log fixes: 3 SQL-compilation errors from the live log (2026-08-17)
+
+The owner pulled the full `APP_ERROR_LOG` messages. Three distinct SQL-compilation
+failures, two of them recent regressions from my own work — all fixed.
+
+- **Alerts `000904` invalid identifier RESOLUTION_NOTE** (×13, the persistent one):
+  `resolutions_for_rule` selected `RESOLUTION_NOTE` from `ALERT_EVENTS`, but that column
+  was added to `ACTION_QUEUE` (V074), not alerts. The alert resolution note lives in
+  `ALERT_AUDIT.NOTE` — now joined on `EVENT_ID` (latest resolve/remediate/note).
+- **Cost `001072` "Lateral View cannot be on the left side of join"** (my wave-2
+  regression): the `TOKENS_GRANULAR` token-economics builder put `LATERAL FLATTEN` in a
+  comma-join left of a `LEFT JOIN USERS`. FLATTEN moved into its own CTE; the join is now
+  on the CTE.
+- **Alerts `002031` "Unsupported subquery type cannot be evaluated"**: `incident_metrics`
+  nested a scalar subquery inside `NULLIF` inside a scalar subquery (COMPRESSION/CHANGE_PCT).
+  The incident count + both numerators are hoisted into single-row CTEs and cross-joined;
+  the ratios are now plain column arithmetic. Same output columns.
+
+Two remaining log entries are lower-priority: the Cortex-Guardrails `START_TIME` identifier
+(wrong column on the optional view — degrades to "not available", now probe-suppressed) and
+a single Operations `090234` (current-user-in-proc) that couldn't be located in any builder.
+
+App version 4.250.0.
+
 ## 4.249.0 - Snowsight reconciliation: humanize every byte surface (2026-08-17)
 
 A 7-agent audit checked 48 user-facing numbers against their Snowsight equivalents:

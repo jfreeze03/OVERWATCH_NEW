@@ -1135,14 +1135,26 @@ def resolutions_for_rule(rule_id: str, days: int = 180, limit: int = 5) -> str:
         raise ValueError(f"Invalid rule id: {rule_id!r}")
     days = bounded_days(days, 365)
     cap = max(1, min(int(limit), 20))
+    # RESOLUTION_NOTE lives in ALERT_AUDIT.NOTE (the resolve/remediate action's note),
+    # keyed by EVENT_ID — NOT on ALERT_EVENTS (V074 added RESOLUTION_NOTE to ACTION_QUEUE,
+    # a different table). Selecting it from ALERT_EVENTS raised 000904 invalid identifier
+    # on every Alerts drawer open (owner error log 2026-08-17). Join the audit note.
     return f"""
-SELECT RESOLVED_AT, RESOLUTION_KIND, COMPANY, TITLE, RESOLUTION_NOTE
-FROM {core_object("ALERT_EVENTS")}
-WHERE RULE_ID = {sql_literal(rid)}
-  AND STATUS = 'RESOLVED'
-  AND COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED'
-  AND RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-ORDER BY RESOLVED_AT DESC
+SELECT e.RESOLVED_AT, e.RESOLUTION_KIND, e.COMPANY, e.TITLE,
+       a.NOTE AS RESOLUTION_NOTE
+FROM {core_object("ALERT_EVENTS")} e
+LEFT JOIN (
+    SELECT EVENT_ID, MAX_BY(NOTE, ACTED_AT) AS NOTE
+    FROM {core_object("ALERT_AUDIT")}
+    WHERE ACTION IN ('RESOLVE', 'REMEDIATE', 'NOTE')
+      AND COALESCE(NOTE, '') <> ''
+    GROUP BY EVENT_ID
+) a ON a.EVENT_ID = e.EVENT_ID
+WHERE e.RULE_ID = {sql_literal(rid)}
+  AND e.STATUS = 'RESOLVED'
+  AND COALESCE(e.RESOLUTION_KIND, '') <> 'SUPERSEDED'
+  AND e.RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+ORDER BY e.RESOLVED_AT DESC
 LIMIT {cap}
 """
 
@@ -2053,15 +2065,34 @@ def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    # COMPRESSION and CHANGE_PCT previously nested (SELECT COUNT(*) FROM w) inside
+    # NULLIF inside a scalar subquery — Snowflake 002031 "Unsupported subquery type
+    # cannot be evaluated" (owner error log 2026-08-17). Hoist the incident count and
+    # both numerators into single-row CTEs and CROSS JOIN, so the ratios are plain
+    # column arithmetic with no nested subquery. The other single-scalar subqueries
+    # (OPEN_NOW, the MEDIAN/REOPEN aggregates over w) are uncorrelated and fine.
     return f"""
 WITH w AS (
     SELECT * FROM {core_object("INCIDENTS")}
     WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){comp}
+),
+wn AS (SELECT COUNT(*) AS N FROM w),
+compression AS (
+    SELECT COUNT(*) AS ALERT_MEMBERS
+    FROM {core_object("INCIDENT_MEMBERS")} m
+    JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
+    WHERE m.MEMBER_KIND = 'ALERT'
+),
+change_inc AS (
+    SELECT COUNT(DISTINCT w.INCIDENT_ID) AS CHANGE_INCIDENTS
+    FROM w
+    JOIN {core_object("INCIDENT_MEMBERS")} m ON m.INCIDENT_ID = w.INCIDENT_ID
+    WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
       WHERE STATUS IN ('OPEN', 'MITIGATED'){comp}) AS OPEN_NOW,
-    (SELECT COUNT(*) FROM w) AS DECLARED_N,
+    wn.N AS DECLARED_N,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
       WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, ACK_AT)), 1) FROM w
@@ -2070,15 +2101,9 @@ SELECT
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
     (SELECT ROUND(100.0 * COUNT_IF(REOPENED_FROM IS NOT NULL)
             / NULLIF(COUNT_IF(RESOLVED_AT IS NOT NULL), 0), 1) FROM w) AS REOPEN_PCT,
-    (SELECT ROUND(COUNT(*) / NULLIF((SELECT COUNT(*) FROM w), 0), 1)
-       FROM {core_object("INCIDENT_MEMBERS")} m
-       JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
-      WHERE m.MEMBER_KIND = 'ALERT') AS COMPRESSION,
-    (SELECT ROUND(100.0 * COUNT(DISTINCT w.INCIDENT_ID) / NULLIF((SELECT COUNT(*) FROM w), 0), 1)
-       FROM w
-       JOIN {core_object("INCIDENT_MEMBERS")} m
-         ON m.INCIDENT_ID = w.INCIDENT_ID
-      WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')) AS CHANGE_PCT
+    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION,
+    ROUND(100.0 * change_inc.CHANGE_INCIDENTS / NULLIF(wn.N, 0), 1) AS CHANGE_PCT
+FROM wn CROSS JOIN compression CROSS JOIN change_inc
 """
 
 
