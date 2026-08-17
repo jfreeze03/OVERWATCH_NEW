@@ -9,18 +9,21 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.core.query import run, run_batch
+from app.config import core_object
+from app.core.query import execute_statement, run, run_batch
 from app.core.session import is_operator as _is_operator
+from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
-from app.logic.formulas import humanize_duration, humanize_minutes_ago, safe_float
+from app.logic.formulas import format_usd, humanize_duration, humanize_minutes_ago, safe_float
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
     load_settings,
+    notify,
     page_header,
     page_verdict_line,
     result_caption,
@@ -50,6 +53,54 @@ from app.ui.pages.cost_parts.spend import (  # noqa: E402,F401
     _storage_tab,
 )
 from app.ui.pages.cost_parts.unit_costs import _unit_costs_tab  # noqa: E402
+
+# GRAIN (as emitted by mart_sql.unmapped_entities) -> COMPANY_SCOPE.SCOPE_TYPE.
+# Users map through USER_OVERRIDE (V044's COMPANY_FOR_USER checks it first).
+_SCOPE_FOR_GRAIN = {"WAREHOUSE": "WAREHOUSE", "DATABASE": "DATABASE", "USER": "USER_OVERRIDE"}
+
+
+def _unmapped_mapper(df, is_operator: bool) -> None:
+    """Map an UNKNOWN-company entity to a company (owner ask: "map untapped users
+    and backfill"). Builds the idempotent COMPANY_SCOPE upsert for the picked entity;
+    an operator applies it in place, otherwise it's copy-paste for Snowsight. The
+    next loader pass re-stamps go-forward facts — history needs a backfill re-run."""
+    with st.expander("Map an entity to a company"):
+        entities = [str(e) for e in df["ENTITY"].dropna().tolist() if str(e).strip()]
+        if not entities:
+            st.caption("Nothing to map in this window.")
+            return
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            pick = st.selectbox("Entity", entities, key="unmap_entity")
+        with c2:
+            company_choice = st.selectbox("Company", ["ALFA", "Trexis"], key="unmap_company")
+        _row = df[df["ENTITY"].astype(str) == str(pick)]
+        grain = str(_row.iloc[0]["GRAIN"]).upper() if len(_row) else "WAREHOUSE"
+        scope_type = _SCOPE_FOR_GRAIN.get(grain, "USER_OVERRIDE")
+        pattern = str(pick).upper()
+        note = f"Classified via OVERWATCH ({grain})"
+        merge_sql = (
+            f"MERGE INTO {core_object('COMPANY_SCOPE')} t\n"
+            f"USING (SELECT {sql_literal(scope_type)} AS SCOPE_TYPE, "
+            f"{sql_literal(pattern)} AS PATTERN) s\n"
+            "ON t.SCOPE_TYPE = s.SCOPE_TYPE AND UPPER(t.PATTERN) = s.PATTERN\n"
+            f"WHEN MATCHED THEN UPDATE SET COMPANY = {sql_literal(company_choice)}, "
+            f"NOTE = {sql_literal(note)}\n"
+            "WHEN NOT MATCHED THEN INSERT (COMPANY, SCOPE_TYPE, PATTERN, NOTE)\n"
+            f"VALUES ({sql_literal(company_choice)}, s.SCOPE_TYPE, s.PATTERN, "
+            f"{sql_literal(note)});"
+        )
+        st.code(merge_sql, language="sql")
+        st.caption(
+            f"Maps **{pick}** ({scope_type}) → **{company_choice}**. Go-forward facts stamp "
+            "immediately; the nightly reconcile re-stamps the trailing 3 days. Older history "
+            "keeps its original stamp until a full loader backfill re-run.")
+        if is_operator and st.button("Apply mapping", key="unmap_apply"):
+            ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
+            notify(ok, msg if not ok else f"Mapped {pick} → {company_choice}.")
+        elif not is_operator:
+            st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app "
+                       "execution needs an admin profile.")
 
 
 def render() -> None:
@@ -175,14 +226,30 @@ def render() -> None:
             if unm.ok and unm.empty:
                 st.success("Every entity in the window carries company evidence — nothing is billed blind.")
             elif guard(unm, ""):
-                kpi_row([{"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
-                          "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
-                                  "original company until a backfill re-run."}])
-                styled_table(unm.df, height=240)
-                st.caption("Classify explicitly, then the next loader pass re-stamps: "
-                           "`INSERT INTO DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE (SCOPE_TYPE, PATTERN, COMPANY) "
-                           "VALUES ('WAREHOUSE'|'DATABASE'|'USER_OVERRIDE', '<NAME>', 'ALFA'|'Trexis');`")
+                import pandas as pd
+
+                # Owner ask ("add costs"): put a dollar figure on the worklist. Only the
+                # WAREHOUSE rows carry credits (MEASURE='credits'); DATABASE/USER rows are
+                # counts with no direct $, so their Est. $ stays blank.
+                _disp = unm.df.copy()
+                _credits = pd.to_numeric(_disp["VALUE"], errors="coerce").where(
+                    _disp["MEASURE"].astype(str).eq("credits"))
+                _disp["EST_USD"] = (_credits * float(rate)).round(2)
+                _at_stake = float(_disp["EST_USD"].sum())
+                kpi_row([
+                    {"label": "Unmapped entities", "value": f"{len(unm.df)}", "delta_color": "inverse",
+                     "help": "Facts re-stamp trailing 3 days nightly; older rows keep their "
+                             "original company until a backfill re-run."},
+                    {"label": "Unmapped spend, billed blind", "value": format_usd(_at_stake),
+                     "delta_color": "inverse" if _at_stake > 0 else "normal",
+                     "help": "Estimated $ (warehouse credits x contract rate) in this window "
+                             "stamped UNKNOWN — real money not yet attributed to a company."},
+                ])
+                styled_table(_disp, height=240, column_config={
+                    "EST_USD": st.column_config.NumberColumn("Est. $ (window)", format="$%.0f"),
+                })
                 result_caption(unm)
+                _unmapped_mapper(_disp, is_operator)
     elif section == "Contract & Forecast":
         section_header("Contract pacing & renewal planner", "info", "contract")
         _contract_tab(settings)

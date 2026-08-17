@@ -60,7 +60,10 @@ def test_app_mirrors_and_pill_and_worklist():
     assert "COMPANY = 'UNKNOWN'" in sql and "ACCOUNT_USAGE" not in sql   # mart-only worklist
     cost = (_ROOT / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
     assert "Unmapped entities" in cost
-    assert "COMPANY_SCOPE (SCOPE_TYPE, PATTERN, COMPANY)" in cost        # the fix, printed
+    # the fix, printed: v4.233.0 replaced the static caption with an interactive
+    # COMPANY_SCOPE upsert (pick entity + company -> ready-to-run MERGE).
+    assert "Map an entity to a company" in cost
+    assert "INSERT (COMPANY, SCOPE_TYPE, PATTERN, NOTE)" in cost
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     assert "mart_sql.unmapped_entities" in canary
 

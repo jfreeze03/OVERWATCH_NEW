@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.234.0 - Unmapped entities: $ at stake + one-click company mapping (2026-08-17)
+
+Live-app punch-list, data batch. Cost ▸ Spend & Attribution ▸ Unmapped entities.
+
+- **Cost on the worklist.** The unmapped table gains an "Est. $ (window)" column and a
+  headline "Unmapped spend, billed blind" KPI — warehouse credits × contract rate — so the
+  dollar exposure of UNKNOWN-stamped compute is visible, not just a credit count. DATABASE/
+  USER rows (counts, no direct $) stay blank.
+- **Map an entity → company.** The static INSERT hint becomes an interactive mapper: pick an
+  UNKNOWN entity + a company and get a ready-to-run, idempotent `COMPANY_SCOPE` upsert (MERGE);
+  an operator applies it in place, everyone else copies it to Snowsight. GRAIN maps to the
+  right SCOPE_TYPE (USER → USER_OVERRIDE). The caption states the backfill contract: go-forward
+  stamps immediately, the nightly reconcile re-stamps the trailing 3 days, older history waits
+  on a loader backfill re-run.
+
+App version 4.234.0.
+
 ## 4.233.0 - Sidebar polish, $-font fix, visible query drill-through (2026-08-17)
 
 Live-app punch-list, UI batch (app-only). Chrome + Operations.
