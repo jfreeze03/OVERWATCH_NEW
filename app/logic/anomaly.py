@@ -27,6 +27,85 @@ DEFAULT_THRESHOLD = 3.5
 ANOMALY_MIN_USD = 50.0
 ANOMALY_MIN_ACTIVE_DAYS = 10
 
+# Known-spike calendar (repo review 2026-08-17, adaptive-compute): predictable
+# spend spikes — month-end closes, quarter closes, named events — are not
+# anomalies, and flagging them every cycle teaches operators to ignore the
+# sweep. The calendar is a SETTINGS string (EXPECTED_SPIKE_CALENDAR) so the
+# owner edits it on Admin without a migration. Format, semicolon-separated:
+#   MONTH_END:<n>            last n + first n days of every month
+#   QUARTER_END:<n>          last n + first n days of every quarter
+#   YYYY-MM-DD..YYYY-MM-DD:<label>   explicit date range (renewal, load test)
+# Suppressed days KEEP their z-score and gain EXPECTED_SPIKE=<label> — shown as
+# "expected (month-end)" instead of an anomaly, never silently dropped.
+DEFAULT_SPIKE_CALENDAR = "MONTH_END:1;QUARTER_END:2"
+
+
+def expected_spike_labels(days: pd.Series, calendar: str | None) -> pd.Series:
+    """Label each day that falls inside the known-spike calendar ('' = not expected).
+
+    Malformed rules are skipped (a config typo must never break the sweep)."""
+    labels = pd.Series("", index=days.index, dtype=str)
+    text = str(calendar or "").strip()
+    if not text or days.empty:
+        return labels
+    ts = pd.to_datetime(days, errors="coerce")
+    for rule in text.split(";"):
+        rule = rule.strip()
+        if not rule:
+            continue
+        try:
+            if ".." in rule:
+                span, _, label = rule.partition(":")
+                start_s, _, end_s = span.partition("..")
+                start = pd.Timestamp(start_s.strip())
+                end = pd.Timestamp(end_s.strip())
+                if pd.isna(start) or pd.isna(end) or end < start:
+                    continue
+                hit = (ts >= start) & (ts <= end.normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+                name = (label.strip() or "scheduled event")
+            else:
+                kind, _, n_s = rule.partition(":")
+                n = max(1, min(int(n_s or 1), 10))
+                kind = kind.strip().upper()
+                if kind == "MONTH_END":
+                    month_len = ts.dt.days_in_month
+                    hit = (ts.dt.day > month_len - n) | (ts.dt.day <= n)
+                    name = "month-end"
+                elif kind == "QUARTER_END":
+                    q_end_month = ts.dt.month.isin((3, 6, 9, 12))
+                    q_start_month = ts.dt.month.isin((1, 4, 7, 10))
+                    month_len = ts.dt.days_in_month
+                    hit = (q_end_month & (ts.dt.day > month_len - n)) | (q_start_month & (ts.dt.day <= n))
+                    name = "quarter-end"
+                else:
+                    continue
+        except (ValueError, TypeError):
+            continue
+        hit = hit.fillna(False)
+        labels = labels.mask(hit & (labels == ""), name)
+    return labels
+
+
+def suppress_expected_spikes(flagged: pd.DataFrame, calendar: str | None,
+                             day_col: str = "DAY") -> pd.DataFrame:
+    """Post-filter for flag_anomalies output: an UPWARD anomaly on a calendar day
+    becomes EXPECTED_SPIKE=<label> with IS_ANOMALY cleared. Collapses (z<0) are
+    NEVER suppressed — a crash during month-end is still a crash. No-op without
+    a calendar or the needed columns."""
+    out = flagged.copy()
+    if out.empty or day_col not in out.columns or "IS_ANOMALY" not in out.columns:
+        if "EXPECTED_SPIKE" not in out.columns:
+            # "" (not an empty Series) — assigning Series(dtype=str) to a NON-empty
+            # frame writes NaN, and NaN != "" reads as "expected" downstream.
+            out["EXPECTED_SPIKE"] = ""
+        return out
+    labels = expected_spike_labels(out[day_col], calendar)
+    z = pd.to_numeric(out.get("Z_SCORE", 0), errors="coerce").fillna(0.0)
+    suppress = out["IS_ANOMALY"].fillna(False) & (labels != "") & (z > 0)
+    out["EXPECTED_SPIKE"] = labels.where(suppress, "")
+    out["IS_ANOMALY"] = out["IS_ANOMALY"] & ~suppress
+    return out
+
 
 def complete_days_only(df: pd.DataFrame, day_col: str = "DAY") -> pd.DataFrame:
     """Drop the current, still-growing day before anomaly scoring (bug round 2 B4).

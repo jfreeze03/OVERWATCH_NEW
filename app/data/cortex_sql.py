@@ -224,3 +224,24 @@ FROM ({_COMBINED_CODE_USAGE.format(days=days)})
 GROUP BY 1
 ORDER BY CREDITS DESC
 """
+
+
+def guardrails_daily(days: int = 30) -> str:
+    """Cortex Guardrails flag telemetry by day (repo review 2026-08-17).
+
+    OPTIONAL view — CORTEX_AI_GUARDRAILS_USAGE_HISTORY exists only on accounts
+    with Cortex Guardrails enabled; callers MUST pass probe=True and render an
+    honest "not enabled" state on the error path (the CORTEX_AI_FUNCTIONS
+    pattern above). Column set kept minimal so schema drift lands in the same
+    honest-degrade path, never in wrong data."""
+    days = bounded_days(days)
+    return f"""
+SELECT
+    START_TIME::DATE AS DAY,
+    COUNT(*) AS REQUESTS,
+    COUNT_IF(COALESCE(GUARDRAILS_RESPONSE, '') <> '') AS FLAGGED
+FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_GUARDRAILS_USAGE_HISTORY
+WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+GROUP BY 1
+ORDER BY DAY
+"""

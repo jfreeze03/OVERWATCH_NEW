@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.245.0"
+APP_VERSION = "4.246.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -74,6 +74,11 @@ DEFAULT_SETTINGS = {
     # Forecast engine: linear | seasonal | ml_forecast (needs the opt-in
     # snowflake/ml_forecast_option.sql; falls back to seasonal when absent).
     "FORECAST_ENGINE": "linear",
+    # Known-spike calendar (repo review 2026-08-17): predictable spend spikes the
+    # anomaly panels label "expected" instead of flagging. Semicolon rules:
+    # MONTH_END:<n> | QUARTER_END:<n> | YYYY-MM-DD..YYYY-MM-DD:<label>.
+    # Collapses (z<0) are never suppressed. Empty = no suppression.
+    "EXPECTED_SPIKE_CALENDAR": "MONTH_END:1;QUARTER_END:2",
     # Governance-drift weights (per-unit penalties; caps fixed in governance.py).
     "GOV_PTS_MFA_GAP": "5",
     "GOV_PTS_EXPIRED_CRED": "8",

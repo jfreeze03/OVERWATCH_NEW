@@ -90,7 +90,12 @@ _REACHABLE = {
     "app/ui/pages/security.py": (
         # v4.187: + ACCESS_HISTORY & TABLE_STORAGE_METRICS for the least-privilege
         # tab (rec#24) — held table grants vs. objects queries actually touched.
-        "ACCESS_HISTORY", "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
+        # v4.246 (owner ask, CoCo ~13% of spend): + the AI-guardrails section —
+        # CORTEX_CODE_* (shared cache with Cost's chargeback scan) and the
+        # probe-gated optional CORTEX_AI_GUARDRAILS_USAGE_HISTORY.
+        "ACCESS_HISTORY", "CORTEX_AI_GUARDRAILS_USAGE_HISTORY",
+        "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
+        "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
         "GRANTS_TO_USERS", "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS",
         "TABLE_STORAGE_METRICS", "USERS"),
     "app/ui/pages/alerts.py": (),

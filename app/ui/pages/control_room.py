@@ -25,6 +25,7 @@ from app.logic.anomaly import (
     anomaly_summary,
     complete_days_only,
     flag_anomalies,
+    suppress_expected_spikes,
 )
 from app.logic.formulas import (
     account_now,
@@ -678,6 +679,10 @@ def render() -> None:
             flagged = flag_anomalies(_wh_complete, "USD", group_col="WAREHOUSE_NAME",
                                      min_value=ANOMALY_MIN_USD,
                                      min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+            # Known-spike calendar: same suppression as the Cost sweep, so the same
+            # day never reads "expected" there but anomalous in this triage queue.
+            flagged = suppress_expected_spikes(
+                flagged, str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
             anomalies = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
             # D6: anomaly_summary carries the z but not the BASELINE, and a z alone is
             # $-blind — z=8 on a $12/day sandbox outranked z=4 on a $9k/day production

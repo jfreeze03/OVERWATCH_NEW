@@ -12,7 +12,7 @@ import streamlit as st
 from app.core.errors import safe_page
 from app.core.query import cache_scope, run, run_batch
 from app.core.state import filters
-from app.data import insights_sql, mart27_sql, security_sql
+from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
@@ -903,6 +903,91 @@ def _clients_tab(company: str, days: int) -> None:
     result_caption(res)
 
 
+def _ai_guardrails_tab(company: str) -> None:
+    """AI Trust & Guardrails (repo review 2026-08-17; owner: CoCo spend is ~13%
+    of total and growing). Two halves:
+    1. BEHAVIOR — per-user Cortex Code flags (velocity vs own baseline, token
+       outliers, new+heavy) derived in pandas from the SAME cached user-day scan
+       the Cost page pays for (cortex_code_user_daily) — zero new scans.
+    2. GUARDRAILS — flag telemetry from the optional Cortex Guardrails usage
+       view, probe-gated with an honest not-enabled state."""
+    from app.logic.ai_guardrails import (
+        TOKEN_Z_FLAG,
+        VELOCITY_MIN_REQUESTS,
+        VELOCITY_RATIO,
+        behavior_kpis,
+        user_behavior,
+    )
+    from app.logic.formulas import account_now, credits_to_usd, format_usd, safe_float
+
+    section_header("AI usage behavior (Cortex Code)", "warn", "security",
+                   anchor="sec-ai-behavior")
+    usage = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
+                key=f"coco_user_daily_{company}", tier="historical",
+                source="CORTEX_CODE_*_USAGE_HISTORY (user-day grain, shared cache)")
+    if guard(usage, "No Cortex Code usage recorded for this scope."):
+        behavior = user_behavior(usage.df, pd.Timestamp(account_now()))
+        k = behavior_kpis(behavior)
+        settings = load_settings(_PAGE)
+        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+        _spend_7d = credits_to_usd(float(behavior["CREDITS_7D"].sum()), ai_rate) if not behavior.empty else 0.0
+        kpi_row([
+            {"label": "CoCo spend, 7d", "value": format_usd(_spend_7d),
+             "help": "Cortex Code token credits x the configured AI rate across active users. "
+                     "The full spend picture lives on Cost > Chargeback & AI."},
+            {"label": "Active users, 7d", "value": f"{k['active_users']:,}"},
+            {"label": "Flagged users", "value": f"{k['flagged_users']:,}",
+             "delta": (f"{k['velocity_spikes']} velocity · {k['token_outliers']} outlier · "
+                       f"{k['new_heavy']} new+heavy"),
+             "delta_color": "inverse" if k["flagged_users"] else "off",
+             "help": f"velocity = daily rate >= {VELOCITY_RATIO:.0f}x own prior-28d baseline AND "
+                     f">= {VELOCITY_MIN_REQUESTS} requests/7d; outlier = 7d tokens >= "
+                     f"{TOKEN_Z_FLAG:.0f} robust-z above the active population; new+heavy = first "
+                     "activity this week with material credits."},
+        ])
+        if behavior.empty:
+            st.success("No Cortex Code activity in the last 7 days.")
+        else:
+            styled_table(with_user_names(behavior, _PAGE), height=320, column_config={
+                "CREDITS_7D": st.column_config.NumberColumn("Credits 7d", format="%.2f"),
+                "TOKENS_7D": st.column_config.NumberColumn("Tokens 7d", format="%d"),
+                "WEEKEND_PCT": st.column_config.NumberColumn("Weekend %", format="%.0f%%"),
+                "VELOCITY": st.column_config.NumberColumn("x baseline", format="%.1fx"),
+                "TOKEN_Z": st.column_config.NumberColumn("Token z", format="%.1f"),
+            })
+            st.caption("Flagged rows first, then by 7d tokens. Behavioral flags, not verdicts — "
+                       "a velocity spike may be a legitimate project push; the point is that "
+                       "someone looks. Baselines are each user's own prior 28 days.")
+        result_caption(usage)
+
+    section_header("Guardrail flags (Cortex Guardrails)", "info", "security",
+                   anchor="sec-ai-guardrails")
+    gr = run(cortex_sql.guardrails_daily(30), page=_PAGE, key="ai_guardrails_daily",
+             tier="historical", source="CORTEX_AI_GUARDRAILS_USAGE_HISTORY", probe=True)
+    if not gr.ok:
+        st.info("Cortex Guardrails telemetry isn't available on this account (the usage view "
+                "appears only once Guardrails is enabled on Cortex functions). Behavioral "
+                "monitoring above still runs; enable Guardrails to add prompt-flag telemetry.")
+    elif gr.empty:
+        st.success("Guardrails is enabled and recorded no flagged requests in 30 days.")
+    else:
+        _g = gr.df.copy()
+        _req = float(pd.to_numeric(_g["REQUESTS"], errors="coerce").fillna(0).sum())
+        _flag = float(pd.to_numeric(_g["FLAGGED"], errors="coerce").fillna(0).sum())
+        kpi_row([
+            {"label": "Guarded requests, 30d", "value": f"{_req:,.0f}"},
+            {"label": "With guardrail response", "value": f"{_flag:,.0f}",
+             "delta": (f"{_flag / _req * 100:.1f}% of requests" if _req else "no requests"),
+             "delta_color": "inverse" if _flag else "off",
+             "help": "Heuristic: requests where a guardrails response was recorded. Validate "
+                     "against a live sample before reading this as an intervention count — if "
+                     "the view logs a response for every guarded request, this reads high."},
+        ])
+        styled_table(_g, height=240)
+        st.caption("Account-wide — guardrail telemetry has no company grain.")
+        result_caption(gr)
+
+
 def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     # Recent grant changes feed (owner ask 2026-08-17): the granular "who granted
     # what to whom, and when" access-change log, newest first — one row per grant or
@@ -1050,8 +1135,8 @@ def render() -> None:
         "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
     section = lazy_sections(
-        ["Decision queue", "Access", "Changes", "Clients", "Egress", "Exposure",
-         "Least privilege", "Trust Center"],
+        ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress",
+         "Exposure", "Least privilege", "Trust Center"],
         key="sec_section",
     )
     _contracts = {
@@ -1063,6 +1148,12 @@ def render() -> None:
         "Access": {
             "applies": ("company", "days"),
             "note": "Identity and role evidence at the selected company/window where grain permits.",
+        },
+        "AI guardrails": {
+            "applies": ("company",),
+            "note": ("Cortex Code behavioral flags scope to Company via user classification; "
+                     "windows are fixed (7d vs prior 28d baseline). Guardrail flag telemetry "
+                     "is account-wide."),
         },
         "Changes": {
             "applies": ("company", "days", "database", "schema_contains"),
@@ -1103,6 +1194,8 @@ def render() -> None:
         _access_tab(f["company"], f["days"])
         st.divider()
         _export_pack(f["company"], f["days"], f["window_label"])
+    elif section == "AI guardrails":
+        _ai_guardrails_tab(f["company"])
     elif section == "Changes":
         _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
     elif section == "Clients":

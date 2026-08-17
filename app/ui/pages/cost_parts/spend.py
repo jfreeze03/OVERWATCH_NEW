@@ -24,6 +24,7 @@ from app.logic.anomaly import (
     anomaly_summary,
     complete_days_only,
     flag_anomalies,
+    suppress_expected_spikes,
 )
 from app.logic.anomaly_explain import explain_by_warehouse
 from app.logic.cost_coverage import (
@@ -839,6 +840,17 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             "USD", group_col="WAREHOUSE_NAME",
             min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS,
         )
+        # Known-spike calendar: a predictable month-end/quarter-end/named-event spike
+        # is labeled "expected", not flagged — collapses always still flag.
+        _cal = str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or "")
+        flagged = suppress_expected_spikes(flagged, _cal)
+        _n_expected = int((flagged["EXPECTED_SPIKE"] != "").sum()) if "EXPECTED_SPIKE" in flagged else 0
+        if _n_expected:
+            _kinds = ", ".join(sorted(set(
+                flagged.loc[flagged["EXPECTED_SPIKE"] != "", "EXPECTED_SPIKE"])))
+            st.caption(f"{_n_expected} spike(s) matched the known-spike calendar ({_kinds}) and "
+                       "are labeled expected, not anomalous — edit EXPECTED_SPIKE_CALENDAR on "
+                       "Admin. Collapses are never suppressed.")
         hits = anomaly_summary(flagged, "WAREHOUSE_NAME", "USD")
         if hits:
             for h in hits[:5]:

@@ -32,6 +32,7 @@ from app.logic.anomaly import (
     anomaly_markers,
     complete_days_only,
     flag_anomalies,
+    suppress_expected_spikes,
 )
 from app.logic.dq import row_volume_anomalies, summarize_row_volume
 from app.logic.formulas import (
@@ -1228,6 +1229,10 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
     # the trend chart below keeps the full frame including today.
     flagged = flag_anomalies(complete_days_only(df), "USD", group_col="WAREHOUSE_NAME",
                              min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+    # Known-spike calendar: same suppression as the Cost sweep, so the same day
+    # never reads "expected" there but anomalous here.
+    flagged = suppress_expected_spikes(
+        flagged, str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or ""))
     daily = df.groupby("DAY", as_index=False)["USD"].sum()
     st.caption("Click a day in the trend to break its spend down by warehouse. "
                "Dashed rules flag anomalous warehouse-days.")

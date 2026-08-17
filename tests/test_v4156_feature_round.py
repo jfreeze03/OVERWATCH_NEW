@@ -64,7 +64,7 @@ def test_security_navigation_precedes_selected_section_reads() -> None:
     decision_branch = security.index('if section == "Decision queue":')
     overview = security.index('render_security_overview(f["company"])')
     assert switch < decision_branch < overview
-    assert '"Decision queue", "Access", "Changes", "Clients", "Egress", "Exposure",' in security
+    assert '"Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress",' in security
     assert '"Least privilege", "Trust Center"' in security
 
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.246.0 - AI guardrails, known-spike calendar, critical veto (2026-08-17)
+
+Repo-review wave 1 (owner: "we need them now — CoCo spend is 13% of total and growing").
+All three adversarially reviewed pre-commit; the review caught two real window-math bugs
+(both fixed + regression-locked) and drove four honesty hardenings.
+
+- **Security ▸ AI guardrails** (new section). Two halves: **AI usage behavior** — per-user
+  Cortex Code flags computed in pandas from the SAME cached user-day scan Cost already
+  pays for (zero new scans): velocity ≥3× the user's own prior-28d baseline (with a
+  ≥20-requests/7d noise floor), 7d-token outliers (robust z vs the active population),
+  weekend-share, and new+heavy adopters; KPI row leads with CoCo 7d spend. **Guardrail
+  flags** — the optional `CORTEX_AI_GUARDRAILS_USAGE_HISTORY` view, probe-gated with an
+  honest not-enabled state and a validate-before-trusting caption on the response-count
+  heuristic. Review fixes: the 7d window is half-open (excludes today's partial day; the
+  8-day span inflated velocity ~14%), and baselines divide by the days a user actually
+  existed (a 10-day-old steady user no longer reads ~10× and false-flags for weeks).
+- **Known-spike calendar.** `EXPECTED_SPIKE_CALENDAR` SETTINGS string
+  (`MONTH_END:<n>; QUARTER_END:<n>; YYYY-MM-DD..YYYY-MM-DD:<label>`) — predictable
+  spikes are labeled "expected (month-end)" instead of anomalous, on **all four** anomaly
+  surfaces (Cost sweep, Overview trend markers, Operations warehouses, Control Room
+  triage — review caught the single-surface gap). Collapses (z<0) are never suppressed;
+  malformed rules never break the sweep.
+- **Critical veto on the platform score.** Weighting-then-averaging could read
+  "Healthy 94" with an open critical. Any open critical now caps the score below the
+  Healthy band (84) with an explicit "Critical veto" driver — a critical is a verdict,
+  not a weight. Retro trend divergence (facts carry raised-that-day, not open counts)
+  documented in `score_history`.
+
+App version 4.246.0.
+
 ## 4.245.0 - Codex #20: product-mapping coverage (2026-08-17)
 
 Decision Studio's Products board showed mapped product $ but no denominator — an

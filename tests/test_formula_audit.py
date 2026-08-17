@@ -112,7 +112,9 @@ def test_forecast_flat_series_hand():
 
 def test_score_hand():
     score = platform_score({"critical_alerts": 2, "high_alerts": 1}, resolve_weights(None))
-    assert score.score == 86                    # 100 - 2*6 - 1*2
+    # 100 - 2*6 - 1*2 = 86 raw, then the v4.246 critical veto caps any score with
+    # open criticals below the Healthy band (85) -> 84.
+    assert score.score == 84
 
 
 def test_score_caps_engage():

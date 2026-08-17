@@ -38,6 +38,8 @@ def test_score_floor_zero():
 
 
 def test_single_driver_attribution():
+    # v4.246.0 critical veto: one open critical alone would read Healthy 94 —
+    # the veto caps it at 84 with an explicit driver (see test_ai_guardrails).
     result = platform_score({"critical_alerts": 1})
-    assert result.score == 94
-    assert result.drivers[0].driver == "Critical alerts"
+    assert result.score == 84
+    assert result.drivers[0].driver == "Critical veto"

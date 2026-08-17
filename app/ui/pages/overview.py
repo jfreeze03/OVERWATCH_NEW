@@ -904,6 +904,7 @@ def render() -> None:
             anomaly_markers,
             complete_days_only,
             flag_anomalies,
+            suppress_expected_spikes,
         )
         _dc = daily.columns[0]
         _uc = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
@@ -911,6 +912,10 @@ def render() -> None:
         _flag = flag_anomalies(
             complete_days_only(daily.rename(columns={_dc: "DAY", _uc: "USD"}), "DAY"),
             "USD", min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+        # Known-spike calendar: the same suppression the Cost sweep applies, so a
+        # month-end day never reads "expected" there but anomalous here.
+        _flag = suppress_expected_spikes(
+            _flag, str(settings.get("EXPECTED_SPIKE_CALENDAR") or ""))
         charts.spend_trend(daily, daily_budget_usd=daily_budget,
                            markers=anomaly_markers(_flag, "DAY"))
         activity = run(mart_sql.fact_daily_activity(14, company), page=_PAGE,

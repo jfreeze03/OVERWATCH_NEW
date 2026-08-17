@@ -202,6 +202,18 @@ def platform_score(signals: dict, weights: dict | None = None,
 
     total_penalty = sum(d.penalty for d in drivers)
     score = round(max(0.0, 100.0 - total_penalty))
+    # Critical veto (repo review 2026-08-17, health-dashboard): weighting-then-averaging
+    # can hide one open critical behind many greens — a single per-driver-capped critical
+    # (6 pts) still reads "Healthy 94". A critical is a verdict, not a weight: while ANY
+    # critical alert is open, the score is CAPPED below the Healthy band, with an explicit
+    # driver naming the veto so the cap never reads as an ordinary penalty.
+    if critical > 0 and score >= 85:
+        capped_to = 84
+        drivers.append(ScoreDriver(
+            "Critical veto", float(score - capped_to),
+            f"Score capped below Healthy while {critical:.0f} critical alert(s) stay open — "
+            "a critical is a verdict, not a weight."))
+        score = capped_to
     state = "Healthy" if score >= 85 else "Watch" if score >= 70 else "Degraded" if score >= 50 else "At risk"
     ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
     return PlatformScore(score=score, state=state, drivers=ranked)
@@ -218,6 +230,10 @@ def score_history(inputs: pd.DataFrame, weights: dict | None = None,
     monthly budget, like the live score. Labeled RETRO: the live score also counts
     stale sources and open actions, which facts don't carry per-day — the
     trend is comparable, the absolute value can differ by a few points.
+    The critical VETO also diverges here: retro feeds CRIT_RAISED (raised that
+    day), not open criticals, so the veto caps only raise-days — a critical
+    that stays open all week reads Healthy on the retro trend from day two
+    while the live score stays capped. Facts don't carry per-day open counts.
 
     E3/#50 — first-partial-month artifact: MTD is a cumsum WITHIN each ``_MONTH``
     group of the frame it is handed, so when the window opens mid-month (a 30-day
