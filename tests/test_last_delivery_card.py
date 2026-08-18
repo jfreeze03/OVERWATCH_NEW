@@ -33,8 +33,16 @@ def test_builder_parses_and_returns_the_four_signals():
     sql = mart_sql.last_delivery_health()
     sqlglot.parse(sql, dialect="snowflake")
     for col in ("LAST_SENT_AT", "MINUTES_SINCE", "ELIGIBLE_NOW",
-                "ROUTE_FAILS_24H", "ENABLED_ROUTES"):
+                "ROUTE_FAILS_24H", "ENABLED_ROUTES", "DISTINCT_ELIGIBLE_NOW"):
         assert col in sql, col
+
+
+def test_headline_eligible_counts_distinct_events_not_route_sum():
+    # The 'Eligible to send now' headline reads DISTINCT_ELIGIBLE_NOW once, not
+    # SUM(ELIGIBLE_NOW) — an event matching several routes must not be double-counted.
+    card = _ALERTS.split("def _last_delivery_card", 1)[1].split("\ndef ", 1)[0]
+    assert 'rdf["DISTINCT_ELIGIBLE_NOW"].iloc[0]' in card
+    assert 'rdf["ELIGIBLE_NOW"].sum()' not in card
 
 
 def test_eligibility_mirrors_the_senders_own_predicate():

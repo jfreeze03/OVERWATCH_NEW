@@ -568,8 +568,13 @@ def render() -> None:
             ])
         # CR5: a lifecycle Gantt — detected->resolved spans (open runs to now), so
         # the shape of the last 14 days of incidents reads at a glance.
-        _ig = run(mart_sql.incident_gantt(14, company), page=_PAGE,
-                  key=f"incident_gantt_{company}", tier="recent",
+        # Pass account-time now (minute-rounded so the SQL-keyed cache doesn't churn
+        # every render) so an OPEN incident's live duration measures against account
+        # time, not the server's UTC CURRENT_TIMESTAMP() (unset account TZ = a false
+        # multi-hour bar).
+        _ig = run(mart_sql.incident_gantt(14, company,
+                                          account_now().replace(second=0, microsecond=0).isoformat()),
+                  page=_PAGE, key=f"incident_gantt_{company}", tier="recent",
                   source="INCIDENTS (14d lifecycle spans)")
         if _ig.usable():
             st.caption("Recent incidents (14d) — bar = detected → resolved; an open incident's bar "
@@ -777,7 +782,7 @@ def render() -> None:
             st.caption(f"{len(queue)} item(s), ranked by severity then by dollars at risk "
                        "— select one to open its page. Sources: alerts, task facts, spend "
                        "anomalies. Task rows are one per task (failures summed across the "
-                       "2-day window), not one per day."
+                       "last 3 days incl. today), not one per day."
                        + (" Task failures follow the database filter; alerts and "
                           "spend anomalies don't have database grain." if f["database"] else ""))
         # C2: the app scores FACT_WAREHOUSE_DAILY itself, so the server twin's

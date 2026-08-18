@@ -920,7 +920,11 @@ def fact_daily_activity(days: int, company: str = "ALL", database: str = "") -> 
     from app import companies
 
     days = bounded_days(days, 30)
-    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"]
+    # Day-boundary basis, not a rolling server timestamp: the sparkline's edge day
+    # must line up with the CURRENT_DATE()-anchored 'since yesterday' pulse KPIs
+    # beside it. CURRENT_TIMESTAMP() here (server tz, not account-aligned under SiS)
+    # sliced the window mid-day and could drop/shift the edge day vs the pulse.
+    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company or "ALL").upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     where.append(companies.database_equals_clause(database, "DATABASE_NAME"))
@@ -1079,11 +1083,17 @@ FROM {core_object("SAVINGS_LEDGER")}
 def app_cost_quarter() -> str:
     """The ROI denominator: everything the app + its tasks burned this
     quarter on their shared warehouse. From the fact since r14 #5 — the
-    Brief was the last always-on surface paying a live metering scan."""
+    Brief was the last always-on surface paying a live metering scan.
+
+    WAREHOUSE_NAME comes from config (siblings app_self_cost/app_statement_stats
+    do the same); a hardcoded literal would silently zero the ROI denominator if
+    the app warehouse is ever renamed."""
+    from app.config import APP_WAREHOUSE
+
     return f"""
 SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_QTD
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
-WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'
+WHERE WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
   AND DAY >= DATE_TRUNC('quarter', CURRENT_DATE())
 """
 
@@ -1237,11 +1247,13 @@ l_q AS (
       AND WAREHOUSE_NAME IS NOT NULL
 )
 SELECT 'Billed credits (28d, mart vs metering-daily)' AS CHECK_NAME,
+       'credits' AS UNIT,
        ROUND(f_met.V, 2) AS FACT_VALUE, ROUND(l_met.V, 2) AS LIVE_VALUE,
        ROUND(100 * (f_met.V - l_met.V) / NULLIF(l_met.V, 0), 2) AS DRIFT_PCT
 FROM f_met, l_met
 UNION ALL
 SELECT 'Query count (7d, mart vs query-history)',
+       'statements',
        f_q.V, l_q.V,
        ROUND(100 * (f_q.V - l_q.V) / NULLIF(l_q.V, 0), 2)
 FROM f_q, l_q
@@ -1700,6 +1712,31 @@ eligible AS (
 ),
 summary AS (
     SELECT COUNT(*) AS ENABLED_ROUTES FROM {core_object("ALERT_ROUTES")} WHERE ENABLED
+),
+dist_eligible AS (
+    -- Account-wide DISTINCT eligible events inside the sender's 24h window. The card's
+    -- 'Eligible to send now' headline is a count of DISTINCT events that will actually
+    -- be delivered — NOT the sum of per-route ELIGIBLE_NOW, which double-counts one
+    -- event that matches several enabled routes. Same eligibility predicate as the
+    -- per-route `eligible` CTE (open, config-joined, family/company/severity, not yet
+    -- delivered to that route), collapsed to DISTINCT e.EVENT_ID across all routes.
+    SELECT COUNT(DISTINCT e.EVENT_ID) AS DISTINCT_ELIGIBLE_NOW
+    FROM {core_object("ALERT_ROUTES")} r
+    JOIN {core_object("ALERT_EVENTS")} e
+      ON e.STATUS = 'OPEN'
+    JOIN {core_object("ALERT_CONFIG")} c
+      ON c.RULE_ID = e.RULE_ID
+     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
+    WHERE r.ENABLED
+      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+           OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
+      AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                          WHEN 'MEDIUM' THEN 2 ELSE 1 END
+          >= CASE r.MIN_SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
+                                 WHEN 'MEDIUM' THEN 2 ELSE 1 END
+      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d
+                      WHERE d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID)
 )
 SELECT r.ROUTE_ID,
        r.INTEGRATION_NAME,
@@ -1725,9 +1762,13 @@ SELECT r.ROUTE_ID,
        (el.OLDEST_ELIGIBLE IS NOT NULL
         AND DATEDIFF('minute', el.OLDEST_ELIGIBLE, CURRENT_TIMESTAMP()) >= 90) AS STUCK,
        el.OLDEST_ELIGIBLE,
-       sm.ENABLED_ROUTES
+       sm.ENABLED_ROUTES,
+       -- Same on every row (account-wide): the card reads this once for the
+       -- 'Eligible to send now' headline instead of SUM(ELIGIBLE_NOW).
+       de.DISTINCT_ELIGIBLE_NOW
 FROM {core_object("ALERT_ROUTES")} r
 CROSS JOIN summary sm
+CROSS JOIN dist_eligible de
 LEFT JOIN sent s      ON s.ROUTE_ID = r.ROUTE_ID
 LEFT JOIN fails f     ON f.ROUTE_ID = r.ROUTE_ID
 LEFT JOIN consec cf   ON cf.ROUTE_ID = r.ROUTE_ID
@@ -1735,7 +1776,7 @@ LEFT JOIN eligible el ON el.ROUTE_ID = r.ROUTE_ID
 WHERE r.ENABLED
 UNION ALL
 -- no enabled route: one synthetic row so the card can render 'nothing can be delivered'
-SELECT NULL, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, 0, NULL, FALSE, FALSE, NULL, sm.ENABLED_ROUTES
+SELECT NULL, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, 0, NULL, FALSE, FALSE, NULL, sm.ENABLED_ROUTES, 0
 FROM summary sm
 WHERE sm.ENABLED_ROUTES = 0
 """
@@ -2036,14 +2077,27 @@ LIMIT {limit}
 """
 
 
-def incident_gantt(days: int = 14, company: str = "ALL") -> str:
+def incident_gantt(days: int = 14, company: str = "ALL", now_iso: str = "") -> str:
     """CR5: per-incident lifecycle spans for a Gantt view — DETECTED_AT to
     RESOLVED_AT (or to now for an open incident). Includes RESOLVED incidents so
     completed spans render, not just the open queue. ACK/MITIGATE timestamps are
-    not consistently written, so the bar is the detected->resolved span."""
+    not consistently written, so the bar is the detected->resolved span.
+
+    ``now_iso`` is the account-aligned 'now' (account_now().isoformat()); the
+    caller passes it so an OPEN incident's live end/duration measure against
+    account time. DETECTED_AT is written in account time, so mixing it with the
+    server CURRENT_TIMESTAMP() (ALTER SESSION TIMEZONE is a no-op under SiS)
+    otherwise adds the server-vs-account offset to every open span. Defaults to
+    CURRENT_TIMESTAMP() when unset, so an un-updated caller still renders."""
+    from datetime import datetime
+
     days = bounded_days(days, 90)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
+    if str(now_iso or "").strip():
+        _now = "'" + datetime.fromisoformat(str(now_iso)).strftime("%Y-%m-%d %H:%M:%S") + "'::TIMESTAMP_NTZ"
+    else:
+        _now = "CURRENT_TIMESTAMP()"
     return f"""
 SELECT
     INCIDENT_ID,
@@ -2051,18 +2105,19 @@ SELECT
     UPPER(COALESCE(SEVERITY, 'INFO')) AS SEVERITY,
     STATUS,
     DETECTED_AT::TIMESTAMP_NTZ AS STARTED,
-    COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())::TIMESTAMP_NTZ AS ENDED,
-    DATEDIFF('minute', DETECTED_AT, COALESCE(RESOLVED_AT, CURRENT_TIMESTAMP())) AS DURATION_MIN
+    COALESCE(RESOLVED_AT, {_now})::TIMESTAMP_NTZ AS ENDED,
+    DATEDIFF('minute', DETECTED_AT, COALESCE(RESOLVED_AT, {_now})) AS DURATION_MIN
 FROM {core_object("INCIDENTS")}
-WHERE DETECTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()){comp}
+WHERE DETECTED_AT >= DATEADD('day', -{days}, {_now}){comp}
 ORDER BY DETECTED_AT DESC
 LIMIT 60
 """
 
 
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
-    """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate over
-    the owner-decided 14-day window, storm compression, change-correlated %."""
+    """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate (share of
+    resolved incidents in the same window that were reopened, bounded 0..100%),
+    storm compression, change-correlated %."""
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
@@ -2089,6 +2144,24 @@ change_inc AS (
     FROM w
     JOIN {core_object("INCIDENT_MEMBERS")} m ON m.INCIDENT_ID = w.INCIDENT_ID
     WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')
+),
+-- REOPEN_PCT is a share-of-closed reading that must not exceed 100%. The old form
+-- counted reopen CHILDREN (REOPENED_FROM IS NOT NULL) in the numerator against
+-- RESOLVED incidents in the denominator — different populations, so an incident
+-- reopened twice (two children) over few resolved incidents read >100%. Instead
+-- count, among RESOLVED incidents in the SAME window w, those that were actually
+-- reopened (their id appears as some in-window child's REOPENED_FROM parent).
+-- Numerator is a subset of the denominator by construction -> bounded 0..100%.
+reopen AS (
+    SELECT
+        COUNT(*) AS RESOLVED_N,
+        COUNT_IF(p.PARENT_ID IS NOT NULL) AS REOPENED_N
+    FROM w r
+    LEFT JOIN (
+        SELECT DISTINCT REOPENED_FROM AS PARENT_ID
+        FROM w WHERE REOPENED_FROM IS NOT NULL
+    ) p ON p.PARENT_ID = r.INCIDENT_ID
+    WHERE r.RESOLVED_AT IS NOT NULL
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
@@ -2100,11 +2173,10 @@ SELECT
       WHERE ACK_AT IS NOT NULL) AS MTTA_MIN,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
-    (SELECT ROUND(100.0 * COUNT_IF(REOPENED_FROM IS NOT NULL)
-            / NULLIF(COUNT_IF(RESOLVED_AT IS NOT NULL), 0), 1) FROM w) AS REOPEN_PCT,
+    ROUND(100.0 * reopen.REOPENED_N / NULLIF(reopen.RESOLVED_N, 0), 1) AS REOPEN_PCT,
     ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION,
     ROUND(100.0 * change_inc.CHANGE_INCIDENTS / NULLIF(wn.N, 0), 1) AS CHANGE_PCT
-FROM wn CROSS JOIN compression CROSS JOIN change_inc
+FROM wn CROSS JOIN compression CROSS JOIN change_inc CROSS JOIN reopen
 """
 
 

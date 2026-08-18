@@ -902,6 +902,11 @@ SELECT DATE(START_TIME) AS DAY,
        ROUND(SUM(BYTES_TRANSFERRED) / POWER(1024, 3), 3) AS GB
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+  -- true egress only: a same-region (TARGET_REGION NULL) and internal
+  -- (TARGET_CLOUD NULL) transfer is neither cross-region nor cross-cloud, so
+  -- excluding it keeps the KPI, 'Top destination', and the panel's
+  -- 'No cross-cloud or cross-region transfer' empty-state consistent.
+  AND (TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)
 GROUP BY 1, 2, 3, 4
 HAVING SUM(BYTES_TRANSFERRED) > 0
 ORDER BY DAY, GB DESC

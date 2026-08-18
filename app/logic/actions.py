@@ -143,10 +143,16 @@ def ledger_totals(df: pd.DataFrame) -> dict:
     ver_usd_col = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0)
     ver_usd = ver_usd_col.sum()
     # Track record: of what VERIFIED items were originally estimated to save, how much
-    # actually measured out — a fair estimate-vs-actual on verified items only.
-    ver_est_usd = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0).sum()
-    realization = (round(float(ver_usd) / float(ver_est_usd) * 100, 1)
-                   if ver_est_usd > 0 else None)
+    # actually measured out — a fair estimate-vs-actual on verified items only. Restrict
+    # the ratio to items that carried a positive estimate: a verified item with a zero or
+    # absent estimate would otherwise add its verified $ to the numerator with nothing in
+    # the denominator, inflating realization past a meaningful figure.
+    ver_est_col = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0)
+    ver_est_usd = ver_est_col.sum()
+    _est_pos = ver_est_col > 0
+    _real_den = float(ver_est_col[_est_pos].sum())
+    realization = (round(float(ver_usd_col[_est_pos].sum()) / _real_den * 100, 1)
+                   if _real_den > 0 else None)
     # This-quarter capture + booking->verify latency, both from VERIFIED_AT. Default to an
     # index-aligned NaT Series so a ledger read missing these columns stays a Series (not a
     # scalar NaT) and the comparisons below never raise.

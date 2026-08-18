@@ -117,7 +117,10 @@ def test_control_room_incidents_section():
     assert "is_operator()" in _CR
     assert "mart_sql.incident_metrics(90, company)" in _CR      # triage filter honored
     assert "mart_sql.open_incidents(50, company)" in _CR
-    assert "mart_sql.incident_gantt(14, company)" in _CR        # CR5 lifecycle Gantt wired
+    # CR5 lifecycle Gantt wired; passes account-time now (minute-rounded) so an OPEN
+    # incident's live duration measures against account time, not server CURRENT_TIMESTAMP().
+    assert "mart_sql.incident_gantt(14, company," in _CR
+    assert "account_now().replace(second=0, microsecond=0).isoformat()" in _CR
     assert "charts.incident_gantt(" in _CR
     assert "nothing groups silently" in _CR                   # proposals expander says so
 

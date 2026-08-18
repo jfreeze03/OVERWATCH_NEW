@@ -135,7 +135,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                      "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
-        kpis.append({"label": "AI spend (window)",
+        kpis.append({"label": f"AI spend ({days}d)",
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
                      "delta_color": "off",

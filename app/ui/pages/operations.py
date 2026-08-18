@@ -584,11 +584,12 @@ def _release_compare_tab(company: str) -> None:
             st.success("No task gained failures or slowed >25% after the release.")
         else:
             st.warning(f"{len(worse)} task(s) regressed after the release:")
-        styled_table(
-            deltas[["DATABASE_NAME", "TASK_NAME", "RUNS_BEFORE", "RUNS_AFTER",
-                     "FAILED_BEFORE", "FAILED_AFTER", "NEW_FAILURES",
-                     "AVG_SEC_BEFORE", "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]],
-        )
+        _delta_cols = [c for c in ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
+                                   "RUNS_BEFORE", "RUNS_AFTER", "FAILED_BEFORE",
+                                   "FAILED_AFTER", "NEW_FAILURES", "AVG_SEC_BEFORE",
+                                   "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]
+                       if c in deltas.columns]
+        styled_table(deltas[_delta_cols])
         result_caption(t_res)
         ai_evaluation_panel(
             key=f"release_{company}_{release_iso}_{window}",
@@ -1355,7 +1356,7 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
              "delta_color": "inverse" if _sum["up"] else "off"},
             {"label": "Tune auto-suspend first", "value": f"{_sum['suspend']}"},
             {"label": "Size-down candidates", "value": f"{_sum['down']}"},
-            {"label": "Idle spend on those", "value": format_usd(_sum["idle_saving_usd"])},
+            {"label": "Idle $ on suspend-first WHs", "value": format_usd(_sum["idle_saving_usd"])},
         ])
         _cols = [c for c in ["WAREHOUSE_NAME", "SCORE", "GRADE", "RECOMMENDATION", "WHY",
                              "IDLE_PCT", "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY",

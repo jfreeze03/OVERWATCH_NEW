@@ -424,8 +424,12 @@ def task_release_deltas(df: pd.DataFrame) -> pd.DataFrame:
     """Pivot per-task BEFORE/AFTER rows; surface tasks that got worse."""
     if df is None or df.empty:
         return pd.DataFrame()
+    # Key by SCHEMA_NAME too so two same-named tasks in different schemas of one
+    # database don't blend into a single before/after row (kept optional so
+    # pre-SCHEMA_NAME callers/frames still pivot on DB+task).
+    index = [c for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME") if c in df.columns]
     pivot = df.pivot_table(
-        index=["DATABASE_NAME", "TASK_NAME"], columns="PERIOD",
+        index=index, columns="PERIOD",
         values=["RUNS", "FAILED", "AVG_SEC"], aggfunc="sum",
     )
     pivot.columns = [f"{m}_{p}" for m, p in pivot.columns]
@@ -467,7 +471,15 @@ def build_failure_timeline(df: pd.DataFrame) -> pd.DataFrame:
     out["QUERY_START_TIME"] = pd.to_datetime(out["QUERY_START_TIME"], errors="coerce")
     group_col = "GRAPH_RUN_GROUP_ID" if "GRAPH_RUN_GROUP_ID" in out.columns else None
     if group_col and out[group_col].notna().any():
-        firsts = out.sort_values("QUERY_START_TIME").groupby(group_col, dropna=False).head(1).index
+        # Standalone failures carry no graph-run group id; each one is its own
+        # root cause. Collapsing every NULL-group row into a single pseudo-group
+        # would keep only the earliest as 'Root cause' and mark the rest
+        # 'Cascade' (which route_incidents(root_only=True) then drops), so give
+        # NULL-group rows a unique synthetic key while real graph groups stay
+        # grouped for genuine cascade detection.
+        grp = out[group_col]
+        synthetic = grp.where(grp.notna(), "\x00standalone\x00" + out.index.to_series().astype(str))
+        firsts = out.sort_values("QUERY_START_TIME").groupby(synthetic, dropna=False).head(1).index
         out["ROLE_IN_GRAPH"] = "Cascade"
         out.loc[firsts, "ROLE_IN_GRAPH"] = "Root cause"
     else:

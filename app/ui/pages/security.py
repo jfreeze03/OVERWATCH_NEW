@@ -835,7 +835,7 @@ def _change_kind(qt: object) -> str:
         return "Create"
     if s.startswith("ALTER"):
         return "Alter"
-    if s in ("DROP", "TRUNCATE_TABLE", "RENAME_TABLE", "RENAME"):
+    if s.startswith(("DROP", "TRUNCATE")) or s in ("RENAME_TABLE", "RENAME"):
         return "Drop / truncate"
     if s in ("GRANT", "REVOKE"):
         return "Grants"

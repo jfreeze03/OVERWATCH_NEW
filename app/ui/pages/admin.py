@@ -495,7 +495,13 @@ def _migrations_tab() -> None:
             errs = run(mart_sql.app_error_log(100), page=_PAGE, key="adm_stale_errs",
                        tier="live", source="APP_ERROR_LOG")
             try:
-                stale = fresh.df[fresh.df["HOURS_SINCE_LOAD"].astype(float) > 26]
+                _hrs = pd.to_numeric(fresh.df["HOURS_SINCE_LOAD"], errors="coerce")
+                _rows = pd.to_numeric(fresh.df["ROW_COUNT"], errors="coerce")
+                # A never-loaded source reads HOURS_SINCE_LOAD NULL (NaN>26 is False,
+                # which would silently hide the worst case) and/or ROW_COUNT 0 —
+                # health_strip treats a NULL load ts as maximally urgent, so mirror
+                # that here and count never-loaded / empty sources as stale.
+                stale = fresh.df[(_hrs > 26) | _hrs.isna() | (_rows.fillna(0) <= 0)]
             except (KeyError, TypeError, ValueError):
                 stale = fresh.df.iloc[0:0]
             if stale.empty:
@@ -514,7 +520,10 @@ def _migrations_tab() -> None:
                         _r0 = _m.iloc[0]
                         hint = (f"last loader error {_r0['LOGGED_AT']}: "
                                 f"{str(_r0['ERROR_MESSAGE'])[:160]}")
-                st.markdown(f"- **{name}** — {humanize_duration(s['HOURS_SINCE_LOAD'], 'h')} since load. "
+                _hval = s["HOURS_SINCE_LOAD"]
+                _age = ("never loaded" if pd.isna(_hval)
+                        else f"{humanize_duration(_hval, 'h')} since load")
+                st.markdown(f"- **{name}** — {_age}. "
                             + (hint or "no matching error logged — check SHOW TASKS "
                                        "(tasks suspend if a migration half-applied)."))
 
@@ -534,8 +543,13 @@ def _self_cost_tab() -> None:
               source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, split by query tag)")
     if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
         df = res.df.copy()
-        total = int(pd.to_numeric(df["APP_QUERIES"], errors="coerce").fillna(0).sum())
-        failed = int(pd.to_numeric(df["FAILED"], errors="coerce").fillna(0).sum())
+        # app_self_cost returns one row per (DAY, WORKLOAD); the caption promises
+        # UI-vs-loader separation, so the headline counts the INTERACTIVE APP
+        # workload only — summing every row folded loader/task statements into
+        # "App queries". The table below keeps the full per-workload split.
+        _app = df[df["WORKLOAD"].astype(str) == "INTERACTIVE APP"]
+        total = int(pd.to_numeric(_app["APP_QUERIES"], errors="coerce").fillna(0).sum())
+        failed = int(pd.to_numeric(_app["FAILED"], errors="coerce").fillna(0).sum())
         kpi_row([
             {"label": "App queries (14d)", "value": f"{total:,}"},
             {"label": "Failed", "value": f"{failed:,}",

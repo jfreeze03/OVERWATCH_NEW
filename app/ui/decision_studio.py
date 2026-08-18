@@ -525,7 +525,8 @@ def _roi(company: str) -> None:
                    if _real is not None else "nothing verified yet"),
          "delta_color": "off",
          "help": "Verified $ as a share of what those items were estimated to save — the honest "
-                 "estimate-vs-actual (verified items only). Near 100% means the estimates held up."},
+                 "estimate-vs-actual (verified items that carried an estimate). Near 100% means the "
+                 "estimates held up; above 100% means realized savings beat the estimate."},
         {"label": "Open pipeline", "value": format_usd(totals["estimated_usd"]),
          "delta": f"{totals['estimated_count']:,} item(s) awaiting proof", "delta_color": "off",
          "help": "Estimated savings still unverified — the opportunity ahead. Verify them on "
@@ -677,7 +678,9 @@ def _experiments() -> None:
          "help": "Longest-running planned/running/observing experiment (days since it was "
                  "created). A long-lived active experiment may be stuck — verify or close it."},
         {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
-        {"label": "Verified value", "value": format_usd(frame["VERIFIED_USD"].map(safe_float).sum())},
+        {"label": "Verified value",
+         "value": format_usd(
+             frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())},
     ])
     selected = selectable_table(frame, key="decision_experiment_table", height=340,
                                 sort_label="active status, observation end, then update")

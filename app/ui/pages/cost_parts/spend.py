@@ -138,7 +138,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     df["CATEGORY"] = df["SERVICE_TYPE"].map(_categorize)
     df["RATE"] = df["CATEGORY"].map(lambda c: ai_rate if c == "AI / Cortex" else rate)
     df["USD"] = df["CREDITS_BILLED"].map(safe_float) * df["RATE"]
-    df["ADJ_USD"] = df["CREDITS_ADJUSTMENT"].map(safe_float) * df["RATE"]
+    # The cloud-services adjustment is a compute-side rebate; price it at the
+    # compute rate regardless of the row's service category (a non-zero
+    # adjustment on an AI/Cortex row would otherwise mis-price at ai_rate).
+    df["ADJ_USD"] = df["CREDITS_ADJUSTMENT"].map(safe_float) * rate
 
     billed_usd = float(df["USD"].sum())
     rebate_usd = float(df["ADJ_USD"].sum())  # negative or zero

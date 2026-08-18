@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.257.0 - Audit cleanup wave 2: correctness bug fixes (2026-08-17)
+
+22 confirmed defects from the 9-page audit, verified + fixed (each reviewed against
+the code; false positives and documented limitations skipped):
+
+- **Overview**: idle account (0 queries, read succeeded) no longer reads platform
+  score "Incomplete"; per-day queue/spill divisor now shares the SQL's UTC/CURRENT_DATE
+  clock (was account-time, ~1 day off in the evening); window-spend fallback stays
+  complete-days-only (was silently today-inclusive); score help scope wording corrected.
+- **Security**: `_change_kind` now buckets every DROP_*/TRUNCATE_* (DROP_ROLE/SCHEMA/USER)
+  as "Drop / truncate" so the change chart agrees with the CRITICAL risk score; egress
+  builder filters to true cross-region/cross-cloud (same-region/internal no longer
+  counted as "egress", matching the empty-state).
+- **Control Room**: incident-Gantt open-incident duration now measures against
+  account-time now (passed minute-rounded), not the server's UTC CURRENT_TIMESTAMP()
+  (unset account TZ = a false multi-hour bar); triage caption corrected to "last 3 days".
+- **Alerts / mart_sql**: incident REOPEN_PCT rewritten so the numerator is a subset of
+  the denominator (bounded ≤100%); "Eligible to send now" headline counts DISTINCT
+  events (was summing per-route, double-counting an event on multiple routes);
+  `fact_daily_activity` window aligned to CURRENT_DATE(); `mart_vs_live_recon` gained a
+  UNIT column (credits vs statements); `app_cost_quarter` uses config APP_WAREHOUSE.
+- **Decision Studio**: "Verified value" sums VERIFIED_USD only over VERIFIED rows (was
+  all rows). **actions.realization_pct** restricted to items with a positive estimate.
+- **Admin**: "Diagnose stale sources" now flags never-loaded (NULL/0-row) sources (was
+  silently dropped); "App queries (14d)" counts the INTERACTIVE workload only.
+- **Operations**: standalone (no graph-group) task failures are each their own root
+  cause (were collapsed, dropping all but one from incident routing); release compare
+  keys tasks by SCHEMA_NAME too; sizing "Idle $" KPI relabeled to what it sums.
+- **Cost**: cloud-services rebate priced at the compute rate (not the AI rate) for AI
+  rows; AI-spend tile window made explicit in its label.
+
+App version 4.257.0.
+
+
 ## 4.256.0 - Audit cleanup wave 1: formatting + label fixes (2026-08-17)
 
 First wave of a comprehensive audit (9-page deep pass + structural audit). Safe,

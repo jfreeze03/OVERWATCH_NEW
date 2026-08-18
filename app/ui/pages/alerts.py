@@ -240,7 +240,10 @@ def _last_delivery_card() -> None:
     mins_series = rdf["MINUTES_SINCE"].dropna() if not rdf.empty else rdf.get("MINUTES_SINCE")
     mins = safe_float(mins_series.min(), -1) if (mins_series is not None and not mins_series.empty) else -1
     never = rdf.empty or rdf["LAST_SENT_AT"].dropna().empty
-    waiting = int(safe_float(rdf["ELIGIBLE_NOW"].sum())) if not rdf.empty else 0
+    # DISTINCT_ELIGIBLE_NOW is a count of DISTINCT events eligible to send now (same on
+    # every row via CROSS JOIN); read it once. Summing per-route ELIGIBLE_NOW would
+    # double-count an event that matches several enabled routes.
+    waiting = int(safe_float(rdf["DISTINCT_ELIGIBLE_NOW"].iloc[0])) if not rdf.empty else 0
     fails = int(safe_float(rdf["ROUTE_FAILS_24H"].sum())) if not rdf.empty else 0
     failing = rdf[_flag(rdf["FAILING_NOW"])] if not rdf.empty else rdf
     stuck = rdf[_flag(rdf["STUCK"])] if not rdf.empty else rdf

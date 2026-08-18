@@ -274,8 +274,12 @@ def render() -> None:
         daily[pd.to_datetime(daily["DAY"], errors="coerce").dt.date < account_today()]
         if not daily.empty else daily
     )
+    # rec1/rec36: with no complete day in the window, the honest complete-days total
+    # is 0 — NOT the board CREDITS KPI, which is a today-INCLUSIVE window aggregate.
+    # Falling back to it would contradict this tile's "complete days only" label, the
+    # 'as of' watermark (built from daily_complete), and the reconciliation caption.
     window_spend = (float(daily_complete["USD"].sum()) if not daily_complete.empty
-                    else _board_metric(board, "CREDITS", "VALUE_USD"))
+                    else 0.0)
     # rec28: the credits behind the dollar headline, for reconciling against Snowsight.
     # This card's value IS credits x rate (warehouse metering), so credits = USD / rate —
     # exact and column-independent (the `daily` frame here is only [DAY, USD], no credits col).
@@ -408,11 +412,18 @@ def render() -> None:
     # actually covered to get a per-DAY rate: stable across the day, and the same
     # basis the retro score sparkline uses (score_history feeds one day per row).
     # The failure percentages are ratios and were already time-invariant.
-    _win_start = pd.Timestamp(account_today()) - pd.Timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
-    # Floor at 1.0: the window opens a full day before midnight of today, so elapsed
-    # is >= 1 by construction — the clamp only defends against a skewed clock, and it
-    # errs toward the smaller divisor (never dilutes a real penalty away).
-    _elapsed_days = max((pd.Timestamp(account_now()) - _win_start).total_seconds() / 86400.0, 1.0)
+    # The SQL window anchors on CURRENT_DATE(), which under SiS is the UTC server
+    # date (ALTER SESSION TIMEZONE is a no-op) — NOT account time. The de-cumulation
+    # divisor must share that clock: in the Chicago evening UTC has already rolled to
+    # the next date, so an account-time anchor sits ~a day off and the per-day rate is
+    # diluted (or inflated). Derive both anchor and elapsed from the same UTC midnight
+    # the SQL used.
+    _now_utc = pd.Timestamp.utcnow().tz_localize(None)
+    _win_start = _now_utc.normalize() - pd.Timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
+    # Floor at 1.0: the window opens a full day before UTC midnight of today, so
+    # elapsed is >= 1 by construction — the clamp only defends against a skewed clock,
+    # and it errs toward the smaller divisor (never dilutes a real penalty away).
+    _elapsed_days = max((_now_utc - _win_start).total_seconds() / 86400.0, 1.0)
     queued_minutes = (safe_float(_tr.get("QUEUED_SEC")) / 60.0 / _elapsed_days) if _tr is not None else 0.0
     spill_gb = (safe_float(_tr.get("SPILL_REMOTE_GB")) / _elapsed_days) if _tr is not None else 0.0
     # A-score-3: FACT_TASK_DAILY is DAY-grain, so this covers the previous + current
@@ -468,7 +479,12 @@ def render() -> None:
     # of a false green. C2/N5: the required health source is now the fixed-window
     # throughput read (not the exec board, which no longer feeds the score).
     _available = set()
-    if _thr.usable() and queries > 0:
+    # A SUCCESSFUL throughput read is available even on a genuinely idle account
+    # (QUERY_COUNT 0/NULL) — a quiet window is real health data, not a missing input,
+    # so it must not force the whole score to read Incomplete. The per-day penalty
+    # math is 0-query-safe (fail_pct guards on `queries`; queue/spill divide by
+    # elapsed days, never by query count).
+    if _thr.usable():
         _available.add("throughput")
     if alerts_res.ok:
         _available.add("alerts")
@@ -621,8 +637,9 @@ def render() -> None:
                      "health signals are missing (see the deductions below)."
                      if _score_incomplete
                      else "Throughput & pressure (queries, failures, queue, spill) read the "
-                          "previous + current calendar day and are company-scoped; budget, "
-                          "open alerts, stale telemetry and the owner queue are account-wide "
+                          "previous + current calendar day and are company-scoped; budget "
+                          "and stale telemetry are account-wide, and open alerts and the owner "
+                          "queue are company plus account-level "
                           "— so the score does NOT move when you change the spend window. "
                           "Every deduction is itemized below the trend; sparkline = 14d retro."),
         },
