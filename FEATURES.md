@@ -3,6 +3,9 @@
 One line per capability and where it lives. Guarded by tests (`test_p0_polish.py`) — update this file in the same commit as the feature. Two review rounds missed shipped
 features; this is the map that makes that impossible. Deep detail: RUNBOOK.md.
 
+**Section-by-section, metric-by-metric, column-by-column definitions (what does *95s*
+mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSARY.md).**
+
 ## Watch (always-on, no humans required)
 | Capability | Where |
 |---|---|
