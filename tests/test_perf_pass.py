@@ -66,9 +66,10 @@ def test_overview_decoupled_and_day_replay_batched():
     assert "_load_board" not in _batch_block and "board" not in _batch_block
     assert "fact_daily" not in _batch_block
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
-    # retro recent + historical groups, plus the T2.1 live-trio group (open
-    # incidents / proposals / triage alerts submitted as one live round trip)
-    assert cr.count("run_batch(") == 3
+    # retro recent + historical groups, the T2.1 live-trio group (open incidents /
+    # proposals / triage alerts as one live round trip), plus the incident
+    # auto-investigation batch (change/task/grant/anomaly signals, on incident-select only).
+    assert cr.count("run_batch(") == 4
     assert 'run_batch(_live_specs, page=_PAGE, tier="live")' in cr
     assert "else:" in cr.split("_b_hist", 2)[2][:2000]            # serial fallback survives
 

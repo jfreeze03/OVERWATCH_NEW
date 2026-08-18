@@ -125,6 +125,81 @@ def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     )
 
 
+def _auto_investigation(inc_row, company: str, rate: float) -> None:
+    """Incidents that investigate themselves (read-only): for the selected incident,
+    assemble the change / task-failure / spend-anomaly / grant signals around its onset
+    and RANK candidate root causes by timing, magnitude, and entity match (app/logic/rca.py).
+    It explains — it never writes an INCIDENT_MEMBERS row, never executes a remediation."""
+    from app.data import change_impact_sql, insights_sql
+    from app.logic.insights import build_failure_timeline
+    from app.logic.rca import (
+        candidates_from_anomalies,
+        candidates_from_changes,
+        candidates_from_grants,
+        candidates_from_tasks,
+        rank_root_causes,
+        rca_summary,
+    )
+
+    onset_dt = pd.to_datetime(inc_row.get("STARTED_AT") or inc_row.get("DETECTED_AT"), errors="coerce")
+    if pd.isna(onset_dt):
+        return
+    section_header("Auto-investigation — ranked root cause", "info", "incident")
+    st.caption("Read-only synthesis: the changes, task failures, spend anomalies and grant "
+               "changes around this incident's onset, ranked as candidate causes by timing "
+               "(a trigger precedes onset), magnitude, and entity match. It explains — it never "
+               "remediates.")
+    # Window-covering lookback: a couple of days of lead-in before onset, through now.
+    _days = max(3, min((pd.Timestamp(account_now()) - onset_dt).days + 3, 30))
+    _b = run_batch([
+        {"key": "ai_obj", "sql": change_impact_sql.change_registry(_days, company),
+         "source": "OBJECT_CHANGE_REGISTRY"},
+        {"key": "ai_wh", "sql": change_impact_sql.warehouse_change_registry(_days, company),
+         "source": "WAREHOUSE_CHANGE_REGISTRY"},
+        {"key": "ai_task", "sql": insights_sql.task_failure_details(_days, company),
+         "source": "TASK_HISTORY failures"},
+        {"key": "ai_grant", "sql": security_sql.recent_grant_changes(_days, company),
+         "source": "GRANTS_TO_USERS changes"},
+        {"key": "ai_whd", "sql": mart_sql.fact_warehouse_daily(max(_days, 14), company),
+         "source": "FACT_WAREHOUSE_DAILY (spend anomaly)"},
+    ], page=_PAGE, tier="recent")
+    if _b is None:
+        st.caption("Investigation feeds could not be read.")
+        return
+
+    cands: list = []
+    _obj, _wh = _b.get("ai_obj"), _b.get("ai_wh")
+    _task, _grant, _whd = _b.get("ai_task"), _b.get("ai_grant"), _b.get("ai_whd")
+    if _obj is not None and _obj.usable():
+        cands += candidates_from_changes(_obj.df)
+    if _wh is not None and _wh.usable():
+        cands += candidates_from_changes(_wh.df)
+    if _task is not None and _task.usable():
+        cands += candidates_from_tasks(build_failure_timeline(_task.df))
+    if _grant is not None and _grant.usable():
+        cands += candidates_from_grants(_grant.df)
+    if _whd is not None and _whd.usable():
+        _priced = complete_days_only(_whd.df.copy())
+        _priced["USD"] = pd.to_numeric(_priced.get("CREDITS_TOTAL"), errors="coerce").fillna(0.0) * rate
+        _flagged = flag_anomalies(_priced, "USD", group_col="WAREHOUSE_NAME",
+                                  min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+        cands += candidates_from_anomalies(anomaly_summary(_flagged, "WAREHOUSE_NAME", "USD"))
+
+    hyps = rank_root_causes(cands, onset_dt, top=5)
+    summ = rca_summary(hyps)
+    _banner = st.info if not summ["has_lead"] else (st.warning if summ["top_band"] == "MEDIUM" else st.error)
+    _banner(md_dollars(summ["headline"]))
+    if hyps:
+        _rows = pd.DataFrame([{
+            "Confidence": h["band"], "Hypothesis": h["title"], "When": h["lead_text"],
+            "Magnitude": h["magnitude_text"], "By": h["changed_by"], "Why (scoring)": h["why"],
+        } for h in hyps])
+        styled_table(_rows, height=min(60 + 34 * len(hyps), 260))
+        st.caption("Ranked by 0.45·timing + 0.35·magnitude + 0.20·entity-match. A change outside "
+                   "the ~48h pre-onset window can't be a confident cause however large. Confirm the "
+                   "lead, then close the incident with its root cause above.")
+
+
 def _day_replay() -> None:
     """One day, every domain, one story — the flight recorder Snowsight
     can't assemble from its silos."""
@@ -601,6 +676,8 @@ def render() -> None:
                           key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
                 if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
                     styled_table(with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"))
+                # Incidents that investigate themselves: the auto-assembled ranked root cause.
+                _auto_investigation(oi.df.iloc[int(sel_i)], company, rate)
                 if _is_op:
                     with st.expander("Close this incident (audited, forward-only)"):
                         _kind = st.selectbox("Root cause",

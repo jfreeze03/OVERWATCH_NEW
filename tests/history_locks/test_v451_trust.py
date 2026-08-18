@@ -39,7 +39,11 @@ _REACHABLE = {
     "app/ui/pages/brief.py": (),
     "app/ui/pages/overview.py": ("WAREHOUSE_METERING_HISTORY",),
     "app/ui/pages/control_room.py": (
-        "GRANTS_TO_USERS", "QUERY_HISTORY", "TASK_HISTORY", "WAREHOUSE_METERING_HISTORY"),
+        # + GRANTS_TO_ROLES: the incident auto-investigation's grant-change signal
+        # (recent_grant_changes unions GRANTS_TO_USERS + GRANTS_TO_ROLES), reached only
+        # when a DBA selects an incident — the same drill-scoped scan class as day-replay.
+        "GRANTS_TO_ROLES", "GRANTS_TO_USERS", "QUERY_HISTORY", "TASK_HISTORY",
+        "WAREHOUSE_METERING_HISTORY"),
     "app/ui/pages/cost.py": ("QUERY_HISTORY",),
     "app/ui/pages/cost_parts/spend.py": (
         # V077 cost-by-application panel adds QUERY_ATTRIBUTION_HISTORY + SESSIONS

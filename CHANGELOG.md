@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.260.0 - Incidents that investigate themselves (2026-08-18)
+
+Open an incident and the investigation is already done. Control Room ▸ Incidents & triage,
+when you select an open incident, now assembles a read-only **Auto-investigation — ranked
+root cause**: the change / task-failure / spend-anomaly / grant-change signals around the
+incident's onset, ranked as competing hypotheses for what caused it.
+
+- **Ranked hypotheses** — each candidate scores on `0.45·timing + 0.35·magnitude +
+  0.20·entity-match`: a change 12 min before onset outranks a day-old one (a cause
+  precedes its effect — a change outside the ~48h pre-onset window can't be a confident
+  cause however large), a REGRESSED verdict / big robust-z / root-cause task failure /
+  p95 blow-up lifts magnitude, and touching the incident's own entity lifts match. Banded
+  HIGH / MEDIUM / LOW, strongest first, with a transparent `why` per row so it's auditable.
+- **Hypothesis types**, each from an existing builder (no new evidence source): object
+  deploy/DDL change (`change_registry`), warehouse config change (`warehouse_change_registry`),
+  upstream task failure root-vs-cascade (`build_failure_timeline`), spend anomaly
+  (`flag_anomalies`/`anomaly_summary`), privilege/grant change (`recent_grant_changes`).
+- A one-line **verdict** ("Most likely cause (high confidence): …" / "Best available lead
+  (low confidence): …" / "No clear trigger in the signals …" — an honest blank, never a
+  false accusation).
+- **Read-only**: it explains and stops — never writes an INCIDENT_MEMBERS row, never
+  executes a remediation. The signal reads run only on incident-select (a deliberate drill,
+  same scan class as day-replay).
+
+New pure `app/logic/rca.py` (per-signal adapters + the ranker + summary; 11 tests) wired
+into the incident-selection block via one signal-assembly batch that reuses existing
+builders. Composes what exists — no new scan source, no duplication.
+
+App version 4.260.0.
+
+
 ## 4.259.0 - Prove-it scorecard: does OVERWATCH earn its keep? (2026-08-18)
 
 The gate the owner set before going autonomous — one director-facing surface that proves
