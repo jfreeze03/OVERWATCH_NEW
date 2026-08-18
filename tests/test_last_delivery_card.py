@@ -74,16 +74,14 @@ def test_send_failures_are_counted_separately_from_silence():
 
 
 def test_card_is_rendered_under_the_delivery_banner():
-    # Section-aware rendering keeps the health card on the two operating surfaces
-    # that need it (Open events + Native delivery), always below the banner.
+    # The account-wide delivery banner + card render ONCE, on Native delivery (audit
+    # consolidation removed the duplicate copy from the company-scoped Open events
+    # section — a scope-mix as well as a duplicate). The banner still precedes the card.
     render = _ALERTS.split("def render()", 1)[1]
-    assert render.count("_delivery_status()") == 2
-    assert render.count("_last_delivery_card()") == 2
+    assert render.count("_delivery_status()") == 1
+    assert render.count("_last_delivery_card()") == 1
     assert render.index('section = lazy_sections(') < render.index("_delivery_status()")
-    first_status = render.index("_delivery_status()")
-    first_card = render.index("_last_delivery_card()")
-    assert first_status < first_card
-    assert render.rindex("_delivery_status()") < render.rindex("_last_delivery_card()")
+    assert render.index("_delivery_status()") < render.index("_last_delivery_card()")
 
 
 def test_card_separates_quiet_from_broken():

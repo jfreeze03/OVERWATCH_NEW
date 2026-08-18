@@ -752,6 +752,11 @@ def _performance_tab() -> None:
         styled_table(usage.df)
         st.caption("Merging or retiring sections should follow this table, not opinions.")
 
+    # Kept SEPARATE from the session-telemetry table above: that one is THIS viewer's
+    # in-session buffer (query_telemetry -> session_state); this is the fleet aggregate
+    # across ALL viewers over 7d (fleet_query_stats -> APP_QUERY_TELEMETRY). Different
+    # populations answering different questions — the audit's "same population" flag was
+    # a false positive.
     st.markdown("**Fleet slow/failed fetches (all viewers, 7d)**")
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
              source="APP_QUERY_TELEMETRY (V021)")
@@ -1076,26 +1081,15 @@ def _setup_progress_tab() -> None:
     if sv.ok and not sv.empty:
         applied = {int(v) for v in pd.to_numeric(sv.df["VERSION"], errors="coerce").dropna()}
     missing = [n for n in _EXPECTED_MIGRATIONS if n not in applied]
+    # Single migration rollup — the per-version applied/missing breakdown lives on
+    # the Migrations & freshness tab (SCHEMA_VERSION + 'Missing migrations'); this
+    # checklist only needs the "N of M applied" headline, not a row per VNNN.
     _add("Database migrations", done=bool(applied) and not missing,
          detail=(f"{len(applied)} of {len(_EXPECTED_MIGRATIONS)} applied"
                  + (f"; {len(missing)} missing" if missing else "")) if sv.ok
                 else "SCHEMA_VERSION unreadable — nothing applied yet",
-         fix="Run the missing migrations in order (DEPLOYMENT.md).")
-    for _v, _label, _feature in (
-        (74, "V074", "Operating workbench: Action Center, Entity 360, SLOs, experiments"),
-        (75, "V075", "Security posture facts: the decision queue"),
-        (76, "V076", "Anomaly materiality gate"),
-        (77, "V077", "Cost by application x user: FACT_APP_COST_DAILY"),
-        (78, "V078", "AI usage loader unbreak: ai_code TZ->NTZ casts + backfill"),
-        (79, "V079", "AI predicate historical split: loader procs count CoCo as AI"),
-        (80, "V080", "Security change-risk ETL exclusion: ETL-role DROP/TRUNCATE de-noised"),
-        (81, "V081", "Unified experiment verify: SP_VERIFY_EXPERIMENT books ledger + closes action in one txn"),
-        (82, "V082", "Query-family company regrain: MART_QUERY_FAMILY_DAILY gains COMPANY (per-company grain)"),
-        (83, "V083", "Action estimate time-basis: ACTION_QUEUE gains PERIOD labeling ESTIMATED_USD (DS #7)"),
-    ):
-        _add(f"{_label} — {_feature}", done=_v in applied,
-             detail="applied" if _v in applied else "not applied",
-             fix=f"Apply {_label} in Snowsight (owner).")
+         fix="Run the missing migrations in order (DEPLOYMENT.md); "
+             "see the Migrations & freshness tab for per-version detail.")
 
     fr = run(mart_sql.source_freshness_state(), page=_PAGE, key="setup_freshness",
              tier="recent", source="SOURCE_FRESHNESS_STATE", probe=True)
@@ -1143,6 +1137,8 @@ def _setup_progress_tab() -> None:
     else:
         st.warning(f"{pending} setup item(s) still pending — see the FIX column.")
     styled_table(df, height=360)
+    st.caption("Per-version migration detail (which VNNN is applied or missing) is on "
+               "the Migrations & freshness tab.")
 
 
 @safe_page(_PAGE)

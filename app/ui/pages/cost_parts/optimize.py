@@ -28,7 +28,7 @@ from app.core.state import request_navigation
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.data.common import bounded_days
 from app.logic import remediation
-from app.logic.actions import LEDGER_ESTIMATED, can_verify, ledger_totals
+from app.logic.actions import LEDGER_ESTIMATED, can_verify
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
@@ -37,7 +37,6 @@ from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_repeat_candidates,
     idle_advisor,
-    idle_suspend_sql,
     idle_waste_summary,
     repeat_min_runs,
     storage_movers,
@@ -289,7 +288,6 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             advisor = idle_advisor(_idle_df, rate, idle_days)
             flagged = advisor[advisor["FLAGGED"]]
             actionable = advisor[advisor["ACTIONABLE"]]
-            total_idle = float(advisor["IDLE_USD"].sum())
             _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
                 SavingsOpportunity("IDLE", str(r["WAREHOUSE_NAME"]),
                                    safe_float(r["ACTIONABLE_MONTHLY_USD"]),
@@ -306,12 +304,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if {"name", "size"}.issubset(_sw.columns):
                     _size_by_wh = {str(n).strip().upper(): str(s).upper()
                                    for n, s in zip(_sw["name"], _sw["size"], strict=False)}
+            # The gross idle spend + projected-monthly figures are the section headline
+            # above (same cached builder); this tile keeps only the value unique to
+            # this sub-tab — the settings-verified, resume-tail-net recoverable number.
             kpi_row([
-                {"label": f"Idle spend ({idle_days}d)", "value": format_usd(total_idle),
-                 "help": "Credits billed while no query ran on the warehouse."},
-                {"label": "Projected monthly idle",
-                 "value": format_usd(float(advisor["PROJECTED_MONTHLY_IDLE_USD"].sum())),
-                 "help": "All idle, monthly-ized — the gross number, not the recoverable one."},
                 {"label": "Actionable via timer",
                  "value": format_usd(float(advisor["ACTIONABLE_MONTHLY_USD"].sum())),
                  "help": f"Settings-verified targets only, net of the unavoidable "
@@ -359,29 +355,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 "target or disabled. Unknown and already-tuned settings are deliberately excluded."
             )
             if not actionable.empty:
-                with st.expander("Generated remediation + savings-ledger entries"):
-                    statements = []
-                    for _, r in actionable.head(10).iterrows():
-                        # A3: never generate an ALTER that RAISES a tuned warehouse's
-                        # suspend — clamp the target to min(current, 60s) and skip
-                        # warehouses already at/below target (their idle is resume overhead).
-                        _cur = safe_float(r.get("AUTO_SUSPEND"), 0.0)
-                        if 0 < _cur <= IDLE_TARGET_SUSPEND_SEC:
-                            continue
-                        _target = int(min(_cur, IDLE_TARGET_SUSPEND_SEC)) if _cur > 0 else IDLE_TARGET_SUSPEND_SEC
-                        statements.append(idle_suspend_sql(r["WAREHOUSE_NAME"], _target))
-                        # B3: book the RECOVERABLE figure, and say in the DESCRIPTION
-                        # what was deducted — the ledger is the number people quote.
-                        statements.append(
-                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} (DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL)\n"
-                            f"VALUES ({sql_literal('Auto-suspend tune: ' + str(r['WAREHOUSE_NAME']) + ' (idle net of ~' + str(IDLE_TARGET_SUSPEND_SEC) + 's resume tail per active hour)')}, 'ESTIMATED', "
-                            f"{sql_number(r['ACTIONABLE_MONTHLY_USD'])}, "
-                            f"{sql_literal('Re-run idle analysis for ' + str(r['WAREHOUSE_NAME']) + ' after the change; verify idle $ drop.')});"
-                        )
-                    st.code("\n".join(statements), language="sql")
-                    st.caption("Review and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS. Warehouse changes are "
-                               "never executed from the app. Booked amounts are the recoverable idle "
-                               "(resume tail deducted), not the gross idle.")
+                st.caption(
+                    f"{len(actionable)} warehouse(s) have an actionable timer change. Generate the "
+                    "exact auto-suspend ALTER, execute it, and book the recoverable saving on the "
+                    "**Remediation & ledger** sub-tab — the single guarded execute + booking path."
+                )
             ai_evaluation_panel(
                 key=f"idle_{company}_{days}",
                 prompt=idle_warehouse_prompt(advisor, company, idle_days),
@@ -720,10 +698,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 result_caption(expq, note="allocated by execution-second share within each warehouse-hour")
                 st.caption("Chase the top rows in Operations → Queries (query drill-through) by QUERY_ID.")
 
-        # rec#41: the exact complement of the allocated estimate above, offered right
-        # here instead of siloed on the Unit-costs tab — QUERY_ATTRIBUTION_HISTORY bills
-        # each query its OWN attributed credits (idle warehouse time excluded), so on an
-        # idle-heavy warehouse the allocated panel above distorts and this one does not.
+        # rec#41: the MEASURED (exact QUERY_ATTRIBUTION_HISTORY, idle-excluded) lens sits
+        # ALONGSIDE the allocated one here on purpose — the value is the side-by-side
+        # measured-vs-allocated contrast, not a duplicate of the Unit-costs price list.
         st.markdown("**Most expensive queries (measured $, exact attribution)**")
         st.caption(
             "Measured, not allocated: exact QUERY_ATTRIBUTION_HISTORY credits for running "
@@ -1357,34 +1334,15 @@ def _savings_tab() -> None:
     if not res.ok:
         st.info("Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
         return
-    totals = ledger_totals(res.df)
     st.caption("Books itself since V038: the daily scan detects cost-lever changes "
                "(auto-suspend, size, clusters, scaling policy) wherever they were "
                "made — Snowsight included — and settles each against 14 days of "
                "measured actuals. Manual items remain for one-offs.")
-    _kpis = [
-        {"label": "Verified savings", "value": format_usd(totals["verified_usd"]),
-         "delta": f"{totals['verified_count']} items",
-         "help": "Measured post-period proof. This is the number to quote. Account-wide — "
-                 "SAVINGS_LEDGER has no company grain, so the company filter does not narrow it."},
-        {"label": "Estimated (unverified)", "value": format_usd(totals["estimated_usd"]),
-         "delta": f"{totals['estimated_count']} items", "delta_color": "off",
-         "help": "Never added to verified. Auto-booked items settle themselves "
-                 "when the 14-day verdict lands; manual items use the verify flow."},
-    ]
-    # Cost#9: the track record that calibrates a new estimate.
-    if totals.get("realization_pct") is not None:
-        _kpis.append({
-            "label": "Realization rate",
-            "value": f"{totals['realization_pct']:.0f}%",
-            "delta": f"{format_usd(totals['verified_usd'])} of "
-                     f"{format_usd(totals['verified_estimated_usd'])} estimated",
-            "delta_color": "off",
-            "help": "Of what verified items were originally ESTIMATED to save, how much "
-                    "measured out — the track record for the estimates. ~70% means a fresh "
-                    "$1,000 estimate is worth about $700 in expectation.",
-        })
-    kpi_row(_kpis)
+    # The verified / estimated / realization ROI headline is owned by Decision Studio ▸ ROI
+    # (same ledger_totals() source). This tab keeps the operational VERIFY workflow only.
+    st.caption("Verified / estimated / realization totals live on **Decision Studio ▸ ROI**.")
+    if st.button("Open the ROI story → Decision Studio", key="savings_roi_link"):
+        request_navigation("Decision Studio", "ROI")
     if res.empty:
         st.info("Nothing booked yet — the autobook task fills this as warehouse "
                 "cost-lever changes are detected (needs migration V038).")

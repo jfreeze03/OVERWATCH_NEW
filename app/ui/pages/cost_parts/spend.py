@@ -45,7 +45,6 @@ from app.logic.formulas import (
     pct_delta,
     safe_float,
 )
-from app.logic.remediation import retention_fix
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -1007,9 +1006,9 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
     """Drill the per-database storage bars down to the TABLE level, in dollars
     (owner ask 2026-08-17: "breakdown of what's driving storage costs ... drill to
     the table level and calculate ... adjust time travel or purge"). Prices each
-    table's active / time-travel / fail-safe split at the configured $/TiB, flags
-    STALE (no DML in 90 days) reduce/purge candidates, and hands over the retention
-    ALTER for one table; the tracked execute + savings booking stays on Optimization."""
+    table's active / time-travel / fail-safe split at the configured $/TiB, and flags
+    STALE (no DML in 90 days) reduce/purge candidates. Read-only: the retention ALTER
+    plus the tracked execute + savings booking live on Optimization ▸ Storage & waste."""
     st.markdown("**Drill to tables — what's driving a database's storage**")
     st.caption(
         "Current on-disk snapshot (TABLE_STORAGE_METRICS) priced at the configured $/TiB — "
@@ -1068,30 +1067,13 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
            for c in ("Active $", "Time-travel $", "Fail-safe $", "Clone $", "Total $")}
     styled_table(t[[c for c in show_cols if c in t.columns]], height=340, column_config=cfg)
     result_caption(res)
-    # The retention ALTER can only target LIVE tables: a dropped-but-still-retained
-    # table (DROPPED, RETENTION_DAYS NULL) keeps billing until it ages out, but the
-    # ALTER would error — so it's shown in the table above yet excluded as a candidate.
-    live = t[~t["DROPPED"].astype(bool)] if "DROPPED" in t.columns else t
-    live = live.reset_index(drop=True)
-    if not live.empty:
-        # index-prefixed labels stay unique even if a name repeats (dropped+recreated).
-        labels = [f"{i + 1}. {r['SCHEMA_NAME']}.{r['TABLE_NAME']}" for i, r in live.iterrows()]
-        c1, c2 = st.columns([3, 1])
-        with c1:
-            picked = st.selectbox("Reduce time-travel retention on", labels, key="storage_drill_table")
-        with c2:
-            target = st.number_input("Retention days", min_value=0, max_value=90, value=1,
-                                     step=1, key="storage_drill_days")
-        prow = live.iloc[labels.index(picked)]
-        if int(target) == 0:
-            st.warning("Retention 0 disables Time Travel on this table — no UNDROP and no "
-                       "AT/BEFORE recovery (fail-safe still applies for 7 days on permanent tables).")
-        st.code(retention_fix(str(prow["DATABASE_NAME"]), str(prow["SCHEMA_NAME"]),
-                              str(prow["TABLE_NAME"]), int(target)), language="sql")
-        st.caption("Copy-run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS. Lowering retention frees only "
-                   "the time-travel bytes older than the new window; to recover a table's active + "
-                   "time-travel storage, DROP it (fail-safe then ages out over 7 days). The tracked "
-                   "execute + savings-ledger booking lives on Cost → Optimization & Savings.")
+    # Read-only drill: the retention ALTER-generator + tracked execute + savings-ledger
+    # booking are owned by Cost → Optimization & Savings ▸ Storage & waste, which
+    # generates the SAME DATA_RETENTION_TIME_IN_DAYS change. This panel just names the
+    # drivers and STALE candidates.
+    st.caption("This is a read-only breakdown. To reduce a table's "
+               "DATA_RETENTION_TIME_IN_DAYS with a tracked execute and a savings-ledger "
+               "booking, use **Cost → Optimization & Savings ▸ Storage & waste**.")
 
 
 def _storage_tab(company: str, days: int, settings: dict) -> None:

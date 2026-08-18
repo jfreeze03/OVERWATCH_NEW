@@ -260,8 +260,6 @@ def _freshness_board() -> None:
         return "STALE" if row["HOURS_SINCE_LOAD"] > limit else "OK"
 
     df["STATUS"] = df.apply(_status, axis=1)
-    # Never-loaded first, then oldest-relative drift, so the worst is at the top.
-    df = df.sort_values(["NOT_LOADED", "HOURS_SINCE_LOAD"], ascending=[False, False])
     not_loaded = int(df["NOT_LOADED"].sum())
     stale_count = int((df["STATUS"] == "STALE").sum())
     if not_loaded:
@@ -269,10 +267,12 @@ def _freshness_board() -> None:
                  "until the loader task runs. Check Admin → Migrations & freshness.")
     if stale_count:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
-    styled_table(
-        df[["SOURCE_NAME", "STATUS", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD"]],
-        column_config={"HOURS_SINCE_LOAD": st.column_config.NumberColumn("Age (h)", format="%.1f")},
-    )
+    if not (not_loaded or stale_count):
+        st.success("All telemetry sources fresh.")
+    # Admin ▸ Migrations & freshness owns the full per-source freshness table; this
+    # is just the at-a-glance count, so link there instead of repeating the table.
+    if st.button("Full freshness table → Admin", key="cr_freshness_admin"):
+        request_navigation("Admin", "Migrations & freshness")
 
 
 @safe_page(_PAGE)
@@ -482,6 +482,11 @@ def render() -> None:
             st.error(f"Pulse unavailable: {pulse.error}")
         else:
             st.info("No queries recorded since yesterday 00:00 for this scope.")
+        # The pulse is the distinct "since yesterday" glance; Operations ▸ Queries
+        # owns the full query metrics (and their definitions), so link there rather
+        # than repeat them here.
+        if st.button("Full query metrics → Operations", key="cr_pulse_ops"):
+            request_navigation("Operations", "Queries")
 
         section_header("14-day query activity", "info", "operations")
         if _activity_ready:
@@ -554,18 +559,10 @@ def render() -> None:
                          "detail": "Feeds past their freshness SLA — see Freshness & replay.",
                          "severity": "warn"})
         exception_summary(_exc, "No open criticals, open incidents, or stale sources.")
-        if inc_met.usable():
-            im = inc_met.df.iloc[0]
-            # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
-            # change-correlated) moved to Alerts > History — retrospective process
-            # health, not morning triage. Only the number that changes overnight
-            # stays on this screen.
-            kpi_row([
-                {"label": "Open incidents", "value": f"{safe_float(im.get('OPEN_NOW')):,.0f}",
-                 "severity": "bad" if safe_float(im.get("OPEN_NOW")) else "ok",
-                 "help": "Lifecycle metrics (MTTA/MTTR, reopen, compression) live on "
-                         "Alerts -> History."},
-            ])
+        # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
+        # change-correlated) moved to Alerts > History — retrospective process
+        # health, not morning triage. Open incidents now surfaces once, via the
+        # exception summary above (OPEN_NOW), so the standalone KPI is dropped.
         # CR5: a lifecycle Gantt — detected->resolved spans (open runs to now), so
         # the shape of the last 14 days of incidents reads at a glance.
         # Pass account-time now (minute-rounded so the SQL-keyed cache doesn't churn
@@ -893,19 +890,18 @@ def render() -> None:
             view["USD_CURRENT"] = view["CREDITS_CURRENT"].map(lambda c: credits_to_usd(c, rate))
             view["USD_PRIOR"] = view["CREDITS_PRIOR"].map(lambda c: credits_to_usd(c, rate))
             view["DELTA_USD"] = view["USD_CURRENT"] - view["USD_PRIOR"]
-            view["DELTA_PCT"] = view.apply(lambda r: pct_delta(r["USD_CURRENT"], r["USD_PRIOR"]), axis=1)
-            view = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(10)
-            styled_table(  # rec21: + delta sign-coloring on the Δ columns, status tint, CSV
-                view[["WAREHOUSE_NAME", "COMPANY", "USD_CURRENT", "USD_PRIOR", "DELTA_USD", "DELTA_PCT"]],
-                column_config={
-                    "USD_CURRENT": st.column_config.NumberColumn("Current $", format="$%.0f"),
-                    "USD_PRIOR": st.column_config.NumberColumn("Prior $", format="$%.0f"),
-                    "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.0f"),
-                    "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
-                },
-            )
-            total_delta = float(view["DELTA_USD"].sum())
-            st.caption(f"Net movement across top movers: {format_usd(total_delta)}.")
+            # Cost ▸ Spend & Attribution owns the full movers table; here we show
+            # only the top-3 by absolute movement as a glance + a deep-link.
+            top = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(3)
+            kpi_row([
+                {"label": str(r["WAREHOUSE_NAME"]),
+                 "value": format_usd(safe_float(r["DELTA_USD"])),
+                 "help": f"{format_usd(safe_float(r['USD_PRIOR']))} → "
+                         f"{format_usd(safe_float(r['USD_CURRENT']))}"}
+                for _, r in top.iterrows()
+            ])
+            if st.button("Full spend movers → Cost & Contract", key="cr_movers_cost"):
+                request_navigation("Cost & Contract", "Spend & Attribution")
             result_caption(movers)
 
     elif section == "Freshness & replay":

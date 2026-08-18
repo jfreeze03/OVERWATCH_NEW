@@ -124,8 +124,6 @@ def _portfolio(company: str, days: int, rate: float) -> None:
     )
     kpi_row([
         {"label": "Measured families", "value": f"{len(portfolio):,}"},
-        {"label": "Act now", "value": f"{portfolio['LANE'].eq('ACT NOW').sum():,}",
-         "severity": "warn" if portfolio["LANE"].eq("ACT NOW").any() else "ok"},
         {"label": "30d normalized impact",
          "value": format_usd(portfolio["IMPACT_USD_30D"].sum()),
          "help": "Measured pattern credits normalized to 30 days; observed cost, not promised savings."},

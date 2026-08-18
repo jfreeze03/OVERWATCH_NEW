@@ -183,8 +183,10 @@ def test_a3_show_warehouses_merge_preserves_disabled_vs_unknown():
 
 def test_a3_generated_sql_never_raises_the_timer():
     opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    # rec2 indented this block one level (nested opt_section pills); match
-    # whitespace-insensitively so the guard (skip already-short warehouses) still holds.
-    assert "if 0 < _cur <= IDLE_TARGET_SUSPEND_SEC: continue" in " ".join(opt.split())
-    assert "int(min(_cur, IDLE_TARGET_SUSPEND_SEC))" in opt
-    assert 'idle_suspend_sql(r["WAREHOUSE_NAME"], _target)' in opt
+    # The generator never raises an already-short warehouse's timer. The bulk
+    # idle-suspend copy-expander (Idle & sizing) was removed as a duplicate booking
+    # surface (audit); the guard now lives in the single-warehouse Remediation & ledger
+    # path — an already-short WH is skipped (no ALTER), else target = min(current, 60).
+    assert "elif 0 < _current <= IDLE_TARGET_SUSPEND_SEC:" in opt
+    assert "min(_current, IDLE_TARGET_SUSPEND_SEC)" in opt
+    assert "remediation.auto_suspend_fix(wh_pick, _target)" in opt

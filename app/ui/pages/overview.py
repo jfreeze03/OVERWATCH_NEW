@@ -588,19 +588,6 @@ def render() -> None:
                     "served series (today's still-filling partial is excluded, matching "
                     "the window total above).",
         })
-    if not driver_view.empty:
-        top_driver = driver_view.iloc[0]
-        driver_total = float(driver_view["VALUE_USD"].map(safe_float).sum())
-        top_usd = safe_float(top_driver.get("VALUE_USD"))
-        company_kpis.append({
-            "label": "Top warehouse driver",
-            "value": str(top_driver.get("DIMENSION") or "n/a"),
-            "delta": f"{format_usd(top_usd)} · {(top_usd / driver_total * 100) if driver_total else 0:.0f}%",
-            "delta_color": "off",
-            "method": "metering",
-            "scope": "company",
-        })
-
     account_kpis = [
         _mtd_pace_kpi(mtd_spend, _bt_hist, rate, ai_rate, budget) if mtd_source else {
             "label": "MTD credit spend",
@@ -939,12 +926,10 @@ def render() -> None:
                        key="spark_activity", tier="hourly",
                        source="FACT_QUERY_HOURLY (daily)")
         adf = activity.df if activity.ok and not activity.empty else None
-        spend14 = daily.tail(14) if len(daily) else None
-        day_col = daily.columns[0] if len(daily.columns) else "DAY"
-        usd_col = next((c for c in daily.columns if "USD" in str(c).upper() or "CREDIT" in str(c).upper()),
-                       daily.columns[-1] if len(daily.columns) else "USD")
+        # The full spend_trend line chart directly above already shows spend; the
+        # sparkline_row keeps only the series that chart does NOT carry (queries,
+        # failures) so it stops duplicating the trend chart.
         charts.sparkline_row([
-            ("Spend, 14d", spend14, day_col, usd_col),
             ("Queries, 14d", adf, "DAY", "QUERIES"),
             ("Failures, 14d", adf, "DAY", "FAILS"),
         ])

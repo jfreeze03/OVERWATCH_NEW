@@ -187,7 +187,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # Owner ask (2026-07-11): "a visual of bad code and how it could cost us
     # silently." Unlike the POC's estimates these are MEASURED attribution
     # credits per parameterized hash — one cheap query run thousands of
-    # times shows its real bill.
+    # times shows its real bill. (Kept: this is the MEASURED pattern lens;
+    # Optimization's 'Recurring cost patterns' is the ALLOCATED estimate — distinct.)
     _pc = run(mart27_sql.pattern_cost(days, company, 25), page=_PAGE,
               key=f"patterns_{company}_{days}", tier="recent",
               source=f"MART_PATTERN_COST_DAILY ({company} + account-level)", probe=True)

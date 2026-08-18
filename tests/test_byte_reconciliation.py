@@ -71,7 +71,9 @@ def test_kpi_byte_sites_use_humanize_gb():
     assert 'f"{remote_spill_gb:,.1f} GB"' not in cr
     assert cr.count("humanize_gb(remote_spill_gb)") == 2   # exception value + KPI tile
     sec = _src("app/ui/pages/security.py")
-    assert 'humanize_gb(xdf["GB"].sum())' in sec
+    # The egress $ KPI moved to Cost ▸ Spend (audit consolidation); the unload
+    # "GB written out" KPI is the byte site that stays on Security.
+    assert "humanize_gb(float(udf['GB_OUT'].sum()))" in sec
 
 
 def test_per_table_storage_dollars_show_cents():

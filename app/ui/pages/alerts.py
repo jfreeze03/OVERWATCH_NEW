@@ -903,8 +903,6 @@ def render() -> None:
                           else "Open + acknowledged events across all severities."),
                  "severity": "info"},
             ])
-        _delivery_status()
-        _last_delivery_card()
         _open_events_section(events, is_operator, company)
     elif section == "Rules":
         rules = run(mart_sql.alert_rules(), page=_PAGE, key="alert_rules", tier="recent",

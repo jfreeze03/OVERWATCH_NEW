@@ -11,7 +11,7 @@ import streamlit as st
 
 from app.core.errors import safe_page
 from app.core.query import cache_scope, run, run_batch
-from app.core.state import filters
+from app.core.state import filters, request_navigation
 from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
@@ -100,8 +100,6 @@ def _access_tab(company: str, days: int) -> None:
         {"key": "logins", "sql": _logins_sql, "source": _activity_source},
         {"key": "login_reasons", "sql": _reasons_sql, "source": _activity_source},
         {"key": "newnet", "sql": _newnet_sql, "source": _network_source},
-        {"key": "grants", "sql": security_sql.recent_role_grants(days),
-         "source": "ACCOUNT_USAGE.GRANTS_TO_USERS"},
     ], page=_PAGE,
        tier="hourly" if use_security_fact and use_security_network_fact else "recent")
 
@@ -280,15 +278,8 @@ def _access_tab(company: str, days: int) -> None:
         st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
 
-    section_header("Role grants in the window (account-wide)", "info", "admin")
-    res = batch.get("grants") or run(security_sql.recent_role_grants(days), page=_PAGE, key=f"grants_{days}",
-              tier="recent", source="ACCOUNT_USAGE.GRANTS_TO_USERS")
-    if res.ok and res.empty:
-        st.success("No new role grants in this window.")
-    elif guard(res, ""):
-        styled_table(with_user_names(with_user_names(res.df, _PAGE), _PAGE,
-                                     user_col="GRANTED_BY", display_col="Granted by"))
-        result_caption(res)
+    st.caption("Role and privilege grant activity — grants, revokes, and privilege changes, "
+               "newest first — lives on the Changes section (Recent grant changes).")
 
     render_effective_access(company)
     render_admin_grant_anomalies(company)
@@ -301,25 +292,11 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     both start as 'bytes moved that nobody was watching'."""
     st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
     section_header("Outbound transfer (account-wide)", "info", "security")
-    xfer = run(security_sql.egress_daily(days), page=_PAGE, key=f"egress_{days}",
-               tier="recent", source="ACCOUNT_USAGE.DATA_TRANSFER_HISTORY")
-    if xfer.ok and xfer.empty:
-        st.success("No cross-cloud or cross-region transfer in this window.")
-    elif guard(xfer, "", setup_hint="Needs the ACCOUNT_USAGE.DATA_TRANSFER_HISTORY view."):
-        from app.logic.formulas import humanize_gb
-        xdf = xfer.df.copy()
-        _by_tgt = xdf.groupby("TARGET_REGION")["GB"].sum().sort_values(ascending=False)
-        kpi_row([
-            {"label": f"Egress · {days}d", "value": humanize_gb(xdf["GB"].sum()),
-             "help": "Total outbound bytes; same MB/GB/TB scale as Snowsight Cost "
-                     "Management ▸ Data Transfer and the Cost ▸ Spend egress panel."},
-            {"label": "Top destination", "value": str(_by_tgt.index[0]) if len(_by_tgt) else "—",
-             "help": "Region receiving the most bytes. An unexpected destination is the finding."},
-            {"label": "Destinations", "value": f"{int((_by_tgt > 0).sum())}"},
-        ])
-        charts.daily_stacked_count(xdf, "DAY", "TARGET_REGION", "GB", title="GB by destination region")
-        styled_table(xdf.sort_values("GB", ascending=False).head(50), height=240)
-        result_caption(xfer)
+    st.caption("The dollar egress story — outbound transfer by destination region — lives on "
+               "Cost ▸ Spend & Attribution, which owns it. This section keeps only the "
+               "security lenses: new/spiking destinations and unload activity.")
+    if st.button("Open Cost ▸ Spend & Attribution →", key="sec_egress_cost_link"):
+        request_navigation("Cost & Contract", "Spend & Attribution")
 
     if st.toggle("Compare destinations with the prior period", key="sec_egress_baseline_on"):
         baseline = run(
@@ -924,7 +901,7 @@ def _ai_guardrails_tab(company: str) -> None:
         behavior_kpis,
         user_behavior,
     )
-    from app.logic.formulas import account_now, credits_to_usd, format_usd, safe_float
+    from app.logic.formulas import account_now
 
     section_header("AI usage behavior (Cortex Code)", "warn", "security",
                    anchor="sec-ai-behavior")
@@ -934,13 +911,7 @@ def _ai_guardrails_tab(company: str) -> None:
     if guard(usage, "No Cortex Code usage recorded for this scope."):
         behavior = user_behavior(usage.df, pd.Timestamp(account_now()))
         k = behavior_kpis(behavior)
-        settings = load_settings(_PAGE)
-        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-        _spend_7d = credits_to_usd(float(behavior["CREDITS_7D"].sum()), ai_rate) if not behavior.empty else 0.0
         kpi_row([
-            {"label": "CoCo spend, 7d", "value": format_usd(_spend_7d),
-             "help": "Cortex Code token credits x the configured AI rate across active users. "
-                     "The full spend picture lives on Cost > Chargeback & AI."},
             {"label": "Active users, 7d", "value": f"{k['active_users']:,}"},
             {"label": "Flagged users", "value": f"{k['flagged_users']:,}",
              "delta": (f"{k['velocity_spikes']} velocity · {k['token_outliers']} outlier · "
@@ -951,6 +922,10 @@ def _ai_guardrails_tab(company: str) -> None:
                      f"{TOKEN_Z_FLAG:.0f} robust-z above the active population; new+heavy = first "
                      "activity this week with material credits."},
         ])
+        st.caption("The CoCo dollar picture — spend, chargeback, and AI rate — lives on "
+                   "Cost ▸ Chargeback & AI, which owns it.")
+        if st.button("Open Cost ▸ Chargeback & AI →", key="sec_ai_cost_link"):
+            request_navigation("Cost & Contract", "Chargeback & AI")
         if behavior.empty:
             st.success("No Cortex Code activity in the last 7 days.")
         else:

@@ -106,7 +106,10 @@ def test_setup_progress_panel_registered():
     # reuses existing probes: migration floor, marts loading, config — applies nothing
     assert "schema_version()" in tab and "_EXPECTED_MIGRATIONS" in tab
     assert "source_freshness_state()" in tab
-    assert "V074" in tab and "V075" in tab
+    # Single migration rollup ("N of M applied"); per-version applied/missing detail
+    # lives on the Migrations & freshness tab (audit consolidation removed the duplicated
+    # per-VNNN enumeration from Setup progress).
+    assert "applied" in tab and "Migrations & freshness tab" in tab
     assert "execute_statement" not in tab           # read-only panel
 
 

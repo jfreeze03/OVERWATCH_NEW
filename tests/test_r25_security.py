@@ -67,7 +67,9 @@ def test_egress_section_and_new_network_panel_wired():
     assert "def _egress_tab(" in sec
     assert '"key": "newnet"' in sec                           # rides the Access batch round-trip
     assert "New networks for privileged users" in sec
-    assert "GB by destination region" in sec
+    # The $ egress panel (KPI + 'GB by destination region' chart) moved to Cost ▸ Spend
+    # (audit consolidation); Security keeps the security lenses + a deep-link to Cost.
+    assert "sec_egress_cost_link" in sec
     # honest empty states — silence must read as "checked, clean", never blank
     assert "No break-glass account logged in from a network unseen" in sec
     assert "No unloads to stages in this window" in sec

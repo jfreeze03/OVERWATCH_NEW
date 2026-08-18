@@ -62,7 +62,10 @@ def test_drill_is_wired_into_the_storage_tab_with_dollars_and_retention():
     assert "Reclaimable $" not in ui            # overstated label removed per review
     assert "Top-50 table storage" in ui         # KPI not sold as the whole-DB total
     assert "no WRITES in 90 days" in ui or "no consumers" in ui  # STALE reads caveat
-    assert "retention_fix(" in ui
+    # Read-only drill (audit consolidation): the retention ALTER + tracked execute +
+    # savings booking are owned by Optimization ▸ Storage & waste (one execute surface,
+    # not two). This panel names the drivers/STALE candidates and points there.
+    assert "read-only breakdown" in ui and "Optimization & Savings" in ui
 
 
 def test_breakdown_parses_under_sqlglot():

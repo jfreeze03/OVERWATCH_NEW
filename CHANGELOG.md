@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.258.0 - Audit cleanup wave 3: redundancy consolidation (2026-08-17)
+
+Removed/consolidated duplicated panels found by the audit. Cross-page duplicates keep
+a compact glance + a deep-link to the single owner page (owner-approved ownership).
+
+Intra-page duplicates removed:
+- **Alerts**: the account-wide delivery banner + card rendered twice — dropped the copy
+  from the company-scoped Open events section (also a scope-mix); kept on Native delivery.
+- **Overview**: "Top warehouse driver" KPI (== the "Top driver" caption) and the
+  "Spend, 14d" sparkline (== the spend-trend chart above it) removed.
+- **Control Room**: the standalone "Open incidents" KPI (already in the exception summary).
+- **Decision Studio**: the Portfolio "Act now" KPI (already in the exception banner).
+- **Cost**: the Idle & sizing "Idle spend"/"Projected monthly idle" tiles (== the section
+  headline); the Spend storage-table drill is now READ-ONLY (the retention ALTER + booking
+  live once, on Optimization); the Idle & sizing idle-suspend copy-expander (the booking
+  lives once, on Remediation & ledger).
+
+Cross-page consolidations (owner → the other becomes a glance + link):
+- **Egress** and **CoCo/AI spend**: Cost owns the $ story; Security keeps its security
+  lenses + a deep-link.
+- **Pulse KPIs**: Operations owns the definitions; Control Room keeps the since-yesterday
+  glance + a link.
+- **Freshness board**: Admin owns the full table; Control Room keeps the stale-count + link.
+- **Spend movers**: Cost owns the full table; Control Room keeps a top-3 strip + link.
+- **Savings/ROI ledger totals**: Decision Studio ▸ ROI owns the track record; the Cost
+  Savings tab keeps the verify workflow + a link.
+- **Access "Role grants in window"**: dropped — the Changes ▸ "Recent grant changes" feed
+  is a superset (adds revokes + privilege changes).
+
+Three audit "duplicates" were found on review to be distinct-purpose panels and KEPT:
+the Admin session-telemetry vs fleet-telemetry tables (different populations), and the
+Cost measured-vs-allocated query + pattern lenses (exact QUERY_ATTRIBUTION_HISTORY, a
+deliberate contrast — rec#41 — not a copy).
+
+App version 4.258.0.
+
+
 ## 4.257.0 - Audit cleanup wave 2: correctness bug fixes (2026-08-17)
 
 22 confirmed defects from the 9-page audit, verified + fixed (each reviewed against
