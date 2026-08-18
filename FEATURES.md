@@ -82,7 +82,6 @@ mean here? what goes into *that* formula?): [FEATURE_GLOSSARY.md](FEATURE_GLOSSA
 | Weekly zero-copy backups of operator tables + DR runbook | `TASK_BACKUP_OPERATOR`; RUNBOOK §16 |
 | Saved views, default landing, display timezone (per user) | 💾 Views popover |
 | Usage analytics (page adoption + render ms) | Admin → Performance |
-| Dynamic Table pilot with measured cost | `MART_SPEND_ROLLUP_DT` |
 | Parallel batch fetch, lazy sections, SQL-keyed cache, fragments | core runtime |
 | **Design system**: token layer, card variants, severity stripes, SVG icons, sparklines, persistent status bar, refined charts, responsive | app/theme.py, app/ui/icons.py, app/ui/components.py |
 

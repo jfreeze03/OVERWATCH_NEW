@@ -437,7 +437,7 @@ def test_deploy_and_rebuild_surfaces_track_v075() -> None:
         "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT"
     ) == 2
     assert "ACCESS_REVIEW_DECISION_LOG" not in roles
-    assert "V001..V089 applied" in _read("snowflake/validate.sql")
+    assert "V001..V090 applied" in _read("snowflake/validate.sql")
     assert "SP_LOAD_SECURITY_FACTS(90)" in _read("snowflake/backfill_365.sql")
     teardown = _read("snowflake/teardown.sql")
     for name in (

@@ -1,4 +1,4 @@
--- 02_migrations_V001_V089.sql — GENERATED: the 89 migration files,
+-- 02_migrations_V001_V090.sql — GENERATED: the 90 migration files,
 -- byte-concatenated in order (locked by tests/test_rebuild_bundle.py).
 -- Snowsight 'Run All' executes top to bottom and HALTS at the first
 -- error — exactly the rule from docs/FULL_REBUILD.md. If it halts,
@@ -46059,3 +46059,40 @@ INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 89 AS VERSION,
        'SP_BACKUP_OPERATOR_TABLES clones to a TRANSIENT *_BAK_LAST target (was permanent): transient operator tables (ALERT_EVENTS, ACTION_QUEUE, ...) cannot clone into a permanent object, so those weekly backups failed every run (owner error log 2026-08-17, clone_failed x3 since 2026-08-02). TRANSIENT works for transient and permanent sources and needs no Fail-safe. Proc re-derived from V075; no data reload.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 89);
+
+-- ===========================================================================
+-- >>> V090__drop_spend_rollup_dt_pilot.sql
+-- ===========================================================================
+-- V090__drop_spend_rollup_dt_pilot.sql
+--
+-- Retire the MART_SPEND_ROLLUP_DT Dynamic Table pilot (V015). It was a deliberate,
+-- low-risk experiment to measure Dynamic-Table refresh cost vs the MERGE marts
+-- ("Additive: nothing reads it yet"). The app standardized on scheduled-task marts;
+-- the 2026-08-17 audit confirmed NOTHING reads the DT (no app query, procedure, task,
+-- or downstream mart), yet it keeps auto-refreshing every ~6h on WH_ALFA_ADMIN,
+-- spending serverless credits for no consumer. Drop it.
+--
+-- Idempotent DROP ... IF EXISTS; no data loss (the rollup is derivable from
+-- FACT_METERING_DAILY, untouched). FACT_METERING_DAILY.CHANGE_TRACKING (enabled in
+-- V015 for the DT) is left ON -- cheap, and a future reader could rely on it. Owner
+-- applies in Snowsight after V089. This file never runs from the app.
+
+EXECUTE IMMEDIATE
+$$
+DECLARE
+    v NUMBER;
+    not_ready EXCEPTION (-20090, 'V090 requires V089 first - apply migrations in order.');
+BEGIN
+    SELECT MAX(VERSION) INTO :v FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION;
+    IF (v < 89) THEN
+        RAISE not_ready;
+    END IF;
+END;
+$$;
+
+DROP DYNAMIC TABLE IF EXISTS DBA_MAINT_DB.OVERWATCH.MART_SPEND_ROLLUP_DT;
+
+INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
+SELECT 90 AS VERSION,
+       'Retire the MART_SPEND_ROLLUP_DT Dynamic Table pilot (V015): a low-risk MERGE-vs-DT refresh-cost experiment that nothing ever read; the app standardized on scheduled-task marts. As a Dynamic Table it kept auto-refreshing every ~6h on WH_ALFA_ADMIN with no consumer -- pure serverless waste. DROP ... IF EXISTS; no data loss (derivable from FACT_METERING_DAILY).' AS DESCRIPTION
+WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 90);

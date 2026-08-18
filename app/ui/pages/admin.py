@@ -266,6 +266,10 @@ _EXPECTED_MIGRATIONS = {
         "clone into a permanent object, so those weekly backups failed every run (owner "
         "error log 2026-08-17, clone_failed x3). TRANSIENT works for both source kinds "
         "and needs no Fail-safe; proc re-derived from V075, no reload",
+    90: "Retire the MART_SPEND_ROLLUP_DT Dynamic Table pilot (V015): nothing ever read "
+        "it, yet it auto-refreshed every ~6h on WH_ALFA_ADMIN for no consumer -- pure "
+        "serverless waste. Guarded DROP ... IF EXISTS; no data loss (derivable from "
+        "FACT_METERING_DAILY)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
