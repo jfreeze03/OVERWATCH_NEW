@@ -32,7 +32,7 @@ PAGE_SECTION_LABELS = {
                          "Unit costs", "Compare", "Optimization & Savings"],
     "Operations": ["Queries", "Tasks", "Warehouses", "Change impact",
                    "Pipeline SLA", "Release compare", "Emergency"],
-    "Decision Studio": ["ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
+    "Decision Studio": ["Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
     "Alerts": ["Open events", "Rules", "History", "Native delivery"],
     "Security": ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress", "Exposure", "Least privilege", "Trust Center"],
     "Admin": ["Settings", "Migrations & freshness", "Setup progress", "Metrics",

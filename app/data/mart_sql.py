@@ -1941,6 +1941,26 @@ SELECT
 """
 
 
+def action_acceptance(days: int = 90) -> str:
+    """Action acceptance: of the recommendations the team DECIDED on in the window, how
+    many were acted on (DONE) vs dismissed (DROPPED) — the honest 'does the team act on
+    its advice' rate the acceptance_funnel couldn't give (no impression denominator, but
+    a decided-then-DONE vs decided-then-DROPPED ratio is real). Terminal decisions are
+    dated by UPDATED_AT (when the row was closed); OPEN/IN_PROGRESS is the current
+    still-undecided backlog. Account-wide (ACTION_QUEUE is the account queue)."""
+    days = bounded_days(days, 365)
+    since = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+    return f"""
+SELECT
+    COUNT_IF(UPPER(STATUS) = 'DONE'    AND UPDATED_AT >= {since}) AS DONE_N,
+    COUNT_IF(UPPER(STATUS) = 'DROPPED' AND UPDATED_AT >= {since}) AS DROPPED_N,
+    COUNT_IF(UPPER(STATUS) IN ('OPEN', 'IN_PROGRESS'))           AS OPEN_N,
+    ROUND(SUM(IFF(UPPER(STATUS) = 'DONE' AND UPDATED_AT >= {since},
+                  COALESCE(ESTIMATED_USD, 0), 0)), 2)             AS DONE_USD
+FROM {core_object("ACTION_QUEUE")}
+"""
+
+
 def telemetry_by_page(days: int = 7) -> str:
     """Per-page fetch health from the V027 telemetry rider. Only slow/failed +
     a ~2% healthy sample are persisted, so FETCHES is a PERSISTED count, not a

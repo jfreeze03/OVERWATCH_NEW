@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.259.0 - Prove-it scorecard: does OVERWATCH earn its keep? (2026-08-18)
+
+The gate the owner set before going autonomous — one director-facing surface that proves
+the advising features are correct and pay for themselves. New **Decision Studio ▸
+Scorecard** section (the page's flagship landing), composing five trust/value signals:
+
+- **Pays for itself** — verified savings this quarter as a multiple of OVERWATCH's own
+  warehouse run cost (`savings_summary_quarter` ÷ `app_cost_quarter × rate`). ≥1× = it
+  pays for itself.
+- **Realization** — of what verified items were estimated to save, how much measured out
+  (existing `ledger_totals.realization_pct`).
+- **Acted on** — of the recommendations the team DECIDED on (90d), the share acted on
+  (DONE) vs dismissed (DROPPED). **New** `mart_sql.action_acceptance` — the honest
+  acceptance rate the acceptance_funnel couldn't give.
+- **Alert precision** — when a rule fires and resolves, how often it was real (ACTIONED)
+  vs noise, account-wide, with an unlabeled-share trust caveat. **New** account-wide
+  roll-up of the existing per-rule `rule_precision`.
+- **On solid evidence** — mean `EVIDENCE_COVERAGE` (existing) — how much advice rests on
+  complete signals.
+
+Plus a one-line **verdict** (earning its keep / providing value but watch: … / not yet
+proven) and the recommended→executed→verified→$ funnel. Deep-links to the ROI track
+record and Alerts ▸ Rules precision rather than duplicating them. `None` (not 0%) when
+there's no labeled outcome yet — an empty ledger never reads as "0% precise".
+
+New `app/logic/proof.py` (pure, 11 tests) + one mart read; everything else composes
+existing telemetry (no new scan, no duplication). Read-only.
+
+App version 4.259.0.
+
+
 ## 4.258.0 - Audit cleanup wave 3: redundancy consolidation (2026-08-17)
 
 Removed/consolidated duplicated panels found by the audit. Cross-page duplicates keep

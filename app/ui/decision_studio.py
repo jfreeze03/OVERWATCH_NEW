@@ -20,6 +20,12 @@ from app.logic.formulas import (
     md_dollars,
     safe_float,
 )
+from app.logic.proof import (
+    acceptance_summary,
+    account_precision,
+    proof_verdict,
+    roi_multiple,
+)
 from app.logic.workbench import (
     EXPERIMENT_STATUSES,
     SLO_METRIC_KEYS,
@@ -493,6 +499,111 @@ def _cost_truth(company: str, days: int) -> None:
            if (present.get("METERED") and metered and present.get("MEASURED")
                and present.get("ALLOCATED")) else "")
     )
+
+
+def _scorecard(company: str, rate: float) -> None:
+    """Prove-it flagship: does OVERWATCH work, and does it pay for itself? Composes the
+    five trust/value signals — ROI multiple, realization, acceptance, alert precision,
+    evidence coverage — into one director-facing scorecard + a one-line verdict. The gate
+    the owner set before going autonomous. Account-wide; reuses the ledger/queue/alert
+    marts and adds no new scan (only the small account roll-ups in app/logic/proof.py)."""
+    section_header("Does OVERWATCH earn its keep?", "info", "target")
+    st.caption("Account-wide proof: what the tool recommended, how much the team acted on, what "
+               "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
+               "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
+
+    ledger = run(mart_sql.savings_ledger(), page=_PAGE, key="decision_roi_ledger",
+                 tier="recent", source="SAVINGS_LEDGER")
+    if not ledger.ok:
+        empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
+        return
+    totals = ledger_totals(ledger.df)
+    realization = totals["realization_pct"]
+
+    _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
+             tier="recent", source="SAVINGS_LEDGER (QTD)")
+    _ac = run(mart_sql.app_cost_quarter(), page=_PAGE, key="sc_appcost",
+              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, QTD)")
+    verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
+    run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_QTD")) * rate if _ac.usable() else 0.0
+    roi = roi_multiple(verified_qtd, run_cost)
+
+    _acc = run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
+               tier="recent", source="ACTION_QUEUE (decided in 90d)")
+    acc = acceptance_summary(_acc.df if _acc.usable() else None)
+
+    _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
+                tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
+    prec = account_precision(_prec.df if _prec.usable() else None)
+
+    evcov = None
+    _port = run(workbench_sql.workload_portfolio(30, "ALL", 200), page=_PAGE, key="sc_portfolio",
+                tier="historical", source="MART_PATTERN_COST_DAILY (evidence coverage)", probe=True)
+    if _port.usable():
+        _pf = prioritize_workloads(_port.df, rate, 30)
+        if not _pf.empty and "EVIDENCE_COVERAGE" in _pf.columns:
+            evcov = round(float(_pf["EVIDENCE_COVERAGE"].mean()) * 100, 0)
+
+    verdict = proof_verdict(roi, realization, acc["ACCEPTANCE_PCT"], prec)
+    _banner = {"good": st.success, "watch": st.warning, "unproven": st.info}[verdict["level"]]
+    _banner(md_dollars(verdict["headline"]))
+
+    kpi_row([
+        {"label": "Pays for itself",
+         "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
+         "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
+         "delta": (f"{format_usd(roi['VERIFIED_USD'])} verified vs {format_usd(roi['RUN_COST_USD'])} run cost (QTD)"
+                   if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
+         "delta_color": "off",
+         "help": "Verified savings this quarter as a multiple of OVERWATCH's own warehouse run cost "
+                 "(APP_WAREHOUSE credits × rate). ≥1× means it pays for itself."},
+        {"label": "Realization",
+         "value": (f"{realization:,.0f}%" if realization is not None else "—"),
+         "help": "Of what verified items were estimated to save, how much actually measured out. "
+                 "Near 100% means the estimates held up (verified items that carried an estimate)."},
+        {"label": "Acted on",
+         "value": (f"{acc['ACCEPTANCE_PCT']:,.0f}%" if acc["ACCEPTANCE_PCT"] is not None else "—"),
+         "delta": f"{acc['DONE_N']} done · {acc['DROPPED_N']} dismissed · {acc['OPEN_N']} open",
+         "delta_color": "off",
+         "help": "Of the recommendations the team DECIDED on (last 90d), the share acted on (DONE) vs "
+                 "dismissed (DROPPED). Open items are still undecided, not counted for or against."},
+        {"label": "Alert precision",
+         "value": (f"{prec['PRECISION_PCT']:,.0f}%" if prec["PRECISION_PCT"] is not None else "—"),
+         "severity": ("ok" if (prec["PRECISION_PCT"] or 0) >= 70 else
+                      ("warn" if prec["PRECISION_PCT"] is not None else "")),
+         "delta": (f"{prec['ACTIONED']} actioned · {prec['NOISE']} noise"
+                   + (f" · {prec['UNTAGGED_SHARE_PCT']:.0f}% unlabeled" if prec["UNTAGGED_SHARE_PCT"] else "")),
+         "delta_color": "off",
+         "help": "When a rule fires and is resolved, how often it was real (ACTIONED) vs noise "
+                 "(expected/maintenance closes excluded). A high unlabeled share means the number "
+                 "isn't trustworthy yet — resolve alerts with a kind on Alerts ▸ Open events."},
+        {"label": "On solid evidence",
+         "value": (f"{evcov:,.0f}%" if evcov is not None else "—"),
+         "help": "Share of the recommendation board's three signals (cache, latency, fail-rate) "
+                 "actually present per family — how much of the advice rests on complete evidence."},
+    ])
+
+    _fn = run(mart_sql.acceptance_funnel(90), page=_PAGE, key="sc_funnel",
+              tier="recent", source="REMEDIATION_LOG + SAVINGS_LEDGER", probe=True)
+    if _fn.usable():
+        fr = _fn.df.iloc[0]
+        st.caption(md_dollars(
+            "Last 90 days — "
+            f"**{int(safe_float(fr.get('SAVINGS_ESTIMATED')))}** savings items estimated → "
+            f"**{int(safe_float(fr.get('FIXES_EXECUTED')))}** fixes executed → "
+            f"**{int(safe_float(fr.get('SAVINGS_VERIFIED')))}** verified "
+            f"(**{format_usd(safe_float(fr.get('VERIFIED_USD')))}**)"
+            + (f" · {int(safe_float(fr.get('SAVINGS_REJECTED')))} rejected"
+               if safe_float(fr.get("SAVINGS_REJECTED")) else "") + "."))
+
+    _c1, _c2 = st.columns(2)
+    with _c1:
+        if st.button("Savings track record → ROI", key="sc_link_roi", type="secondary"):
+            request_navigation("Decision Studio", "ROI")
+    with _c2:
+        if st.button("Per-rule alert precision → Alerts ▸ Rules", key="sc_link_alerts", type="secondary"):
+            request_navigation("Alerts", "Rules")
+    result_caption(ledger)
 
 
 def _roi(company: str) -> None:

@@ -66,9 +66,10 @@ def test_ledger_builder_carries_finding_type():
 
 def test_roi_is_a_first_class_decision_studio_section():
     page = _src("app/ui/pages/decision_studio.py")
-    # ROI is FIRST in the section list (the flagship landing) and dispatched.
-    assert '["ROI", "Portfolio"' in page
-    assert 'if section == "ROI":' in page and "_roi(company)" in page
+    # ROI is a top section and dispatched. (The prove-it Scorecard now leads the list as
+    # the flagship landing; ROI is the verified-savings track-record detail behind it.)
+    assert '["Scorecard", "ROI", "Portfolio"' in page
+    assert 'section == "ROI":' in page and "_roi(company)" in page
     ds = _src("app/ui/decision_studio.py")
     assert "def _roi(company: str)" in ds
     assert "Return on OVERWATCH" in ds
