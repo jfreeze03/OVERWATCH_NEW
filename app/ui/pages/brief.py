@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from app.core.errors import safe_page
+from app.core.identity import viewer_name
 from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
@@ -44,6 +45,7 @@ from app.ui.components import (
     styled_table,
 )
 from app.ui.sizing import TABLE_H_SM
+from app.ui.workbench import render_watch_badge
 
 _PAGE = "Brief"
 
@@ -340,6 +342,12 @@ def render() -> None:
             st.caption("Top 3 by severity, then overdue, then estimated $, then age.")
     else:
         st.success("Action queue is empty." if actions.ok else "Action queue not installed yet.")
+
+    # Watch automation (owner ask 2026-08-17): the proactive half of "watch". If
+    # any watched entity moved (cost spike/drop or health drop), the badge leads
+    # here on the landing page with what moved and a jump to the Watchlist; quiet
+    # when steady. Renders nothing when the viewer has no watchlist.
+    render_watch_badge(viewer_name(), rate)
 
     # rec2: the AI narrative is context, not the headline — it sits BELOW the numbers,
     # fires, and asks (the page's "numbers first, fires second, asks third" contract)

@@ -12,9 +12,19 @@ from app.core.identity import viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import mart_sql, workbench_sql
+from app.data import mart27_sql, mart_sql, workbench_sql
 from app.logic.actions import rank_actions
-from app.logic.formulas import account_today, credits_to_usd, format_usd, humanize_duration, safe_float
+from app.logic.formulas import (
+    account_today,
+    credits_to_usd,
+    format_usd,
+    humanize_duration,
+    md_dollars,
+    safe_float,
+)
+from app.logic.sizing import size_recommendations
+from app.logic.watch_monitor import watch_summary, watched_status
+from app.logic.wh_health import warehouse_health
 from app.logic.workbench import (
     ACTION_STATUSES,
     CRITICALITIES,
@@ -41,6 +51,7 @@ from app.ui.components import (
     read_model_caption,
     section_header,
     selectable_table,
+    served_days,
     snowsight_profile_column,
     status_chips,
     styled_table,
@@ -668,6 +679,64 @@ def render_entity_360(company: str) -> None:
             empty_state("no_data_yet", "No evidence, remediation, or savings outcome is linked yet.")
 
 
+# Watch automation (owner ask 2026-08-17): "when I click Watch, does it do
+# something behind the scenes or is it waiting for me? I need that automated."
+# Watching used to be a passive bookmark. Now each watched WAREHOUSE is evaluated
+# for a cost spike/drop + a health-grade drop and surfaced on the Brief badge and
+# the Watchlist tab. Read-only; no external push. 30d window; cross-company (a
+# personal watchlist spans companies) so it ignores the page's company filter.
+_WATCH_WINDOW_DAYS = 30
+
+
+def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
+    """Per watched entity: cost spike/drop + health-grade status (attention first).
+
+    Cheap and degradation-safe: cost from FACT_WAREHOUSE_DAILY (mart), health from
+    the efficiency MART only (probe — never the heavy live sizing scan). An absent
+    source degrades to cost-only, or to a steady list, rather than loading a scan.
+    Cross-company (company='ALL') so a watched entity is evaluated no matter which
+    company filter the viewer is on, and both surfaces share one cache identity."""
+    cols = ["ENTITY_TYPE", "ENTITY_KEY", "LABEL", "ATTENTION", "STATUS", "SEVERITY"]
+    if not viewer:
+        return pd.DataFrame(columns=cols)
+    wl = run(workbench_sql.watchlist(viewer), page=_PAGE, key="watch_auto_list",
+             tier="live", source="USER_WATCHLIST", probe=True)
+    if not wl.usable():
+        return pd.DataFrame(columns=cols)
+    daily = run(mart_sql.fact_warehouse_daily(_WATCH_WINDOW_DAYS, "ALL"), page=_PAGE,
+                key="watch_auto_cost", tier="recent", source="FACT_WAREHOUSE_DAILY", probe=True)
+    health = pd.DataFrame()
+    prof = run(mart27_sql.eff_sizing_profile(_WATCH_WINDOW_DAYS, "ALL"), page=_PAGE,
+               key="watch_auto_health", tier="recent",
+               source="MART_WAREHOUSE_EFFICIENCY_DAILY", probe=True)
+    if prof.usable():
+        sized = size_recommendations(prof.df, rate, served_days(prof, _WATCH_WINDOW_DAYS))
+        health = warehouse_health(sized)
+    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate)
+
+
+def render_watch_badge(viewer: str, rate: float) -> None:
+    """Brief in-app badge: how many watched entities moved, and which — the
+    proactive half of 'watch'. Quiet (a one-line caption) when nothing moved, so
+    the phone-sized Brief stays uncluttered; a warning with a jump only on movement."""
+    status = watched_attention(viewer, rate)
+    if status.empty:
+        return
+    summary = watch_summary(status)
+    if not summary["attention"]:
+        st.caption(f"👁 {summary['watched']} watched "
+                   + ("entity is" if summary["watched"] == 1 else "entities are") + " steady.")
+        return
+    att = status[status["ATTENTION"]].head(4)
+    lines = [f"**{r['LABEL']}** — {r['STATUS']}" for _, r in att.iterrows()]
+    st.warning("👁 " + str(summary["attention"]) + " of " + str(summary["watched"])
+               + " watched " + ("entity has" if summary["attention"] == 1 else "entities have")
+               + " moved:\n\n" + "\n\n".join(md_dollars(x) for x in lines))
+    if st.button("Open Watchlist", key="brief_watch_jump", type="secondary"):
+        st.session_state["_ow_entity_view_pending"] = "Watchlist"
+        request_navigation("Control Room", "Entity 360")
+
+
 def render_watchlist() -> None:
     viewer = viewer_name()
     if not viewer:
@@ -699,6 +768,25 @@ def render_watchlist() -> None:
                 + ("entity has" if crossed == 1 else "entities have")
                 + " crossed a configured threshold (an SLO objective is in breach)."
             )
+    # Watch automation: annotate each watched entity with its cost spike/drop +
+    # health-grade status (the "behind the scenes" work), so the list is a live
+    # monitor, not a passive bookmark. Merged on the entity key; a STATUS column
+    # rides along and an attention banner leads with what moved. Cross-company by
+    # design (a personal watchlist spans companies), so no company filter here.
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    status = watched_attention(viewer, rate)
+    if not status.empty:
+        frame = frame.merge(status[["ENTITY_TYPE", "ENTITY_KEY", "STATUS", "SEVERITY", "ATTENTION"]],
+                            on=["ENTITY_TYPE", "ENTITY_KEY"], how="left")
+        moved = status[status["ATTENTION"]]
+        if not moved.empty:
+            names = ", ".join(f"{r['LABEL']} ({r['STATUS']})" for _, r in moved.head(4).iterrows())
+            more = "" if len(moved) <= 4 else f", +{len(moved) - 4} more"
+            st.warning(md_dollars(
+                f"👁 {len(moved)} watched "
+                + ("entity has" if len(moved) == 1 else "entities have")
+                + f" moved: {names}{more}."))
+        frame = frame.drop(columns=["SEVERITY", "ATTENTION"])
     selected = selectable_table(frame, key="watchlist_table", height=260, sort_label="newest watched")
     # BUGFIX (infinite-rerun): navigate ONLY on a CHANGED selection. A sticky
     # st.dataframe selection re-fired request_navigation every rerun; the target

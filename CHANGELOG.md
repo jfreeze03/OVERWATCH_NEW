@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.255.0 - Watch automation: a watched entity now watches itself (2026-08-17)
+
+Answers the owner's question — "when I click Watch in Entity 360, does it do
+something behind the scenes, or is it waiting for me?" It was waiting: watching
+wrote a row and only showed an SLO badge when you opened the Watchlist tab. Now
+each watched **warehouse** is evaluated for a cost move and a health drop, and the
+result is surfaced where you land — no external push, no migration, read-only.
+
+- **Cost spike/drop** — the same robust median/MAD anomaly sweep the Cost page runs
+  (materiality-gated: >=$50 day, >=10 active days), over FACT_WAREHOUSE_DAILY. Signed
+  z carries the direction ("spend spike" vs "spend drop").
+- **Health-grade drop** — the per-warehouse health chip (0-100 grade). A grade below
+  Healthy reads as "health: Watch/Degraded/At risk"; Degraded/At risk escalate the
+  row to warn.
+- **Brief badge** (landing page): "N of M watched entities have moved: ..." with a jump
+  straight to the Watchlist; a quiet one-line "steady" caption when nothing moved;
+  nothing at all when you have no watchlist.
+- **Watchlist tab**: a STATUS column per entity plus a lead banner naming what moved.
+- Cost + health are warehouse-grain, so a watched query family / product / user passes
+  through un-flagged here (the pin + SLO badge still cover it). Cross-company by design
+  (a personal watchlist spans companies), so it ignores the page's company filter.
+- Cheap + degradation-safe: cost is a mart read; health uses the efficiency MART only
+  (probe -- never the heavy live sizing scan); an absent source degrades to cost-only.
+- New app/logic/watch_monitor.py (pure, 10 tests); wired via workbench.watched_attention
+  / render_watch_badge.
+
+App version 4.255.0.
+
+
 ## 4.254.0 - Wave-3 remainder: idle-waste KPI, per-WH health chip, peer z-score (2026-08-17)
 
 The last three repo-review efficiency lenses, all reusing already-cached warehouse
