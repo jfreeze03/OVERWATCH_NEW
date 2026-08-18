@@ -68,14 +68,6 @@ ALTER TASK DBA_MAINT_DB.OVERWATCH.OVERWATCH_SUSPEND_{wh} RESUME;
 ALTER TASK DBA_MAINT_DB.OVERWATCH.OVERWATCH_RESUME_{wh} RESUME;"""
 
 
-def monthly_savings_estimate(idle_credits_window: float, window_days: int, rate: float) -> float:
-    """Monthly-ized idle burn. Labeled ESTIMATED in the ledger until the
-    savings verifier compares actual before/after spend."""
-    if window_days <= 0:
-        return 0.0
-    return round(max(0.0, float(idle_credits_window)) / window_days * 30 * max(0.0, float(rate)), 2)
-
-
 def propose_quiet_window(hours: list[dict], min_len: int = 4,
                           max_avg_queries: float = 1.0,
                           min_avg_credits: float = 0.05,

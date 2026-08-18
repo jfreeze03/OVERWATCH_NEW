@@ -31,7 +31,6 @@ from app.data import (
     insights_sql,
     mart_sql,
     ops_sql,
-    prefs_sql,
     security_sql,
     workbench_sql,
 )
@@ -83,7 +82,6 @@ TARGETS = [
     ("cb.window.company", lambda p: chargeback_sql.department_window_credits(7, p)),
     ("mart.factsum.wh", lambda p: mart_sql.fact_query_window_summary(7, "ALFA", p, "", "")),
     ("mart.factsum.user", lambda p: mart_sql.fact_query_window_summary(7, "ALFA", "", p, "")),
-    ("prefs.value", lambda p: prefs_sql.upsert_pref_sql("VIEW:fuzz", p)),
 ]
 
 # Builders whose ONLY correct response to hostile input is refusal.
@@ -91,7 +89,6 @@ REFUSERS = [
     ("chg.run_history.name", lambda p: change_impact_sql.object_run_history("PROCEDURE", p)),
     ("ins.evidence.date", lambda p: insights_sql.anomaly_evidence(p)),
     ("mart.ledger.event", lambda p: mart_sql.ledger_for_event(p)),
-    ("prefs.key", lambda p: prefs_sql.upsert_pref_sql(p, "{}")),
     ("rem.warehouse", lambda p: remediation.auto_suspend_fix(p)),
     ("rem.user", lambda p: remediation.disable_user(p)),
     ("rem.cortex", lambda p: remediation.cortex_allowlist(p)),

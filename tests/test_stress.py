@@ -270,7 +270,7 @@ def test_charts_at_density():
 def test_logic_layer_at_scale():
     from app.logic.anomaly import flag_anomalies, robust_zscores
     from app.logic.forecast import month_end_projection
-    from app.logic.formulas import account_today, allocate_by_share
+    from app.logic.formulas import account_today
     from app.logic.sizing import simulate_scenario
     from app.ui.components import severity_sort
 
@@ -292,10 +292,6 @@ def test_logic_layer_at_scale():
                           "USD": [250.0 + (i % 90) for i in range(1095)]})
     month_end_projection(daily, account_today(), engine="seasonal")
     _clock("logic: 3y seasonal forecast", started)
-
-    started = time.perf_counter()
-    allocate_by_share(1_000_000.0, [float(i % 100) for i in range(10_000)])
-    _clock("logic: allocate 10k weights", started)
 
     started = time.perf_counter()
     for i in range(10_000):

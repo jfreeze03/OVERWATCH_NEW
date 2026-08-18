@@ -9,7 +9,6 @@ from __future__ import annotations
 import csv
 import html as _html
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from io import StringIO
@@ -204,51 +203,12 @@ def egress_effective_rate_per_tb(org_transfer_usd: float, billable_tb: float,
     return fallback, False
 
 
-def billed_credits(credits_used: float, cloud_services_adjustment: float = 0.0) -> float:
-    """Billed credits = used + adjustment (adjustment is negative or zero).
-
-    Snowflake's daily cloud-services adjustment rebates cloud-services credits
-    up to 10% of daily compute. Ignoring it overstates spend — the old app
-    hardcoded it to zero; this function exists so no caller can.
-    """
-    used = safe_float(credits_used)
-    adj = safe_float(cloud_services_adjustment)
-    if adj > 0:  # defensive: source column is <= 0
-        adj = -adj
-    return max(0.0, used + adj)
-
-
 def pct_delta(current: float, prior: float) -> float | None:
     """Percent change vs prior. ``None`` when there is no meaningful prior."""
     prior_v = safe_float(prior)
     if prior_v == 0.0:
         return None
     return round((safe_float(current) - prior_v) / abs(prior_v) * 100.0, 1)
-
-
-def allocate_by_share(total: float, weights: Sequence[float]) -> list[float]:
-    """Allocate ``total`` proportionally to non-negative weights.
-
-    Used for labeled *allocated* attribution (user/database cost) where
-    Snowflake bills only at warehouse grain. Zero-weight sets allocate zeros.
-    """
-    total_v = safe_float(total)
-    clean = [max(0.0, safe_float(w)) for w in weights]
-    weight_sum = sum(clean)
-    if weight_sum <= 0.0:
-        return [0.0 for _ in clean]
-    # Largest-remainder in cents: naive per-part rounding drifted (100 across
-    # [1,1,1] -> 33.33*3 = 99.99) and chargeback tables leaked pennies vs the
-    # exact warehouse total they must reconcile to by construction.
-    total_cents = round(total_v * 100)
-    raw = [total_v * 100 * w / weight_sum for w in clean]
-    floors = [int(x) for x in raw]
-    shortfall = int(total_cents - sum(floors))
-    order = sorted(range(len(raw)), key=lambda i: raw[i] - floors[i], reverse=True)
-    step = 1 if shortfall >= 0 else -1
-    for i in order[: abs(shortfall)]:
-        floors[i] += step
-    return [cents / 100.0 for cents in floors]
 
 
 def month_days(day: date) -> tuple[int, int, int]:
@@ -499,30 +459,6 @@ def executive_summary_html(view: ExecutiveSummaryView, *, presentation: bool = F
 <h2>Top actions</h2><ul>{action_items}</ul>
 <div class="scope">{notes}</div>
 </main></body></html>"""
-
-
-def executive_summary_text(view: ExecutiveSummaryView) -> str:
-    """Render the shared executive model as durable plain text."""
-    lines = [
-        f"OVERWATCH {view.title} - {view.company}",
-        f"Last {view.days} days | generated {view.generated}",
-        "",
-    ]
-    lines.extend(f"{label}: {value}" for label, value in view.cards)
-    lines.extend(["", "Score deductions"])
-    lines.extend(
-        (f"- {driver}: {value} ({evidence})" for driver, value, evidence in view.drivers),
-    )
-    if not view.drivers:
-        lines.append("- None")
-    lines.extend(["", "Top actions"])
-    lines.extend(f"- {action}" for action in view.actions)
-    if not view.actions:
-        lines.append("- None")
-    if view.scope_notes:
-        lines.extend(["", "Scope and method"])
-        lines.extend(f"- {note}" for note in view.scope_notes)
-    return "\n".join(lines)
 
 
 def executive_slide_bullets(view: ExecutiveSummaryView) -> str:

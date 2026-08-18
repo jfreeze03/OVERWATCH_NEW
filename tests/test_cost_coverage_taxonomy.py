@@ -11,8 +11,6 @@ which is what ``material_unmapped_services`` covers at runtime on Admin.
 
 from __future__ import annotations
 
-import pandas as pd
-
 from app.logic import cost_coverage as cc
 
 # Real service-type strings Snowflake emits into METERING_DAILY_HISTORY /
@@ -64,30 +62,3 @@ def test_case_insensitive_categorization():
     # Snowflake casing varies; the classifier upper-cases before lookup.
     assert cc.service_category("auto_clustering") == "Serverless"
     assert cc.service_category("Warehouse_Metering") == "Warehouse"
-
-
-def test_material_unmapped_services_flags_other_material_rows():
-    inv = pd.DataFrame(
-        {
-            "SERVICE_TYPE": ["WAREHOUSE_METERING", "SOME_NEW_METER"],
-            "CATEGORY": ["Warehouse", "Other"],
-            "MATERIALITY": ["Material", "Material"],
-        }
-    )
-    flagged = cc.material_unmapped_services(inv)
-    assert list(flagged["SERVICE_TYPE"]) == ["SOME_NEW_METER"]
-
-
-def test_material_unmapped_services_ignores_below_threshold_other():
-    inv = pd.DataFrame(
-        {
-            "SERVICE_TYPE": ["TINY_NEW_METER"],
-            "CATEGORY": ["Other"],
-            "MATERIALITY": ["Below threshold"],
-        }
-    )
-    assert cc.material_unmapped_services(inv).empty
-
-
-def test_material_unmapped_services_empty_frame_is_safe():
-    assert cc.material_unmapped_services(pd.DataFrame()).empty

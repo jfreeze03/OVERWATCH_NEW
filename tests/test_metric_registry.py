@@ -19,9 +19,7 @@ def test_core_metrics_registered():
         assert k in keys, k
 
 
-def test_every_method_is_used_and_rows_render():
-    grouped = mr.by_method()
-    assert all(grouped.get(meth) for meth in mr.METHODS)    # each method has >=1 metric
+def test_rows_render():
     rows = mr.as_rows()
     assert len(rows) == len(mr.METRICS) and set(rows[0]) >= {"Metric", "Method", "Source"}
 

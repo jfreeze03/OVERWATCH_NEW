@@ -1,8 +1,6 @@
 from datetime import date
 
 from app.logic.formulas import (
-    allocate_by_share,
-    billed_credits,
     credits_to_usd,
     format_credits,
     format_usd,
@@ -23,32 +21,10 @@ def test_credits_to_usd_garbage_is_zero():
     assert credits_to_usd(float("nan")) == 0.0
 
 
-def test_billed_credits_applies_negative_adjustment():
-    assert billed_credits(100.0, -7.5) == 92.5
-
-
-def test_billed_credits_defensive_on_positive_adjustment():
-    # Source column is documented <= 0; a positive value is treated as a rebate.
-    assert billed_credits(100.0, 7.5) == 92.5
-
-
-def test_billed_credits_never_negative():
-    assert billed_credits(1.0, -5.0) == 0.0
-
-
 def test_pct_delta_none_without_prior():
     assert pct_delta(50, 0) is None
     assert pct_delta(110, 100) == 10.0
     assert pct_delta(90, 100) == -10.0
-
-
-def test_allocate_by_share_sums_to_total():
-    parts = allocate_by_share(100.0, [1, 1, 2])
-    assert parts == [25.0, 25.0, 50.0]
-
-
-def test_allocate_by_share_zero_weights():
-    assert allocate_by_share(100.0, [0, 0]) == [0.0, 0.0]
 
 
 def test_month_days_february_leap():

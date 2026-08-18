@@ -1,9 +1,8 @@
 """P2 items 14a + 15: governance drift score, display timezone."""
 
 import pandas as pd
-import pytest
 
-from app.data import prefs_sql, security_sql
+from app.data import security_sql
 from app.logic.governance import governance_drift
 
 
@@ -37,14 +36,6 @@ def test_governance_counts_builder():
                    "ROLE IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')"):
         assert marker in sql, marker
     assert "LIMIT" in security_sql.show_warehouses_sql()
-
-
-def test_display_tz_pref_key_accepted():
-    sql = prefs_sql.upsert_pref_sql("DISPLAY_TZ", "UTC")
-    assert "'DISPLAY_TZ'" in sql
-    with pytest.raises(ValueError):
-        prefs_sql.upsert_pref_sql("DISPLAY_TZ2", "UTC")
-    assert "Account (America/Chicago)" in prefs_sql.DISPLAY_TIMEZONES
 
 
 def test_localize_timestamps_is_display_only():

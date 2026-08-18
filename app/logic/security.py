@@ -98,27 +98,6 @@ def domain_posture(exceptions: pd.DataFrame, coverage: pd.DataFrame) -> tuple[Do
     return tuple(rows)
 
 
-def security_change_risk(query_type: object, role: object = "", database: object = "") -> tuple[int, str, str]:
-    kind = str(query_type or "").upper()
-    if kind.startswith(("DROP", "TRUNCATE")):
-        score, family = 90, "DESTRUCTIVE"
-    elif kind in ("GRANT", "REVOKE"):
-        score, family = 80, "PRIVILEGE"
-    elif "POLICY" in kind or "USER" in kind:
-        score, family = 85, "SECURITY POLICY"
-    elif kind.startswith(("ALTER", "RENAME")):
-        score, family = 55, "ALTER"
-    else:
-        score, family = 30, "CREATE"
-    if str(role or "").upper() in ("ACCOUNTADMIN", "SNOW_ACCOUNTADMINS"):
-        score += 10
-    if "PROD" in str(database or "").upper():
-        score += 10
-    score = min(100, score)
-    level = "CRITICAL" if score >= 90 else ("HIGH" if score >= 70 else ("MEDIUM" if score >= 45 else "LOW"))
-    return score, level, family
-
-
 def posture_alert_rule_sql(
     metric: str, threshold: float, severity: str = "HIGH", owner: str = "DBA"
 ) -> str:

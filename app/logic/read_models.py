@@ -82,16 +82,3 @@ def get_contract(key: str) -> ReadModelContract:
         if contract.key == normalized:
             return contract
     raise KeyError(f"Unknown read-model contract: {normalized or 'blank'}")
-
-
-def validate_contracts() -> list[str]:
-    problems: list[str] = []
-    keys = [contract.key for contract in READ_MODELS]
-    if len(keys) != len(set(keys)):
-        problems.append("duplicate read-model key")
-    for contract in READ_MODELS:
-        if not all((contract.summary, contract.evidence, contract.trigger, contract.freshness)):
-            problems.append(f"{contract.key}: incomplete description")
-        if contract.summary_reads < 1 or contract.evidence_reads < 1:
-            problems.append(f"{contract.key}: read counts must be positive")
-    return problems

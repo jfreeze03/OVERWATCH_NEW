@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from app.logic.read_models import READ_MODELS, get_contract, validate_contracts
+from app.logic.read_models import READ_MODELS, get_contract
 from app.ui import components
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +19,6 @@ def _source(path: str) -> str:
 
 
 def test_read_model_contracts_are_complete_unique_and_truthful() -> None:
-    assert validate_contracts() == []
     assert {contract.key for contract in READ_MODELS} == {
         "action_center",
         "entity_360",

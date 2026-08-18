@@ -15,7 +15,6 @@ from app.logic.security import (
     escalation_flags,
     fact_coverage_complete,
     grant_anomaly_flags,
-    security_change_risk,
 )
 from app.ui.security_center import _cell_text
 
@@ -148,15 +147,6 @@ def test_fact_coverage_requires_span_and_freshness(monkeypatch) -> None:
     assert not fact_coverage_complete(thin, 30)
     assert fact_coverage_complete(ninety, 90)
     assert not fact_coverage_complete(complete, 90)
-
-
-def test_change_risk_is_monotonic_for_sensitive_context() -> None:
-    low = security_change_risk("CREATE_TABLE", "ANALYST", "DEV_DB")
-    destructive = security_change_risk("DROP", "ACCOUNTADMIN", "PROD_DB")
-    drop_user = security_change_risk("DROP_USER", "ANALYST", "")
-    assert low == (30, "LOW", "CREATE")
-    assert destructive == (100, "CRITICAL", "DESTRUCTIVE")
-    assert drop_user == (90, "CRITICAL", "DESTRUCTIVE")
 
 
 def test_effective_access_exposes_admin_reach() -> None:

@@ -22,8 +22,6 @@ from app.data import mart_sql
 from app.logic.cortex import enrich_user_rollup
 from app.logic.forecast import contract_pace, month_end_projection
 from app.logic.formulas import (
-    allocate_by_share,
-    billed_credits,
     credits_to_usd,
     month_days,
     pct_delta,
@@ -39,12 +37,6 @@ def test_credits_to_usd_hand():
     assert credits_to_usd(123.456, 3.68) == 454.32  # 454.31808 -> cents
 
 
-def test_billed_credits_hand():
-    assert billed_credits(100, -7.5) == 92.5
-    assert billed_credits(100, 7.5) == 92.5   # defensive sign flip
-    assert billed_credits(3, -10) == 0.0      # floor
-
-
 def test_pct_delta_hand():
     assert pct_delta(120, 100) == 20.0
     assert pct_delta(50, -100) == 150.0       # |prior| denominator
@@ -55,31 +47,6 @@ def test_month_days_hand():
     assert month_days(date(2026, 7, 7)) == (31, 7, 24)
     assert month_days(date(2026, 2, 28)) == (28, 28, 0)
     assert month_days(date(2026, 12, 31)) == (31, 31, 0)
-
-
-# ---------------------------------------------------------------------------
-# Allocation: exact-sum invariant (finding 1)
-# ---------------------------------------------------------------------------
-
-
-def test_allocation_sums_exactly():
-    parts = allocate_by_share(100.0, [1, 1, 1])
-    assert round(sum(parts), 2) == 100.00      # was 99.99 pre-fix
-    assert sorted(parts) == [33.33, 33.33, 33.34]
-
-
-def test_allocation_exactness_property():
-    cases = [(100.0, [1, 1, 1]), (999.97, [3, 7, 11, 13]), (0.05, [1, 1, 1, 1, 1, 1]),
-             (12345.67, list(range(1, 40))), (10.0, [0, 5, 0, 5])]
-    for total, weights in cases:
-        parts = allocate_by_share(total, weights)
-        assert round(sum(parts), 2) == round(total, 2), (total, weights, parts)
-        assert all(p >= 0 for p in parts)
-
-
-def test_allocation_proportionality_preserved():
-    parts = allocate_by_share(300.0, [1, 2, 3])
-    assert parts == [50.0, 100.0, 150.0]
 
 
 # ---------------------------------------------------------------------------

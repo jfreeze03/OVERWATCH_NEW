@@ -64,11 +64,6 @@ def test_quiet_window_rejects_sparse_metering_evidence():
     assert remediation.propose_quiet_window(sparse) is None
 
 
-def test_savings_estimate_monthlyizes():
-    assert remediation.monthly_savings_estimate(30, 30, 3.68) == pytest.approx(110.4)
-    assert remediation.monthly_savings_estimate(-5, 30, 3.68) == 0.0
-
-
 def test_contract_planner_scenarios():
     rows = contract_planner.plan_scenarios(100.0, 12, 15.0, remaining_usd=0)
     flat = next(r for r in rows if r["GROWTH"] == "+0%")

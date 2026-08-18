@@ -318,11 +318,3 @@ def as_rows() -> list[dict]:
          "Owner": m.owner, "Notes": m.notes}
         for m in METRICS
     ]
-
-
-def by_method() -> dict:
-    """Metric labels grouped by method — the 'read this as…' summary."""
-    out: dict = {meth: [] for meth in METHODS}
-    for m in METRICS:
-        out.setdefault(m.method, []).append(m.label)
-    return out

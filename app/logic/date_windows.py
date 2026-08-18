@@ -70,7 +70,3 @@ def window_scope_label(value: object, today: date | None = None) -> str:
         start = current.replace(month=1, day=1)
         return f"Current year ({_short_date(start)} - {_short_date(current)})"
     return f"Last {int(selection)} days"
-
-
-def is_calendar_window(value: object) -> bool:
-    return normalize_window(value) in (CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
