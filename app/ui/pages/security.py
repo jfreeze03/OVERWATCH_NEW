@@ -355,11 +355,14 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     if unl.ok and unl.empty:
         st.success("No unloads to stages in this window for this scope.")
     elif guard(unl, ""):
+        from app.logic.formulas import humanize_gb
         udf = unl.df.copy()
         udf, profile_config = snowsight_profile_column(udf, _PAGE)
         kpi_row([
             {"label": "Unload runs", "value": f"{int(udf['UNLOADS'].sum())}"},
-            {"label": "GB written out", "value": f"{float(udf['GB_OUT'].sum()):,.1f}"},
+            # humanize_gb so this MB/GB/TB scale matches the Egress KPI + the table's
+            # auto-humanized GB_OUT column (was a raw 1-dp GB float).
+            {"label": "GB written out", "value": humanize_gb(float(udf['GB_OUT'].sum()))},
             {"label": "Users unloading", "value": f"{udf['USER_NAME'].nunique()}"},
         ])
         styled_table(with_user_names(udf, _PAGE), height=320, column_config=profile_config,

@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.256.0 - Audit cleanup wave 1: formatting + label fixes (2026-08-17)
+
+First wave of a comprehensive audit (9-page deep pass + structural audit). Safe,
+self-contained formatting and label corrections:
+
+- **Brief**: "Oldest unacked critical" KPI renamed "Oldest open critical" — the feed
+  is STATUS IN ('OPEN','ACK'), so an acknowledged critical still drove the tile; the
+  "unacked" label was wrong.
+- **Decision Studio**: per-lane cost caption wrapped in md_dollars() — two `$` amounts
+  in one caption were rendering the text between them as LaTeX math (the exact bug
+  md_dollars exists to prevent).
+- **Byte humanization**: Security "GB written out" (unload) and Control Room Entity-360
+  GB metric cards now use humanize_gb() (MB/GB/TB scale) instead of a raw ".2f GB" —
+  matching the sibling humanized KPIs and the auto-humanized table columns.
+- **Percent columns**: Cost ▸ Spend "Share %" (coverage) and "Cloud svc %" tables now
+  render the `%` sign (were bare numbers).
+- **Duration/units**: Operations heaviest-queries Elapsed/Queued columns labeled "(s)";
+  Control Room freshness "Age" labeled "Age (h)".
+- **Help/code agreement**: Operations volume-drops help said "≥4 of the prior 7 days"
+  but the SQL gates `DAYS_ACTIVE_7D >= 3` — help corrected to ≥3.
+
+App version 4.256.0.
+
+
 ## 4.255.0 - Watch automation: a watched entity now watches itself (2026-08-17)
 
 Answers the owner's question — "when I click Watch in Entity 360, does it do

@@ -271,7 +271,7 @@ def _freshness_board() -> None:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
     styled_table(
         df[["SOURCE_NAME", "STATUS", "LAST_LOAD_TS", "ROW_COUNT", "HOURS_SINCE_LOAD"]],
-        column_config={"HOURS_SINCE_LOAD": st.column_config.Column("Age")},
+        column_config={"HOURS_SINCE_LOAD": st.column_config.NumberColumn("Age (h)", format="%.1f")},
     )
 
 

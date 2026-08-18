@@ -162,11 +162,11 @@ def render() -> None:
     ]
     if _oldest_crit_h is not None:
         kpis.append({
-            "label": "Oldest unacked critical",
+            "label": "Oldest open critical",
             "value": humanize_duration(_oldest_crit_h, "h"),
             "severity": "bad" if _oldest_crit_h >= 24 else "warn",
-            "help": "Time since the oldest still-open CRITICAL alert was raised — the "
-                    "responsiveness signal a raw count hides. Work the Fires below.",
+            "help": "Time since the oldest still-open (OPEN or ACK) CRITICAL alert was "
+                    "raised — the responsiveness signal a raw count hides. Work the Fires below.",
         })
     if not strip_up:
         st.warning("Telemetry marts unreachable — the Brief refuses to invent numbers. "

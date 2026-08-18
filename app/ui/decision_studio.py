@@ -152,8 +152,8 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         for _lane in ("ACT NOW", "PLAN", "VALIDATE") if _lane in _lane_cost.index
     )
     if _lane_bits:
-        st.caption(f"30-day measured cost by lane — {_lane_bits} "
-                   "(observed cost concentration, not promised savings).")
+        st.caption(md_dollars(f"30-day measured cost by lane — {_lane_bits} "
+                   "(observed cost concentration, not promised savings)."))
 
     def open_profile(index: int) -> None:
         _open_entity("QUERY_FINGERPRINT", str(portfolio.iloc[int(index)]["FINGERPRINT"]))

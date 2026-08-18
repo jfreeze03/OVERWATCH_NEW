@@ -243,8 +243,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             key="ops_top_sel",
             column_config={
                 "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
-                "ELAPSED_SEC": st.column_config.Column("Elapsed"),
-                "QUEUED_SEC": st.column_config.Column("Queued"),
+                "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed (s)", format="%.1f"),
+                "QUEUED_SEC": st.column_config.NumberColumn("Queued (s)", format="%.1f"),
                 "SPILL_REMOTE_GB": st.column_config.NumberColumn("Spill GB", format="%.2f"),
                 **_tp_cfg,
             },
@@ -750,7 +750,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
     section_header("Volume drops (yesterday vs prior-7d average)", "info", "pipeline")
     panel_help(
         "Rows added per table yesterday vs its prior-7-day average (steady movers: "
-        "≥1,000 rows/day AND written on ≥4 of the prior 7 days). **Timing:** 'yesterday' "
+        "≥1,000 rows/day AND written on ≥3 of the prior 7 days). **Timing:** 'yesterday' "
         "is the prior full calendar day in account time; an overnight batch that finishes "
         "after midnight books its rows on the day it ran, so a table loaded at 00:30 for "
         "the prior day reads as 0 for 'yesterday'. To cut the truncate-reload false "

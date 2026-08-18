@@ -63,6 +63,8 @@ def test_oldest_open_hours_filters_severity_and_handles_empty():
     assert oldest_open_hours(pd.DataFrame(), now=now) is None
 
 
-def test_brief_surfaces_oldest_unacked_critical():
+def test_brief_surfaces_oldest_open_critical():
+    # Label says "open" not "unacked": the feed is STATUS IN ('OPEN','ACK'), so an
+    # ACK'd critical still drives this tile — "unacked" was a mislabel (audit fix).
     brief = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "oldest_open_hours(" in brief and "Oldest unacked critical" in brief
+    assert "oldest_open_hours(" in brief and "Oldest open critical" in brief

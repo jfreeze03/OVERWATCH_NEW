@@ -247,7 +247,8 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             "help": "Service totals above $500 or 1% of spend without a native object-level drill.",
         },
     ])
-    styled_table(coverage, height=300, sort_label="$ desc")
+    styled_table(coverage, height=300, sort_label="$ desc",
+                 column_config={"SHARE_PCT": st.column_config.NumberColumn("Share %", format="%.1f%%")})
     st.caption(
         "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
         "charges use organization currency data and appear in the on-demand detail below."
@@ -547,7 +548,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
               key=f"cs_ratio_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
     if guard(csr, "No warehouse metering in this window."):
-        styled_table(csr.df, height=260)
+        styled_table(csr.df, height=260,
+                     column_config={"CLOUD_SVC_PCT": st.column_config.NumberColumn(
+                         "Cloud svc %", format="%.1f%%")})
         result_caption(csr)
         elevated = csr.df[csr.df["STATUS"].astype(str) == "ELEVATED"]
         if not elevated.empty:

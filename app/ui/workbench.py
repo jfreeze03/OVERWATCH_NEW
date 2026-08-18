@@ -19,6 +19,7 @@ from app.logic.formulas import (
     credits_to_usd,
     format_usd,
     humanize_duration,
+    humanize_gb,
     md_dollars,
     safe_float,
 )
@@ -72,7 +73,7 @@ def _entity_metric_card(row: pd.Series, rate: float) -> dict[str, str]:
         display = humanize_duration(value, "s")
         detail = basis.lower()
     elif unit == "gb":
-        display = f"{value:,.2f} GB"
+        display = humanize_gb(value)
         detail = basis.lower()
     else:
         display = f"{value:,.0f}"
