@@ -12,7 +12,7 @@ app/
   data/                     SQL string builders — pure Python, no Streamlit, unit-tested
   core/                     runtime: session, cached query engine, errors, state
   ui/                       components, Altair charts, pages
-snowflake/migrations/       versioned setup SQL (V001..V005) + SCHEMA_VERSION
+snowflake/migrations/       versioned setup SQL (V001, V002, … one file per change) + SCHEMA_VERSION
 tests/                      pytest over logic/, data/, companies, sqlsafe
 ```
 

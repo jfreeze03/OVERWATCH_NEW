@@ -8,9 +8,9 @@ them — they are the source of truth.** Trust `git log` over any snapshot
 numbers in docs. This file is the condensed version of the rules that break
 things most often; `CLAUDE.md` has the full house laws.
 
-**Baseline: git commit `11a795b` (v4.128.0).** Work is reviewed as a diff
-against it (`git diff 11a795b..HEAD`). Keep scopes small and self-contained;
-don't restructure or "clean up" beyond the task you were given.
+**Baseline: the last shipped release** (see `APP_VERSION` in `app/config.py` and the
+top of `CHANGELOG.md`). Work is reviewed as a diff against `origin/main`. Keep scopes
+small and self-contained; don't restructure or "clean up" beyond the task you were given.
 
 ## Non-negotiable
 
@@ -24,9 +24,10 @@ don't restructure or "clean up" beyond the task you were given.
 2. **Never run or author Snowflake migrations against the account.** Migrations
    are applied by the owner in Snowsight, off-peak — never by an agent. Agent
    Snowflake access is **READ-ONLY** (SELECT/SHOW/DESCRIBE only; never
-   CREATE/ALTER/DROP/CALL/MERGE). New DB work is a **new forward migration file
-   V072+**; never edit an already-applied migration (V001–V071 are live). Never
-   drop the shared schema/database.
+   CREATE/ALTER/DROP/CALL/MERGE). New DB work is a **new forward migration file** —
+   the next unused `VNNN` after the highest one in `snowflake/migrations/`; never edit
+   an already-applied migration (every committed `VNNN` is live). Never drop the shared
+   schema/database.
 3. **Never commit secrets** (tokens, webhook URLs, emails) into tracked files —
    a test fails on it. Leave placeholders for the owner to paste in Snowsight.
 
