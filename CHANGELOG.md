@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.261.0 - Fix: Cortex token-economics panel read all zeros (2026-08-19)
+
+Cost ▸ Chargeback & AI ▸ "Load token economics" showed 0 tokens / 0% cache-hit for
+everyone. Root cause: `TOKENS_GRANULAR` on this account is nested **by model** — each
+model name maps to an object of token-type→count (`input`, `output`, `cache_read_input`,
+`cache_write_input`) — but the builder flattened one level and read `F.VALUE:token_type`
+/ `F.VALUE:tokens`, keys that don't exist there (the first flatten yields `KEY=model`,
+`VALUE=the type object`), so every count extracted to null → zero.
+
+Fix: `cortex_code_token_types` now does a **RECURSIVE flatten** and keeps the numeric
+leaves keyed by `F.KEY` — pulling the token-type→count pairs regardless of nesting, so
+it's resilient whether the granular blob is model-nested (this account) or a flat
+type→count map. And `token_economics` learned the real leaf keys (`cache_read_input` /
+`cache_write_input`) alongside the older aliases so a future shape drift can't re-zero it.
+(The plain `TOKENS` column is populated, so the "Cost by user" totals were never affected.)
+
+App version 4.261.0.
+
+
 ## 4.260.0 - Incidents that investigate themselves (2026-08-18)
 
 Open an incident and the investigation is already done. Control Room ▸ Incidents & triage,

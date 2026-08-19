@@ -88,10 +88,12 @@ def token_economics(frame: pd.DataFrame | None) -> pd.DataFrame:
         return pd.Series(0.0, index=pivot.index)
 
     out = pd.DataFrame(index=pivot.index)
+    # Snowflake's TOKENS_GRANULAR leaf keys are input / output / cache_read_input /
+    # cache_write_input; keep the older aliases too so a shape drift can't re-zero it.
     out["INPUT"] = _series("input", "input_tokens", "prompt")
     out["OUTPUT"] = _series("output", "output_tokens", "completion")
-    out["CACHE_READ"] = _series("cache_read", "cached", "cache_read_tokens")
-    out["CACHE_WRITE"] = _series("cache_write", "cache_creation", "cache_write_tokens")
+    out["CACHE_READ"] = _series("cache_read_input", "cache_read", "cached", "cache_read_tokens")
+    out["CACHE_WRITE"] = _series("cache_write_input", "cache_write", "cache_creation", "cache_write_tokens")
     out["TOTAL"] = pivot.sum(axis=1)
     denom = out["CACHE_READ"] + out["INPUT"]
     out["CACHE_HIT_PCT"] = (out["CACHE_READ"] / denom.where(denom > 0) * 100).fillna(0.0).round(1)

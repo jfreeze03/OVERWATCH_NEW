@@ -266,15 +266,22 @@ WITH combined AS (
     WHERE USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ),
 flat AS (
-    -- FLATTEN in its own CTE, then LEFT JOIN USERS on the CTE: a LATERAL view
-    -- cannot sit on the LEFT side of a join (Snowflake 001072), which is what the
-    -- old FROM combined + LATERAL FLATTEN then LEFT JOIN USERS produced (owner
-    -- error log 2026-08-17, Cost page).
+    -- TOKENS_GRANULAR on this account is nested BY MODEL: each model name maps to an
+    -- object of token-type to count, e.g. claude-opus-4-6 -> input 6, output 210,
+    -- cache_read_input 277061, cache_write_input 49119. A single FLATTEN yielded
+    -- KEY=model, VALUE=the-type-object, so the old F.VALUE:token_type / F.VALUE:tokens
+    -- read NULL and every count came out 0 (owner 2026-08-19). RECURSIVE flatten + a
+    -- numeric-leaf filter pulls the token-type-to-count leaves regardless of nesting
+    -- depth -- resilient to the model-nested shape here OR a flat type-to-count map --
+    -- keyed by the leaf token-type name (input / output / cache_read_input /
+    -- cache_write_input). FLATTEN stays in its own CTE, LEFT JOIN USERS on it (a LATERAL
+    -- cannot sit on the LEFT of a LEFT JOIN -- Snowflake 001072).
     SELECT C.USER_ID,
-           LOWER(F.VALUE:token_type::VARCHAR) AS TOKEN_TYPE,
-           TRY_TO_NUMBER(TO_VARCHAR(F.VALUE:tokens)) AS TOKENS
+           LOWER(F.KEY::VARCHAR) AS TOKEN_TYPE,
+           TRY_TO_NUMBER(TO_VARCHAR(F.VALUE)) AS TOKENS
     FROM combined C,
-         LATERAL FLATTEN(INPUT => C.TOKENS_GRANULAR) F
+         LATERAL FLATTEN(INPUT => C.TOKENS_GRANULAR, RECURSIVE => TRUE) F
+    WHERE TRY_TO_NUMBER(TO_VARCHAR(F.VALUE)) IS NOT NULL
 )
 SELECT
     COALESCE(U.NAME, 'UNKNOWN (' || flat.USER_ID || ')') AS USER_NAME,

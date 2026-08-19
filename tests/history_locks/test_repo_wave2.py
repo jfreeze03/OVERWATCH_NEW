@@ -29,8 +29,12 @@ def test_wave2_builders_shapes():
     rm = ops_sql.show_resource_monitors_sql()
     assert rm == "SHOW RESOURCE MONITORS LIMIT 200"
     tt = cortex_sql.cortex_code_token_types(30)
-    assert "LATERAL FLATTEN" in tt and "TOKENS_GRANULAR" in tt
-    assert "token_type" in tt and "CORTEX_CODE_CLI_USAGE_HISTORY" in tt
+    # TOKENS_GRANULAR is nested BY MODEL, so a single flatten read NULL keys and zeroed
+    # everything (owner 2026-08-19). A RECURSIVE flatten + numeric-leaf filter pulls the
+    # (token_type -> count) leaves keyed by F.KEY regardless of nesting.
+    assert "LATERAL FLATTEN(INPUT => C.TOKENS_GRANULAR, RECURSIVE => TRUE)" in tt
+    assert "F.KEY::VARCHAR) AS TOKEN_TYPE" in tt and "CORTEX_CODE_CLI_USAGE_HISTORY" in tt
+    assert "IS NOT NULL" in tt        # numeric-leaf filter drops the model-object rows
     assert "DATEADD('day', -30," in tt
 
 
@@ -109,7 +113,8 @@ def test_monitor_coverage_is_safe_on_empty_or_odd_shapes():
 def test_token_economics_cache_hit_math():
     rows = pd.DataFrame({
         "USER_NAME": ["A", "A", "A", "B", "B"],
-        "TOKEN_TYPE": ["input", "cache_read", "output", "input", "output"],
+        # cache_read_input is Snowflake's actual TOKENS_GRANULAR leaf key (not cache_read).
+        "TOKEN_TYPE": ["input", "cache_read_input", "output", "input", "output"],
         "TOKENS": [100.0, 300.0, 50.0, 200.0, 80.0],
     })
     econ = token_economics(rows)
