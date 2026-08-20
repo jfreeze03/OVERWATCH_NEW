@@ -605,37 +605,63 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
               key=f"cs_ratio_{company}_{days}", tier="recent",
               source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
+    _sel_wh = ""
     if guard(csr, "No warehouse metering in this window."):
-        styled_table(csr.df, height=260,
-                     column_config={"CLOUD_SVC_PCT": st.column_config.NumberColumn(
-                         "Cloud svc %", format="%.1f%%")})
+        # Selectable (owner ask): click a warehouse to scope the "why elevated?" drivers
+        # to it, instead of an account-wide list that can't be filtered per warehouse.
+        _wh_sel = selectable_table(
+            csr.df, key=f"csr_sel_{company}_{days}", height=260,
+            column_config={"CLOUD_SVC_PCT": st.column_config.NumberColumn(
+                "Cloud svc %", format="%.1f%%")})
         result_caption(csr)
+        # Bounds-guard the sticky selection against a window-narrow that shrinks the frame.
+        _sel_wh = (str(csr.df.iloc[int(_wh_sel)]["WAREHOUSE_NAME"])
+                   if _wh_sel is not None and 0 <= int(_wh_sel) < len(csr.df) else "")
         elevated = csr.df[csr.df["STATUS"].astype(str) == "ELEVATED"]
-        if not elevated.empty:
-            st.markdown("**Why is it elevated? Compile-heavy query families**")
-            comp = run_mart_first(
-                mart27_sql.family_compile_heavy(days, company),
-                cost_sql.compile_heavy_families(days, company),
-                page=_PAGE, key=f"compile_fams_{company}_{days}",
-                mart_source="MART_QUERY_FAMILY_DAILY (mart, run-weighted averages)",
-                live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
-            if guard(comp, "No query family with 20+ runs averages >0.5s compile time — "
-                           "the ratio driver is likely many tiny/metadata queries instead."):
+        if _sel_wh:
+            st.caption(f"Cloud-services drivers scoped to **{_sel_wh}** — click another warehouse to switch.")
+        elif not elevated.empty:
+            st.caption("Click a warehouse above to scope its drivers; showing account-wide until then.")
+        # A warehouse selection drills the drivers via a live per-warehouse QUERY_HISTORY
+        # read (the family/CS marts aren't warehouse-grained for this cut); account-wide
+        # (mart-first) when nothing is selected.
+        if _sel_wh or not elevated.empty:
+            _fam_title = (f"Cloud-services drivers on {_sel_wh} — compile-heavy query families"
+                          if _sel_wh else "Why is it elevated? Compile-heavy query families")
+            st.markdown(f"**{_fam_title}**")
+            if _sel_wh:
+                comp = run(
+                    cost_sql.compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5),
+                    page=_PAGE, key=f"compile_fams_{company}_{days}_{_sel_wh}", tier="recent",
+                    source="ACCOUNT_USAGE.QUERY_HISTORY (compile-heavy families, per warehouse)")
+            else:
+                comp = run_mart_first(
+                    mart27_sql.family_compile_heavy(days, company),
+                    cost_sql.compile_heavy_families(days, company),
+                    page=_PAGE, key=f"compile_fams_{company}_{days}",
+                    mart_source="MART_QUERY_FAMILY_DAILY (mart, run-weighted averages)",
+                    live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
+            _fam_floor = 5 if _sel_wh else 20
+            if guard(comp, f"No query family with {_fam_floor}+ runs averages >0.5s compile time — the "
+                           "ratio driver is likely many tiny/metadata queries (see statement types below)."):
                 styled_table(comp.df)
                 result_caption(comp)
             st.markdown("**Cloud-services credits by statement type**")
-            # P7: this panel only renders when a warehouse is ELEVATED — precisely the
-            # accounts whose QUERY_HISTORY is heaviest, where the live scan measured ~25s.
-            # MART_CLOUD_SVC_DAILY already carries per-query cloud-services credits, so
-            # read the mart first (K2 contract with Group A: cs_by_query_type_mart emits
-            # the same columns as cost_sql.cs_by_query_type) and keep the live scan as the
-            # labeled fallback for accounts where V055 isn't deployed/loaded yet.
-            cs_types = run_mart_first(
-                mart_sql.cs_by_query_type_mart(days, company),
-                cost_sql.cs_by_query_type(days, company),
-                page=_PAGE, key=f"cs_types_{company}_{days}",
-                mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
-                live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
+            # MART_CLOUD_SVC_DAILY carries per-query CS credits (mart-first, K2 contract:
+            # cs_by_query_type_mart emits the same columns as cost_sql.cs_by_query_type);
+            # a warehouse selection uses the live per-warehouse read instead.
+            if _sel_wh:
+                cs_types = run(
+                    cost_sql.cs_by_query_type(days, company, warehouse=_sel_wh),
+                    page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}", tier="recent",
+                    source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, per warehouse)")
+            else:
+                cs_types = run_mart_first(
+                    mart_sql.cs_by_query_type_mart(days, company),
+                    cost_sql.cs_by_query_type(days, company),
+                    page=_PAGE, key=f"cs_types_{company}_{days}",
+                    mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
+                    live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
             if guard(cs_types, "No cloud-services credits recorded on queries in this window."):
                 styled_table(cs_types.df, height=220)
                 result_caption(cs_types)

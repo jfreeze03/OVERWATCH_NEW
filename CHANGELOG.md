@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.267.0 - Per-warehouse "why is IT elevated?" cloud-services drill (2026-08-20)
+
+Cost ▸ Spend ▸ Cloud-services health by warehouse: the ratio table is now **selectable**
+— click a warehouse and the "Why is it elevated?" compile-heavy query families and the
+cloud-services-by-statement-type tables scope to *that* warehouse, so a DBA can see and
+target the specific queries driving its cloud-services pressure (previously both were
+account-wide and couldn't be filtered per warehouse).
+
+- `cost_sql.compile_heavy_families` / `cs_by_query_type` gain a `warehouse` filter (exact
+  `WAREHOUSE_NAME`, `sql_literal`-escaped); the family/CS marts aren't warehouse-grained,
+  so a selection uses a live per-warehouse `QUERY_HISTORY` read (interaction-gated on the
+  row click — not first paint). `compile_heavy_families` also takes a `min_runs` floor,
+  relaxed to 5 for the scoped drill (one warehouse has fewer runs per family) while the
+  account-wide default keeps the 20-run floor.
+- Nothing selected → the existing account-wide (mart-first) view, with a hint to click a
+  warehouse. The bounds-guarded selection can't `IndexError` after a window-narrow shrinks
+  the frame.
+
+Adversarial review (4 agents, 2 raised → 2 confirmed, both fixed): the scoped builders
+re-applied the hardcoded company predicate (`WH_ALFA_%` / Trexis tuple) on top of the exact
+`WAREHOUSE_NAME` filter — so a warehouse mapped to a company via the runtime `COMPANY_SCOPE`
+table (the in-app unmapped-mapper does exactly this) but not in the hardcoded list would
+return a false-empty drill for a warehouse the same page flagged ELEVATED; the company
+predicate is now dropped when an exact warehouse is given (a single warehouse is a complete
+scope). And the V055 drill's `index=`-to-selection default was removed — Streamlit ignores
+`index` once a keyed selectbox has a stored value, so it would silently diverge from later
+selections; the deeper drill stays independent.
+
 ## 4.266.0 - Repo-review EASY-win leftovers (2026-08-20)
 
 Five more gaps mined from the external `snowmonitor` reference repo — all read-only,

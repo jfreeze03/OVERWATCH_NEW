@@ -11,6 +11,7 @@ Dollarization happens in app/logic/formulas.py, not in SQL.
 from __future__ import annotations
 
 from app import companies
+from app.core.sqlsafe import sql_literal
 from app.data.common import (
     ai_service_predicate,
     and_where,
@@ -723,14 +724,25 @@ LIMIT 100
 """
 
 
-def compile_heavy_families(days: int, company: str = "ALL") -> str:
+def compile_heavy_families(days: int, company: str = "ALL", warehouse: str = "",
+                           min_runs: int = 20) -> str:
     """Query families whose compile time dominates — the usual driver of a
-    high cloud-services ratio."""
+    high cloud-services ratio.
+
+    ``warehouse`` scopes to a single warehouse (the per-warehouse "why is IT
+    elevated?" drill); ``min_runs`` is the sample floor (relaxed for a scoped drill
+    where one warehouse has fewer runs per family). Account-wide default keeps the
+    20-run floor."""
     days = bounded_days(days)
+    min_runs = max(1, min(int(min_runs), 100))
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
-        companies.warehouse_clause(company),
+        # an exact warehouse is already a complete scope; the company predicate
+        # (hardcoded tuple/prefix) would only subtract and can zero a warehouse
+        # mapped to a company via the runtime COMPANY_SCOPE table.
+        companies.warehouse_clause(company) if not warehouse else "",
+        f"WAREHOUSE_NAME = {sql_literal(warehouse)}" if warehouse else "",
     )
     return f"""
 SELECT
@@ -744,7 +756,7 @@ SELECT
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY 1
-HAVING COUNT(*) >= 20 AND AVG(COMPILATION_TIME) > 500
+HAVING COUNT(*) >= {min_runs} AND AVG(COMPILATION_TIME) > 500
 ORDER BY SUM(COMPILATION_TIME) DESC
 LIMIT 25
 """
@@ -876,15 +888,19 @@ LIMIT 30
 """
 
 
-def cs_by_query_type(days: int, company: str = "ALL") -> str:
+def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "") -> str:
     """Cloud-services credits by statement type (COST_DB recon R6) — makes
     metadata storms (SHOW/DESCRIBE floods) visible beside the compile-heavy
-    families when the CS ratio is ELEVATED."""
+    families when the CS ratio is ELEVATED. ``warehouse`` scopes to one warehouse
+    for the per-warehouse elevation drill."""
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "CREDITS_USED_CLOUD_SERVICES > 0",
-        companies.warehouse_clause(company),
+        # exact warehouse is a complete scope (see compile_heavy_families) — the
+        # company predicate would only subtract and can zero a runtime-mapped warehouse.
+        companies.warehouse_clause(company) if not warehouse else "",
+        f"WAREHOUSE_NAME = {sql_literal(warehouse)}" if warehouse else "",
     )
     return f"""
 SELECT
