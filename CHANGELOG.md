@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.263.0 - Grounded-AI incident narrative (2026-08-20)
+
+Control Room ▸ Auto-investigation now offers a plain-English root-cause narrative
+on top of the ranked hypotheses. When the auto-investigation produces a ranked
+field, a button-gated **AI evaluation — root cause** panel composes a Cortex prompt
+from *exactly those ranked hypotheses* (`incident_narrative_prompt` in
+`app/logic/ai_prompts.py`) and returns a short narrative for the on-call responder.
+
+Grounding is strict by construction:
+- The prompt embeds only the hypotheses the DBA can already see in the table — no
+  hidden data, no second fetch. One reused `ai_evaluation_panel` (the same
+  button-gated, credit-warned, model-from-SETTINGS primitive as Alerts/Operations/
+  Optimize) with its "grounded in the on-screen evidence only · verify before acting"
+  caption and audit "Show grounding prompt" popover.
+- Instructions forbid inventing warehouses/tasks/users/times/numbers, demand an
+  honest "signals are inconclusive" when the top lead is only LOW confidence, and
+  **forbid remediation SQL/DDL** — the RCA feature explains, it never acts, so the
+  narrative stays read-only end to end (the shared `_SYSTEM_RULES`, which invites a
+  fix statement, is deliberately not used here).
+- Offered only when there is a ranked hypothesis to narrate; an empty field yields
+  an empty prompt, so the model is never asked to confabulate a cause the
+  deterministic ranker couldn't find. Never auto-runs — no Cortex credits until the
+  responder presses the button.
+
+Hardening (surfaced by the adversarial review of this feature):
+- `sql_literal` now escapes backslashes as well as single quotes. Snowflake honors
+  backslash escapes inside single-quoted string literals, so a value ending in a
+  lone backslash (e.g. a quoted-identifier warehouse/task name like `MY_LOAD\`) used
+  to make the closing `\'` read as an escaped quote → unterminated literal → compile
+  error, and an embedded `\n`/`\t` silently became a newline/tab. The narrative
+  feature newly routes attacker-influenceable entity names into this shared helper,
+  so it is fixed at the root — a strict correctness gain for every `sql_literal`
+  caller (no regex-via-literal or backslash-bearing builder call sites exist, so no
+  behavior change for legitimate SQL).
+
 ## 4.262.0 - Token-economics counts render as integers (2026-08-20)
 
 Follow-up polish to the now-working token-economics panel (Cost ▸ Chargeback & AI):

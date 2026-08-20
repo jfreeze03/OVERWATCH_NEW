@@ -20,11 +20,19 @@ _CONTROL_RE = re.compile(
 
 
 def sql_literal(value: object, max_len: int = 8000) -> str:
-    """Quote a value as a SQL string literal (NULL for None)."""
+    """Quote a value as a SQL string literal (NULL for None).
+
+    Snowflake honors backslash escape sequences inside single-quoted string
+    literals (the reason contains_filter uses a '~' LIKE-escape), so a raw
+    backslash must be doubled too — otherwise a value ending in a lone backslash
+    (a quoted-identifier name like ``MY_LOAD\\``) makes the closing ``\\'`` read as
+    an escaped quote, leaving the literal unterminated, and an embedded ``\\n`` /
+    ``\\t`` silently becomes a newline/tab. Escape backslashes FIRST, then double
+    quotes (disjoint characters — order is safety, not correctness)."""
     if value is None:
         return "NULL"
     text = str(value).replace("\x00", "")[:max_len]
-    return "'" + text.replace("'", "''") + "'"
+    return "'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def sql_number(value: object, default: float = 0.0) -> str:

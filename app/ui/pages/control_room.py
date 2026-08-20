@@ -198,6 +198,20 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
         st.caption("Ranked by 0.45·timing + 0.35·magnitude + 0.20·entity-match. A change outside "
                    "the ~48h pre-onset window can't be a confident cause however large. Confirm the "
                    "lead, then close the incident with its root cause above.")
+        # Grounded-AI narrative (button-gated, credit-warned): a plain-English read
+        # of the ranked evidence above for the responder. The prompt embeds exactly
+        # these hypotheses — the model never sees data the DBA can't — and it is told
+        # to explain, not remediate, so the feature stays read-only end to end.
+        from app.logic.ai_prompts import incident_narrative_prompt
+        from app.ui.ai_panel import ai_evaluation_panel
+        _iid = str(inc_row.get("INCIDENT_ID") or "inc")
+        ai_evaluation_panel(
+            key=f"rca_{_iid[:12]}",
+            prompt=incident_narrative_prompt(inc_row, hyps, summ),
+            settings=load_settings(_PAGE),
+            page=_PAGE,
+            subject=f"root cause · {str(inc_row.get('TITLE') or 'incident')[:60]}",
+        )
 
 
 def _day_replay() -> None:

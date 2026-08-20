@@ -134,6 +134,80 @@ _EVIDENCE_FRAMING: dict[str, str] = {
 }
 
 
+def _incident_field(incident: object, *keys: str) -> str:
+    """First non-empty incident field as a trimmed string, NaN-safe (a pandas
+    Series yields NaN for an absent column, and ``bool(NaN)`` is True)."""
+    get = getattr(incident, "get", None)
+    if get is None:
+        return ""
+    for key in keys:
+        value = get(key)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def incident_narrative_prompt(incident: object, hypotheses: list[dict],
+                              summary: dict | None = None) -> str:
+    """Plain-English root-cause narrative for a declared incident, grounded
+    STRICTLY in the ranked hypotheses the auto-investigation already shows
+    (app.logic.rca.rank_root_causes). Read-only by construction: the
+    instructions forbid remediation SQL — the RCA feature explains, never acts,
+    so the shared ``_SYSTEM_RULES`` (which invites a fix statement) is NOT used.
+
+    Empty hypotheses -> '' — the caller offers the panel only when there is a
+    ranked field to narrate, so the model is never asked to confabulate a cause
+    the deterministic ranker couldn't find."""
+    hyps = list(hypotheses or [])
+    if not hyps:
+        return ""
+    title = _incident_field(incident, "TITLE") or "(untitled incident)"
+    severity = _incident_field(incident, "SEVERITY") or "unknown"
+    status = _incident_field(incident, "STATUS") or "unknown"
+    onset = _incident_field(incident, "STARTED_AT", "DETECTED_AT") or "unknown"
+    lines = []
+    for i, h in enumerate(hyps[:MAX_ROWS], 1):
+        band = str(h.get("band") or "LOW")
+        htitle = str(h.get("title") or "")[:160]
+        lead = str(h.get("lead_text") or "")
+        mag = str(h.get("magnitude_text") or "")
+        by = str(h.get("changed_by") or "").strip() or "unknown"
+        why = str(h.get("why") or "")
+        lines.append(f"  {i}. [{band}] {htitle} — {lead}; magnitude: {mag}; "
+                     f"changed by: {by}; scoring: {why}")
+    prompt = (
+        "You are a senior Snowflake DBA assistant helping an on-call engineer "
+        "investigate a declared incident. Write a brief plain-English root-cause "
+        "narrative for the responder.\n\n"
+        "Using ONLY the ranked evidence below:\n"
+        "- Lead with the single most likely cause and explain why its timing "
+        "(a trigger precedes onset) and magnitude support it.\n"
+        "- If the strongest lead is only LOW confidence, say the signals are "
+        "inconclusive and name what to check next — do not overstate.\n"
+        "- Never invent warehouses, tasks, users, times, or numbers that are "
+        "not in the evidence lines.\n"
+        "- This is read-only triage: do NOT propose SQL, DDL, or remediation "
+        "commands. Explain the cause; do not prescribe the fix.\n"
+        "- Plain prose, 3-5 sentences, no headings or markdown.\n\n"
+        f"INCIDENT: {title[:200]}\n"
+        f"Severity: {severity} · Status: {status} · Onset: {onset}\n\n"
+        "RANKED CANDIDATE CAUSES (strongest first):\n"
+        + "\n".join(lines)
+    )
+    assessment = str((summary or {}).get("headline") or "").strip()
+    if assessment:
+        prompt += f"\n\nDETERMINISTIC LEADING ASSESSMENT: {assessment}"
+    return prompt[:MAX_PROMPT_CHARS]
+
+
 def alert_evidence_prompt(kind: str, title: str, detail: str,
                           evidence: pd.DataFrame, window_label: str) -> str:
     """Grounded 'explain this alert' prompt whose evidence framing matches the

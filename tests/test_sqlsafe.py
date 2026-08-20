@@ -18,6 +18,16 @@ def test_sql_literal_escapes_quotes():
     assert sql_literal(None) == "NULL"
 
 
+def test_sql_literal_escapes_backslashes():
+    # Snowflake honors backslash escapes in single-quoted literals, so a lone
+    # trailing backslash must not steal the closing quote, and \n must stay literal.
+    assert sql_literal("MY_LOAD\\") == "'MY_LOAD\\\\'"   # trailing \ -> \\, literal terminates
+    assert sql_literal("a\\nb") == "'a\\\\nb'"           # backslash-n stays two chars, not a newline
+    assert sql_literal("C:\\new") == "'C:\\\\new'"
+    # combined with a quote: both get escaped, order-independent
+    assert sql_literal("x\\'y") == "'x\\\\''y'"
+
+
 def test_sql_literal_strips_nul_and_caps_length():
     assert sql_literal("a\x00b", 10) == "'ab'"
     assert sql_literal("x" * 50, 10) == "'" + "x" * 10 + "'"

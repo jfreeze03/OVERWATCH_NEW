@@ -128,3 +128,6 @@ def test_no_signals_is_an_honest_no_lead():
 def test_rca_is_wired_into_control_room():
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
     assert "rank_root_causes(" in cr and "Auto-investigation" in cr
+    # the grounded-AI narrative is button-gated inside the ranked-field block
+    assert "incident_narrative_prompt(inc_row, hyps, summ)" in cr
+    assert "ai_evaluation_panel(" in cr

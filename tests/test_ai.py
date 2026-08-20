@@ -8,6 +8,7 @@ from app.logic.ai_prompts import (
     MAX_PROMPT_CHARS,
     MAX_ROWS,
     idle_warehouse_prompt,
+    incident_narrative_prompt,
     release_compare_prompt,
     task_failure_prompt,
 )
@@ -75,6 +76,63 @@ def test_release_prompt_includes_both_sections():
     prompt = release_compare_prompt(verdicts, deltas, "2026-07-01", 3)
     assert "QUERY HEALTH:" in prompt and "PER-TASK DELTAS:" in prompt
     assert "TRXS_EDW_PRD" in prompt and "Worse" in prompt and "2026-07-01" in prompt
+
+
+def _hyps():
+    return [
+        {"kind": "warehouse_change", "band": "HIGH",
+         "title": "Warehouse change on WH_ETL: resize XL->4XL (Regressed)",
+         "lead_text": "0.2h before onset", "magnitude_text": "Regressed — p95 blew up",
+         "changed_by": "tf_deploy", "why": "timing 98% (0.2h before onset), magnitude 100%, entity match 100%"},
+        {"kind": "spend_anomaly", "band": "LOW",
+         "title": "Spend spike on WH_OTHER (robust-z +3.6)",
+         "lead_text": "20.0h before onset", "magnitude_text": "z +3.6, $120 that day",
+         "changed_by": "", "why": "timing 8% (20.0h before onset), magnitude 45%, entity match 30%"},
+    ]
+
+
+def test_incident_narrative_prompt_grounds_only_ranked_evidence():
+    incident = pd.Series({"INCIDENT_ID": "abc123", "TITLE": "ETL pipeline latency breach",
+                          "SEVERITY": "HIGH", "STATUS": "OPEN",
+                          "STARTED_AT": "2026-08-18 14:00:00"})
+    summary = {"headline": "Most likely cause (high confidence): Warehouse change on WH_ETL"}
+    prompt = incident_narrative_prompt(incident, _hyps(), summary)
+    # incident identity + both ranked hypotheses are embedded verbatim
+    assert "ETL pipeline latency breach" in prompt and "HIGH" in prompt
+    assert "resize XL->4XL" in prompt and "WH_OTHER" in prompt
+    assert "2026-08-18 14:00:00" in prompt
+    # deterministic assessment anchors the model
+    assert "DETERMINISTIC LEADING ASSESSMENT:" in prompt and "WH_ETL" in prompt
+    # grounding + read-only guardrails
+    assert "ONLY the ranked evidence" in prompt
+    assert "Never invent" in prompt
+    assert "do NOT propose SQL, DDL, or remediation" in prompt
+    assert "inconclusive" in prompt          # low-confidence honesty escape
+
+
+def test_incident_narrative_prompt_is_empty_without_hypotheses():
+    incident = pd.Series({"TITLE": "x", "SEVERITY": "LOW", "STATUS": "OPEN"})
+    assert incident_narrative_prompt(incident, []) == ""
+    assert incident_narrative_prompt(incident, None) == ""
+
+
+def test_incident_narrative_prompt_is_nan_safe_on_missing_fields():
+    # a Series missing TITLE/STARTED_AT yields NaN — must not render "nan".
+    incident = pd.Series({"SEVERITY": "CRITICAL"})
+    prompt = incident_narrative_prompt(incident, _hyps())
+    assert "(untitled incident)" in prompt and "Onset: unknown" in prompt
+    assert "nan" not in prompt.lower().split("scoring:", 1)[0]  # not in the header
+    # no summary passed -> the deterministic-assessment trailer is omitted, not empty
+    assert "DETERMINISTIC LEADING ASSESSMENT:" not in prompt
+
+
+def test_incident_narrative_prompt_caps_length():
+    incident = pd.Series({"TITLE": "x" * 500, "SEVERITY": "HIGH", "STATUS": "OPEN"})
+    huge = [{"band": "LOW", "title": "y" * 500, "lead_text": "z" * 200,
+             "magnitude_text": "m" * 200, "changed_by": "", "why": "w" * 200}
+            for _ in range(MAX_ROWS + 20)]
+    prompt = incident_narrative_prompt(incident, huge)
+    assert len(prompt) == MAX_PROMPT_CHARS
 
 
 def test_model_name_validation():
