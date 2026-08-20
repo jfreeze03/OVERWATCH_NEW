@@ -16,7 +16,7 @@ from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
-from app.logic.insights import dormant_severity, reawakening_severity
+from app.logic.insights import dormant_severity, reawakening_severity, takeover_severity
 from app.logic.least_privilege import (
     classify_grant_scopes,
     recommend_for_sheet,
@@ -148,6 +148,47 @@ def _access_tab(company: str, days: int) -> None:
             styled_table(with_user_names(with_user_names(_admin_frame, _PAGE), _PAGE,
                                          user_col="GRANTED_BY", display_col="Granted by"))
             st.caption("This list should be short and every name should be expected.")
+
+    # Account-takeover candidates: a failed-login burst FOLLOWED BY a success —
+    # the breakthrough failed_logins' count-only lens can't express. Event-grain
+    # live LOGIN_HISTORY scan, so toggle-gated (off first paint) like the other
+    # heavy security scans.
+    from app.ui.components import toggle_cost_hint as _toggle_cost_hint
+    section_header("Account-takeover candidates (failed burst → success)", "warn", "security",
+                   anchor="sec-ato")
+    st.caption(_toggle_cost_hint("takeover"))
+    _ato_on = st.toggle(
+        "Run account-takeover scan (correlates failed then successful logins)",
+        key="sec_takeover_toggle",
+        help="Flags a user with a burst of failed logins followed by a successful one — the "
+             "brute-force breakthrough a failure count alone can't show.")
+    if _ato_on:
+        ato = run(security_sql.login_takeover_candidates(days=min(days, 30), company=company),
+                  page=_PAGE, key=f"takeover_{company}_{days}", tier="recent",
+                  source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
+        if ato.ok and ato.empty:
+            st.success("No user shows a failed-login burst in this window (reader capped at 30d).")
+        elif guard(ato, ""):
+            ranked = takeover_severity(ato.df)
+            broke = ranked[ranked["SUCCEEDED_AFTER"].astype(bool)]
+            high = ranked[ranked["SEVERITY"] == "High"]
+            kpi_row([
+                {"label": "Failure bursts", "value": f"{len(ranked)}",
+                 "help": "Users with 5+ failed logins in the window."},
+                {"label": "Succeeded after (breakthrough)", "value": f"{len(broke)}",
+                 "help": "A successful login followed the failure burst — the dangerous case.",
+                 "delta_color": "inverse" if len(broke) else "off"},
+                {"label": "High severity", "value": f"{len(high)}",
+                 "delta_color": "inverse" if len(high) else "off"},
+            ])
+            styled_table(
+                with_user_names(ranked, _PAGE)[[
+                    "SEVERITY", "USER", "USER_NAME", "SUCCEEDED_AFTER", "FAILURES", "FAIL_IPS",
+                    "FIRST_FAILURE", "FIRST_SUCCESS_AFTER", "MINS_TO_BREAKTHROUGH", "LAST_ERROR"]],
+            )
+            st.caption("A burst followed by a success is the signal; a burst with no later success is "
+                       "a locked-out user. Confirm against expected activity before acting — read-only.")
+            result_caption(ato)
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
     # login telemetry, not change evidence.

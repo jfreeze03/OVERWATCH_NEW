@@ -134,7 +134,7 @@ def test_operations_refuses_partial_or_invalid_graphs_before_rendering():
     assert "shape.cyclic_nodes" in source
     assert "charts.interactive_task_dag" in source
     assert "st.graphviz_chart" in source
-    assert 'nested_sections(\n        ["Health", "Graph", "Runs"]' in source
+    assert 'nested_sections(\n        ["Health", "SLA", "Graph", "Runs"]' in source
 
 
 def test_overview_orders_economics_risk_actions_drivers_then_context():

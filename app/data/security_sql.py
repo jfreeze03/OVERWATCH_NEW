@@ -107,6 +107,76 @@ LIMIT 100
 """
 
 
+def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5) -> str:
+    """Account-takeover candidates: a burst of failed logins for a user FOLLOWED
+    BY a success — the brute-force breakthrough ``failed_logins``' count-only lens
+    can't express (it reads IS_SUCCESS='NO' only, never correlating a later success).
+
+    Per user over the window: failures, distinct failing IPs, first/last failure,
+    and the earliest SUCCESS landing AFTER the first failure. SUCCEEDED_AFTER (a
+    success followed the burst) is the dangerous signal — a burst with no later
+    success is a locked-out user, not a breach. Needs event-grain ordering, so it
+    reads live LOGIN_HISTORY (day-grain FACT_SECURITY_LOGIN_DAILY can't express
+    intra-window ordering). Scored by ``logic.insights.takeover_severity``.
+    Read-only review — no alert is raised; a legitimate user who fat-fingered a
+    password then logged in will also surface, so confirm before acting."""
+    days = bounded_days(days, maximum=30)
+    min_failures = max(2, min(int(min_failures), 100))
+    ev_where = and_where(
+        f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        companies.user_clause(company),
+    )
+    return f"""
+WITH ev AS (
+    SELECT USER_NAME, EVENT_TIMESTAMP, IS_SUCCESS, CLIENT_IP, ERROR_MESSAGE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY
+    WHERE {ev_where}
+),
+fails AS (
+    SELECT USER_NAME,
+           COUNT(*) AS FAILURES,
+           COUNT(DISTINCT CLIENT_IP) AS FAIL_IPS,
+           MIN(EVENT_TIMESTAMP) AS FIRST_FAILURE,
+           MAX(EVENT_TIMESTAMP) AS LAST_FAILURE,
+           MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 200), EVENT_TIMESTAMP) AS LAST_ERROR
+    FROM ev
+    WHERE IS_SUCCESS = 'NO'
+    GROUP BY USER_NAME
+    HAVING COUNT(*) >= {min_failures}
+),
+succ_after AS (
+    SELECT f.USER_NAME, MIN(e.EVENT_TIMESTAMP) AS FIRST_SUCCESS_AFTER
+    FROM fails f
+    JOIN ev e
+      ON e.USER_NAME = f.USER_NAME
+     AND e.IS_SUCCESS = 'YES'
+     AND e.EVENT_TIMESTAMP > f.FIRST_FAILURE
+    GROUP BY f.USER_NAME
+),
+succ_total AS (
+    SELECT USER_NAME, COUNT(*) AS SUCCESSES
+    FROM ev
+    WHERE IS_SUCCESS = 'YES'
+    GROUP BY USER_NAME
+)
+SELECT f.USER_NAME,
+       f.FAILURES,
+       COALESCE(t.SUCCESSES, 0) AS SUCCESSES,
+       f.FAIL_IPS,
+       f.FIRST_FAILURE,
+       f.LAST_FAILURE,
+       sa.FIRST_SUCCESS_AFTER,
+       IFF(sa.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER,
+       DATEDIFF('minute', f.FIRST_FAILURE, sa.FIRST_SUCCESS_AFTER) AS MINS_TO_BREAKTHROUGH,
+       f.LAST_ERROR
+FROM fails f
+LEFT JOIN succ_after sa ON sa.USER_NAME = f.USER_NAME
+LEFT JOIN succ_total t ON t.USER_NAME = f.USER_NAME
+ORDER BY SUCCEEDED_AFTER DESC, f.FAILURES DESC
+LIMIT 100
+"""
+
+
 def expiring_credentials(days_ahead: int = 30, company: str = "ALL") -> str:
     """ACCOUNT_USAGE.CREDENTIALS expiry watch (EXPIRATION_DATE, TIMESTAMP_LTZ).
     The caller still guards in case an edition lacks the column."""

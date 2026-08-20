@@ -142,7 +142,7 @@ def test_c18_operations_panel_wired_mart_only():
     ops = _src("app/ui/pages/operations.py")
     assert "task_nodes(days, company" in ops
     assert "Node run timing" in ops
-    assert '["Health", "Graph", "Runs"]' in ops
+    assert '["Health", "SLA", "Graph", "Runs"]' in ops
     # mart-only: must NOT be wrapped in run_mart_first (no numerically-agreeing live leg)
     assert "run_mart_first(mart27_sql.task_nodes" not in ops
 

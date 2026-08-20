@@ -519,6 +519,142 @@ def reawakening_severity(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def task_failure_streaks(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-task leading FAILED streak since the last SUCCEEDED (repo wave-2).
+
+    Input: ``ops_sql.task_recent_states`` rows (DATABASE_NAME, SCHEMA_NAME,
+    TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE), newest first. A task whose
+    newest runs are failing in a row is 'actively broken now' — a sharper on-call
+    signal than a lifetime failure count, which ``task_runs`` (MAX_BY newest state)
+    cannot express. Returns one row per task with a leading failure streak >= 1:
+    FAIL_STREAK, ACTIVELY_BROKEN (>= 2 consecutive), LAST_RUN, LAST_ERROR, SEVERITY
+    (High >= 3, Medium == 2, Low == 1). Empty in -> empty out; never raises."""
+    if df is None or df.empty or "STATE" not in df.columns:
+        return pd.DataFrame()
+    keys = ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME"]
+    if any(k not in df.columns for k in keys):
+        return pd.DataFrame()
+    work = df.copy()
+    work["SCHEDULED_TIME"] = pd.to_datetime(work.get("SCHEDULED_TIME"), errors="coerce")
+    work["STATE"] = work["STATE"].astype(str).str.upper()
+    rows: list[dict] = []
+    for key_vals, grp in work.groupby(keys, dropna=False):
+        ordered = grp.sort_values("SCHEDULED_TIME", ascending=False)
+        streak = 0
+        last_error = ""
+        for _, r in ordered.iterrows():
+            if r["STATE"] == "FAILED":
+                streak += 1
+                if not last_error:
+                    last_error = str(r.get("ERROR_MESSAGE") or "")
+            else:
+                break  # newest SUCCEEDED reached — the failing streak ends here
+        if streak < 1:
+            continue
+        db, sch, task = key_vals
+        rows.append({
+            "DATABASE_NAME": db, "SCHEMA_NAME": sch, "TASK_NAME": task,
+            "FAIL_STREAK": int(streak),
+            "ACTIVELY_BROKEN": bool(streak >= 2),
+            "LAST_RUN": ordered.iloc[0]["SCHEDULED_TIME"],
+            "LAST_ERROR": last_error,
+            "SEVERITY": "High" if streak >= 3 else "Medium" if streak >= 2 else "Low",
+        })
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    return out.sort_values(["FAIL_STREAK", "LAST_RUN"],
+                           ascending=[False, False]).reset_index(drop=True)
+
+
+# A task silent only within the ACCOUNT_USAGE reporting lag (~45 min) is not late —
+# it may simply not have been reported yet; require overdue beyond it before flagging.
+_TASK_LAG_MIN = 45.0
+
+
+def task_freshness_status(df: pd.DataFrame) -> pd.DataFrame:
+    """Classify each task On-time / Late / Stale against its own cadence (repo wave-2).
+
+    Input: ``ops_sql.task_freshness_sla`` rows (MEDIAN_GAP_MIN, MINS_SINCE_SUCCESS,
+    ...). A task silent well past its expected cadence has quietly stopped being
+    scheduled — invisible to the run/failure views, which only show runs that
+    happened. Stale ~ 2x cadence overdue; Late ~ 1x; and nothing is flagged unless
+    overdue by more than the ~45-min ACCOUNT_USAGE lag, so a task merely inside the
+    telemetry window is not a false positive. A task with no success in the window
+    reads as Stale (silent). Adds OVERDUE_MIN, STATUS, SEVERITY. Empty in -> empty
+    out; never raises."""
+    if df is None or df.empty or "MEDIAN_GAP_MIN" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy().reset_index(drop=True)
+
+    def _num(name: str) -> pd.Series:
+        if name in out.columns:
+            return pd.to_numeric(out[name], errors="coerce")
+        return pd.Series([float("nan")] * len(out), index=out.index)  # absent -> all-NaN, never raises
+
+    gap = _num("MEDIAN_GAP_MIN")
+    mins = _num("MINS_SINCE_SUCCESS")
+    statuses: list[str] = []
+    severities: list[str] = []
+    overdue: list[float] = []
+    for i in range(len(out)):
+        g = safe_float(gap.iloc[i])
+        m_raw = mins.iloc[i]
+        if pd.isna(m_raw):
+            statuses.append("Stale")
+            severities.append("High")
+            overdue.append(float("nan"))
+            continue
+        m = safe_float(m_raw)
+        over = m - g
+        overdue.append(round(over, 1))
+        if g > 0 and m >= 2 * g and over >= _TASK_LAG_MIN:
+            statuses.append("Stale")
+            severities.append("High")
+        elif g > 0 and m >= g and over >= _TASK_LAG_MIN:
+            statuses.append("Late")
+            severities.append("Medium")
+        else:
+            statuses.append("On-time")
+            severities.append("Low")
+    out["OVERDUE_MIN"] = overdue
+    out["STATUS"] = statuses
+    out["SEVERITY"] = severities
+    return out.sort_values("OVERDUE_MIN", ascending=False,
+                           na_position="first").reset_index(drop=True)
+
+
+def takeover_severity(df: pd.DataFrame) -> pd.DataFrame:
+    """Rank account-takeover candidates (``security_sql.login_takeover_candidates``).
+
+    A failure burst FOLLOWED BY a success (SUCCEEDED_AFTER) is the dangerous case —
+    a burst with no later success is a locked-out user. High when a breakthrough
+    pairs with volume or spread (10+ failures, or 3+ distinct source IPs); Medium
+    for any breakthrough; Low for a failure burst that never succeeded. Adds
+    SEVERITY, sorted worst-first. Empty in -> empty out; never raises."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    for _c in ("FAILURES", "FAIL_IPS"):
+        # absent -> 0.0 column (never raises: out.get(_c, 0) would be a bare int with no .map)
+        out[_c] = (pd.to_numeric(out[_c], errors="coerce").fillna(0.0)
+                   if _c in out.columns else 0.0)
+    broke_col = out.get("SUCCEEDED_AFTER")
+    broke = (broke_col.fillna(False).astype(bool)
+             if broke_col is not None else pd.Series(False, index=out.index))
+    out["SUCCEEDED_AFTER"] = broke
+    out["SEVERITY"] = out.apply(
+        lambda r: ("Low" if not bool(r["SUCCEEDED_AFTER"])
+                   else "High" if (r["FAILURES"] >= 10 or r["FAIL_IPS"] >= 3)
+                   else "Medium"),
+        axis=1,
+    )
+    rank = {"High": 0, "Medium": 1, "Low": 2}
+    return (out.assign(_o=out["SEVERITY"].map(rank))
+            .sort_values(["_o", "FAILURES"], ascending=[True, False])
+            .drop(columns="_o").reset_index(drop=True))
+
+
 def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.DataFrame:
     """Turn the reactive freshness SLA into a forward-looking tier (O10).
 

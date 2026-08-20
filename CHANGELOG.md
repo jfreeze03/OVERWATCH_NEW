@@ -1,5 +1,52 @@
 # Changelog
 
+## 4.264.0 - Repo-review wave-2 flagship leftovers (2026-08-20)
+
+Four genuine gaps mined from the external `snowmonitor` reference repo (a 6-cluster
+adversarial review classified 70 of its capabilities → 45 already adopted/exceeded,
+so these are the real un-adopted lenses). All read-only, no migration:
+
+- **Operations ▸ Tasks ▸ SLA (new sub-tab)** — two "task health beyond run counts"
+  lenses on live TASK_HISTORY (neither task mart preserves ordered per-run STATE):
+  - *Actively broken tasks* — per-task leading FAILED streak since the last SUCCEEDED
+    (`ops_sql.task_recent_states` + `logic.insights.task_failure_streaks`). Tells a
+    one-off failure from a task stuck in a retry loop (streak ≥ 2 = "actively broken")
+    — sharper than `task_runs`' newest-state-only view.
+  - *Task freshness (silent-stop)* — each task's own cadence (median scheduled-gap via
+    LAG) vs minutes since its last success, classified On-time / Late / Stale
+    (`ops_sql.task_freshness_sla` + `logic.insights.task_freshness_status`). Catches a
+    task that quietly stops being *scheduled* — invisible to run/failure views. A
+    ~45-min lag buffer keeps a task merely inside the ACCOUNT_USAGE window from
+    flagging.
+- **Operations ▸ Queries ▸ Optimization triage** — the specific statements an optimizer
+  should fix, ranked remote-spill → poor-pruning → large-cold-scan, filtered to "real
+  work" (drops CALL wrappers and the app's own queries; requires spill or > 50 GB
+  scanned). `ops_sql.query_optimization_triage`; each row carries a Snowsight PROFILE
+  link. Distinct from the elapsed-only "Heaviest queries" list.
+- **Security ▸ Access ▸ Account-takeover candidates** — the brute-force *breakthrough*
+  the count-only failed-logins lens can't express: a per-user burst of failures
+  FOLLOWED BY a success (`security_sql.login_takeover_candidates` +
+  `logic.insights.takeover_severity`). SUCCEEDED_AFTER is the dangerous signal; a burst
+  with no later success is a locked-out user. Event-grain, so it reads live
+  LOGIN_HISTORY; toggle-gated like the other heavy security scans; read-only (no alert
+  raised).
+
+Mapped each attach point with parallel scouts (reuse existing builders/columns, no
+duplication), verified pure scorers on frames + SQL builders by shape.
+
+Adversarial review (19 agents, 15 raised → 5 confirmed, all fixed at the root). The
+three most valuable shared one root cause I'd missed — **auto-retry attempts in
+TASK_HISTORY share one SCHEDULED_TIME**:
+- `task_recent_states` now collapses each scheduled run to its terminal attempt (latest
+  COMPLETED_TIME), so the streak counts failed *runs* not attempts and a FAILED retry
+  can't sort ahead of the run's SUCCEEDED final attempt.
+- `task_freshness_sla` takes its cadence median over positive gaps only
+  (`MEDIAN(IFF(GAP_MIN > 0, ...))`), so a retry-heavy task can't get a 0-minute median
+  that would make it structurally unflaggable; and orders `NULLS FIRST` so a task with
+  no success in the window (highest-severity "silent") survives `LIMIT`, not truncated.
+- `task_freshness_status` / `takeover_severity` now honor their "never raises" contract
+  on absent columns; added the untested FAIL_IPS≥3 → High escalation case.
+
 ## 4.263.0 - Grounded-AI incident narrative (2026-08-20)
 
 Control Room ▸ Auto-investigation now offers a plain-English root-cause narrative

@@ -251,6 +251,34 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         )
         st.caption("Elapsed-time ranking.")
 
+    # A second live QUERY_HISTORY scan (ranked by inefficiency, not elapsed). It is a
+    # deliberate drill, so toggle-gate it off first paint — the Heaviest-queries scan
+    # above already pays one live round-trip for this section.
+    section_header("Optimization triage", "warn", "optimize")
+    _triage_on = st.toggle(
+        "Run optimization triage (rank statements by spill / pruning / cold scan)",
+        key="ops_triage_toggle",
+        help="A second live scan that surfaces the specific statements an optimizer should "
+             "fix — remote spill, poor partition pruning, or huge cold-cache scans.")
+    if _triage_on:
+        _triage = run(
+            ops_sql.query_optimization_triage(
+                days, company, wh_filter, user_filter, database, schema_contains),
+            page=_PAGE, key=f"q_triage_{company}_{days}", tier="recent",
+            source="ACCOUNT_USAGE.QUERY_HISTORY (spill / pruning / scan)", max_rows=50)
+        if _triage.ok and _triage.empty:
+            st.success("No spill-heavy or poorly-pruned statements in this window — nothing to optimize first.")
+        elif guard(_triage, "No queries in this window/scope."):
+            _tr, _tr_cfg = snowsight_profile_column(_triage.df, _PAGE)
+            _tr = with_user_names(_tr, _PAGE)
+            _tr_cols = [c for c in ["REASON", "QUERY_ID", "USER", "WAREHOUSE_NAME", "SPILL_REMOTE_GB",
+                                    "GB_SCANNED", "SCAN_PCT", "CACHE_PCT", "ELAPSED_SEC", "QUERY_PREVIEW",
+                                    "PROFILE"] if c in _tr.columns]
+            styled_table(_tr[_tr_cols], column_config=_tr_cfg,
+                         sort_label="spill, then pruning, then scan")
+            st.caption("Ranked worst-first: remote spill, then poor partition pruning (SCAN_PCT), then "
+                       "large cold-cache scans. 'Real work' only — CALL wrappers and app queries excluded.")
+
     section_header("Query drill-through", "info", "search")
     candidate_ids: list[str] = []
     if top.usable():
@@ -847,6 +875,75 @@ def _task_health_view(company: str, days: int, database: str = "",
                               known_failures=known_failed if days >= 7 else None)
 
 
+def _task_sla_view(company: str, days: int, database: str = "",
+                   schema_contains: str = "") -> None:
+    """Two 'task health beyond run counts' lenses (repo wave-2): tasks failing
+    repeatedly right now (leading FAILED streak), and tasks that quietly stopped
+    being scheduled (freshness vs their own cadence). Both read live TASK_HISTORY —
+    neither task mart preserves ordered per-run STATE — so this is its own sub-tab,
+    off the default Health paint."""
+    from app.config import ACCOUNT_USAGE_LAG_NOTE
+    from app.logic.insights import task_failure_streaks, task_freshness_status
+
+    _b = run_batch([
+        {"key": "streak",
+         "sql": ops_sql.task_recent_states(days, company, database, schema_contains),
+         "source": "ACCOUNT_USAGE.TASK_HISTORY (recent per-task states)", "max_rows": 4000},
+        {"key": "fresh",
+         "sql": ops_sql.task_freshness_sla(max(days, 14), company, database, schema_contains),
+         "source": "ACCOUNT_USAGE.TASK_HISTORY (cadence + silence)"},
+    ], page=_PAGE, tier="recent")
+
+    section_header("Actively broken tasks (failure streaks)", "warn", "alerts")
+    _sres = _b.get("streak")
+    if _sres is None or not _sres.usable():
+        st.caption("No SUCCEEDED/FAILED task runs in this window/scope.")
+    else:
+        streaks = task_failure_streaks(_sres.df)
+        if streaks.empty:
+            st.success("No task is in a failure streak — every task's newest run succeeded.")
+        else:
+            broken = streaks[streaks["ACTIVELY_BROKEN"]]
+            kpi_row([
+                {"label": "Tasks failing now", "value": f"{len(streaks)}",
+                 "help": "Newest run failed (leading FAILED streak >= 1)."},
+                {"label": "Actively broken", "value": f"{len(broken)}",
+                 "help": "Two or more consecutive failures since the last success — a retry loop, not a blip.",
+                 "delta_color": "inverse" if len(broken) else "off"},
+            ])
+            styled_table(
+                streaks[["SEVERITY", "DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
+                         "FAIL_STREAK", "LAST_RUN", "LAST_ERROR"]],
+                sort_label="failure streak desc")
+        result_caption(_sres)
+
+    st.divider()
+    section_header("Task freshness — silent-stop detection", "warn", "clock")
+    _fres = _b.get("fresh")
+    if _fres is None or not _fres.usable():
+        st.caption("Not enough scheduled history to derive task cadence in this window/scope.")
+    else:
+        fresh = task_freshness_status(_fres.df)
+        late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
+                if not fresh.empty else fresh)
+        if fresh.empty or late.empty:
+            st.success("Every task with a derivable cadence is on-time against its own schedule.")
+        else:
+            stale = late[late["STATUS"] == "Stale"]
+            kpi_row([
+                {"label": "Late or stale", "value": f"{len(late)}"},
+                {"label": "Stale (silently stopped)", "value": f"{len(stale)}",
+                 "help": "Silent for 2x+ its typical cadence beyond the ~45-min telemetry lag — likely stopped being scheduled.",
+                 "delta_color": "inverse" if len(stale) else "off"},
+            ])
+            styled_table(
+                late[["STATUS", "DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
+                      "MEDIAN_GAP_MIN", "MINS_SINCE_SUCCESS", "OVERDUE_MIN", "LAST_SUCCESS"]],
+                sort_label="overdue desc")
+        result_caption(_fres)
+    st.caption(f"Cadence is each task's own median scheduled-gap. {ACCOUNT_USAGE_LAG_NOTE}")
+
+
 def _task_runs_view(company: str, days: int, database: str = "",
                     schema_contains: str = "") -> None:
     section_header("Node run timing", "info", "clock")
@@ -1231,11 +1328,13 @@ def _task_graph_view() -> None:
 
 def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
     view = nested_sections(
-        ["Health", "Graph", "Runs"],
+        ["Health", "SLA", "Graph", "Runs"],
         key="ops_tasks_view",
     )
     if view == "Health":
         _task_health_view(company, days, database, schema_contains)
+    elif view == "SLA":
+        _task_sla_view(company, days, database, schema_contains)
     elif view == "Graph":
         _task_graph_view()
     else:

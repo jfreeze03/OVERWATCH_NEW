@@ -130,6 +130,121 @@ LIMIT 200
 """
 
 
+def task_recent_states(days: int, company: str = "ALL", database: str = "",
+                       schema_contains: str = "", per_task: int = 12) -> str:
+    """Recent terminal runs per task (newest first), for the failure-streak fold.
+
+    ``task_runs`` collapses each task with ``MAX_BY(STATE, ...)`` — it sees only the
+    newest state, so it can't tell a one-off failure from a task stuck failing every
+    run. This returns the last ``per_task`` SUCCEEDED/FAILED runs per task so
+    ``logic.insights.task_failure_streaks`` can count the leading FAILED streak
+    (consecutive failures since the last success). SKIPPED/CANCELLED are excluded so
+    the streak measures real success-vs-failure, not scheduler skips. TASK_HISTORY
+    prunes on SCHEDULED_TIME, so the window bounds that column."""
+    days = bounded_days(days)
+    per_task = max(2, min(int(per_task), 50))
+    where = and_where(
+        f"SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        "STATE IN ('SUCCEEDED', 'FAILED')",
+        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+WITH attempts AS (
+    SELECT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME AS TASK_NAME,
+        SCHEDULED_TIME,
+        STATE,
+        LEFT(COALESCE(ERROR_MESSAGE, ''), 200) AS ERROR_MESSAGE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+    -- Auto-retries emit multiple rows sharing one SCHEDULED_TIME; collapse each
+    -- scheduled run to its TERMINAL attempt (latest COMPLETED_TIME) so the streak
+    -- counts failed RUNS not attempts, and a FAILED retry can never sort ahead of
+    -- the run's SUCCEEDED final attempt (a plain SCHEDULED_TIME tie is nondeterministic).
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
+SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME, STATE, ERROR_MESSAGE
+FROM attempts
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME
+    ORDER BY SCHEDULED_TIME DESC) <= {per_task}
+ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, SCHEDULED_TIME DESC
+"""
+
+
+def task_freshness_sla(days: int = 14, company: str = "ALL", database: str = "",
+                       schema_contains: str = "") -> str:
+    """Per-task refresh cadence + silence, so a task that quietly STOPS being
+    scheduled (not failing, just gone) becomes visible.
+
+    Mirrors ``insights_sql.pipeline_sla_forecast``'s LAG->MEDIAN cadence
+    construction, retargeted from TABLE_DML_HISTORY to TASK_HISTORY: the median gap
+    (minutes) between successive SCHEDULED_TIMEs is the task's expected cadence, and
+    MINS_SINCE_SUCCESS is DATEDIFF to now from the last SUCCEEDED run.
+    ``logic.insights.task_freshness_status`` then classifies On-time / Late / Stale.
+    SCHEDULED_TIME/CURRENT_TIMESTAMP are TIMESTAMP_LTZ (absolute instants), so the
+    DATEDIFF is correct regardless of session time zone. Only tasks with >= 3
+    observed intervals (a trustworthy cadence) are returned."""
+    days = max(3, min(int(days or 14), 90))
+    where = and_where(
+        f"SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+WITH runs AS (
+    SELECT DATABASE_NAME, SCHEMA_NAME, NAME AS TASK_NAME, SCHEDULED_TIME,
+           DATEDIFF('minute',
+                    LAG(SCHEDULED_TIME) OVER (
+                        PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME
+                        ORDER BY SCHEDULED_TIME),
+                    SCHEDULED_TIME) AS GAP_MIN
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+), cadence AS (
+    SELECT DATABASE_NAME, SCHEMA_NAME, TASK_NAME,
+           -- median over POSITIVE gaps only, so MEDIAN and INTERVALS agree: a
+           -- retry-heavy task (GAP_MIN=0 for same-SCHEDULED_TIME retries) can't get
+           -- a 0-minute median that would make it structurally unflaggable.
+           MEDIAN(IFF(GAP_MIN > 0, GAP_MIN, NULL)) AS MEDIAN_GAP_MIN,
+           COUNT_IF(GAP_MIN IS NOT NULL AND GAP_MIN > 0) AS INTERVALS
+    FROM runs
+    GROUP BY 1, 2, 3
+), last_run AS (
+    SELECT DATABASE_NAME, SCHEMA_NAME, NAME AS TASK_NAME,
+           MAX(IFF(STATE = 'SUCCEEDED', SCHEDULED_TIME, NULL)) AS LAST_SUCCESS,
+           MAX(SCHEDULED_TIME) AS LAST_SCHEDULED,
+           MAX_BY(STATE, SCHEDULED_TIME) AS LAST_STATE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+    GROUP BY 1, 2, 3
+)
+SELECT c.DATABASE_NAME, c.SCHEMA_NAME, c.TASK_NAME,
+       ROUND(c.MEDIAN_GAP_MIN, 1) AS MEDIAN_GAP_MIN,
+       c.INTERVALS,
+       l.LAST_SUCCESS, l.LAST_SCHEDULED, l.LAST_STATE,
+       DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS
+FROM cadence c
+JOIN last_run l
+  ON l.DATABASE_NAME = c.DATABASE_NAME
+ AND l.SCHEMA_NAME = c.SCHEMA_NAME
+ AND l.TASK_NAME = c.TASK_NAME
+WHERE c.MEDIAN_GAP_MIN IS NOT NULL AND c.INTERVALS >= 3
+-- NULLS FIRST: a task with no SUCCEEDED run in the window has NULL
+-- MINS_SINCE_SUCCESS but is the HIGHEST-severity 'silent' case — keep it under the
+-- LIMIT, don't let it be truncated first (the classifier ranks these Stale/High).
+ORDER BY MINS_SINCE_SUCCESS DESC NULLS FIRST
+LIMIT 200
+"""
+
+
 def warehouse_pressure(days: int, company: str = "ALL") -> str:
     """Queue and spill pressure per warehouse for the window."""
     days = bounded_days(days)
@@ -201,6 +316,61 @@ WHERE {scope}
 GROUP BY 1
 ORDER BY SUM(BYTES_SCANNED) DESC
 LIMIT 25
+"""
+
+
+def query_optimization_triage(days: int, company: str = "ALL", warehouse_contains: str = "",
+                              user_contains: str = "", database: str = "",
+                              schema_contains: str = "", limit: int = 50) -> str:
+    """The specific statements an optimizer should fix, ranked by inefficiency:
+    remote spill first, then poor partition pruning, then huge cold-cache scans.
+
+    ``top_queries_by_elapsed`` ranks by elapsed time only — the slowest, not the
+    most fixable. This keeps QUERY_ID grain but filters to 'real work' (drops CALL
+    wrappers, which meter through their children, and the app's own Streamlit /
+    OVERWATCH-tagged queries) and requires a genuine inefficiency signal (remote
+    spill, or > 50 GB scanned), so every row is actionable. Column names follow
+    styled_table's byte/percent auto-humanize convention (SPILL_REMOTE_GB,
+    GB_SCANNED, SCAN_PCT, CACHE_PCT)."""
+    days = bounded_days(days)
+    limit = max(1, min(int(limit), 200))
+    where = and_where(
+        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains),
+        "EXECUTION_STATUS = 'SUCCESS'",
+        "QUERY_TYPE <> 'CALL'",
+        "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'",
+        "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE '%OVERWATCH_APP%'",
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        "(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) > 0 "
+        "OR COALESCE(BYTES_SCANNED, 0) > 50 * POWER(1024, 3))",
+    )
+    return f"""
+SELECT
+    QUERY_ID,
+    START_TIME,
+    USER_NAME,
+    WAREHOUSE_NAME,
+    WAREHOUSE_SIZE,
+    QUERY_TYPE,
+    COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) / POWER(1024, 3) AS SPILL_REMOTE_GB,
+    BYTES_SCANNED / POWER(1024, 3) AS GB_SCANNED,
+    ROUND(PARTITIONS_SCANNED / NULLIF(PARTITIONS_TOTAL, 0) * 100, 1) AS SCAN_PCT,
+    ROUND(COALESCE(PERCENTAGE_SCANNED_FROM_CACHE, 0) * 100, 1) AS CACHE_PCT,
+    TOTAL_ELAPSED_TIME / 1000.0 AS ELAPSED_SEC,
+    CASE
+        WHEN COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) > 0 THEN 'Remote spill'
+        WHEN PARTITIONS_TOTAL >= 100
+             AND PARTITIONS_SCANNED / NULLIF(PARTITIONS_TOTAL, 0) > 0.8 THEN 'Poor pruning'
+        ELSE 'Large cold scan'
+    END AS REASON,
+    LEFT(QUERY_TEXT, 180) AS QUERY_PREVIEW
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+ORDER BY
+    COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) DESC,
+    PARTITIONS_SCANNED / NULLIF(PARTITIONS_TOTAL, 0) DESC NULLS LAST,
+    BYTES_SCANNED DESC
+LIMIT {limit}
 """
 
 
