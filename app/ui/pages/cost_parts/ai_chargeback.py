@@ -310,6 +310,13 @@ def _token_economics_panel() -> None:
         {"label": "Users measured", "value": f"{len(econ):,}"},
     ])
     styled_table(with_user_names(econ, _PAGE), height=300, column_config={
+        # Token COUNTS are whole tokens — show them as integers, not the raw-float
+        # "2044782.000000" Streamlit paints a float64 column with by default.
+        "INPUT": st.column_config.NumberColumn("Input", format="%d"),
+        "OUTPUT": st.column_config.NumberColumn("Output", format="%d"),
+        "CACHE_READ": st.column_config.NumberColumn("Cache Read", format="%d"),
+        "CACHE_WRITE": st.column_config.NumberColumn("Cache Write", format="%d"),
+        "TOTAL": st.column_config.NumberColumn("Total", format="%d"),
         "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
     })
     st.caption("Low cache-hit heavy users are the efficiency lever: repeated context re-sent "

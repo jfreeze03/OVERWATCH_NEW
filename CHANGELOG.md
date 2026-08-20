@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.262.0 - Token-economics counts render as integers (2026-08-20)
+
+Follow-up polish to the now-working token-economics panel (Cost ▸ Chargeback & AI):
+the Input / Output / Cache Read / Cache Write / Total columns are whole token counts,
+but Streamlit painted the float64 columns with its raw default (`2044782.000000`).
+Each now carries an explicit integer `NumberColumn` format (`%d`), so the table reads
+as clean token counts instead of six trailing zeros. Display-only — the frame stays
+numeric, so sort and CSV export keep the exact values.
+
+(A global `_TOKENS` format suffix was considered and rejected: rate columns like
+`USD_PER_1M_TOKENS` also end in `_TOKENS` and would have mis-rounded to `0`.)
+
 ## 4.261.0 - Fix: Cortex token-economics panel read all zeros (2026-08-19)
 
 Cost ▸ Chargeback & AI ▸ "Load token economics" showed 0 tokens / 0% cache-hit for
