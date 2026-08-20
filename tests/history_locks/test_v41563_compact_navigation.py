@@ -52,8 +52,10 @@ def test_in_page_jump_chips_are_removed() -> None:
 
 def test_notebook_subset_adds_exact_name_parts() -> None:
     spend = _read("app/ui/pages/cost_parts/spend.py")
+    # the whole "Compute pools & notebooks" branch (v4.265 added a pool→user drill
+    # above the notebook subset, so don't truncate at the first st.caption)
     notebook = spend.split('detail == "Compute pools & notebooks"', 1)[1].split(
-        'st.caption(', 1
+        "elif detail ==", 1
     )[0]
     assert "with_user_name_parts(notebooks.df, _PAGE)" in notebook
     directory = _read("app/data/directory_sql.py")

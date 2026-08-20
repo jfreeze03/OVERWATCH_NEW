@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.265.0 - Compute-pool → per-user cost drill (2026-08-20)
+
+Cost ▸ Spend ▸ Compute pools & notebooks: the pool table is now selectable — click a
+compute pool to see the **users driving its cost**. Per-user attribution comes from
+`NOTEBOOKS_CONTAINER_RUNTIME_HISTORY` (the only user-grain SPCS feed), aggregated by
+`USER_NAME` for the selected pool (`logic.spcs.compute_pool_user_costs`): credits, USD
+at the configured rate, execution time, sessions, notebooks.
+
+Honest about the platform limit: `SNOWPARK_CONTAINER_SERVICES_HISTORY` meters pools at
+the POOL level with no user column, so a **native-app pool** (e.g. a Posit Workbench
+pool) has no per-user split in ACCOUNT_USAGE — selecting it shows a clear note that its
+cost is metered at the pool level and per-user sessions live in the app's own admin
+console, rather than a fabricated attribution. No new query (drills the notebook feed
+already fetched for the section); no migration.
+
+Adversarial review (6 agents, 4 raised → 3 confirmed, all fixed): the empty-drill note
+now distinguishes its three real causes — a genuine native-app pool, a user-owned
+non-notebook pool (`Unassigned` → non-notebook Snowpark services), and a simply-empty
+notebook feed this window — instead of branding every empty result a "native-app pool";
+a bounds guard (`0 <= sel < len(pool_df)`) stops Streamlit's sticky selection from
+red-tracebacking the page after a window-narrow shrinks the frame; and the pure helper
+honors its "never raises" contract when a frame lacks the `CREDITS` column.
+
 ## 4.264.0 - Repo-review wave-2 flagship leftovers (2026-08-20)
 
 Four genuine gaps mined from the external `snowmonitor` reference repo (a 6-cluster

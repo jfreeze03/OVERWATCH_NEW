@@ -55,6 +55,8 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    section_header,
+    selectable_table,
     served_days,
     styled_table,
     user_display_map,
@@ -384,8 +386,62 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     {"label": "Compute pools", "value": str(pool_df["COMPUTE_POOL_NAME"].nunique())},
                     {"label": "Applications", "value": str(pool_df["APPLICATION_NAME"].nunique())},
                 ])
-                styled_table(pool_df, height=300, sort_label="credits desc")
+                _pool_sel = selectable_table(pool_df, key="spcs_pool_sel", height=300,
+                                             sort_label="credits desc")
                 result_caption(pools)
+                st.caption("Select a compute pool to see the users driving its cost.")
+                # Drill: users on the selected pool. The pool feed itself is metered at
+                # the POOL level (no user column), so per-user attribution comes from the
+                # notebook-runtime feed — which covers notebook workloads only. A
+                # native-app pool (e.g. Posit) has no notebook rows -> honest note.
+                # Bounds guard: st.dataframe's selection is sticky and survives a
+                # window-narrow that shrinks pool_df, so a stale index must not iloc
+                # out of range (would red-traceback the whole page).
+                if _pool_sel is not None and 0 <= int(_pool_sel) < len(pool_df):
+                    from app.logic.spcs import compute_pool_user_costs
+                    _prow = pool_df.iloc[int(_pool_sel)]
+                    _pool_name = str(_prow["COMPUTE_POOL_NAME"])
+                    _app_name = str(_prow["APPLICATION_NAME"])
+                    _pool_usd = safe_float(_prow["USD"])
+                    _nb_ok = notebooks is not None and notebooks.usable()
+                    _users = compute_pool_user_costs(notebooks.df if _nb_ok else None,
+                                                     _pool_name, rate)
+                    section_header(f"Users driving {_pool_name}", "info", "chargeback")
+                    if _users.empty:
+                        # Be honest about WHY there's no per-user split — don't brand every
+                        # empty case a "native-app pool" (a user-owned non-notebook pool
+                        # shows APPLICATION_NAME='Unassigned'; the notebook feed can also
+                        # simply be empty this window).
+                        if not _nb_ok:
+                            st.info(
+                                f"**{_pool_name}** — {format_usd(_pool_usd)} — the per-user drill reads the "
+                                "notebook-runtime feed (NOTEBOOKS_CONTAINER_RUNTIME_HISTORY), which has no "
+                                "rows for this window, so no per-user split can be shown here."
+                            )
+                        elif _app_name and _app_name.upper() != "UNASSIGNED":
+                            st.info(
+                                f"**{_pool_name}** — {format_usd(_pool_usd)}, app **{_app_name}** — is a "
+                                "native-app pool, metered by Snowflake at the pool level; the usage views "
+                                f"carry no per-user split for it. For **{_app_name}**, use the app's own "
+                                "admin/usage console for per-user sessions."
+                            )
+                        else:
+                            st.info(
+                                f"**{_pool_name}** — {format_usd(_pool_usd)} — runs non-notebook Snowpark "
+                                "Container Services, which Snowflake meters at the pool level (no per-user "
+                                "split). Per-user cost is available only for notebook-backed pools."
+                            )
+                    else:
+                        _attributed = float(_users["USD"].sum())
+                        kpi_row([
+                            {"label": "Users on this pool", "value": str(len(_users))},
+                            {"label": "Attributed spend", "value": format_usd(_attributed),
+                             "help": "Notebook-runtime credits on this pool, priced at the configured rate — "
+                                     "a subset of the pool total when non-notebook services also run here."},
+                        ])
+                        styled_table(with_user_name_parts(_users, _PAGE), sort_label="credits desc")
+                        st.caption("Per-user notebook-runtime cost on this pool "
+                                   "(NOTEBOOKS_CONTAINER_RUNTIME_HISTORY).")
             if notebooks is not None and notebooks.ok and notebooks.empty:
                 empty_state("no_data_yet", "No notebook container runtime was recorded in this window.")
             elif notebooks is not None and guard(notebooks, ""):
