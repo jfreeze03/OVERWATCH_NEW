@@ -107,6 +107,49 @@ LIMIT 100
 """
 
 
+def single_factor_logins(days: int = 30, company: str = "ALL") -> str:
+    """#16: successful PASSWORD logins that landed with NO second factor — behavioral
+    MFA-bypass proof, independent of the HAS_MFA config flag.
+
+    ``users_without_mfa``/``users_without_mfa_live`` are config-anchored (HAS_MFA=FALSE)
+    and structurally cannot surface a user who IS enrolled (HAS_MFA=TRUE) yet still
+    authenticated single-factor. This reads live LOGIN_HISTORY for PASSWORD-first,
+    no-second-factor, successful logins; the USERS join exposes HAS_MFA so the render
+    separates the genuine bypass (enrolled) from the not-yet-enrolled. Read-only."""
+    days = bounded_days(days, maximum=30)
+    where = and_where(
+        f"L.EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "L.FIRST_AUTHENTICATION_FACTOR = 'PASSWORD'",
+        "COALESCE(TO_VARCHAR(L.SECOND_AUTHENTICATION_FACTOR), '') = ''",
+        "L.IS_SUCCESS = 'YES'",
+        companies.user_clause(company, "L.USER_NAME"),
+    )
+    return f"""
+WITH single_factor AS (
+    SELECT L.USER_NAME,
+           COUNT(*) AS SINGLE_FACTOR_LOGINS,
+           COUNT(DISTINCT L.CLIENT_IP) AS DISTINCT_IPS,
+           MIN(L.EVENT_TIMESTAMP) AS FIRST_SEEN,
+           MAX(L.EVENT_TIMESTAMP) AS LAST_SEEN_AT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY L
+    WHERE {where}
+    GROUP BY L.USER_NAME
+)
+SELECT S.USER_NAME,
+       COALESCE(U.HAS_MFA, FALSE) AS HAS_MFA,
+       S.SINGLE_FACTOR_LOGINS,
+       S.DISTINCT_IPS,
+       S.FIRST_SEEN,
+       S.LAST_SEEN_AT,
+       U.LAST_SUCCESS_LOGIN
+FROM single_factor S
+JOIN SNOWFLAKE.ACCOUNT_USAGE.USERS U
+  ON U.NAME = S.USER_NAME AND U.DELETED_ON IS NULL
+ORDER BY HAS_MFA DESC, S.SINGLE_FACTOR_LOGINS DESC
+LIMIT 200
+"""
+
+
 def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5) -> str:
     """Account-takeover candidates: a burst of failed logins for a user FOLLOWED
     BY a success — the brute-force breakthrough ``failed_logins``' count-only lens

@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.266.0 - Repo-review EASY-win leftovers (2026-08-20)
+
+Five more gaps mined from the external `snowmonitor` reference repo — all read-only,
+no migration, mostly pure logic over data already fetched:
+
+- **Operations ▸ Tasks ▸ Health — Systemic errors** (#14): one error family hitting 3+
+  distinct tasks is surfaced above the raw failure list ("one revoked grant / dead
+  source, not N bugs"). `logic.insights.cluster_failures_by_family` over the failure
+  timeline already built; counts DISTINCT tasks over the composite DB.SCHEMA.TASK key.
+- **Operations ▸ Tasks ▸ Health — Duration drift** (#15): a task 100% successful but
+  quietly slower than its own baseline. Feeds FACT_TASK_DAILY `AVG_SEC` (already
+  fetched) into the robust-z engine (`task_duration_anomalies`), slow-side only, with
+  BASELINE_SEC and SLOWER_X, gated ≥30s / 7+ active days.
+- **Cost ▸ Optimization — Auto-clustering churn** (#6): names the poor-cluster-key
+  tables — `flag_clustering_churn` adds `CREDITS_PER_TB_RECLUSTERED`, `SPEND_USD`, and a
+  `CHURNY` flag (material credits reclustering ~0 TB — the sharpest "paying to
+  reorganize nothing" case), which the raw spend table couldn't name.
+- **Security ▸ Access — Single-factor logins (MFA-bypassed)** (#16): the behavioral
+  counterpart to the config-anchored MFA lens — a successful PASSWORD login with an
+  empty `SECOND_AUTHENTICATION_FACTOR`. Unlike `HAS_MFA=FALSE`, it surfaces an *enrolled*
+  user who still landed single-factor (a real bypass/misconfig); the USERS join sorts
+  enrolled-bypass to the top. `security_sql.single_factor_logins`.
+- **Overview — Pace vs budget calendar** (#11): a signed variance of MTD spend vs the
+  budget's OWN straight-line expected-to-date (`budget_pace_variance`), isolating
+  "ahead of the budget calendar right now" from the structural "will we end over". A new
+  KPI beside MTD/Projected; budget-gated (no `MONTHLY_BUDGET_USD` → no card); no query.
+
+Adversarial review (17 agents, 13 raised → 2 confirmed, both fixed): the #11 pace card's
+delta line rendered a red up-arrow even when *under* budget (the prose delta has no
+leading sign, so a colored arrow always pointed one way) — now a neutral delta with the
+severity stripe carrying good/bad. And #16's "(bypass) — a real MFA bypass/misconfig"
+label overclaimed: `HAS_MFA` is a current snapshot joined to 30d of history, so a login
+made *before* the user enrolled (or MFA caching, or a temporary admin bypass) isn't a
+true bypass — relabeled "Enrolled yet single-factor" with a "candidate, verify enrollment
+timing" caption. (The sharp dismissals: #15's mean-AD masking only fires on bit-identical
+data real `AVG(DATEDIFF)` never produces; #11 counting today as a full day is intentional,
+matching the adjacent MTD card's basis.)
+
 ## 4.265.0 - Compute-pool → per-user cost drill (2026-08-20)
 
 Cost ▸ Spend ▸ Compute pools & notebooks: the pool table is now selectable — click a

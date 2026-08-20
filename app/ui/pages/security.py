@@ -126,6 +126,35 @@ def _access_tab(company: str, days: int) -> None:
         styled_table(with_user_names(mfa.df, _PAGE))
         result_caption(mfa)
 
+    # #16: the behavioral counterpart to the config-anchored MFA lens above — a
+    # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
+    # surfaces an ENROLLED user (HAS_MFA=TRUE) who still landed single-factor (a real
+    # bypass/misconfig). Live LOGIN_HISTORY, companion to MFA gaps.
+    section_header("Single-factor logins (MFA-bypassed, 30d)", "warn", "security",
+                   anchor="sec-single-factor")
+    sf = run(security_sql.single_factor_logins(min(days, 30), company), page=_PAGE,
+             key=f"single_factor_{company}_{days}", tier="recent",
+             source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
+    if sf.ok and sf.empty:
+        st.success("No successful password login landed without a second factor in this window "
+                   "(reader capped at 30d).")
+    elif guard(sf, ""):
+        _bypass = sf.df[sf.df["HAS_MFA"].astype(bool)]
+        kpi_row([
+            {"label": "Users with single-factor logins", "value": f"{len(sf.df)}"},
+            {"label": "Enrolled yet single-factor", "value": f"{len(_bypass)}",
+             "help": "HAS_MFA is TRUE now yet they authenticated single-factor — a bypass CANDIDATE "
+                     "to verify. HAS_MFA is a current snapshot, so a login made before they enrolled, "
+                     "MFA caching, or a temporary admin bypass also land here.",
+             "delta_color": "inverse" if len(_bypass) else "off"},
+        ])
+        styled_table(with_user_names(sf.df, _PAGE))
+        st.caption("PASSWORD logins with an empty SECOND_AUTHENTICATION_FACTOR; currently-enrolled "
+                   "users sort first. HAS_MFA is a point-in-time snapshot — a login before MFA "
+                   "enrollment, MFA caching, or a temporary admin bypass can also appear here; verify "
+                   "enrollment timing before acting. Read-only.")
+        result_caption(sf)
+
     left, right = st.columns(2)
     with left:
         section_header("Failed logins", "info", "alerts", anchor="sec-faillog")

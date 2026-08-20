@@ -35,6 +35,7 @@ from app.logic.consolidation import WarehouseProfile, consolidation_candidates
 from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
+    flag_clustering_churn,
     flag_repeat_candidates,
     idle_advisor,
     idle_waste_summary,
@@ -1196,9 +1197,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             if clu.ok and clu.empty:
                 st.success("No automatic-clustering credits in this window.")
             elif guard(clu, ""):
-                styled_table(clu.df, height=240)
-                st.caption("High credits with high TB reclustered = revisit the clustering "
-                           "key or the load pattern; dollars = credits x your compute rate.")
+                _clu = flag_clustering_churn(clu.df, rate=rate)
+                _clu_cols = [c for c in ["TABLE_FQN", "CREDITS", "SPEND_USD", "TB_RECLUSTERED",
+                                         "CREDITS_PER_TB_RECLUSTERED", "RECLUSTER_RUNS", "CHURNY"]
+                             if c in _clu.columns]
+                styled_table(_clu[_clu_cols], height=240, sort_label="churny first, then $/TB")
+                st.caption("CHURNY = spending clustering credits to recluster ~0 TB (a poor cluster key "
+                           "or load pattern — the sharpest 'paying to reorganize nothing' case). "
+                           "Otherwise, high credits per TB reclustered = revisit the key; dollars = "
+                           "credits x your compute rate.")
                 result_caption(clu)
 
     elif opt_section == "Remediation & ledger":

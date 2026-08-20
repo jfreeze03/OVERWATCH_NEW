@@ -81,6 +81,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.egress_daily", lambda: security_sql.egress_daily(30)),
     ("security.unload_activity", lambda: security_sql.unload_activity(30, "ALFA")),
     ("security.failed_logins", lambda: security_sql.failed_logins(1, "ALFA")),
+    ("security.single_factor_logins", lambda: security_sql.single_factor_logins(30, "ALFA")),
     ("security.recent_role_grants", lambda: security_sql.recent_role_grants(1)),
     ("security.admin_role_holders", security_sql.admin_role_holders),
     ("security.recent_ddl_changes", lambda: security_sql.recent_ddl_changes(1, "ALFA")),

@@ -46,9 +46,11 @@ from app.logic.formulas import (
 from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import (
     build_failure_timeline,
+    cluster_failures_by_family,
     compare_release_periods,
     pipeline_sla_forecast,
     rank_release_candidates,
+    task_duration_anomalies,
     task_release_deltas,
     with_auto_suspend_settings,
 )
@@ -470,6 +472,22 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     fam = timeline.groupby("ERROR_FAMILY", as_index=False).size().rename(columns={"size": "FAILURES"})
     charts.bar_count(fam.sort_values("FAILURES", ascending=False), "ERROR_FAMILY", "FAILURES",
                      title="Failures by family", takeaway=True)
+    # #14: one error family hitting MANY distinct tasks is usually a single cause
+    # (a revoked grant / dead source), not N separate bugs — surface it above the raw list.
+    _clusters = cluster_failures_by_family(timeline)
+    _systemic = _clusters[_clusters["SYSTEMIC"]] if not _clusters.empty else _clusters
+    if not _systemic.empty:
+        section_header("Systemic errors — one cause, many tasks", "warn", "alerts")
+        kpi_row([
+            {"label": "Systemic error families", "value": f"{len(_systemic)}"},
+            {"label": "Distinct tasks hit", "value": f"{int(_systemic['DISTINCT_TASKS'].sum())}",
+             "help": "One error family across 3+ tasks — investigate the shared cause first."},
+        ])
+        styled_table(_systemic[["ERROR_FAMILY", "DISTINCT_TASKS", "FAILURES",
+                                "SAMPLE_TASK", "SAMPLE_ERROR"]],
+                     slug="systemic-task-errors", sort_label="distinct tasks desc")
+        st.caption("One error family hitting several tasks usually means a single revoked grant / "
+                   "dead source, not N separate bugs.")
     styled_table(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
                    "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
@@ -870,6 +888,22 @@ def _task_health_view(company: str, days: int, database: str = "",
             task_sort_label = "failed runs desc"
         styled_table(df, sort_label=task_sort_label)
         result_caption(res)
+        # #15: a task 100% successful but quietly slower than its own baseline is
+        # otherwise invisible. Reuses the fact_task_daily frame already fetched (mart
+        # path only — the live task_runs fallback carries no daily AVG_SEC series).
+        if {"DAY", "AVG_SEC", "TASK_NAME"}.issubset(res.df.columns):
+            _drift = task_duration_anomalies(res.df)
+            section_header("Duration drift — tasks slower than their own baseline", "warn", "clock")
+            if _drift.empty:
+                st.caption("No task is running materially slower than its own recent baseline.")
+            else:
+                kpi_row([
+                    {"label": "Tasks drifting slower", "value": f"{len(_drift)}",
+                     "help": "Daily mean runtime is a robust-z outlier above the task's own median "
+                             "(>= 30s, 7+ active days).",
+                     "delta_color": "inverse"},
+                ])
+                styled_table(_drift, slug="task-duration-drift", sort_label="x slower desc")
     st.divider()
     _failure_timeline_section(company, database, schema_contains,
                               known_failures=known_failed if days >= 7 else None)

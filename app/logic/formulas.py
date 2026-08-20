@@ -564,3 +564,20 @@ def mtd_pace_vs_prior_month(daily, today):
     if prior_rows.empty or prior <= 0:
         return mtd, prior, None
     return mtd, prior, (mtd_same - prior) / prior * 100.0
+
+
+def budget_pace_variance(mtd_actual, budget_usd, today) -> tuple[float, float]:
+    """Signed variance of MTD spend vs the budget's OWN straight-line expected-to-date
+    (repo wave-2 #11): ``mtd_actual - budget * day_of_month / days_in_month``.
+
+    Isolates 'are we ahead of the budget calendar right now' (pace) from the
+    structural 'will we end over' (projection). Positive = ahead of the flat daily
+    budget target (burning fast); negative = behind. Returns
+    (variance, expected_to_date); (0.0, 0.0) when no budget is configured (the KPI
+    must not invent a denominator)."""
+    budget = safe_float(budget_usd)
+    if budget <= 0:
+        return 0.0, 0.0
+    days_in_month, elapsed, _remaining = month_days(today)
+    expected = budget * elapsed / days_in_month if days_in_month else 0.0
+    return safe_float(mtd_actual) - expected, expected

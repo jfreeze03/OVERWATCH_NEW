@@ -7,6 +7,8 @@ from math import ceil
 
 import pandas as pd
 
+from app.logic.anomaly import flag_anomalies
+
 from .formulas import credits_to_usd, humanize_duration, safe_div, safe_float
 
 # ---- 1. Idle warehouse advisor ---------------------------------------------
@@ -485,6 +487,115 @@ def build_failure_timeline(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["ROLE_IN_GRAPH"] = "Root cause"
     return out.sort_values("QUERY_START_TIME", ascending=False).reset_index(drop=True)
+
+
+SYSTEMIC_TASK_THRESHOLD = 3   # >= 3 distinct tasks hit by one family => one cause, not N bugs
+
+
+def cluster_failures_by_family(timeline: pd.DataFrame) -> pd.DataFrame:
+    """Systemic error roll-up (repo wave-2 #14): which error families hit MANY
+    distinct tasks — usually one revoked grant / dead source, not N separate bugs.
+
+    From ``build_failure_timeline`` output (ERROR_FAMILY + DATABASE_NAME /
+    SCHEMA_NAME / TASK_NAME / ERROR_MESSAGE). Per family: DISTINCT_TASKS (over the
+    composite DB.SCHEMA.TASK key, so a task name reused across schemas isn't
+    undercounted), FAILURES, SAMPLE_TASK, SAMPLE_ERROR, and SYSTEMIC (>= 3 distinct
+    tasks). 'No error text' is listed but never flagged systemic. Sorted systemic
+    first, then by breadth. Empty in -> empty out; never raises."""
+    if timeline is None or timeline.empty or "ERROR_FAMILY" not in timeline.columns:
+        return pd.DataFrame()
+    work = timeline.copy()
+    for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME"):
+        if c not in work.columns:
+            work[c] = ""
+    work["_TASK_KEY"] = (work["DATABASE_NAME"].astype(str) + "." +
+                         work["SCHEMA_NAME"].astype(str) + "." + work["TASK_NAME"].astype(str))
+    rows: list[dict] = []
+    for family, grp in work.groupby("ERROR_FAMILY", dropna=False):
+        distinct = int(grp["_TASK_KEY"].nunique())
+        fam = str(family)
+        errs = [str(e) for e in grp.get("ERROR_MESSAGE", pd.Series(dtype=str)).tolist()
+                if str(e).strip()]
+        rows.append({
+            "ERROR_FAMILY": fam,
+            "DISTINCT_TASKS": distinct,
+            "FAILURES": len(grp),
+            "SAMPLE_TASK": str(grp["_TASK_KEY"].iloc[0]),
+            "SAMPLE_ERROR": errs[0][:200] if errs else "",
+            "SYSTEMIC": bool(distinct >= SYSTEMIC_TASK_THRESHOLD and fam != "No error text"),
+        })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(
+        ["SYSTEMIC", "DISTINCT_TASKS", "FAILURES"],
+        ascending=[False, False, False]).reset_index(drop=True)
+
+
+DURATION_MIN_SEC = 30.0        # ignore trivially-short tasks (1s->4s is z-huge but immaterial)
+DURATION_MIN_ACTIVE_DAYS = 7   # need a real baseline before calling drift
+
+
+def task_duration_anomalies(df: pd.DataFrame) -> pd.DataFrame:
+    """Tasks running slower than their OWN daily baseline (repo wave-2 #15).
+
+    From FACT_TASK_DAILY rows (DAY, DATABASE_NAME, TASK_NAME, AVG_SEC, RUNS): a task
+    that is 100% successful yet quietly 3x slower is otherwise unflagged. Feeds each
+    task's daily AVG_SEC into the robust-z engine (``flag_anomalies``, median/MAD),
+    keeps the SLOW side, and reduces to one row per task = its worst flagged day,
+    with BASELINE_SEC (the task's median) and SLOWER_X (AVG_SEC / baseline). Empty
+    in -> empty out; never raises."""
+    cols = ["DATABASE_NAME", "TASK_NAME", "DAY", "AVG_SEC", "BASELINE_SEC",
+            "SLOWER_X", "Z_SCORE", "RUNS"]
+    if (df is None or df.empty
+            or not {"DAY", "AVG_SEC", "TASK_NAME", "DATABASE_NAME"}.issubset(df.columns)):
+        return pd.DataFrame(columns=cols)
+    work = df.copy()
+    work["AVG_SEC"] = pd.to_numeric(work["AVG_SEC"], errors="coerce")
+    work["TASK_KEY"] = work["DATABASE_NAME"].astype(str) + "." + work["TASK_NAME"].astype(str)
+    flagged = flag_anomalies(work, "AVG_SEC", group_col="TASK_KEY",
+                             min_value=DURATION_MIN_SEC, min_active_days=DURATION_MIN_ACTIVE_DAYS)
+    if flagged is None or flagged.empty or "IS_ANOMALY" not in flagged.columns:
+        return pd.DataFrame(columns=cols)
+    slow = flagged[flagged["IS_ANOMALY"]
+                   & (pd.to_numeric(flagged["Z_SCORE"], errors="coerce") > 0)].copy()
+    if slow.empty:
+        return pd.DataFrame(columns=cols)
+    baseline = work.groupby("TASK_KEY")["AVG_SEC"].median().rename("BASELINE_SEC")
+    slow = slow.join(baseline, on="TASK_KEY")
+    slow["SLOWER_X"] = (pd.to_numeric(slow["AVG_SEC"], errors="coerce")
+                        / slow["BASELINE_SEC"].where(slow["BASELINE_SEC"] > 0)).round(1)
+    slow["_absz"] = pd.to_numeric(slow["Z_SCORE"], errors="coerce").abs()
+    worst = (slow.sort_values("_absz", ascending=False)
+             .groupby("TASK_KEY", as_index=False).head(1))
+    keep = [c for c in cols if c in worst.columns]
+    return worst.sort_values("SLOWER_X", ascending=False).reset_index(drop=True)[keep]
+
+
+def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
+                          min_credits: float = 1.0) -> pd.DataFrame:
+    """Auto-clustering churn (repo wave-2 #6): tables paying credits to recluster
+    ~nothing — the poor-cluster-key signal the raw spend table can't name.
+
+    From ``clustering_by_table`` (TABLE_FQN, CREDITS, TB_RECLUSTERED,
+    RECLUSTER_RUNS): adds CREDITS_PER_TB_RECLUSTERED (NaN when 0 TB reclustered),
+    SPEND_USD (when a rate is given), and CHURNY = material credits spent to
+    recluster ~0 TB (the sharpest 'paying to reorganize nothing' case). Sorted
+    churny-first, then by credits-per-TB. Empty in -> empty out; never raises."""
+    if df is None or df.empty or "CREDITS" not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    out["CREDITS"] = pd.to_numeric(out["CREDITS"], errors="coerce").fillna(0.0)
+    tb = pd.to_numeric(out.get("TB_RECLUSTERED", 0.0), errors="coerce").fillna(0.0)
+    out["TB_RECLUSTERED"] = tb
+    # ratio is undefined at 0 TB -> NaN (blank in the table); the CHURNY flag, not the
+    # ratio, carries the zero-TB signal so a div-by-zero can't mis-sort it to the bottom.
+    out["CREDITS_PER_TB_RECLUSTERED"] = (out["CREDITS"] / tb.where(tb > 0)).round(2)
+    if rate is not None:
+        out["SPEND_USD"] = (out["CREDITS"] * safe_float(rate)).round(2)
+    out["CHURNY"] = (out["CREDITS"] >= float(min_credits)) & (tb <= 0)
+    return out.sort_values(["CHURNY", "CREDITS_PER_TB_RECLUSTERED", "CREDITS"],
+                           ascending=[False, False, False],
+                           na_position="last").reset_index(drop=True)
 
 
 def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:

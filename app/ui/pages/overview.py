@@ -26,6 +26,7 @@ from app.logic.formulas import (
     account_now,
     account_today,
     blended_billed_usd,
+    budget_pace_variance,
     contract_runway,
     credits_to_usd,
     executive_slide_bullets,
@@ -636,6 +637,35 @@ def render() -> None:
         account_kpis[0]["as_of"] = _ov_asof_meter
     if _ov_asof_meter and forecast.ok:
         account_kpis[1]["as_of"] = _ov_asof_meter
+
+    # #11: signed pace vs the budget's OWN straight-line expected-to-date — isolates
+    # "ahead of the budget calendar right now" from the structural "will we end over"
+    # the projected-month-end KPI answers. Budget-gated (config contract: no budget ->
+    # no card); reuses mtd_spend + month_days, no extra query. Inserted at [1] AFTER
+    # the as-of stamping so the already-stamped MTD[0]/Projected cards keep their as_of.
+    if budget > 0 and mtd_source:
+        _pace_var, _expected_td = budget_pace_variance(mtd_spend, budget, account_today())
+        _dim, _elapsed, _rem = month_days(account_today())
+        _pace_word = "ahead of" if _pace_var > 0 else "behind" if _pace_var < 0 else "on"
+        _pace_sign = "+" if _pace_var > 0 else "-" if _pace_var < 0 else ""
+        account_kpis.insert(1, {
+            "label": "Pace vs budget calendar",
+            "value": f"{_pace_sign}{format_usd(abs(_pace_var))}",
+            "delta": (f"{_pace_word} straight-line "
+                      f"({format_usd(_expected_td)} expected by day {_elapsed}/{_dim})"),
+            # neutral delta (flat dash) — the severity stripe carries good/bad; the prose
+            # delta has no leading sign, so a colored arrow would always point the same way.
+            "delta_color": "off",
+            "severity": ("bad" if _pace_var > 0.15 * _expected_td
+                         else "warn" if _pace_var > 0 else "ok"),
+            "method": "billed", "scope": "account-wide",
+            "as_of": _ov_asof_meter,
+            "help": "Signed variance of MTD billed spend vs the budget's own straight-line "
+                    "expected-to-date (MONTHLY_BUDGET_USD / days_in_month x day_of_month). "
+                    "Positive = ahead of the flat daily budget target (burning fast); negative = "
+                    "behind. Isolates calendar PACE from the structural 'will we end over' the "
+                    "projected month-end KPI. Account-wide billed credits (AI at the AI rate).",
+        })
 
     # CoCo do-first #1: a page-level "should I worry?" opener from signals already
     # computed above (platform score band, open alerts, budget pace) — no new query.
