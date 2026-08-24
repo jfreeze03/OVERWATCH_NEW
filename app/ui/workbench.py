@@ -713,7 +713,8 @@ def watched_attention(viewer: str, rate: float) -> pd.DataFrame:
     if prof.usable():
         sized = size_recommendations(prof.df, rate, served_days(prof, _WATCH_WINDOW_DAYS))
         health = warehouse_health(sized)
-    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate)
+    _cal = str(load_settings(_PAGE).get("EXPECTED_SPIKE_CALENDAR") or "")
+    return watched_status(wl.df, daily.df if daily.usable() else None, health, rate, calendar=_cal)
 
 
 def render_watch_badge(viewer: str, rate: float) -> None:
@@ -728,7 +729,12 @@ def render_watch_badge(viewer: str, rate: float) -> None:
         st.caption(f"👁 {summary['watched']} watched "
                    + ("entity is" if summary["watched"] == 1 else "entities are") + " steady.")
         return
-    att = status[status["ATTENTION"]].head(4)
+    # Preview the MOST SEVERE movers, not the first-added: rank warn > watch > other before
+    # truncating, so a real spend spike isn't dropped below soft health-watches added earlier.
+    _sev_rank = {"warn": 0, "watch": 1}
+    att = (status[status["ATTENTION"]]
+           .assign(_o=lambda d: d["SEVERITY"].map(lambda s: _sev_rank.get(str(s), 2)))
+           .sort_values("_o", kind="stable").head(4))
     lines = [f"**{r['LABEL']}** — {r['STATUS']}" for _, r in att.iterrows()]
     st.warning("👁 " + str(summary["attention"]) + " of " + str(summary["watched"])
                + " watched " + ("entity has" if summary["attention"] == 1 else "entities have")

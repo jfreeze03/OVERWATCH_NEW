@@ -31,17 +31,23 @@ def graph_daily_costs(days: int, company: str = "ALL", database: str = "",
         contains_filter("h.SCHEMA_NAME", schema_contains),
     )
     return f"""
-WITH runs AS (
+WITH attempts AS (
     SELECT
         COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID) AS RUN_KEY,
-        MIN_BY(h.NAME, h.QUERY_START_TIME) AS PIPELINE,
-        MIN_BY(h.DATABASE_NAME, h.QUERY_START_TIME) AS DATABASE_NAME,
-        MIN_BY(h.SCHEMA_NAME, h.QUERY_START_TIME) AS SCHEMA_NAME,
-        DATE(MIN(h.QUERY_START_TIME)) AS DAY,
-        COUNT(*) AS TASK_RUNS,
-        COUNT_IF(h.STATE = 'FAILED') AS FAILED_TASKS,
-        DATEDIFF('second', MIN(h.QUERY_START_TIME), MAX(h.COMPLETED_TIME)) AS WALL_SEC,
-        SUM(COALESCE(a.CREDITS, 0)) AS CREDITS
+        h.NAME,
+        h.DATABASE_NAME,
+        h.SCHEMA_NAME,
+        h.QUERY_START_TIME,
+        h.COMPLETED_TIME,
+        h.STATE,
+        COALESCE(a.CREDITS, 0) AS CREDITS,
+        -- Auto-retries emit multiple rows sharing one SCHEDULED_TIME within a graph run;
+        -- tag the terminal attempt so TASK_RUNS/FAILED_TASKS count scheduled TASKS not
+        -- attempts (a retried-then-succeeded task is not a failure). Credits still SUM over
+        -- all attempts below — each retry really billed compute.
+        ROW_NUMBER() OVER (
+            PARTITION BY COALESCE(h.GRAPH_RUN_GROUP_ID::VARCHAR, h.QUERY_ID), h.NAME, h.SCHEDULED_TIME
+            ORDER BY h.COMPLETED_TIME DESC NULLS LAST) AS TERMINAL_RN
     FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY h
     LEFT JOIN (
         -- Roll each statement's compute up to the task's CALL query id via
@@ -64,6 +70,19 @@ WITH runs AS (
         GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)
     ) a ON a.ROOT_ID = h.QUERY_ID
     WHERE {where}
+),
+runs AS (
+    SELECT
+        RUN_KEY,
+        MIN_BY(NAME, QUERY_START_TIME) AS PIPELINE,
+        MIN_BY(DATABASE_NAME, QUERY_START_TIME) AS DATABASE_NAME,
+        MIN_BY(SCHEMA_NAME, QUERY_START_TIME) AS SCHEMA_NAME,
+        DATE(MIN(QUERY_START_TIME)) AS DAY,
+        COUNT_IF(TERMINAL_RN = 1) AS TASK_RUNS,
+        COUNT_IF(TERMINAL_RN = 1 AND STATE = 'FAILED') AS FAILED_TASKS,
+        DATEDIFF('second', MIN(QUERY_START_TIME), MAX(COMPLETED_TIME)) AS WALL_SEC,
+        SUM(CREDITS) AS CREDITS
+    FROM attempts
     GROUP BY RUN_KEY
 )
 SELECT

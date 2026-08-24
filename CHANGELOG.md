@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.273.0 - Bug-hunt round 4: watch-monitor hygiene, graph retry-collapse, AI-KPI source (2026-08-24)
+
+Round 4 hunted new angles (predicate logic, sort/rank, type coercion, metric consistency,
+alert/severity, deep dives) and confirmed 5 bugs — all P2, read-only, no migration. 3
+cluster in the newer watch-monitor code, which never inherited the anomaly hygiene the
+mature Cost surfaces have. Also folded in a zero-risk defensive one-liner from a refuted
+finding. 5-agent adversarial review pending.
+
+- **Watch badge previews the wrong movers** (`workbench.render_watch_badge`) — `head(4)` on a
+  frame sorted only by the ATTENTION bool showed the first-added watched entities, not the
+  most severe; a real spend spike could be dropped below soft health-watches. Rank
+  warn > watch before truncating.
+- **Stale spike re-fires as "moved" daily** (`watch_monitor.watched_status`) — the cost sweep
+  flagged any spike in the 30-day window, so a weeks-old spike kept firing every day. Restrict
+  cost attention to the MOST RECENT complete day (as the Cost decision surfaces do).
+- **Month-end close flagged as an anomaly** (`watch_monitor.watched_status`) — the sweep
+  skipped `suppress_expected_spikes`, so a known month/quarter-end spike flagged the watch
+  while every other surface labeled it "expected". Thread EXPECTED_SPIKE_CALENDAR through.
+- **Graph pipeline retry over-count** (`graph_sql.graph_daily_costs`) — a 5th TASK_HISTORY
+  retry site: a retried-then-succeeded task inflated TASK_RUNS and flagged the healthy run as
+  a run-with-failures. Collapse to the terminal attempt for the counts; keep credits summed
+  over all attempts (each retry really billed).
+- **AI-spend KPI understates on the fallback** (`unit_costs`) — the mart source covers Cortex
+  Functions + Code but the live fallback is Functions-only, so if the mart is unavailable the
+  KPI silently drops Cortex Code spend while claiming "Account-wide". Disclose "Functions only"
+  when the fallback serves it.
+- Defensive (refuted finding): `cost_sql` org-currency breakdown wraps the OTHER residual in
+  `COALESCE(UPPER(RATING_TYPE),'')` so a NULL rating lands in OTHER and the buckets stay
+  additive to TOTAL, regardless of whether NULL-rating rows ever appear.
+
 ## 4.272.0 - Bug-hunt round 3: charts, units, RCA, anomaly-share, state (2026-08-24)
 
 Round 3 hunted new angles (chart encoding, cross-page state/caching, formatting/units,

@@ -135,13 +135,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                      "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
-        kpis.append({"label": f"AI spend ({days}d)",
+        # The mart (_ai_m) covers Cortex Functions + Code; the live fallback
+        # (cortex_model_costs) is Functions-only, so disclose when the fallback served this
+        # KPI rather than silently understating account AI spend by the Cortex Code portion.
+        _ai_full = _ai_m.usable()
+        kpis.append({"label": f"AI spend ({days}d)" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
                      "delta_color": "off",
-                     "help": "Account-wide — the AI usage view carries no company/database grain "
-                             "(unlike the query-cost KPIs beside it); per-user attribution is on "
-                             "Chargeback & AI."})
+                     "help": ("Account-wide — the AI usage view carries no company/database grain "
+                              "(unlike the query-cost KPIs beside it); per-user attribution is on "
+                              "Chargeback & AI." if _ai_full else
+                              "Cortex FUNCTIONS only — the Code+Functions mart (FACT_AI_USAGE_DAILY) "
+                              "was unavailable on this refresh, so Cortex Code spend is excluded from "
+                              "this figure.")})
     if kpis:
         kpi_row(kpis)
 

@@ -24,6 +24,7 @@ from app.logic.anomaly import (
     anomaly_summary,
     complete_days_only,
     flag_anomalies,
+    suppress_expected_spikes,
 )
 from app.logic.formulas import safe_float
 
@@ -34,13 +35,16 @@ _BAD_GRADES = {"DEGRADED", "AT RISK"}
 def watched_status(watchlist: pd.DataFrame | None,
                    wh_daily: pd.DataFrame | None,
                    health: pd.DataFrame | None,
-                   rate: float = 3.68) -> pd.DataFrame:
+                   rate: float = 3.68,
+                   calendar: str = "") -> pd.DataFrame:
     """Per watched entity: does it need attention, and why.
 
     ``watchlist``: USER_WATCHLIST rows (ENTITY_TYPE, ENTITY_KEY, LABEL).
     ``wh_daily``: FACT_WAREHOUSE_DAILY (WAREHOUSE_NAME, DAY, CREDITS_TOTAL) — the
       cost-anomaly input; priced with ``rate``.
     ``health``: warehouse_health output (WAREHOUSE_NAME, GRADE).
+    ``calendar``: EXPECTED_SPIKE_CALENDAR — known month/quarter-end spikes are labeled
+      expected, not flagged (same hygiene as the Cost surfaces).
     Returns ENTITY_TYPE, ENTITY_KEY, LABEL, ATTENTION (bool), STATUS, SEVERITY —
     attention rows first. Empty watchlist -> empty frame."""
     cols = ["ENTITY_TYPE", "ENTITY_KEY", "LABEL", "ATTENTION", "STATUS", "SEVERITY"]
@@ -54,6 +58,18 @@ def watched_status(watchlist: pd.DataFrame | None,
         priced["USD"] = pd.to_numeric(priced["CREDITS_TOTAL"], errors="coerce").fillna(0.0) * safe_float(rate, 3.68)
         flagged = flag_anomalies(priced, "USD", group_col="WAREHOUSE_NAME",
                                  min_value=ANOMALY_MIN_USD, min_active_days=ANOMALY_MIN_ACTIVE_DAYS)
+        # Same anomaly hygiene as the Cost decision surfaces: (1) a known month/quarter-end
+        # spike is 'expected', not flagged; (2) only the last TWO complete days count as CURRENT
+        # attention — else a weeks-old spike still inside the 30d window re-fires as 'moved'
+        # every day (r6-bug5). Restrict to that recent window BEFORE anomaly_summary so a genuine
+        # current spike is never crowded out of its top-10 by stronger HISTORICAL spikes
+        # elsewhere in the account; the 2-day grace survives mart-lag and a day-missed Brief.
+        flagged = suppress_expected_spikes(flagged, calendar)
+        if "DAY" in flagged.columns:
+            _fdays = pd.to_datetime(flagged["DAY"], errors="coerce")
+            _latest = _fdays.max()
+            if pd.notna(_latest):
+                flagged = flagged[_fdays >= (_latest.normalize() - pd.Timedelta(days=1))]
         for h in anomaly_summary(flagged, "WAREHOUSE_NAME", "USD"):
             # anomaly_summary is strongest-first; keep the STRONGEST day per warehouse.
             cost_hits.setdefault(str(h.get("label", "")).upper(), h)
