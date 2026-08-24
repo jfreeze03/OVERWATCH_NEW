@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.279.0 - Chargeback & AI bug-hunt round 3: chargeback / writeback / export (2026-08-24)
+
+A third sweep, targeting the department-chargeback, Action Queue writeback, and statement-export
+surface rounds 1-2 didn't deeply hunt (7 findings, 5 unique). The adversarial fix-review then
+found one of the five fixes was itself wrong and it was reverted — so four ship.
+
+- **A duplicate / case-variant `DEPARTMENT_MAP` row double-counted a warehouse's credits.** The
+  case-insensitive map join fans out 1→N on a warehouse mapped twice (legal under the table's
+  case-sensitive PK, e.g. a hand-seeded lower-case row), inflating the chargeback total and
+  over-billing the finance statements. The join now collapses the map to one row per
+  `UPPER(NAME)` (latest `UPDATED_AT` wins). (`app/data/chargeback_sql.py`)
+- **An AI exception queued from the all-companies view was mis-attributed and could duplicate.**
+  The Action Queue writeback stamped a per-user breach with the view's filter (`'ALL'`) rather
+  than the user's real company, so the same breach re-queued from a company scope inserted a
+  SECOND open row (double-counting its projected spend on the Workbench KPI). Per-user rows now
+  stamp `COMPANY_FOR_USER(user)`; the scope-aggregate row stays under the view's scope.
+  (`app/ui/pages/cost_parts/ai_chargeback.py`)
+- **A statement-zip filename collision silently dropped a department's CSV.** Two department
+  names sanitizing to the same file (`R&D`/`R/D` → `R_D`) overwrote each other on extraction
+  while the summary still listed both. Zip arcnames are now de-duplicated.
+  (`app/ui/pages/cost_parts/ai_chargeback.py`)
+- **The cross-company CoCo leak had a second trigger the round-2 fix missed.** A scoped company
+  whose credit rows fall OUTSIDE the selected window (present within the 365d fetch but cut by
+  the shorter window) emptied the rollup and fell back to the account-wide token population,
+  listing other companies' users. `coco_efficiency` gained a `scoped` flag that refuses the
+  account-wide fallback for a company view; the panel shows an honest note instead.
+  (`app/logic/wave2.py`, `app/ui/pages/cost_parts/ai_chargeback.py`)
+
+Reverted before shipping: a fifth fix armed `coverage_gate=True` on the account-wide Cortex-spend
+KPI. The fix-review showed the AI-metering series is naturally sparse (no row on idle days), so
+the dense-series coverage contract would reject a good mart on the common case and degrade to the
+90d-clamped live fallback — undercounting long windows. Left unarmed (with a guard comment).
+
 ## 4.278.0 - Chargeback & AI bug-hunt round 2: small-cohort / young-data edges (2026-08-24)
 
 A second adversarial sweep of the same section (7 findings confirmed, 0 refuted), then an

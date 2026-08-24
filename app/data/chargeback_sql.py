@@ -15,9 +15,18 @@ from app.data.common import and_where, bounded_days
 _DEPT = (
     "COALESCE(D.DEPARTMENT, 'Unmapped')"
 )
+# A LEFT JOIN straight to DEPARTMENT_MAP fans out — double-counting a warehouse's credits
+# across departments — if the map holds >1 WAREHOUSE row for one name. The app MERGE stores
+# NAME uppercased and dedups case-sensitively, but a hand-seeded lower/mixed-case or duplicate
+# row is legal under the case-SENSITIVE PK yet collides on this case-INSENSITIVE join. Collapse
+# the map to ONE row per UPPER(NAME) (latest UPDATED_AT wins) so this money join can't fan out.
 _MAP_JOIN = (
-    f"LEFT JOIN {core_object('DEPARTMENT_MAP')} D "
-    "ON D.MAP_TYPE = 'WAREHOUSE' AND UPPER(D.NAME) = UPPER(M.WAREHOUSE_NAME)"
+    f"LEFT JOIN (\n"
+    f"    SELECT NAME, DEPARTMENT, OWNER FROM {core_object('DEPARTMENT_MAP')}\n"
+    f"    WHERE MAP_TYPE = 'WAREHOUSE'\n"
+    f"    QUALIFY ROW_NUMBER() OVER "
+    f"(PARTITION BY UPPER(NAME) ORDER BY UPDATED_AT DESC NULLS LAST, NAME) = 1\n"
+    f") D ON UPPER(D.NAME) = UPPER(M.WAREHOUSE_NAME)"
 )
 
 

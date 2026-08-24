@@ -196,3 +196,14 @@ def test_zero_credit_users_do_not_drag_the_peer_baseline_to_zero():
     eff = coco_efficiency(econ, daily, cap_credits=15.0, window_days=30, as_of=today).set_index("USER_NAME")
     assert eff.loc["HEAVY", "FLAG"] == "🚩 Review"
     assert eff.loc["HEAVY", "PEER_MULT"] >= 2.0
+
+
+def test_scoped_view_does_not_fall_back_to_account_wide_token_population():
+    # A company view whose credit rows are empty (daily scan didn't resolve, or all rows fall
+    # outside the window) must NOT fall back to the account-wide token grain -- that would list
+    # other companies' users under the company. scoped=True returns empty; the ALL view (scoped=
+    # False) keeps its correct account-wide fallback.
+    econ = token_economics(pd.DataFrame(_token_rows("OTHERCO_USER", 100, 100, 100, 100)))
+    assert coco_efficiency(econ, None, cap_credits=15.0, window_days=30, scoped=True).empty
+    unscoped = coco_efficiency(econ, None, cap_credits=15.0, window_days=30, scoped=False)
+    assert list(unscoped["USER_NAME"]) == ["OTHERCO_USER"]

@@ -148,7 +148,7 @@ _COACH_FLAG = "🚩 Review"  # flags a usage pattern to review — lights up in 
 
 def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | None,
                     *, cap_credits: float = 15.0, window_days: int = 30,
-                    as_of: date | None = None) -> pd.DataFrame:
+                    as_of: date | None = None, scoped: bool = False) -> pd.DataFrame:
     """Per-user CoCo efficiency + a usage-review flag: distinguishes targeted, supplemental usage
     from a high-intensity pattern (heavy sustained spend, extended autonomous sessions, and
     consistently over the daily allowance).
@@ -161,9 +161,13 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     The population is the credit set (``user_daily``, which the caller scopes to the company) when
     present — so a company view isn't padded by other companies' account-wide token rows, and a
     credit-only user with no token grain still surfaces; it falls back to the account-wide token
-    grain (no credit signals) when the daily scan is unavailable. Peer multiples are measured over
-    the DISPLAYED set and compared UNROUNDED. The 🚩 flag = consistently over cap AND (heavy vs
-    peers OR extended sessions). Flagged rows sort first; empty in -> empty out (never raises)."""
+    grain (no credit signals) when the daily scan is unavailable. ``scoped=True`` (a specific
+    company view) SUPPRESSES that account-wide fallback — the token grain has no company clause,
+    so returning it under a company filter would leak other companies' users; with no in-window
+    company credits the result is empty (the caller then shows an honest note) rather than a leak.
+    Peer multiples are measured over the DISPLAYED set and compared UNROUNDED. The 🚩 flag =
+    consistently over cap AND (heavy vs peers OR extended sessions). Flagged rows sort first;
+    empty in -> empty out (never raises)."""
     cols = ["USER_NAME", "FLAG", "TOTAL_CREDITS", "PEER_MULT", "AVG_DAILY_CR", "ACTIVE_DAYS",
             "DAYS_OVER_CAP", "CR_PER_REQ", "SESSION_MULT", "CACHE_WRITE_PCT", "READ_AMP",
             "CACHE_HIT_PCT", "TOTAL", "REASON"]
@@ -222,7 +226,11 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     # --- population: the company-scoped credit set when available, else the account token grain ---
     if not roll.empty:
         out = roll.merge(cache, on="USER_NAME", how="left")
-    elif not cache.empty:
+    elif not cache.empty and not scoped:
+        # Account-wide token fallback (no credit signals) — only when NOT company-scoped. In a
+        # scoped view the token grain has no company clause, so falling back here would list other
+        # companies' users under this company (also fires when the company's credits fall OUTSIDE
+        # the selected window, emptying roll after the cut); return empty and let the caller note it.
         out = cache.copy()
         for c in ("TOTAL_CREDITS", "AVG_DAILY_CR", "CR_PER_REQ", "DAYS_OVER_CAP", "ACTIVE_DAYS"):
             out[c] = 0.0

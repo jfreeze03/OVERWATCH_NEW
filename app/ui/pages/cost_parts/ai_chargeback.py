@@ -57,6 +57,11 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
     # v4.50: the storage panels moved to Spend & Attribution — storage is
     # neither chargeback nor AI, and the section label was hiding it.
     st.markdown("**Cortex / AI spend (account-wide)**")
+    # NB: do NOT arm coverage_gate here. The AI-service metering series is naturally SPARSE (no
+    # DAY row on idle days, and AI adoption may post-date a long window), so coverage_contract's
+    # dense-series reach-back/interior-gap rules would reject a perfectly good mart on the common
+    # case and degrade to the 90d-clamped live fallback — undercounting long windows. served_days
+    # already labels the live-fallback path honestly; the mart is trusted for its available history.
     res = run_mart_first(
         mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
         page=_PAGE, key=f"cortex_{days}",
@@ -255,22 +260,29 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         with st.expander("Queue top exceptions to the Action Queue"):
             statements = []
             for _, r in exceptions.head(10).iterrows():
-                title = f"Cortex {r['SIGNAL']}: {r['USER_NAME']} ({r['SOURCE']})"
+                user = str(r['USER_NAME'])
+                title = f"Cortex {r['SIGNAL']}: {user} ({r['SOURCE']})"
                 detail = (f"{int(r['TOTAL_REQUESTS'])} requests, projected 30d "
                           f"{format_usd(r['PROJECTED_30D_USD'])}, cr/request {r['CREDITS_PER_REQUEST']:.4f}.")
-                # codex#39: idempotent insert. Keyed on COMPANY + TITLE (TITLE already encodes
-                # signal+user+source) + this month + open status, so a double-click or a
-                # partial-failure retry is a no-op instead of duplicating the action row.
-                # DS #7: ESTIMATED_USD here is PROJECTED_30D_USD -- a 30-day (monthly-
-                # equivalent) figure -- so stamp PERIOD='MONTHLY'. Without the label it
-                # was summed on the Workbench KPI beside one-time operator estimates.
+                # Attribute a PER-USER breach to the user's REAL company (COMPANY_FOR_USER), not the
+                # view's filter: in the ALL view `company` is 'ALL', which would both mis-file a
+                # Trexis user's action under 'ALL' AND -- because the dedup keys on COMPANY -- let
+                # the SAME breach queue a SECOND time from the Trexis scope (double-counting its
+                # ESTIMATED_USD on the Workbench KPI). The scope-aggregate '(all users)' row IS the
+                # per-scope total, so it stays under the view's company (distinct per scope).
+                # codex#39: idempotent insert keyed on COMPANY + TITLE (TITLE encodes signal+user+
+                # source) + this month + open status, so a double-click/retry is a no-op.
+                # DS #7: ESTIMATED_USD here is PROJECTED_30D_USD -- a 30-day (monthly-equivalent)
+                # figure -- so stamp PERIOD='MONTHLY' (else it summed beside one-time estimates).
+                company_expr = (sql_literal(company) if user == "(all users)"
+                                else f"{companies.COMPANY_FOR_USER_FN}({sql_literal(user)})")
                 statements.append(
                     f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD, PERIOD)\n"
-                    f"SELECT {sql_literal(company)}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
+                    f"SELECT {company_expr}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
                     f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
                     f"{sql_number(r['PROJECTED_30D_USD'])}, 'MONTHLY'\n"
                     f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
-                    f"WHERE q.COMPANY = {sql_literal(company)} AND q.TITLE = {sql_literal(title)} "
+                    f"WHERE q.COMPANY = {company_expr} AND q.TITLE = {sql_literal(title)} "
                     f"AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS') "
                     f"AND q.CREATED_AT >= DATE_TRUNC('month', CURRENT_DATE()));"
                 )
@@ -324,18 +336,26 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
                  source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
                  probe=True, max_rows=200_000)
     # econ (token grain) is ACCOUNT-WIDE — cortex_code_token_types has no company clause — so the
-    # panel only becomes company-scoped through the (scoped) daily credit set. In a COMPANY view
-    # where that daily scan didn't resolve, coco_efficiency would fall back to the account-wide
-    # token population and list/count OTHER companies' users under this company. Hide it instead of
-    # misattributing (the ALL view has no such clause, so its account-wide fallback stays correct).
-    if companies.user_clause(company, "USER_NAME") and not ud_res.usable():
-        st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "
-                   "which didn't resolve this run. The per-user token grain is account-wide and "
-                   "can't be attributed to this company without it, so it's hidden here.")
+    # panel only becomes company-scoped through the (scoped) daily credit set. scoped=True makes
+    # coco_efficiency REFUSE the account-wide fallback for a company view, so it never lists other
+    # companies' users — whether the daily scan didn't resolve OR the company's credits fall
+    # outside the selected window (emptying the rollup after the cut). The ALL view (no clause)
+    # keeps its correct account-wide fallback.
+    _scoped = bool(companies.user_clause(company, "USER_NAME"))
+    eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
+                          cap_credits=cap_credits, window_days=days, as_of=account_today(),
+                          scoped=_scoped)
+    if _scoped and eff.empty:
+        if not ud_res.usable():
+            st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "
+                       "which didn't resolve this run. The per-user token grain is account-wide and "
+                       "can't be attributed to this company without it, so it's hidden here.")
+        else:
+            st.caption(f"No Cortex Code credit usage for this company in the last {days} days — "
+                       "widen the Window if they used CoCo earlier. Per-user token grain is "
+                       "account-wide, so it isn't attributed to a single company here.")
         result_caption(te_res)
         return
-    eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
-                          cap_credits=cap_credits, window_days=days, as_of=account_today())
     _flags = coco_coaching_count(eff)
     # Scope the cache KPIs/caption to the SHOWN (company) users, so a company view doesn't blend
     # other companies' account-wide token traffic into 'Fleet cache-hit' or the low-cache note.
@@ -442,8 +462,19 @@ def _statement_export(company: str, rate: float) -> None:
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
                 summary = frame.groupby(["DEPARTMENT", "DEPT_OWNER"], as_index=False)["USD"].sum()
                 bundle.writestr("00_summary.csv", summary.to_csv(index=False))
+                # Two department names can sanitize to the SAME filename ('R&D'/'R/D' -> 'R_D',
+                # or names sharing their first 60 chars), and a duplicate zip arcname silently
+                # overwrites the earlier member on extraction — one department's statement would
+                # vanish while the summary still lists it. De-dup arcnames (reserving the fixed
+                # members) so every department gets its own file.
+                _used = {"00_summary", "manifest"}
                 for dept_name, block in frame.groupby("DEPARTMENT"):
-                    safe_name = "".join(ch if ch.isalnum() else "_" for ch in str(dept_name))[:60]
+                    base = "".join(ch if ch.isalnum() else "_" for ch in str(dept_name))[:60] or "dept"
+                    safe_name, _n = base, 2
+                    while safe_name.lower() in _used:
+                        safe_name = f"{base[:56]}_{_n}"
+                        _n += 1
+                    _used.add(safe_name.lower())
                     bundle.writestr(f"{safe_name}.csv", block.to_csv(index=False))
                 bundle.writestr(
                     "MANIFEST.txt",

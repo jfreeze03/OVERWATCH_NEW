@@ -26,6 +26,18 @@ def test_department_window_is_exact_metering_with_unmapped_bucket():
     assert "WH!_ALFA!_%" not in sql
 
 
+def test_department_map_join_is_deduplicated_against_fanout():
+    # A duplicate / case-variant DEPARTMENT_MAP row must not fan out this money join and
+    # double-count a warehouse's credits across departments — the map side is collapsed to one
+    # row per UPPER(NAME) before the join, on BOTH the window and the monthly-statement paths.
+    win = chargeback_sql.department_window_credits(30, "ALL")
+    mon = chargeback_sql.department_month_credits("2026-06", "ALL")
+    for sql in (win, mon):
+        assert "QUALIFY" in sql
+        assert "ROW_NUMBER() OVER (PARTITION BY UPPER(NAME)" in sql
+        assert "COALESCE(D.DEPARTMENT, 'Unmapped')" in sql   # join still resolves DEPARTMENT
+
+
 def test_role_share_normalizes_per_warehouse():
     sql = chargeback_sql.role_share_within_warehouse(7, "Trexis")
     assert "RATIO_TO_REPORT" in sql and "PARTITION BY WAREHOUSE_NAME" in sql
