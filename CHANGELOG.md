@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.276.0 - AI chargeback: Total Requests as a whole number (2026-08-24)
+
+- `Total Requests` rendered as a raw float (`233.000000`) in both the AI user-attribution
+  detail table and the Exceptions table — request counts are whole numbers, so both now
+  format the column as an integer (`%d`).
+
 ## 4.275.0 - CoCo efficiency review: neutral wording + tie to the Window filter (2026-08-24)
 
 Refines the v4.274.0 CoCo efficiency panel from owner feedback:

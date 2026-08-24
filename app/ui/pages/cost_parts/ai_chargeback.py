@@ -205,6 +205,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                    "TOTAL_CREDITS", "TOTAL_TOKENS", "CREDITS_PER_REQUEST", "SPEND_USD",
                    "PROJECTED_30D_USD", "FIRST_USAGE", "LAST_USAGE"] if c in enriched.columns]],
         column_config={
+            "TOTAL_REQUESTS": st.column_config.NumberColumn("Total Requests", format="%d"),
             "SPEND_USD": st.column_config.NumberColumn("Spend $", format="$%.2f"),
             "PROJECTED_30D_USD": st.column_config.NumberColumn("Proj. 30d $", format="$%.2f"),
             "CREDITS_PER_REQUEST": st.column_config.NumberColumn("Cr/request", format="%.4f"),
@@ -240,6 +241,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         styled_table(
             exceptions[["SEVERITY", "SIGNAL", "USER_NAME", "SOURCE", "TOTAL_REQUESTS",
                          "CREDITS_PER_REQUEST", "PROJECTED_30D_USD"]],
+            column_config={
+                "TOTAL_REQUESTS": st.column_config.NumberColumn("Total Requests", format="%d"),
+            },
         )
         st.caption(md_dollars(_rules))
         with st.expander("Queue top exceptions to the Action Queue"):
