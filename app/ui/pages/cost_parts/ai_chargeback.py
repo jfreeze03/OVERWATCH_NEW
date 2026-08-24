@@ -275,19 +275,26 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
-    _token_economics_panel()
+    _coco_cap = safe_float(settings.get("COCO_DAILY_CAP_CREDITS"), 15.0)
+    _token_economics_panel(company, _coco_cap if _coco_cap > 0 else 15.0)
 
 
-def _token_economics_panel() -> None:
-    """Prompt-cache economics (repo review wave 2: TOKENS_GRANULAR) — the lever
-    raw token totals can't show. Optional column on newer view versions: the
-    toggle keeps the flatten off the default paint, and a schema miss degrades
-    to an honest not-available note."""
-    from app.logic.wave2 import fleet_cache_hit_pct, token_economics
+def _token_economics_panel(company: str, cap_credits: float) -> None:
+    """CoCo efficiency + coaching flag (repo review wave 2: TOKENS_GRANULAR). Cache-hit alone
+    can't separate a heavy-but-targeted user from one letting CoCo do the work, so this merges
+    the token grain with per-user daily credits into peer-relative signals + a 🚩 Coach flag.
+    Opt-in toggle; a schema/telemetry miss degrades to an honest not-available note."""
+    from app.logic.wave2 import (
+        coco_coaching_count,
+        coco_efficiency,
+        fleet_cache_hit_pct,
+        token_economics,
+    )
 
-    if not st.toggle("Load token economics (cache efficiency)", key="cortex_tok_econ",
-                     help="Flattens TOKENS_GRANULAR (input / output / cache-read / "
-                          "cache-write) per user — on demand; needs the newer view shape."):
+    if not st.toggle("Load CoCo efficiency & coaching flags", key="cortex_tok_econ",
+                     help="Flattens TOKENS_GRANULAR (input / output / cache-read / cache-write) "
+                          "per user and merges daily credits into peer-relative efficiency "
+                          "signals — on demand; needs the newer view shape."):
         return
     te_res = run(cortex_sql.cortex_code_token_types(30), page=_PAGE, key="cortex_token_types",
                  tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
@@ -300,28 +307,72 @@ def _token_economics_panel() -> None:
     if econ.empty:
         st.info("No token-type rows in the last 30 days.")
         return
-    _fleet = fleet_cache_hit_pct(econ)
+    # Per-user daily credits drive the credit / session / over-cap signals. Same days-independent
+    # cache key as _ai_users_tab's live leg, so this reuses that fetch when it ran.
+    ud_res = run(cortex_sql.cortex_code_user_daily(company), page=_PAGE,
+                 key=f"cortex_user_daily_{company}", tier="metadata",
+                 source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
+                 probe=True, max_rows=200_000)
+    eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None, cap_credits=cap_credits)
+    _flags = coco_coaching_count(eff)
+    # Scope the cache KPIs/caption to the SHOWN (company) users, so a company view doesn't blend
+    # other companies' account-wide token traffic into 'Fleet cache-hit' or the low-cache note.
+    _shown = set(eff["USER_NAME"].astype(str)) if not eff.empty else set()
+    _econ_shown = econ[econ["USER_NAME"].astype(str).isin(_shown)] if _shown else econ
+    _fleet = fleet_cache_hit_pct(_econ_shown)
+    _cap = round(cap_credits)
     kpi_row([
+        {"label": "Coaching candidates", "value": f"{_flags:,}",
+         "delta_color": "inverse" if _flags else "off",
+         "help": f"Users chronically over the {_cap} cr/day base allowance AND either heavy vs "
+                 "peers or running long autonomous sessions — the 'let CoCo do the work' profile, "
+                 "not targeted use."},
         {"label": "Fleet cache-hit", "value": f"{_fleet:.1f}%",
-         "delta_color": "normal" if _fleet >= 50 else "off",
-         "help": "cache_read / (cache_read + input), token-weighted across users — the share "
-                 "of prompt context served from cache instead of re-sent (cached reads bill "
-                 "far cheaper than fresh input)."},
-        {"label": "Users measured", "value": f"{len(econ):,}"},
+         "help": "cache_read / (cache_read + input). See the caption — where it is high and "
+                 "uniform, caching is not the lever; the coaching flag is."},
+        {"label": "Users measured", "value": f"{len(eff):,}"},
     ])
-    styled_table(with_user_names(econ, _PAGE), height=300, column_config={
-        # Token COUNTS are whole tokens — show them as integers, not the raw-float
-        # "2044782.000000" Streamlit paints a float64 column with by default.
-        "INPUT": st.column_config.NumberColumn("Input", format="%d"),
-        "OUTPUT": st.column_config.NumberColumn("Output", format="%d"),
-        "CACHE_READ": st.column_config.NumberColumn("Cache Read", format="%d"),
-        "CACHE_WRITE": st.column_config.NumberColumn("Cache Write", format="%d"),
-        "TOTAL": st.column_config.NumberColumn("Total", format="%d"),
+    if not ud_res.usable():
+        st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "
+                   "which didn't resolve this run — showing cache-grain behaviour only.")
+    _cols = ["USER_NAME", "FLAG", "TOTAL_CREDITS", "PEER_MULT", "AVG_DAILY_CR", "DAYS_OVER_CAP",
+             "ACTIVE_DAYS", "CR_PER_REQ", "CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "REASON"]
+    styled_table(with_user_names(eff[_cols], _PAGE), height=340, column_config={
+        "FLAG": st.column_config.TextColumn("Flag"),
+        "TOTAL_CREDITS": st.column_config.NumberColumn("Credits (30d)", format="%.1f"),
+        "PEER_MULT": st.column_config.NumberColumn("Peer x", format="%.1f"),
+        "AVG_DAILY_CR": st.column_config.NumberColumn("Avg cr/active day", format="%.1f"),
+        "DAYS_OVER_CAP": st.column_config.NumberColumn(f"Days > {_cap}cr", format="%d"),
+        "ACTIVE_DAYS": st.column_config.NumberColumn("Active days", format="%d"),
+        "CR_PER_REQ": st.column_config.NumberColumn("Cr/request", format="%.3f"),
+        "CACHE_WRITE_PCT": st.column_config.NumberColumn("Cache-write %", format="%.1f%%"),
+        "READ_AMP": st.column_config.NumberColumn("Read-amp", format="%.0f"),
         "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
+        "REASON": st.column_config.TextColumn("Why flagged"),
     })
-    st.caption("Low cache-hit heavy users are the efficiency lever: repeated context re-sent "
-               "as fresh input tokens that caching would serve at a fraction of the price. "
-               "30d, account-wide token grain.")
+    _low_cache = (int((_econ_shown["CACHE_HIT_PCT"] < 80).sum())
+                  if "CACHE_HIT_PCT" in _econ_shown.columns else 0)
+    _cache_note = (
+        "Cache-hit % is high across every user here, so caching is NOT the lever — session weight, "
+        "cache-write churn (context re-written at full price), and days-over-cap are."
+        if _low_cache == 0 else
+        f"{_low_cache} user(s) have low cache-hit (<80%) — for them caching IS a real lever (context "
+        "re-sent as fresh input); the flag adds the volume / session view for the rest.")
+    st.caption(
+        f"🚩 Coach = chronically over the {_cap} cr/day base allowance AND a crutch behaviour — heavy "
+        f"sustained spend (peer x) or long autonomous sessions (cr/request, read-amp) — the 'let CoCo "
+        f"do the work' profile, not targeted use. {_cache_note} Peer-relative, 30d — a defensible "
+        f"basis to open a coaching conversation, but verify against what the person shipped before "
+        f"acting.")
+    with st.expander("Raw token grain (input / output / cache tokens)", expanded=False):
+        styled_table(with_user_names(econ, _PAGE), height=280, column_config={
+            "INPUT": st.column_config.NumberColumn("Input", format="%d"),
+            "OUTPUT": st.column_config.NumberColumn("Output", format="%d"),
+            "CACHE_READ": st.column_config.NumberColumn("Cache Read", format="%d"),
+            "CACHE_WRITE": st.column_config.NumberColumn("Cache Write", format="%d"),
+            "TOTAL": st.column_config.NumberColumn("Total", format="%d"),
+            "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
+        })
     result_caption(te_res)
 
 

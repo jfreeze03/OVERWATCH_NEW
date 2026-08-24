@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.274.0 - CoCo efficiency & coaching flags (2026-08-24)
+
+Cost & Contract ▸ Chargeback & AI ▸ the token-economics panel now surfaces *which* Cortex
+Code users are leaning on CoCo as a crutch rather than a supplement — the signal an owner
+needs to justify coaching a heavy user instead of just raising their 15-credit/day cap.
+
+- **Reframed the panel.** Cache-hit % is near-uniform (>97%) across the fleet, so it isn't the
+  efficiency lever — the old "low cache-hit is the lever" caption pointed at a dead end. The
+  panel now leads with a peer-relative **CoCo efficiency** table and a **🚩 Coach flag**.
+- **New logic** `wave2.coco_efficiency()` merges the TOKENS_GRANULAR cache grain with per-user
+  daily credits (`cortex_code_user_daily`) into: **avg cr/day**, **peer ×** (vs fleet-median
+  daily), **cr/request** & **session ×** (long autonomous sessions), **days over the base
+  allowance**, **cache-write %** (context churn at full price), and **read-amplification**
+  (context re-read per token of new conversation). The 🚩 flag trips when a user hits ≥2 of the
+  peer-relative crutch signals — heavy consumer, long sessions, or chronically over cap.
+- **Configurable cap.** Days-over-cap reads `COCO_DAILY_CAP_CREDITS` (default 15), so the users
+  granted the 30/day exception light up as chronically over the *standard* allowance.
+- Peer-relative by design so one heavy-but-productive user can't be flagged in isolation, and
+  the panel says plainly to verify against shipped work before acting. The raw token grid moves
+  under an expander. Degrades honestly when the daily scan or TOKENS_GRANULAR isn't available.
+
 ## 4.273.0 - Bug-hunt round 4: watch-monitor hygiene, graph retry-collapse, AI-KPI source (2026-08-24)
 
 Round 4 hunted new angles (predicate logic, sort/rank, type coercion, metric consistency,
