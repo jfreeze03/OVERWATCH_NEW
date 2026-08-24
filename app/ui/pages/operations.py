@@ -1798,7 +1798,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
             "CHANGE_SEEN_AT") if c in df.columns]],
             key="whchg_sel", height=260)
         result_caption(res)
-        row = df.iloc[int(sel)] if sel is not None else None
+        row = df.iloc[int(sel)] if sel is not None and 0 <= int(sel) < len(df) else None
         if row is None:
             st.caption("Select a warehouse change to inspect its before/after evidence.")
         else:

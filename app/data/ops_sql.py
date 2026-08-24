@@ -112,6 +112,25 @@ def task_runs(days: int, company: str = "ALL", database: str = "", schema_contai
         contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
+WITH runs AS (
+    SELECT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME,
+        QUERY_START_TIME,
+        COMPLETED_TIME,
+        STATE,
+        ERROR_MESSAGE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+    -- Auto-retries emit multiple rows sharing one SCHEDULED_TIME; collapse each
+    -- scheduled run to its TERMINAL attempt (latest COMPLETED_TIME) so RUNS counts
+    -- scheduled runs not attempts, and a FAILED attempt that later SUCCEEDED on retry
+    -- is not counted as a failure. Mirrors task_recent_states.
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
 SELECT
     DATABASE_NAME,
     SCHEMA_NAME,
@@ -122,8 +141,7 @@ SELECT
     MAX(QUERY_START_TIME) AS LAST_RUN,
     MAX_BY(STATE, QUERY_START_TIME) AS LAST_STATE,
     MAX_BY(LEFT(COALESCE(ERROR_MESSAGE, ''), 200), QUERY_START_TIME) AS LAST_ERROR
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE {where}
+FROM runs
 GROUP BY 1, 2, 3
 ORDER BY FAILED DESC, LAST_RUN DESC
 LIMIT 200

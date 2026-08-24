@@ -425,7 +425,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             sel_g = selectable_table(
                 rolled[["SEVERITY", "RULE_ID", "EVENTS", "NEWEST", "SAMPLE"]],
                 key="alert_rollup_sel", height=280)
-            if sel_g is not None:
+            if sel_g is not None and 0 <= int(sel_g) < len(rolled):
                 rid_pick = str(rolled.iloc[int(sel_g)]["RULE_ID"])
                 st.markdown(f"**Events for `{rid_pick}`**")
                 styled_table(edf[edf["RULE_ID"].astype(str) == rid_pick]
@@ -448,7 +448,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             ]
             sel = matches[0] if matches else None
         result_caption(events)
-        if sel is None:
+        if sel is None or not (0 <= int(sel) < len(edf)):
             st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
                        "one-click investigate, ack/resolve.")
         else:

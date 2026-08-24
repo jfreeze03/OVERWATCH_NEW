@@ -958,7 +958,7 @@ def render() -> None:
                 credits_df = cdf
             charts.operational_replay(tdf, credits=credits_df)
             sel_tl = selectable_table(tdf, key="cr_timeline_sel", height=240)
-            if sel_tl is not None:
+            if sel_tl is not None and 0 <= sel_tl < len(tdf):
                 anchor = tdf.iloc[sel_tl]
                 try:
                     at = pd.to_datetime(anchor["AT"])

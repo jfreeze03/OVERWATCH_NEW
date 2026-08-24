@@ -46,6 +46,22 @@ def test_prompts_cap_rows_with_marker():
     assert "(+5 more rows not shown)" in prompt
 
 
+def test_assemble_never_exceeds_cap_across_budgets():
+    # Regression: the evidence-budget path must never emit a prompt over MAX_PROMPT_CHARS,
+    # including when the remaining budget is smaller than the truncation marker (a small
+    # budget must NOT still append the ~30-char marker and overshoot the hard cap).
+    from app.logic.ai_prompts import _assemble
+
+    evidence = "E" * (MAX_PROMPT_CHARS * 2)
+    # Sweep context length so the budget crosses large-positive -> below-marker -> <= 0.
+    for clen in range(MAX_PROMPT_CHARS - 700, MAX_PROMPT_CHARS + 50):
+        prompt = _assemble("c" * clen, evidence, "")
+        assert len(prompt) <= MAX_PROMPT_CHARS, clen
+    # And the instruction-first ordering must survive truncation (TASK before EVIDENCE).
+    grounded = _assemble("scope", evidence, "do the thing")
+    assert grounded.index("TASK: do the thing") < grounded.index("EVIDENCE ROWS:")
+
+
 def test_empty_evidence_is_explicit():
     prompt = task_failure_prompt(pd.DataFrame(), "ALFA")
     assert "(no rows)" in prompt

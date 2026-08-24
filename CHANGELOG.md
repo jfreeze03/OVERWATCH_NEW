@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.270.0 - Bug-hunt fixes: sticky-selection crashes, task-retry over-count, NaT/prompt/selectbox (2026-08-24)
+
+An adversarial bug-hunt (7 finders → independent verification, ~45% of raw findings
+refuted) surfaced 10 confirmed runtime bugs. All fixed — read-only, no migration:
+
+- **Sticky-selection IndexError guards (×4)** — drill sites did `df.iloc[sel]` on a
+  positional selection Streamlit re-emits after the frame shrinks (row resolved, scope
+  narrowed, window toggled), red-tracebacking the page. Added the `0 <= sel < len(frame)`
+  guard already used elsewhere: Control Room incident timeline, Alerts open-events drawer,
+  Alerts rule rollup, Operations warehouse-change registry.
+- **TASK_HISTORY auto-retry over-count (×3)** — task builders counted each retry attempt as
+  a separate run (auto-retries share one SCHEDULED_TIME), inflating RUNS/FAILED and making a
+  healthy deploy look like it broke tasks. Collapse each scheduled run to its terminal
+  attempt (the `QUALIFY ROW_NUMBER()` pattern already in `task_recent_states`):
+  `ops_sql.task_runs`, `insights_sql.release_task_compare`,
+  `change_impact_sql.object_run_history`.
+- **Contract-runway "NaT"** — `formulas._coerce_date` returned `pd.NaT` (a datetime subclass)
+  for a NULL date, so the countdown bar rendered "exhausts NaT · decide by NaT". Guard
+  NaT/NaN before the isinstance branch.
+- **Effective-access dead selection** — clicking a user row couldn't move the access-path
+  graph because the selectbox read its own widget key and ignored the recomputed `index=`.
+  Drive the selectbox by its own key.
+- **AI prompt grounding** — `ai_prompts._assemble` put the TASK after the evidence then
+  truncated at 6000 chars, so a wide evidence set dropped the task entirely. Order the
+  instruction blocks first and budget the evidence tail.
+
 ## 4.269.0 - Drillable sweep, MODERATE wave: scope-the-detail-to-my-selection (2026-08-20)
 
 The MODERATE tier of the UX gap sweep — 8 drills that fetch per-entity detail on a row

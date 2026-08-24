@@ -73,6 +73,12 @@ def safe_float(value: object, default: float = 0.0) -> float:
 
 def _coerce_date(value: object) -> date | None:
     """Best-effort date from a mart cell (date, datetime/Timestamp, or ISO string)."""
+    # pd.NaT is a datetime SUBCLASS (isinstance(pd.NaT, datetime) is True), so a NULL
+    # date cell would slip past the isinstance branch below and return pd.NaT.date()==NaT
+    # instead of None — surfacing the literal 'NaT' on the contract-runway bar. Guard it
+    # first, mirroring rca._to_dt / anomaly_explain._to_date.
+    if value is None or pd.isna(value):
+        return None
     if isinstance(value, datetime):   # pandas Timestamp is a datetime subclass
         return value.date()
     if isinstance(value, date):

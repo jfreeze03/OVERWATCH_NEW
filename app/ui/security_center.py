@@ -367,18 +367,25 @@ def render_effective_access(company: str) -> None:
     selection = selectable_table(
         summary, key="sec_effective_users", height=260, sort_label="escalation risk"
     )
-    if selection is not None:
-        try:
-            chosen = str(summary.iloc[int(selection)]["USER_NAME"])
-            st.session_state["sec_effective_user"] = chosen
-        except (IndexError, TypeError, ValueError):
-            pass
     users = summary["USER_NAME"].astype(str).tolist()
     if not users:
         return
-    preferred = str(st.session_state.get("sec_effective_user") or users[0])
-    index = users.index(preferred) if preferred in users else 0
-    user = st.selectbox("Access path for", users, index=index, key="sec_effective_user_pick")
+    if selection is not None:
+        try:
+            chosen = str(summary.iloc[int(selection)]["USER_NAME"])
+            # Drive the selectbox by ITS OWN key: a keyed widget reads session_state[key]
+            # and ignores index= after its first render, so writing the widget key is the
+            # only way a table-row click can move the selectbox (and the graph/detail it
+            # feeds). Writing a separate key left the row-click a dead affordance.
+            if chosen in users:
+                st.session_state["sec_effective_user_pick"] = chosen
+        except (IndexError, TypeError, ValueError):
+            pass
+    # Seed the box on the highest-risk user before it first renders, and reset a stale
+    # selection when the scope changes and the prior user drops out of the list.
+    if st.session_state.get("sec_effective_user_pick") not in users:
+        st.session_state["sec_effective_user_pick"] = users[0]
+    user = st.selectbox("Access path for", users, key="sec_effective_user_pick")
     one = frame[frame["USER_NAME"].astype(str) == user].head(80)
     dot = ["digraph access {", "rankdir=LR;", 'node [shape=box, style="rounded"];']
     dot.append(f'"{_dot_text(user)}" [shape=ellipse];')

@@ -255,6 +255,23 @@ def release_task_compare(release_date: str, window_days: int, company: str = "AL
         companies.database_clause(company, "DATABASE_NAME"),
     )
     return f"""
+WITH runs AS (
+    SELECT
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        NAME,
+        QUERY_START_TIME,
+        COMPLETED_TIME,
+        STATE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+    -- Collapse auto-retry attempts (they share one SCHEDULED_TIME) to the terminal
+    -- attempt so before/after counts reflect scheduled RUNS, not attempts — otherwise a
+    -- retried task inflates RUNS/FAILED and a healthy deploy looks like it broke tasks.
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
 SELECT
     DATABASE_NAME,
     SCHEMA_NAME,
@@ -263,8 +280,7 @@ SELECT
     COUNT(*) AS RUNS,
     SUM(IFF(STATE = 'FAILED', 1, 0)) AS FAILED,
     AVG(DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME)) AS AVG_SEC
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE {where}
+FROM runs
 GROUP BY 1, 2, 3, 4
 ORDER BY DATABASE_NAME, SCHEMA_NAME, TASK_NAME, PERIOD
 LIMIT 1000

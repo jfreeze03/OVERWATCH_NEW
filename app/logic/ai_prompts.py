@@ -43,13 +43,28 @@ def _serialize_rows(df: pd.DataFrame, columns: list[str], max_rows: int = MAX_RO
 
 
 def _assemble(context: str, evidence: str, question: str) -> str:
-    prompt = (
+    # The instruction blocks (system rules, context, TASK) must ALWAYS reach the model;
+    # only the evidence may be trimmed. Order the fixed blocks first and give the evidence
+    # the remaining char budget, so a wide evidence set can never push the TASK past the
+    # MAX_PROMPT_CHARS cut (which would leave Cortex with evidence and no instructions —
+    # an ungrounded answer). Instruction-first also matches incident_narrative_prompt.
+    head = (
         f"{_SYSTEM_RULES}\n\n"
         f"CONTEXT: {context}\n\n"
-        f"EVIDENCE ROWS:\n{evidence}\n\n"
-        f"TASK: {question}"
+        f"TASK: {question}\n\n"
+        "EVIDENCE ROWS:\n"
     )
-    return prompt[:MAX_PROMPT_CHARS]
+    budget = MAX_PROMPT_CHARS - len(head)
+    if budget <= 0:
+        return head[:MAX_PROMPT_CHARS]
+    if len(evidence) > budget:
+        marker = "\n- (evidence truncated to fit)"
+        # Only append the marker when it actually fits in the budget; otherwise a small
+        # budget (< marker length) would push the result past the cap. Belt-and-suspenders
+        # final slice keeps the MAX_PROMPT_CHARS contract absolute.
+        evidence = (evidence[: budget - len(marker)].rstrip() + marker
+                    if budget > len(marker) else evidence[:budget])
+    return (head + evidence)[:MAX_PROMPT_CHARS]
 
 
 def task_failure_prompt(timeline: pd.DataFrame, company: str, window_days: int = 7) -> str:

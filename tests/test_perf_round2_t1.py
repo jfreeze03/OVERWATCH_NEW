@@ -65,7 +65,8 @@ def test_t1_4_change_impact_drills_are_gated():
     # warehouse 28d history runs only on an explicit row selection, historical tier
     assert ("if sel is not None and row is not None:\n"
             "            hist = run(change_impact_sql.warehouse_daily_series") in op
-    assert "row = df.iloc[int(sel)] if sel is not None else None" in op
+    assert ("row = df.iloc[int(sel)] if sel is not None and 0 <= int(sel) < len(df) "
+            "else None") in op
     assert 'key=f"whchg_hist_{row[\'WAREHOUSE_NAME\']}", tier="historical"' in op
     # object 28d history behind a row click or a load toggle, historical tier
     assert 'st.toggle("Load 28-day run history", key="chg_hist_toggle")' in op

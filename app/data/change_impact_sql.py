@@ -81,16 +81,29 @@ GROUP BY 1
 ORDER BY 1
 """
     return f"""
+WITH runs AS (
+    SELECT
+        QUERY_START_TIME,
+        COMPLETED_TIME,
+        STATE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND STATE IN ('SUCCEEDED', 'FAILED')
+      AND DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME = {sql_literal(name.upper())}
+    -- Collapse auto-retry attempts (shared SCHEDULED_TIME) to the terminal attempt so
+    -- RUNS counts scheduled runs and FAILS counts runs whose final attempt failed — a
+    -- retried-then-succeeded run must not read as a phantom failure in the drill chart.
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
 SELECT
     DATE_TRUNC('day', QUERY_START_TIME) AS DAY,
     COUNT(*) AS RUNS,
     COUNT_IF(STATE = 'FAILED') AS FAILS,
     ROUND(MEDIAN(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME)) / 1000, 1) AS MEDIAN_S,
     ROUND(APPROX_PERCENTILE(DATEDIFF('millisecond', QUERY_START_TIME, COMPLETED_TIME), 0.95) / 1000, 1) AS P95_S
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-  AND STATE IN ('SUCCEEDED', 'FAILED')
-  AND DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME = {sql_literal(name.upper())}
+FROM runs
 GROUP BY 1
 ORDER BY 1
 """
