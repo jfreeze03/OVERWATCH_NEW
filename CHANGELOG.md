@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.268.0 - Make-it-drillable sweep: 17 tables now click-to-drill (2026-08-20)
+
+A proactive UX gap sweep (6-cluster adversarial pass over every page) surfaced the exact
+pattern the owner kept hitting via screenshots — static tables whose rows ARE entities
+you'd want to click, and account-wide panels that should scope to a selection. 17 verified
+gaps, now fixed (each a drop-in to an existing primitive; no new data, no migration):
+
+- **Click → Control Room ▸ Entity 360** (`entity_nav_table`): Overview Top-movers (warehouse),
+  Operations Tasks-Health / Node-timing / Release-regressions / Failure-timeline (task, keyed
+  on the composed DB.SCHEMA.TASK FQN — `fact_task_daily` gains `SCHEMA_NAME`), Operations
+  Cost-per-query outliers (warehouse), Security Dormant-users (user), Decision Studio Scenarios
+  action plan (its source entity).
+- **Click → the drill/detail** : Operations ▸ Queries Optimization-triage row now loads the
+  query drill-through (mirrors Heaviest-queries); Brief Fires and Control Room incident members
+  open the specific alert; Alerts Rule-precision and Alert-fatigue rows show that rule's recent
+  resolutions/events inline; Admin SLO-scorecard shows a failing page's slow keys, and the
+  error-family row filters the raw error rows.
+- **Scope-to-selection**: Security ▸ Least-privilege — click an over-broad grant scope and the
+  per-table revoke shortlist (and its REVOKE script) filters to that scope. Overview's open-
+  crit/high KPI gained a one-click path to the alert queue.
+
+Built by fanning out one agent per file-group, then an adversarial review of the whole diff
+(6 clusters, 1 confirmed finding, fixed): the Least-privilege scope filter compared an
+UPPER-cased prefix against the original-case `OBJECT_NAME` FQN, so a quoted lowercase
+database/schema would silently filter the shortlist to empty — now matched case-insensitively.
+
 ## 4.267.0 - Per-warehouse "why is IT elevated?" cloud-services drill (2026-08-20)
 
 Cost ▸ Spend ▸ Cloud-services health by warehouse: the ratio table is now **selectable**

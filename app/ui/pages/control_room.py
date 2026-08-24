@@ -689,7 +689,21 @@ def render() -> None:
                 mem = run(mart_sql.incident_members_detail(_iid), page=_PAGE,
                           key=f"inc_mem_{_iid[:8]}", tier="live", source="INCIDENT_MEMBERS")
                 if guard(mem, "No members linked yet — link from the timeline drill or proposals."):
-                    styled_table(with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"))
+                    def _open_member(_mi: int) -> None:
+                        # A linked ALERT member's REF_ID is the ALERT_EVENTS EVENT_ID —
+                        # carry it so the click lands on that event's drawer (the Alerts
+                        # drawer self-selects on an event_id context). Non-ALERT kinds
+                        # have no obvious drill, so a click on them stays inert. The
+                        # sticky-selection guard lives in selectable_nav_table (per key).
+                        _mrow = mem.df.iloc[int(_mi)]
+                        if str(_mrow.get("MEMBER_KIND") or "").strip() == "ALERT":
+                            _mref = str(_mrow.get("REF_ID") or "").strip()
+                            if _mref:
+                                request_navigation("Alerts", "Open events",
+                                                   context={"event_id": _mref})
+                    selectable_nav_table(
+                        with_user_names(mem.df, _PAGE, user_col="LINKED_BY", display_col="Linked by"),
+                        key=f"cr_inc_mem_sel_{_iid[:8]}", on_select=_open_member)
                 # Incidents that investigate themselves: the auto-assembled ranked root cause.
                 _auto_investigation(oi.df.iloc[int(sel_i)], company, rate)
                 if _is_op:

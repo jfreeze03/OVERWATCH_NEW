@@ -924,9 +924,25 @@ def render() -> None:
                         "with a resolution kind.")
             else:
                 pdf_ = prec.df.copy()
-                styled_table(pdf_, column_config={
+                _prec_sel = selectable_table(pdf_, key="rule_prec_sel", column_config={
                     "PRECISION_PCT": st.column_config.NumberColumn("Precision %", format="%.1f%%"),
                 })
+                # Click a rule -> its recent resolved-event playbook inline. Store the
+                # RULE_ID (not the positional index) so sticky re-emit just re-renders the
+                # same cached read instead of re-firing anything.
+                if _prec_sel is not None and 0 <= _prec_sel < len(pdf_):
+                    st.session_state["rule_prec_sel_last"] = str(pdf_.iloc[int(_prec_sel)]["RULE_ID"])
+                _prec_rid = st.session_state.get("rule_prec_sel_last")
+                if _prec_rid:
+                    _prec_res = run(mart_sql.resolutions_for_rule(_prec_rid), page=_PAGE,
+                                    key=f"rule_prec_res:{_prec_rid}", tier="recent",
+                                    source="ALERT_EVENTS (resolved, this rule)")
+                    if _prec_res.usable():
+                        st.markdown(f"**Recent resolutions for {_prec_rid}**")
+                        styled_table(_prec_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
+                                     height=180, slug="rule-prec-resolutions")
+                    else:
+                        st.caption(f"No resolved events yet for {_prec_rid}.")
                 st.caption(
                     "Precision = ACTIONED / (ACTIONED + NOISE); EXPECTED is excluded. High NOISE "
                     "with low precision = move the threshold away from noise in the rule's firing "
@@ -1080,11 +1096,25 @@ def render() -> None:
         fat = run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
                   tier="recent", source="ALERT_EVENTS (resolution kinds + dedupe repeats)")
         if fat.usable():
-            styled_table(fat.df, height=240, column_config={
+            _fat_sel = selectable_table(fat.df, key="alert_fatigue_sel", height=240, column_config={
                 "PER_WEEK": st.column_config.NumberColumn("Events/week", format="%.1f"),
             })
             st.caption("High NOISE or UNTAGGED at high volume = tune or retire the rule — "
                        "the precision panel under Rules has suggested thresholds.")
+            # Click a rule -> its recent events inline. Store RULE_ID (not the row index)
+            # so the sticky re-emit only re-renders the same cached read.
+            if _fat_sel is not None and 0 <= _fat_sel < len(fat.df):
+                st.session_state["alert_fatigue_sel_last"] = str(fat.df.iloc[int(_fat_sel)]["RULE_ID"])
+            _fat_rid = st.session_state.get("alert_fatigue_sel_last")
+            if _fat_rid:
+                _fat_ev = run(mart_sql.events_for_rule(_fat_rid, 90), page=_PAGE,
+                              key=f"alert_fatigue_ev:{_fat_rid}", tier="recent",
+                              source="ALERT_EVENTS (90d, this rule)")
+                if _fat_ev.usable():
+                    st.markdown(f"**Recent events for {_fat_rid}**")
+                    styled_table(_fat_ev.df, height=220)
+                else:
+                    st.caption(f"No events in 90d for {_fat_rid}.")
         else:
             empty_state("no_data_yet", "Fatigue metrics appear once events exist in the window.")
 

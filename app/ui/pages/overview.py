@@ -44,6 +44,7 @@ from app.ui import charts
 from app.ui.components import (
     contract_runway_bar,
     download_text_button,
+    entity_nav_table,
     export_button,
     kpi_row,
     load_settings,
@@ -719,6 +720,11 @@ def render() -> None:
         "Incomplete, open its deductions below and work the highest-penalty driver first."
     )
     kpi_row(account_kpis)
+    # CoCo Overview #10: the open-crit/high KPI is a dead-end count — give it a path
+    # to the actual events, but only when there's something open to work.
+    if (alerts_res.ok and (critical_alerts or high_alerts)
+            and st.button("Open the alert queue →", key=f"ov_open_alerts_{company}")):
+        request_navigation("Alerts", "Open events")
     # N7: MTD & Projected are credit-billed services (compute + serverless + AI).
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
     # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
@@ -904,7 +910,9 @@ def render() -> None:
                                     for d, p in zip(_mv["DELTA_USD"], _mv["PRIOR_USD"], strict=True)]
                 _mv = _mv.iloc[_mv["DELTA_USD"].abs().argsort()[::-1]].head(6)
                 st.caption(f"Top movers — {_last_m} vs {_prev_m}")
-                styled_table(_mv, height=TABLE_H_MD, slug="warehouse-movers", column_config={
+                entity_nav_table(_mv, key=f"ov_wh_movers_{company}", key_col="WAREHOUSE",
+                                 entity_type="WAREHOUSE", height=TABLE_H_MD,
+                                 slug="warehouse-movers", column_config={
                     "PRIOR_USD": st.column_config.NumberColumn("Prior $", format="$%.0f"),
                     "LATEST_USD": st.column_config.NumberColumn("Latest $", format="$%.0f"),
                     "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%+.0f"),

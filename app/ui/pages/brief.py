@@ -42,7 +42,7 @@ from app.ui.components import (
     panel_help,
     section_filter_contract,
     section_header,
-    styled_table,
+    selectable_table,
 )
 from app.ui.sizing import TABLE_H_SM
 from app.ui.workbench import render_watch_badge
@@ -301,7 +301,15 @@ def render() -> None:
         if crit.empty:
             st.success("No open critical or high alerts.")
         else:
-            styled_table(crit[["RAISED_AT", "SEVERITY", "TITLE"]].head(5), height=TABLE_H_SM)
+            _fires = crit.head(5)
+            _fire_sel = selectable_table(_fires[["RAISED_AT", "SEVERITY", "TITLE"]],
+                                         key="brief_fires_sel", height=TABLE_H_SM)
+            # rec29 sticky-selection guard: st.dataframe re-emits the selection on
+            # every rerun, so open the event's drawer only when the row CHANGES.
+            if _fire_sel is not None and _fire_sel != st.session_state.get("_brief_fire_sel_last"):
+                st.session_state["_brief_fire_sel_last"] = _fire_sel
+                _eid = str(_fires.iloc[int(_fire_sel)]["EVENT_ID"])
+                request_navigation("Alerts", "Open events", context={"event_id": _eid})
             if company != "ALL":
                 st.caption(f"Scoped to {company} plus account-level events.")
             if st.button("Open the alert queue →", key="brief_alerts", use_container_width=True):

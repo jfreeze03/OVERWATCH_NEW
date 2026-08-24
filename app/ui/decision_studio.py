@@ -752,11 +752,22 @@ def _scenarios(company: str) -> None:
                    .drop(columns="_SR").reset_index(drop=True))
             st.caption(f"★ {int(adf['WATCHED'].sum())} action(s) on your watched entities, "
                        "pinned to the top of their severity band.")
-        styled_table(
-            adf[[column for column in (
-                "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
-                "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
-            ) if column in adf.columns]],
+        # Every other board on this page drills into Entity 360 on row click; the open-action
+        # plan should too. A row click opens that action's SOURCE entity (no-op when it has none).
+        display = adf[[column for column in (
+            "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
+            "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
+        ) if column in adf.columns]]
+
+        def open_scenario_entity(index: int) -> None:
+            row = adf.iloc[int(index)]
+            kind = row.get("SOURCE_ENTITY_TYPE")
+            key = row.get("SOURCE_ENTITY_KEY")
+            if pd.notna(kind) and pd.notna(key) and str(kind).strip() and str(key).strip():
+                _open_entity(str(kind).strip(), str(key).strip())
+
+        selectable_nav_table(
+            display, key="ds_scenarios", on_select=open_scenario_entity,
             height=320, sort_label="action priority order",
         )
 

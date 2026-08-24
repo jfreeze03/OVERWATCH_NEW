@@ -298,7 +298,7 @@ def fact_task_daily(days: int, company: str = "ALL", database: str = "") -> str:
     if str(database or "").strip():
         where.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
     return f"""
-SELECT DAY, DATABASE_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
+SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
 FROM {mart_object("FACT_TASK_DAILY")}
 WHERE {and_where(*where)}
 ORDER BY FAILED DESC, DAY DESC

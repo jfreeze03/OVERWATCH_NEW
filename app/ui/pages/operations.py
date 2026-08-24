@@ -276,10 +276,16 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _tr_cols = [c for c in ["REASON", "QUERY_ID", "USER", "WAREHOUSE_NAME", "SPILL_REMOTE_GB",
                                     "GB_SCANNED", "SCAN_PCT", "CACHE_PCT", "ELAPSED_SEC", "QUERY_PREVIEW",
                                     "PROFILE"] if c in _tr.columns]
-            styled_table(_tr[_tr_cols], column_config=_tr_cfg,
-                         sort_label="spill, then pruning, then scan")
+            _tri_sel = selectable_table(_tr[_tr_cols], key="ops_triage_sel", column_config=_tr_cfg,
+                                        sort_label="spill, then pruning, then scan")
+            if _tri_sel is not None and _tri_sel != st.session_state.get("_ops_tri_sel_last"):
+                st.session_state["_ops_tri_sel_last"] = _tri_sel
+                _tqid = str(_tr.iloc[int(_tri_sel)]["QUERY_ID"])
+                st.session_state["_ops_drill_target"] = _tqid
+                st.session_state["ops_drill_manual"] = _tqid
             st.caption("Ranked worst-first: remote spill, then poor partition pruning (SCAN_PCT), then "
-                       "large cold-cache scans. 'Real work' only — CALL wrappers and app queries excluded.")
+                       "large cold-cache scans. 'Real work' only — CALL wrappers and app queries excluded. "
+                       "Click a row to load it in the drill-through below.")
 
     section_header("Query drill-through", "info", "search")
     candidate_ids: list[str] = []
@@ -488,9 +494,13 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
                      slug="systemic-task-errors", sort_label="distinct tasks desc")
         st.caption("One error family hitting several tasks usually means a single revoked grant / "
                    "dead source, not N separate bugs.")
-    styled_table(
+    timeline["TASK_FQN"] = (timeline["DATABASE_NAME"].astype(str) + "."
+                            + timeline["SCHEMA_NAME"].astype(str) + "."
+                            + timeline["TASK_NAME"].astype(str))
+    entity_nav_table(
         timeline[["QUERY_START_TIME", "ROLE_IN_GRAPH", "ERROR_FAMILY", "DATABASE_NAME",
-                   "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE"]],
+                   "SCHEMA_NAME", "TASK_NAME", "RUN_SEC", "ERROR_MESSAGE", "TASK_FQN"]],
+        key="ops_fail_timeline", key_col="TASK_FQN", entity_type="TASK",
     )
     result_caption(res)
     _incident_routing_panel(timeline)
@@ -635,7 +645,11 @@ def _release_compare_tab(company: str) -> None:
                                    "FAILED_AFTER", "NEW_FAILURES", "AVG_SEC_BEFORE",
                                    "AVG_SEC_AFTER", "RUNTIME_DELTA_PCT", "GOT_WORSE"]
                        if c in deltas.columns]
-        styled_table(deltas[_delta_cols])
+        deltas["TASK_FQN"] = (deltas["DATABASE_NAME"].astype(str) + "."
+                              + deltas["SCHEMA_NAME"].astype(str) + "."
+                              + deltas["TASK_NAME"].astype(str))
+        entity_nav_table(deltas[[*_delta_cols, "TASK_FQN"]], key="ops_release_regr",
+                         key_col="TASK_FQN", entity_type="TASK")
         result_caption(t_res)
         ai_evaluation_panel(
             key=f"release_{company}_{release_iso}_{window}",
@@ -886,7 +900,15 @@ def _task_health_view(company: str, days: int, database: str = "",
             ])
             df = df.sort_values(failed_col, ascending=False)
             task_sort_label = "failed runs desc"
-        styled_table(df, sort_label=task_sort_label)
+        if {"DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME"}.issubset(df.columns):
+            df["TASK_FQN"] = (df["DATABASE_NAME"].astype(str) + "."
+                              + df["SCHEMA_NAME"].astype(str) + "."
+                              + df["TASK_NAME"].astype(str))
+            entity_nav_table(df, key=f"ops_task_health_{company}_{days}",
+                             key_col="TASK_FQN", entity_type="TASK",
+                             sort_label=task_sort_label)
+        else:
+            styled_table(df, sort_label=task_sort_label)
         result_caption(res)
         # #15: a task 100% successful but quietly slower than its own baseline is
         # otherwise invisible. Reuses the fact_task_daily frame already fetched (mart
@@ -1001,7 +1023,11 @@ def _task_runs_view(company: str, days: int, database: str = "",
                 else 0.0
                 for failed, runs in zip(ndf["FAILED"], ndf["RUNS"], strict=False)
             ]
-        styled_table(ndf, sort_label="p95 queue desc, failed desc")
+        ndf["TASK_FQN"] = (ndf["DATABASE_NAME"].astype(str) + "."
+                           + ndf["SCHEMA_NAME"].astype(str) + "."
+                           + ndf["TASK_NAME"].astype(str))
+        entity_nav_table(ndf, key=f"ops_node_timing_{company}", key_col="TASK_FQN",
+                         entity_type="TASK", sort_label="p95 queue desc, failed desc")
         st.caption(
             "Dispatch queue = scheduled-to-start delay; execution = start-to-complete. "
             "The mart is task-grain and ordered by p95 dispatch queue."
@@ -1523,7 +1549,9 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
                          "floor: ≥100 queries and ≥1 credit. Needs ≥5 material warehouses to z-score; "
                          "on a smaller fleet nothing flags — read the × fleet-median column instead."},
             ])
-            styled_table(_peers.head(50), height=260, column_config={
+            entity_nav_table(_peers.head(50), key=f"ops_cpq_out_{company}",
+                             key_col="WAREHOUSE_NAME", entity_type="WAREHOUSE",
+                             height=260, column_config={
                 "USD_PER_QUERY": st.column_config.NumberColumn("$/query", format="$%.4f"),
                 "MULT_OF_MEDIAN": st.column_config.NumberColumn("× fleet median", format="%.1fx"),
                 "Z_SCORE": st.column_config.NumberColumn("Peer z", format="%.1f"),

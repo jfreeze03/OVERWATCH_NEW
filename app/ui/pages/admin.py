@@ -632,7 +632,21 @@ def _observability_tab() -> None:
             grouped = (_e.groupby(["PAGE", "FAMILY"], as_index=False)
                        .agg(COUNT=("FAMILY", "size"), FIRST_SEEN=("LOGGED_AT", "min"),
                             LAST_SEEN=("LOGGED_AT", "max")))
-            styled_table(grouped.sort_values("LAST_SEEN", ascending=False), height=240)
+            gsorted = grouped.sort_values("LAST_SEEN", ascending=False).reset_index(drop=True)
+            _fam_sel = selectable_table(gsorted, key="err_family_sel", height=240)
+            # Click a family -> the raw rows behind it (this PAGE + FAMILY) inline. Store
+            # (PAGE, FAMILY) so the sticky re-emit just re-filters the frame already in hand.
+            if _fam_sel is not None and 0 <= _fam_sel < len(gsorted):
+                _fr = gsorted.iloc[int(_fam_sel)]
+                st.session_state["err_family_sel_last"] = (str(_fr["PAGE"]), str(_fr["FAMILY"]))
+            _fam_pick = st.session_state.get("err_family_sel_last")
+            if _fam_pick:
+                _fp_page, _fp_family = _fam_pick
+                _filtered = _e[(_e["PAGE"].astype(str) == _fp_page)
+                               & (_e["FAMILY"].astype(str) == _fp_family)]
+                if not _filtered.empty:
+                    st.markdown(f"**Raw errors — {_fp_page} · {_fp_family}**")
+                    styled_table(_filtered)
             with st.expander(f"Raw rows ({len(_e)})"):
                 styled_table(_e)
         except (KeyError, TypeError):
@@ -671,7 +685,24 @@ def _performance_tab() -> None:
              "delta_color": "inverse" if (states == "FAIL").any() else "off"},
             {"label": "Watch / insufficient", "value": f"{int(states.isin(('WATCH', 'INSUFFICIENT')).sum())}"},
         ])
-        styled_table(sdf, height=300, sort_label="SLO state then p95 render time")
+        _slo_sel = selectable_table(sdf, key="perf_slo_sel", height=300,
+                                    sort_label="SLO state then p95 render time")
+        # Click a FAIL/WATCH page -> its slowest/failed fleet keys inline. Store the PAGE
+        # (not the row index) so the sticky re-emit only re-renders the same cached read.
+        if _slo_sel is not None and 0 <= _slo_sel < len(sdf):
+            st.session_state["perf_slo_sel_last"] = str(sdf.iloc[int(_slo_sel)]["PAGE"])
+        _slo_pg = st.session_state.get("perf_slo_sel_last")
+        if _slo_pg and _slo_pg in set(sdf["PAGE"].astype(str)):
+            _slo_state = str(sdf[sdf["PAGE"].astype(str) == _slo_pg].iloc[0]["SLO_STATE"])
+            if _slo_state in ("FAIL", "WATCH"):
+                _slo_det = run(mart_sql.fleet_query_stats(7, page=_slo_pg), page=_PAGE,
+                               key=f"perf_slo_keys:{_slo_pg}", tier="recent",
+                               source="APP_QUERY_TELEMETRY (V021), this page only")
+                if _slo_det.usable():
+                    st.markdown(f"**Slow keys on {_slo_pg}**")
+                    styled_table(_slo_det.df, height=200)
+                else:
+                    st.caption(f"No slow (≥2s) or failed fetch persisted for {_slo_pg} in 7d.")
         st.caption(
             "Render p95 uses complete APP_USAGE first paints (minimum n=20). Failure and "
             "cache rates are sample-reweighted; batch-wall telemetry is excluded from totals."

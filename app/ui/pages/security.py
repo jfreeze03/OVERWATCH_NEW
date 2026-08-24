@@ -28,6 +28,7 @@ from app.logic.security import (
 )
 from app.ui import charts
 from app.ui.components import (
+    entity_nav_table,
     export_button,
     guard,
     kpi_row,
@@ -39,6 +40,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    selectable_table,
     snowsight_profile_column,
     styled_table,
     user_display_map,
@@ -292,10 +294,11 @@ def _access_tab(company: str, days: int) -> None:
                  "help": "180+ days dormant, or 5+ roles still granted.",
                  "delta_color": "inverse" if len(high) else "off"},
             ])
-            styled_table(
+            entity_nav_table(
                 with_user_names(ranked, _PAGE)[[
                     "SEVERITY", "USER", "USER_NAME", "EMAIL", "DAYS_DORMANT",
                     "ROLE_COUNT", "ROLES", "LAST_SUCCESS_LOGIN"]],
+                key=f"sec_dormant_{company}", key_col="USER_NAME", entity_type="USER",
             )
             st.caption("Review with the owner before disabling; service accounts may log in rarely by design.")
             result_caption(res)
@@ -553,6 +556,7 @@ def _least_privilege_tab() -> None:
                  tier="historical",
                  source="ACCESS_HISTORY x GRANTS_TO_ROLES x TABLE_STORAGE_METRICS")
     have_evidence = False
+    _scope_sel: int | None = None
     if scopes.ok and scopes.empty:
         st.info("No direct table data-privilege grants resolve to a live table — nothing to review here.")
     elif guard(scopes, "", setup_hint="Needs GRANTS_TO_ROLES and TABLE_STORAGE_METRICS alongside ACCESS_HISTORY."):
@@ -571,9 +575,10 @@ def _least_privilege_tab() -> None:
              "help": "Total granted tables (by name) that saw no read or write in the covered window."},
         ])
         section_header("Over-broad grant scopes (role × schema)", "warn", "security")
-        styled_table(classified, height=340, slug="lp-scopes",
-                     sort_label="most unused tables first")
+        _scope_sel = selectable_table(classified, key="sec_lp_scopes_sel", height=340,
+                                      slug="lp-scopes", sort_label="most unused tables first")
         st.caption("VERDICT: UNUSED = touched none of its grants (revoke the scope); OVER-BROAD = used a third or fewer (narrow it); FOCUSED = mostly used.")
+        st.caption("Select a scope row to filter the per-table revoke shortlist below to that role and schema.")
         result_caption(scopes)
 
     if have_evidence and st.toggle("Show the per-table revoke shortlist", key="sec_lp_unused_on"):
@@ -584,13 +589,33 @@ def _least_privilege_tab() -> None:
             st.success("Every granted table was read or modified within the covered window.")
         elif guard(unused, ""):
             section_header("Untouched table grants — review before revoking", "warn", "security")
-            styled_table(unused.df, height=320, slug="lp-unused", sort_label="role then object")
+            # #4: when a scope row is selected above, post-filter this same loaded
+            # frame (no new read) to that role + db.schema so the shortlist matches
+            # the scope the reviewer is inspecting. Pure pandas; guards missing cols.
+            shortlist = unused.df
+            if _scope_sel is not None and 0 <= _scope_sel < len(classified):
+                _scope = classified.iloc[int(_scope_sel)]
+                _role = str(_scope.get("ROLE_NAME") or "")
+                _db = str(_scope.get("DATABASE_NAME") or "")
+                _schema = str(_scope.get("SCHEMA_NAME") or "")
+                if _role and _db and _schema and {"ROLE_NAME", "OBJECT_NAME"} <= set(shortlist.columns):
+                    # classified's DB/SCHEMA are UPPER()'d in SQL but OBJECT_NAME's FQN is
+                    # original-case, so match case-insensitively — else a quoted lowercase
+                    # identifier silently filters the revoke shortlist (and its script) to empty.
+                    _prefix = f"{_db}.{_schema}.".upper()
+                    shortlist = shortlist[
+                        (shortlist["ROLE_NAME"].astype(str).str.upper() == _role.upper())
+                        & (shortlist["OBJECT_NAME"].astype(str).str.upper().str.startswith(_prefix))
+                    ]
+                    st.caption(f"Filtered to the selected scope — {_role} on {_db}.{_schema}. "
+                               "Clear the selection to see all.")
+            styled_table(shortlist, height=320, slug="lp-unused", sort_label="role then object")
             st.caption(f"Each row is a privilege on a table no query has touched in the covered ~{coverage_days}d window. Confirm the object isn't seasonal before revoking.")
             result_caption(unused)
             # CoCo Security #11: turn the shortlist into copy-paste REVOKEs — the DBA's
             # bottleneck is writing the statements, not knowing they're needed. The app
             # still revokes nothing; this is a reviewed, run-it-yourself script.
-            _revokes = revoke_statements(unused.df)
+            _revokes = revoke_statements(shortlist)
             if _revokes:
                 with st.expander(f"Generate REVOKE statements ({len(_revokes)})"):
                     _script = (
