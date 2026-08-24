@@ -1484,6 +1484,15 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                                  selection_mode="single-row", **kwargs)
             rows = list(getattr(getattr(event, "selection", None), "rows", None) or [])
             selected = int(rows[0]) if rows else None
+            # st.dataframe's row selection is STICKY: it re-emits its raw positional index
+            # on every rerun, even after the frame shrinks (a row resolved, the company/
+            # window filter narrowed, or a live frame was re-read smaller). An index past
+            # the current end is a stale selection, so report it as no-selection. `data`
+            # has the same row count as `df`, so this one clamp immunizes every caller's
+            # `frame.iloc[sel]` against an out-of-range IndexError instead of a bounds guard
+            # repeated at each of ~40 drill sites.
+            if selected is not None and not (0 <= selected < len(df)):
+                selected = None
         except TypeError:  # runtime without selection support: render, no selection
             st.dataframe(data, **kwargs)
     else:
@@ -1592,7 +1601,10 @@ def selectable_table(df, key: str, *, height: int | None = None,
                      days: int | None = None, size_note: bool = True,
                      sort_label: str = "") -> int | None:
     """styled_table + single-row click selection; returns the positional row
-    index or None. Degrades to a plain table on runtimes without selections."""
+    index into ``df``, or None. A stale sticky selection whose index is past the
+    current frame end is reported as None (not the raw out-of-range index), so a
+    caller's ``df.iloc[sel]`` is always in-bounds. Degrades to a plain table on
+    runtimes without selections."""
     return _render_table(df, height=height, column_config=column_config,
                          key=key, selectable=True, slug=slug, days=days,
                          size_note=size_note, sort_label=sort_label)

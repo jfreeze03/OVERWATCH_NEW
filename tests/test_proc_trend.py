@@ -18,8 +18,10 @@ def test_trend_builder_matches_the_leaderboard_semantics():
     assert "COALESCE(ROOT_QUERY_ID, QUERY_ID)" in sql             # children roll to the CALL
     assert "GROUP BY n.DAY" in sql                                # the trend grain
     assert "ATTRIBUTED_CALLS" in sql                              # $0 rows stay diagnosable
-    # bare names match any qualification; exact qualified names match too
-    assert "= 'SP_LOAD_MARTS_V27'" in sql and "LIKE '%.SP_LOAD_MARTS_V27'" in sql
+    # bare names match any qualification; qualified names match too. Underscores are
+    # LIKE-escaped (~_) with ESCAPE '~' so '%.SP_LOAD...' can't wildcard-match SPZLOAD.
+    assert "= 'SP_LOAD_MARTS_V27'" in sql
+    assert "LIKE '%.SP~_LOAD~_MARTS~_V27' ESCAPE '~'" in sql
 
 
 def test_trend_honors_the_triage_filters_and_is_safe():

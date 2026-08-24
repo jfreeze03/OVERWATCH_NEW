@@ -442,7 +442,7 @@ def governance_counts() -> str:
     return """
 SELECT
     (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.USERS U
-      WHERE U.DELETED_ON IS NULL AND U.DISABLED = FALSE
+      WHERE U.DELETED_ON IS NULL AND COALESCE(U.DISABLED, FALSE) = FALSE
         AND U.HAS_PASSWORD = TRUE AND COALESCE(U.HAS_MFA, FALSE) = FALSE
         -- ONE definition of "MFA gap" app-wide (review #10): the same
         -- password-login evidence the Access panel lists, not the old

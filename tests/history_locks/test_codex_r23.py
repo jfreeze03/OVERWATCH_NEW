@@ -39,7 +39,11 @@ def test_change_drill_prefilters_before_normalizing():
     sql = change_impact_sql.object_run_history("PROCEDURE", "DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN", 28)
     # the V031 scan-v2 trick: cheap ILIKE rides in front of the POSITION pass
     assert sql.count("QUERY_TEXT ILIKE '%SP_ALERT_SCAN%'") == 1
-    assert sql.count("POSITION('SP_ALERT_SCAN('") == 1     # exact match still decides
+    # anchored match (RUN_SP_ALERT_SCAN must NOT match SP_ALERT_SCAN): 'CALL<name>(' or
+    # '.<name>(' against the whitespace-stripped text still decides
+    assert "POSITION('CALLSP_ALERT_SCAN('" in sql
+    assert "POSITION('.SP_ALERT_SCAN('" in sql
+    assert "REGEXP_REPLACE(UPPER(QUERY_TEXT), '[[:space:]]', '')" in sql
     assert sql.index("ILIKE") < sql.index("POSITION")
     # the TASK branch has an exact FQN equality — no text pass to prefilter
     tsql = change_impact_sql.object_run_history("TASK", "DBA_MAINT_DB.OVERWATCH.TASK_LOAD_HOURLY", 28)

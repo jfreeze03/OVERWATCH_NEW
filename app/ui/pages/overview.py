@@ -657,7 +657,11 @@ def render() -> None:
             # neutral delta (flat dash) — the severity stripe carries good/bad; the prose
             # delta has no leading sign, so a colored arrow would always point the same way.
             "delta_color": "off",
-            "severity": ("bad" if _pace_var > 0.15 * _expected_td
+            # Early month (0 completed days -> expected 0) has no meaningful pace signal
+            # yet; treat it as neutral rather than let the 0.15*0 threshold redden any
+            # spend. From day 2 (expected > 0) the graded threshold applies as before.
+            "severity": ("ok" if _expected_td <= 0
+                         else "bad" if _pace_var > 0.15 * _expected_td
                          else "warn" if _pace_var > 0 else "ok"),
             "method": "billed", "scope": "account-wide",
             "as_of": _ov_asof_meter,

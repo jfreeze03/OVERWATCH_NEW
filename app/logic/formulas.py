@@ -585,5 +585,9 @@ def budget_pace_variance(mtd_actual, budget_usd, today) -> tuple[float, float]:
     if budget <= 0:
         return 0.0, 0.0
     days_in_month, elapsed, _remaining = month_days(today)
-    expected = budget * elapsed / days_in_month if days_in_month else 0.0
+    # The MTD actual excludes today (daily metering lags ~24h), so measure the target
+    # over COMPLETED days too — else an on-pace account reads ~one day's budget "behind"
+    # every day. Matches the today-excluded convention (mtd_pace_vs_prior_month uses day-1).
+    completed = max(elapsed - 1, 0)
+    expected = budget * completed / days_in_month if days_in_month else 0.0
     return safe_float(mtd_actual) - expected, expected

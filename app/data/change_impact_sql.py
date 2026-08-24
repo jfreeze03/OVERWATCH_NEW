@@ -64,6 +64,8 @@ def object_run_history(object_type: str, object_name: str, days: int = 28) -> st
         raise ValueError(f"Invalid object name: {object_name!r}")
     if otype == "PROCEDURE":
         short = name.split(".")[-1].upper()
+        _call = sql_literal("CALL" + short + "(")
+        _dotted = sql_literal("." + short + "(")
         return f"""
 SELECT
     DATE_TRUNC('day', START_TIME) AS DAY,
@@ -75,8 +77,13 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND QUERY_TYPE = 'CALL'
   AND QUERY_TEXT ILIKE {sql_literal('%' + short + '%')}
-  AND POSITION({sql_literal(short + "(")} IN
-               REPLACE(REPLACE(UPPER(QUERY_TEXT), ' ', ''), CHR(10), '')) > 0
+  -- Anchor the CALL target to the whole final identifier segment so RUN_SP_LOAD no
+  -- longer matches SP_LOAD: strip ALL whitespace, then require 'CALL<name>(' (unqualified)
+  -- or '.<name>(' (schema-qualified). QUERY_TYPE='CALL' guarantees the target follows CALL.
+  -- (Same-named procs in different schemas still blend — disambiguating needs the schema
+  -- threaded from the caller.)
+  AND (POSITION({_call} IN REGEXP_REPLACE(UPPER(QUERY_TEXT), '[[:space:]]', '')) > 0
+       OR POSITION({_dotted} IN REGEXP_REPLACE(UPPER(QUERY_TEXT), '[[:space:]]', '')) > 0)
 GROUP BY 1
 ORDER BY 1
 """

@@ -29,7 +29,8 @@ def test_registry_reader_all_companies_has_no_company_filter():
 def test_run_history_procedure_matches_call_text():
     sql = change_impact_sql.object_run_history("PROCEDURE", "DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN", 28)
     assert "QUERY_TYPE = 'CALL'" in sql
-    assert "'SP_ALERT_SCAN('" in sql
+    assert "'.SP_ALERT_SCAN('" in sql        # schema-qualified CALL target
+    assert "'CALLSP_ALERT_SCAN('" in sql     # unqualified CALL target
     assert "ACCOUNT_USAGE.QUERY_HISTORY" in sql
 
 

@@ -1358,7 +1358,10 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
     days = bounded_days(days)
     name = str(proc_name or "").strip().upper().rstrip("(")
     lit = sql_literal(name)
-    suffix = sql_literal("%." + name)
+    # Escape LIKE metacharacters so an underscore in a proc name stays literal (else
+    # '%.SP_LOAD' also matches SPZLOAD) — mirrors query_family_drift_history + ESCAPE '~'.
+    _esc = name.replace("~", "~~").replace("%", "~%").replace("_", "~_")
+    suffix = sql_literal("%." + _esc)
     where = and_where(
         f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "c.QUERY_TYPE = 'CALL'",
@@ -1375,7 +1378,7 @@ WITH calls AS (
 ),
 named AS (
     SELECT * FROM calls
-    WHERE PROC_NAME = {lit} OR PROC_NAME LIKE {suffix}
+    WHERE PROC_NAME = {lit} OR PROC_NAME LIKE {suffix} ESCAPE '~'
 ),
 att AS (
     SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,

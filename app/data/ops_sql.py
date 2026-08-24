@@ -698,6 +698,25 @@ def task_graph_recent_runs(root_task_id: str = "0", days: int = 7,
     horizon = max(1, min(int(days or 7), 14))
     cap = max(1, min(int(limit or 40), 100))
     return f"""
+WITH attempts AS (
+    SELECT
+        GRAPH_RUN_GROUP_ID,
+        QUERY_ID,
+        SCHEDULED_TIME,
+        QUERY_START_TIME,
+        COMPLETED_TIME,
+        STATE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE SCHEDULED_TIME >= DATEADD('day', -{horizon}, CURRENT_DATE())
+      AND TO_VARCHAR(ROOT_TASK_ID) = {sql_literal(root, 80)}
+      AND GRAPH_RUN_GROUP_ID IS NOT NULL
+    -- Auto-retries emit multiple rows sharing one SCHEDULED_TIME within a graph run;
+    -- collapse each scheduled task to its terminal attempt so TASKS/FAILED_TASKS count
+    -- tasks, not attempts (mirrors task_runs / task_recent_states).
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY GRAPH_RUN_GROUP_ID, DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
 SELECT COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID) AS RUN_KEY,
        MIN(SCHEDULED_TIME) AS SCHEDULED_AT,
        MIN(QUERY_START_TIME) AS STARTED_AT,
@@ -707,10 +726,7 @@ SELECT COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID) AS RUN_KEY,
        ROUND(SUM(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
                                    QUERY_START_TIME), 0)) / 1000, 2) AS QUEUE_SEC,
        DATEDIFF('second', MIN(SCHEDULED_TIME), MAX(COMPLETED_TIME)) AS WALL_SEC
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE SCHEDULED_TIME >= DATEADD('day', -{horizon}, CURRENT_DATE())
-  AND TO_VARCHAR(ROOT_TASK_ID) = {sql_literal(root, 80)}
-  AND GRAPH_RUN_GROUP_ID IS NOT NULL
+FROM attempts
 GROUP BY COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID)
 ORDER BY SCHEDULED_AT DESC
 LIMIT {cap}

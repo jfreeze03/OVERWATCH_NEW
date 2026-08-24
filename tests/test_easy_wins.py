@@ -128,10 +128,11 @@ def test_clustering_churn_min_credits_gate():
 # ================================================== #11 budget pace ==========
 
 def test_budget_pace_variance_signed():
-    # day 10 of 31, budget 3000 -> expected 3000*10/31 = 967.74
+    # day 10 of 31: target measured over COMPLETED days (day-1=9) to match the
+    # today-excluded MTD actual -> expected = 3000*9/31 = 870.97 (not 10/31).
     var, exp = budget_pace_variance(600.0, 3000.0, dt.date(2026, 8, 10))
-    assert round(exp, 2) == 967.74
-    assert round(var, 2) == round(600.0 - 967.74, 2)      # behind pace (negative)
+    assert round(exp, 2) == 870.97
+    assert round(var, 2) == round(600.0 - 870.97, 2)      # behind pace (negative)
     ahead, _ = budget_pace_variance(1500.0, 3000.0, dt.date(2026, 8, 10))
     assert ahead > 0                                       # ahead of the flat target
 

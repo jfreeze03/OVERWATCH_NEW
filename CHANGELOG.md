@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.271.0 - Bug-hunt round 2: root-cause the sticky-selection crash + 5 SQL/logic fixes (2026-08-24)
+
+Round 2 (cross-cutting defect-pattern finders + deep-file dives, adversarially verified)
+surfaced 11 confirmed bugs — 6 more sticky-selection `.iloc` crash sites plus 5 correctness
+bugs. All read-only, no migration:
+
+- **Sticky-selection crash — fixed at the ROOT** instead of site-by-site: `selectable_table`
+  now clamps a stale sticky selection to the current frame and returns `None` when its index
+  is past the end, so every caller's `frame.iloc[sel]` is always in-bounds. This immunizes
+  all ~40 drill sites at once (the round-2 finders had surfaced 6 more unguarded ones —
+  Control Room incidents, Operations emergency-cancel + object change-impact, Optimization
+  right-size, Admin tuning-targets, Unit-costs procedures — and there were likely others).
+- **task_graph_recent_runs** (`ops_sql`) — collapse TASK_HISTORY auto-retries to the terminal
+  attempt (QUALIFY ROW_NUMBER over graph-run + task + SCHEDULED_TIME) so TASKS/FAILED_TASKS
+  count tasks, not attempts. (Fourth builder of the class; three were fixed in 4.270.0.)
+- **budget_pace_variance** (`formulas`) — measure the straight-line target over COMPLETED days
+  (`day - 1`) to match the today-excluded MTD actual (metering lags ~24h), so an on-pace
+  account no longer reads ~one day's budget "behind" every day.
+- **object_run_history** PROCEDURE drill (`change_impact_sql`) — anchor the CALL target to the
+  whole final identifier segment so `RUN_SP_LOAD` no longer blends into `SP_LOAD`'s run history.
+- **proc_cost_trend** (`insights_sql`) — escape LIKE metacharacters + `ESCAPE '~'` so an
+  underscore in a proc name stays literal (was matching `SPZLOAD` for `SP_LOAD`).
+- **governance_counts** MFA-gap KPI (`security_sql`) — `COALESCE(DISABLED, FALSE) = FALSE` so a
+  NULL-DISABLED active user is counted, matching the Access-panel list the KPI reconciles with.
+
 ## 4.270.0 - Bug-hunt fixes: sticky-selection crashes, task-retry over-count, NaT/prompt/selectbox (2026-08-24)
 
 An adversarial bug-hunt (7 finders → independent verification, ~45% of raw findings
