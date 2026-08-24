@@ -41,7 +41,7 @@ def _daily() -> pd.DataFrame:
 def test_crutch_user_is_flagged_and_supplements_are_not():
     eff = coco_efficiency(_econ(), _daily(), cap_credits=15.0)
     by_user = eff.set_index("USER_NAME")
-    assert by_user.loc["CRUTCH", "FLAG"] == "🚩 Coach"
+    assert by_user.loc["CRUTCH", "FLAG"] == "🚩 Review"
     assert by_user.loc["MID", "FLAG"] == ""
     assert by_user.loc["LIGHT", "FLAG"] == ""
     # the reason names the tripped, peer-relative signals — a defensible basis to coach
@@ -80,7 +80,7 @@ def test_empty_and_missing_daily_degrade_without_raising():
     # economics missing but daily present -> credit-only users still surface and can be flagged
     credit_only = coco_efficiency(None, _daily(), cap_credits=15.0)
     assert not credit_only.empty
-    assert credit_only.set_index("USER_NAME").loc["CRUTCH", "FLAG"] == "🚩 Coach"
+    assert credit_only.set_index("USER_NAME").loc["CRUTCH", "FLAG"] == "🚩 Review"
     assert (credit_only["CACHE_WRITE_PCT"] == 0).all()   # no token grain -> cache cols zero
 
 

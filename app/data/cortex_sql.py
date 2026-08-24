@@ -253,8 +253,12 @@ def cortex_code_token_types(days: int = 30) -> str:
     lens raw token totals can't show.
 
     OPTIONAL column (newer view versions; VARIANT shape may drift) — callers
-    MUST pass probe=True and degrade honestly to the token-total view."""
-    days = bounded_days(days)
+    MUST pass probe=True and degrade honestly to the token-total view.
+
+    Honors the long window (v4.54): per-user token telemetry is low-volume, like the
+    sibling cortex_code_* scans, so it tracks the page window up to 365d rather than the
+    90d ACCOUNT_USAGE cap — the panel ties to the page's Window filter."""
+    days = bounded_days(days, 365)
     return f"""
 WITH combined AS (
     SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR

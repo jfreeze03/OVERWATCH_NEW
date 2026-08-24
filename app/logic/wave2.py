@@ -110,22 +110,22 @@ def fleet_cache_hit_pct(economics: pd.DataFrame) -> float:
     return round(read / denom * 100, 1) if denom > 0 else 0.0
 
 
-# CoCo coaching flag — the "using CoCo as a crutch, not a supplement" profile. The flag is GATED
-# on being chronically over the base daily allowance (so a low-volume burst can never read as a
-# chronic crutch) AND showing a crutch behaviour: heavy sustained spend vs peers, or long
-# autonomous sessions. All peer-relative so one heavy-but-productive user can't be flagged in
-# isolation and the flag can't be argued away with a raw number.
+# CoCo usage-review flag — a high-intensity usage pattern worth reviewing. GATED on being
+# consistently over the base daily allowance (so a low-volume burst can't qualify) AND showing
+# heavy sustained spend vs peers or extended autonomous sessions. All peer-relative so one
+# heavy-but-productive user isn't flagged in isolation and the flag can't be argued away with a
+# raw number.
 _COACH_PEER_MULT = 2.0        # heavy sustained consumer: >= 2x the fleet-median window credits
-_COACH_SESSION_MULT = 2.0     # long autonomous sessions: >= 2x the median credits/request
-_COACH_MIN_DAYS_OVER = 5      # chronically OVER the base daily allowance (days in the window)
-_COACH_FLAG = "🚩 Coach"  # red flag — lights up in the table
+_COACH_SESSION_MULT = 2.0     # extended autonomous sessions: >= 2x the median credits/request
+_COACH_MIN_DAYS_OVER = 5      # consistently OVER the base daily allowance (days in the window)
+_COACH_FLAG = "🚩 Review"  # flags a usage pattern to review — lights up in the table
 
 
 def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | None,
                     *, cap_credits: float = 15.0, window_days: int = 30) -> pd.DataFrame:
-    """Per-user CoCo efficiency + a coaching flag: is the user leaning on CoCo as a SUPPLEMENT
-    (targeted asks) or a CRUTCH (heavy sustained spend, long autonomous sessions, chronically over
-    the cap)?
+    """Per-user CoCo efficiency + a usage-review flag: distinguishes targeted, supplemental usage
+    from a high-intensity pattern (heavy sustained spend, extended autonomous sessions, and
+    consistently over the daily allowance).
 
     Merges the token-economics cache grain (``economics`` = token_economics() output) with the
     per-user-per-day credit/request rollup (``user_daily`` = cortex_code_user_daily rows:
@@ -136,8 +136,8 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     present — so a company view isn't padded by other companies' account-wide token rows, and a
     credit-only user with no token grain still surfaces; it falls back to the account-wide token
     grain (no credit signals) when the daily scan is unavailable. Peer multiples are measured over
-    the DISPLAYED set and compared UNROUNDED. The 🚩 flag = chronically over cap AND (heavy vs peers
-    OR long sessions). Flagged rows sort first; empty in -> empty out (never raises)."""
+    the DISPLAYED set and compared UNROUNDED. The 🚩 flag = consistently over cap AND (heavy vs
+    peers OR extended sessions). Flagged rows sort first; empty in -> empty out (never raises)."""
     cols = ["USER_NAME", "FLAG", "TOTAL_CREDITS", "PEER_MULT", "AVG_DAILY_CR", "ACTIVE_DAYS",
             "DAYS_OVER_CAP", "CR_PER_REQ", "SESSION_MULT", "CACHE_WRITE_PCT", "READ_AMP",
             "CACHE_HIT_PCT", "TOTAL", "REASON"]
@@ -211,8 +211,8 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
     out["PEER_MULT"] = _peer.round(1)
     out["SESSION_MULT"] = _sess.round(1)
 
-    # --- flag: chronically over cap AND (heavy OR long sessions). The over-cap gate stops a
-    # low-volume burst from reading as a chronic crutch. ---
+    # --- flag: consistently over cap AND (heavy OR extended sessions). The over-cap gate stops a
+    # low-volume burst from reading as a sustained high-intensity pattern. ---
     s_over = out["DAYS_OVER_CAP"] >= _COACH_MIN_DAYS_OVER
     s_heavy = _peer >= _COACH_PEER_MULT
     s_long = _sess >= _COACH_SESSION_MULT
@@ -239,7 +239,7 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
 
 
 def coco_coaching_count(efficiency: pd.DataFrame | None) -> int:
-    """How many users tripped the coaching flag."""
+    """How many users tripped the review flag."""
     if efficiency is None or efficiency.empty or "FLAG" not in efficiency.columns:
         return 0
     return int((efficiency["FLAG"].astype(str) != "").sum())

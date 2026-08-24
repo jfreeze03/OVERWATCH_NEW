@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.275.0 - CoCo efficiency review: neutral wording + tie to the Window filter (2026-08-24)
+
+Refines the v4.274.0 CoCo efficiency panel from owner feedback:
+
+- **Neutral, professional wording.** Dropped the "let CoCo do the work" / "crutch" framing
+  throughout. The flag is now 🚩 **Review** (was 🚩 Coach), the KPI is **Flagged for review**,
+  and the caption describes a "high-intensity usage pattern worth reviewing … a pattern to
+  review, not a verdict — confirm against delivered work before acting." Same signals, softer voice.
+- **Tied to the page Window filter.** The panel was hardcoded to 30 days; it now tracks the
+  page's `days` filter (`_token_economics_panel` takes `days`), so filtering for a quarter or a
+  year is reflected in the token scan, the credit window, the `Credits (Nd)` header, and the
+  caption — no more silent 30-day mismatch. `cortex_code_token_types` now honors the long window
+  (up to 365d) like the sibling Cortex Code scans (low-volume per-user telemetry), and its cache
+  key includes the window so switching the filter re-reads rather than serving a stale frame.
+
 ## 4.274.0 - CoCo efficiency & coaching flags (2026-08-24)
 
 Cost & Contract ▸ Chargeback & AI ▸ the token-economics panel now surfaces *which* Cortex

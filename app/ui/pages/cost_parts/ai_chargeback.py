@@ -276,14 +276,14 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
     _coco_cap = safe_float(settings.get("COCO_DAILY_CAP_CREDITS"), 15.0)
-    _token_economics_panel(company, _coco_cap if _coco_cap > 0 else 15.0)
+    _token_economics_panel(company, days, _coco_cap if _coco_cap > 0 else 15.0)
 
 
-def _token_economics_panel(company: str, cap_credits: float) -> None:
-    """CoCo efficiency + coaching flag (repo review wave 2: TOKENS_GRANULAR). Cache-hit alone
-    can't separate a heavy-but-targeted user from one letting CoCo do the work, so this merges
-    the token grain with per-user daily credits into peer-relative signals + a 🚩 Coach flag.
-    Opt-in toggle; a schema/telemetry miss degrades to an honest not-available note."""
+def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
+    """CoCo efficiency review (repo review wave 2: TOKENS_GRANULAR). Cache-hit alone can't separate
+    a heavy-but-targeted user from a high-intensity one, so this merges the token grain with
+    per-user daily credits into peer-relative signals + a 🚩 Review flag. Tracks the page's Window
+    filter (``days``). Opt-in toggle; a schema/telemetry miss degrades to an honest note."""
     from app.logic.wave2 import (
         coco_coaching_count,
         coco_efficiency,
@@ -291,12 +291,12 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
         token_economics,
     )
 
-    if not st.toggle("Load CoCo efficiency & coaching flags", key="cortex_tok_econ",
+    if not st.toggle("Load CoCo efficiency review", key="cortex_tok_econ",
                      help="Flattens TOKENS_GRANULAR (input / output / cache-read / cache-write) "
                           "per user and merges daily credits into peer-relative efficiency "
                           "signals — on demand; needs the newer view shape."):
         return
-    te_res = run(cortex_sql.cortex_code_token_types(30), page=_PAGE, key="cortex_token_types",
+    te_res = run(cortex_sql.cortex_code_token_types(days), page=_PAGE, key=f"cortex_token_types_{days}",
                  tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
                  probe=True)
     if not te_res.ok:
@@ -305,7 +305,7 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
         return
     econ = token_economics(te_res.df)
     if econ.empty:
-        st.info("No token-type rows in the last 30 days.")
+        st.info("No token-type rows in the selected window.")
         return
     # Per-user daily credits drive the credit / session / over-cap signals. Same days-independent
     # cache key as _ai_users_tab's live leg, so this reuses that fetch when it ran.
@@ -313,7 +313,8 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
                  key=f"cortex_user_daily_{company}", tier="metadata",
                  source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
                  probe=True, max_rows=200_000)
-    eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None, cap_credits=cap_credits)
+    eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
+                          cap_credits=cap_credits, window_days=days)
     _flags = coco_coaching_count(eff)
     # Scope the cache KPIs/caption to the SHOWN (company) users, so a company view doesn't blend
     # other companies' account-wide token traffic into 'Fleet cache-hit' or the low-cache note.
@@ -322,14 +323,14 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
     _fleet = fleet_cache_hit_pct(_econ_shown)
     _cap = round(cap_credits)
     kpi_row([
-        {"label": "Coaching candidates", "value": f"{_flags:,}",
+        {"label": "Flagged for review", "value": f"{_flags:,}",
          "delta_color": "inverse" if _flags else "off",
-         "help": f"Users chronically over the {_cap} cr/day base allowance AND either heavy vs "
-                 "peers or running long autonomous sessions — the 'let CoCo do the work' profile, "
-                 "not targeted use."},
+         "help": f"Users consistently over the {_cap} cr/day base allowance AND either heavy vs "
+                 "peers or running extended autonomous sessions — a high-intensity usage pattern "
+                 "worth reviewing."},
         {"label": "Fleet cache-hit", "value": f"{_fleet:.1f}%",
          "help": "cache_read / (cache_read + input). See the caption — where it is high and "
-                 "uniform, caching is not the lever; the coaching flag is."},
+                 "uniform, caching is not the lever; the review flag is."},
         {"label": "Users measured", "value": f"{len(eff):,}"},
     ])
     if not ud_res.usable():
@@ -339,7 +340,7 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
              "ACTIVE_DAYS", "CR_PER_REQ", "CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "REASON"]
     styled_table(with_user_names(eff[_cols], _PAGE), height=340, column_config={
         "FLAG": st.column_config.TextColumn("Flag"),
-        "TOTAL_CREDITS": st.column_config.NumberColumn("Credits (30d)", format="%.1f"),
+        "TOTAL_CREDITS": st.column_config.NumberColumn(f"Credits ({days}d)", format="%.1f"),
         "PEER_MULT": st.column_config.NumberColumn("Peer x", format="%.1f"),
         "AVG_DAILY_CR": st.column_config.NumberColumn("Avg cr/active day", format="%.1f"),
         "DAYS_OVER_CAP": st.column_config.NumberColumn(f"Days > {_cap}cr", format="%d"),
@@ -359,11 +360,10 @@ def _token_economics_panel(company: str, cap_credits: float) -> None:
         f"{_low_cache} user(s) have low cache-hit (<80%) — for them caching IS a real lever (context "
         "re-sent as fresh input); the flag adds the volume / session view for the rest.")
     st.caption(
-        f"🚩 Coach = chronically over the {_cap} cr/day base allowance AND a crutch behaviour — heavy "
-        f"sustained spend (peer x) or long autonomous sessions (cr/request, read-amp) — the 'let CoCo "
-        f"do the work' profile, not targeted use. {_cache_note} Peer-relative, 30d — a defensible "
-        f"basis to open a coaching conversation, but verify against what the person shipped before "
-        f"acting.")
+        f"🚩 Review flags a high-intensity usage pattern — consistently over the {_cap} cr/day "
+        f"allowance and either heavy sustained spend vs peers (peer x) or extended autonomous "
+        f"sessions (cr/request, read-amp). It highlights a pattern to review, not a verdict — "
+        f"confirm against delivered work before acting. {_cache_note} Peer-relative, {days}d.")
     with st.expander("Raw token grain (input / output / cache tokens)", expanded=False):
         styled_table(with_user_names(econ, _PAGE), height=280, column_config={
             "INPUT": st.column_config.NumberColumn("Input", format="%d"),
