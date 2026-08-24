@@ -150,3 +150,49 @@ def test_as_of_anchors_the_window_to_the_account_date():
     assert a == 2      # only today-2 and today-3 fall within [today-3, today]
     assert b == 4      # max-anchor drifts the window back to [today-5, today-2]
     assert a < b
+
+
+def test_dominant_user_flags_in_a_two_user_company_scope():
+    # Leave-one-out peer median (R2-3): a whole-population median includes the user being tested,
+    # so in a 1-2 user company scope the heaviest user's ratio to the midpoint is < 2 and the
+    # flag could NEVER fire. A chronically over-cap dominant user in a 2-user scope must flag.
+    today = dt.date(2026, 8, 24)
+    rows = [
+        {"USER_NAME": "HEAVY", "USAGE_DATE": str(today - dt.timedelta(days=1 + i)),
+         "REQUESTS": 2, "CREDITS": 25.0}
+        for i in range(30)
+    ]
+    rows.append({"USER_NAME": "LIGHT", "USAGE_DATE": str(today - dt.timedelta(days=1)),
+                 "REQUESTS": 1, "CREDITS": 5.0})
+    daily = pd.DataFrame(rows)
+    econ = token_economics(pd.DataFrame(_token_rows("HEAVY", 100, 100, 100, 100)
+                                        + _token_rows("LIGHT", 10, 10, 10, 10)))
+    eff = coco_efficiency(econ, daily, cap_credits=15.0, window_days=30, as_of=today).set_index("USER_NAME")
+    assert eff.loc["HEAVY", "FLAG"] == "🚩 Review"
+    assert eff.loc["HEAVY", "DAYS_OVER_CAP"] == 30
+    assert eff.loc["HEAVY", "PEER_MULT"] >= 2.0
+    assert eff.loc["LIGHT", "FLAG"] == ""          # under cap -> never flagged
+    assert coco_coaching_count(eff.reset_index()) == 1
+
+
+def test_zero_credit_users_do_not_drag_the_peer_baseline_to_zero():
+    # A zero-credit user is not a spending peer. If zeros stay in the leave-one-out baseline its
+    # median can collapse to 0 and (via the med>0 guard) silently drop a genuinely dominant heavy
+    # user's flag. positive_baseline must exclude them so HEAVY still flags.
+    today = dt.date(2026, 8, 24)
+    rows = [
+        {"USER_NAME": "HEAVY", "USAGE_DATE": str(today - dt.timedelta(days=1 + i)),
+         "REQUESTS": 2, "CREDITS": 25.0}
+        for i in range(30)
+    ]
+    rows.append({"USER_NAME": "LIGHT", "USAGE_DATE": str(today - dt.timedelta(days=1)),
+                 "REQUESTS": 1, "CREDITS": 5.0})
+    rows.extend(       # zero-credit users present in the scan
+        {"USER_NAME": u, "USAGE_DATE": str(today - dt.timedelta(days=1)),
+         "REQUESTS": 1, "CREDITS": 0.0}
+        for u in ("Z1", "Z2"))
+    daily = pd.DataFrame(rows)
+    econ = token_economics(pd.DataFrame(_token_rows("HEAVY", 100, 100, 100, 100)))
+    eff = coco_efficiency(econ, daily, cap_credits=15.0, window_days=30, as_of=today).set_index("USER_NAME")
+    assert eff.loc["HEAVY", "FLAG"] == "🚩 Review"
+    assert eff.loc["HEAVY", "PEER_MULT"] >= 2.0

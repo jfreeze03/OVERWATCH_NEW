@@ -184,7 +184,12 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
     if "FIRST_USAGE" in out.columns:
         _first = pd.to_datetime(out["FIRST_USAGE"], errors="coerce", utc=True)
         _now = pd.Timestamp(account_today()).tz_localize("UTC")
-        _elapsed = (_now - _first).dt.days + 1
+        # .normalize() to date-grain FIRST: a first-usage timestamp carries a time-of-day, and
+        # a bare (_now - _first).dt.days would FLOOR the intraday fraction, landing one day short
+        # for every real (non-midnight) request — so this must match effective_window_days'
+        # date-based inclusive '(today - first.date()).days + 1', or the per-user projection and
+        # the _MIN_OBSERVABLE_DAYS breach guard drift a day off the scope divisor.
+        _elapsed = (_now - _first.dt.normalize()).dt.days + 1
         out["OBSERVABLE_DAYS"] = _elapsed.clip(lower=1, upper=cap).fillna(float(window))
     else:
         out["OBSERVABLE_DAYS"] = float(window)
@@ -318,12 +323,32 @@ def rollup_summary(enriched: pd.DataFrame, window_days: int) -> dict:
     spend = float(enriched["SPEND_USD"].sum())
     projected = (float(enriched["PROJECTED_30D_USD"].sum())
                  if "PROJECTED_30D_USD" in enriched.columns else spend / days * 30.0)
+    # The headline KPI (projected_30d_usd) is the full column sum so it reconciles with the
+    # detail table. The BUDGET aggregate (aggregate_budget_row) instead reads the GUARDED total
+    # below, built on the SAME per-USER basis classify_exceptions uses: group by user, SUM credits,
+    # re-project over the user's MAX observable window, and drop only whole users below the small-N
+    # floor. A per-ROW drop would instead discard a young secondary source's credits entirely and
+    # let a distributed breach fall below budget (surfacing in neither the aggregate nor per-user
+    # rows); re-projecting the user's summed credits keeps that spend in the guarded total while
+    # still refusing to extrapolate a brand-new user's first-afternoon burst 30x.
+    projected_guarded = projected
+    if {"USER_NAME", "TOTAL_CREDITS", "OBSERVABLE_DAYS"}.issubset(enriched.columns):
+        _rate = (spend / total_credits) if total_credits > 0 else 0.0
+        _pu = pd.DataFrame({
+            "USER_NAME": enriched["USER_NAME"],
+            "_CR": pd.to_numeric(enriched["TOTAL_CREDITS"], errors="coerce").fillna(0.0),
+            "_OBS": pd.to_numeric(enriched["OBSERVABLE_DAYS"], errors="coerce").fillna(0.0),
+        }).groupby("USER_NAME").agg(_CR=("_CR", "sum"), _OBS=("_OBS", "max"))
+        _pu = _pu[_pu["_OBS"] >= _MIN_OBSERVABLE_DAYS]
+        _proj_cr = _pu["_CR"] / _pu["_OBS"].where(_pu["_OBS"] > 0, 1.0) * 30.0
+        projected_guarded = float((_proj_cr * _rate).sum())
     return {
         "active_users": int(enriched["USER_NAME"].nunique()),
         "total_requests": int(enriched["TOTAL_REQUESTS"].sum()),
         "total_credits": round(total_credits, 4),
         "spend_usd": round(spend, 2),
         "projected_30d_usd": round(projected, 2),
+        "projected_30d_usd_guarded": round(projected_guarded, 2),
         "window_days": days,
     }
 
@@ -339,7 +364,12 @@ def aggregate_budget_row(summary: dict, ai_budget_usd: float) -> dict | None:
     actually written against.
     """
     budget = safe_float(ai_budget_usd)
-    projected = safe_float((summary or {}).get("projected_30d_usd"))
+    # Fire on the small-N-GUARDED projection (falls back to the full projection when the guard
+    # column is absent, e.g. an old-shape summary), so the scope breach uses the SAME reliable
+    # basis as the per-user ladder — a brand-new user's un-guarded 30x burst must not manufacture
+    # a Critical the Exceptions table then can't explain with any per-user row.
+    _s = summary or {}
+    projected = safe_float(_s.get("projected_30d_usd_guarded", _s.get("projected_30d_usd")))
     if budget <= 0 or projected <= budget:
         return None
     requests = safe_float((summary or {}).get("total_requests"))

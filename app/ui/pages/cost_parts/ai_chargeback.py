@@ -12,6 +12,7 @@ from dataclasses import replace
 
 import streamlit as st
 
+from app import companies
 from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.identity import identity_sql
 from app.core.query import execute_statement, run
@@ -322,6 +323,17 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
                  key=f"cortex_user_daily_{company}", tier="metadata",
                  source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
                  probe=True, max_rows=200_000)
+    # econ (token grain) is ACCOUNT-WIDE — cortex_code_token_types has no company clause — so the
+    # panel only becomes company-scoped through the (scoped) daily credit set. In a COMPANY view
+    # where that daily scan didn't resolve, coco_efficiency would fall back to the account-wide
+    # token population and list/count OTHER companies' users under this company. Hide it instead of
+    # misattributing (the ALL view has no such clause, so its account-wide fallback stays correct).
+    if companies.user_clause(company, "USER_NAME") and not ud_res.usable():
+        st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "
+                   "which didn't resolve this run. The per-user token grain is account-wide and "
+                   "can't be attributed to this company without it, so it's hidden here.")
+        result_caption(te_res)
+        return
     eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
                           cap_credits=cap_credits, window_days=days, as_of=account_today())
     _flags = coco_coaching_count(eff)
@@ -329,7 +341,12 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
     # other companies' account-wide token traffic into 'Fleet cache-hit' or the low-cache note.
     _shown = set(eff["USER_NAME"].astype(str)) if not eff.empty else set()
     _econ_shown = econ[econ["USER_NAME"].astype(str).isin(_shown)] if _shown else econ
-    _fleet = fleet_cache_hit_pct(_econ_shown)
+    # The shown (credit) users can be DISJOINT from the account-wide token grain (e.g. their
+    # Cortex Code rows predate TOKENS_GRANULAR), leaving _econ_shown empty. Show cache-hit as
+    # n/a then, not a 0.0% that would contradict a "caching is high" caption computed off the
+    # same empty frame.
+    _has_cache = (not _econ_shown.empty) and ("CACHE_HIT_PCT" in _econ_shown.columns)
+    _fleet = fleet_cache_hit_pct(_econ_shown) if _has_cache else 0.0
     _cap = round(cap_credits)
     kpi_row([
         {"label": "Flagged for review", "value": f"{_flags:,}",
@@ -337,7 +354,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
          "help": f"Users consistently over the {_cap} cr/day base allowance AND either heavy vs "
                  "peers or running extended autonomous sessions — a high-intensity usage pattern "
                  "worth reviewing."},
-        {"label": "Fleet cache-hit", "value": f"{_fleet:.1f}%",
+        {"label": "Fleet cache-hit", "value": (f"{_fleet:.1f}%" if _has_cache else "n/a"),
          "help": "cache_read / (cache_read + input). See the caption — where it is high and "
                  "uniform, caching is not the lever; the review flag is."},
         {"label": "Users measured", "value": f"{len(eff):,}"},
@@ -360,21 +377,28 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
         "CACHE_HIT_PCT": st.column_config.NumberColumn("Cache hit %", format="%.1f%%"),
         "REASON": st.column_config.TextColumn("Why flagged"),
     })
-    _low_cache = (int((_econ_shown["CACHE_HIT_PCT"] < 80).sum())
-                  if "CACHE_HIT_PCT" in _econ_shown.columns else 0)
-    _cache_note = (
-        "Cache-hit % is high across every user here, so caching is NOT the lever — session weight, "
-        "cache-write churn (context re-written at full price), and days-over-cap are."
-        if _low_cache == 0 else
-        f"{_low_cache} user(s) have low cache-hit (<80%) — for them caching IS a real lever (context "
-        "re-sent as fresh input); the flag adds the volume / session view for the rest.")
+    _low_cache = int((_econ_shown["CACHE_HIT_PCT"] < 80).sum()) if _has_cache else 0
+    if not _has_cache:
+        _cache_note = (
+            "No token-grain (TOKENS_GRANULAR) cache data for these users, so cache-hit isn't "
+            "measurable here — the flag relies on the credit / session / over-cap signals.")
+    elif _low_cache == 0:
+        _cache_note = (
+            "Cache-hit % is high across every user here, so caching is NOT the lever — session "
+            "weight, cache-write churn (context re-written at full price), and days-over-cap are.")
+    else:
+        _cache_note = (
+            f"{_low_cache} user(s) have low cache-hit (<80%) — for them caching IS a real lever "
+            "(context re-sent as fresh input); the flag adds the volume / session view for the rest.")
     st.caption(
         f"🚩 Review flags a high-intensity usage pattern — consistently over the {_cap} cr/day "
         f"allowance and either heavy sustained spend vs peers (peer x) or extended autonomous "
         f"sessions (cr/request, read-amp). It highlights a pattern to review, not a verdict — "
         f"confirm against delivered work before acting. {_cache_note} Peer-relative, {days}d.")
     with st.expander("Raw token grain (input / output / cache tokens)", expanded=False):
-        styled_table(with_user_names(econ, _PAGE), height=280, column_config={
+        # _econ_shown, not econ: stay scoped to the shown (company) users so a company view
+        # doesn't leak other companies' per-user token traffic in this expander.
+        styled_table(with_user_names(_econ_shown, _PAGE), height=280, column_config={
             "INPUT": st.column_config.NumberColumn("Input", format="%d"),
             "OUTPUT": st.column_config.NumberColumn("Output", format="%d"),
             "CACHE_READ": st.column_config.NumberColumn("Cache Read", format="%d"),

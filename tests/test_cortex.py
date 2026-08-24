@@ -213,6 +213,62 @@ def test_new_source_burst_does_not_false_breach():
     assert out.empty or not out["SIGNAL"].astype(str).str.contains("Budget", case=False).any()
 
 
+def test_observable_days_is_date_grain_inclusive_not_floored():
+    # OBSERVABLE_DAYS must match effective_window_days' inclusive calendar-day count even when
+    # FIRST_USAGE carries a time-of-day. A bare timestamp subtraction floors the intraday fraction
+    # one day short, over-projecting the 30d figure and (via the >=4 guard) dropping a real 4-day
+    # breacher a day longer than intended.
+    _today = account_today()
+    r = _rollup(USER_NAME="TZ", TOTAL_CREDITS=40.0,
+                FIRST_USAGE=f"{_today - timedelta(days=3)} 09:00:00")   # inclusive span = 4 days
+    enriched = enrich_user_rollup(r, 2.20, 30)
+    assert float(enriched.iloc[0]["OBSERVABLE_DAYS"]) == 4.0
+    assert effective_window_days(enriched, 30) == 4        # enrich now agrees with the scope divisor
+
+
+def test_scope_budget_breach_uses_the_small_n_guard():
+    # The scope-wide budget aggregate must apply the SAME small-N guard as the per-user ladder:
+    # a brand-new user's first-day burst (OBSERVABLE_DAYS=1, projected 30x) must not manufacture a
+    # Critical 'AI budget breach (all users)' that no per-user row substantiates.
+    _today = account_today()
+    steady = _rollup(USER_NAME="STEADY", TOTAL_CREDITS=272.0,
+                     FIRST_USAGE=str(_today - timedelta(days=30)))
+    newbie = _rollup(USER_NAME="NEW", TOTAL_CREDITS=113.0, FIRST_USAGE=str(_today))   # OBS_DAYS=1
+    enriched = enrich_user_rollup(pd.concat([steady, newbie], ignore_index=True), 2.20, 30)
+    summary = rollup_summary(enriched, 30)
+    # headline KPI still reconciles with the full detail-column sum (round-1 invariant intact)...
+    assert summary["projected_30d_usd"] == round(float(enriched["PROJECTED_30D_USD"].sum()), 2)
+    # ...but the guarded total drops the <4-day newbie, so no false Critical against a $2000 budget
+    assert aggregate_budget_row(summary, ai_budget_usd=2000.0) is None
+    # a genuine breach still fires, and it reports the GUARDED amount (not the inflated full sum)
+    row = aggregate_budget_row(summary, ai_budget_usd=500.0)
+    assert row is not None
+    assert row["PROJECTED_30D_USD"] == summary["projected_30d_usd_guarded"]
+
+
+def test_guarded_aggregate_catches_distributed_breach_with_young_secondary_sources():
+    # The guarded total must re-project each user's SUMMED credits over their MAX observable window
+    # (classify's per-USER basis), not drop young ROWS. A per-row drop discards a young secondary
+    # source's credits entirely, letting a breach distributed across many users fall below budget
+    # and surface in neither the aggregate nor any per-user row.
+    _today = account_today()
+    frames = []
+    for n in range(10):
+        u = f"U{n}"
+        frames.append(_rollup(USER_NAME=u, SOURCE="CLI", TOTAL_CREDITS=100.0,
+                              FIRST_USAGE=str(_today - timedelta(days=9))))    # OBS_DAYS = 10
+        frames.append(_rollup(USER_NAME=u, SOURCE="Snowsight", TOTAL_CREDITS=20.0,
+                              FIRST_USAGE=str(_today - timedelta(days=1))))    # OBS_DAYS = 2 (young)
+    enriched = enrich_user_rollup(pd.concat(frames, ignore_index=True), 1.0, 30)
+    summary = rollup_summary(enriched, 30)
+    assert summary["projected_30d_usd"] == 6000.0            # full per-row sum (reconciles w/ table)
+    # per user: 120 cr / MAX obs 10 * 30 = 360; x10 users = 3600 (NOT the per-row-drop's 3000)
+    assert summary["projected_30d_usd_guarded"] == 3600.0
+    assert aggregate_budget_row(summary, ai_budget_usd=3300.0) is not None
+    # a per-row-drop guard (3000) would have MISSED a breach a per-user reprojection (3600) catches
+    assert aggregate_budget_row(summary, ai_budget_usd=3050.0) is not None
+
+
 def test_empty_inputs_are_safe():
     assert enrich_user_rollup(pd.DataFrame(), 2.2, 7).empty
     assert classify_exceptions(pd.DataFrame(), 100, 2.2).empty
@@ -266,6 +322,17 @@ def test_fact_readers_are_coverage_gated():
                 mart27_sql.ai_code_daily(180, "ALL")):
         assert "MIN(DAY) AS FIRST_DAY" in sql
         assert "(SELECT FIRST_DAY FROM cov) <= DATEADD('day', -180 + 1, CURRENT_DATE())" in sql
+
+
+def test_ai_costs_by_model_is_coverage_gated_all_source():
+    # ai_costs_by_model serves Code + Functions, so its coverage gate is ALL-source (no
+    # SOURCE<>'Functions' filter its Code-only siblings use). Without it a young/backfilling
+    # fact answers a 365d question with ~30 days of credits under an 'AI spend (365d)' label;
+    # the gate emits zero rows so the KPI falls back to the honestly-labeled live Functions reader.
+    sql = mart27_sql.ai_costs_by_model(365)
+    assert "SELECT MIN(a2.DAY) FROM" in sql
+    assert "<= DATEADD('day', -365 + 1, CURRENT_DATE())" in sql
+    assert "SOURCE <> 'Functions'" not in sql
 
 
 def test_fact_rollup_scopes_company_after_grouping():

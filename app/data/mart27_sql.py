@@ -430,6 +430,13 @@ SELECT
           / NULLIF(SUM(COALESCE(a.TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
 FROM {mart_object("FACT_AI_USAGE_DAILY")} a
 WHERE a.DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+  -- Coverage gate (same guard as ai_code_user_rollup/_daily, ALL sources here since this
+  -- serves Code + Functions): emit ZERO rows unless the fact's earliest day covers the asked
+  -- window, so a young/backfilling fact falls back to the live Functions reader (honestly
+  -- labeled ' - Functions only' + the 90d cap) instead of answering a 365d question with three
+  -- weeks of credits and silently UNDER-REPORTING account AI spend under a full-window label.
+  AND (SELECT MIN(a2.DAY) FROM {mart_object("FACT_AI_USAGE_DAILY")} a2)
+      <= DATEADD('day', -{days} + 1, CURRENT_DATE())
 GROUP BY a.SOURCE, a.MODEL_NAME
 ORDER BY CREDITS DESC
 LIMIT 200

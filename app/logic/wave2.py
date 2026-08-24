@@ -8,9 +8,32 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from app.logic.formulas import safe_float
+
+
+def _peer_ratio(values: pd.Series, *, positive_baseline: bool = False) -> pd.Series:
+    """Each value over the median of the OTHER rows (leave-one-out).
+
+    A whole-population median includes the row being tested, so in a 1- or 2-user
+    cohort the heaviest user's ratio to the midpoint is mathematically < 2 and the
+    peer/session flag can NEVER fire no matter how extreme the overuse. Comparing
+    each user to the median of everyone ELSE removes that self-dilution; for large
+    cohorts it is indistinguishable from the whole-population median (dropping one of
+    many barely moves it). No peers (n<=1, or no positive baseline) -> ratio 0.
+    """
+    arr = pd.to_numeric(values, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    n = arr.size
+    ratios = np.zeros(n, dtype=float)
+    for i in range(n):
+        others = np.delete(arr, i)
+        if positive_baseline:
+            others = others[others > 0]
+        med = float(np.median(others)) if others.size else 0.0
+        ratios[i] = (arr[i] / med) if med > 0 else 0.0
+    return pd.Series(ratios, index=values.index)
 
 
 def _col(df: pd.DataFrame, *names: str) -> str:
@@ -210,11 +233,13 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
         out[c] = pd.to_numeric(out.get(c, pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
 
     # --- peer-relative multiples over the DISPLAYED set (compare UNROUNDED, round for display) ---
-    _med_total = float(out["TOTAL_CREDITS"].median()) if len(out) else 0.0
-    _pos_req = out.loc[out["CR_PER_REQ"] > 0, "CR_PER_REQ"]
-    _med_req = float(_pos_req.median()) if not _pos_req.empty else 0.0
-    _peer = (out["TOTAL_CREDITS"] / _med_total) if _med_total > 0 else pd.Series(0.0, index=out.index)
-    _sess = (out["CR_PER_REQ"] / _med_req) if _med_req > 0 else pd.Series(0.0, index=out.index)
+    # Leave-one-out medians: compare each user to the median of everyone ELSE, so a dominant user
+    # in a 1-2 user company scope can actually clear the >=2 gate (a whole-population median that
+    # includes the user makes the max/midpoint ratio structurally < 2, so the flag could never fire).
+    # positive_baseline on BOTH: a zero-credit / zero-CR user is not a spending peer, and letting
+    # zeros into the baseline could drag its median to 0 and silently drop a heavy user's flag.
+    _peer = _peer_ratio(out["TOTAL_CREDITS"], positive_baseline=True)
+    _sess = _peer_ratio(out["CR_PER_REQ"], positive_baseline=True)
     out["PEER_MULT"] = _peer.round(1)
     out["SESSION_MULT"] = _sess.round(1)
 

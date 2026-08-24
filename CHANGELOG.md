@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.278.0 - Chargeback & AI bug-hunt round 2: small-cohort / young-data edges (2026-08-24)
+
+A second adversarial sweep of the same section (7 findings confirmed, 0 refuted), then an
+adversarial review of the fixes themselves that caught 2 regressions before commit. All 9 are
+locked by regression tests.
+
+- **`ai_costs_by_model` lacked the coverage gate its Code-only siblings enforce.** A young /
+  backfilling `FACT_AI_USAGE_DAILY` returned ~30 days of credits under an "AI spend (365d)"
+  label. Added the ALL-source coverage gate (this KPI serves Code + Functions) so a fact that
+  can't cover the window emits zero rows and the KPI falls back to the honestly-labeled live
+  Functions reader. (`app/data/mart27_sql.py`)
+- **`OBSERVABLE_DAYS` floored one day low.** A first-usage timestamp carries a time-of-day, so a
+  bare `.dt.days` subtraction landed a day short of `effective_window_days`' inclusive count —
+  over-projecting the 30d figure ~33% and suppressing a real 4-day breacher a day longer.
+  Normalize to date grain. (`app/logic/cortex.py`)
+- **CoCo review flag was arithmetically unreachable for any 1-2 user company scope.** A
+  whole-population median includes the user being tested, so the heaviest user's ratio to the
+  midpoint was < 2 and could never clear the gate. Switched peer/session multiples to
+  leave-one-out, positive-only medians (a zero-credit user isn't a spending peer, and can't drag
+  the baseline to 0). (`app/logic/wave2.py`)
+- **A new user's first-day burst fired a false Critical "AI budget breach (all users)".** The
+  scope-aggregate projection had no small-N guard (the per-user ladder does), so a 1-day burst
+  extrapolated 30x inflated the scope total into a breach no per-user row explained. Added a
+  guarded scope total on the same per-USER re-projection basis `classify_exceptions` uses — which
+  also catches a breach distributed across users who each added a young secondary source (a
+  per-row drop would have missed it). The headline KPI stays the full column sum. (`app/logic/cortex.py`)
+- **CoCo panel leaked other companies' users under a company filter** in three places: the "Raw
+  token grain" expander rendered the account-wide frame; a company view whose daily scan didn't
+  resolve fell back to the account-wide population; and "Fleet cache-hit 0.0%" contradicted a
+  "caching is high" caption when no shown user had token grain. Scoped the expander to the shown
+  users, early-return with an honest caption for scoped views, and show cache-hit as n/a when
+  there's no token grain for the shown users. (`app/ui/pages/cost_parts/ai_chargeback.py`)
+
 ## 4.277.0 - Chargeback & AI bug-hunt round 1: same-metric reconciliation (2026-08-24)
 
 A focused bug sweep of the Cost & Contract ▸ Chargeback & AI section (7 findings, 5 unique
