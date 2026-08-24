@@ -293,6 +293,56 @@ LIMIT 50
 """
 
 
+def lock_wait_object_detail(database: str, schema: str, object_name: str,
+                            days: int = 2, limit: int = 100) -> str:
+    """Per-object lock-wait events for the Control-Room spike drill.
+    Account-wide source (LOCK_WAIT_HISTORY has no company grain); the object
+    triplet narrows it. Window default 2d (the spike's 'last day' framing),
+    capped at 7d -- ACCOUNT_USAGE is not pruned by object name, so the scan
+    reads the whole window regardless of the filter (lock_contention notes
+    the 14d scan hit ~56GB); keep it short and interaction-gated.
+
+    Sentinel: the parent mart stores COALESCE(<col>,'NONE'), so a clicked
+    row's DATABASE_NAME/SCHEMA_NAME/OBJECT_NAME may be the literal 'NONE'
+    standing for a SQL NULL on the raw view. Each key emits ``<COL> IS NULL``
+    for 'NONE', else an exact ``<COL> = <literal>`` -- interpolating 'NONE'
+    as a literal would silently return zero rows for NULL-keyed objects.
+
+    Columns limited to those confirmed present on this account (the
+    lock_contention sibling reads DATABASE_NAME/SCHEMA_NAME/OBJECT_NAME/
+    LOCK_TYPE/REQUESTED_AT/ACQUIRED_AT) plus QUERY_ID; BLOCKER_QUERIES /
+    TRANSACTION_ID / RELEASED_AT are deliberately skipped (unconfirmed here
+    -- a missing column is a compile error that breaks the whole drill)."""
+    days = bounded_days(days, maximum=7)
+    limit = max(1, min(int(limit), 500))
+
+    def _key_predicate(column: str, value: str) -> str:
+        return f"{column} IS NULL" if value == "NONE" else f"{column} = {sql_literal(value)}"
+
+    where = and_where(
+        f"REQUESTED_AT >= DATEADD('day', -{days}, CURRENT_DATE())",
+        _key_predicate("DATABASE_NAME", database),
+        _key_predicate("SCHEMA_NAME", schema),
+        _key_predicate("OBJECT_NAME", object_name),
+    )
+    return f"""
+SELECT
+    REQUESTED_AT,
+    ACQUIRED_AT,
+    LOCK_TYPE,
+    QUERY_ID,
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    OBJECT_NAME,
+    DATEDIFF('second', REQUESTED_AT, ACQUIRED_AT) AS WAIT_SEC,
+    IFF(ACQUIRED_AT IS NULL, 1, 0) AS NEVER_ACQ
+FROM SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY
+WHERE {where}
+ORDER BY (ACQUIRED_AT IS NULL) DESC, WAIT_SEC DESC
+LIMIT {limit}
+"""
+
+
 def poor_pruning_queries(days: int, company: str = "ALL", database: str = "",
                          schema_contains: str = "") -> str:
     """Query families scanning >80% of a 100+-partition table — missing

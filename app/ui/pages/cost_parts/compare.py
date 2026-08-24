@@ -33,7 +33,14 @@ from app.logic.formulas import (
     safe_float,
 )
 from app.ui import charts
-from app.ui.components import guard, kpi_row, panel_help, result_caption, styled_table
+from app.ui.components import (
+    guard,
+    kpi_row,
+    panel_help,
+    result_caption,
+    selectable_table,
+    styled_table,
+)
 
 _PAGE = "Cost & Contract"
 
@@ -200,6 +207,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
 
     # ---- warehouse movers ---------------------------------------------------
     st.markdown("**Warehouse movers — who moved the bill**")
+    _sel_wh = ""  # sticky selection drives the pattern-movers scope below
     if guard(wh, "No warehouse credits in either window."):
         view = wh.df.copy()
         # #34: a partial backfill on either side manufactures false movers — gate
@@ -214,8 +222,13 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         view = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index)
         charts.paired_bars(view, "WAREHOUSE_NAME", "A_USD", "B_USD",
                            a_label=pair["label_a"], b_label=pair["label_b"])
-        styled_table(
-            view[["WAREHOUSE_NAME", "A_USD", "B_USD", "DELTA_USD", "DELTA_PCT"]].head(15),
+        # Selectable (owner ask #6): click a warehouse to scope the pattern movers
+        # below to it. Index off the EXACT displayed sub-frame (reindex-sorted then
+        # head(15)); a positional selection maps only to the frame passed in.
+        disp = view[["WAREHOUSE_NAME", "A_USD", "B_USD", "DELTA_USD", "DELTA_PCT"]].head(15)
+        _wh_sel = selectable_table(
+            disp,
+            key=f"cmp_wh_sel_{company}_{a0}_{b0}",
             height=260,
             column_config={
                 "A_USD": st.column_config.NumberColumn(f"A $ ({pair['label_a']})", format="$%.0f"),
@@ -223,15 +236,43 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
                 "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.0f"),
                 "DELTA_PCT": st.column_config.NumberColumn("Δ %", format="%.1f%%"),
             })
+        _sel_wh = (str(disp.iloc[int(_wh_sel)]["WAREHOUSE_NAME"])
+                   if _wh_sel is not None and 0 <= int(_wh_sel) < len(disp) else "")
         result_caption(wh)
 
     # ---- pattern movers -----------------------------------------------------
-    st.markdown("**Pattern movers — the silent-spend delta (measured $)**")
-    if not pat.ok:
+    # #6: a warehouse selection above scopes these to that warehouse via a LIVE
+    # per-warehouse read (MART_PATTERN_COST_DAILY has no warehouse grain); the
+    # scan is interaction-gated (fires only on the row click, never first paint),
+    # the one exception to Compare's zero-live-scan invariant. Account-wide (mart)
+    # until a warehouse is clicked.
+    if _sel_wh:
+        st.markdown(f"**Pattern movers on {_sel_wh} — the silent-spend delta (measured $)**")
+        st.caption("Live per-warehouse scan (QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY), "
+                   "measured compute credits at ~8h view lag — same $ attribution basis as the "
+                   "account-wide movers. RUNS here counts distinct executions (the account-wide "
+                   "table counts attribution rows, which run higher for multi-hour queries). "
+                   "Click another warehouse to switch.")
+        _pat = run(
+            mart27_sql.compare_pattern_costs_by_warehouse(a0, a1, b0, b1, _sel_wh),
+            page=_PAGE, key=f"cmp_pat_wh_{company}_{a0}_{b0}_{_sel_wh}", tier="recent",
+            source="QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY (per-warehouse pattern movers, "
+                   "interaction-gated)")
+        _pat_empty = f"No repeated pattern on {_sel_wh} crossed the 0.01-credit floor in either window."
+        _pat_note = ("Measured attribution compute credits per parameterized hash on "
+                     f"{_sel_wh} — new-in-A patterns show B = $0.")
+    else:
+        st.markdown("**Pattern movers — the silent-spend delta (measured $)**")
+        st.caption("Click a warehouse above to scope these to it; account-wide until then.")
+        _pat = pat
+        _pat_empty = "No repeated pattern crossed the 0.01-credit floor in either window."
+        _pat_note = ("Measured QUERY_ATTRIBUTION_HISTORY credits per parameterized hash — "
+                     "new-in-A patterns show B = $0.")
+    if not _sel_wh and not pat.ok:
         st.info("Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
                 "an admin can apply the pending schema update on Admin → Migrations & freshness.")
-    elif guard(pat, "No repeated pattern crossed the 0.01-credit floor in either window."):
-        pv = pat.df.copy()
+    elif guard(_pat, _pat_empty):
+        pv = _pat.df.copy()
         pv["A_USD"] = pv["A_CREDITS"].map(safe_float) * rate
         pv["B_USD"] = pv["B_CREDITS"].map(safe_float) * rate
         pv["DELTA_USD"] = pv["A_USD"] - pv["B_USD"]
@@ -243,8 +284,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
                 "B_USD": st.column_config.NumberColumn("B $", format="$%.2f"),
                 "DELTA_USD": st.column_config.NumberColumn("Δ $", format="$%.2f"),
             })
-        result_caption(pat, note="Measured QUERY_ATTRIBUTION_HISTORY credits per "
-                                 "parameterized hash — new-in-A patterns show B = $0.")
+        result_caption(_pat, note=_pat_note)
 
     # ---- volume shape ---------------------------------------------------------
     if act.usable():

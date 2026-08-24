@@ -58,6 +58,7 @@ from app.ui.components import (
     blast_radius,
     confirm_gate,
     empty_state,
+    entity_nav_table,
     guard,
     kpi_row,
     lazy_sections,
@@ -934,8 +935,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _tdf["USD"] = _tdf["CREDITS"].map(safe_float) * rate
                 _tdf["QUERY_USD"] = _tdf["QUERY_CREDITS"].map(safe_float) * rate
                 _tdf["MAINT_USD"] = _tdf["MAINTENANCE_CREDITS"].map(safe_float) * rate
-                styled_table(_tdf[["OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "QUERY_USD", "MAINT_USD", "USD"]],
-                             height=300)
+                # UI22: each row IS an OBJECT — click deep-links to Control Room ▸
+                # Entity 360 (object-level cost totals + recent changes). Degrades to a
+                # plain styled_table when the runtime has no selection. No new scan.
+                entity_nav_table(
+                    _tdf[["OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "QUERY_USD", "MAINT_USD", "USD"]],
+                    key=f"objcost_top_sel_{company}_{days}_{_oc_db}",
+                    key_col="OBJECT_FQN", entity_type="OBJECT", height=300)
             st.caption(
                 ("Scoped to the selected database. " if str(_oc_db).strip() else "")
                 + "Measured query compute is split equally across a query's base objects "
@@ -988,14 +994,63 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
                 if "LOW_CONFIDENCE" in movers.columns:
                     _mv_cols.append("LOW_CONFIDENCE")
-                styled_table(  # rec21: status tint, prettified headers, CSV
-                    movers[_mv_cols],
+                # #24: capture the exact rendered frame in its natural (unsorted)
+                # order so the click's positional index maps back to the same object.
+                _mv_show = movers[_mv_cols]
+
+                def _open_db(index: int) -> None:
+                    """Interaction-gated drill: the clicked database's per-table storage,
+                    priced at the configured $/TiB (mirrors spend.py:_storage_table_drill).
+                    Fires only on a row click — a new live usage-view scan that stays off
+                    first paint — so the perf budget holds."""
+                    _db = str(_mv_show.iloc[int(index)]["DATABASE_NAME"])
+                    _res = run(insights_sql.table_storage_breakdown(company, _db), page=_PAGE,
+                               key=f"storgrow_drill_{company}_{_db}", tier="historical",
+                               source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+                    if not guard(_res, f"No table storage rows for {_db} "
+                                       "(or TABLE_STORAGE_METRICS is unavailable)."):
+                        return
+                    _t = _res.df.copy()
+                    _rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+
+                    def _usd(gb_col: str) -> pd.Series:
+                        _col = _t[gb_col] if gb_col in _t.columns else pd.Series(0.0, index=_t.index)
+                        return _col.map(safe_float) / 1024.0 * _rate_tb
+
+                    _t["Active $"] = _usd("ACTIVE_GB")
+                    _t["Time-travel $"] = _usd("TIME_TRAVEL_GB")
+                    _t["Fail-safe $"] = _usd("FAILSAFE_GB")
+                    _t["Clone $"] = _usd("CLONE_GB")
+                    _t["Total $"] = (_t["Active $"] + _t["Time-travel $"]
+                                     + _t["Fail-safe $"] + _t["Clone $"])
+                    st.markdown(f"**Tables driving storage in {_db}**")
+                    # Honest scope: this drill is a current on-disk snapshot ordered by
+                    # total size, NOT a per-table growth series (TABLE_STORAGE_METRICS has
+                    # no table-grain history) — so it spots the drivers but won't sum to
+                    # the growth slope above.
+                    st.caption(
+                        "Current on-disk snapshot (TABLE_STORAGE_METRICS) priced at the "
+                        "configured $/TiB — it spots the drivers behind this database's "
+                        "growth, but won't sum to the growth slope above.")
+                    _cfg = {c: st.column_config.NumberColumn(c, format="$%.2f")
+                            for c in ("Active $", "Time-travel $", "Fail-safe $", "Clone $", "Total $")}
+                    _show_cols = ["SCHEMA_NAME", "TABLE_NAME", "Active $", "Time-travel $",
+                                  "Fail-safe $", "Clone $", "Total $", "STATUS", "RETENTION_DAYS", "LAST_DML"]
+                    styled_table(_t[[c for c in _show_cols if c in _t.columns]], height=340,
+                                 column_config=_cfg)
+                    result_caption(_res)
+
+                selectable_nav_table(  # rec21: status tint, prettified headers, CSV; #24: row click drills to tables
+                    _mv_show,
+                    key=f"storgrow_sel_{company}_{days_storage}",
+                    on_select=_open_db,
                     column_config={
                         "GROWTH_USD_30D": st.column_config.NumberColumn("Growth $/mo", format="$%.0f"),
                         "FAILSAFE_SHARE_PCT": st.column_config.NumberColumn("Failsafe %", format="%.1f%%"),
                         "LOW_CONFIDENCE": st.column_config.CheckboxColumn("Low confidence"),
                     },
                 )
+                st.caption("Click a database row to drill to the tables driving its storage.")
                 result_caption(sg_res, note=(f"Window widened to {days_storage}d for a stable growth slope."
                                              if days < days_storage else f"{days_storage}d window."))
                 _low = int(movers["LOW_CONFIDENCE"].sum()) if "LOW_CONFIDENCE" in movers.columns else 0

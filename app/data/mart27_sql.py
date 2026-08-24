@@ -908,6 +908,64 @@ ORDER BY ABS(A_CREDITS - B_CREDITS) DESC
 LIMIT {lim}"""
 
 
+def compare_pattern_costs_by_warehouse(a_start: str, a_end: str, b_start: str,
+                                       b_end: str, warehouse: str = "",
+                                       limit: int = 25) -> str:
+    """Pattern movers scoped to ONE warehouse — the #6 scope-to-warehouse drill.
+
+    MART_PATTERN_COST_DAILY (V037) aggregates WAREHOUSE_NAME away, so a per
+    -warehouse pattern cut can only come from the one place
+    QUERY_PARAMETERIZED_HASH and WAREHOUSE_NAME coexist: a LIVE
+    QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY scan. This is interaction-gated
+    in Compare (fires only on a warehouse-row click, never first paint), the
+    single exception to the tab's zero-live-scan invariant.
+
+    An exact WAREHOUSE_NAME is a COMPLETE scope, so — like
+    cost_sql.compile_heavy_families — NO company predicate is applied (a
+    hardcoded company tuple would only subtract, and can zero a warehouse
+    mapped to a company via the runtime COMPANY_SCOPE table). Output columns
+    mirror compare_pattern_costs (QUERY_HASH/SAMPLE_TEXT/A_RUNS/B_RUNS/
+    A_CREDITS/B_CREDITS) so the Compare render block is reused verbatim.
+    Credits are measured CREDITS_ATTRIBUTED_COMPUTE (+ query-acceleration) —
+    the same attribution basis as the account-wide mart, at ~8h view lag.
+    """
+    in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end,
+                                       col="q.START_TIME")
+    lim = max(5, min(int(limit), 100))
+    _credits = ("a.CREDITS_ATTRIBUTED_COMPUTE "
+                "+ COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)")
+    _earliest = f"LEAST('{_iso(a_start)}'::DATE, '{_iso(b_start)}'::DATE)"
+    return f"""
+WITH q AS (
+    SELECT QUERY_ID, QUERY_PARAMETERIZED_HASH, START_TIME,
+           LEFT(QUERY_TEXT, 140) AS SAMPLE_TEXT
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+    WHERE {either}
+      AND WAREHOUSE_NAME = {sql_literal(warehouse)}
+      AND QUERY_PARAMETERIZED_HASH IS NOT NULL
+)
+-- Join the FILTERED window first, THEN aggregate credits: pre-aggregating the
+-- whole attribution view is the 139s-family slow path (insights_sql
+-- .measured_query_costs / Codex #11) — the pre-filter-then-join order avoids it.
+SELECT
+    q.QUERY_PARAMETERIZED_HASH AS QUERY_HASH,
+    ANY_VALUE(q.SAMPLE_TEXT) AS SAMPLE_TEXT,
+    COUNT(DISTINCT CASE WHEN {in_a} THEN q.QUERY_ID END) AS A_RUNS,
+    COUNT(DISTINCT CASE WHEN {in_b} THEN q.QUERY_ID END) AS B_RUNS,
+    SUM(IFF({in_a}, {_credits}, 0)) AS A_CREDITS,
+    SUM(IFF({in_b}, {_credits}, 0)) AS B_CREDITS
+FROM q
+JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
+  ON a.QUERY_ID = q.QUERY_ID
+ AND a.START_TIME >= DATEADD('day', -1, {_earliest})
+GROUP BY q.QUERY_PARAMETERIZED_HASH
+HAVING GREATEST(SUM(IFF({in_a}, {_credits}, 0)),
+                SUM(IFF({in_b}, {_credits}, 0))) > 0.01
+ORDER BY ABS(SUM(IFF({in_a}, {_credits}, 0)) - SUM(IFF({in_b}, {_credits}, 0))) DESC
+LIMIT {lim}
+"""
+
+
 def fact_monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> str:
     """Boss-chart fallback from FACT_WAREHOUSE_DAILY (r14 #5): the fact is
     backfilled 365 days, so the 13-month live WAREHOUSE_METERING_HISTORY

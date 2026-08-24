@@ -69,7 +69,10 @@ _REACHABLE = {
         "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
         "CORTEX_FUNCTIONS_USAGE_HISTORY", "QUERY_ATTRIBUTION_HISTORY",
         "QUERY_HISTORY", "SERVERLESS_TASK_HISTORY", "TASK_HISTORY"),
-    "app/ui/pages/cost_parts/compare.py": (),
+    # +QUERY_HISTORY/QUERY_ATTRIBUTION_HISTORY v4.269 (UX sweep #6): a warehouse row-click
+    # scopes the pattern-movers table via a live per-warehouse read (the pattern mart has no
+    # warehouse grain) — interaction-gated on the click, not first paint.
+    "app/ui/pages/cost_parts/compare.py": ("QUERY_ATTRIBUTION_HISTORY", "QUERY_HISTORY"),
     # +TABLES (2026-07-31, audit B4): the storage retention-fix estimate counted the whole
     # time-travel + failsafe pile as recoverable, which is systematically high — failsafe
     # drains in 7d regardless of RETENTION_TIME. ACCOUNT_USAGE.TABLES carries the per-table

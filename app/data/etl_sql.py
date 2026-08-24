@@ -90,6 +90,58 @@ LIMIT 100
 """
 
 
+def etl_failed_runs_for_pipeline(pipeline: str, days: int, company: str = "ALL",
+                                 database: str = "", schema_contains: str = "") -> str:
+    """Per-pipeline drill: every non-SUCCESS statement for ONE tagged pipeline,
+    one row per statement, with its measured attribution credits (the retry/abort
+    waste that rolls up into the parent's RETRY_WASTE_CREDITS / Failed-run $).
+
+    Scoping (company/db/schema) and the ``cred`` CTE window (days+1) are IDENTICAL
+    to etl_cost_by_pipeline so the drill's summed waste $ reconciles to the row's
+    Failed-run $. Pipeline equality is an EXACT, case-preserving match on the JSON
+    tag value (no UPPER() — the parent extracts PIPELINE from the same
+    GET_PATH(...)::VARCHAR, so the clicked cell round-trips exactly)."""
+    days = bounded_days(days)
+    from app.core.sqlsafe import contains_filter, sql_literal
+
+    where = and_where(
+        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "q.QUERY_TAG IS NOT NULL",
+        "GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'pipeline') IS NOT NULL",
+        companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
+        companies.database_equals_clause(database, "q.DATABASE_NAME"),
+        contains_filter("q.SCHEMA_NAME", schema_contains),
+        f"GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'pipeline')::VARCHAR = {sql_literal(pipeline)}",
+        "q.EXECUTION_STATUS <> 'SUCCESS'",
+    )
+    return f"""
+WITH cred AS (
+    SELECT QUERY_ID,
+           SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
+    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    GROUP BY QUERY_ID
+)
+SELECT
+    q.START_TIME,
+    GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'run_id')::VARCHAR AS RUN_ID,
+    q.QUERY_ID,
+    q.QUERY_TYPE,
+    q.EXECUTION_STATUS,
+    q.ERROR_CODE,
+    q.ERROR_MESSAGE,
+    q.WAREHOUSE_NAME,
+    q.USER_NAME,
+    q.TOTAL_ELAPSED_TIME,
+    COALESCE(c.CREDITS, 0) AS WASTE_CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
+LEFT JOIN cred c ON c.QUERY_ID = q.QUERY_ID
+WHERE {where}
+ORDER BY q.START_TIME DESC
+LIMIT 100
+"""
+
+
 def etl_tag_coverage(days: int, company: str = "ALL", database: str = "",
                      schema_contains: str = "") -> str:
     """Credit-weighted pipeline-tag coverage: how much MEASURED compute carries

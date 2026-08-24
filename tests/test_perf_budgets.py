@@ -71,7 +71,7 @@ _LIVE_SCAN_BUDGETS = {
     # Wave 2 pins (v4.12.0) — every count below is labeled live fallbacks
     # under mart-first reads, or panels the marts genuinely cannot serve
     # (tag coverage needs user grain; pruning needs partition stats).
-    "app/ui/pages/cost_parts/optimize.py": 3,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled)
+    "app/ui/pages/cost_parts/optimize.py": 4,   # +1 v4.30: toggled clustering-spend scan (COST_DB recon R7; on-demand, labeled); +1 v4.269 (UX sweep #24): storage-growth movers row-click drills the clicked database's per-table storage (table_storage_breakdown; ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY) — interaction-gated on the row click, not first paint, mirrors spend.py's existing _storage_table_drill
     "app/ui/pages/cost_parts/spend.py": 12,     # +1 v4.30: CS-by-QUERY_TYPE drill (COST_DB recon R6); +1 v4.50: the v4.46 storage-tier live fallback moved here with the storage panels (probe-gated, non-first-paint, unchanged); +2 v4.267 (owner ask): per-warehouse "why is IT elevated?" drill — a warehouse selection scopes compile-heavy-families + CS-by-type via a live per-warehouse QUERY_HISTORY read (the family/CS marts aren't warehouse-grained), interaction-gated on the ratio-table row click, NOT first paint
     "app/ui/pages/cost_parts/ai_chargeback.py": 4,  # -1 v4.50: the storage-tier live fallback moved to spend.py with the storage panels
     # +2 (2026-07-31, P6): NOT new scans — this budget counts the literal string (see the

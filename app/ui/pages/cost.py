@@ -30,6 +30,7 @@ from app.ui.components import (
     run_mart_first,
     section_filter_contract,
     section_header,
+    selectable_table,
     styled_table,
     user_display_map,
     with_user_names,
@@ -300,10 +301,43 @@ def render() -> None:
                            if len(tdf_g) else None),
                  "delta_color": "off"},
             ])
-            styled_table(with_user_names(tdf_g, _PAGE), height=260, column_config={
-                "TAGGED_PCT": st.column_config.NumberColumn("Tagged %", format="%.1f%%")})
+            # Capture the display frame BEFORE indexing so the positional
+            # (iloc) selection stays stable; with_user_names adds a friendly
+            # USER column but KEEPS the raw login USER_NAME the drill filters on.
+            _disp = with_user_names(tdf_g, _PAGE)
+            _usel = selectable_table(
+                _disp, key=f"tagcov_sel_{f['company']}_{f['days']}_{f['database']}_{f['schema_contains']}",
+                height=260,
+                column_config={"TAGGED_PCT": st.column_config.NumberColumn("Tagged %", format="%.1f%%")})
             st.caption("Fix at the source: set QUERY_TAG in the tool/session that runs the "
                        "workload; the scoreboard moves within a day.")
+            # Click a user row -> their top untagged statement types (live
+            # QUERY_HISTORY read; interaction-gated). Index into the RAW
+            # USER_NAME, not the USER display column. Bounds-guard the sticky
+            # selection against a window narrow that shrinks the frame.
+            _sel_user = (str(_disp.iloc[int(_usel)]["USER_NAME"])
+                         if _usel is not None and 0 <= int(_usel) < len(_disp) else "")
+            if _sel_user:
+                _u_db, _u_sc = f["database"], f["schema_contains"]
+                ut = run(cost_sql.untagged_executions_for_user(
+                             _sel_user, f["days"], f["company"], _u_db, _u_sc),
+                         page=_PAGE,
+                         key=f"untagged_user_{f['company']}_{f['days']}_{_sel_user}_{_u_db}_{_u_sc}",
+                         tier="historical", source="QUERY_HISTORY (untagged executions, per user)")
+                st.markdown(f"**Untagged executions — "
+                            f"{resolve_display(_sel_user, user_display_map(_PAGE))}**")
+                if guard(ut, "No untagged executions for this user in the window/scope."):
+                    styled_table(ut.df, height=240)
+                    result_caption(ut)
+                    # The drill is a LIVE scan capped at ~90d; the scoreboard above can be
+                    # mart-served over a longer window, so its untagged seconds may exceed
+                    # this decomposition. Say so rather than let the numbers silently differ.
+                    if isinstance(f.get("days"), int) and f["days"] > 90:
+                        st.caption("Live scan of the last ~90 days — with a longer page window the "
+                                   "row above (mart-served) can span more, so these totals are a "
+                                   "recent-90d subset, not a full-window decomposition.")
+            else:
+                st.caption("Click a user row to see their top untagged statement types.")
         st.divider()
         section_header("Cortex / AI spend", "info", "cost", anchor="cost-cortex")
         _cortex_spend_tab(f["days"], ai_rate)

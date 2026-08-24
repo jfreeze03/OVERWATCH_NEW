@@ -347,9 +347,37 @@ def _access_tab(company: str, days: int) -> None:
     if ur.ok and ur.empty:
         st.success("Every active role was assumed in the last 90 days.")
     elif guard(ur, ""):
-        styled_table(ur.df)
+        # #26: click a role -> who holds it + what it grants (confirm before revoke).
+        # ur.df arrives index-reset from run, but reset again defensively so
+        # selectable_table's POSITIONAL index maps back through .iloc.
+        frame = ur.df.reset_index(drop=True)
+        sel = selectable_table(frame, key="sec_unused_role_drill",
+                               sort_label="most-granted first")
+        if sel is not None and sel != st.session_state.get("_sec_unused_role_sel"):
+            st.session_state["_sec_unused_role_sel"] = sel
         st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
+        role = str(frame.iloc[sel]["ROLE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
+        if role:
+            section_header(f"Before revoking {role}: who holds it, what it grants", "warn", "admin")
+            # Both reads are interaction-gated (fire only after a row click), so
+            # they are NOT first-paint usage-view scans; tier="historical"
+            # makes a re-click on the same role a cache hit.
+            h = run(security_sql.role_holders(role), page=_PAGE,
+                    key=f"sec_role_holders_{role}", tier="historical",
+                    source="ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)")
+            st.markdown("**Holders**")
+            if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis)."):
+                styled_table(with_user_names(h.df, _PAGE) if "USER_NAME" in h.df.columns else h.df,
+                             height=200)
+            p = run(security_sql.role_privileges(role), page=_PAGE,
+                    key=f"sec_role_privs_{role}", tier="historical",
+                    source="ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)")
+            st.markdown("**Privileges this role grants**")
+            if guard(p, f"{role} grants no object privileges — it confers no direct access."):
+                styled_table(p.df, height=240, sort_label="by object type")
+            st.caption("This reports; it revokes nothing. Confirm holders and privileges "
+                       "with the owner first (up to ~2h usage-view latency).")
 
     st.caption("Role and privilege grant activity — grants, revokes, and privilege changes, "
                "newest first — lives on the Changes section (Recent grant changes).")
@@ -427,9 +455,10 @@ def _exposure_tab() -> None:
     One metadata read (SHOW SHARES) answers "which objects are exposed to whom":
     OUTBOUND shares are the exposure surface, ``to`` names the consumer accounts,
     and a marketplace LISTING is broad by construction. Company scoping doesn't
-    apply — shares are an account-wide object with no company grain. The alert on
-    *new/broadened* exposure (SEC_NEW_EXPOSURE) and the per-object SHOW GRANTS TO
-    SHARE drill are the owner-migration / next-slice halves of this finding."""
+    apply — shares are an account-wide object with no company grain. Clicking an
+    outbound share drills to the objects it exposes (SHOW GRANTS TO SHARE, #8);
+    the alert on *new/broadened* exposure (SEC_NEW_EXPOSURE) is the remaining
+    owner-migration half of this finding."""
     st.caption("Outbound shares are the surface where this account's data leaves it. Every consumer here should be a known partner.")
     shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",
                  tier="metadata", source="SHOW SHARES", max_rows=0)
@@ -474,8 +503,32 @@ def _exposure_tab() -> None:
     outbound_first = classified[classified["KIND"] != "INBOUND"]
     if not outbound_first.empty:
         section_header("Outbound exposure (who can see our data)", "warn", "security")
-        styled_table(outbound_first, height=320, slug="share-exposure",
-                     sort_label="most-exposing first, then consumer count")
+        # #8: click a share -> the objects it exposes (SHOW GRANTS TO SHARE).
+        # outbound_first is a boolean-filtered slice with a GAPPY index; reset it
+        # so selectable_table's POSITIONAL index maps back through .iloc.
+        frame = outbound_first.reset_index(drop=True)
+        sel = selectable_table(frame, key="sec_share_drill", height=320,
+                               slug="share-exposure",
+                               sort_label="most-exposing first, then consumer count")
+        if sel is not None and sel != st.session_state.get("_sec_share_sel"):
+            st.session_state["_sec_share_sel"] = sel
+        share = str(frame.iloc[sel]["SHARE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
+        if share:
+            section_header(f"Objects exposed by {share}", "info", "security")
+            # Metadata SHOW (not a usage-view scan), interaction-gated. No LIMIT
+            # is legal on SHOW, so max_rows=0 — mirrors show_shares_sql's run pattern.
+            g = run(security_sql.show_grants_to_share_sql(share), page=_PAGE,
+                    key=f"sec_share_grants_{share}", tier="metadata",
+                    source=f"SHOW GRANTS TO SHARE {share}", max_rows=0)
+            if g.ok and g.empty:
+                st.info("This share grants USAGE to consumers but exposes no objects yet, "
+                        "or the current role can't read its grants — an empty result here is "
+                        "a privilege gap, not proof of no objects.")
+            elif guard(g, ""):
+                cols = [c for c in ("PRIVILEGE", "GRANTED_ON", "NAME", "GRANT_OPTION")
+                        if c in g.df.columns]
+                styled_table(g.df[cols] if cols else g.df, height=280, sort_label="by object type")
+                result_caption(g)
     inbound = classified[classified["KIND"] == "INBOUND"]
     if not inbound.empty:
         section_header("Inbound shares (data we consume)", "info", "security")

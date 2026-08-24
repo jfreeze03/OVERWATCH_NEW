@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.269.0 - Drillable sweep, MODERATE wave: scope-the-detail-to-my-selection (2026-08-20)
+
+The MODERATE tier of the UX gap sweep — 8 drills that fetch per-entity detail on a row
+click (7 new live builders + 1 reuse + 1 Entity-360 deep-link), read-only, no migration:
+
+- **Cost ▸ Compare** — click a warehouse mover → its pattern-movers scoped to that warehouse
+  (`compare_pattern_costs_by_warehouse`, live QUERY_HISTORY×QUERY_ATTRIBUTION_HISTORY).
+- **Cost ▸ Unit costs ▸ ETL** — click a pipeline → its non-SUCCESS runs + errors
+  (`etl_failed_runs_for_pipeline`).
+- **Cost ▸ Chargeback ▸ Query-tag governance** — click a user → their top untagged statement
+  types (`untagged_executions_for_user`).
+- **Cost ▸ Optimization** — storage-growth mover → the database's per-table storage (reuses
+  `table_storage_breakdown`); object-cost-ledger row → that object's Control Room ▸ Entity 360.
+- **Security ▸ Exposure** — click an outbound share → the objects it exposes (`SHOW GRANTS TO
+  SHARE`, identifier-quoted).
+- **Security ▸ Access ▸ Unused roles** — click a role → who holds it + what it grants
+  (`role_holders` + `role_privileges`), the confirm-before-revoke context.
+- **Control Room ▸ Lock-wait spikes** — click an object → its recent lock-wait events
+  (`lock_wait_object_detail` over LOCK_WAIT_HISTORY).
+
+Built by fanning out one agent per code-file group, then an adversarial review of the whole
+diff (3 confirmed, fixed): the Compare drill's `RUNS` counts distinct executions vs the mart's
+attribution-row count (caption now says so); the untagged-executions drill is a live 90-day
+scan while the parent can span longer (caption + docstring now disclose the subset); and the
+ETL/tag drill keys gained `database`/`schema_contains` so a sticky selection can't drill the
+wrong entity after a filter change. **#7 (attribution scope-to-warehouse) was dropped** — a
+selectable main table loses its additive totals and the scoped split introduced a second
+attribution formula path, both of which the attribution-math invariants (correctly) forbid.
+
 ## 4.268.0 - Make-it-drillable sweep: 17 tables now click-to-drill (2026-08-20)
 
 A proactive UX gap sweep (6-cluster adversarial pass over every page) surfaced the exact

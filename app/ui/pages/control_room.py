@@ -976,9 +976,21 @@ def render() -> None:
                    source="MART_LOCK_WAIT_DAILY (spikes)")
         if _spk.ok and not _spk.empty:
             st.subheader("Lock-wait spikes (last day vs prior 6-day avg)")
-            styled_table(_spk.df, height=180)
+            _ls_sel = selectable_table(_spk.df, key="cr_lockspike_sel", height=180)
             st.caption("Objects with >=5 waits last day and >3x their own baseline — the Operations "
-                       "Warehouses section has the full table and history.")
+                       "Warehouses section has the full table and history. Select an object for its "
+                       "recent lock-wait events.")
+            if _ls_sel is not None and 0 <= _ls_sel < len(_spk.df):
+                _o = _spk.df.iloc[_ls_sel]
+                _odb, _osc, _oob = str(_o["DATABASE_NAME"]), str(_o["SCHEMA_NAME"]), str(_o["OBJECT_NAME"])
+                _det = run(ops_sql.lock_wait_object_detail(_odb, _osc, _oob, days=2), page=_PAGE,
+                           key=f"cr_lockdetail_{_odb}_{_osc}_{_oob}", tier="recent",
+                           source="LOCK_WAIT_HISTORY (per-object detail, live)")
+                st.markdown(f"**Lock-wait events** — `{_odb}.{_osc}.{_oob}` (last 2 days)")
+                if guard(_det, "No lock-wait events for this object in the last 2 days "
+                               "(aggregate lags the raw view)."):
+                    styled_table(_det.df, height=240)
+                    result_caption(_det)
 
         section_header("Spend movers (window vs prior)")
         if f["database"]:

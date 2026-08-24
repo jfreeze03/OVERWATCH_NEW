@@ -492,6 +492,26 @@ def show_shares_sql() -> str:
     return "SHOW SHARES LIMIT 500"
 
 
+def show_grants_to_share_sql(share_name: str) -> str:
+    """rec#8 drill: the objects one outbound share exposes.
+
+    SHOW GRANTS TO SHARE lists every privilege the share carries (USAGE on the
+    exposed database/schema, SELECT / REFERENCE_USAGE on the objects) — the
+    "what does this share actually expose" answer behind the SHOW SHARES
+    inventory. Metadata command, not an ACCOUNT_USAGE scan.
+
+    Injection: the share name is an IDENTIFIER in a SHOW command, NOT a
+    string-literal position, so ``sql_literal`` is WRONG here (it would emit
+    ``SHOW GRANTS TO SHARE 'X'``, a syntax error). Wrap it as a double-quoted
+    identifier and double any embedded double-quote — the only escape from a
+    ``"``-quoted identifier is ``"``, which is doubled, so this is closed
+    against injection and still handles shares created as quoted identifiers
+    (spaces / lowercase). No LIMIT: SHOW rejects it, which is why the run()
+    call must pass ``max_rows=0``."""
+    ident = '"' + str(share_name).replace('"', '""') + '"'
+    return f"SHOW GRANTS TO SHARE {ident}"
+
+
 def role_privilege_matrix() -> str:
     """Auditor sheet: privileges per role aggregated by object type."""
     return """
@@ -522,6 +542,42 @@ WHERE r.DELETED_ON IS NULL AND q.ROLE_NAME IS NULL
   AND r.NAME NOT IN ('PUBLIC')
 ORDER BY GRANTED_TO_USERS DESC, r.CREATED_ON
 LIMIT 500
+"""
+
+
+def role_holders(role: str) -> str:
+    """rec#26 drill: who currently holds one role (revoke-decision context).
+
+    GRANTS_TO_USERS filtered to the clicked role, active grants only — the same
+    source as the parent ``unused_roles`` list's GRANTED_TO_USERS count, so the
+    two reconcile. ROLE here is a WHERE-clause STRING comparison (a
+    string-literal position), so use ``sql_literal`` (NOT identifier quoting):
+    the verbatim ROLE_NAME value matches on exact ``=`` (do not upper/lower it).
+    Up to ~2h ACCOUNT_USAGE latency, so a grant added in the last hour may not
+    appear — confirm with the owner before revoking."""
+    return f"""
+SELECT GRANTEE_NAME AS USER_NAME, GRANTED_BY, CREATED_ON AS GRANTED_ON
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
+WHERE ROLE = {sql_literal(role)} AND DELETED_ON IS NULL
+ORDER BY USER_NAME
+LIMIT 500
+"""
+
+
+def role_privileges(role: str) -> str:
+    """rec#26 drill: what one role grants — what a revoke would remove.
+
+    GRANTS_TO_ROLES where the clicked role is the GRANTEE: every privilege the
+    role holds and on which object. GRANTEE_NAME is a WHERE-clause STRING
+    comparison (a string-literal position), so use ``sql_literal`` (NOT
+    identifier quoting); the verbatim ROLE_NAME value matches on exact ``=``.
+    Up to ~2h ACCOUNT_USAGE latency — confirm with the owner before revoking."""
+    return f"""
+SELECT PRIVILEGE, GRANTED_ON AS OBJECT_TYPE, NAME AS OBJECT, GRANTED_BY, CREATED_ON
+FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES
+WHERE GRANTEE_NAME = {sql_literal(role)} AND DELETED_ON IS NULL
+ORDER BY GRANTED_ON, PRIVILEGE
+LIMIT 1000
 """
 
 

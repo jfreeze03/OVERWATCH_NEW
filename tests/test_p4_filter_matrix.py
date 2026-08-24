@@ -63,6 +63,10 @@ _REQUIRED_ARGS: dict[str, object] = {
     # recheck_sql.recheck_sql gained a company param (audit #5) — drive it with the
     # rule that actually honors company so the matrix injection-tests that filter.
     "rule_id": "PERF_QUERY_FAIL_PCT",
+    # v4.269 UX-sweep per-entity drills: the clicked entity is an exact sql_literal match,
+    # so the matrix drives them with a value and injection-tests the company/text filters.
+    "user_name": "SOME_USER",          # cost_sql.untagged_executions_for_user
+    "pipeline": "nightly_load",        # etl_sql.etl_failed_runs_for_pipeline
 }
 
 # Free-text filter arguments — the other injection surface besides company.

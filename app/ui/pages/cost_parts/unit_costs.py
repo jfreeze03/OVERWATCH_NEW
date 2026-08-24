@@ -368,9 +368,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             edf["USD_PER_M_ROWS"] = edf["CREDITS_PER_M_ROWS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
             edf["USD_PER_TIB"] = edf["CREDITS_PER_TIB"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
             edf["WASTE_USD"] = edf["RETRY_WASTE_CREDITS"].map(lambda c: credits_to_usd(c, rate))
-            styled_table(
-                edf[["PIPELINE", "RUNS", "USD", "USD_PER_RUN", "RUN_ID_CREDIT_PCT",
-                     "USD_PER_M_ROWS", "USD_PER_TIB", "WASTE_USD"]],
+            from app.ui.components import selectable_table
+            _etl_disp = edf[["PIPELINE", "RUNS", "USD", "USD_PER_RUN", "RUN_ID_CREDIT_PCT",
+                             "USD_PER_M_ROWS", "USD_PER_TIB", "WASTE_USD"]]
+            _esel = selectable_table(
+                _etl_disp,
+                key=f"etl_pipe_sel_{company}_{days}_{f['database']}_{f['schema_contains']}",
                 height=300, column_config={
                     "USD": st.column_config.NumberColumn("$", format="$%.2f"),
                     "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f"),
@@ -383,6 +386,29 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             result_caption(etl, note="Failed-run $ = attributed credits on non-SUCCESS statements, "
                                      "run grain (retry/abort waste). Rows = write statements only. "
                                      "Method = MEASURED (Admin → Metrics).")
+            # Click a pipeline row -> its non-SUCCESS runs (retry/abort waste,
+            # error messages). Interaction-gated: fires only on a row click, not
+            # first paint. Bounds-guard the sticky selection against a window
+            # narrow that shrinks the frame.
+            _sel_pipe = (str(_etl_disp.iloc[int(_esel)]["PIPELINE"])
+                         if _esel is not None and 0 <= int(_esel) < len(_etl_disp) else "")
+            if _sel_pipe:
+                fr = run(etl_sql.etl_failed_runs_for_pipeline(
+                             _sel_pipe, days, company, f["database"], f["schema_contains"]),
+                         page=_PAGE,
+                         key=f"etl_fail_{company}_{days}_{f['database']}_{f['schema_contains']}_{_sel_pipe[:40]}",
+                         tier="historical",
+                         source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (non-SUCCESS runs, per pipeline)")
+                st.markdown(f"**Non-SUCCESS runs — {_sel_pipe}**")
+                if guard(fr, "No non-SUCCESS runs for this pipeline in the window "
+                             "(its failed-run $ may be attribution lag)."):
+                    fdf = fr.df.copy()
+                    fdf["WASTE_USD"] = fdf["WASTE_CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                    styled_table(fdf, height=280, column_config={
+                        "WASTE_USD": st.column_config.NumberColumn("Failed-run $", format="$%.4f")})
+                    result_caption(fr)
+            else:
+                st.caption("Click a pipeline row to see its failed/aborted runs and error messages.")
 
     st.divider()
     st.markdown("**Task-graph pipeline costs**")

@@ -888,6 +888,43 @@ LIMIT 30
 """
 
 
+def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL",
+                                 database: str = "", schema_contains: str = "") -> str:
+    """Per-user drill for tag_coverage: the top untagged statement TYPES for ONE
+    user, so a chargeback owner can see WHAT is running without a QUERY_TAG.
+
+    Reuses tag_coverage's EXACT predicate (WAREHOUSE_NAME IS NOT NULL,
+    COALESCE(EXECUTION_TIME,0) > 0, NULLIF(QUERY_TAG,'') IS NULL) and the same
+    company/db/schema scoping, plus an exact USER_NAME match, so it can't widen
+    scope. Grouped by QUERY_TYPE. NOTE: this is a LIVE scan capped at ~90d
+    (bounded_days); when the parent scoreboard is mart-served over a longer window
+    the summed UNTAGGED_EXEC_SEC is a recent-90d subset, not a full reconciliation
+    — the UI captions that."""
+    from app.core.sqlsafe import contains_filter
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "WAREHOUSE_NAME IS NOT NULL",
+        "COALESCE(EXECUTION_TIME, 0) > 0",
+        companies.warehouse_clause(company),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+        f"USER_NAME = {sql_literal(user_name)}",
+        "NULLIF(QUERY_TAG, '') IS NULL",
+    )
+    return f"""
+SELECT
+    QUERY_TYPE,
+    COUNT(*) AS QUERIES,
+    ROUND(SUM(EXECUTION_TIME) / 1000.0, 1) AS UNTAGGED_EXEC_SEC
+FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+WHERE {where}
+GROUP BY QUERY_TYPE
+ORDER BY UNTAGGED_EXEC_SEC DESC
+LIMIT 20
+"""
+
+
 def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "") -> str:
     """Cloud-services credits by statement type (COST_DB recon R6) — makes
     metadata storms (SHOW/DESCRIBE floods) visible beside the compile-heavy
