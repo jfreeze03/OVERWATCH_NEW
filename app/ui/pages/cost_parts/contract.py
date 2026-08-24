@@ -360,13 +360,13 @@ def _rate_card_reconciliation(settings: dict) -> None:
                 f" — configured is {'+' if _drift >= 0 else ''}{_drift:.1f}% vs contract"
                 f"{' (adopt it on Admin → Settings)' if abs(_drift) >= 1.0 else ' (in line)'}."
             )
-        st.caption(
+        st.caption(md_dollars(
             f"Model = FACT_METERING_DAILY billed credits x ${rate_now:.2f} (SETTINGS). The current "
             "month is partial on both sides; judge the prior full month. The **Effective "
             "rate** column (org compute ÷ billed credits) is the realized per-credit rate — "
             "reconcile CREDIT_PRICE_USD to it on Admin → Settings when the gap is steady."
             + _contract_line
-        )
+        ))
 
 
 def _org_accounts_spend() -> None:

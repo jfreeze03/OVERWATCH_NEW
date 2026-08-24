@@ -743,10 +743,15 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
     st.altair_chart(bars + labels, use_container_width=True)
-    if takeaway and float(data["USD"].sum()) > 0:
-        top = data.loc[data["USD"].idxmax()]
-        st.caption(_share_note(str(top["Label"]), float(top["USD"]),
-                               float(data["USD"].sum())))
+    if takeaway:
+        # Share denominator is the FULL frame's total, not the head(top_n) sum — else
+        # the top contributor's "% of $total" is overstated and the "$total" label
+        # misrepresents the universe when the caller passes more than top_n rows
+        # (matches waterfall_usd / monthly_stacked_usd, which use the full total).
+        _full_total = float(pd.to_numeric(df[usd_col], errors="coerce").fillna(0).sum())
+        if _full_total > 0:
+            top = data.loc[data["USD"].idxmax()]
+            st.caption(_share_note(str(top["Label"]), float(top["USD"]), _full_total))
 
 
 def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
@@ -877,10 +882,14 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         )
     )
     st.altair_chart(chart, use_container_width=True)
-    if takeaway and float(data["Value"].sum()) > 0:
-        top = data.loc[data["Value"].idxmax()]
-        st.caption(_share_note(str(top["Label"]), float(top["Value"]),
-                               float(data["Value"].sum()), dollars=False))
+    if takeaway:
+        # Full-frame total as the share denominator (see bar_usd): a head(top_n) sum
+        # would overstate the top contributor's share of the universe.
+        _full_total = float(pd.to_numeric(df[value_col], errors="coerce").fillna(0).sum())
+        if _full_total > 0:
+            top = data.loc[data["Value"].idxmax()]
+            st.caption(_share_note(str(top["Label"]), float(top["Value"]),
+                                   _full_total, dollars=False))
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,

@@ -290,11 +290,12 @@ LIMIT 50
     match = (f"UPPER(DATABASE_NAME) = {literal}" if kind == "DATABASE" else
              f"(UPPER(OBJECT_NAME) = {literal} OR "
              f"UPPER(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || OBJECT_NAME) = {literal})")
+    # OBJECT_NAME in OBJECT_CHANGE_REGISTRY is already the fully-qualified DB.SCHEMA.NAME;
+    # render it directly below — an extra DB.SCHEMA prefix doubled the identifier.
     return f"""
 SELECT
     CHANGE_SEEN_AT AS CHANGED_AT,
-    OBJECT_TYPE || ' ' || COALESCE(DATABASE_NAME, '') || '.'
-               || COALESCE(SCHEMA_NAME, '') || '.' || OBJECT_NAME AS CHANGE,
+    OBJECT_TYPE || ' ' || OBJECT_NAME AS CHANGE,
     CHANGED_BY, VERDICT, VERDICT_DETAIL AS DETAIL
 FROM {core_object('OBJECT_CHANGE_REGISTRY')}
 WHERE {match}

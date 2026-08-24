@@ -210,7 +210,18 @@ def _mtd_pace_kpi(mtd_spend: float, hist: QueryResult, rate: float,
                    "credit is priced at the compute rate — AI/Cortex-heavy spend may read high.")
     frame["USD"] = _billed_usd_series(frame, rate, ai_rate)
     mtd, prior, pct = mtd_pace_vs_prior_month(frame[["DAY", "USD"]], account_today())
-    _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
+    # Credit sub-line: when the AI/OTHER split is present, sum billed CREDITS directly over
+    # the SAME MTD window (run a credits series through mtd_pace) rather than back-solving
+    # mtd_usd/rate — the USD blends AI credits at ai_rate, so mtd/rate would undercount
+    # credits by the AI portion (~13% on AI-heavy spend). Without the split, mtd/rate is exact.
+    if _split_ok:
+        _cr_frame = frame[["DAY"]].assign(
+            USD=frame["CREDITS_BILLED_OTHER"].map(safe_float)
+            + frame["CREDITS_BILLED_AI"].map(safe_float))
+        _mtd_cr, _, _ = mtd_pace_vs_prior_month(_cr_frame, account_today())
+        _mtd_credits = safe_float(_mtd_cr)
+    else:
+        _mtd_credits = safe_float(mtd) / rate if rate > 0 else None
     budget_note = (f" Budget context: {mtd / budget * 100:,.0f}% of "
                    f"{format_usd(budget)} (MONTHLY_BUDGET_USD)." if budget > 0 else "")
     if pct is None:

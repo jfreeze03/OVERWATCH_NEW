@@ -90,12 +90,21 @@ def test_rec28_mtd_card_has_credits_on_every_data_outcome(monkeypatch):
     assert fallback["sub"] == "10.00 cr"
 
 
-def test_rec28_mtd_credits_are_column_independent():
+def test_rec28_mtd_credits_reconcile_under_ai_split():
+    # rec28 originally back-solved mtd_credits from mtd/rate to stay column-independent, but
+    # under an AI/compute rate mix the USD blends two rates, so mtd/rate undercounts billed
+    # credits by the AI portion (v4.272.0 fix). The credit sub-line now sums the split columns
+    # directly WHEN present, guarded by _split_ok, and keeps the mtd/rate fallback otherwise.
     overview = _src("app/ui/pages/overview.py")
     body = overview.split("def _mtd_pace_kpi", 1)[1].split("@safe_page", 1)[0]
-    assert "_mtd_credits = safe_float(mtd_spend) / rate" in body
-    assert "_mtd_credits = safe_float(mtd) / rate" in body
-    assert 'frame["CREDITS' not in body
+    assert "_mtd_credits = safe_float(mtd_spend) / rate" in body   # the mtd_spend KPI path
+    assert "_mtd_credits = safe_float(mtd) / rate" in body         # the no-split fallback
+    # the direct-credit path must be GATED on the split (never a bare CREDITS read that would
+    # KeyError on a split-less frame)
+    assert "if _split_ok:" in body
+    guarded = body.split("if _split_ok:", 1)[1]
+    assert 'frame["CREDITS_BILLED_OTHER"]' in guarded
+    assert 'frame["CREDITS_BILLED_AI"]' in guarded
 
 
 def test_rec30_task_sort_label_is_assigned_after_sort():

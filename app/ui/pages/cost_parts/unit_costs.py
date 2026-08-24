@@ -172,7 +172,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             "USD_PER_CALL": st.column_config.NumberColumn("$/call", format="$%.4f"),
             "FAIL_PCT": st.column_config.NumberColumn("Fail %", format="%.1f%%"),
         })
-        if _psel is not None:
+        # Seed the trend box only on a NEW leaderboard click (st.dataframe selection is sticky
+        # and re-emits every rerun); an unconditional write clobbers a proc name the user then
+        # types into the trend text_input. Change-detection sentinel, like ops_drill_manual.
+        if _psel is not None and _psel != st.session_state.get("_uc_proc_sel_last"):
+            st.session_state["_uc_proc_sel_last"] = _psel
             st.session_state["uc_proc_trend_name"] = str(pdf.iloc[int(_psel)]["PROC_NAME"])
             st.caption(f"Selected **{st.session_state['uc_proc_trend_name']}** — "
                        "the trend panel below is prefilled.")

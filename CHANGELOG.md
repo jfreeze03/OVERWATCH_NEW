@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.272.0 - Bug-hunt round 3: charts, units, RCA, anomaly-share, state (2026-08-24)
+
+Round 3 hunted new angles (chart encoding, cross-page state/caching, formatting/units,
+degenerate-data, analytical math, deep dives) and confirmed 7 bugs — all P2, all read-only,
+no migration (~46% of raw findings correctly refuted):
+
+- **Top-share % of the wrong total** (`charts.bar_usd`/`bar_count`) — the "% of $total"
+  takeaway used the `head(top_n)` sum as the denominator, overstating the leader's share and
+  mislabelling the universe. Use the full-frame total (as waterfall_usd already does).
+- **Credit sub-line undercount** (`overview` MTD-pace card) — the "cr" sub-line back-solved
+  `mtd_usd / rate`, but USD blends AI credits at the AI rate, so it undercounted credits by
+  the AI portion (~13% on AI-heavy spend). Sum billed CREDITS directly over the same window.
+- **RCA post-onset "high confidence"** (`rca.rank_root_causes`) — the causation gate capped
+  only beyond-window candidates (proximity 0), so a change that happened AFTER onset could
+  still headline as "most likely cause (high confidence)". Cap after-onset changes at LOW.
+- **Anomaly share blows past ±100%** (`anomaly_explain`) — on an offsetting/redistribution
+  day the net delta is tiny while per-WH deltas are large, so `delta/net` rendered e.g.
+  "+3000% of the move". Suppress the share when the net move doesn't dominate the churn.
+- **Rate caption LaTeX garble** (`contract` rate reconciliation) — a two-`$` caption wasn't
+  wrapped in `md_dollars`, so Streamlit rendered the prose between the `$`s as a math span.
+- **Trend box clobbered** (`unit_costs`) — the sticky leaderboard selection overwrote the
+  proc-name text-input every rerun, reverting what the user typed. Change-detection sentinel.
+- **Doubled object identifier** (`workbench_sql.entity_recent_changes`) — the change-feed
+  re-prefixed DB.SCHEMA onto `OBJECT_NAME`, which is already the FQN, showing
+  `TASK DB.SCH.DB.SCH.NAME`. Display `OBJECT_NAME` directly.
+
 ## 4.271.0 - Bug-hunt round 2: root-cause the sticky-selection crash + 5 SQL/logic fixes (2026-08-24)
 
 Round 2 (cross-cutting defect-pattern finders + deep-file dives, adversarially verified)

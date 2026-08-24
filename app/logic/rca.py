@@ -208,11 +208,15 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
         match = _entity_match(c.get("entity"), entity_name, fams)
         score = _W_PROX * prox + _W_MAG * mag + _W_MATCH * match
         band = "HIGH" if score >= _BAND_HIGH else ("MEDIUM" if score >= _BAND_MED else "LOW")
-        # Timing gates causation: a change outside the plausible trigger window (proximity 0)
-        # cannot be a confident cause however big or on-entity it is — cap it at LOW.
-        if prox <= 0.0:
-            band = "LOW"
         when = c.get("when")
+        # Timing gates causation: a change outside the plausible trigger window (proximity 0),
+        # OR one that happened AFTER onset, cannot be a confident cause however big or
+        # on-entity it is — a cause must precede the effect. Cap those at LOW so a post-onset
+        # change can never headline as "most likely cause (high confidence)".
+        _after_onset = (when is not None and onset_dt is not None
+                        and (onset_dt - when).total_seconds() < 0)
+        if prox <= 0.0 or _after_onset:
+            band = "LOW"
         if when is not None and onset_dt is not None:
             lead_h = (onset_dt - when).total_seconds() / 3600.0
             lead_text = (f"{lead_h:.1f}h before onset" if lead_h >= 0

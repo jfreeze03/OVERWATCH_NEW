@@ -86,11 +86,17 @@ def explain_by_warehouse(frame: pd.DataFrame, flagged_day: object, *,
     total_delta = total_actual - total_baseline
     rows.sort(key=lambda r: abs(r[3]), reverse=True)
 
+    # Per-driver "share of the net move" is only meaningful when the net move dominates the
+    # gross churn. On an offsetting/redistribution day (one WH spikes, another collapses) the
+    # net delta is tiny while individual deltas are large, so delta/net_delta blows past
+    # +/-100% (e.g. +3000%). Suppress the share there rather than show a nonsense percentage.
+    _gross = sum(abs(d) for _, _, _, d in rows) or 0.0
+    _material_move = bool(total_delta) and abs(total_delta) >= 0.5 * _gross
     drivers = tuple(
         DriverContribution(
             name=name, baseline_usd=round(base, 2), actual_usd=round(act, 2),
             delta_usd=round(delta, 2),
-            share_pct=round(100.0 * delta / total_delta, 1) if total_delta else 0.0)
+            share_pct=round(100.0 * delta / total_delta, 1) if _material_move else 0.0)
         for name, base, act, delta in rows[:_MAX_DRIVERS] if abs(delta) >= 0.005
     )
     return AnomalyExplanation(
@@ -107,9 +113,11 @@ def _narrative(fday: date | None, actual: float, baseline: float, delta: float,
     lead = (f"Spend on {fday} was {format_usd(actual)} — {format_usd(abs(delta))} {direction} "
             f"the recent median of {format_usd(baseline)}. ")
     top = drivers[0]
+    # Omit the "% of the move" clause on an offsetting day (share suppressed to 0) — the
+    # dollar figures still name the biggest mover honestly without a nonsense percentage.
     tail = (f"Top driver: {top.name}, {format_usd(abs(top.delta_usd))} "
-            f"{'over' if top.delta_usd >= 0 else 'under'} its usual "
-            f"({top.share_pct:+.0f}% of the move)")
+            f"{'over' if top.delta_usd >= 0 else 'under'} its usual"
+            + (f" ({top.share_pct:+.0f}% of the move)" if top.share_pct else ""))
     if len(drivers) > 1 and abs(drivers[1].delta_usd) >= 0.01:
         second = drivers[1]
         tail += (f", then {second.name} ({format_usd(abs(second.delta_usd))} "
