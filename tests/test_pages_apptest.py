@@ -11,12 +11,25 @@ import pandas as pd
 import pytest
 
 st = pytest.importorskip("streamlit")
+from packaging.version import parse as _parse_version  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 from app.config import PAGES_BY_PROFILE  # noqa: E402
 from app.core.result import QueryResult  # noqa: E402
 
 _PAGES = PAGES_BY_PROFILE["DBA"]
+
+# streamlit < 1.55.0 ships an AppTest-harness bug (NOT an app bug): the internal
+# ButtonGroup class behind st.segmented_control/st.pills does not wrap a *single*-select
+# widget's scalar value in a list, so ButtonGroup.indices char-iterates the section
+# switcher's stored string ("SLO scorecard" -> 'S','L','O', ...) and AppTest.run() raises
+# `ValueError: content: "S" is not in list` before the app's own nav logic ever runs. The
+# app renders correctly at runtime on those versions; only the test harness mis-introspects.
+# Fixed in streamlit 1.55.0 (verified by bisect: 1.54.0 fails, 1.55.0 passes). The
+# floor-compat CI job pins streamlit==1.45.0, and only the multi-run nav test below trips
+# it (the 2-run test_each_page_renders survives). Guarding just that test keeps the floor
+# gate green while the test still runs on the modern lint-and-test job and locally.
+_APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
 
 def _fake_run(*_args, **kwargs):
@@ -97,6 +110,11 @@ def _selected_pages(at, current: str) -> set:
     return sel
 
 
+@pytest.mark.skipif(
+    not _APPTEST_BUTTONGROUP_OK,
+    reason="streamlit<1.55 AppTest ButtonGroup single-select bug char-iterates the section "
+    "switcher's scalar value; app is correct at runtime, harness fixed in streamlit 1.55.0",
+)
 def test_nav_single_select_across_groups():
     # multi-select bug: clicking a page in a DIFFERENT group (Analyze) than the current
     # one (Watch) must navigate AND leave exactly ONE group highlighted — the old
