@@ -6,6 +6,8 @@ Tested in tests/test_repo_wave2.py.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 
 from app.logic.formulas import safe_float
@@ -122,7 +124,8 @@ _COACH_FLAG = "🚩 Review"  # flags a usage pattern to review — lights up in 
 
 
 def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | None,
-                    *, cap_credits: float = 15.0, window_days: int = 30) -> pd.DataFrame:
+                    *, cap_credits: float = 15.0, window_days: int = 30,
+                    as_of: date | None = None) -> pd.DataFrame:
     """Per-user CoCo efficiency + a usage-review flag: distinguishes targeted, supplemental usage
     from a high-intensity pattern (heavy sustained spend, extended autonomous sessions, and
     consistently over the daily allowance).
@@ -170,7 +173,11 @@ def coco_efficiency(economics: pd.DataFrame | None, user_daily: pd.DataFrame | N
         d["REQUESTS"] = pd.to_numeric(d.get("REQUESTS", pd.Series(0.0, index=d.index)), errors="coerce").fillna(0.0)
         d = d.dropna(subset=["USAGE_DATE"])
         if not d.empty:
-            _cut = d["USAGE_DATE"].max() - pd.to_timedelta(max(1, int(window_days)), unit="D")
+            # Anchor the window to as_of (the caller passes account_today(), so this reconciles
+            # with the AI-users tab's cortex._window_slice, which cuts at account_today()-days);
+            # fall back to the data's own max date when no anchor is given (pure/tested use).
+            _anchor = pd.Timestamp(as_of) if as_of is not None else d["USAGE_DATE"].max()
+            _cut = _anchor - pd.to_timedelta(max(1, int(window_days)), unit="D")
             d = d[d["USAGE_DATE"] >= _cut]
         if not d.empty:
             # cortex_code_user_daily grain is user-day-SOURCE; collapse to user-day first so a

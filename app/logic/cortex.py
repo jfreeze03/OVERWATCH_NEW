@@ -236,6 +236,15 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
         if "OBSERVABLE_DAYS" in src.columns:
             _obs = src.groupby("USER_NAME")["OBSERVABLE_DAYS"].max()
             agg["OBSERVABLE_DAYS"] = agg["USER_NAME"].map(_obs)
+            # rec #38: re-project the user's SUMMED credits over their most-reliable (MAX)
+            # observable window, rather than summing per-source projections that each divide
+            # by their OWN (possibly 1-day) window — else a brand-new second source's first-day
+            # burst is extrapolated 30x into the total and trips a false Critical breach. Mirrors
+            # enrich_user_rollup's projection over the same window the small-N guard trusts.
+            if "TOTAL_CREDITS" in agg.columns:
+                _obs_days = agg["OBSERVABLE_DAYS"].where(agg["OBSERVABLE_DAYS"] > 0, 1.0)
+                agg["PROJECTED_30D_CREDITS"] = agg["TOTAL_CREDITS"] / _obs_days * 30.0
+                agg["PROJECTED_30D_USD"] = (agg["PROJECTED_30D_CREDITS"] * rate).round(2)
         for _, u in agg.iterrows():
             # rec #38: skip users with too few observed days — projecting a brand-
             # new user's first day/two at full intensity would be a false breach.
@@ -296,21 +305,25 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
 def rollup_summary(enriched: pd.DataFrame, window_days: int) -> dict:
     """Window totals + 30d projection for the KPI row.
 
-    Uses the SAME clamped divisor as enrich_user_rollup — if the KPI and the
-    per-user rows disagreed about the projection basis we would be back to
-    review finding #11, only in the opposite direction."""
+    The 30d projection is the SUM of the per-user PROJECTED_30D_USD column (rec #38:
+    each user projected over their OWN observable window), so the headline KPI equals the
+    total of the 'Proj. 30d $' column in the detail table it sits above. Dividing scope
+    spend by the scope-wide window instead systematically under-projects a new heavy user
+    in a mature scope (their big spend spread over the oldest user's long tenure)."""
     if enriched is None or enriched.empty:
         return {"active_users": 0, "total_requests": 0, "total_credits": 0.0,
                 "spend_usd": 0.0, "projected_30d_usd": 0.0, "window_days": 1}
     days = effective_window_days(enriched, window_days)
     total_credits = float(enriched["TOTAL_CREDITS"].sum())
     spend = float(enriched["SPEND_USD"].sum())
+    projected = (float(enriched["PROJECTED_30D_USD"].sum())
+                 if "PROJECTED_30D_USD" in enriched.columns else spend / days * 30.0)
     return {
         "active_users": int(enriched["USER_NAME"].nunique()),
         "total_requests": int(enriched["TOTAL_REQUESTS"].sum()),
         "total_credits": round(total_credits, 4),
         "spend_usd": round(spend, 2),
-        "projected_30d_usd": round(spend / days * 30.0, 2),
+        "projected_30d_usd": round(projected, 2),
         "window_days": days,
     }
 

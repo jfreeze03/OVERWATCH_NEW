@@ -175,11 +175,42 @@ def test_exceptions_ranked_critical_first():
 
 def test_summary_totals():
     frames = pd.concat([_rollup(USER_NAME="A"), _rollup(USER_NAME="B", SOURCE="CLI")], ignore_index=True)
-    summary = rollup_summary(enrich_user_rollup(frames, 2.20, 7), window_days=7)
+    enriched = enrich_user_rollup(frames, 2.20, 7)
+    summary = rollup_summary(enriched, window_days=7)
     assert summary["active_users"] == 2
     assert summary["total_requests"] == 200
     assert summary["spend_usd"] == 44.0
-    assert summary["projected_30d_usd"] == round(44.0 / 7 * 30, 2)
+    # rec#38 parity: the KPI 30d projection equals the SUM of the per-user 'Proj. 30d $' column
+    # (the detail table it sits above), not scope-spend / scope-window — the latter systematically
+    # under-projects a new heavy user in a mature scope.
+    assert summary["projected_30d_usd"] == round(float(enriched["PROJECTED_30D_USD"].sum()), 2)
+
+
+def test_scope_projection_reconciles_with_a_new_heavy_user():
+    # Mature scope + a brand-new heavy user: the old scope-window divisor under-projected the
+    # headline (spread the new user's burst over the oldest user's long tenure). The KPI must
+    # equal the sum of the per-user 'Proj. 30d $' column, so the new burn is visible.
+    _today = account_today()
+    old = _rollup(USER_NAME="OLD", TOTAL_CREDITS=60.0, FIRST_USAGE=str(_today - timedelta(days=90)))
+    new = _rollup(USER_NAME="NEW", TOTAL_CREDITS=200.0, FIRST_USAGE=str(_today - timedelta(days=2)))
+    enriched = enrich_user_rollup(pd.concat([old, new], ignore_index=True), 2.20, 30)
+    summary = rollup_summary(enriched, window_days=30)
+    assert summary["projected_30d_usd"] == round(float(enriched["PROJECTED_30D_USD"].sum()), 2)
+    assert summary["projected_30d_usd"] > 4000.0     # the new heavy user's projected burn shows
+
+
+def test_new_source_burst_does_not_false_breach():
+    # An established user (CLI, ~30d) adopts a SECOND source today with a one-day burst. Summing
+    # per-source projections extrapolated that one day 30x (6/1*30=180) into a false Critical;
+    # re-projecting the user's summed credits over their reliable window (46/30*30=46) must not breach.
+    _today = account_today()
+    cli = _rollup(USER_NAME="BOT", SOURCE="CLI", TOTAL_CREDITS=40.0, TOTAL_REQUESTS=300,
+                  FIRST_USAGE=str(_today - timedelta(days=29)))
+    snow = _rollup(USER_NAME="BOT", SOURCE="Snowsight", TOTAL_CREDITS=6.0, TOTAL_REQUESTS=4,
+                   FIRST_USAGE=str(_today))
+    enriched = enrich_user_rollup(pd.concat([cli, snow], ignore_index=True), 2.20, 30)
+    out = classify_exceptions(enriched, ai_budget_usd=440.0, ai_rate_usd=2.20)   # 200-credit budget
+    assert out.empty or not out["SIGNAL"].astype(str).str.contains("Budget", case=False).any()
 
 
 def test_empty_inputs_are_safe():

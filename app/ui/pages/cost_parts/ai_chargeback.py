@@ -40,6 +40,7 @@ from app.ui.components import (
     panel_help,
     result_caption,
     run_mart_first,
+    served_days,
     styled_table,
     with_user_names,
 )
@@ -63,7 +64,11 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
     if guard(res, "No AI/Cortex service credits in this window."):
         df = res.df.copy()
         df["USD"] = df["CREDITS_BILLED"].map(safe_float) * ai_rate
-        kpi_row([{"label": f"Cortex spend, {days}d", "value": format_usd(float(df["USD"].sum())),
+        # The live fallback clamps to MAX_LIVE_WINDOW_DAYS, so label the window ACTUALLY
+        # served (K1 contract), not the raw ask — else a 365d view over a cold mart shows a
+        # 90-day sum under a "365d" label.
+        _win = served_days(res, days)
+        kpi_row([{"label": f"Cortex spend, {_win}d", "value": format_usd(float(df["USD"].sum())),
                   "help": f"Billed AI-service credits x ${ai_rate:.2f}."}])
         charts.daily_stacked_usd(df, "DAY", "SERVICE_TYPE", "USD")
         result_caption(res)
@@ -318,7 +323,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
                  source="ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY (daily, window derived in-app)",
                  probe=True, max_rows=200_000)
     eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
-                          cap_credits=cap_credits, window_days=days)
+                          cap_credits=cap_credits, window_days=days, as_of=account_today())
     _flags = coco_coaching_count(eff)
     # Scope the cache KPIs/caption to the SHOWN (company) users, so a company view doesn't blend
     # other companies' account-wide token traffic into 'Fleet cache-hit' or the low-cache note.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from app.config import MAX_LIVE_WINDOW_DAYS
 from app.core.query import run, run_batch
 from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
@@ -136,10 +137,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
         # The mart (_ai_m) covers Cortex Functions + Code; the live fallback
-        # (cortex_model_costs) is Functions-only, so disclose when the fallback served this
-        # KPI rather than silently understating account AI spend by the Cortex Code portion.
+        # (cortex_model_costs) is Functions-only AND clamps to MAX_LIVE_WINDOW_DAYS, so disclose
+        # both — the label window and the help — when the fallback served this KPI, rather than
+        # silently understating account AI spend and mislabeling the window.
         _ai_full = _ai_m.usable()
-        kpis.append({"label": f"AI spend ({days}d)" + ("" if _ai_full else " · Functions only"),
+        _ai_days = days if _ai_full else min(int(days), MAX_LIVE_WINDOW_DAYS)
+        kpis.append({"label": f"AI spend ({_ai_days}d)" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
                      "delta_color": "off",
@@ -147,8 +150,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                               "(unlike the query-cost KPIs beside it); per-user attribution is on "
                               "Chargeback & AI." if _ai_full else
                               "Cortex FUNCTIONS only — the Code+Functions mart (FACT_AI_USAGE_DAILY) "
-                              "was unavailable on this refresh, so Cortex Code spend is excluded from "
-                              "this figure.")})
+                              "was unavailable on this refresh, so Cortex Code spend is excluded and "
+                              f"the window is capped at {MAX_LIVE_WINDOW_DAYS}d (the live-scan limit).")})
     if kpis:
         kpi_row(kpis)
 

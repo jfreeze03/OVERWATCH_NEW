@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.277.0 - Chargeback & AI bug-hunt round 1: same-metric reconciliation (2026-08-24)
+
+A focused bug sweep of the Cost & Contract ▸ Chargeback & AI section (7 findings, 5 unique
+after collapse) fixing five same-metric-divergence / mislabeled-window defects. Each is
+locked by a regression test asserting the reconciliation invariant, not a hard-coded number.
+
+- **Headline 30d projection under-projected a new heavy user.** `rollup_summary` divided
+  scope spend by the scope-wide window, spreading a brand-new heavy user's burst over the
+  oldest user's long tenure — so the KPI could read far below the sum of the `Proj. 30d $`
+  column in the detail table right beneath it. The KPI now equals that column's sum (each
+  user projected over their own observable window). (`app/logic/cortex.py`)
+- **A new second source's first-day burst tripped a false Critical budget breach.**
+  `classify_exceptions` summed per-source 30d projections, each dividing by its own (possibly
+  1-day) window, so a mature user adopting a second source today saw that one day extrapolated
+  30x into a false breach. It now re-projects the user's summed credits over their most
+  reliable (max) observable window. (`app/logic/cortex.py`)
+- **CoCo efficiency windowed off the data's max date, not "today".** With metering lag, the
+  latest usage date predates the account date, so the CoCo window silently drifted back and
+  disagreed with the AI-users tab. `coco_efficiency` now accepts `as_of` and the panel passes
+  `account_today()`, reconciling the two. (`app/logic/wave2.py`, `ai_chargeback.py`)
+- **"Cortex spend, 365d" over a 90-day live fallback.** The spend KPI labeled the raw ask
+  even when the live fallback clamped the scan to 90 days; it now labels the window actually
+  served (K1 contract). (`app/ui/pages/cost_parts/ai_chargeback.py`)
+- **"AI spend (365d)" understated the window on the unit-costs KPI.** When the Functions-only
+  live fallback served this KPI, the label showed the raw ask though the query clamps to
+  `MAX_LIVE_WINDOW_DAYS`; the label and help now disclose the 90-day cap. (`unit_costs.py`)
+
 ## 4.276.0 - AI chargeback: Total Requests as a whole number (2026-08-24)
 
 - `Total Requests` rendered as a raw float (`233.000000`) in both the AI user-attribution

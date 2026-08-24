@@ -129,3 +129,24 @@ def test_multi_source_day_counts_as_one_day_for_the_cap_test():
     ])
     eff = coco_efficiency(econ, daily, cap_credits=15.0).set_index("USER_NAME")
     assert eff.loc["U", "DAYS_OVER_CAP"] == 1   # 20cr combined on the one day, not 2 days
+
+
+def test_as_of_anchors_the_window_to_the_account_date():
+    # Metering lags: the latest USAGE_DATE (today-2) predates the account date. Anchoring the
+    # window on max(USAGE_DATE) silently shifts it back and counts days that fall outside the
+    # requested [as_of - window] range; passing as_of pins the window to the real 'today' so it
+    # reconciles with the AI-users tab (which slices off account_today()).
+    today = dt.date(2026, 8, 24)
+    daily = pd.DataFrame([
+        {"USER_NAME": "U", "USAGE_DATE": str(today - dt.timedelta(days=2 + i)),
+         "REQUESTS": 5, "CREDITS": 20.0}
+        for i in range(10)
+    ])
+    econ = token_economics(pd.DataFrame(_token_rows("U", 100, 100, 100, 100)))
+    anchored = coco_efficiency(econ, daily, cap_credits=15.0, window_days=3, as_of=today)
+    drifting = coco_efficiency(econ, daily, cap_credits=15.0, window_days=3)
+    a = anchored.set_index("USER_NAME").loc["U", "DAYS_OVER_CAP"]
+    b = drifting.set_index("USER_NAME").loc["U", "DAYS_OVER_CAP"]
+    assert a == 2      # only today-2 and today-3 fall within [today-3, today]
+    assert b == 4      # max-anchor drifts the window back to [today-5, today-2]
+    assert a < b
