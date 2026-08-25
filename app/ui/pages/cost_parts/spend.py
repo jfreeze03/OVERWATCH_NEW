@@ -29,6 +29,8 @@ from app.logic.anomaly import (
 from app.logic.anomaly_explain import explain_by_warehouse
 from app.logic.cost_coverage import (
     SERVICE_CATEGORY,
+    attribution_gap,
+    attribution_gap_trend,
     drill_ready_spend_share,
     service_category,
     service_coverage_inventory,
@@ -256,6 +258,41 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     st.caption(
         "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
         "charges use organization currency data and appear in the on-demand detail below."
+    )
+
+    st.markdown("**Billed vs attributed**")
+    _gap_summary, _gap_breakdown = attribution_gap(df)
+    _cov = _gap_summary["coverage_pct"]
+    kpi_row([
+        {"label": "Attributable to a company",
+         "value": f"{_cov:.0f}%",
+         "help": "Share of billed metering on your OWN warehouses — the only spend with a "
+                 "company key (COMPANY_FOR_WAREHOUSE). Reader-account, serverless, AI/Cortex, "
+                 "replication and storage credits have none.",
+         "severity": ("ok" if _cov >= 85 else "warn")},
+        {"label": "Unattributed spend",
+         "value": format_usd(_gap_summary["gap_usd"]),
+         "delta": f"{100 - _cov:.0f}% of billed",
+         "delta_color": "off",
+         "help": "Reader-account, serverless, AI/Cortex, replication and storage credits — "
+                 "billed but not chargeable to a company from metering alone."},
+        {"label": "Attributed (warehouse)",
+         "value": format_usd(_gap_summary["attributed_usd"]),
+         "help": "Exact warehouse + reader metering, company-scopable."},
+    ])
+    if not _gap_breakdown.empty:
+        charts.bar_usd(_gap_breakdown, "CATEGORY", "GAP_USD",
+                       title="Unattributed $ by service", top_n=8)
+    _gap_trend = attribution_gap_trend(complete_days_only(df))
+    if len(_gap_trend) >= 2:
+        charts.daily_metric_line(_gap_trend, "DAY", "GAP_PCT",
+                                 title="Unattributed share % (new-workload canary)")
+    st.caption(
+        "A DIFFERENT axis from 'Cost drill coverage' above: that measures object-level "
+        "drillability (serverless has an object ledger, so it counts as covered there); this "
+        "measures what can be charged back to a company (only warehouse metering carries a "
+        "company key). Account-wide — company-level attribution is on the Attribution tab. "
+        "Byte-metered storage/transfer live in the org rate-card panels, not this credit lens."
     )
 
     if st.toggle(

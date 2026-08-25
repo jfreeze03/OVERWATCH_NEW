@@ -221,3 +221,86 @@ def drill_ready_spend_share(frame: pd.DataFrame) -> float:
     ready = frame[frame["DRILL_STATUS"].astype(str).isin(_DRILLABLE_STATUSES)]
     covered = float(pd.to_numeric(ready["BILLED_USD"], errors="coerce").fillna(0.0).sum())
     return covered / total * 100.0
+
+
+# Company/owner-ATTRIBUTABLE spend: only own-account warehouse metering carries a
+# company key — COMPANY_FOR_WAREHOUSE resolves THIS account's warehouse names.
+# Everything else is the "unattributed gap": reader-account metering (compute runs
+# in the consumer account, no company key here — and no reader drill exists, rec
+# #43), serverless, AI/Cortex, replication, storage credits. This is a DIFFERENT
+# axis from drill_ready_spend_share (object-level drillability), but the two AGREE
+# that reader/serverless are not company-attributable — so the two coverage
+# percentages on the Spend screen never contradict each other.
+_ATTRIBUTABLE_CATEGORIES = ("Warehouse",)
+
+
+def attribution_gap(
+    frame: pd.DataFrame,
+    *,
+    usd_col: str = "USD",
+    category_col: str = "CATEGORY",
+    attributable: tuple[str, ...] = _ATTRIBUTABLE_CATEGORIES,
+) -> tuple[dict[str, float], pd.DataFrame]:
+    """Split billed metering dollars into company-attributable vs the unattributed gap.
+
+    Returns ``({billed_usd, attributed_usd, gap_usd, coverage_pct}, breakdown)``
+    where ``breakdown`` is one row per NON-attributable CATEGORY with GAP_USD and
+    its SHARE_PCT of the gap, largest first. Operates on the already-categorized and
+    priced metering frame (CATEGORY + USD); both sides share one account-wide basis
+    so the subtraction is valid. Empty/short frame -> zeros + empty breakdown; never
+    raises, never divides by zero.
+    """
+    summary = {"billed_usd": 0.0, "attributed_usd": 0.0, "gap_usd": 0.0, "coverage_pct": 0.0}
+    empty = pd.DataFrame(columns=["CATEGORY", "GAP_USD", "SHARE_PCT"])
+    if frame is None or getattr(frame, "empty", True) or not {usd_col, category_col}.issubset(frame.columns):
+        return summary, empty
+    usd = pd.to_numeric(frame[usd_col], errors="coerce").fillna(0.0)
+    is_attr = frame[category_col].astype(str).isin(attributable)
+    billed = float(usd.sum())
+    attributed = float(usd[is_attr].sum())
+    gap = billed - attributed
+    summary = {
+        "billed_usd": billed,
+        "attributed_usd": attributed,
+        "gap_usd": gap,
+        "coverage_pct": (attributed / billed * 100.0) if billed > 0 else 0.0,
+    }
+    breakdown = (
+        pd.DataFrame({"CATEGORY": frame.loc[~is_attr, category_col].astype(str),
+                      "GAP_USD": usd[~is_attr]})
+        .groupby("CATEGORY", as_index=False)["GAP_USD"].sum()
+    )
+    breakdown = breakdown[breakdown["GAP_USD"] > 0].copy()
+    breakdown["SHARE_PCT"] = (breakdown["GAP_USD"] / gap * 100.0) if gap > 0 else 0.0
+    breakdown = breakdown.sort_values("GAP_USD", ascending=False).reset_index(drop=True)
+    return summary, breakdown
+
+
+def attribution_gap_trend(
+    frame: pd.DataFrame,
+    *,
+    day_col: str = "DAY",
+    usd_col: str = "USD",
+    category_col: str = "CATEGORY",
+    attributable: tuple[str, ...] = _ATTRIBUTABLE_CATEGORIES,
+) -> pd.DataFrame:
+    """Per-day billed vs unattributed dollars and the gap share (new-workload canary).
+
+    Returns DAY, BILLED_USD, GAP_USD, GAP_PCT sorted by day. A rising GAP_PCT is a
+    new-unattributed-workload signal. Empty/short frame -> empty; a zero-billed day
+    yields GAP_PCT 0.0 (no divide-by-zero). Never raises."""
+    if frame is None or getattr(frame, "empty", True) or not {day_col, usd_col, category_col}.issubset(frame.columns):
+        return pd.DataFrame(columns=["DAY", "BILLED_USD", "GAP_USD", "GAP_PCT"])
+    billed = pd.to_numeric(frame[usd_col], errors="coerce").fillna(0.0)
+    is_attr = frame[category_col].astype(str).isin(attributable)
+    work = pd.DataFrame({
+        "DAY": frame[day_col],
+        "BILLED_USD": billed,
+        "GAP_USD": billed.where(~is_attr, 0.0),
+    })
+    out = work.groupby("DAY", as_index=False)[["BILLED_USD", "GAP_USD"]].sum()
+    out["GAP_PCT"] = out.apply(
+        lambda r: (r["GAP_USD"] / r["BILLED_USD"] * 100.0) if r["BILLED_USD"] > 0 else 0.0,
+        axis=1,
+    )
+    return out.sort_values("DAY").reset_index(drop=True)

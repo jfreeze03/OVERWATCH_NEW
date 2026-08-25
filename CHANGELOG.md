@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.292.0 - Billed-vs-attributed gap panel (2026-08-25)
+
+Cost & Contract ▸ Spend gains a "Billed vs attributed" panel (Upgrade Board P0
+#12) right under the existing "Cost drill coverage" block. From the metering
+frame already loaded, it splits billed dollars into company-attributable
+warehouse spend (the only service carrying a company key via
+COMPANY_FOR_WAREHOUSE) vs the unattributed gap (serverless, AI/Cortex,
+replication, storage credits — billed but not chargeable to a company):
+
+- a coverage KPI ("Attributable to a company") + the unattributed $ and its
+  share of the bill;
+- a per-service breakdown of what makes up the gap;
+- a daily unattributed-share % line as a new-workload canary (complete days only).
+
+Two new pure functions in `app/logic/cost_coverage.py`: `attribution_gap`
+(totals + coverage% + per-category gap breakdown) and `attribution_gap_trend`
+(daily gap share). This is a DIFFERENT axis from the adjacent "Cost drill
+coverage" KPI, which measures object-level drillability — the caption states the
+distinction so the two percentages don't read as a contradiction. App-only — no
+new SQL builder (reuses the loaded frame), no migration.
+
 ## 4.291.0 - Stored-procedure regression advisor (2026-08-25)
 
 Operations ▸ Queries gains a toggle-gated "Stored-procedure regression" section
