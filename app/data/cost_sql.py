@@ -156,7 +156,8 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
     # scan, and the mart path (182d, credit-weighted) is the normal, preferred estimate.
     days, _win = resolve_effective_window(days, "START_TIME", max_days=90)
     dim = "USER_NAME" if str(dimension).upper() == "USER_NAME" else "DATABASE_NAME"
-    vis = (companies.user_clause(company) if dim == "USER_NAME"
+    vis = (companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", distinct_where=_win)
+           if dim == "USER_NAME"
            else companies.database_visibility_clause(company))
     from app.core.sqlsafe import contains_filter
 

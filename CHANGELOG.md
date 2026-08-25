@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.285.0 - Performance: per-distinct-user company scope in live security builders (2026-08-24)
+
+Cross-repo review finding #15. `companies.user_clause` emits `COMPANY_FOR_USER(col) = 'X'` — one
+UDF call PER SCANNED ROW — applied directly on raw ACCOUNT_USAGE views, the documented worst
+live-scan pattern on a scoped session.
+
+- **`companies.user_scope_subquery(...)`** returns the equivalent membership predicate that runs
+  `COMPANY_FOR_USER` once per DISTINCT user (the proven `mart27_sql.ai_code_daily` shape):
+  `col IN (SELECT c FROM (SELECT DISTINCT c FROM <source> WHERE <window>) WHERE COMPANY_FOR_USER(c)='X')`.
+  Leak-safe by construction (the inner UDF filter admits only company-X users, so a wrong window
+  can only under-include, never leak) and **byte-exact**: under the live V044 UDF
+  `COMPANY_FOR_USER(NULL)='UNKNOWN'`, so the `UNKNOWN` scope re-admits `OR col IS NULL` while
+  Trexis/ALFA correctly exclude NULL both before and after. Injection-guarded via `safe_identifier`
+  / `sql_literal` / `assert_no_control_tokens` (the assembled SELECT is never passed whole to the
+  control-token gate). `user_clause` itself is unchanged.
+- Rewrote the 13 in-scope LIVE builders (reducing UDF invocations from O(rows) to O(distinct
+  users)): `security_sql` failed_logins, single_factor_logins, login_takeover_candidates,
+  failed_login_reasons, admin_role_activity, client_drivers, dormant_reawakening, unload_activity,
+  recent_grant_changes (user arm), effective_access; `insights_sql` repeat_query_fingerprints,
+  release_query_compare; `cost_sql` allocated_attribution (USER dimension). Skipped the
+  already-one-row-per-user USERS scans, the FACT/mart readers, the cortex user rollups, and the
+  GRANTS_TO_ROLES role arm. Adversarially security-reviewed (3 reviewers): 0 issues. (`app/companies.py`,
+  `app/data/security_sql.py`, `app/data/insights_sql.py`, `app/data/cost_sql.py`)
+
 ## 4.284.0 - Performance: mixed-tier run_batch gather path (2026-08-24)
 
 Cross-repo review finding #58. `run_batch` requires all members share one tier (its tuple-level

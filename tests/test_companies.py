@@ -108,3 +108,29 @@ def test_admin_roles_resolve_to_dba_profile():
         assert profile == "DBA", (role, profile)
         assert profile in OPERATOR_PROFILES
         assert "Admin" in PAGES_BY_PROFILE[profile]
+
+
+def test_user_scope_subquery_membership_shape_and_guards():
+    import pytest
+
+    from app import companies as co
+    # ALL scope -> empty, exactly like user_clause
+    assert co.user_scope_subquery("ALL", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY") == ""
+    # scoped -> nested distinct-first membership; outer keeps the alias, inner is the bare column
+    s = co.user_scope_subquery("ALFA", "L.USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                               distinct_where="EVENT_TIMESTAMP >= DATEADD('day', -30, CURRENT_TIMESTAMP())")
+    assert s.startswith("L.USER_NAME IN (SELECT USER_NAME FROM (SELECT DISTINCT USER_NAME "
+                        "FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY WHERE")
+    assert s.endswith("WHERE DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_USER(USER_NAME) = 'ALFA')")
+    assert "IS NULL" not in s   # ALFA has no NULL re-admit
+    # UNKNOWN re-admits NULL for byte-exactness (COMPANY_FOR_USER(NULL)='UNKNOWN' under V044)
+    u = co.user_scope_subquery("UNKNOWN", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                               distinct_where="START_TIME >= DATEADD('day', -7, CURRENT_TIMESTAMP())")
+    assert u.endswith("OR USER_NAME IS NULL)")
+    assert "COMPANY_FOR_USER(USER_NAME) = 'UNKNOWN'" in u
+    # injection: a malicious source or a control-token distinct_where must raise
+    with pytest.raises(ValueError):
+        co.user_scope_subquery("ALFA", source="X; DROP TABLE Y")
+    with pytest.raises(ValueError):
+        co.user_scope_subquery("ALFA", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                               distinct_where="1=1); DROP TABLE Z --")

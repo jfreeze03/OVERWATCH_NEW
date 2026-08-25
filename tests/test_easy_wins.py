@@ -157,7 +157,10 @@ def test_single_factor_logins_shape():
 
 
 def test_single_factor_company_scoped():
-    assert "COMPANY_FOR_USER(L.USER_NAME) = 'ALFA'" in security_sql.single_factor_logins(30, "ALFA")
+    # PERF #15: company scope is now the per-distinct-user membership subquery (UDF once per user).
+    _sfa = security_sql.single_factor_logins(30, "ALFA")
+    assert "L.USER_NAME IN (SELECT USER_NAME FROM" in _sfa
+    assert "COMPANY_FOR_USER(USER_NAME) = 'ALFA'" in _sfa          # UDF once per distinct user
     assert "COMPANY_FOR_USER" not in security_sql.single_factor_logins(30, "ALL")
 
 

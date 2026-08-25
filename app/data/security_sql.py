@@ -90,7 +90,8 @@ def failed_logins(days: int, company: str = "ALL") -> str:
     where = and_where(
         f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "IS_SUCCESS = 'NO'",
-        companies.user_clause(company),
+        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 SELECT
@@ -122,7 +123,8 @@ def single_factor_logins(days: int = 30, company: str = "ALL") -> str:
         "L.FIRST_AUTHENTICATION_FACTOR = 'PASSWORD'",
         "COALESCE(TO_VARCHAR(L.SECOND_AUTHENTICATION_FACTOR), '') = ''",
         "L.IS_SUCCESS = 'YES'",
-        companies.user_clause(company, "L.USER_NAME"),
+        companies.user_scope_subquery(company, "L.USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 WITH single_factor AS (
@@ -167,7 +169,8 @@ def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures:
     min_failures = max(2, min(int(min_failures), 100))
     ev_where = and_where(
         f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        companies.user_clause(company),
+        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 WITH ev AS (
@@ -379,7 +382,8 @@ def failed_login_reasons(days: int, company: str = "ALL") -> str:
     where = and_where(
         f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "IS_SUCCESS = 'NO'",
-        companies.user_clause(company, "USER_NAME"),
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 SELECT
@@ -404,7 +408,8 @@ def admin_role_activity(days: int, company: str = "ALL") -> str:
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')",
-        companies.user_clause(company, "USER_NAME"),
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 SELECT
@@ -627,7 +632,8 @@ def recent_grant_changes(days: int = 30, company: str = "ALL", limit: int = 500)
     days = bounded_days(days, 365)
     limit = max(10, min(int(limit or 500), 2000))
     cutoff = f"DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
-    u_scope = companies.user_clause(company, "GRANTEE_NAME")   # grantee is a user
+    u_scope = companies.user_scope_subquery(company, "GRANTEE_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS",
+                                            distinct_where=f"CREATED_ON >= {cutoff} OR DELETED_ON >= {cutoff}")   # grantee is a user
     r_scope = companies.role_clause(company, "GRANTEE_NAME")   # grantee is a role
     # Owner finding 2026-08-17: every object CREATE (incl. the TMP_* stages/formats
     # procs make per run) records an OWNERSHIP grant BY the creating role TO itself
@@ -862,7 +868,8 @@ def client_drivers(days: int = 30, company: str = "ALL") -> str:
     where = and_where(
         f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "CLIENT_APPLICATION_ID IS NOT NULL",
-        companies.user_clause(company, "USER_NAME"),
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.SESSIONS",
+                                      distinct_where=f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 WITH s AS (
@@ -1018,7 +1025,8 @@ def dormant_reawakening(dormant_gap_days: int = 45, recent_days: int = 7,
     where = and_where(
         f"L.EVENT_TIMESTAMP >= DATEADD('day', -{baseline_days}, CURRENT_TIMESTAMP())",
         "L.IS_SUCCESS = 'YES'",
-        companies.user_clause(company, "L.USER_NAME"),
+        companies.user_scope_subquery(company, "L.USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
+                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{baseline_days}, CURRENT_TIMESTAMP())"),
     )
     return f"""
 WITH logins AS (
@@ -1099,7 +1107,8 @@ def unload_activity(days: int = 30, company: str = "ALL", database: str = "",
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "QUERY_TYPE = 'UNLOAD'",
         "EXECUTION_STATUS = 'SUCCESS'",
-        companies.user_clause(company, "USER_NAME"),
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -1404,7 +1413,8 @@ ORDER BY 1
 
 
 def effective_access(company: str = "ALL") -> str:
-    user_filter = companies.user_clause(company, "g.GRANTEE_NAME")
+    user_filter = companies.user_scope_subquery(company, "g.GRANTEE_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS",
+                                                distinct_where="DELETED_ON IS NULL")
     where = and_where("g.DELETED_ON IS NULL", user_filter)
     return f"""
 WITH RECURSIVE role_tree (USER_NAME, DIRECT_ROLE, EFFECTIVE_ROLE, DEPTH, ACCESS_PATH) AS (

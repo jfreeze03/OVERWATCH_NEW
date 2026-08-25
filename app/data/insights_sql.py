@@ -137,7 +137,8 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
         companies.warehouse_clause(company),
-        companies.user_clause(company),
+        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -228,7 +229,8 @@ def release_query_compare(release_date: str, window_days: int, company: str = "A
         f"START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
         f"START_TIME < DATEADD('day', {window}, DATE '{release}')",
         companies.warehouse_clause(company),
-        companies.user_clause(company),
+        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=f"START_TIME >= DATEADD('day', -{window}, DATE '{release}') AND START_TIME < DATEADD('day', {window}, DATE '{release}')"),
     )
     return f"""
 SELECT

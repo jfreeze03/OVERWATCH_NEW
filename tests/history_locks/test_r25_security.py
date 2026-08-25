@@ -36,7 +36,11 @@ def test_dormant_reawakening_contract():
     assert "GAP_DAYS" in sql and "WAKE_LOGIN" in sql and "LAST_ACTIVE_BEFORE" in sql
     assert "w.GAP_DAYS >= 45" in sql                              # default gap threshold
     assert "QUALIFY ROW_NUMBER()" in sql                          # biggest-gap login per user
-    assert "COMPANY_FOR_USER(L.USER_NAME) = 'ALFA'" in sql        # user-role company scope
+    # PERF #15: user scope is now the per-distinct-user membership subquery (COMPANY_FOR_USER
+    # once per distinct user, not once per scanned row) — leak-safe and byte-exact for non-NULL users.
+    assert ("L.USER_NAME IN (SELECT USER_NAME FROM (SELECT DISTINCT USER_NAME FROM "
+            "SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY") in sql
+    assert "COMPANY_FOR_USER(USER_NAME) = 'ALFA'" in sql          # UDF once per distinct user
     # baseline clamps to LOGIN_HISTORY's 365d retention; the gap clamps to <= 365
     assert "DATEADD('day', -365," in security_sql.dormant_reawakening(baseline_days=9999)
     assert "w.GAP_DAYS >= 365" in security_sql.dormant_reawakening(dormant_gap_days=9999)

@@ -20,7 +20,14 @@ are seeded into ``DBA_MAINT_DB.OVERWATCH.COMPANY_SCOPE`` by V001 and
 
 from __future__ import annotations
 
-from .core.sqlsafe import assert_no_control_tokens, in_list, like_any, not_in_list, sql_literal
+from .core.sqlsafe import (
+    assert_no_control_tokens,
+    in_list,
+    like_any,
+    not_in_list,
+    safe_identifier,
+    sql_literal,
+)
 
 COMPANIES = ("ALFA", "Trexis", "UNKNOWN", "ALL")
 DEFAULT_COMPANY = "ALFA"
@@ -182,6 +189,49 @@ def user_clause(company: str, column: str = "USER_NAME") -> str:
     else:
         clause = ""
     return assert_no_control_tokens(clause)
+
+
+def user_scope_subquery(company: str, column: str = "USER_NAME", *,
+                        source: str, distinct_where: str = "",
+                        distinct_column: str | None = None) -> str:
+    """PERF #15: membership form of user_clause for RAW ACCOUNT_USAGE scans.
+
+    ``user_clause`` emits ``COMPANY_FOR_USER(col) = 'X'`` — one UDF call PER SCANNED ROW on a
+    large account-usage view. This returns the EQUIVALENT predicate that runs COMPANY_FOR_USER
+    once per DISTINCT user (the proven mart27_sql.ai_code_daily shape):
+
+        col IN (SELECT c FROM (SELECT DISTINCT c FROM <source> [WHERE <w>])
+                WHERE COMPANY_FOR_USER(c) = 'X')
+
+    Returns '' for the ALL scope, exactly like user_clause. LEAK-SAFE by construction: the inner
+    COMPANY_FOR_USER filter admits ONLY company-X users into the IN set, so a too-loose
+    ``distinct_where`` can only DROP in-scope rows (fail-closed), never add a wrong-company user.
+    ``distinct_where`` MUST be a SUPERSET of the outer scan's row filters (typically the time
+    window) so no in-scope user is dropped, and ``source`` MUST be the physical table ``column``
+    is selected from (for a post-JOIN column like U.NAME, pass its base table, e.g. USERS).
+
+    BYTE-EXACT vs the per-row form for every user value including NULL: under the live V044 UDF
+    COMPANY_FOR_USER(NULL) = 'UNKNOWN', so a NULL-user row is in-scope ONLY under the UNKNOWN
+    company; ``NULL IN (...)`` is never true, so re-admit NULL for that scope alone (Trexis/ALFA
+    correctly exclude a NULL user both before and after).
+
+    Injection gate: the assembled string legitimately contains SELECT/FROM/DISTINCT, so
+    assert_no_control_tokens is applied ONLY to ``distinct_where`` (builder SQL, never raw UI
+    text); identifiers go through safe_identifier and the company value through sql_literal.
+    """
+    company = str(company or DEFAULT_COMPANY)
+    if company not in ("Trexis", "ALFA", "UNKNOWN"):
+        return ""
+    outer = safe_identifier(column, allow_qualified=True)
+    inner = safe_identifier(distinct_column or column.rsplit(".", 1)[-1])
+    src = safe_identifier(source, allow_qualified=True)
+    where = f" WHERE {assert_no_control_tokens(distinct_where)}" if distinct_where else ""
+    clause = (f"{outer} IN (SELECT {inner} FROM "
+              f"(SELECT DISTINCT {inner} FROM {src}{where}) "
+              f"WHERE {COMPANY_FOR_USER_FN}({inner}) = {sql_literal(company)})")
+    if company == "UNKNOWN":   # COMPANY_FOR_USER(NULL)='UNKNOWN' (V044): keep NULL-user rows exact
+        clause = f"({clause} OR {outer} IS NULL)"
+    return clause
 
 
 def environment_clause(environment: str, column: str = "DATABASE_NAME") -> str:
