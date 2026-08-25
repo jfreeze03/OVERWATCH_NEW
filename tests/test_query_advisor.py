@@ -56,10 +56,12 @@ def test_poor_pruning_needs_both_partition_floor_and_ratio():
     assert "poor_pruning" not in _codes(_row(PARTITIONS_TOTAL=1000.0, PARTITIONS_SCANNED=100.0))
 
 
-def test_cold_scan_needs_size_and_low_cache():
+def test_large_scan_fires_on_size_alone_matching_triage():
+    # review: the triage ELSE branch labels any >50GB scan "Large cold scan" with NO
+    # cache gate, so the advisor must too — else the two surfaces contradict.
     assert "cold_scan" in _codes(_row(GB_SCANNED=200.0, CACHE_PCT=5.0))
-    assert "cold_scan" not in _codes(_row(GB_SCANNED=200.0, CACHE_PCT=90.0))  # cached
-    assert "cold_scan" not in _codes(_row(GB_SCANNED=10.0, CACHE_PCT=5.0))    # small
+    assert "cold_scan" in _codes(_row(GB_SCANNED=200.0, CACHE_PCT=90.0))   # warm: still a large scan
+    assert "cold_scan" not in _codes(_row(GB_SCANNED=10.0, CACHE_PCT=5.0))  # small: no
 
 
 def test_compile_bound_needs_fraction_and_min_elapsed():

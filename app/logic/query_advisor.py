@@ -25,8 +25,7 @@ REMOTE_SPILL_MIN_GB = 0.0        # any remote spill is memory exhaustion
 LOCAL_SPILL_MIN_GB = 1.0         # local-only spill: milder pressure
 POOR_PRUNE_MIN_PARTITIONS = 100  # below this, a high scan-ratio isn't meaningful
 POOR_PRUNE_SCAN_RATIO = 0.8      # scanned/total above this = poor pruning
-COLD_SCAN_MIN_GB = 50.0          # a "large" scan
-COLD_SCAN_CACHE_MAX_PCT = 25.0   # ... that is mostly not cached
+COLD_SCAN_MIN_GB = 50.0          # a "large" scan (mirrors triage's ELSE branch: size alone)
 COMPILE_FRACTION = 0.5           # compile time this share of elapsed = compile-bound
 COMPILE_MIN_ELAPSED_SEC = 1.0    # ignore trivially short queries
 QUEUE_FRACTION = 0.5             # queued this share of elapsed = concurrency/resume
@@ -114,14 +113,15 @@ def advise(row: Mapping[str, object]) -> tuple[list[Finding], int]:
             "(it defeats pruning).",
             pts))
 
-    # 4) large cold scan
-    if gb_scanned > COLD_SCAN_MIN_GB and cache_pct < COLD_SCAN_CACHE_MAX_PCT:
+    # 4) large scan — size alone, exactly like the triage table's ELSE branch
+    #    (no cache gate, so the two surfaces never disagree for the same query).
+    if gb_scanned > COLD_SCAN_MIN_GB:
         pts = _cap(12 + gb_scanned / 50.0 * 8, _CAP["cold_scan"])
         findings.append(Finding(
-            "cold_scan", "bad", "Large cold scan",
-            f"Read {gb_scanned:.0f} GB with only {cache_pct:.0f}% from cache. "
-            "Select just the columns you need, filter earlier, or materialize the "
-            "hot subset so repeat reads stay warm.",
+            "cold_scan", "bad", "Large scan",
+            f"Read {gb_scanned:.0f} GB ({cache_pct:.0f}% from cache). Select just the "
+            "columns you need, filter earlier, or materialize the hot subset so repeat "
+            "reads stay warm.",
             pts))
 
     # 5) compile-bound
