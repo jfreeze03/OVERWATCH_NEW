@@ -1152,7 +1152,7 @@ def _task_run_analyzer(root_id: str, topology, shape) -> None:
         try:
             st.graphviz_chart(charts.task_dag_dot(overlay, shape), width="stretch", height=620)
         except TypeError:
-            st.graphviz_chart(charts.task_dag_dot(overlay, shape), use_container_width=True)
+            st.graphviz_chart(charts.task_dag_dot(overlay, shape), width="stretch")
     st.caption(
         "The highlighted path is the longest observed dependency path for this run. "
         "Node duration includes dispatch queue plus execution; current topology supplies the edges."
@@ -1412,7 +1412,7 @@ def _task_graph_view() -> None:
         try:
             st.graphviz_chart(dot, width="stretch", height=680)
         except TypeError:
-            st.graphviz_chart(dot, use_container_width=True)
+            st.graphviz_chart(dot, width="stretch")
     export_button(
         "Task graph (DOT)",
         dot,

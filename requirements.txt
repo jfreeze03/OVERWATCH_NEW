@@ -1,7 +1,10 @@
 # Local/dev + Community Cloud (dev-only) dependencies.
 # Streamlit-in-Snowflake uses environment.yml (Snowflake conda channel) instead.
 # Compatible-release pins: tested floor, no surprise major upgrades.
-streamlit~=1.45
+# Floor raised 1.45 -> 1.52 with the use_container_width -> width='stretch' migration:
+# the width='stretch'/'content' string values do not exist before ~1.52, and SiS
+# (environment.yml) runs streamlit=1.52.2, so 1.52 is the real minimum now.
+streamlit~=1.52
 pandas~=2.2
 altair~=5.4
 snowflake-snowpark-python~=1.53

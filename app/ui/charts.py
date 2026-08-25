@@ -697,13 +697,13 @@ def spend_trend(
         # a plain chart on any runtime without on_select.
         sel = alt.selection_point(fields=["DayStr"], name="pt", on="click", clear="dblclick")
         try:
-            event = st.altair_chart(chart.add_params(sel), use_container_width=True,
+            event = st.altair_chart(chart.add_params(sel), width="stretch",
                                     on_select="rerun", key=key)
             picked_day = _current_click_value(event, field="DayStr")
         except Exception:  # noqa: BLE001 - runtime without on_select -> plain chart
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
     else:
-        st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, width="stretch")
     total = float(data["USD"].sum())
     note = f"Bars = each day's spend (window total ${total:,.0f}); line = 7-day average"
     # r6-bug7: pace over COMPLETE days only. The newest day is PROVISIONAL (metering lags
@@ -742,7 +742,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
-    st.altair_chart(bars + labels, use_container_width=True)
+    st.altair_chart(bars + labels, width="stretch")
     if takeaway:
         # Share denominator is the FULL frame's total, not the head(top_n) sum — else
         # the top contributor's "% of $total" is overstated and the "$total" label
@@ -778,10 +778,10 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
     plain = bars + labels
     try:
         sel = alt.selection_point(fields=["Label"], name="pt", on="click", clear="dblclick")
-        event = st.altair_chart(plain.add_params(sel), use_container_width=True,
+        event = st.altair_chart(plain.add_params(sel), width="stretch",
                                 on_select="rerun", key=key)
     except Exception:  # noqa: BLE001 - runtime without on_select -> plain chart
-        st.altair_chart(plain, use_container_width=True)
+        st.altair_chart(plain, width="stretch")
         return None
     return _read_click_selection(event, field="Label", seen_key=f"_ow_barsel_{key}")
 
@@ -806,7 +806,7 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
                      alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 # C15 (a11y): a fixed categorical palette + a NAME-stable index, so a given
@@ -857,7 +857,7 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if takeaway:  # rec35: lead with the conclusion
         _g = data.assign(_v=pd.to_numeric(data["Value"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
@@ -881,7 +881,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
             tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Value:Q", format=",.0f")],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if takeaway:
         # Full-frame total as the share denominator (see bar_usd): a head(top_n) sum
         # would overstate the top contributor's share of the universe.
@@ -922,7 +922,7 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
             ],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if takeaway:  # rec35: lead with the conclusion
         _g = data.assign(_v=pd.to_numeric(data["USD"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
@@ -951,7 +951,7 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
                 )
                 .properties(height=56)
             )
-            st.altair_chart(chart, use_container_width=True)
+            st.altair_chart(chart, width="stretch")
 
 
 def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
@@ -981,7 +981,7 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
         )
         .properties(height=max(120, 24 * data["Row"].nunique()))
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if capped_note:
         st.caption(capped_note)
     if takeaway:  # rec35: name the hottest cell (positional + coerced, so a
@@ -1025,7 +1025,7 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
         )
         .properties(height=CHART_H_MD)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if takeaway:  # rec35: name the top contributor (only when there is a real total)
         _total = float(data["USD"].sum())
         if _total > 0:
@@ -1055,7 +1055,7 @@ def event_timeline(df: pd.DataFrame) -> None:
     dots = alt.Chart().mark_point(size=110, opacity=0.95, filled=True,
                 stroke=palette.BG, strokeWidth=0.6).encode(color=color, shape=shape, **common)
     st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
-                    use_container_width=True)
+                    width="stretch")
 
 
 def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:
@@ -1138,7 +1138,7 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
             .properties(height=70)
         )
         focus = _focus(xdom)
-        st.altair_chart(alt.vconcat(spend, focus, spacing=8), use_container_width=True)
+        st.altair_chart(alt.vconcat(spend, focus, spacing=8), width="stretch")
         return
 
     # No overlay: the persistent overview brush zooms the event focus.
@@ -1157,7 +1157,7 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
         .add_params(brush)
         .properties(height=48)
     )
-    st.altair_chart(alt.vconcat(focus, overview, spacing=8), use_container_width=True)
+    st.altair_chart(alt.vconcat(focus, overview, spacing=8), width="stretch")
 
 
 def incident_gantt(df: pd.DataFrame) -> None:
@@ -1194,7 +1194,7 @@ def incident_gantt(df: pd.DataFrame) -> None:
         )
         .properties(height=max(_HEIGHT, 22 * len(data)))
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def workload_portfolio(df: pd.DataFrame) -> None:
@@ -1234,7 +1234,7 @@ def workload_portfolio(df: pd.DataFrame) -> None:
         )
         .properties(height=330)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
@@ -1259,7 +1259,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
             .encode(x="Day:T")
         )
         chart = chart + rule
-    st.altair_chart(chart.properties(height=CHART_H_SM), use_container_width=True)
+    st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
     # rec35 / CoCo UI#14: name the peak day so the line leads with a conclusion.
     if takeaway and not data.empty:
         _v = pd.to_numeric(data["Value"], errors="coerce").dropna()
@@ -1298,7 +1298,7 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
             tooltip=["Day:T", "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
         )
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     if takeaway:  # rec35: name the worst day
         _by_day = data.assign(_v=pd.to_numeric(data["Events"], errors="coerce")).groupby("Day")["_v"].sum()
         if float(_by_day.sum()) > 0:
@@ -1339,7 +1339,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
         tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
     ))
-    st.altair_chart(bars, use_container_width=True)
+    st.altair_chart(bars, width="stretch")
     # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
     if takeaway and float(totals.sum()) > 0:
         st.caption(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum())))
@@ -1373,4 +1373,4 @@ def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
         )
         .properties(height=CHART_H_MD, title=title or "")
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")

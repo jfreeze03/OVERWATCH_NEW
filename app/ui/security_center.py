@@ -225,13 +225,13 @@ def render_security_overview(company: str) -> None:
     c1, c2 = st.columns(2)
     action_id = _cell_text(row.get("ACTION_ID"))
     with c1:
-        if action_id and st.button("Open tracked action", key="sec_exception_action", use_container_width=True):
+        if action_id and st.button("Open tracked action", key="sec_exception_action", width="stretch"):
             request_navigation(
                 "Control Room", "Action Center", context={"action_id": action_id}
             )
     with c2:
         entity_key = _cell_text(row.get("ENTITY_KEY"))
-        if entity_key and st.button("Open entity", key="sec_exception_entity", use_container_width=True):
+        if entity_key and st.button("Open entity", key="sec_exception_entity", width="stretch"):
             request_navigation(
                 "Control Room",
                 "Entity 360",
@@ -409,7 +409,7 @@ def render_effective_access(company: str) -> None:
     if self_escalates:
         dot.append(f'"{_dot_text(user)}" [shape=ellipse, color="#c0392b", penwidth=2];')
     dot.append("}")
-    st.graphviz_chart("\n".join(dot), use_container_width=True)
+    st.graphviz_chart("\n".join(dot), width="stretch")
     if self_escalates:
         st.caption(
             "⚠ This user holds MANAGE GRANTS on an effective role — it can grant itself "

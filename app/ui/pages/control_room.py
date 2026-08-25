@@ -388,7 +388,7 @@ def render() -> None:
         _und_age_txt = f", oldest {humanize_duration(_und_age, 'min')}" if _und_age > 0 else ""
         if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody (account-wide; 30+ min, "
                               f"no delivery{_und_age_txt}) — check delivery →", key="cr_undelivered",
-                              type="primary", use_container_width=True):
+                              type="primary", width="stretch"):
             request_navigation("Alerts", "Native delivery")
     # The shell strip is intentionally account-wide. The page badge must match the
     # company-scoped incident/alert queue it opens (company + account-level events).

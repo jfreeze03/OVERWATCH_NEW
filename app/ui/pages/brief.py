@@ -294,7 +294,7 @@ def render() -> None:
     _und_age_txt = f", oldest {humanize_duration(_und_age, 'min')}" if _und_age > 0 else ""
     if _und and st.button(f"⚠ {_und} critical alert(s) reached nobody{_und_age_txt} — "
                           "check delivery →", key="brief_undelivered", type="primary",
-                          use_container_width=True):
+                          width="stretch"):
         request_navigation("Alerts", "Native delivery")
 
     section_header("Fires", "warn", "alerts")
@@ -318,7 +318,7 @@ def render() -> None:
                 request_navigation("Alerts", "Open events", context={"event_id": _eid})
             if company != "ALL":
                 st.caption(f"Scoped to {company} plus account-level events.")
-            if st.button("Open the alert queue →", key="brief_alerts", use_container_width=True):
+            if st.button("Open the alert queue →", key="brief_alerts", width="stretch"):
                 request_navigation("Alerts", "Open events")
     else:
         # rec23/house-rule-8: green means VERIFIED CLEAN, never "nothing loaded".
@@ -400,7 +400,7 @@ def render() -> None:
                 executive_summary_html(_brief_view, presentation=True),
                 file_name="overwatch_morning_brief.html",
                 mime="text/html",
-                use_container_width=True,
+                width="stretch",
             )
         with _ex_slide:
             download_text_button(
@@ -414,7 +414,7 @@ def render() -> None:
                 executive_summary_csv(_brief_view),
                 file_name="overwatch_morning_brief.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width="stretch",
             )
 
     st.caption(pd.Timestamp.now().strftime("Generated %Y-%m-%d %H:%M") +

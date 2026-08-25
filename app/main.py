@@ -152,7 +152,7 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
 
         st.divider()
         _global_jump(pages)
-        if st.button("Refresh data", use_container_width=True):
+        if st.button("Refresh data", width="stretch"):
             bump_refresh_salt()
             # Re-resolve the role too: a grant/role change mid-session should
             # be picked up here, not only on a full browser reload.
@@ -306,7 +306,7 @@ def _global_jump(pages: tuple) -> None:
                         key="_ow_jump", label_visibility="collapsed")
     open_jump = st.button(
         "Open destination", key="_ow_jump_open", type="primary",
-        disabled=not bool(pick), use_container_width=True,
+        disabled=not bool(pick), width="stretch",
         help="Open the selected page or section.",
     )
     # rec16: an explicit button — not a fake "More …" OPTION that mutated state
@@ -314,7 +314,7 @@ def _global_jump(pages: tuple) -> None:
     # `and` short-circuits so the button only RENDERS while not yet loaded.
     if not st.session_state.get("_ow_jump_loaded") and st.button(
             "Load all warehouses & alert rules", key="_ow_jump_loadall",
-            type="tertiary", use_container_width=True):
+            type="tertiary", width="stretch"):
         st.session_state["_ow_jump_loaded"] = True
         st.rerun()
     investigation_kinds = []
@@ -337,7 +337,7 @@ def _global_jump(pages: tuple) -> None:
             )
             if st.button(
                 "Open investigation", key="_ow_investigate_open",
-                type="primary", use_container_width=True,
+                type="primary", width="stretch",
             ):
                 try:
                     target = investigation_target(target_kind, target_value)
@@ -587,7 +587,7 @@ def _topbar_scope() -> None:
                 if str(st.session_state.get(key) or "").strip()
             )
             _more_label = f"More · {_adv_n}" if _adv_n else "More"
-            with st.popover(_more_label, use_container_width=True):
+            with st.popover(_more_label, width="stretch"):
                 st.caption("Contains filters")
                 st.text_input("Warehouse contains", key="flt_warehouse_contains")
                 st.text_input("User contains", key="flt_user_contains")
@@ -600,7 +600,7 @@ def _topbar_scope() -> None:
                 st.button(
                     "Reset", key="flt_reset", on_click=_reset_scope,
                     help="Back to the account-wide default scope.",
-                    use_container_width=True,
+                    width="stretch",
                 )
         _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
         _days = resolve_window_days(_window)

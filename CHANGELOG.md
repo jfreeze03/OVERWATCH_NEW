@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.290.0 - Migrate use_container_width -> width='stretch' (2026-08-25)
+
+Streamlit is removing the deprecated `use_container_width` parameter (already gone
+from `st.image`/`plotly_chart`/`vega_lite_chart` in 1.57/1.61). Migrated all ~51
+call sites to the replacement `width` parameter (`use_container_width=True` ->
+`width='stretch'`, `False` -> `'content'`) across `st.dataframe`, `st.button`,
+`st.download_button`, and `st.altair_chart`, plus the `export_button` wrapper and
+the shared table helper. No visual change.
+
+- `requirements.txt` streamlit floor raised `~=1.45` -> `~=1.52`: the `width`
+  string values don't exist before ~1.52, and SiS (`environment.yml`) runs
+  streamlit **1.52.2**, so 1.52 is the real minimum now.
+- Verified: full suite on streamlit 1.58.0 (2792 passed); the `width='stretch'`
+  render of every migrated component AND the full page-render AppTest suite pass
+  on streamlit **1.52.2** (the SiS version).
+- Also merged dependabot: `snowflake-snowpark-python ~=1.30 -> ~=1.53` (app uses
+  only stable core Snowpark; no breaking change).
+
 ## 4.289.0 - Auto-resolve cleared alerts (V091, owner-applied) (2026-08-25)
 
 Alerts whose condition has cleared now close themselves, so the operator stops

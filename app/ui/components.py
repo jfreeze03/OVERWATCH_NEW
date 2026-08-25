@@ -87,7 +87,7 @@ def localize_timestamps(df, columns: list[str]):
 def panel_help(text: str) -> None:
     """Per-panel 'what is this / when red do X' popover (help mode)."""
     from app.logic.formulas import md_dollars
-    with st.popover("ⓘ about this panel", use_container_width=False):
+    with st.popover("ⓘ about this panel", width="content"):
         st.markdown(md_dollars(text))  # two $'s in help prose must not go LaTeX-math
 
 
@@ -521,7 +521,7 @@ def contract_runway_bar(runway: dict | None) -> None:
 
 def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
                   key: str | None = None, help: str = "", disabled: bool = False,
-                  use_container_width: bool = False) -> bool:
+                  width: str = "content") -> bool:
     """rec20: one page-level export affordance for the whole app. Thin wrapper over
     st.download_button that prefixes the same download glyph the per-table export
     uses ("⬇ ") and suppresses the rerun a download would otherwise trigger.
@@ -530,7 +530,7 @@ def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
     return st.download_button(
         f"⬇ {label}", data=data, file_name=file_name, mime=mime, key=key,
         help=help or None, disabled=disabled,
-        use_container_width=use_container_width, on_click="ignore")
+        width=width, on_click="ignore")
 
 
 def status_bar(stats: list[dict]) -> None:
@@ -577,7 +577,7 @@ def status_bar(stats: list[dict]) -> None:
                         help=f"Open {page} · {section}",
                         type="tertiary",
                         icon=":material/arrow_forward:",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         request_navigation(page, section)
 
@@ -1402,7 +1402,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                   size_note: bool = True, sort_label: str = "",
                   totals: tuple = ()) -> int | None:
     if df is None or getattr(df, "empty", True):
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, width="stretch")
         return None
     display_df = df
     try:  # display-timezone conversion is display-only; the CSV keeps account time
@@ -1500,7 +1500,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     column_config = _cfg or None
     if height is None and len(df) > 10:
         height = TABLE_H_XL
-    kwargs = {"hide_index": True, "use_container_width": True, "column_config": column_config}
+    kwargs = {"hide_index": True, "width": "stretch", "column_config": column_config}
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height
     if totals:

@@ -674,7 +674,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             # gets a full-width row of its own instead of a cramped ~30% column.
             c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
             with c_inv:
-                if st.button("Investigate →", key="alert_investigate", use_container_width=True,
+                if st.button("Investigate →", key="alert_investigate", width="stretch",
                              help=f"Jump to {target['page']} · {target['section'] or 'top'} "
                                   "with filters applied from this event"):
                     # rec24: only claim "filters applied" when the jump actually reshapes
@@ -685,7 +685,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                                     f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
                     request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
             with c_fix:
-                if fix and st.button("Generate fix →", key="alert_fix", use_container_width=True,
+                if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
                                      help="Lands on the remediation surface with this event's "
                                           "scope applied — generate, confirm, execute, audited."):
                     request_navigation(fix["page"], fix["section"], fix["filters"])
@@ -725,7 +725,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     # one click; RESOLVE classifies the event, so it keeps the confirm gate.
                     if action in ("ACK", "SNOOZE"):
                         _fire = st.button("Execute with audit row", type="primary",
-                                          use_container_width=True,
+                                          width="stretch",
                                           key=f"alert_exec_ack_{event_id[:8]}")
                     else:
                         _fire = confirm_gate(action, "Execute with audit row",

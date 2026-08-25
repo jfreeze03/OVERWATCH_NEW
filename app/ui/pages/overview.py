@@ -1113,11 +1113,11 @@ def render() -> None:
     with c_html:
         export_button("Presentation summary (HTML)", html,
                       file_name="overwatch_executive_summary.html", mime="text/html",
-                      use_container_width=True)
+                      width="stretch")
     with c_txt:
         download_text_button("Slide bullets (.txt)", summary,
                              "overwatch_executive_slide_bullets.txt")
     with c_csv:
         export_button("Summary data (CSV)", executive_summary_csv(_export_view),
                       file_name="overwatch_executive_summary.csv", mime="text/csv",
-                      use_container_width=True)
+                      width="stretch")

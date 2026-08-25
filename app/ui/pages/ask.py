@@ -87,7 +87,7 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
 
     if result.evidence is not None and not result.evidence.empty:
         with st.expander("Evidence — the rows this answer is built from", expanded=True):
-            st.dataframe(result.evidence, use_container_width=True, hide_index=True)
+            st.dataframe(result.evidence, width="stretch", hide_index=True)
 
     # Use the answer's OWN effective window (an answerer may clamp it, e.g. the
     # spend mart's 182-day horizon), never the raw request, so the caption can't
@@ -131,7 +131,7 @@ def render() -> None:
         cols = st.columns(3)
         for i, q in enumerate(cases):
             with cols[i % 3]:
-                if st.button(q, key=f"ask_chip_{i}", use_container_width=True):
+                if st.button(q, key=f"ask_chip_{i}", width="stretch"):
                     st.session_state["ask_q"] = q
         question = st.text_input(
             "Your question", key="ask_q",
