@@ -72,7 +72,8 @@ def _analyze_spend_by_user(
     src = f"mart27_sql.alloc_attribution(USER, {params.days}d) + robust_zscores"
     meta: dict[str, object] = {"days": params.days, "company": params.company}
     df = frames.get("alloc")
-    if df is None or df.empty or "ALLOC_CREDITS" not in df.columns:
+    if (df is None or df.empty or "ALLOC_CREDITS" not in df.columns
+            or "DIMENSION" not in df.columns):
         return AnswerResult(
             intent=_SPEND_INTENT,
             headline=f"No attributable user spend in the last {params.days}d.",
@@ -136,8 +137,9 @@ def _analyze_spend_by_user(
     if not outlier:
         if n_users < 5:
             bullets.append(
-                f"Only {n_users} user(s) had attributable spend this window — too "
-                "few for the peer-outlier test; read the ranking directly."
+                f"Only {n_users} user{'s' if n_users != 1 else ''} had attributable "
+                "spend this window — too few for the peer-outlier test; read the "
+                "ranking directly."
             )
         elif top_share >= 0.5:
             bullets.append(
@@ -150,11 +152,12 @@ def _analyze_spend_by_user(
                 "spread across the cohort, not one runaway account."
             )
 
-    evidence_cols = [c for c in ("DIMENSION", "ALLOC_CREDITS", "ELAPSED_SHARE") if c in d.columns]
-    ev = d.head(15)[evidence_cols].copy()
-    # alloc_attribution names this column ELAPSED_SHARE but it is a CREDIT share
-    # (SUM(ALLOC_CREDITS)/total) — label it honestly for the reader.
-    ev = ev.rename(columns={"ELAPSED_SHARE": "CREDIT_SHARE"})
+    ev = d.head(15)[["DIMENSION", "ALLOC_CREDITS"]].copy()
+    # CREDIT_SHARE is recomputed from the SAME named-user total the headline and
+    # bullets use — NOT the builder's ELAPSED_SHARE, whose denominator is the whole
+    # scoped pool INCLUDING the NONE/UNKNOWN load we dropped, which would show a
+    # different (smaller) share than the headline for the very same row.
+    ev["CREDIT_SHARE"] = ev["ALLOC_CREDITS"] / total
     return AnswerResult(
         intent=_SPEND_INTENT,
         headline=headline,
@@ -224,7 +227,10 @@ def _analyze_cs_by_query(
         )
 
     top = s.iloc[0]
-    qtype = str(top.get("QUERY_TYPE", "query")) or "query"
+    # QUERY_TYPE can be SQL NULL (ANY_VALUE over a null group) -> None/NaN, which
+    # str() would render as the literal "None"/"nan". Coerce those to "query".
+    _qt = top.get("QUERY_TYPE")
+    qtype = str(_qt) if (_qt is not None and not pd.isna(_qt) and str(_qt).strip()) else "query"
     cs = float(top["CS_CREDITS"])
     runs = int(_num(top.get("RUNS", 0)))
     # cloud_svc_top_shapes is LIMIT 30, so total_cs is the sum of the TOP shapes,
@@ -232,11 +238,14 @@ def _analyze_cs_by_query(
     # the headline never overstates the top shape's fraction of true CS spend.
     n_shapes = len(s)
     share = cs / total_cs
+    if n_shapes == 1:
+        share_clause = "the only cloud-services query shape this window"
+    else:
+        share_clause = f"{share * 100:.0f}% of the top {n_shapes} query shapes' CS credits"
 
     headline = (
         f"The biggest cloud-services driver over {params.days}d is a {qtype} "
-        f"pattern: {_fmt(cs)} CS credits across {runs:,} runs "
-        f"({share * 100:.0f}% of the top {n_shapes} query shapes' CS credits)."
+        f"pattern: {_fmt(cs)} CS credits across {runs:,} runs ({share_clause})."
     )
 
     bullets: list[str] = []
@@ -302,8 +311,12 @@ REGISTRY: tuple[Answerer, ...] = (
             "credits", "spik", "expensive", "driving", "driver", "top",
         ),
         require_all=(
-            ("user", "users", "who", "whom", "account", "login"),
-            # "spik" stems spike/spikes/spiking/spiked (substring match).
+            # A "spender"/"spenders" IS a user reference, so it satisfies the
+            # user gate for phrasings like "top spenders" that name no who/user.
+            ("user", "users", "who", "whom", "account", "login",
+             "spender", "spenders"),
+            # "spik"/"spend" are prefix stems (router._STEMS): spik -> spike/…,
+            # spend -> spends/spending/spender/spent, so the verb family all gate.
             ("spend", "spending", "cost", "costs", "credit", "credits",
              "spik", "expensive", "burn", "driving", "driver"),
         ),

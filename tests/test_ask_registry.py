@@ -214,6 +214,75 @@ def test_cloud_services_sample_text_is_clipped_in_evidence():
     assert res.evidence.iloc[0]["SAMPLE_TEXT"].endswith("…")    # long text truncated
 
 
+# ============================ round-1 adversarial-test regressions ==========
+
+def test_spend_verb_inflections_all_route():
+    # R1 #3 (high): the spend answerer exists to answer these, so none may refuse.
+    for q in ("who is the top spender", "top spenders", "biggest spenders",
+              "which user spends the most", "who spends the most",
+              "which account is the biggest spender"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == \
+            "spend_spike_by_user", q
+    # the word-boundary honesty guard still holds (no user token -> refuse)
+    assert route("what is the whole cost of storage",
+                 default_days=30, company="ALL").answerer is None
+
+
+def test_extract_days_clamps_absurd_widths_consistently():
+    # R1 #4: 7+ digit counts must clamp to the retention cap, not fall to default.
+    assert extract_days("last 999999 days", 30) == 365
+    assert extract_days("last 1000000 days", 30) == 365
+
+
+def test_window_phrases_match_on_word_boundaries():
+    # R1 #5: "this week" must not fire inside "this weekend"/"this weekly", etc.
+    assert extract_days("this weekend", 30) == 30      # -> default, not 7
+    assert extract_days("this weekly", 30) == 30
+    assert extract_days("this yearly", 30) == 30       # -> default, not 365
+    assert extract_days("todaywalk", 30) == 30         # -> default, not 1
+    assert extract_days("this week", 30) == 7          # real phrase still works
+    assert extract_days("this year", 30) == 365
+
+
+def test_spend_missing_dimension_column_is_no_data_not_crash():
+    # R1 #1: a non-empty frame lacking DIMENSION must degrade honestly, not KeyError.
+    df = pd.DataFrame({"ALLOC_CREDITS": [100.0, 50.0]})
+    res = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
+    assert res.confidence == "no_data"
+
+
+def test_cloud_services_null_query_type_is_not_rendered_as_None():
+    # R1 #2: a SQL-NULL QUERY_TYPE on the top shape must read "query", never "None"/"nan".
+    for null in (None, float("nan")):
+        s = pd.DataFrame({"QUERY_TYPE": [null, "SHOW"], "SAMPLE_TEXT": ["a", "b"],
+                          "RUNS": [999, 50], "CS_CREDITS": [42.0, 5.0]})
+        res = _analyze_cs_by_query(AskParams(7, "ALL"), {"shapes": s})
+        assert "None pattern" not in res.headline and "nan pattern" not in res.headline
+        assert "query pattern" in res.headline
+
+
+def test_spend_evidence_credit_share_matches_headline_base():
+    # R1 #6 (high): CREDIT_SHARE must use the SAME named-user denominator as the
+    # headline, not the builder's whole-scope share that includes dropped NONE load.
+    c = {"NONE": 5000.0, "ETL_SVC": 100.0, "BI_APP": 50.0}
+    tot = sum(c.values())
+    df = pd.DataFrame({"DIMENSION": list(c), "ELAPSED_SHARE": [v / tot for v in c.values()],
+                       "ALLOC_CREDITS": list(c.values())})
+    res = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
+    # named-user total = 150; ETL_SVC share = 100/150 = 0.667, matching "67%".
+    etl = float(res.evidence[res.evidence["DIMENSION"] == "ETL_SVC"]["CREDIT_SHARE"].iloc[0])
+    assert round(etl, 3) == 0.667
+    assert "67% of named-user spend" in res.headline
+
+
+def test_cloud_services_single_shape_wording_is_grammatical():
+    s = pd.DataFrame({"QUERY_TYPE": ["SELECT"], "SAMPLE_TEXT": ["x"], "RUNS": [10],
+                      "CS_CREDITS": [5.0]})
+    res = _analyze_cs_by_query(AskParams(30, "ALL"), {"shapes": s})
+    assert "top 1 query shapes" not in res.headline
+    assert "the only cloud-services query shape" in res.headline
+
+
 # ================================================= wiring lock ==============
 
 def test_ask_page_is_wired_and_isolated():

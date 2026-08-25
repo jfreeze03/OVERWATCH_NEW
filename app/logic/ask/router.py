@@ -33,14 +33,15 @@ _WINDOW_WORDS: tuple[tuple[str, int], ...] = (
     ("last year", 365),
 )
 
-_DAYS_RE = re.compile(r"\b(\d{1,6})\s*[- ]?(?:days?|d)\b", re.IGNORECASE)
+_DAYS_RE = re.compile(r"\b(\d+)\s*[- ]?(?:days?|d)\b", re.IGNORECASE)  # any width; clamped below
 _MAX_DAYS = 365
 
 # Plain single-word signals match on WORD boundaries (so "who" never fires inside
 # "whole" and "cs" never inside "docs"); deliberate prefix stems match a word's
 # start; multi-word / hyphenated phrases fall back to substring.
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_STEMS = frozenset({"spik"})  # stems spike/spikes/spiking/spiked
+# spik -> spike/spikes/spiking; spend -> spends/spending/spender/spenders/spent.
+_STEMS = frozenset({"spik", "spend"})
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,9 @@ def extract_days(text: str, default: int) -> int:
     if m:
         return max(1, min(_MAX_DAYS, int(m.group(1))))
     for phrase, days in _WINDOW_WORDS:
-        if phrase in low:
+        # word-boundary match so "this week" does not fire inside "this weekend"
+        # / "this weekly", nor "today" inside "todaywalk".
+        if re.search(r"\b" + re.escape(phrase) + r"\b", low):
             return days
     return max(1, min(_MAX_DAYS, default))
 
