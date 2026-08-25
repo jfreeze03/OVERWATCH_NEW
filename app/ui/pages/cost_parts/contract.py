@@ -22,6 +22,7 @@ from app.logic.formulas import (
     account_today,
     blended_billed_usd,
     blended_credit_rate,
+    daily_spend_last_n,
     format_usd,
     md_dollars,
     safe_float,
@@ -29,6 +30,7 @@ from app.logic.formulas import (
 from app.logic.insights import idle_advisor, with_auto_suspend_settings
 from app.ui import charts
 from app.ui.components import (
+    daily_spend_wide,
     guard,
     kpi_row,
     panel_help,
@@ -268,8 +270,7 @@ def _rate_card_reconciliation(settings: dict) -> None:
     # reconciles to org AI_USD instead of only being displayed. Same monthly grain as
     # the compute recon, so no window mismatch — a boundary month partly outside the
     # 70d window drifts exactly like the compute side already does.
-    ai_model = run(mart_sql.fact_daily_spend(70), page=_PAGE, key="fact_daily_ai_70",
-                   tier="recent", source="FACT_METERING_DAILY (AI/Cortex credits, for the AI recon)")
+    ai_model = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 70d at use below
     # rec #9: the ACTUAL contracted compute rate from RATE_SHEET_DAILY, a third
     # anchor beside the configured SETTINGS rate and the realized effective rate.
     # Read-only reconciliation (not wired into pricing by design); degrades quietly.
@@ -295,7 +296,7 @@ def _rate_card_reconciliation(settings: dict) -> None:
         ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
         ai_by_month: dict = {}
         if ai_model.usable() and "CREDITS_BILLED_AI" in ai_model.df.columns:
-            adf = ai_model.df.copy()
+            adf = daily_spend_last_n(ai_model.df, 70).copy()   # PERF #46: 70d recon window
             adf["MONTH"] = pd.to_datetime(adf["DAY"], errors="coerce").dt.to_period("M").dt.to_timestamp()
             ai_by_month = (adf.groupby("MONTH")["CREDITS_BILLED_AI"]
                            .apply(lambda s: s.map(safe_float).sum()).mul(ai_rate)).to_dict()
@@ -480,8 +481,7 @@ def _contract_tab(settings: dict) -> None:
     # the year strip) use, so the prominent "Projected term total" can't disagree
     # with the planner below. Excludes today's partial day (N1); reuses the
     # planner's cache key so it costs no extra query.
-    _burn = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
-                tier="recent", source="FACT_METERING_DAILY")
+    _burn = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 30d at use
     rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     # C4: the burn frame is read ONCE here and shared by everything below it —
@@ -489,7 +489,7 @@ def _contract_tab(settings: dict) -> None:
     # blended $/credit out of the planner is the point: the gap used to be priced
     # at the flat compute rate while the planner beside it used the blended rate,
     # so one overage carried two dollar values on the same screen.
-    _burn_df = _whole_day_rows(_burn.df.copy()) if _burn.usable() else None
+    _burn_df = _whole_day_rows(daily_spend_last_n(_burn.df, 30).copy()) if _burn.usable() else None
     eff_rate = _blended_rate(_burn_df, rate_now, ai_rate) if _burn_df is not None else rate_now
     _trailing_daily = None
     # #36: only when a COMPLETE day exists — a mean over an empty whole-day frame
@@ -627,15 +627,14 @@ def _contract_tab(settings: dict) -> None:
         "same commitment, so the recommended commit is biased slightly short — add their "
         "share (org rate-card panel above) before signing."
     )
-    burn_res = run(mart_sql.fact_daily_spend(30), page=_PAGE, key="planner_burn",
-                   tier="recent", source="FACT_METERING_DAILY")
+    burn_res = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 30d at use
     if guard(burn_res, "Need the metering fact loaded to plan (run the hourly task once)."):
         # C1/C4: rate_now, ai_rate, the whole-day filter (N1) and the blended
         # eff_rate are all hoisted above the steering block now — the planner
         # reuses the SAME numbers instead of re-deriving its own, which is how
         # the gap and the planner came to disagree in the first place. Same
         # cache key as `_burn`, so this read costs nothing extra.
-        bdf = _burn_df if _burn_df is not None else _whole_day_rows(burn_res.df.copy())
+        bdf = _burn_df if _burn_df is not None else _whole_day_rows(daily_spend_last_n(burn_res.df, 30).copy())
         # #36: if the only metering row is today's partial one, _whole_day_rows
         # returns empty — there is no complete-day burn baseline, so withhold the
         # planner instead of projecting a term from a fraction of a day.

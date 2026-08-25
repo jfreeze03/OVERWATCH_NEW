@@ -20,6 +20,7 @@ from app.logic.formulas import (
     account_now,
     blended_billed_usd,
     contract_runway,
+    daily_spend_last_n,
     executive_slide_bullets,
     executive_summary_csv,
     executive_summary_html,
@@ -32,6 +33,7 @@ from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 from app.ui import charts
 from app.ui.components import (
     contract_runway_bar,
+    daily_spend_wide,
     download_text_button,
     empty_state,
     export_button,
@@ -99,7 +101,9 @@ def render() -> None:
         {"key": "roi", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER"},
         {"key": "appq", "sql": mart_sql.app_cost_quarter(),
          "source": "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)"},
-        {"key": "spark", "sql": mart_sql.fact_daily_spend(14), "source": "FACT_METERING_DAILY"},
+        # PERF #46: the 14d spark moved OUT of this 'recent' batch to the shared hourly
+        # daily_spend_wide() read below — batch members cache in a separate 'recent' store
+        # that can't share with the solo hourly wide entry Overview/Contract also use.
         {"key": "digest", "sql": mart_sql.latest_digest(),
          "source": "DAILY_DIGEST (Cortex, grounded)"},
     ], page=_PAGE, tier="recent")
@@ -268,20 +272,20 @@ def render() -> None:
     st.caption("Spend covers credit-billed services (compute, serverless, AI); "
                "storage and data-transfer bill separately.")
 
-    spend = _b_rec.get("spark") or run(mart_sql.fact_daily_spend(14), page=_PAGE, key="brief_spark", tier="recent",
-                source="FACT_METERING_DAILY")
+    spend = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 14d for the spark
     brief_spend_series: list[float] = []
     if spend.ok and not spend.empty:
-        charts.sparkline_row([("Spend, 14 days", spend.df, "DAY", "CREDITS_BILLED")])
-        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"}.issubset(spend.df.columns):
+        spark_df = daily_spend_last_n(spend.df, 14)
+        charts.sparkline_row([("Spend, 14 days", spark_df, "DAY", "CREDITS_BILLED")])
+        if {"CREDITS_BILLED_OTHER", "CREDITS_BILLED_AI"}.issubset(spark_df.columns):
             brief_spend_series = [
                 blended_billed_usd(row["CREDITS_BILLED_OTHER"], row["CREDITS_BILLED_AI"],
                                    rate, ai_rate)
-                for _, row in spend.df.iterrows()
+                for _, row in spark_df.iterrows()
             ]
         else:
             brief_spend_series = [safe_float(value) * rate
-                                  for value in spend.df["CREDITS_BILLED"].tolist()]
+                                  for value in spark_df["CREDITS_BILLED"].tolist()]
 
     # N2: a critical that paged nobody hides behind a green board — call it out
     # on the one surface a half-awake on-call actually reads.

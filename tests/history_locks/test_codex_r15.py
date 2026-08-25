@@ -70,5 +70,7 @@ def test_r16_reader_swaps_are_fact_first_and_column_true():
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
     assert "fact_cortex_daily_spend" in cb and "live fallback" in cb.split("fact_cortex_daily_spend", 1)[1][:300]
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
-    assert ov.count('key="fact_daily_150"') == 1                      # one wide read
+    # PERF #46: the 150d read is now the shared daily_spend_wide() accessor (one cache entry
+    # across Brief/Overview/Contract); MTD still derives from that same frame via preloaded.
+    assert "_bt_hist = daily_spend_wide(_PAGE)" in ov                 # one shared wide read
     assert "preloaded=_bt_hist" in ov                                 # MTD derives from it

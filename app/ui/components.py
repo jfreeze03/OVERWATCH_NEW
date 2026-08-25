@@ -1159,6 +1159,23 @@ def load_settings(page: str) -> dict:
         return merged
 
 
+def daily_spend_wide(page: str) -> QueryResult:
+    """PERF #46: ONE FACT_METERING_DAILY scan (150 daily rows, ~few KB) shared by every
+    daily-spend caller. Cache identity is (tier, SQL-text, scope) — the caller key is
+    telemetry-only — so every caller that routes through here lands on ONE cache entry,
+    shared across Brief/Overview/Contract and across pages within a session. Callers slice
+    the returned frame with formulas.daily_spend_last_n(df, n).
+
+    tier='hourly' matches FACT_METERING_DAILY's hourly ingest cadence (a 'recent'/300s TTL
+    would rescan ~12x/hr for data that changes hourly); the refresh salt + domain salts still
+    invalidate immediately on manual refresh / post-write.
+    """
+    from app.core.query import run  # local import: avoid the app.ui<->app.core cycle
+    return run(mart_sql.fact_daily_spend(mart_sql.WIDE_DAILY_SPEND_DAYS),
+               page=page, key="fact_daily_wide", tier="hourly",
+               source="FACT_METERING_DAILY (150d, shared)")
+
+
 def budget_kpi(settings: dict, spend_usd: float) -> dict:
     """Budget KPI that refuses to invent a denominator (old-app finding)."""
     budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))

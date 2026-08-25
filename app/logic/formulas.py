@@ -60,6 +60,22 @@ def account_today() -> date:
     return account_now().date()
 
 
+def daily_spend_last_n(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """PERF #46: last-N-days suffix of a wide daily-grain FACT_METERING_DAILY frame.
+
+    FACT_METERING_DAILY is daily grain (~1 row/day), so a smaller window is a strict
+    suffix of a larger one — this slice is row-for-row equal to fetching N days. Uses
+    account_today() (America/Chicago), equal-or-more-correct than the old SQL
+    CURRENT_DATE()-N session-tz window. Safe on empty/failed/missing-DAY frames (returns
+    the frame unchanged) so callers keep their .usable()/.ok/guard() checks.
+    """
+    if df is None or df.empty or "DAY" not in df.columns:
+        return df
+    out = df.copy()
+    out["DAY"] = pd.to_datetime(out["DAY"], errors="coerce").dt.date
+    return out[out["DAY"] >= (account_today() - timedelta(days=n))]
+
+
 def safe_float(value: object, default: float = 0.0) -> float:
     """Coerce to float; NaN/None/garbage become ``default``."""
     try:

@@ -43,6 +43,7 @@ from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     contract_runway_bar,
+    daily_spend_wide,
     download_text_button,
     entity_nav_table,
     export_button,
@@ -145,9 +146,7 @@ def _mtd_spend_usd(rate: float, ai_rate: float,
                    preloaded: QueryResult | None = None) -> tuple[float, str]:
     """MTD account billed spend (adjustment applied) from the daily fact,
     AI credits priced at the AI rate (C1)."""
-    res = preloaded if preloaded is not None and preloaded.ok else run(
-        mart_sql.fact_daily_spend(45), page=_PAGE, key="fact_daily_45",
-        tier="hourly", source="FACT_METERING_DAILY")
+    res = preloaded if preloaded is not None and preloaded.ok else daily_spend_wide(_PAGE)
     if not res.usable():
         return 0.0, ""
     frame = res.df.copy()
@@ -300,8 +299,7 @@ def render() -> None:
     # One 150d metering read serves MTD here AND the forecast backtest below
     # (Codex r16 #17) — the separate 45d read survives only as the fallback
     # inside _mtd_spend_usd when this one fails.
-    _bt_hist = run(mart_sql.fact_daily_spend(150), page=_PAGE, key="fact_daily_150",
-                   tier="hourly", source="FACT_METERING_DAILY (150d)")
+    _bt_hist = daily_spend_wide(_PAGE)   # PERF #46: the shared wide read (also serves MTD above)
     mtd_spend, mtd_source = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist)
     # Triage #1: the exec-board `daily` frame is windowed to the filter `days`
     # (default 7) and is company-scoped, so it truncates month-to-date for most of

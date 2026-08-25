@@ -242,6 +242,13 @@ ORDER BY DAY
 """
 
 
+# PERF #46: the single wide window every daily-spend caller shares. Must cover the
+# largest caller (Overview forecast backtest = 150). FACT_METERING_DAILY is daily-grain,
+# so a smaller window is a strict suffix — callers slice the wide frame client-side
+# (formulas.daily_spend_last_n) instead of issuing a distinct scan per window.
+WIDE_DAILY_SPEND_DAYS = 150
+
+
 def fact_daily_spend(days: int) -> str:
     """Account billed credits per day from the daily fact (adjustment applied).
 

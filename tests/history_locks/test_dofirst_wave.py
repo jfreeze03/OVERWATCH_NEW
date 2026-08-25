@@ -365,7 +365,9 @@ def test_n11_contract_pace_lifetime_fallback_backward_compatible():
 def test_n11_contract_page_passes_trailing_burn():
     ct = _src("app/ui/pages/cost_parts/contract.py")
     assert "trailing_daily_credits=" in ct
-    assert 'key="planner_burn"' in ct  # reuses the planner's cache key
+    # PERF #46: both burn reads now share the ONE hourly daily_spend_wide() entry (sliced to
+    # 30d at use) instead of a shared planner_burn key — still one physical read, no extra query.
+    assert ct.count("daily_spend_wide(_PAGE)") >= 2
 
 
 # ---------------------------------------------------------------------------

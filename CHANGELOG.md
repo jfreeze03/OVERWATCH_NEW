@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.283.0 - Performance: one wide FACT_METERING_DAILY read shared by every daily-spend caller (2026-08-24)
+
+Cross-repo review finding #46. Each daily-spend caller emitted a distinct `fact_daily_spend(N)`
+window (14/30/45/70/150) across two tiers, so FACT_METERING_DAILY was scanned up to 5× per session
+and never warm-shared across pages. Now every caller reads ONE wide 150d frame through a shared
+accessor and slices client-side.
+
+- **`components.daily_spend_wide(page)`** reads `fact_daily_spend(150)` at tier `hourly` with a
+  single telemetry key. Cache identity is (tier, SQL-text, scope) — the caller key is
+  telemetry-only — so every caller lands on ONE cache entry, shared across Brief/Overview/Contract
+  and across pages within a session.
+- **`formulas.daily_spend_last_n(df, n)`** slices the wide frame to the last N days. Because
+  FACT_METERING_DAILY is daily-grain, a smaller window is a strict suffix — row-for-row equal to
+  fetching N days (pinned by a new unit test). Safe on empty/failed/missing-DAY frames.
+- Rerouted all six callers: Overview (150d backtest + 45d MTD fallback), Contract (70d AI recon +
+  two 30d planner-burn reads, each sliced at use), Brief (the 14d spark left the `recent`
+  run_batch for the shared hourly read). The `fact_daily_spend` builder and its canary are
+  untouched. Adversarially reviewed: 0 regressions. (`mart_sql.py`, `formulas.py`, `components.py`,
+  `overview.py`, `brief.py`, `contract.py`)
+
 ## 4.282.0 - Performance: batch the Operations Pipeline SLA tab's four serial scans (2026-08-24)
 
 The flagship follow-up to the v4.281.0 perf batch (cross-repo review finding #6). The Operations

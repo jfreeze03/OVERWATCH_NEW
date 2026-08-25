@@ -13,7 +13,11 @@ _BRIEF = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8
 
 def test_brief_reads_go_out_as_two_batches():
     assert _BRIEF.count("run_batch(") == 2                    # live + recent groups
-    assert _BRIEF.count(") or run(") == 8                     # every BATCHED read keeps its serial fallback
+    # PERF #46: the 14d spark left the recent batch for the shared hourly daily_spend_wide()
+    # read (batch-member cache can't share with the solo hourly wide entry), so 7 batched
+    # reads keep a serial fallback now (was 8).
+    assert _BRIEF.count(") or run(") == 7
+    assert "daily_spend_wide(_PAGE)" in _BRIEF                 # the spark now reads the shared wide frame
     # (health_strip left the batch at r15 #14 — it shares the app shell's
     # run() cache entry under key="health_strip" instead of paying twice)
     assert '"key": "strip"' not in _BRIEF

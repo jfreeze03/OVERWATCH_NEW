@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from app.logic.formulas import (
     credits_to_usd,
@@ -84,3 +84,39 @@ def test_mtd_pace_caps_at_short_prior_months_and_never_fakes_zero():
     assert pct2 is None
     assert mtd_pace_vs_prior_month(None, today) == (0.0, 0.0, None)
 
+
+
+def test_daily_spend_last_n_is_the_suffix_of_a_wide_frame():
+    # PERF #46 invariant: FACT_METERING_DAILY is daily-grain, so slicing a wide frame to the
+    # last N days must equal what fetching N days would return. This is what makes routing
+    # every daily-spend caller through one wide read behavior-preserving.
+    import pandas as pd
+
+    from app.logic.formulas import account_today, daily_spend_last_n
+    today = account_today()
+    wide = pd.DataFrame({
+        "DAY": [today - timedelta(days=i) for i in range(150)],
+        "CREDITS_BILLED": [float(i) for i in range(150)],
+    })
+    for n in (14, 30, 45, 70):
+        sliced = daily_spend_last_n(wide, n)
+        # exactly the days within the last n (>= today-n): n+1 rows (today-n .. today inclusive)
+        assert sliced["DAY"].min() >= today - timedelta(days=n)
+        assert sliced["DAY"].max() == today
+        assert len(sliced) == n + 1
+        # and it equals an explicit suffix filter on the same frame
+        ref = wide.copy()
+        ref["DAY"] = pd.to_datetime(ref["DAY"]).dt.date
+        ref = ref[ref["DAY"] >= today - timedelta(days=n)]
+        assert sorted(sliced["CREDITS_BILLED"].tolist()) == sorted(ref["CREDITS_BILLED"].tolist())
+
+
+def test_daily_spend_last_n_is_safe_on_empty_and_missing_day():
+    import pandas as pd
+
+    from app.logic.formulas import daily_spend_last_n
+    assert daily_spend_last_n(None, 14) is None
+    empty = pd.DataFrame({"DAY": [], "CREDITS_BILLED": []})
+    assert daily_spend_last_n(empty, 14).empty
+    no_day = pd.DataFrame({"X": [1, 2]})
+    assert len(daily_spend_last_n(no_day, 14)) == 2   # returned unchanged

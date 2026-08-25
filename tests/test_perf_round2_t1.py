@@ -16,11 +16,16 @@ def _read(rel: str) -> str:
 def test_t1_1_overview_facts_on_hourly_tier():
     ov = _read("app/ui/pages/overview.py")
     for key in ('key=f"exec_board_{company}_{window or days}", tier="hourly"',
-                'tier="hourly", source="FACT_METERING_DAILY")',
-                'tier="hourly", source="FACT_METERING_DAILY (150d)")',
                 'key="spark_activity", tier="hourly"',
                 'key="daily_digest", tier="hourly"'):
         assert key in ov, key
+    # PERF #46: the 45d + 150d FACT_METERING_DAILY reads moved to the shared daily_spend_wide()
+    # accessor (one cache entry across pages); it is STILL on the hourly tier, and Overview
+    # routes through it.
+    assert "daily_spend_wide(_PAGE)" in ov
+    cmp_src = _read("app/ui/components.py")
+    assert "def daily_spend_wide(" in cmp_src
+    assert 'key="fact_daily_wide", tier="hourly"' in cmp_src
     assert "mart_sql.exec_board(company, days, window)" in ov
     # rec 10 (v4.89): score-inputs moved recent -> hourly too — FACT_PLATFORM_SCORE_DAILY
     # / the retro facts refresh daily, so the 5-min tier only re-paid unchanged reads.
