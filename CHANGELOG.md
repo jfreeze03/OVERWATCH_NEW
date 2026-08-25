@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.290.1 - CI floor-compat green: raise pinned floors to match 1.52 runtime (2026-08-25)
+
+Hotfix for the red CI gate on 4.290.0. The `width='stretch'` migration raised the
+requirements streamlit floor to `~=1.52`, but the CI `floor-compat` job still
+hard-pinned `streamlit==1.45.0` — where `st.button(width=...)` does not exist —
+so it failed with `ButtonMixin.button() got an unexpected keyword argument 'width'`
+(14 failed). Root cause: a floor pin that no longer equalled the requirements
+floor. Fixes, all kept in lockstep:
+
+- `.github/workflows/ci.yml` floor-compat: `streamlit==1.45.0` -> `1.52.2` (the
+  exact SiS runtime), `altair==5.4.0` -> `5.5.0`.
+- Surfaced a second latent conflict: streamlit 1.52.2 declares
+  `altair!=5.4.0,!=5.4.1` (the whole 5.4 line; no 5.4.2 exists), so it is not
+  co-installable with `altair==5.4.0`. Raised the altair floor `~=5.4` -> `~=5.5`
+  in both `requirements.txt` and `requirements-dev.txt`; bumped the dev streamlit
+  floor `~=1.45` -> `~=1.52` to match.
+- Verified against an exact-floor venv (streamlit 1.52.2 + altair 5.5.0 +
+  pandas 2.2.0 + jinja2 3.1.2): full suite 2791 passed, 2 skipped.
+- The `_APPTEST_BUTTONGROUP_OK` guard (< 1.55.0) still fires on 1.52.2; refreshed
+  its stale `1.45.0` comment reference.
+
 ## 4.290.0 - Migrate use_container_width -> width='stretch' (2026-08-25)
 
 Streamlit is removing the deprecated `use_container_width` parameter (already gone

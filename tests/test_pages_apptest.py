@@ -26,9 +26,10 @@ _PAGES = PAGES_BY_PROFILE["DBA"]
 # `ValueError: content: "S" is not in list` before the app's own nav logic ever runs. The
 # app renders correctly at runtime on those versions; only the test harness mis-introspects.
 # Fixed in streamlit 1.55.0 (verified by bisect: 1.54.0 fails, 1.55.0 passes). The
-# floor-compat CI job pins streamlit==1.45.0, and only the multi-run nav test below trips
-# it (the 2-run test_each_page_renders survives). Guarding just that test keeps the floor
-# gate green while the test still runs on the modern lint-and-test job and locally.
+# floor-compat CI job pins streamlit==1.52.2 (still < 1.55.0), and only the multi-run
+# nav test below trips it (the 2-run test_each_page_renders survives). Guarding just
+# that test keeps the floor gate green while the test still runs on the modern
+# lint-and-test job and locally.
 _APPTEST_BUTTONGROUP_OK = _parse_version(st.__version__) >= _parse_version("1.55.0")
 
 

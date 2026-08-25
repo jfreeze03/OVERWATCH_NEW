@@ -55,7 +55,20 @@ jobs:
           # in the run reported as a collection failure), masking real floor
           # regressions. Keep this list in sync with requirements-dev.txt's
           # test-only deps.
-          pip install "streamlit==1.45.0" "pandas==2.2.0" "altair==5.4.0" \
+          #
+          # streamlit==1.52.2 is the REAL floor: it is the exact version the SiS
+          # conda channel deploys (see environment.yml), and requirements.txt
+          # pins streamlit~=1.52 because the width='stretch'/'content' string API
+          # (the use_container_width successor) does not exist before 1.52. This
+          # pin MUST equal the requirements floor — pinning an older streamlit
+          # here tests a fictional environment the requirements no longer promise.
+          #
+          # altair==5.5.0 (not 5.4.0): streamlit 1.52.2 declares
+          # `altair!=5.4.0,!=5.4.1,<7,>=4.0` — it BLACKLISTS the entire 5.4 line
+          # (there is no 5.4.2), so 5.4.0 is not co-installable with the streamlit
+          # floor. 5.5.0 is the lowest altair that satisfies both the streamlit
+          # exclusion and requirements.txt's altair~=5.5.
+          pip install "streamlit==1.52.2" "pandas==2.2.0" "altair==5.5.0" \
                       "jinja2==3.1.2" "pytest~=8.3" "sqlglot>=25"
       - name: Page smokes + logic tests on the floor pins
         run: pytest -q
