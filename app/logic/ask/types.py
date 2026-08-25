@@ -80,3 +80,8 @@ class Answerer:
     needs: Callable[[AskParams], list[QuerySpec]]
     analyze: Callable[[AskParams, dict[str, pd.DataFrame]], AnswerResult]
     require_all: tuple[tuple[str, ...], ...] = ()
+    # Tie-break weight among strong candidates: a more SPECIFIC domain answerer
+    # (e.g. cloud-services, gated on an explicit phrase) outranks a generic one so
+    # a question naming that domain can't be out-scored by duplicated generic
+    # keywords. Higher wins; score breaks equal priority.
+    priority: int = 0

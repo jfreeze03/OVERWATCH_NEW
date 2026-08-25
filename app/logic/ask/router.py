@@ -116,7 +116,9 @@ def route(
             base += _hits(low, tokens, group)
         return base
 
-    best = max(strong, key=_score)
+    # Higher priority wins (a domain-specific answerer beats a generic one that
+    # merely double-counts overlapping keywords); score breaks equal priority.
+    best = max(strong, key=lambda a: (a.priority, _score(a)))
     return RouteResult(
         answerer=best, params=params, score=_score(best), considered=len(strong)
     )

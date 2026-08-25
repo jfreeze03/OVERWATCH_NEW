@@ -35,9 +35,17 @@ def _fmt(x: float) -> str:
     return f"{x:.3f}"
 
 
-def _clip(text: str, n: int) -> str:
+def _clip(text: object, n: int) -> str:
+    if text is None or (not isinstance(text, str) and pd.isna(text)):
+        return ""
     t = " ".join(str(text).split())
     return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+
+
+def _sample(text: object, n: int) -> str:
+    """Display SAMPLE_TEXT honestly: a SQL-NULL cell becomes a neutral
+    placeholder, never the literal 'None'/'nan'."""
+    return _clip(text, n) or "(no sample text)"
 
 
 def _num(series_val: object, default: float = 0.0) -> float:
@@ -56,11 +64,15 @@ _SPEND_INTENT = "spend_spike_by_user"
 
 
 def _needs_spend_by_user(params: AskParams) -> list[QuerySpec]:
-    # Credits-grounded per-user attribution (ALLOC_CREDITS is dollarizable).
+    # Use the SAME builder the Cost & Contract page serves for per-user attribution
+    # (alloc_xdim_attribution over FACT_COST_ALLOC_XDIM_DAILY): warehouse-grain
+    # company scope, per-warehouse-hour credit weighting, and the resolved
+    # today-excluded window — so Ask's "top spender" reconciles with the Cost page
+    # instead of the owner-scoped mart the Cost page abandoned for divergent totals.
     return [
         QuerySpec(
             key="alloc",
-            sql=mart27_sql.alloc_attribution(params.days, "USER", params.company),
+            sql=mart27_sql.alloc_xdim_attribution(params.days, "USER", params.company, ""),
             tier="recent",
         )
     ]
@@ -69,14 +81,21 @@ def _needs_spend_by_user(params: AskParams) -> list[QuerySpec]:
 def _analyze_spend_by_user(
     params: AskParams, frames: dict[str, pd.DataFrame]
 ) -> AnswerResult:
-    src = f"mart27_sql.alloc_attribution(USER, {params.days}d) + robust_zscores"
+    src = f"mart27_sql.alloc_xdim_attribution(USER, {params.days}d) + robust_zscores"
     meta: dict[str, object] = {"days": params.days, "company": params.company}
+    # The builder is coverage-gated, so an empty frame can mean "no spend" OR "the
+    # attribution mart hasn't accrued this window yet" — say so rather than assert
+    # a bare zero.
+    no_data_line = (
+        f"No attributable user spend for the last {params.days}d "
+        "(the cost-allocation mart may still be accruing this window)."
+    )
     df = frames.get("alloc")
     if (df is None or df.empty or "ALLOC_CREDITS" not in df.columns
             or "DIMENSION" not in df.columns):
         return AnswerResult(
             intent=_SPEND_INTENT,
-            headline=f"No attributable user spend in the last {params.days}d.",
+            headline=no_data_line,
             source=src,
             confidence="no_data",
             params=meta,
@@ -92,7 +111,7 @@ def _analyze_spend_by_user(
     if d.empty:
         return AnswerResult(
             intent=_SPEND_INTENT,
-            headline=f"No attributable user spend in the last {params.days}d.",
+            headline=no_data_line,
             source=src,
             confidence="no_data",
             params=meta,
@@ -101,7 +120,7 @@ def _analyze_spend_by_user(
     if total <= 0:
         return AnswerResult(
             intent=_SPEND_INTENT,
-            headline=f"No attributable user spend in the last {params.days}d.",
+            headline=no_data_line,
             source=src,
             confidence="no_data",
             params=meta,
@@ -252,7 +271,7 @@ def _analyze_cs_by_query(
     for i in range(min(3, len(s))):
         r = s.iloc[i]
         bullets.append(
-            f"{_clip(r.get('SAMPLE_TEXT', ''), 90)} — "
+            f"{_sample(r.get('SAMPLE_TEXT'), 90)} — "
             f"{_fmt(float(r['CS_CREDITS']))} CS credits ({int(_num(r.get('RUNS', 0))):,} runs)"
         )
 
@@ -263,9 +282,10 @@ def _analyze_cs_by_query(
         bu = bu.sort_values("CS_CREDITS", ascending=False)
         if not bu.empty and float(bu.iloc[0]["CS_CREDITS"]) > 0:
             r0 = bu.iloc[0]
+            _u = r0.get("USER_NAME")
+            uname = str(_u) if (_u is not None and not pd.isna(_u) and str(_u).strip()) else "(unknown)"
             bullets.append(
-                f"Heaviest user: {r0.get('USER_NAME', '(unknown)')} "
-                f"({_fmt(float(r0['CS_CREDITS']))} CS credits)"
+                f"Heaviest user: {uname} ({_fmt(float(r0['CS_CREDITS']))} CS credits)"
             )
 
     ratio = frames.get("ratio")
@@ -282,7 +302,7 @@ def _analyze_cs_by_query(
     ev_cols = [c for c in ("QUERY_TYPE", "SAMPLE_TEXT", "RUNS", "CS_CREDITS", "CS_PER_1K_RUNS") if c in s.columns]
     ev = s.head(10)[ev_cols].copy()
     if "SAMPLE_TEXT" in ev.columns:
-        ev["SAMPLE_TEXT"] = ev["SAMPLE_TEXT"].map(lambda t: _clip(t, 100))
+        ev["SAMPLE_TEXT"] = ev["SAMPLE_TEXT"].map(lambda t: _sample(t, 100))
     return AnswerResult(
         intent=_CS_INTENT,
         headline=headline,
@@ -345,5 +365,8 @@ REGISTRY: tuple[Answerer, ...] = (
         ),
         needs=_needs_cs_by_query,
         analyze=_analyze_cs_by_query,
+        # A question that names "cloud services" is a specific intent — it must win
+        # over the generic spend answerer even when it also carries user/spend words.
+        priority=1,
     ),
 )

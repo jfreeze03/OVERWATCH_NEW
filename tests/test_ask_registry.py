@@ -283,6 +283,49 @@ def test_cloud_services_single_shape_wording_is_grammatical():
     assert "the only cloud-services query shape" in res.headline
 
 
+# ============================ round-2 adversarial-test regressions ==========
+
+def test_cloud_services_null_sample_text_shows_placeholder():
+    # R2 #1: NULL/NaN SAMPLE_TEXT must not render as "None"/"nan".
+    sh = pd.DataFrame({"QUERY_TYPE": ["SELECT", "INSERT"], "SAMPLE_TEXT": [None, float("nan")],
+                       "RUNS": [1000, 500], "CS_CREDITS": [12.5, 6.0]})
+    res = _analyze_cs_by_query(AskParams(30, "ALL"), {"shapes": sh})
+    joined = " ".join(res.bullets) + " " + " ".join(map(str, res.evidence["SAMPLE_TEXT"].tolist()))
+    assert "None" not in joined and "nan" not in joined
+    assert "(no sample text)" in joined
+
+
+def test_cloud_services_null_user_name_shows_unknown():
+    # R2 #2: NULL USER_NAME on the heaviest-user bullet must read "(unknown)".
+    sh = pd.DataFrame({"QUERY_TYPE": ["SELECT"], "SAMPLE_TEXT": ["x"], "RUNS": [10], "CS_CREDITS": [5.0]})
+    bu = pd.DataFrame({"USER_NAME": [None], "CS_CREDITS": [9.0], "RUNS": [100]})
+    res = _analyze_cs_by_query(AskParams(30, "ALL"), {"shapes": sh, "byuser": bu})
+    heaviest = [b for b in res.bullets if "Heaviest user" in b]
+    assert heaviest and "(unknown)" in heaviest[0] and "None" not in heaviest[0]
+
+
+def test_cloud_services_phrase_wins_mixed_domain_questions():
+    # R2 #3: a question naming cloud services must route to the CS answerer even
+    # with user/spend words present (priority), while pure questions still route.
+    for q in ("who is driving cloud services credits",
+              "which user is driving cloud services spend",
+              "who is the biggest cloud services spender"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == \
+            "cloud_services_spike_by_query", q
+    assert route("who is the top spender", default_days=30, company="ALL").answerer.intent == \
+        "spend_spike_by_user"
+
+
+def test_spend_answer_uses_the_cost_pages_attribution_builder():
+    # R2 #4 (high): Ask's per-user spend must use the SAME warehouse-grain,
+    # today-excluded builder the Cost page serves, so the two never contradict.
+    from app.logic.ask.registry import _needs_spend_by_user
+    sql = _needs_spend_by_user(AskParams(30, "ALFA"))[0].sql
+    assert "FACT_COST_ALLOC_XDIM_DAILY" in sql          # same mart as Cost & Contract
+    assert "DAY < CURRENT_DATE()" in sql                # half-open window (excludes today)
+    assert "MART_COST_ALLOCATION_DAILY" not in sql      # not the abandoned owner-scoped mart
+
+
 # ================================================= wiring lock ==============
 
 def test_ask_page_is_wired_and_isolated():
