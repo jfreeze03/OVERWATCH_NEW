@@ -184,12 +184,17 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     left, right = st.columns([1.1, 1.0])
     with left:
         st.markdown("**Cost by user (exact token credits)**")
-        # Owner ask (v4.50): the chart shows people, not login names —
-        # DISPLAY_NAME is "First Last" with a USER_NAME fallback.
-        by_user = (enriched.groupby("DISPLAY_NAME", as_index=False)["SPEND_USD"].sum()
-                   .sort_values("SPEND_USD", ascending=False))
-        charts.bar_usd(by_user, "DISPLAY_NAME", "SPEND_USD", title="Spend (USD)", top_n=12,
-                       takeaway=True)
+        # Owner ask (v4.50): the chart shows people, not login names — DISPLAY_NAME is "First Last".
+        # Group by the UNIQUE login (USER_NAME), NOT DISPLAY_NAME: two distinct logins can share a
+        # First+Last, and grouping by the display name would merge two people into one bar that then
+        # disagrees with the login-keyed detail table below. Label by DISPLAY_NAME, disambiguating
+        # with the login only where a name is shared, so namesakes stay distinct and legible.
+        by_user = enriched.groupby(["USER_NAME", "DISPLAY_NAME"], as_index=False)["SPEND_USD"].sum()
+        _dupe_name = by_user["DISPLAY_NAME"].duplicated(keep=False)
+        by_user["LABEL"] = by_user["DISPLAY_NAME"].where(
+            ~_dupe_name, by_user["DISPLAY_NAME"] + " (" + by_user["USER_NAME"].astype(str) + ")")
+        by_user = by_user.sort_values("SPEND_USD", ascending=False)
+        charts.bar_usd(by_user, "LABEL", "SPEND_USD", title="Spend (USD)", top_n=12, takeaway=True)
     with right:
         st.markdown("**Daily usage by source**")
         if live_res is not None:
@@ -460,7 +465,14 @@ def _statement_export(company: str, rate: float) -> None:
             frame["USD"] = frame["CREDITS_TOTAL"].map(lambda c: credits_to_usd(c, rate))
             buffer = io.BytesIO()
             with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
-                summary = frame.groupby(["DEPARTMENT", "DEPT_OWNER"], as_index=False)["USD"].sum()
+                # Group the summary by DEPARTMENT ALONE so its grain matches the per-department
+                # statement files and the department count below. A department can span warehouses
+                # mapped to different OWNER values (OWNER is per-warehouse free text), which would
+                # otherwise split one department into several summary rows with partial totals —
+                # none equal to its true spend; fold distinct owners into one cell instead.
+                summary = frame.groupby("DEPARTMENT", as_index=False).agg(
+                    DEPT_OWNER=("DEPT_OWNER", lambda s: "; ".join(sorted(set(s.astype(str))))),
+                    USD=("USD", "sum"))
                 bundle.writestr("00_summary.csv", summary.to_csv(index=False))
                 # Two department names can sanitize to the SAME filename ('R&D'/'R/D' -> 'R_D',
                 # or names sharing their first 60 chars), and a duplicate zip arcname silently
@@ -548,6 +560,10 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         # (department_window_credits) spans up to 365d — a 90d share x a 365d pool
         # over-attributes recent-only roles. If a >90d request is served LIVE, rebuild the
         # per-warehouse pool over the same clamped window (mirrors spend.py _alloc_pool).
+        # r4: a SHORT-retention role mart (FACT_QUERY_ROLE_HOURLY purged below the window) used
+        # to slip past this by serving the mart with a short-window share; role_share now carries
+        # a reach-back coverage gate that makes it abstain in that case, so the live leg serves and
+        # this same rematch fires — no separate mart-path branch needed.
         _pool_df = df
         if "QUERY_HISTORY" in str(share_res.source) and days > MAX_LIVE_WINDOW_DAYS:
             _pr = run(chargeback_sql.department_window_credits(MAX_LIVE_WINDOW_DAYS, company),
@@ -609,8 +625,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                 f"USING (SELECT {sql_literal(str(pick_dept))} AS D) s ON t.DEPARTMENT = s.D "
                 f"WHEN MATCHED THEN UPDATE SET MONTHLY_BUDGET_USD = {sql_number(float(bud_usd))}, "
                 f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
-                f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD) "
-                f"VALUES (s.D, {sql_number(float(bud_usd))});"
+                # Stamp UPDATED_BY on INSERT too — the column DEFAULTs to CURRENT_USER(), which in
+                # owner's-rights SiS is the app owner, not the operator; a NEW budget would otherwise
+                # be misattributed to the owner until the next edit (which the UPDATE branch fixes).
+                f"WHEN NOT MATCHED THEN INSERT (DEPARTMENT, MONTHLY_BUDGET_USD, UPDATED_BY) "
+                f"VALUES (s.D, {sql_number(float(bud_usd))}, {identity_sql()});"
             )
         else:
             stmt_b = (f"DELETE FROM {core_object('DEPT_BUDGETS')} "
@@ -648,8 +667,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             "ON t.MAP_TYPE = s.MAP_TYPE AND t.NAME = s.NAME\n"
             "WHEN MATCHED THEN UPDATE SET DEPARTMENT = s.DEPARTMENT, OWNER = s.OWNER, "
             f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()}\n"
-            "WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER) "
-            "VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER);"
+            # Stamp UPDATED_BY on INSERT too — it DEFAULTs to CURRENT_USER() (the app owner under
+            # owner's-rights SiS), so a NEW mapping would credit the owner, not the operator, until
+            # a later edit corrects it via the UPDATE branch.
+            "WHEN NOT MATCHED THEN INSERT (MAP_TYPE, NAME, DEPARTMENT, OWNER, UPDATED_BY) "
+            f"VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER, {identity_sql()});"
         )
         st.code(merge_sql, language="sql")
         if is_operator and name and department and st.button("Execute mapping", key="cb_map_exec"):

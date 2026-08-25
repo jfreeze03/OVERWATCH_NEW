@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.280.0 - Chargeback & AI bug-hunt round 4: role-share / audit-stamp / display (2026-08-24)
+
+A fourth sweep of the last lighter-covered surface — the role allocation lens, the DEPARTMENT_MAP /
+DEPT_BUDGETS admin writes, statement export, and per-user display (5 findings, all confirmed; the
+charts and caching angles came back clean). The adversarial fix-review then caught a regression in
+the role-share fix, which was corrected and independently re-verified before shipping.
+
+- **The role allocation lens over-attributed dollars under a short-retention role fact.** When the
+  owner sets `FACT_RETENTION_DAYS_HOURLY` below the window, `FACT_QUERY_ROLE_HOURLY` holds only
+  recent days while the credit pool (`FACT_WAREHOUSE_DAILY`, 365d floor) spans the full window, so a
+  short-window elapsed-share multiplied a full-window pool — allocating a recent-only role its
+  warehouse's entire year of spend. `role_share` now carries a coverage gate that abstains to the
+  live leg (which clamps to 90d and rematches the pool) ONLY on a material retention shortfall
+  (measured pool-vs-role with a 7-day slack, so a young account, a short window, or the routine
+  1-day ingestion-boundary offset still serve the mart). (`app/data/mart27_sql.py`)
+- **New admin writes credited the app owner, not the operator.** The `DEPARTMENT_MAP` and
+  `DEPT_BUDGETS` MERGE `WHEN NOT MATCHED` inserts omitted `UPDATED_BY`, so it defaulted to
+  `CURRENT_USER()` — the app owner under owner's-rights SiS — and a newly-added mapping or budget
+  showed the owner as its author until the next edit. Both inserts now stamp `identity_sql()`.
+  (`app/ui/pages/cost_parts/ai_chargeback.py`)
+- **A statement summary split one department into several rows.** `00_summary.csv` grouped by
+  `[DEPARTMENT, DEPT_OWNER]`, but a department can span warehouses with different owners, so it
+  emitted the department multiple times with partial totals while one statement file (grouped by
+  department alone) held its full spend. The summary now groups by department, folding distinct
+  owners into one cell. (`app/ui/pages/cost_parts/ai_chargeback.py`)
+- **The "Cost by user" chart merged namesakes.** It grouped by `DISPLAY_NAME` ("First Last"), so two
+  distinct logins that share a name collapsed into one bar that disagreed with the login-keyed detail
+  table beneath it. It now groups by the unique login and disambiguates a shared display name with
+  the login. (`app/ui/pages/cost_parts/ai_chargeback.py`)
+
 ## 4.279.0 - Chargeback & AI bug-hunt round 3: chargeback / writeback / export (2026-08-24)
 
 A third sweep, targeting the department-chargeback, Action Queue writeback, and statement-export

@@ -135,6 +135,25 @@ def test_role_share_anchor_matches_live_twin():
     assert "CURRENT_TIMESTAMP())" not in mart.split("WITH scoped")[0]   # rolling anchor gone
 
 
+def test_role_share_mart_abstains_only_on_a_genuine_retention_shortfall():
+    # A role-hour fact purged SHORTER than the credit pool must abstain (-> live fallback +
+    # pool-rematch) so a short-window elapsed-share doesn't pair with a full-window credit pool
+    # (over-attributing recent-only roles). Crucially the gate compares the role fact's reach-back
+    # to the POOL fact, NOT to the asked window — else a young account / short window (both legs
+    # equally limited, no mismatch) would be wrongly degraded to the 90d live scan.
+    from app.data import mart27_sql
+    sql = mart27_sql.role_share(365, "ALL")
+    assert "FACT_QUERY_ROLE_HOURLY" in sql and "FACT_WAREHOUSE_DAILY" in sql
+    assert "MIN(HOUR_TS)::DATE" in sql                       # role fact reach-back
+    assert "MIN(DAY) FROM" in sql                            # ...compared to the POOL fact
+    assert "> DATEADD('day', -365 + 1, CURRENT_DATE())" in sql
+    # the mismatch test is guarded by NOT(...) so a covered mart still serves
+    assert "NOT ((SELECT MIN(HOUR_TS)" in sql
+    # 7-day slack on the pool-vs-role comparison, so a routine 1-2 day ingestion-boundary offset
+    # (pool fact leads the role fact) does NOT false-abstain and degrade a long window to 90d live
+    assert "< DATEADD('day', -7, (SELECT MIN(HOUR_TS)::DATE" in sql
+
+
 def test_cache_pct_readers_scale_fraction_to_percent():
     """Chip fix: PERCENTAGE_SCANNED_FROM_CACHE is a 0-1 fraction (empirically
     confirmed on live rows, owner 2026-07-29), so BOTH repeat-query read points

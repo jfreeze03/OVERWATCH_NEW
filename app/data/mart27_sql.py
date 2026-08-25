@@ -326,7 +326,21 @@ def role_share(days: int, company: str = "ALL") -> str:
     excluded role keeps its slice and this company's roles never absorb it."""
     days = bounded_days(days, 400)
     where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",  # verify round: match live twin's anchor
-                      _company_arm(company))
+                      _company_arm(company),
+                      # Coverage gate — abstain (zero rows -> live fallback + pool-rematch) ONLY when
+                      # the role-hour fact is MATERIALLY SHORTER than the credit POOL fact AND the
+                      # window reaches past the role fact's earliest day. That is the only case the
+                      # short-share x long-pool over-attribution bites (owner sets
+                      # FACT_RETENTION_DAYS_HOURLY below FACT_RETENTION_DAYS_DAILY). Reach-back is
+                      # measured against the POOL fact, not the ask, so a young account / short window
+                      # (both legs equally limited) still serves. The 7-day slack absorbs the ROUTINE
+                      # boundary offset — the role fact starts at the first role-TAGGED query, the
+                      # warehouse fact at the first metered (incl. idle) day, so pool commonly leads
+                      # by a day or two — while any real retention purge (tens+ of days) still abstains.
+                      f"NOT ((SELECT MIN(HOUR_TS)::DATE FROM {mart_object('FACT_QUERY_ROLE_HOURLY')}) "
+                      f"> DATEADD('day', -{days} + 1, CURRENT_DATE()) "
+                      f"AND (SELECT MIN(DAY) FROM {mart_object('FACT_WAREHOUSE_DAILY')}) "
+                      f"< DATEADD('day', -7, (SELECT MIN(HOUR_TS)::DATE FROM {mart_object('FACT_QUERY_ROLE_HOURLY')})))")
     vis = and_where(companies.role_clause(company, "ROLE_NAME"))
     return f"""
 WITH scoped AS (
