@@ -14,7 +14,7 @@ import streamlit as st
 
 from app.config import THRESHOLDS
 from app.core.errors import safe_page
-from app.core.query import run, run_batch
+from app.core.query import run, run_batch, run_batch_mixed
 from app.core.state import filters, navigation_context, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql, ops_sql, security_sql
 from app.logic.actions import ANOMALY_HIGH_EXCESS_USD, ANOMALY_HIGH_Z, triage_queue
@@ -229,28 +229,27 @@ def _day_replay() -> None:
     day_iso = pick.isoformat()
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
     rp_company = filters()["company"]
-    # Six independent reads -> two tier-grouped parallel batches (Codex #7);
-    # any batch failure falls back to the original serial per-query path.
-    _b_recent = run_batch([
-        {"key": "mv", "sql": mart_sql.day_spend_movers(day_iso, rp_company),
+    # PERF #58: six independent reads across TWO tiers (recent + historical) now gather in ONE
+    # mixed-tier parallel batch instead of two round trips; any batch failure falls back to the
+    # original serial per-query path below (also the path the stress harness forces).
+    _b = run_batch_mixed([
+        {"key": "mv", "tier": "recent", "sql": mart_sql.day_spend_movers(day_iso, rp_company),
          "source": "FACT_WAREHOUSE_DAILY vs 14d baseline"},
-        {"key": "act", "sql": mart_sql.day_activity(day_iso, rp_company),
+        {"key": "act", "tier": "recent", "sql": mart_sql.day_activity(day_iso, rp_company),
          "source": "FACT_QUERY_HOURLY (day vs baseline)"},
-        {"key": "tf", "sql": mart_sql.day_task_failures(day_iso, rp_company),
+        {"key": "tf", "tier": "recent", "sql": mart_sql.day_task_failures(day_iso, rp_company),
          "source": "FACT_TASK_DAILY (failures that day)"},
-        {"key": "al", "sql": mart_sql.day_alerts(day_iso, rp_company),
+        {"key": "al", "tier": "recent", "sql": mart_sql.day_alerts(day_iso, rp_company),
          "source": "ALERT_EVENTS (that day)"},
-    ], page=_PAGE, tier="recent")
-    _b_hist = run_batch([
-        {"key": "ddl", "sql": security_sql.day_ddl(day_iso, rp_company),
+        {"key": "ddl", "tier": "historical", "sql": security_sql.day_ddl(day_iso, rp_company),
          "source": "QUERY_HISTORY (DDL that day)", "max_rows": 300},
-        {"key": "gr", "sql": security_sql.day_grants(day_iso, rp_company),
+        {"key": "gr", "tier": "historical", "sql": security_sql.day_grants(day_iso, rp_company),
          "source": "GRANTS_TO_USERS (that day)", "max_rows": 200},
-    ], page=_PAGE, tier="historical")
-    if _b_recent is not None and _b_hist is not None:
-        movers, activity = _b_recent["mv"], _b_recent["act"]
-        tasks, alerts_d = _b_recent["tf"], _b_recent["al"]
-        ddl, grants = _b_hist["ddl"], _b_hist["gr"]
+    ], page=_PAGE) or {}
+    if all(_b.get(k) is not None for k in ("mv", "act", "tf", "al", "ddl", "gr")):
+        movers, activity = _b["mv"], _b["act"]
+        tasks, alerts_d = _b["tf"], _b["al"]
+        ddl, grants = _b["ddl"], _b["gr"]
     else:
         movers = run(mart_sql.day_spend_movers(day_iso, rp_company), page=_PAGE,
                      key=f"rp_mv_{rp_company}_{day_iso}",

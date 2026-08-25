@@ -306,7 +306,7 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
 def test_large_batches_are_executed_in_waves_of_four(monkeypatch) -> None:
     calls: list[tuple] = []
 
-    def fake(chunk: tuple, tier: str, page: str) -> tuple:
+    def fake(chunk: tuple, tier: str, page: str, *, timeout_s=None) -> tuple:  # #58: signature parity
         calls.append(chunk)
         return tuple(pd.DataFrame({"VALUE": [value]}) for value in chunk)
 
@@ -319,7 +319,7 @@ def test_large_batches_are_executed_in_waves_of_four(monkeypatch) -> None:
 def test_bounded_batch_preserves_partial_indices_and_finishes_later_waves(monkeypatch) -> None:
     calls: list[tuple] = []
 
-    def fake(chunk: tuple, tier: str, page: str) -> tuple:
+    def fake(chunk: tuple, tier: str, page: str, *, timeout_s=None) -> tuple:  # #58: signature parity
         calls.append(chunk)
         if chunk[0] == 0:
             raise query._BatchPartial(
@@ -412,7 +412,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.283.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.284.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )

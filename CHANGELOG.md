@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.284.0 - Performance: mixed-tier run_batch gather path (2026-08-24)
+
+Cross-repo review finding #58. `run_batch` requires all members share one tier (its tuple-level
+`st.cache_data` has one fixed TTL), so a panel mixing a live + recent + historical read had to
+issue several round-trips. Added a sibling gather path.
+
+- **`query.run_batch_mixed(specs, page)`** submits members of DIFFERENT tiers async on ONE session
+  in ONE round-trip. Each member's telemetry, `QueryResult.tier`, and per-member cache entry are
+  stamped with ITS OWN tier, so the tier-keyed member cache + per-tier TTLs stay exact and a member
+  is cache-hit-reusable by the same member in any batch of that tier. The statement timeout is the
+  MAX over the members' tiers (the safe direction — no member gets less time than its solo run()).
+  Same contract as `run_batch`: always returns every key; failures quarantine + fall back per-key
+  through `run()`. Single-tier `run_batch` is unchanged (its tuple cache is a real optimization a
+  mixed path can't keep); the only existing-code change is a backward-compatible `timeout_s` kwarg
+  on `_execute_batch`/`_execute_batch_bounded`. (`app/core/query.py`)
+- **Control Room day-replay** adopts it: the recent 4-member + historical 2-member batches merge
+  into ONE cross-tier round-trip; the original serial fallback is preserved.
+- Adversarially reviewed — caught and fixed a telemetry double-count (the mixed wall/fallback
+  rows now reuse the `batch_wall:`/`batch_fallback:` prefixes the fleet-seconds aggregators
+  exclude) before shipping. 4 new unit tests (per-member tier, max-tier timeout, member-cache
+  keying, telemetry prefix).
+
 ## 4.283.0 - Performance: one wide FACT_METERING_DAILY read shared by every daily-spend caller (2026-08-24)
 
 Cross-repo review finding #46. Each daily-spend caller emitted a distinct `fact_daily_spend(N)`

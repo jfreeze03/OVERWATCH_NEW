@@ -148,6 +148,8 @@ def _stub_runtime(monkeypatch):
             monkeypatch.setattr(module, "run", _keyed_run)
         if hasattr(module, "run_batch"):
             monkeypatch.setattr(module, "run_batch", lambda *_a, **_k: None)  # serial path
+        if hasattr(module, "run_batch_mixed"):
+            monkeypatch.setattr(module, "run_batch_mixed", lambda *_a, **_k: None)  # serial path (#58)
         if hasattr(module, "execute_statement"):
             monkeypatch.setattr(module, "execute_statement", lambda *_a, **_k: (True, "stub"))
         if hasattr(module, "current_role"):

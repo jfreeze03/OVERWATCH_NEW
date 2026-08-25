@@ -66,12 +66,14 @@ def test_overview_decoupled_and_day_replay_batched():
     assert "_load_board" not in _batch_block and "board" not in _batch_block
     assert "fact_daily" not in _batch_block
     cr = (_ROOT / "app" / "ui" / "pages" / "control_room.py").read_text(encoding="utf-8")
-    # retro recent + historical groups, the T2.1 live-trio group (open incidents /
-    # proposals / triage alerts as one live round trip), plus the incident
-    # auto-investigation batch (change/task/grant/anomaly signals, on incident-select only).
-    assert cr.count("run_batch(") == 4
+    # PERF #58: the day-replay's recent + historical groups merged into ONE cross-tier
+    # run_batch_mixed. The remaining run_batch( calls are the T2.1 live-trio group (open incidents
+    # / proposals / triage alerts as one live round trip) and the incident auto-investigation batch
+    # (change/task/grant/anomaly signals, on incident-select only).
+    assert cr.count("run_batch(") == 2
+    assert cr.count("run_batch_mixed(") == 1
     assert 'run_batch(_live_specs, page=_PAGE, tier="live")' in cr
-    assert "else:" in cr.split("_b_hist", 2)[2][:2000]            # serial fallback survives
+    assert "else:" in cr.split("run_batch_mixed(", 1)[1][:2500]   # serial fallback survives
 
 
 # ---------------------------------------------------------------------------
@@ -210,3 +212,79 @@ def test_cost_spend_section_batches_recent_and_defers_storage_unmapped():
     # each batched panel keeps its own live/historical fallback (prefetch-else-run)
     assert spend.count("if metering_res is not None else run(") == 1
     assert spend.count("if wh_res is not None else run(") == 1
+
+
+# ---------------------------------------------------------------------------
+# #58 — mixed-tier run_batch gather path
+# ---------------------------------------------------------------------------
+def test_run_batch_mixed_adds_no_fetcher_entry():
+    # The mixed path deliberately has NO per-tier tuple st.cache_data (a fixed-TTL fetcher
+    # can't hold a mixed-TTL tuple), so it adds no _BATCH_FETCHERS key — the 5-tier invariant holds.
+    from app.core.query import _BATCH_FETCHERS
+    assert set(_BATCH_FETCHERS) == {"recent", "historical", "live", "metadata", "hourly"}
+    assert "mixed" not in _BATCH_FETCHERS
+
+
+def test_run_batch_mixed_stamps_per_member_tier_and_uses_max_timeout(monkeypatch):
+    import pandas as pd
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state["_ow_refresh_salt"] = "t58a"
+    st.session_state["_ow_batch_quarantine"] = {"salt": "t58a", "keys": set()}
+    captured: dict = {}
+
+    def fake_exec(sqls, tier, page, *, timeout_s=None):
+        captured.update(tier=tier, timeout_s=timeout_s, n=len(sqls))
+        return tuple(pd.DataFrame({"X": [i]}) for i in range(len(sqls)))
+
+    monkeypatch.setattr(q, "_execute_batch", fake_exec)
+    out = q.run_batch_mixed([
+        {"key": "a", "sql": "SELECT /*mix58a*/ 1", "tier": "live", "source": "s"},
+        {"key": "b", "sql": "SELECT /*mix58a*/ 2", "tier": "historical", "source": "s"},
+    ], page="Test")
+    assert set(out) == {"a", "b"}                                   # every key present
+    assert out["a"].tier == "live" and out["b"].tier == "historical"   # per-member tier stamped
+    assert out["a"].ok and out["b"].ok
+    assert captured["tier"] == "mixed" and captured["n"] == 2        # ONE mixed round trip
+    # statement_timeout = MAX over the members' tiers (never LESS than a member's solo run())
+    assert captured["timeout_s"] == max(q.STATEMENT_TIMEOUTS["live"], q.STATEMENT_TIMEOUTS["historical"])
+
+
+def test_run_batch_mixed_member_cache_is_keyed_by_member_tier(monkeypatch):
+    import pandas as pd
+    import streamlit as st
+
+    from app.core import query as q
+    from app.core.query import (
+        DEFAULT_MAX_ROWS,
+        _batch_member_cache_get,
+        _cache_scope,
+        _with_row_cap,
+    )
+    st.session_state["_ow_refresh_salt"] = "t58b"
+    st.session_state["_ow_batch_quarantine"] = {"salt": "t58b", "keys": set()}
+
+    def fake_exec(sqls, tier, page, *, timeout_s=None):
+        return tuple(pd.DataFrame({"X": [i]}) for i in range(len(sqls)))
+
+    monkeypatch.setattr(q, "_execute_batch", fake_exec)
+    sql = "SELECT /*mix58b_cache*/ 1"
+    q.run_batch_mixed([{"key": "c", "sql": sql, "tier": "historical"}], page="Test")
+    capped = _with_row_cap(sql, DEFAULT_MAX_ROWS)
+    scope = _cache_scope(capped)
+    # cached under the member's OWN tier -> a same-tier single-tier batch/run would be a hit
+    assert _batch_member_cache_get("historical", capped, scope) is not None
+    # ...and NOT under a different tier (tier is part of the member-cache key)
+    assert _batch_member_cache_get("recent", capped, scope) is None
+
+
+def test_run_batch_mixed_wall_row_uses_the_excluded_batch_wall_prefix():
+    # The mixed wall row is a SUPERSET of its member 'mixed:%' rows, so it MUST key under the
+    # 'batch_wall:' prefix the fleet-seconds aggregators (mart_sql) exclude, or a mixed batch
+    # double-counts its wall time into EST_WAIT_S and surfaces a phantom builder. The fallback
+    # marker likewise reuses run_batch's 'batch_fallback:' prefix for identical handling.
+    q = (_ROOT / "app" / "core" / "query.py").read_text(encoding="utf-8")
+    assert 'f"batch_wall:mixed:n{len(pending)}"' in q
+    assert 'f"batch_fallback:mixed:n{len(pending)}"' in q
+    assert "mixed_wall:" not in q and "mixed_fallback:" not in q   # un-excluded keys must not exist

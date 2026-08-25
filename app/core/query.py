@@ -591,15 +591,20 @@ class _BatchPartial(Exception):
         self.pending = pending or set()
 
 
-def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
+def _execute_batch(sqls: tuple, tier: str, page: str, *, timeout_s: int | None = None) -> tuple:
     """Submit every statement server-side async (collect on one connection is
     serialized; async jobs are not), then gather. Full success returns (and
-    caches); any failure raises — _BatchPartial when there are survivors."""
+    caches); any failure raises — _BatchPartial when there are survivors.
+
+    ``timeout_s`` overrides the per-tier statement_timeout for a MIXED-tier batch
+    (run_batch_mixed passes the MAX over its members' tiers, so no member gets
+    LESS time than its solo run()); single-tier callers leave it None."""
     if len(sqls) > BATCH_MAX_CONCURRENCY:
-        return _execute_batch_bounded(sqls, tier, page)
+        return _execute_batch_bounded(sqls, tier, page, timeout_s=timeout_s)
     session = get_session()
     apply_query_tag(session, build_query_tag(page=page, tier=tier))
-    apply_statement_timeout(session, STATEMENT_TIMEOUTS.get(tier, 120))
+    apply_statement_timeout(session,
+                            timeout_s if timeout_s is not None else STATEMENT_TIMEOUTS.get(tier, 120))
     # P3: INCREMENTAL gather time per member, not the batch wall clock. Every
     # member used to be stamped with the whole batch's duration, so a 2-query
     # batch reported two identical inflated samples — batch:q and batch:p read
@@ -663,13 +668,15 @@ def _execute_batch(sqls: tuple, tier: str, page: str) -> tuple:
     return tuple(frames[i] for i in range(len(jobs)))
 
 
-def _execute_batch_bounded(sqls: tuple, tier: str, page: str) -> tuple:
+def _execute_batch_bounded(sqls: tuple, tier: str, page: str, *, timeout_s: int | None = None) -> tuple:
     """Execute a large batch in bounded async waves.
 
     Four concurrent statements keep the XS warehouse responsive while
     preserving _BatchPartial's survivor/error/pending contract across waves.
     A failed member does not stop later waves; a submission failure marks only
     that wave's unsubmitted members pending, matching the small-batch path.
+    ``timeout_s`` (mixed-tier) is forwarded to every wave so no wave silently
+    reverts to a per-tier default.
     """
     frames: dict[int, pd.DataFrame] = {}
     errors: dict[int, Exception] = {}
@@ -679,7 +686,7 @@ def _execute_batch_bounded(sqls: tuple, tier: str, page: str) -> tuple:
     for start in range(0, len(sqls), BATCH_MAX_CONCURRENCY):
         chunk = sqls[start:start + BATCH_MAX_CONCURRENCY]
         try:
-            returned = _execute_batch(chunk, tier, page)
+            returned = _execute_batch(chunk, tier, page, timeout_s=timeout_s)
             for local, frame in enumerate(returned):
                 frames[start + local] = frame
         except _BatchPartial as partial:
@@ -921,6 +928,146 @@ def run_batch(specs: list[dict], *, page: str, tier: str = "recent") -> dict | N
     _telemetry(page, tier, f"batch_wall:{tier}:n{len(bspecs)}", elapsed, rows_total,
                ok=True, batch_size=len(bspecs))
     return {**out, **out_direct}
+
+
+def run_batch_mixed(specs: list[dict], *, page: str) -> dict:
+    """Parallel fetch for panels whose members span DIFFERENT tiers (#58).
+
+    specs: ``[{key, sql, tier, source?, max_rows?}]``. All members submit async on
+    ONE session in ONE round trip (async job handles are tier-independent). The one
+    ALTER SESSION statement_timeout is the MAX over the submitted members' tiers, so
+    no member gets LESS time than its solo run(). Each member's telemetry AND its
+    _BATCH_MEMBER_CACHE entry are stamped with ITS OWN tier, so the tier-keyed member
+    cache + per-tier CACHE_TTLS stay exact and a member is cache-hit-reusable by the
+    same member in any batch (mixed or single-tier) of that tier; a miss/fallback
+    lands in the matching per-tier st.cache_data slot via run().
+
+    Unlike single-tier run_batch there is NO tuple-level st.cache_data (a per-tier
+    fetcher has one fixed TTL and cannot hold a mixed-TTL tuple), so the per-member
+    _BATCH_MEMBER_CACHE above IS the caching layer. Same public contract: ALWAYS
+    returns {key: QueryResult} with every key present; the parallel unit is
+    all-or-nothing (failures never cached); a failed member is quarantined for the
+    session and every non-survivor falls back through run() individually.
+    """
+    started = time.perf_counter()
+    _salt = str(st.session_state.get("_ow_refresh_salt", "") or "")
+    _q = st.session_state.get("_ow_batch_quarantine") or {}
+    if _q.get("salt") != _salt:
+        _q = {"salt": _salt, "keys": set()}
+    out: dict = {}
+    pending: list[tuple] = []   # (spec, tier, capped_sql, scope, cap) needing a server fetch
+    for spec in specs:
+        key = str(spec["key"])
+        sql = str(spec["sql"])
+        tier = str(spec.get("tier", "recent"))
+        tier = tier if tier in _BATCH_FETCHERS else "recent"
+        cap = int(spec.get("max_rows", DEFAULT_MAX_ROWS) or 0)
+        capped_sql = _with_row_cap(sql, cap)
+        scope = _cache_scope(capped_sql)
+        qk = _quarantine_key(page, key, sql)
+        if qk in _q["keys"]:                       # quarantined -> solo at its own tier
+            solo = run(sql, page=page, key=f"bfb:{key}", tier=tier,
+                       source=str(spec.get("source", "")),
+                       max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+            if solo.ok:
+                _q["keys"].discard(qk)
+                st.session_state["_ow_batch_quarantine"] = _q
+                _batch_member_cache_put(tier, capped_sql, scope, solo.df, solo.truncated)
+            out[key] = solo
+            continue
+        cached = _batch_member_cache_get(tier, capped_sql, scope)   # tier-keyed hit, own TTL
+        if cached is not None:
+            frame, truncated = cached
+            _telemetry(page, tier, f"mixed:{key}", 0.0, len(frame), ok=True,
+                       batch_size=0, truncated=truncated,
+                       sql_hash=_sql_hash16(sql), cache_hit=True)
+            out[key] = QueryResult(df=frame, ok=True, truncated=truncated,
+                                   source=str(spec.get("source", "")), tier=tier,
+                                   fetched_at=datetime.now(), elapsed_ms=0.0)
+            continue
+        pending.append((spec, tier, capped_sql, scope, cap))
+    if not pending:
+        return out
+    sqls = tuple(p[2] for p in pending)
+    timeout_s = max(STATEMENT_TIMEOUTS.get(p[1], 120) for p in pending)
+    # Clear the timing / QUERY_ID sidecars (a stale dict would be misread as this batch's).
+    _BATCH_MEMBER_MS.set(None)
+    _BATCH_MEMBER_QID.set(None)
+    try:
+        # Direct execute, NO tuple-level st.cache_data (it can't hold a mixed-TTL tuple);
+        # the per-member _BATCH_MEMBER_CACHE above is the caching layer.
+        frames = _execute_batch(sqls, "mixed", page, timeout_s=timeout_s)
+    except _BatchPartial as bp:
+        elapsed = (time.perf_counter() - started) * 1000
+        _q["keys"] |= {_quarantine_key(page, str(pending[i][0]["key"]), str(pending[i][0]["sql"]))
+                       for i in bp.errors}          # only CONFIRMED failers; pending stay clean
+        st.session_state["_ow_batch_quarantine"] = _q
+        failed = ",".join(str(pending[i][0].get("key")) for i in bp.errors)[:160]
+        _telemetry(page, "mixed", f"batch_fallback:mixed:n{len(pending)}", elapsed, 0, ok=False)
+        record_error(page, next(iter(bp.errors.values())),
+                     context=f"run_batch_mixed partial failed=[{failed}]")
+        for idx, (spec, tier, capped_sql, scope, cap) in enumerate(pending):
+            key = str(spec["key"])
+            if idx in bp.frames:                    # survivor: ran server-side -> cache miss, cache it
+                df = bp.frames[idx]
+                truncated = bool(cap) and len(df) > cap
+                if truncated:
+                    df = df.head(cap)
+                member_ms = _member_elapsed(idx, elapsed)
+                _telemetry(page, tier, f"mixed:{key}", member_ms, len(df), ok=True,
+                           batch_size=len(pending), truncated=truncated,
+                           query_id=_member_qid(idx), sql_hash=_sql_hash16(spec["sql"]),
+                           cache_hit=False)
+                out[key] = QueryResult(df=df, ok=True, truncated=truncated,
+                                       source=str(spec.get("source", "")), tier=tier,
+                                       fetched_at=datetime.now(), elapsed_ms=member_ms)
+                _batch_member_cache_put(tier, capped_sql, scope, df, truncated)
+            else:                                   # failer OR unsubmitted -> solo run() at its tier
+                solo = run(str(spec["sql"]), page=page, key=f"bfb:{key}", tier=tier,
+                           source=str(spec.get("source", "")),
+                           max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+                out[key] = solo
+                if solo.ok:
+                    _batch_member_cache_put(tier, capped_sql, scope, solo.df, solo.truncated)
+        return out
+    except Exception as exc:                        # whole submit failed before any survivor
+        elapsed = (time.perf_counter() - started) * 1000
+        keys = ",".join(str(p[0].get("key")) for p in pending)[:160]
+        _telemetry(page, "mixed", f"batch_fallback:mixed:n{len(pending)}", elapsed, 0, ok=False)
+        record_error(page, exc,
+                     context=f"run_batch_mixed fallback n={len(pending)} [{keys}] {type(exc).__name__}")
+        for spec, tier, capped_sql, scope, _cap in pending:
+            key = str(spec["key"])
+            solo = run(str(spec["sql"]), page=page, key=f"bfb:{key}", tier=tier,
+                       source=str(spec.get("source", "")),
+                       max_rows=spec.get("max_rows", DEFAULT_MAX_ROWS))
+            out[key] = solo
+            if solo.ok:
+                _batch_member_cache_put(tier, capped_sql, scope, solo.df, solo.truncated)
+        return out
+    elapsed = (time.perf_counter() - started) * 1000
+    rows_total = 0
+    for idx, (spec, tier, capped_sql, scope, cap) in enumerate(pending):
+        key = str(spec["key"])
+        df = frames[idx]
+        truncated = bool(cap) and len(df) > cap
+        if truncated:
+            df = df.head(cap)
+        rows_total += len(df)
+        member_ms = _member_elapsed(idx, elapsed)
+        _telemetry(page, tier, f"mixed:{key}", member_ms, len(df), ok=True,
+                   batch_size=len(pending), truncated=truncated, query_id=_member_qid(idx),
+                   sql_hash=_sql_hash16(spec["sql"]), cache_hit=False)
+        out[key] = QueryResult(df=df, ok=True, truncated=truncated,
+                               source=str(spec.get("source", "")), tier=tier,
+                               fetched_at=datetime.now(), elapsed_ms=member_ms)
+        _batch_member_cache_put(tier, capped_sql, scope, df, truncated)
+    # Wall row is a SUPERSET of its members — key it under the 'batch_wall:' prefix that every
+    # fleet-seconds aggregator (mart_sql fleet/pain/fetch rollups) already excludes, so a mixed
+    # batch never double-counts its wall time (the member 'mixed:%' rows are the real samples).
+    _telemetry(page, "mixed", f"batch_wall:mixed:n{len(pending)}", elapsed, rows_total,
+               ok=True, batch_size=len(pending))
+    return out
 
 
 def run(
