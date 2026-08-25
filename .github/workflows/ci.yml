@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install FLOOR-pinned runtime + FULL test toolchain
@@ -69,7 +69,7 @@ jobs:
           # floor. 5.5.0 is the lowest altair that satisfies both the streamlit
           # exclusion and requirements.txt's altair~=5.5.
           pip install "streamlit==1.52.2" "pandas==2.2.0" "altair==5.5.0" \
-                      "jinja2==3.1.2" "pytest~=8.3" "sqlglot>=25"
+                      "jinja2==3.1.2" "pytest~=8.3" "sqlglot>=30.12.0"
       - name: Page smokes + logic tests on the floor pins
         run: pytest -q
 
@@ -152,7 +152,7 @@ jobs:
           else
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         if: steps.guard.outputs.run == 'true'
         with:
           python-version: "3.11"
