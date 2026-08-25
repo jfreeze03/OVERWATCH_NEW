@@ -1613,10 +1613,18 @@ def _adaptive_candidacy_panel(company: str, days: int) -> None:
     # so cap idle to match — else the idle discount would cover a longer span than the
     # burst profile it modifies.
     _win = min(int(days), 30)
-    hourly = run(insights_sql.warehouse_hourly_activity(_win, company), page=_PAGE,
+    # Perf: the two independent 'hourly' reads (idle_warehouse_analysis is a heavy
+    # QUERY_HISTORY+METERING join) prefetch in one parallel batch; each keeps its run() fallback.
+    _acb = run_batch([
+        {"key": "hourly", "sql": insights_sql.warehouse_hourly_activity(_win, company),
+         "source": "WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day)"},
+        {"key": "idle", "sql": insights_sql.idle_warehouse_analysis(_win, company),
+         "source": "WAREHOUSE_METERING_HISTORY (idle credits)"},
+    ], page=_PAGE, tier="hourly")
+    hourly = _acb.get("hourly") or run(insights_sql.warehouse_hourly_activity(_win, company), page=_PAGE,
                  key=f"ops_wh_hourly_{company}_{_win}", tier="hourly",
                  source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day)")
-    idle = run(insights_sql.idle_warehouse_analysis(_win, company), page=_PAGE,
+    idle = _acb.get("idle") or run(insights_sql.idle_warehouse_analysis(_win, company), page=_PAGE,
                key=f"ops_wh_idle_{company}_{_win}", tier="hourly",
                source="WAREHOUSE_METERING_HISTORY (idle credits)")
     if not guard(hourly, "Needs hour-of-day warehouse metering to score candidacy."):

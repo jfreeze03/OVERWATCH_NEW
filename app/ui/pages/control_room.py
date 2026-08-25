@@ -377,7 +377,8 @@ def render() -> None:
     # N2: undelivered-critical banner up top — the DBA's first triage question is
     # "did last night's page actually reach anyone?". Rides the shell-shared
     # health_strip cache entry (same SQL + key as the sidebar), zero extra queries.
-    _strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+    # Perf: 'recent' (300s) to match the other health_strip sites — see main.py.
+    _strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
                  source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     _sv: dict[str, str] = {}
     _open_crit = 0

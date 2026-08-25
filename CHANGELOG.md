@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.281.0 - Performance: batch serial ACCOUNT_USAGE reads + cache-tier + settings memo (2026-08-24)
+
+The S-effort performance batch from the cross-repo review. Every change is behavior-preserving —
+only reads that were UNCONDITIONAL at their call site are batched, so exactly the same scans fire
+and the render order is unchanged; a pure latency win. Adversarially reviewed: 0 regressions.
+
+- **Alerts ▸ History**: the five unconditional `recent` reads (event history, MTTA/MTTR, incident
+  lifecycle, delivery SLO, alert fatigue) now prefetch in ONE `run_batch` instead of five serial
+  round-trips, and the conditional route/backlog pair batches inside the `slo.usable()` block.
+  (The page previously had 29 `run()` calls and zero `run_batch`.) (`app/ui/pages/alerts.py`)
+- **Admin ▸ access self-check**: the six `SELECT … LIMIT 1` probes fetch in one parallel
+  `metadata` batch (SHOW WAREHOUSES stays solo); a BLOCKED source is still detected via
+  run_batch's per-key fallback. (`app/ui/pages/admin.py`)
+- **Operations ▸ adaptive-candidacy**: the hour-of-day activity read and the heavy
+  idle-warehouse QUERY_HISTORY+METERING join batch as one `hourly` fetch. (`app/ui/pages/operations.py`)
+- **Security ▸ role revoke-safety drill**: `role_holders` + `role_privileges` batch as one
+  `historical` fetch, halving click-to-render. (`app/ui/pages/security.py`)
+- **load_settings**: the `DEFAULT_SETTINGS` + `iterrows` merge is memoized per refresh-salt scope
+  (`_merged_settings_cached`) instead of re-running at each of ~23 call sites per rerun; a
+  transient SETTINGS failure still falls through to code defaults uncached, and cache_data's
+  copy-on-return keeps callers mutation-safe. (`app/ui/components.py`)
+- **health_strip cache tier**: promoted from `live` (30s) to `recent` (300s) at all four call
+  sites (sidebar shell, Brief, Control Room, Overview) — it reads a mart that loads hourly, so a
+  30s TTL re-paid the scan up to 120×/hour on every page shell. Ack/resolve writes still
+  invalidate it immediately via the domain salt and Refresh forces an instant re-read, so
+  interactive freshness is unchanged; the sidebar badge auto-refreshes every 5 min instead of 30s.
+  (`app/main.py`, `app/ui/pages/brief.py`, `control_room.py`, `overview.py`)
+
+Held (not clean S-effort drop-ins): Alerts Rules, Operations monitor-coverage, and Security
+Trust-Center reads are conditionally interleaved or use `SHOW`/`probe=True`, which `run_batch`
+can't batch without changing which scans fire.
+
 ## 4.280.0 - Chargeback & AI bug-hunt round 4: role-share / audit-stamp / display (2026-08-24)
 
 A fourth sweep of the last lighter-covered surface — the role allocation lens, the DEPARTMENT_MAP /

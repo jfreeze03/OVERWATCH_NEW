@@ -395,7 +395,11 @@ def _health_values_cached(scope: str) -> dict[str, tuple[str, str]]:
     ``scope`` is core.query's cache identity (role + refresh salt + the alerts
     domain salt), so Refresh and any ack/resolve write still invalidate this
     layer immediately rather than leaving a stale badge for 2 minutes."""
-    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="live",
+    # Perf: 'recent' (300s), not 'live' (30s) — health_strip reads FACT/freshness marts that
+    # load hourly, so a 30s TTL re-paid the scan up to 120x/hour on every page shell. Ack/resolve
+    # writes still invalidate this immediately via the domain salt, and backend alert scans ride
+    # the hourly chain, so interactive freshness is unchanged and Refresh forces an instant re-read.
+    res = run(mart_sql.health_strip(), page="Sidebar", key="health_strip", tier="recent",
               source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     if not res.ok:
         raise _HealthUnavailable(res.error or "health strip read failed")

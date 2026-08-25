@@ -15,7 +15,7 @@ import streamlit as st
 from app.config import core_object
 from app.core.errors import safe_page
 from app.core.identity import idempotency_key, identity_sql, viewer_name
-from app.core.query import execute_action, execute_statement, run
+from app.core.query import execute_action, execute_statement, run, run_batch
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
@@ -987,13 +987,26 @@ def render() -> None:
                                "catalogue) — editing the column does not change the scan.")
 
     elif section == "History":
-        hist = run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",
+        # Perf: the section's five UNCONDITIONAL 'recent' reads prefetch in one parallel batch
+        # instead of five serial round-trips; each keeps its original run() fallback and render
+        # point, so which scans fire and the render order are unchanged (rt/bl stay conditional).
+        _hb = run_batch([
+            {"key": "hist", "sql": mart_sql.alert_event_history(30), "source": "ALERT_EVENTS"},
+            {"key": "mttr", "sql": mart_sql.alert_mttr(90), "source": "ALERT_EVENTS lifecycle timestamps"},
+            {"key": "inc", "sql": mart_sql.incident_metrics(90, f["company"]),
+             "source": f"INCIDENTS lifecycle (90d, {f['company']} + account-level)"},
+            {"key": "slo", "sql": mart_sql.delivery_slo_summary(30),
+             "source": "ALERT_DELIVERIES + ALERT_EVENTS + APP_ERROR_LOG"},
+            {"key": "fat", "sql": mart_sql.alert_fatigue(30),
+             "source": "ALERT_EVENTS (resolution kinds + dedupe repeats)"},
+        ], page=_PAGE, tier="recent")
+        hist = _hb.get("hist") or run(mart_sql.alert_event_history(30), page=_PAGE, key="alert_history",
                    tier="recent", source="ALERT_EVENTS")
         if guard(hist, "No alert events in the last 30 days.", setup_hint=_SETUP_HINT):
             charts.events_by_day(hist.df)
             result_caption(hist)
         st.markdown("**Response performance (MTTA / MTTR)**")
-        mttr = run(mart_sql.alert_mttr(90), page=_PAGE, key="alert_mttr",
+        mttr = _hb.get("mttr") or run(mart_sql.alert_mttr(90), page=_PAGE, key="alert_mttr",
                    tier="recent", source="ALERT_EVENTS lifecycle timestamps")
         if mttr.usable():
             df = mttr.df.copy()
@@ -1018,7 +1031,7 @@ def render() -> None:
         # Moved from Control Room (v4.50): retrospective process-health
         # medians don't change morning to morning — they read with alert
         # history, beside the alert-grain MTTA/MTTR above.
-        inc_met = run(mart_sql.incident_metrics(90, f["company"]), page=_PAGE,
+        inc_met = _hb.get("inc") or run(mart_sql.incident_metrics(90, f["company"]), page=_PAGE,
                       key=f"inc_metrics_{f['company']}", tier="recent",
                       source=f"INCIDENTS lifecycle (90d, {f['company']} + account-level)")
         if inc_met.usable():
@@ -1042,7 +1055,7 @@ def render() -> None:
             st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")
 
         st.markdown("**Delivery health (SLO)** — did alerts leave the building, and how fast?")
-        slo = run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
+        slo = _hb.get("slo") or run(mart_sql.delivery_slo_summary(30), page=_PAGE, key="delivery_slo",
                   tier="recent", source="ALERT_DELIVERIES + ALERT_EVENTS + APP_ERROR_LOG")
         if slo.usable():
             row0 = slo.df.iloc[0]
@@ -1071,7 +1084,12 @@ def render() -> None:
                  "help": "undelivered_expired rows SP_NOTIFY_WEBHOOK raises when an eligible "
                          "event crosses 24h unsent — a persistent integration outage, not lag."},
             ])
-            rt = run(mart_sql.delivery_by_route(30), page=_PAGE, key="delivery_routes",
+            _db = run_batch([
+                {"key": "rt", "sql": mart_sql.delivery_by_route(30), "source": "ALERT_DELIVERIES by route"},
+                {"key": "bl", "sql": mart_sql.route_backlog(),
+                 "source": "ALERT_EVENTS x ALERT_ROUTES (send-eligibility)"},
+            ], page=_PAGE, tier="recent")
+            rt = _db.get("rt") or run(mart_sql.delivery_by_route(30), page=_PAGE, key="delivery_routes",
                      tier="recent", source="ALERT_DELIVERIES by route")
             if rt.usable():
                 styled_table(rt.df, height=170)
@@ -1079,7 +1097,7 @@ def render() -> None:
             # the age of the oldest pending event (the starvation signal rec8 fixes).
             # Same send-eligibility predicate as the drainer, so the two agree.
             st.markdown("**Route backlog** — open eligible events not yet delivered, oldest first.")
-            bl = run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
+            bl = _db.get("bl") or run(mart_sql.route_backlog(), page=_PAGE, key="route_backlog",
                      tier="recent", source="ALERT_EVENTS x ALERT_ROUTES (send-eligibility)")
             if bl.usable() and not bl.df.empty:
                 styled_table(bl.df, height=170, column_config={
@@ -1093,7 +1111,7 @@ def render() -> None:
             st.caption("Delivery SLOs appear once the per-route ledger has rows.")
 
         st.markdown("**Alert fatigue** — which rules burn attention without earning it?")
-        fat = run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
+        fat = _hb.get("fat") or run(mart_sql.alert_fatigue(30), page=_PAGE, key="alert_fatigue",
                   tier="recent", source="ALERT_EVENTS (resolution kinds + dedupe repeats)")
         if fat.usable():
             _fat_sel = selectable_table(fat.df, key="alert_fatigue_sel", height=240, column_config={

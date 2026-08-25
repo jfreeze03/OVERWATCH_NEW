@@ -19,7 +19,7 @@ from app.config import (
 )
 from app.core.errors import error_buffer, safe_page
 from app.core.identity import identity_sql
-from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run
+from app.core.query import bump_refresh_salt, execute_statement, query_telemetry, run, run_batch
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
@@ -593,10 +593,20 @@ def _access_self_check() -> None:
          "Run snowflake/roles.sql as SNOW_ACCOUNTADMINS."),
         ("Warehouse metadata", "SHOW WAREHOUSES", "USAGE/MONITOR on warehouses (roles.sql)."),
     ]
+    # Perf: the SELECT-shaped probes fetch in one parallel 'metadata' batch (SHOW WAREHOUSES
+    # stays solo — not a SELECT). run_batch falls back per-key through run() on any failure, so
+    # a BLOCKED probe is still detected; the parallel win applies when every source is reachable.
+    _ab = run_batch(
+        [{"key": name, "sql": sql, "source": name, "max_rows": 1}
+         for name, sql, fix in probes if not sql.startswith("SHOW")],
+        page=_PAGE, tier="metadata")
     rows = []
     for name, sql, fix in probes:
-        r = run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata", source=name,
-                max_rows=0 if sql.startswith("SHOW") else 1)
+        if sql.startswith("SHOW"):
+            r = run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata", source=name, max_rows=0)
+        else:
+            r = _ab.get(name) or run(sql, page=_PAGE, key=f"acc_{name}", tier="metadata",
+                                     source=name, max_rows=1)
         rows.append({"SOURCE": name, "STATUS": "OK" if r.ok else "BLOCKED",
                      "FIX": "" if r.ok else fix,
                      "ERROR": "" if r.ok else str(r.error)[:140]})

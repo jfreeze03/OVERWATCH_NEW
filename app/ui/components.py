@@ -1122,30 +1122,41 @@ def _settings_frame_cached(scope: str):
     return res.df
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _merged_settings_cached(scope: str) -> dict:
+    """The effective settings dict, built ONCE per (salt) scope instead of re-running the
+    DEFAULT_SETTINGS+iterrows merge at each of load_settings' ~23 call sites per rerun.
+    cache_data returns a fresh copy per call, so callers can mutate safely. A transient
+    SETTINGS read failure PROPAGATES (cache_data never caches a raise, so it retries next
+    call); an empty/malformed frame yields code defaults (a real, cacheable state)."""
+    merged = dict(DEFAULT_SETTINGS)
+    # r21 #15: the refresh salt joins the cache key — without it, a manual refresh after
+    # editing SETTINGS still served the old frame for up to 5 minutes.
+    df = _settings_frame_cached(scope)   # raises on transient failure -> not cached here
+    if df is not None and not df.empty and {"KEY", "VALUE"}.issubset(df.columns):
+        for _, row in df.iterrows():
+            key = str(row["KEY"]).upper()
+            if key in merged:
+                raw = row["VALUE"]
+                if isinstance(merged[key], float):
+                    merged[key] = safe_float(raw, merged[key])
+                else:
+                    merged[key] = str(raw if raw is not None else merged[key])
+        merged["_source"] = "SETTINGS"
+    else:
+        merged["_source"] = "code defaults (SETTINGS not reachable)"
+    return merged
+
+
 def load_settings(page: str) -> dict:
     """Settings from SETTINGS with code defaults as offline fallback."""
-    merged = dict(DEFAULT_SETTINGS)
     try:
-        # r21 #15: the refresh salt joins the cache key — without it, a
-        # manual refresh after editing SETTINGS still served the old frame
-        # for up to 5 minutes (run()'s inner cache clears; this one didn't).
-        df = _settings_frame_cached(
+        return _merged_settings_cached(
             f"global:{st.session_state.get('_ow_refresh_salt', '')}")
-        if df is not None and not df.empty and {"KEY", "VALUE"}.issubset(df.columns):
-            for _, row in df.iterrows():
-                key = str(row["KEY"]).upper()
-                if key in merged:
-                    raw = row["VALUE"]
-                    if isinstance(merged[key], float):
-                        merged[key] = safe_float(raw, merged[key])
-                    else:
-                        merged[key] = str(raw if raw is not None else merged[key])
-            merged["_source"] = "SETTINGS"
-            return merged
     except Exception:  # noqa: BLE001 — settings fallback must never break a page
-        pass
-    merged["_source"] = "code defaults (SETTINGS not reachable)"
-    return merged
+        merged = dict(DEFAULT_SETTINGS)
+        merged["_source"] = "code defaults (SETTINGS not reachable)"
+        return merged
 
 
 def budget_kpi(settings: dict, spend_usd: float) -> dict:

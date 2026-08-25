@@ -104,7 +104,9 @@ def render() -> None:
          "source": "DAILY_DIGEST (Cortex, grounded)"},
     ], page=_PAGE, tier="recent")
 
-    strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+    # Perf: 'recent' (300s) — shares the health_strip cache entry with the sidebar/other shells
+    # (see main.py); the mart loads hourly and writes invalidate via the domain salt.
+    strip = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
                 source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     strip_up = strip.ok and not strip.empty
     vals = ({str(r["METRIC"]): str(r["VALUE"]) for _, r in strip.df.iterrows()}

@@ -468,7 +468,8 @@ def render() -> None:
     # key="health_strip" as main.py/brief — zero extra queries on a warm shell);
     # open_high_actions comes from the ACTION_QUEUE read hoisted above the score
     # (the Top-actions panel below reuses it).
-    _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="live",
+    # Perf: 'recent' (300s) to match the other health_strip sites — see main.py.
+    _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
               source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     stale_sources = 0
     if _hs.ok and not _hs.empty:

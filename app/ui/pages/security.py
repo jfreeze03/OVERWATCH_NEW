@@ -362,15 +362,22 @@ def _access_tab(company: str, days: int) -> None:
             section_header(f"Before revoking {role}: who holds it, what it grants", "warn", "admin")
             # Both reads are interaction-gated (fire only after a row click), so
             # they are NOT first-paint usage-view scans; tier="historical"
-            # makes a re-click on the same role a cache hit.
-            h = run(security_sql.role_holders(role), page=_PAGE,
+            # makes a re-click on the same role a cache hit. Perf: the two independent
+            # historical reads prefetch in one parallel batch, halving click-to-render.
+            _rb = run_batch([
+                {"key": "h", "sql": security_sql.role_holders(role),
+                 "source": "ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)"},
+                {"key": "p", "sql": security_sql.role_privileges(role),
+                 "source": "ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)"},
+            ], page=_PAGE, tier="historical")
+            h = _rb.get("h") or run(security_sql.role_holders(role), page=_PAGE,
                     key=f"sec_role_holders_{role}", tier="historical",
                     source="ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)")
             st.markdown("**Holders**")
             if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis)."):
                 styled_table(with_user_names(h.df, _PAGE) if "USER_NAME" in h.df.columns else h.df,
                              height=200)
-            p = run(security_sql.role_privileges(role), page=_PAGE,
+            p = _rb.get("p") or run(security_sql.role_privileges(role), page=_PAGE,
                     key=f"sec_role_privs_{role}", tier="historical",
                     source="ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)")
             st.markdown("**Privileges this role grants**")
