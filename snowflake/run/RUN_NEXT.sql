@@ -20,12 +20,20 @@
 
 -- ------------------------------------------------------------------------
 -- Q1: Ask smoke 1/4 - per-user spend attribution (spend_spike_by_user)
--- LOOK FOR: Rows of DIMENSION (user) with ALLOC_CREDITS, biggest first. Non-empty = the 'which user is causing spend spikes' answer has data.
+-- LOOK FOR: Rows of DIMENSION (user) with ALLOC_CREDITS, biggest first. Non-empty = the 'which user is causing spend spikes' answer has data. Same builder the Cost & Contract page serves, so the numbers reconcile.
 -- ------------------------------------------------------------------------
-WITH scoped AS (
-    SELECT KEY_NAME, EXEC_SEC, ALLOC_CREDITS
-    FROM DBA_MAINT_DB.OVERWATCH.MART_COST_ALLOCATION_DAILY
-    WHERE DAY >= DATEADD('day', -30, CURRENT_DATE()) AND DIMENSION = 'USER'
+WITH cov AS (
+    SELECT MIN(DAY) AS FIRST_DAY,
+           COUNT(DISTINCT CASE
+                   WHEN DAY >= DATEADD('day', -30, CURRENT_DATE())
+                    AND DAY < CURRENT_DATE() THEN DAY END) AS WINDOW_DAYS
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY x
+    WHERE 1 = 1
+),
+scoped AS (
+    SELECT x.USER_NAME AS KEY_NAME, x.DATABASE_NAME, x.EXEC_SEC, x.ALLOC_CREDITS
+    FROM DBA_MAINT_DB.OVERWATCH.FACT_COST_ALLOC_XDIM_DAILY x
+    WHERE x.DAY >= DATEADD('day', -30, CURRENT_DATE()) AND x.DAY < CURRENT_DATE()
 )
 SELECT
     COALESCE(KEY_NAME, 'NONE') AS DIMENSION,
@@ -34,6 +42,8 @@ SELECT
     ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
 FROM scoped
 WHERE 1 = 1
+  AND (SELECT FIRST_DAY FROM cov) <= DATEADD('day', -30, CURRENT_DATE())
+  AND (SELECT WINDOW_DAYS FROM cov) >= 30
 GROUP BY KEY_NAME
 ORDER BY ALLOC_CREDITS DESC
 LIMIT 100
