@@ -104,6 +104,30 @@ def test_duration_drift_empty_and_missing_columns():
     assert task_duration_anomalies(steady).empty
 
 
+def test_duration_drift_separates_same_task_across_schemas():
+    # a task name reused across schemas must NOT interleave into one series: only the
+    # PROD copy drifts; STG stays steady and is keyed separately despite the same name.
+    rows = []
+    for d in range(1, 13):
+        rows.append({"DAY": dt.date(2026, 8, d), "DATABASE_NAME": "D", "SCHEMA_NAME": "PROD",
+                     "TASK_NAME": "LOAD", "AVG_SEC": 60.0, "RUNS": 5})
+        rows.append({"DAY": dt.date(2026, 8, d), "DATABASE_NAME": "D", "SCHEMA_NAME": "STG",
+                     "TASK_NAME": "LOAD", "AVG_SEC": 60.0, "RUNS": 5})
+    rows.append({"DAY": dt.date(2026, 8, 13), "DATABASE_NAME": "D", "SCHEMA_NAME": "PROD",
+                 "TASK_NAME": "LOAD", "AVG_SEC": 300.0, "RUNS": 5})
+    rows.append({"DAY": dt.date(2026, 8, 13), "DATABASE_NAME": "D", "SCHEMA_NAME": "STG",
+                 "TASK_NAME": "LOAD", "AVG_SEC": 60.0, "RUNS": 5})
+    out = task_duration_anomalies(pd.DataFrame(rows))
+    assert list(out["SCHEMA_NAME"]) == ["PROD"] and out.iloc[0]["SLOWER_X"] == 5.0
+
+
+def test_duration_drift_dedupes_duplicate_day_rows():
+    # 6 distinct days duplicated into 12 rows must NOT reach the >=7-active-day gate
+    base = [{"DAY": dt.date(2026, 8, d), "DATABASE_NAME": "D", "TASK_NAME": "LOAD",
+             "AVG_SEC": (60.0 if d < 6 else 300.0), "RUNS": 5} for d in range(1, 7)]
+    assert task_duration_anomalies(pd.DataFrame(base + base)).empty
+
+
 # ================================================== #6 clustering churn ======
 
 def test_zero_tb_churn_sorts_first_and_flags():

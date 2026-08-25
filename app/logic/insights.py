@@ -538,21 +538,38 @@ DURATION_MIN_ACTIVE_DAYS = 7   # need a real baseline before calling drift
 def task_duration_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     """Tasks running slower than their OWN daily baseline (repo wave-2 #15).
 
-    From FACT_TASK_DAILY rows (DAY, DATABASE_NAME, TASK_NAME, AVG_SEC, RUNS): a task
-    that is 100% successful yet quietly 3x slower is otherwise unflagged. Feeds each
-    task's daily AVG_SEC into the robust-z engine (``flag_anomalies``, median/MAD),
-    keeps the SLOW side, and reduces to one row per task = its worst flagged day,
-    with BASELINE_SEC (the task's median) and SLOWER_X (AVG_SEC / baseline). Empty
-    in -> empty out; never raises."""
-    cols = ["DATABASE_NAME", "TASK_NAME", "DAY", "AVG_SEC", "BASELINE_SEC",
-            "SLOWER_X", "Z_SCORE", "RUNS"]
+    From FACT_TASK_DAILY rows (DAY, DATABASE_NAME[, SCHEMA_NAME], TASK_NAME, AVG_SEC,
+    RUNS): a task that is 100% successful yet quietly 3x slower is otherwise
+    unflagged. Each task is identified by its full grain (DB, schema, name, and
+    company when the frame carries them) and reduced to one value per calendar day,
+    then its daily AVG_SEC is fed into the robust-z engine (``flag_anomalies``,
+    median/MAD). Keeps the SLOW side and reduces to one row per task = its worst
+    flagged day, with BASELINE_SEC (the task's median) and SLOWER_X (AVG_SEC /
+    baseline). Empty in -> empty out; never raises."""
+    cols = ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME", "DAY", "AVG_SEC",
+            "BASELINE_SEC", "SLOWER_X", "Z_SCORE", "RUNS"]
     if (df is None or df.empty
             or not {"DAY", "AVG_SEC", "TASK_NAME", "DATABASE_NAME"}.issubset(df.columns)):
         return pd.DataFrame(columns=cols)
     work = df.copy()
     work["AVG_SEC"] = pd.to_numeric(work["AVG_SEC"], errors="coerce")
-    work["TASK_KEY"] = work["DATABASE_NAME"].astype(str) + "." + work["TASK_NAME"].astype(str)
-    flagged = flag_anomalies(work, "AVG_SEC", group_col="TASK_KEY",
+    work["DAY"] = pd.to_datetime(work["DAY"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["AVG_SEC", "DAY"])
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    # Full-grain identity + one row per calendar day: keying on DB.TASK_NAME alone
+    # interleaves same-named tasks from different schemas/companies into one series,
+    # and a duplicate mart row would inflate the active-day count.
+    grain = (["DATABASE_NAME"]
+             + (["SCHEMA_NAME"] if "SCHEMA_NAME" in work.columns else [])
+             + ["TASK_NAME"]
+             + (["COMPANY"] if "COMPANY" in work.columns else []))
+    agg: dict[str, str] = {"AVG_SEC": "mean"}
+    if "RUNS" in work.columns:
+        agg["RUNS"] = "sum"
+    daily = work.groupby([*grain, "DAY"], as_index=False).agg(agg)
+    daily["TASK_KEY"] = daily[grain].astype(str).agg(".".join, axis=1)
+    flagged = flag_anomalies(daily, "AVG_SEC", group_col="TASK_KEY",
                              min_value=DURATION_MIN_SEC, min_active_days=DURATION_MIN_ACTIVE_DAYS)
     if flagged is None or flagged.empty or "IS_ANOMALY" not in flagged.columns:
         return pd.DataFrame(columns=cols)
@@ -560,7 +577,7 @@ def task_duration_anomalies(df: pd.DataFrame) -> pd.DataFrame:
                    & (pd.to_numeric(flagged["Z_SCORE"], errors="coerce") > 0)].copy()
     if slow.empty:
         return pd.DataFrame(columns=cols)
-    baseline = work.groupby("TASK_KEY")["AVG_SEC"].median().rename("BASELINE_SEC")
+    baseline = daily.groupby("TASK_KEY")["AVG_SEC"].median().rename("BASELINE_SEC")
     slow = slow.join(baseline, on="TASK_KEY")
     slow["SLOWER_X"] = (pd.to_numeric(slow["AVG_SEC"], errors="coerce")
                         / slow["BASELINE_SEC"].where(slow["BASELINE_SEC"] > 0)).round(1)

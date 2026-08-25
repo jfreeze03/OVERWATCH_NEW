@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.294.0 - Task duration-drift: full-grain key + per-day dedup (2026-08-25)
+
+Fixes a latent grain bug in `insights.task_duration_anomalies` (the retrospective
+"Duration drift" panel), surfaced by the F5 review of the sibling forecast. It
+keyed tasks on `DATABASE_NAME.TASK_NAME`, so a task name reused across schemas (or,
+under company='ALL', across companies) interleaved multiple series into one — a
+corrupted robust-z baseline that could flag or clear the wrong task. Now keyed on
+the full grain (DB, schema, name, company when present) and deduped to one AVG_SEC
+per calendar day before the robust-z pass (so a duplicate mart row can't inflate
+the active-day count either). SCHEMA_NAME is carried through to the Operations ▸
+Tasks ▸ Health drift table. Mirrors the fix already applied to
+`duration_sla_forecast` (4.293.0). App-only, no migration.
+
 ## 4.293.0 - Predictive SLA miss: tasks trending slower (2026-08-25)
 
 Operations ▸ Tasks ▸ Health gains a "Predicted SLA miss — tasks trending slower"
