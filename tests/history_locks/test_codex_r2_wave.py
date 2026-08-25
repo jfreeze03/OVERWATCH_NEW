@@ -416,11 +416,15 @@ def test_rec19_alerts_renders_backlog_and_expired():
 # ---------------------------------------------------------------------------
 def test_rec14_nav_groups_partition_and_preserve_role_scope():
     from app.config import PAGES_BY_PROFILE, nav_groups_for
-    # DBA sees everything -> all three groups in order, nothing left over
+    # DBA sees everything -> the three groups in order.
     dba = nav_groups_for(PAGES_BY_PROFILE["DBA"])
-    assert [g for g, _ in dba] == ["Watch", "Analyze", "Govern"]
+    # ASK-OVERWATCH (isolated feature): "Ask" is a DBA-only page in no NAV_GROUP,
+    # so nav_groups_for trails it under "More". Revert: drop "More" from the list
+    # below and delete the dict(dba)["More"] assertion.
+    assert [g for g, _ in dba] == ["Watch", "Analyze", "Govern", "More"]
     assert dict(dba)["Watch"] == ["Brief", "Overview", "Alerts"]
     assert dict(dba)["Govern"] == ["Security", "Admin"]
+    assert dict(dba)["More"] == ["Ask"]
     # EXECUTIVE cannot see Operations/Control Room/Security/Admin -> no Govern group,
     # and only the allowed Analyze member (Cost & Contract) appears
     exe = dict(nav_groups_for(PAGES_BY_PROFILE["EXECUTIVE"]))

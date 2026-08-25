@@ -134,7 +134,11 @@ PAGES_BY_PROFILE = {
     "EXECUTIVE": ("Brief", "Overview", "Cost & Contract", "Alerts"),
     "ANALYST": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
     "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
-    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin"),
+    # ASK-OVERWATCH: "Ask" is appended for the DBA (owner) profile only, so the
+    # isolated test surface is visible to you while testing and to no one else. It
+    # is not in any NAV_GROUP, so nav_groups_for() auto-trails it under "More".
+    # Revert: delete "Ask" from this tuple (+ the main.py wiring + app/logic/ask/).
+    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin", "Ask"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
