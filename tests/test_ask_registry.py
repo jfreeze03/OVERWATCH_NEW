@@ -408,6 +408,14 @@ def test_failover_failsafe_do_not_hijack_task_failures():
     assert route("what task is failing most", default_days=30, company="ALL").answerer.intent == "task_failures"
 
 
+def test_task_failure_verb_inflections_route():
+    # coverage: erroring/errored (error stem) route; the task-subject gate still holds.
+    for q in ("why do my tasks keep erroring", "which pipeline errored",
+              "what task keeps erroring out", "task failure rate"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == "task_failures", q
+    assert route("what is an error", default_days=30, company="ALL").answerer is None
+
+
 def test_warehouse_waste_label_never_overclaims_scope():
     from app.logic.ask.registry import _analyze_warehouse_waste
     idf = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A"], "METERED_HOURS": [720], "IDLE_HOURS": [500],
