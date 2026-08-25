@@ -270,6 +270,11 @@ _EXPECTED_MIGRATIONS = {
         "it, yet it auto-refreshed every ~6h on WH_ALFA_ADMIN for no consumer -- pure "
         "serverless waste. Guarded DROP ... IF EXISTS; no data loss (derivable from "
         "FACT_METERING_DAILY)",
+    91: "Auto-resolve cleared alerts: ALTER ALERT_CONFIG ADD AUTO_CLEAR_ENABLED + "
+        "CLEAR_THRESHOLD_NUM; SP_ALERT_SCAN re-derived from V087 with an auto-clear "
+        "sweep that resolves today's live-window events (PERF_QUERY_FAIL_PCT / "
+        "PERF_QUEUED_MINUTES / PERF_SPILL_GB) once the condition drops below the "
+        "hysteresis floor (AUTO_CLEARED)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

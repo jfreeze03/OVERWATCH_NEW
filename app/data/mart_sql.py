@@ -619,12 +619,13 @@ SELECT
     DATE_TRUNC('week', RAISED_AT)::DATE AS WEEK,
     COUNT(*) AS EVENTS,
     SUM(IFF(ACK_AT IS NOT NULL, 1, 0)) AS ACKED,
-    -- codex#40 companion: a machine SUPERSEDED close (V067's escalation sweep sets
-    -- RESOLVED_AT on the lower-band event) is NOT a human resolution — exclude it from
-    -- the RESOLVED count and MTTR so dedupe timings don't pollute the operator panel.
-    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED', 1, 0)) AS RESOLVED,
+    -- codex#40 companion: a MACHINE close (V067 escalation SUPERSEDED, or the V091
+    -- auto-clear sweep marking a cleared condition AUTO_CLEARED) is NOT a human
+    -- resolution — exclude both from the RESOLVED count and MTTR so machine closes
+    -- don't pollute the operator panel.
+    SUM(IFF(RESOLVED_AT IS NOT NULL AND COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED'), 1, 0)) AS RESOLVED,
     ROUND(AVG(DATEDIFF('minute', RAISED_AT, ACK_AT)), 1) AS MTTA_MIN,
-    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED',
+    ROUND(AVG(IFF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED'),
                   DATEDIFF('minute', RAISED_AT, RESOLVED_AT), NULL)), 1) AS MTTR_MIN
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -1170,7 +1171,7 @@ LEFT JOIN (
 ) a ON a.EVENT_ID = e.EVENT_ID
 WHERE e.RULE_ID = {sql_literal(rid)}
   AND e.STATUS = 'RESOLVED'
-  AND COALESCE(e.RESOLUTION_KIND, '') <> 'SUPERSEDED'
+  AND COALESCE(e.RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED')
   AND e.RESOLVED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 ORDER BY e.RESOLVED_AT DESC
 LIMIT {cap}
@@ -1191,7 +1192,7 @@ SELECT
     RULE_ID,
     -- codex#40 companion: exclude machine SUPERSEDED closes so RESOLVED_EVENTS ties to the
     -- ACTIONED+NOISE+EXPECTED+UNTAGGED buckets (PRECISION_PCT was already unaffected).
-    COUNT_IF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED') AS RESOLVED_EVENTS,
+    COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED')) AS RESOLVED_EVENTS,
     COUNT_IF(RESOLUTION_KIND = 'ACTIONED')            AS ACTIONED,
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,

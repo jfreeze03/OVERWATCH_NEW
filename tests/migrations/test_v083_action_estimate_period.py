@@ -95,7 +95,7 @@ def test_action_queue_readers_select_period():
 
 def test_v083_validate_floor_and_deploy_docs_track_the_migration():
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V090 applied" in validate
-    assert "BETWEEN 1 AND 90) = 90" in validate
+    assert "V001..V091 applied" in validate
+    assert "BETWEEN 1 AND 91) = 91" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V083__action_estimate_period.sql" in (_ROOT / rel).read_text(encoding="utf-8")

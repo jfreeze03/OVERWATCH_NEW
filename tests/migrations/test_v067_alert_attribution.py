@@ -79,9 +79,9 @@ def test_supersede_excluded_from_operator_mttr():
     # timings pollute human MTTR.
     from app.data import mart_sql
     mttr = mart_sql.alert_mttr(90)
-    assert mttr.count("COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED'") == 2   # RESOLVED + MTTR
+    assert mttr.count("COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED')") == 2   # RESOLVED + MTTR
     ms = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
-    assert "COUNT_IF(COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED') AS RESOLVED_EVENTS" in ms
+    assert "COUNT_IF(COALESCE(RESOLUTION_KIND, '') NOT IN ('SUPERSEDED', 'AUTO_CLEARED')) AS RESOLVED_EVENTS" in ms
 
 
 # #17 — residual compute resolves its company from the executing warehouse

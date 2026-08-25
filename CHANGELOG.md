@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.289.0 - Auto-resolve cleared alerts (V091, owner-applied) (2026-08-25)
+
+Alerts whose condition has cleared now close themselves, so the operator stops
+manually resolving stale "over threshold yesterday" rows.
+
+- **Migration V091** (owner applies in Snowsight after V090): `ALTER ALERT_CONFIG
+  ADD AUTO_CLEAR_ENABLED + CLEAR_THRESHOLD_NUM`; seed the three `FACT_QUERY_HOURLY`
+  live-window rules (`PERF_QUERY_FAIL_PCT`, `PERF_QUEUED_MINUTES`, `PERF_SPILL_GB`);
+  `SP_ALERT_SCAN` re-derived from V087 with one final `[auto-clear sweep]` arm that
+  RESOLVEs today's still-OPEN events (`RESOLUTION_KIND='AUTO_CLEARED'`) once the
+  scope drops below the CLEAR hysteresis floor (default 0.9 × THRESHOLD_NUM).
+  OPEN-only (never ACK/RESOLVED/SNOOZED); ≥1h dwell + hysteresis prevent flapping;
+  today's-bucket only, so a historical day-stamped exceedance is never rewritten;
+  the sweep is wrapped so a failure never breaks alerting. Byte-derived from V087
+  (removing the sweep + the two columns reproduces V087).
+- **App read-path**: `AUTO_CLEARED` is excluded from per-rule precision, MTTR, and
+  resolved-counts exactly like the existing machine-close `SUPERSEDED`, so machine
+  closes never distort operator metrics. Auto-cleared events simply drop off the
+  open feed.
+
 ## 4.288.0 - Per-query optimization advisor (2026-08-25)
 
 The Operations ▸ Queries drill now shows a deterministic optimization advisor
