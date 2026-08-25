@@ -26,6 +26,7 @@ from app.logic.formulas import (
     account_now,
     account_today,
     blended_billed_usd,
+    budget_burndown,
     budget_pace_variance,
     contract_runway,
     credits_to_usd,
@@ -744,6 +745,20 @@ def render() -> None:
         "Incomplete, open its deductions below and work the highest-penalty driver first."
     )
     kpi_row(account_kpis)
+    # P1 #57: cumulative-actual-vs-straight-line-budget burndown — the CFO-friendly
+    # 'are we pacing over budget' view. Budget-gated, reuses daily_complete (no scan).
+    if budget > 0:
+        _burn = budget_burndown(daily_complete, budget, account_today())
+        if len(_burn) >= 2:
+            st.markdown("**Budget burndown — cumulative spend vs the straight-line budget**")
+            st.line_chart(_burn.set_index("DAY")[["CUM_ACTUAL_USD", "BUDGET_LINE_USD"]])
+            _last = _burn.iloc[-1]
+            _gap = float(_last["CUM_ACTUAL_USD"]) - float(_last["BUDGET_LINE_USD"])
+            st.caption(md_dollars(
+                f"Cumulative {format_usd(_last['CUM_ACTUAL_USD'])} vs "
+                f"{format_usd(_last['BUDGET_LINE_USD'])} on the flat budget line — "
+                f"{format_usd(abs(_gap))} {'over' if _gap >= 0 else 'under'} pace. Complete days "
+                "only (today's partial excluded); MONTHLY_BUDGET_USD straight-lined across the month."))
     # CoCo Overview #10: the open-crit/high KPI is a dead-end count — give it a path
     # to the actual events, but only when there's something open to work.
     if (alerts_res.ok and (critical_alerts or high_alerts)

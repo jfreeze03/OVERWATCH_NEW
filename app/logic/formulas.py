@@ -607,3 +607,27 @@ def budget_pace_variance(mtd_actual, budget_usd, today) -> tuple[float, float]:
     completed = max(elapsed - 1, 0)
     expected = budget * completed / days_in_month if days_in_month else 0.0
     return safe_float(mtd_actual) - expected, expected
+
+
+def budget_burndown(daily, budget_usd, today, *, day_col="DAY", usd_col="USD") -> pd.DataFrame:
+    """Cumulative actual spend THIS month vs the straight-line budget target per
+    day-of-month — the canonical 'are we pacing over budget' burndown (P1 #57).
+    Returns DAY, CUM_ACTUAL_USD, BUDGET_LINE_USD for the current calendar month up
+    to the latest DAY present. No budget / empty / missing columns -> empty frame;
+    never raises."""
+    cols = ["DAY", "CUM_ACTUAL_USD", "BUDGET_LINE_USD"]
+    budget = safe_float(budget_usd)
+    if (daily is None or getattr(daily, "empty", True) or budget <= 0
+            or day_col not in daily.columns or usd_col not in daily.columns):
+        return pd.DataFrame(columns=cols)
+    days_in_month, _elapsed, _rem = month_days(today)
+    month_start = pd.Timestamp(today).normalize().replace(day=1)
+    out = daily.copy()
+    out["DAY"] = pd.to_datetime(out[day_col], errors="coerce")
+    out = out.dropna(subset=["DAY"])
+    out = out[out["DAY"] >= month_start].sort_values("DAY")
+    if out.empty:
+        return pd.DataFrame(columns=cols)
+    out["CUM_ACTUAL_USD"] = pd.to_numeric(out[usd_col], errors="coerce").fillna(0.0).cumsum().round(2)
+    out["BUDGET_LINE_USD"] = (budget * out["DAY"].dt.day / (days_in_month or 1)).round(2)
+    return out[cols].reset_index(drop=True)

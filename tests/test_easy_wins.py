@@ -16,7 +16,7 @@ from pathlib import Path
 import pandas as pd
 
 from app.data import security_sql
-from app.logic.formulas import budget_pace_variance
+from app.logic.formulas import budget_burndown, budget_pace_variance
 from app.logic.insights import (
     cluster_failures_by_family,
     flag_clustering_churn,
@@ -180,6 +180,18 @@ def test_budget_pace_no_budget_is_zero():
     assert budget_pace_variance(500.0, None, dt.date(2026, 8, 10)) == (0.0, 0.0)
 
 
+def test_budget_burndown_cumulative_vs_straight_line():
+    # August has 31 days; budget 3100 -> 100/day straight line. July rows excluded.
+    daily = pd.DataFrame({"DAY": [dt.date(2026, 7, 31), dt.date(2026, 8, 1), dt.date(2026, 8, 2)],
+                          "USD": [999.0, 100.0, 150.0]})
+    out = budget_burndown(daily, 3100.0, dt.date(2026, 8, 10))
+    assert list(out["DAY"].dt.date) == [dt.date(2026, 8, 1), dt.date(2026, 8, 2)]  # this month only
+    assert list(out["CUM_ACTUAL_USD"]) == [100.0, 250.0]        # cumulative actual
+    assert list(out["BUDGET_LINE_USD"]) == [100.0, 200.0]       # 3100 * day / 31
+    assert budget_burndown(daily, 0.0, dt.date(2026, 8, 10)).empty          # no budget
+    assert budget_burndown(pd.DataFrame(), 3100.0, dt.date(2026, 8, 10)).empty
+
+
 # ================================================== #16 single-factor SQL ====
 
 def test_single_factor_logins_shape():
@@ -215,3 +227,4 @@ def test_easy_wins_wired():
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "budget_pace_variance(mtd_spend, budget, account_today())" in ov
     assert "Pace vs budget calendar" in ov
+    assert "budget_burndown(" in ov and "Budget burndown" in ov   # #57

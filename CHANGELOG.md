@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.298.0 - Budget burndown chart (2026-08-25)
+
+Upgrade Board P1 #57. Overview gains a "Budget burndown" chart: cumulative actual
+spend this month vs the straight-line budget target per day-of-month — the
+CFO-friendly "are we pacing over budget" view, alongside the existing pace-variance
+KPI. New pure `formulas.budget_burndown(daily, budget, today)` returns
+DAY / CUM_ACTUAL_USD / BUDGET_LINE_USD for the current calendar month; budget-gated,
+reuses the daily-spend frame already loaded (no new scan). App-only, no migration.
+
 ## 4.297.0 - Auto-clustering SUSPEND RECLUSTER candidates (2026-08-25)
 
 Upgrade Board P1 #31. Cost ▸ Optimize ▸ Storage & waste ▸ automatic-clustering
