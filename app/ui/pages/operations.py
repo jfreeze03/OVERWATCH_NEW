@@ -24,7 +24,7 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
-from app.logic import remediation, wh_change
+from app.logic import query_advisor, remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -85,6 +85,7 @@ from app.ui.components import (
     selectable_table,
     served_days,
     snowsight_profile_column,
+    status_chips,
     styled_table,
     with_user_names,
 )
@@ -355,6 +356,34 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     {"label": "Status", "value": str(row.get("EXECUTION_STATUS", "?"))},
                 ])
                 st.code(str(row.get("QUERY_TEXT") or ""), language="sql")
+                # Per-query optimization advisor: deterministic findings + a
+                # 0-100 "optimize me first" score from the row already loaded
+                # (zero extra query, zero AI). Thresholds match the triage table.
+                _adv_findings, _adv_score = query_advisor.advise(row)
+                if _adv_findings:
+                    section_header("Optimization advisor",
+                                   "bad" if _adv_score >= 40 else "warn", "optimize")
+                    st.markdown(
+                        f"**Optimize-me-first score: {_adv_score}/100** — "
+                        f"{len(_adv_findings)} finding"
+                        f"{'s' if len(_adv_findings) != 1 else ''}, most impactful first.")
+                    status_chips([(f.title, "bad" if f.severity == "bad" else "")
+                                  for f in _adv_findings])
+                    for _f in _adv_findings:
+                        st.markdown(f"- {_f.detail}")
+                    # OPT-IN Cortex rewrite: button-gated, credit-warned, grounded in
+                    # exactly this query's stats + the findings above. Never auto-runs.
+                    from app.logic.ai_prompts import query_optimization_prompt
+                    from app.ui.ai_panel import ai_evaluation_panel
+                    ai_evaluation_panel(
+                        key=f"qadv_{target_id[:12]}",
+                        prompt=query_optimization_prompt(row, _adv_findings),
+                        settings=load_settings(_PAGE),
+                        page=_PAGE,
+                        subject="rewrite this query to remove the flagged inefficiencies",
+                    )
+                elif str(row.get("EXECUTION_STATUS", "")).upper() == "SUCCESS":
+                    st.caption("No obvious inefficiencies detected for this query.")
                 ctx = run(
                     "SELECT CURRENT_ORGANIZATION_NAME() AS ORG, CURRENT_ACCOUNT_NAME() AS ACCT",
                     page=_PAGE, key="drill_ctx", tier="metadata", source="session context")

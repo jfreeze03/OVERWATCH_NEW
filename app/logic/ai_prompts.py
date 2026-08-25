@@ -11,7 +11,15 @@ Contract (the rebuild's honesty rules applied to AI):
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING
+
 import pandas as pd
+
+from .formulas import safe_float
+
+if TYPE_CHECKING:
+    from .query_advisor import Finding
 
 MAX_ROWS = 25
 MAX_PROMPT_CHARS = 6000
@@ -98,6 +106,39 @@ def idle_warehouse_prompt(advisor: pd.DataFrame, company: str, window_days: int)
         "timer-change estimate; never substitute gross projected idle. For VERIFY SETTING rows, "
         "request metadata verification. For ALREADY TUNED rows, investigate cadence, scheduling, "
         "consolidation, or retirement instead of recommending a longer timer.",
+    )
+
+
+def query_optimization_prompt(row: Mapping[str, object], findings: Sequence[Finding]) -> str:
+    """Ground a Cortex rewrite in ONE query's stats + the deterministic findings.
+
+    The model gets only this query's numbers, the findings already shown to the
+    operator, and the query text — never anything the DBA hasn't seen — and is
+    told to invent no tables/columns beyond the text.
+    """
+    stats = "; ".join([
+        f"warehouse_size={row.get('WAREHOUSE_SIZE') or '?'}",
+        f"elapsed={safe_float(row.get('ELAPSED_SEC')):.1f}s",
+        f"compile={safe_float(row.get('COMPILE_SEC')):.1f}s",
+        f"queued={safe_float(row.get('QUEUED_SEC')):.1f}s",
+        f"gb_scanned={safe_float(row.get('GB_SCANNED')):.1f}",
+        f"cache_pct={safe_float(row.get('CACHE_PCT')):.0f}",
+        f"remote_spill_gb={safe_float(row.get('REMOTE_SPILL_GB')):.1f}",
+        f"partitions_scanned={int(safe_float(row.get('PARTITIONS_SCANNED')))}",
+        f"partitions_total={int(safe_float(row.get('PARTITIONS_TOTAL')))}",
+        f"rows_produced={int(safe_float(row.get('ROWS_PRODUCED')))}",
+    ])
+    finds = "\n".join(f"- {f.title}: {f.detail}" for f in findings) or "- (no deterministic findings)"
+    qtext = str(row.get("QUERY_TEXT") or "").strip()
+    evidence = f"STATS: {stats}\n\nFINDINGS:\n{finds}\n\nQUERY TEXT:\n{qtext}"
+    return _assemble(
+        "One Snowflake query's execution stats plus the deterministic optimization findings "
+        "already computed and shown for it.",
+        evidence,
+        "Rewrite this SQL to remove the flagged inefficiencies. Explain each change and which "
+        "finding it addresses. Do NOT invent tables or columns that are not in the query text; "
+        "if a fix needs schema details you cannot see (clustering keys, row counts), say what "
+        "you would need instead of guessing.",
     )
 
 

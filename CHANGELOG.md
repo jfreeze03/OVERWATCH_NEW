@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.288.0 - Per-query optimization advisor (2026-08-25)
+
+The Operations ▸ Queries drill now shows a deterministic optimization advisor
+below any drilled query: a 0-100 "optimize me first" badness score plus concrete
+plain-English fixes, computed at ZERO AI cost from the query row already loaded.
+
+- New pure `app/logic/query_advisor.py` (`advise(row) -> (findings, score)`),
+  mirroring `sizing.py`'s named-threshold pattern and `scoring._cap`'s capped
+  composite so no single driver saturates the score. Rules: remote spill,
+  local spill, poor partition pruning, large cold scan, compile-bound, queued,
+  and expensive-empty-result — with thresholds identical to
+  `ops_sql.query_optimization_triage` so the advisor never contradicts the
+  triage table that links into the drill.
+- Findings render most-impactful-first as chips + plain-English sentences.
+- OPTIONAL per-query Cortex rewrite (`ai_prompts.query_optimization_prompt` via
+  the existing `ai_evaluation_panel`): button-gated, credit-warned, grounded in
+  exactly this query's stats + the findings, told to invent no tables/columns —
+  never auto-runs, spends nothing until clicked. No migration.
+
 ## 4.287.0 - Ask OVERWATCH: warehouse-waste + task-failure answerers (2026-08-25)
 
 Two more grounded answerers on the Ask page, same pattern (existing tested builders,
