@@ -14,8 +14,8 @@
 --  Each block below is independent: run one at a time. All object names are
 --  fully qualified (DBA_MAINT_DB.OVERWATCH.*), so no USE DATABASE/SCHEMA needed.
 --
---  THIS BATCH: Ask-OVERWATCH smoke checks - confirm the marts the new Ask page
---  reads return rows on the live account (feature branch: feature/ask-overwatch).
+--  THIS BATCH: Ask-OVERWATCH smoke checks for all FOUR answerers (live on main,
+--  v4.287.0) - confirm each mart the Ask page reads returns rows on this account.
 -- ===========================================================================
 
 -- ------------------------------------------------------------------------
@@ -96,7 +96,7 @@ LIMIT 25
 
 
 -- ------------------------------------------------------------------------
--- Q4: Ask smoke 4/4 - cloud-services ratio per warehouse
+-- Q4: Ask smoke 4/6 - cloud-services ratio per warehouse
 -- LOOK FOR: Rows of WAREHOUSE_NAME / CLOUD_SVC_PCT / STATUS (ELEVATED/WATCH/NORMAL). Flags which warehouses have an elevated cloud-services share.
 -- ------------------------------------------------------------------------
 SELECT
@@ -119,5 +119,59 @@ LIMIT 500
 ;
 
 -- RESULT Q4: (paste back to Claude / note what it showed)
+
+
+-- ------------------------------------------------------------------------
+-- Q5: Ask smoke 5/6 - idle warehouse waste (warehouse_idle_waste)
+-- LOOK FOR: Rows of WAREHOUSE_NAME / IDLE_HOURS / IDLE_CREDITS (biggest idle first). Non-empty = the 'which warehouse is wasting credits' answer has data.
+-- ------------------------------------------------------------------------
+WITH q_spans AS (
+    SELECT WAREHOUSE_NAME,
+           DATE_TRUNC('hour', START_TIME) AS H0,
+           DATE_TRUNC('hour', COALESCE(END_TIME, START_TIME)) AS H1
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+      AND WAREHOUSE_NAME IS NOT NULL
+      AND 1 = 1
+),
+query_hours AS (
+    SELECT DISTINCT s.WAREHOUSE_NAME, DATEADD('hour', g.SEQ, s.H0) AS HOUR_TS
+    FROM q_spans s
+    JOIN (SELECT SEQ4() AS SEQ FROM TABLE(GENERATOR(ROWCOUNT => 25))) g
+      ON DATEADD('hour', g.SEQ, s.H0) <= s.H1
+)
+SELECT
+    M.WAREHOUSE_NAME,
+    DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE(M.WAREHOUSE_NAME) AS COMPANY,
+    COUNT(*) AS METERED_HOURS,
+    SUM(IFF(Q.HOUR_TS IS NULL, 1, 0)) AS IDLE_HOURS,
+    SUM(COALESCE(M.CREDITS_USED, 0)) AS TOTAL_CREDITS,
+    SUM(IFF(Q.HOUR_TS IS NULL, COALESCE(M.CREDITS_USED, 0), 0)) AS IDLE_CREDITS
+FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY M
+LEFT JOIN query_hours Q
+       ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+      AND Q.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
+WHERE M.START_TIME >= DATEADD('day', -30, CURRENT_DATE())
+  AND M.WAREHOUSE_ID > 0
+GROUP BY 1, 2
+HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0
+ORDER BY IDLE_CREDITS DESC
+LIMIT 100
+;
+
+-- RESULT Q5: (paste back to Claude / note what it showed)
+
+
+-- ------------------------------------------------------------------------
+-- Q6: Ask smoke 6/6 - task runs/failures per day (task_failures)
+-- LOOK FOR: Rows of TASK_NAME / RUNS / FAILED (FAILED desc). Any FAILED>0 rows = the 'which task is failing most' answer has data; all FAILED=0 = good news.
+-- ------------------------------------------------------------------------
+SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
+FROM DBA_MAINT_DB.OVERWATCH.FACT_TASK_DAILY
+WHERE DAY >= DATEADD('day', -30, CURRENT_DATE())
+ORDER BY FAILED DESC, DAY DESC
+;
+
+-- RESULT Q6: (paste back to Claude / note what it showed)
 
 
