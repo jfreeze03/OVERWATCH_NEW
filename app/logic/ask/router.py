@@ -40,9 +40,10 @@ _MAX_DAYS = 365
 # "whole" and "cs" never inside "docs"); deliberate prefix stems match a word's
 # start; multi-word / hyphenated phrases fall back to substring.
 _WORD_RE = re.compile(r"[a-z0-9]+")
-# prefix stems: spik->spike/spiking, spend->spends/spender, wast->waste/wasting,
-# fail->failing/failed/failure/failures.
-_STEMS = frozenset({"spik", "spend", "wast", "fail"})
+# prefix stems: spik->spike/spiking, spend->spends/spender, wast->waste/wasting.
+# NOT "fail" — it would also match failover/failsafe (real, unrelated Snowflake
+# terms); the failure family is enumerated explicitly in the task answerer.
+_STEMS = frozenset({"spik", "spend", "wast"})
 
 
 @dataclass(frozen=True)

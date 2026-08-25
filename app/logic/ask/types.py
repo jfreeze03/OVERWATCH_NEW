@@ -41,6 +41,10 @@ class QuerySpec:
     key: str
     sql: str
     tier: str = "recent"
+    # Row cap for the fetch. None -> the run() default. Use 0 (uncapped) when the
+    # answerer AGGREGATES the frame and a truncated read would distort a total
+    # (e.g. summing per-task runs — a capped read understates the denominator).
+    max_rows: int | None = None
 
 
 @dataclass

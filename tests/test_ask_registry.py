@@ -398,6 +398,50 @@ def test_task_failures_aggregates_by_task_and_names_worst():
     assert gn.confidence == "grounded" and "No task failures" in gn.headline
 
 
+# ==================== new-answerer hardening (adversarial round) ============
+
+def test_failover_failsafe_do_not_hijack_task_failures():
+    # #1: 'fail' is not a stem; failover/failsafe are unrelated Snowflake terms.
+    for q in ("is failover configured for my task", "is failsafe enabled on this job",
+              "how much failsafe storage does my task use"):
+        assert route(q, default_days=30, company="ALL").answerer is None, q
+    assert route("what task is failing most", default_days=30, company="ALL").answerer.intent == "task_failures"
+
+
+def test_warehouse_waste_label_never_overclaims_scope():
+    from app.logic.ask.registry import _analyze_warehouse_waste
+    idf = pd.DataFrame({"WAREHOUSE_NAME": ["WH_A"], "METERED_HOURS": [720], "IDLE_HOURS": [500],
+                        "TOTAL_CREDITS": [1000.], "IDLE_CREDITS": [600.]})
+    alfa = _analyze_warehouse_waste(AskParams(30, "ALFA"), {"idle": idf})
+    assert any("across ALFA warehouses" in b for b in alfa.bullets)
+    assert not any("Account-wide" in b for b in alfa.bullets)   # #2: company slice != account
+    allc = _analyze_warehouse_waste(AskParams(30, "ALL"), {"idle": idf})
+    assert any("Account-wide" in b for b in allc.bullets)
+
+
+def test_task_failures_null_name_and_schema_qualified():
+    from app.logic.ask.registry import _analyze_task_failures
+    # #3: null task name -> placeholder, never "nan"/"None"
+    tf = pd.DataFrame({"DAY": ["2026-08-20"], "DATABASE_NAME": ["DB"], "SCHEMA_NAME": ["S"],
+                       "TASK_NAME": [None], "RUNS": [10], "FAILED": [9], "LAST_ERROR": ["boom"]})
+    r = _analyze_task_failures(AskParams(30, "ALL"), {"tasks": tf})
+    assert "(unnamed task)" in r.headline and "nan" not in r.headline and "None" not in r.headline
+    # #4: same task name in different schemas stays distinguishable; evidence keeps SCHEMA_NAME
+    tf2 = pd.DataFrame({"DAY": ["2026-08-24", "2026-08-24"], "DATABASE_NAME": ["DB", "DB"],
+                        "SCHEMA_NAME": ["S1", "S2"], "TASK_NAME": ["load", "load"],
+                        "RUNS": [10, 10], "FAILED": [8, 2], "LAST_ERROR": ["e1", "e2"]})
+    r2 = _analyze_task_failures(AskParams(30, "ALL"), {"tasks": tf2})
+    assert "DB.S1.load" in r2.headline
+    assert any("DB.S1.load" in b for b in r2.bullets) and any("DB.S2.load" in b for b in r2.bullets)
+    assert "SCHEMA_NAME" in r2.evidence.columns
+
+
+def test_task_failures_spec_is_uncapped_so_rate_is_not_truncated():
+    # #5: the per-task-day fact is summed, so a capped read would inflate the rate.
+    from app.logic.ask.registry import _needs_task_failures
+    assert _needs_task_failures(AskParams(30, "ALL"))[0].max_rows == 0
+
+
 # ================================================= wiring lock ==============
 
 def test_ask_page_is_wired_and_isolated():

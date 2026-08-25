@@ -156,8 +156,11 @@ def render() -> None:
     # query FAILURE as a confident "no data" answer, the exact false statement
     # this feature promises never to make.
     for spec in ans.needs(params):
-        res = run(spec.sql, page=_PAGE, key=f"ask_{ans.intent}_{spec.key}",
-                  tier=spec.tier, source=f"Ask:{ans.intent}:{spec.key}")
+        run_kwargs = {"page": _PAGE, "key": f"ask_{ans.intent}_{spec.key}",
+                      "tier": spec.tier, "source": f"Ask:{ans.intent}:{spec.key}"}
+        if spec.max_rows is not None:   # an answerer that aggregates asks for an uncapped read
+            run_kwargs["max_rows"] = spec.max_rows
+        res = run(spec.sql, **run_kwargs)
         if not res.ok:
             st.warning(
                 f"I couldn't run the grounded query for this ({res.error_kind or 'error'}), "

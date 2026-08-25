@@ -58,6 +58,22 @@ def _num(series_val: object, default: float = 0.0) -> float:
     return default if pd.isna(f) else f
 
 
+def _notnull(v: object) -> bool:
+    return v is not None and not pd.isna(v) and str(v).strip() != ""
+
+
+def _task_label(row: pd.Series) -> str:
+    """DB.SCHEMA.TASK from the available parts (matching how the Ops surfaces
+    qualify tasks), or a neutral placeholder for a null/blank task name — so
+    same-named tasks in different schemas stay distinguishable and a SQL NULL
+    never renders as 'nan'/'None'."""
+    if not _notnull(row.get("TASK_NAME")):
+        return "(unnamed task)"
+    parts = [str(row.get(c)).strip()
+             for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME") if _notnull(row.get(c))]
+    return ".".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Answerer 1 — "which user is causing spend spikes?"
 # --------------------------------------------------------------------------- #
@@ -371,12 +387,15 @@ def _analyze_warehouse_waste(
         [f"Idle analysis is capped to the live {eff}-day window (you asked for {params.days}d)."]
         if eff < params.days else []
     )
+    # Never claim a scope wider than the query ran: the builder is company-scoped
+    # for a non-ALL filter, so a subtotal is that company's slice, not the account's.
+    scope_wh = "warehouse" if params.company == "ALL" else f"{params.company} warehouse"
     if total_idle <= 0:
         # Honest good news, not a false "no data": warehouses are well-utilized.
         return AnswerResult(
             intent=_WASTE_INTENT,
             headline=(
-                f"No idle-credit waste in the last {eff}d — every metered warehouse "
+                f"No idle-credit waste in the last {eff}d — every metered {scope_wh} "
                 "ran queries in the hours it was billed for."
             ),
             bullets=cap_note,
@@ -406,9 +425,9 @@ def _analyze_warehouse_waste(
         rt = float(r.get("TOTAL_CREDITS", 0.0))
         pct = rc / rt * 100 if rt > 0 else 0.0
         bullets.append(f"{r['WAREHOUSE_NAME']}: {_fmt(rc)} idle credits ({pct:.0f}% of its spend)")
-    bullets.append(
-        f"Account-wide idle waste this window: {_fmt(total_idle)} credits."
-    )
+    idle_scope = ("Account-wide idle waste this window" if params.company == "ALL"
+                  else f"Idle waste across {params.company} warehouses this window")
+    bullets.append(f"{idle_scope}: {_fmt(total_idle)} credits.")
     bullets.extend(cap_note)
 
     ev_cols = [c for c in ("WAREHOUSE_NAME", "IDLE_CREDITS", "TOTAL_CREDITS", "IDLE_HOURS", "METERED_HOURS") if c in d.columns]
@@ -431,6 +450,10 @@ def _needs_task_failures(params: AskParams) -> list[QuerySpec]:
             key="tasks",
             sql=mart_sql.fact_task_daily(params.days, params.company),
             tier="recent",
+            # Uncapped: we SUM RUNS/FAILED per task, so a 5000-row truncation of
+            # this per-task-day fact would drop a busy task's clean days and inflate
+            # its failure rate. Row count is bounded by tasks x active days.
+            max_rows=0,
         )
     ]
 
@@ -472,7 +495,7 @@ def _analyze_task_failures(
         )
 
     top = fails.iloc[0]
-    task = str(top["TASK_NAME"])
+    task = _task_label(top)
     failed = int(top["FAILED"])
     runs = int(top["RUNS"])
     rate = failed / runs * 100 if runs > 0 else 0.0
@@ -486,7 +509,7 @@ def _analyze_task_failures(
         rf = int(r["FAILED"])
         rr = int(r["RUNS"])
         rrate = rf / rr * 100 if rr > 0 else 0.0
-        bullets.append(f"{r['TASK_NAME']}: {rf:,} failures / {rr:,} runs ({rrate:.0f}%)")
+        bullets.append(f"{_task_label(r)}: {rf:,} failures / {rr:,} runs ({rrate:.0f}%)")
     if "LAST_ERROR" in top.index:
         err = _sample(top.get("LAST_ERROR"), 160)
         if err and err != "(no sample text)":
@@ -494,7 +517,9 @@ def _analyze_task_failures(
 
     ev = fails.head(15).copy()
     ev["FAIL_RATE_PCT"] = (ev["FAILED"] / ev["RUNS"].where(ev["RUNS"] > 0) * 100).round(0)
-    ev_cols = [c for c in ("DATABASE_NAME", "TASK_NAME", "FAILED", "RUNS", "FAIL_RATE_PCT", "LAST_ERROR") if c in ev.columns]
+    if "TASK_NAME" in ev.columns:
+        ev["TASK_NAME"] = ev["TASK_NAME"].map(lambda t: str(t) if _notnull(t) else "(unnamed task)")
+    ev_cols = [c for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME", "FAILED", "RUNS", "FAIL_RATE_PCT", "LAST_ERROR") if c in ev.columns]
     return AnswerResult(
         intent=_TASK_INTENT,
         headline=headline, bullets=bullets, evidence=ev[ev_cols],
@@ -586,12 +611,14 @@ REGISTRY: tuple[Answerer, ...] = (
             "which pipeline task keeps failing",
         ),
         keywords=(
-            "task", "tasks", "pipeline", "job", "fail", "error", "broken",
+            "task", "tasks", "pipeline", "job", "fail", "fails", "failed",
+            "failing", "failure", "failures", "error", "broken",
         ),
         require_all=(
             ("task", "tasks", "pipeline", "pipelines", "job", "jobs"),
-            # "fail" stems fail/failing/failed/failure/failures (router._STEMS).
-            ("fail", "error", "errors", "broken"),
+            # Enumerated (not a "fail" stem) so failover/failsafe never match.
+            ("fail", "fails", "failed", "failing", "failure", "failures",
+             "error", "errors", "broken"),
         ),
         needs=_needs_task_failures,
         analyze=_analyze_task_failures,
