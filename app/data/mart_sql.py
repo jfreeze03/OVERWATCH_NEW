@@ -683,6 +683,38 @@ LIMIT 500
 """
 
 
+def verified_wins(company: str = "ALL") -> str:
+    """VERIFIED savings rows typed to (fix, warehouse) for the proven-fix transfer
+    engine. The app-guarded remediation path stamps FINDING_TYPE/TARGET_OBJECT
+    (V053), but the dominant autobook path (V038) leaves them NULL and encodes the
+    fix only in free text — recover the type + warehouse by joining
+    WAREHOUSE_CHANGE_REGISTRY on SOURCE_CHANGE_ID (SETTING -> fix type,
+    WAREHOUSE_NAME -> target). VERIFIED-only, realized dollars only (never ESTIMATED).
+    Scoped to the page's company by COMPANY_FOR_WAREHOUSE on the recovered target, so
+    evidence never leaks across a company boundary; company='ALL' is account-wide."""
+    from app import companies
+    _target = "COALESCE(NULLIF(TRIM(l.TARGET_OBJECT), ''), r.WAREHOUSE_NAME)"
+    _scope = ("" if str(company or "ALL").upper() == "ALL"
+              else f"\n  AND {companies.company_case_sql(_target)} = {sql_literal(str(company))}")
+    return f"""
+SELECT
+    l.ITEM_ID,
+    l.CREATED_AT,
+    l.VERIFIED_AT,
+    l.VERIFIED_USD,
+    COALESCE(NULLIF(TRIM(l.FINDING_TYPE), ''), r.SETTING, 'unclassified') AS FIX_TYPE,
+    {_target} AS TARGET_WAREHOUSE,
+    r.OLD_VALUE,
+    r.NEW_VALUE
+FROM {core_object("SAVINGS_LEDGER")} l
+LEFT JOIN {core_object("WAREHOUSE_CHANGE_REGISTRY")} r ON l.SOURCE_CHANGE_ID = r.CHANGE_ID
+WHERE l.STATE = 'VERIFIED'
+  AND COALESCE(l.VERIFIED_USD, 0) > 0{_scope}
+ORDER BY l.VERIFIED_USD DESC
+LIMIT 200
+"""
+
+
 def latest_digest() -> str:
     return f"""
 SELECT DIGEST_DATE, MODEL, BODY, CREATED_AT

@@ -27,7 +27,7 @@ from app.core.sqlsafe import sql_literal, sql_number
 from app.core.state import request_navigation
 from app.data import cost_sql, insights_sql, mart27_sql, mart_sql, ops_sql, security_sql, workbench_sql
 from app.data.common import bounded_days
-from app.logic import remediation
+from app.logic import proven_fix_transfer, remediation
 from app.logic.actions import LEDGER_ESTIMATED, can_verify
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
@@ -267,6 +267,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # rec#20: idle-tail $ and size class per warehouse, for the consolidation scan.
         _idle_by_wh: dict[str, float] = {}
         _size_by_wh: dict[str, str] = {}
+        # P1 #34: capture the idle/sizing advisor frames for the proven-fix transfer
+        # panel at the end of this section (sizing is toggle-gated, so may stay None).
+        _idle_profiles_tx: pd.DataFrame | None = None
+        _sizing_profiles_tx: pd.DataFrame | None = None
         # ---- Idle warehouse advisor ----------------------------------------------
         st.markdown("**Idle warehouse advisor**")
         st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
@@ -288,6 +292,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             # divide by what was served, or the x30 projection reads ~4x low.
             idle_days = served_days(idle_res, days)
             advisor = idle_advisor(_idle_df, rate, idle_days)
+            _idle_profiles_tx = advisor
             flagged = advisor[advisor["FLAGGED"]]
             actionable = advisor[advisor["ACTIONABLE"]]
             _savings_opps.extend(     # rec#16: idle-timer opportunities (net actionable)
@@ -402,6 +407,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
             )
             sized = size_recommendations(_sizing_df, rate, sizing_days)
+            _sizing_profiles_tx = sized
             _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
                 SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
                                    safe_float(r.get("POTENTIAL_MONTHLY_SAVING_USD")),
@@ -660,6 +666,49 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                  column_config={"Est. $/mo": st.column_config.NumberColumn(format="$%.2f")})
                 else:
                     st.caption("No same-size warehouses with non-overlapping activity in this scope.")
+
+        st.divider()
+        # P1 #34: proven-fix transfer — a fix VERIFIED to save on one warehouse
+        # suggests the SAME fix on OTHER warehouses the idle/sizing advisors above
+        # independently flag for it. Read-only: proven $ is evidence, candidate $ is
+        # its own estimate. Reuses the idle/sizing/experiments frames already in scope.
+        st.markdown("**Replicate a proven fix (evidence-backed quick wins)**")
+        st.caption(
+            "Fixes already VERIFIED to save on one warehouse, matched to other warehouses the "
+            "advisors above independently flag for the SAME fix. Load the right-sizing profile "
+            "above to include size-down transfers.")
+        _vw = run(mart_sql.verified_wins(company), page=_PAGE, key=f"opt_verified_wins_{company}",
+                  tier="recent", source="SAVINGS_LEDGER x WAREHOUSE_CHANGE_REGISTRY (verified wins)")
+        if not _vw.usable():
+            st.caption("No verified savings yet — a fix must be applied and verified before it can "
+                       "be replicated.")
+        else:
+            _tx = proven_fix_transfer.transfer_suggestions(
+                _vw.df, idle_profiles=_idle_profiles_tx, sizing_profiles=_sizing_profiles_tx,
+                open_experiments=_exp_df)
+            if _tx.empty:
+                st.caption("No un-fixed warehouse currently matches a verified fix's profile "
+                           "(already tuned, under experiment, or none flagged).")
+            else:
+                kpi_row([
+                    {"label": "Replicable quick wins", "value": f"{len(_tx)}"},
+                    {"label": "Est. addressable $/mo",
+                     "value": format_usd(float(_tx["CANDIDATE_EST_MONTHLY_USD"].sum())),
+                     "help": "Sum of the candidates' OWN measured estimates — never the proven "
+                             "warehouses' realized dollars."},
+                ])
+                _tx_cols = [c for c in ["FIX_TYPE", "CANDIDATE_WAREHOUSE", "COMPANY",
+                                        "CANDIDATE_EST_MONTHLY_USD", "EVIDENCE_WAREHOUSE",
+                                        "EVIDENCE_VERIFIED_USD", "EVIDENCE_COUNT", "EST_CONFIDENCE",
+                                        "RATIONALE"] if c in _tx.columns]
+                styled_table(_tx[_tx_cols], height=280, sort_label="candidate est $ desc",
+                             column_config={
+                                 "CANDIDATE_EST_MONTHLY_USD": st.column_config.NumberColumn(
+                                     "Est $/mo", format="$%.0f"),
+                                 "EVIDENCE_VERIFIED_USD": st.column_config.NumberColumn(
+                                     "Proven $/mo", format="$%.0f"),
+                             })
+                st.caption("Apply one through the guarded ALTER + rollback in Remediation & ledger.")
 
     elif opt_section == "Queries & patterns":
         # ---- Most expensive queries (allocated $) --------------------------------

@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.296.0 - Proven-fix transfer engine (2026-08-25)
+
+Upgrade Board P1 #34. Cost & Contract ▸ Optimize ▸ Idle & sizing gains a
+"Replicate a proven fix" panel: a fix already VERIFIED to save on one warehouse
+is suggested on OTHER warehouses that the idle/sizing advisors independently flag
+for the same fix but haven't had it applied — evidence-backed quick wins.
+
+- New `mart_sql.verified_wins()` builder reads VERIFIED SAVINGS_LEDGER rows and
+  recovers the fix type + warehouse for autobooked rows (which leave
+  FINDING_TYPE/TARGET_OBJECT NULL) by joining WAREHOUSE_CHANGE_REGISTRY on
+  SOURCE_CHANGE_ID (SETTING → fix type, WAREHOUSE_NAME → target). VERIFIED-only,
+  realized dollars only (never ESTIMATED).
+- New pure `app/logic/proven_fix_transfer.py` cross-references verified wins with
+  the in-scope idle_advisor (AUTO_SUSPEND) and size_recommendations (RESIZE)
+  frames. Each suggestion carries the proven warehouse's realized $ as EVIDENCE
+  and the candidate's OWN measured figure as an ESTIMATE. Dedup excludes the
+  proven warehouse, already-tuned warehouses, and any under an open experiment.
+
+App-only, no migration — read-only over existing SAVINGS_LEDGER +
+WAREHOUSE_CHANGE_REGISTRY + the existing idle/sizing/experiment readers.
+
 ## 4.295.0 - Operator Case File: cross-section handoff builder (2026-08-25)
 
 Upgrade Board P0 #10. A session-only, cross-section case builder. A reusable
