@@ -65,6 +65,7 @@ from app.logic.task_graph import (
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    add_to_case_button,
     confirm_gate,
     entity_nav_table,
     evidence_gate,
@@ -288,6 +289,12 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             st.caption("Ranked worst-first: remote spill, then poor partition pruning (SCAN_PCT), then "
                        "large cold-cache scans. 'Real work' only — CALL wrappers and app queries excluded. "
                        "Click a row to load it in the drill-through below.")
+            add_to_case_button(
+                "Operations · Queries", _triage,
+                title="Optimization triage — statements to fix first",
+                summary="Heaviest statements ranked by spill / poor pruning / cold scan.",
+                next_action="Open the worst rows in the query drill-through and profile in Snowsight.",
+                key=f"ow_case_add_ops_triage_{company}_{days}")
 
     # A third live QUERY_HISTORY read: per-proc CALL rollup (which procs dominate
     # the workload, with fail rate) plus a p95-vs-prior-window degradation view.

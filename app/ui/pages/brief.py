@@ -14,6 +14,7 @@ from app.core.identity import viewer_name
 from app.core.query import run, run_batch
 from app.core.state import filters, request_navigation
 from app.data import mart_sql
+from app.logic import case_file
 from app.logic.actions import rank_actions
 from app.logic.formulas import (
     ExecutiveSummaryView,
@@ -416,6 +417,39 @@ def render() -> None:
                 mime="text/csv",
                 width="stretch",
             )
+
+    _case_items = list(st.session_state.get(case_file.CASE_STATE_KEY, []))
+    with st.expander(f"Operator Case File ({len(_case_items)})", expanded=bool(_case_items)):
+        st.caption(
+            "A session-only, cross-section handoff. Click ＋ Add to Case on evidence across "
+            "Alerts, Operations, Security and Overview to collect it here, then export one "
+            "Markdown document for a ticket or the next shift. Cleared when the session ends.")
+        if not _case_items:
+            st.caption("The case is empty.")
+        else:
+            _md = case_file.assemble_markdown(
+                _case_items, generated=pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"))
+            _dl, _clr = st.columns([3, 1])
+            with _dl:
+                download_text_button("Case File (.md)", _md, "overwatch_case_file.md")
+            with _clr:
+                if st.button("Clear case", key="ow_case_clear", width="stretch"):
+                    st.session_state[case_file.CASE_STATE_KEY] = case_file.clear_items()
+                    st.rerun()
+            for _i, _it in enumerate(_case_items):
+                _row, _rm = st.columns([6, 1])
+                with _row:
+                    st.markdown(
+                        f"**{_it.get('title') or _it.get('section')}** — {_it.get('company')} · "
+                        f"{_it.get('window')} · `{_it.get('source') or '—'}`")
+                with _rm:
+                    if st.button("Remove", key=f"ow_case_rm_{_i}", width="stretch"):
+                        st.session_state[case_file.CASE_STATE_KEY] = case_file.remove_item(
+                            _case_items, _it["id"])
+                        st.rerun()
+            # Raw markdown as the copy-out surface: a working path even when the SiS
+            # download button is inert, and it sidesteps $-as-LaTeX in st.markdown.
+            st.code(_md, language="markdown")
 
     st.caption(pd.Timestamp.now().strftime("Generated %Y-%m-%d %H:%M") +
                " · full detail lives on Overview and Control Room.")

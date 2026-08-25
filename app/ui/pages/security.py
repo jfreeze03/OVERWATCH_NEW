@@ -28,6 +28,7 @@ from app.logic.security import (
 )
 from app.ui import charts
 from app.ui.components import (
+    add_to_case_button,
     entity_nav_table,
     export_button,
     guard,
@@ -220,6 +221,12 @@ def _access_tab(company: str, days: int) -> None:
             st.caption("A burst followed by a success is the signal; a burst with no later success is "
                        "a locked-out user. Confirm against expected activity before acting — read-only.")
             result_caption(ato)
+            add_to_case_button(
+                "Security · Access", ato,
+                title="Failed-login bursts (credential-compromise candidates)",
+                summary=f"{len(ranked)} burst(s); {len(broke)} with a later success, {len(high)} high severity.",
+                next_action="Confirm against expected activity; reset credentials if a success was unexpected.",
+                key="ow_case_add_sec_burst")
 
     # Moved from Changes (v4.49): decomposes the Failed-logins panel above —
     # login telemetry, not change evidence.

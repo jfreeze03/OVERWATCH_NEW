@@ -533,6 +533,53 @@ def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
         width=width, on_click="ignore")
 
 
+def add_to_case_button(section: str, result: QueryResult, *, summary: str,
+                       next_action: str = "", as_of: str = "", title: str = "",
+                       preview_rows: int = 8, key: str) -> bool:
+    """One-click 'Add to Case': snapshot this evidence into the session-only
+    Operator Case File (reviewed and exported on Brief). Scope comes from
+    ``filters()``, source/freshness/tier from the ``result``, and up to
+    ``preview_rows`` of ``result.df``; only summary/next_action/as_of/title are
+    authored per call site. Dedup-guarded (re-adding the same evidence is a no-op);
+    the button is disabled when the result is not usable. Uses a callback-free
+    button + toast, mutating session_state before the natural rerun."""
+    from app.core.state import filters  # local import: avoid module cycle
+    from app.logic import case_file
+
+    usable = bool(getattr(result, "usable", lambda: False)())
+    clicked = st.button("＋ Add to Case", key=key, disabled=not usable, width="content",
+                        help="Snapshot this evidence into the session Case File (see Brief ▸ Operator Case File).")
+    if clicked and usable:
+        f = filters()
+        head = result.df.head(max(1, int(preview_rows)))
+        fetched = (result.fetched_at.strftime("%H:%M:%S")
+                   if getattr(result, "fetched_at", None) else "")
+        item = case_file.new_case_item(
+            section=section,
+            company=str(f.get("company", "ALL")),
+            window=str(f.get("window_label", "")),
+            days=served_days(result, int(f.get("days", 0) or 0)),
+            source=str(getattr(result, "source", "") or ""),
+            fetched_at=fetched,
+            tier=str(getattr(result, "tier", "") or ""),
+            summary=summary, next_action=next_action, as_of=as_of, title=title,
+            added_at=account_today().isoformat(),
+            preview_columns=list(head.columns),
+            preview_rows=head.astype(str).to_numpy().tolist(),
+            # Truncated when the query was row-capped OR the source has more
+            # rows/columns than the preview shows (the head()/col cap above).
+            truncated=(bool(getattr(result, "truncated", False))
+                       or len(result.df.index) > len(head.index)
+                       or len(result.df.columns) > case_file.MAX_PREVIEW_COLS),
+        )
+        current = list(st.session_state.get(case_file.CASE_STATE_KEY, []))
+        updated = case_file.add_item(current, item)
+        st.session_state[case_file.CASE_STATE_KEY] = updated
+        if hasattr(st, "toast"):
+            st.toast("Added to Case File" if len(updated) > len(current) else "Already in the Case File")
+    return bool(clicked)
+
+
 def status_bar(stats: list[dict]) -> None:
     """Persistent status strip: [{k, v, sev?, spark?, icon?, target?}].
 

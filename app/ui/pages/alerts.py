@@ -8,6 +8,7 @@ same action. Rule changes are generate-only by design.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import streamlit as st
@@ -29,6 +30,7 @@ from app.logic.playbooks import playbook_for
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
+    add_to_case_button,
     confirm_gate,
     download_text_button,
     empty_state,
@@ -463,6 +465,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 # Plain text on purpose: DETAIL originates in Snowflake data;
                 # rendering it as markdown let object names inject formatting.
                 st.text(detail_text)
+            add_to_case_button(
+                # Scope the preview to the SELECTED alert, not the whole feed, so the
+                # captured evidence matches the item's title/summary.
+                "Alerts", replace(events, df=edf.iloc[[sel]]),
+                title=f"[{row['SEVERITY']}] {row['TITLE']}",
+                summary=(detail_text[:200] if detail_text
+                         else f"{row['SEVERITY']} alert on rule {row['RULE_ID']}"),
+                next_action=f"Ack/resolve or investigate rule {row['RULE_ID']} (status {row['STATUS']}).",
+                key=f"ow_case_add_alert_{event_id[:8]}")
             rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
                             tier="recent", source="ALERT_CONFIG")
             if rules_res.usable():

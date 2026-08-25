@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.295.0 - Operator Case File: cross-section handoff builder (2026-08-25)
+
+Upgrade Board P0 #10. A session-only, cross-section case builder. A reusable
+`＋ Add to Case` control (`components.add_to_case_button`) on loaded evidence
+snapshots the section, scope (company+window), source, freshness, a short summary,
+a next action, and a few preview rows into `st.session_state`. The accumulated
+items assemble into ONE Markdown handoff document — reviewed and exported on Brief
+(▸ Operator Case File) as a `.md` download plus a raw copy-out block (a working
+path even when the SiS download button is inert) — the cross-section artifact a
+per-section CSV export cannot produce.
+
+New pure module `app/logic/case_file.py` (Streamlit-free, fully unit-tested) holds
+all validation, dedup (re-adding identical evidence is a no-op), preview capping,
+Markdown-cell escaping (untrusted Snowflake values can't break the table), and
+document assembly. Wired into four high-value v1 sites: an open Alert, the
+Operations optimization triage, a Security failed-login burst, and the Overview
+spend tile (which passes its as-of watermark). Session-only, no migration.
+
 ## 4.294.0 - Task duration-drift: full-grain key + per-day dedup (2026-08-25)
 
 Fixes a latent grain bug in `insights.task_duration_anomalies` (the retrospective

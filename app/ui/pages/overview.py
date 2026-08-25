@@ -42,6 +42,7 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
+    add_to_case_button,
     contract_runway_bar,
     daily_spend_wide,
     download_text_button,
@@ -720,6 +721,15 @@ def render() -> None:
         "warehouse lens continues to reconcile."
     )
     kpi_row(company_kpis)
+    add_to_case_button(
+        # _vp is the per-warehouse credits-vs-prior frame; the title names that so
+        # the preview reconciles with what it shows (the $ headline is in the summary).
+        "Overview · Spend", _vp,
+        title=f"Spend {str(f['window_label']).lower()} ({company}) — by warehouse vs prior",
+        summary=format_usd(window_spend) + (f" ({_ov_spend_delta})" if _ov_spend_delta else ""),
+        next_action="Drill into Cost & Contract ▸ Spend & Attribution for the driver.",
+        as_of=_ov_asof_company or "",
+        key=f"ow_case_add_ov_spend_{company}_{days}")
 
     section_header("Account risk & contract", "warn" if critical_alerts else "info", "contract")
     section_filter_contract(
