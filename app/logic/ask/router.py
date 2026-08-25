@@ -36,6 +36,12 @@ _WINDOW_WORDS: tuple[tuple[str, int], ...] = (
 _DAYS_RE = re.compile(r"\b(\d{1,6})\s*[- ]?(?:days?|d)\b", re.IGNORECASE)
 _MAX_DAYS = 365
 
+# Plain single-word signals match on WORD boundaries (so "who" never fires inside
+# "whole" and "cs" never inside "docs"); deliberate prefix stems match a word's
+# start; multi-word / hyphenated phrases fall back to substring.
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_STEMS = frozenset({"spik"})  # stems spike/spikes/spiking/spiked
+
 
 @dataclass(frozen=True)
 class RouteResult:
@@ -59,16 +65,24 @@ def extract_days(text: str, default: int) -> int:
     return max(1, min(_MAX_DAYS, default))
 
 
-def _hits(low: str, terms: tuple[str, ...]) -> int:
-    return sum(1 for t in terms if t in low)
+def _term_matches(term: str, low: str, tokens: frozenset[str]) -> bool:
+    if term in _STEMS:
+        return any(w.startswith(term) for w in tokens)
+    if term.isalnum():          # a plain word -> exact token (word-boundary) match
+        return term in tokens
+    return term in low          # a phrase / hyphenated form -> substring match
 
 
-def _strong(low: str, ans: Answerer) -> bool:
+def _hits(low: str, tokens: frozenset[str], terms: tuple[str, ...]) -> int:
+    return sum(1 for t in terms if _term_matches(t, low, tokens))
+
+
+def _strong(low: str, tokens: frozenset[str], ans: Answerer) -> bool:
     """Strong match = every require_all group has at least one hit. An answerer
     with no require_all falls back to needing any keyword."""
     if ans.require_all:
-        return all(_hits(low, group) >= 1 for group in ans.require_all)
-    return _hits(low, ans.keywords) >= 1
+        return all(_hits(low, tokens, group) >= 1 for group in ans.require_all)
+    return _hits(low, tokens, ans.keywords) >= 1
 
 
 def route(
@@ -80,22 +94,23 @@ def route(
 ) -> RouteResult:
     """Pick the best strong-matching answerer, or refuse honestly."""
     low = (question or "").lower().strip()
+    tokens = frozenset(_WORD_RE.findall(low))
     days = extract_days(low, default_days)
     params = AskParams(days=days, company=company, warehouse="", raw=question or "")
 
     if not low:
         return RouteResult(answerer=None, params=params, score=0, considered=0)
 
-    strong = [a for a in registry if _strong(low, a)]
+    strong = [a for a in registry if _strong(low, tokens, a)]
     if not strong:
         return RouteResult(answerer=None, params=params, score=0, considered=0)
 
     # Rank strong candidates by total keyword hits (require_all terms count too);
     # ties break on registry order (stable via index).
     def _score(a: Answerer) -> int:
-        base = _hits(low, a.keywords)
+        base = _hits(low, tokens, a.keywords)
         for group in a.require_all:
-            base += _hits(low, group)
+            base += _hits(low, tokens, group)
         return base
 
     best = max(strong, key=_score)

@@ -16,11 +16,19 @@ DESIGN (four steps)
     4. Narrate — the deterministic headline is authoritative; the UI may OPTIONALLY
                  ask Cortex to rephrase the already-grounded result (invents nothing).
 
-REVERT PATH (no damage to the original app)
-    Delete  app/logic/ask/  and  app/ui/pages/ask.py , then remove the two clearly
-    marked "ASK-OVERWATCH" wiring blocks in app/main.py and app/config.py. This
-    package imports app.data builders and app.logic.anomaly READ-ONLY and mutates
-    nothing, so removal leaves the original app byte-for-byte unchanged.
+REVERT PATH (no damage to the original app) — delete THREE new paths and revert
+THREE marked "ASK-OVERWATCH" wiring blocks:
+    delete   app/logic/ask/
+    delete   app/ui/pages/ask.py
+    delete   tests/test_ask_registry.py
+    revert   app/main.py            (the `ask` import + the "Ask": ask.render entry)
+    revert   app/config.py          (drop "Ask" from PAGES_BY_PROFILE["DBA"])
+    revert   tests/history_locks/test_codex_r2_wave.py  (restore the DBA nav pin to
+             ["Watch","Analyze","Govern"] and delete the dict(dba)["More"]==["Ask"] line)
+This package imports app.data builders and app.logic.anomaly READ-ONLY and mutates
+nothing, so those deletions leave the original app byte-for-byte unchanged. (The
+whole feature lives on branch feature/ask-overwatch, so `git checkout main` also
+reverts it cleanly.)
 """
 
 from __future__ import annotations

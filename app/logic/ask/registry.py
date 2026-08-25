@@ -129,18 +129,37 @@ def _analyze_spend_by_user(
         bullets.append(
             f"{r['DIMENSION']}: {_fmt(cr)} credits ({cr / total * 100:.0f}%)"
         )
+    # Honest "why isn't this flagged" note. robust_zscores can't test <5 points
+    # (returns zeros), so NEVER claim "spread across the cohort" off a test that
+    # silently didn't run — key the reassurance off the real n and top-share.
+    n_users = len(d)
     if not outlier:
-        bullets.append(
-            "No single user is a statistical outlier this window — spend is "
-            "spread across the cohort, not one runaway account."
-        )
+        if n_users < 5:
+            bullets.append(
+                f"Only {n_users} user(s) had attributable spend this window — too "
+                "few for the peer-outlier test; read the ranking directly."
+            )
+        elif top_share >= 0.5:
+            bullets.append(
+                f"{top_user} carries the majority ({top_share * 100:.0f}%) of "
+                "named-user spend, though not a statistical outlier vs peers."
+            )
+        else:
+            bullets.append(
+                "No single user is a statistical outlier this window — spend is "
+                "spread across the cohort, not one runaway account."
+            )
 
     evidence_cols = [c for c in ("DIMENSION", "ALLOC_CREDITS", "ELAPSED_SHARE") if c in d.columns]
+    ev = d.head(15)[evidence_cols].copy()
+    # alloc_attribution names this column ELAPSED_SHARE but it is a CREDIT share
+    # (SUM(ALLOC_CREDITS)/total) — label it honestly for the reader.
+    ev = ev.rename(columns={"ELAPSED_SHARE": "CREDIT_SHARE"})
     return AnswerResult(
         intent=_SPEND_INTENT,
         headline=headline,
         bullets=bullets,
-        evidence=d.head(15)[evidence_cols].copy(),
+        evidence=ev,
         source=src,
         confidence="grounded",
         params=meta,
@@ -208,12 +227,16 @@ def _analyze_cs_by_query(
     qtype = str(top.get("QUERY_TYPE", "query")) or "query"
     cs = float(top["CS_CREDITS"])
     runs = int(_num(top.get("RUNS", 0)))
+    # cloud_svc_top_shapes is LIMIT 30, so total_cs is the sum of the TOP shapes,
+    # not all cloud-services credits — label the share for exactly that base so
+    # the headline never overstates the top shape's fraction of true CS spend.
+    n_shapes = len(s)
     share = cs / total_cs
 
     headline = (
         f"The biggest cloud-services driver over {params.days}d is a {qtype} "
         f"pattern: {_fmt(cs)} CS credits across {runs:,} runs "
-        f"({share * 100:.0f}% of cloud-services credits)."
+        f"({share * 100:.0f}% of the top {n_shapes} query shapes' CS credits)."
     )
 
     bullets: list[str] = []
@@ -300,11 +323,10 @@ REGISTRY: tuple[Answerer, ...] = (
             "cloud services", "cloud-services", "cs", "spik", "driving",
         ),
         require_all=(
-            # Any cloud-services question routes here (the answer IS the driving
-            # queries); the second group is the hard "cloud services" gate, so
-            # this never steals a plain per-user spend question.
-            ("query", "queries", "statement", "sql", "pattern", "what",
-             "which", "who", "user", "driving", "driver", "causing", "top"),
+            # SINGLE gate: any question that names cloud services routes here —
+            # the answer IS the driving queries, so "why are cloud services
+            # spiking" must not refuse. A plain per-user spend question has no
+            # cloud-services phrase, so this never steals it.
             ("cloud service", "cloud services", "cloud-services",
              "cloud_services", "cs credit", "cs credits", "cloud compute"),
         ),

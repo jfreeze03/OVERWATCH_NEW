@@ -6,8 +6,8 @@ specs, hands the frames to the pure analyze(), and renders a grounded answer —
 or an honest refusal. Optional Cortex phrasing only ever *rewords* the already-
 grounded result; it is OFF by default and invents nothing.
 
-Revert: delete this file + app/logic/ask/, then remove the two marked
-"ASK-OVERWATCH" wiring blocks in app/main.py and app/config.py.
+Revert: see the authoritative REVERT PATH in app/logic/ask/__init__.py (delete
+3 new paths — incl. this file — and revert the 3 marked "ASK-OVERWATCH" blocks).
 """
 
 from __future__ import annotations
@@ -29,6 +29,19 @@ def _capabilities(heading: str) -> None:
     st.markdown(heading)
     for ans in REGISTRY:
         st.markdown(f"- **{ans.title}** — e.g. _{ans.examples[0]}_")
+
+
+# One-click test gallery — every registered phrasing plus a deliberately
+# unmapped probe, so the feature can be exercised end to end without typing.
+_REFUSAL_PROBE = "how many failed logins were there today"
+
+
+def _test_cases() -> list[str]:
+    cases: list[str] = []
+    for ans in REGISTRY:
+        cases.extend(ans.examples)
+    cases.append(_REFUSAL_PROBE)  # should return the honest refusal
+    return cases
 
 
 def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
@@ -109,13 +122,13 @@ def render() -> None:
         )
 
     with left:
-        st.caption("Try one of these — or type your own:")
-        chips = st.columns(len(REGISTRY))
-        for i, ans in enumerate(REGISTRY):
-            with chips[i]:
-                if st.button(ans.examples[0], key=f"ask_chip_{ans.intent}",
-                             use_container_width=True):
-                    st.session_state["ask_q"] = ans.examples[0]
+        st.caption("Click a question to run it — no typing needed — or type your own below:")
+        cases = _test_cases()
+        cols = st.columns(3)
+        for i, q in enumerate(cases):
+            with cols[i % 3]:
+                if st.button(q, key=f"ask_chip_{i}", use_container_width=True):
+                    st.session_state["ask_q"] = q
         question = st.text_input(
             "Your question", key="ask_q",
             placeholder="which user is causing spend spikes",
@@ -134,14 +147,22 @@ def render() -> None:
     ans = rr.answerer
     params = rr.params
     frames = {}
-    try:
-        for spec in ans.needs(params):
-            res = run(spec.sql, page=_PAGE, key=f"ask_{ans.intent}_{spec.key}",
-                      tier=spec.tier, source=f"Ask:{ans.intent}:{spec.key}")
-            frames[spec.key] = res.df
-    except Exception as exc:  # noqa: BLE001 — surface, don't crash the page
-        st.error(f"Couldn't run the grounded query for this question: {exc}")
-        return
+    # run() never raises — it returns ok=False with an empty frame on failure.
+    # We MUST branch on ok: feeding that empty frame to analyze() would render a
+    # query FAILURE as a confident "no data" answer, the exact false statement
+    # this feature promises never to make.
+    for spec in ans.needs(params):
+        res = run(spec.sql, page=_PAGE, key=f"ask_{ans.intent}_{spec.key}",
+                  tier=spec.tier, source=f"Ask:{ans.intent}:{spec.key}")
+        if not res.ok:
+            st.warning(
+                f"I couldn't run the grounded query for this ({res.error_kind or 'error'}), "
+                "so I won't guess. It's logged for follow-up."
+            )
+            if res.error:
+                st.caption(res.error)
+            return
+        frames[spec.key] = res.df
 
     result = ans.analyze(params, frames)
     _render_result(result, company, params, use_ai, model)

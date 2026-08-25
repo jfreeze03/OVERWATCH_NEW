@@ -49,6 +49,26 @@ def test_spiking_stem_and_generic_cloud_services_phrasing_route():
                  default_days=30, company="ALL").answerer.intent == "spend_spike_by_user"
 
 
+def test_word_boundary_matching_stops_substring_false_positives():
+    # review Finding 1: "who" must NOT fire inside "whole", "account" not inside
+    # "accounting" — a generic total-cost question must refuse, not hijack the
+    # per-user spend answerer.
+    assert route("what is the whole cost of storage",
+                 default_days=30, company="ALL").answerer is None
+    assert route("what does accounting cost",
+                 default_days=30, company="ALL").answerer is None
+
+
+def test_any_cloud_services_phrasing_routes_not_refuses():
+    # review Finding 2: cloud-services questions with no "query"/"what" subject
+    # word must still reach the CS answerer (single-gate on the CS phrase).
+    for q in ("why are cloud services spiking",
+              "why is cloud services spend so high",
+              "our cloud services are through the roof"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == \
+            "cloud_services_spike_by_query", q
+
+
 def test_spend_and_cloud_are_not_confused():
     # a pure-spend question must NOT trip the cloud-services answerer and vice versa.
     assert route("who is my most expensive user this month",
@@ -111,11 +131,22 @@ def test_spend_answer_names_top_user_and_flags_outlier():
 
 
 def test_spend_answer_is_honest_when_no_single_outlier():
-    df = _alloc([100.0, 95.0, 90.0, 88.0, 85.0])
+    df = _alloc([100.0, 95.0, 90.0, 88.0, 85.0])   # 5 users, modest top share
     res = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
     assert res.confidence == "grounded"
     assert "outlier" not in res.headline.lower()   # nobody stands out
     assert any("spread across the cohort" in b for b in res.bullets)
+    assert "CREDIT_SHARE" in res.evidence.columns  # honest column label (not ELAPSED_SHARE)
+
+
+def test_spend_answer_does_not_claim_spread_when_too_few_to_test():
+    # robust_zscores can't test <5 points, so with 3 users (one at 90%) the code
+    # must NOT claim "spread across the cohort" off a test that never ran.
+    df = _alloc([900.0, 50.0, 50.0], users=["DOMINANT", "A", "B"])
+    res = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
+    assert res.confidence == "grounded"
+    assert not any("spread across the cohort" in b for b in res.bullets)
+    assert any("too few" in b for b in res.bullets)
 
 
 def test_spend_answer_never_names_unattributed_load_as_the_culprit():
@@ -161,6 +192,10 @@ def test_cloud_services_answer_names_shape_user_and_warehouse():
     assert res.confidence == "grounded"
     assert "SELECT" in res.headline and "120" in res.headline   # top shape + its credits
     assert "500" in res.headline                                # runs, grounded
+    # review Finding 3: the % must be honestly labeled as a share of the top
+    # shapes (LIMIT 30), never "% of cloud-services credits" (the whole).
+    assert "query shapes" in res.headline
+    assert "of cloud-services credits" not in res.headline
     assert any("ETL_SVC" in b for b in res.bullets)             # heaviest user
     assert any("WH_A" in b for b in res.bullets)                # elevated warehouse
     assert res.evidence is not None and not res.evidence.empty
@@ -189,4 +224,7 @@ def test_ask_page_is_wired_and_isolated():
     assert '"Ask"' in cfg
     # the feature owns its files (delete these + the 2 wiring blocks to revert).
     assert (_ROOT / "app" / "logic" / "ask" / "registry.py").exists()
-    assert (_ROOT / "app" / "ui" / "pages" / "ask.py").exists()
+    ask_py = (_ROOT / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
+    # review Finding 4: a query FAILURE must branch on res.ok, never fall through
+    # to analyze() as a false "no data".
+    assert "if not res.ok" in ask_py
