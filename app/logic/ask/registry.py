@@ -14,6 +14,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.data import mart27_sql, mart_sql
+from app.data.common import resolve_effective_window
 from app.logic.anomaly import robust_zscores
 from app.logic.ask.types import (
     OUTLIER_Z,
@@ -81,13 +82,19 @@ def _needs_spend_by_user(params: AskParams) -> list[QuerySpec]:
 def _analyze_spend_by_user(
     params: AskParams, frames: dict[str, pd.DataFrame]
 ) -> AnswerResult:
-    src = f"mart27_sql.alloc_xdim_attribution(USER, {params.days}d) + robust_zscores"
-    meta: dict[str, object] = {"days": params.days, "company": params.company}
+    # alloc_xdim_attribution clamps the window to the mart's effective horizon
+    # (MAX_MART_WINDOW_DAYS//2), so a "last year" (365d) question actually runs
+    # ~182d. Label EVERY surface with that effective window, never the raw request,
+    # so a 182d result is never presented as 365d. meta["days"] carries eff to the
+    # page caption too.
+    eff = resolve_effective_window(params.days, "DAY")[0]
+    src = f"mart27_sql.alloc_xdim_attribution(USER, {eff}d) + robust_zscores"
+    meta: dict[str, object] = {"days": eff, "company": params.company}
     # The builder is coverage-gated, so an empty frame can mean "no spend" OR "the
     # attribution mart hasn't accrued this window yet" — say so rather than assert
     # a bare zero.
     no_data_line = (
-        f"No attributable user spend for the last {params.days}d "
+        f"No attributable user spend for the last {eff}d "
         "(the cost-allocation mart may still be accruing this window)."
     )
     df = frames.get("alloc")
@@ -137,12 +144,17 @@ def _analyze_spend_by_user(
 
     tail = f" — a clear outlier vs peers (z={top_z:.1f})" if outlier else ""
     headline = (
-        f"Over the last {params.days}d, {top_user} is the top spender: "
+        f"Over the last {eff}d, {top_user} is the top spender: "
         f"{_fmt(top_credits)} credits ({top_share * 100:.0f}% of named-user "
         f"spend){tail}."
     )
 
     bullets: list[str] = []
+    if eff < params.days:  # window was clamped to the mart horizon — say so
+        bullets.append(
+            f"Per-user attribution is capped to the mart's {eff}-day horizon "
+            f"(you asked for {params.days}d)."
+        )
     for i in range(min(5, len(d))):
         r = d.iloc[i]
         cr = float(r["ALLOC_CREDITS"])

@@ -89,8 +89,12 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
         with st.expander("Evidence — the rows this answer is built from", expanded=True):
             st.dataframe(result.evidence, use_container_width=True, hide_index=True)
 
+    # Use the answer's OWN effective window (an answerer may clamp it, e.g. the
+    # spend mart's 182-day horizon), never the raw request, so the caption can't
+    # over-claim the window the headline was actually computed over.
+    win = result.params.get("days", params.days)
     st.caption(
-        f"Source: {result.source} · scope: company={company}, window={params.days}d "
+        f"Source: {result.source} · scope: company={company}, window={win}d "
         "· every number above is live query output."
     )
 

@@ -326,6 +326,24 @@ def test_spend_answer_uses_the_cost_pages_attribution_builder():
     assert "MART_COST_ALLOCATION_DAILY" not in sql      # not the abandoned owner-scoped mart
 
 
+# ============================ round-3 adversarial-test regressions ==========
+
+def test_spend_window_label_reflects_the_mart_effective_horizon():
+    # R3 #1: alloc_xdim clamps a 365d request to the mart's 182d horizon, so the
+    # headline/caption/meta must say 182 (never over-claim 365), with a cap note.
+    df = pd.DataFrame({"DIMENSION": ["A", "B", "C", "D", "E"], "ELAPSED_SEC": [9, 5, 4, 3, 2.0],
+                       "ELAPSED_SHARE": [.4, .2, .2, .1, .1], "ALLOC_CREDITS": [400., 200, 150, 100, 50]})
+    res = _analyze_spend_by_user(AskParams(365, "ALL"), {"alloc": df})
+    assert "over the last 182d" in res.headline.lower()
+    assert "365d" not in res.headline
+    assert res.params["days"] == 182
+    assert any("capped to the mart's 182-day" in b for b in res.bullets)
+    # a within-horizon window is untouched, no cap note
+    res30 = _analyze_spend_by_user(AskParams(30, "ALL"), {"alloc": df})
+    assert "over the last 30d" in res30.headline.lower()
+    assert not any("capped" in b for b in res30.bullets)
+
+
 # ================================================= wiring lock ==============
 
 def test_ask_page_is_wired_and_isolated():
