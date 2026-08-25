@@ -690,9 +690,19 @@ def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
     if rate is not None:
         out["SPEND_USD"] = (out["CREDITS"] * safe_float(rate)).round(2)
     out["CHURNY"] = (out["CREDITS"] >= float(min_credits)) & (tb <= 0)
+    if "SPEND_USD" in out.columns:
+        # #31: recoverable $ = the CHURNY spend that SUSPEND RECLUSTER would stop
+        # (paying to recluster ~0 TB); zero for non-churny rows.
+        out["RECOVERABLE_USD"] = out["SPEND_USD"].where(out["CHURNY"], 0.0).round(2)
     return out.sort_values(["CHURNY", "CREDITS_PER_TB_RECLUSTERED", "CREDITS"],
                            ascending=[False, False, False],
                            na_position="last").reset_index(drop=True)
+
+
+def suspend_recluster_sql(table_fqn: str) -> str:
+    """Generated (not executed) SUSPEND RECLUSTER candidate for a churny table."""
+    from app.core.sqlsafe import safe_identifier
+    return f"ALTER TABLE {safe_identifier(str(table_fqn), allow_qualified=True)} SUSPEND RECLUSTER;"
 
 
 def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:

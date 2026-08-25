@@ -20,6 +20,7 @@ from app.logic.formulas import budget_pace_variance
 from app.logic.insights import (
     cluster_failures_by_family,
     flag_clustering_churn,
+    suspend_recluster_sql,
     task_duration_anomalies,
 )
 
@@ -137,8 +138,21 @@ def test_zero_tb_churn_sorts_first_and_flags():
     assert out.iloc[0]["TABLE_FQN"] == "CHURN"          # paying 50 credits, reclustering 0 TB
     assert bool(out.iloc[0]["CHURNY"]) is True
     assert out.iloc[0]["SPEND_USD"] == 150.0            # 50 * 3
+    assert out.iloc[0]["RECOVERABLE_USD"] == 150.0      # #31: churny spend is recoverable
     good = out[out["TABLE_FQN"] == "GOOD"].iloc[0]
     assert bool(good["CHURNY"]) is False and good["CREDITS_PER_TB_RECLUSTERED"] == 2.0
+    assert good["RECOVERABLE_USD"] == 0.0               # non-churny -> nothing to recover
+
+
+def test_suspend_recluster_candidate_and_wiring():
+    # #31: generated (not executed) ALTER for a churny table, qualified name safe
+    sql = suspend_recluster_sql("DB.SCH.MY_TABLE")
+    assert sql.startswith("ALTER TABLE ") and sql.endswith("SUSPEND RECLUSTER;")
+    assert "MY_TABLE" in sql
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "cost_parts"
+           / "optimize.py").read_text(encoding="utf-8")
+    assert "suspend_recluster_sql(" in src and "RECOVERABLE_USD" in src
 
 
 def test_clustering_churn_min_credits_gate():

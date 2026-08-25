@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.297.0 - Auto-clustering SUSPEND RECLUSTER candidates (2026-08-25)
+
+Upgrade Board P1 #31. Cost ▸ Optimize ▸ Storage & waste ▸ automatic-clustering
+scan now surfaces, for the CHURNY tables (paying clustering credits to recluster
+~0 TB), an estimated recoverable $/window and generated `ALTER TABLE … SUSPEND
+RECLUSTER` candidates (review-only). `insights.flag_clustering_churn` gains a
+RECOVERABLE_USD column (the churny spend a suspend would stop; 0 for non-churny)
+and a new `insights.suspend_recluster_sql` helper produces the qualified-name-safe
+ALTER. App-only, no migration.
+
 ## 4.296.0 - Proven-fix transfer engine (2026-08-25)
 
 Upgrade Board P1 #34. Cost & Contract ▸ Optimize ▸ Idle & sizing gains a

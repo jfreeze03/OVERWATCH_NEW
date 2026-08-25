@@ -41,6 +41,7 @@ from app.logic.insights import (
     idle_waste_summary,
     repeat_min_runs,
     storage_movers,
+    suspend_recluster_sql,
     with_auto_suspend_settings,
 )
 from app.logic.savings_rollup import (
@@ -1302,14 +1303,27 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 st.success("No automatic-clustering credits in this window.")
             elif guard(clu, ""):
                 _clu = flag_clustering_churn(clu.df, rate=rate)
-                _clu_cols = [c for c in ["TABLE_FQN", "CREDITS", "SPEND_USD", "TB_RECLUSTERED",
-                                         "CREDITS_PER_TB_RECLUSTERED", "RECLUSTER_RUNS", "CHURNY"]
+                _clu_cols = [c for c in ["TABLE_FQN", "CREDITS", "SPEND_USD", "RECOVERABLE_USD",
+                                         "TB_RECLUSTERED", "CREDITS_PER_TB_RECLUSTERED",
+                                         "RECLUSTER_RUNS", "CHURNY"]
                              if c in _clu.columns]
                 styled_table(_clu[_clu_cols], height=240, sort_label="churny first, then $/TB")
                 st.caption("CHURNY = spending clustering credits to recluster ~0 TB (a poor cluster key "
                            "or load pattern — the sharpest 'paying to reorganize nothing' case). "
                            "Otherwise, high credits per TB reclustered = revisit the key; dollars = "
                            "credits x your compute rate.")
+                # #31: SUSPEND RECLUSTER candidates for the churny tables (review-only).
+                _churny = _clu[_clu["CHURNY"]] if "CHURNY" in _clu.columns else _clu.iloc[0:0]
+                if not _churny.empty and "TABLE_FQN" in _churny.columns:
+                    _recover = float(safe_float(_churny.get("RECOVERABLE_USD", pd.Series(dtype=float)).sum()))
+                    st.markdown(
+                        f"**{len(_churny)} churny table(s) — est. {format_usd(_recover)}/window recoverable "
+                        "by suspending automatic clustering.**")
+                    st.caption("Review-only candidates. SUSPEND RECLUSTER stops the reclustering spend; the "
+                               "table stays queryable and can be RESUME'd. Confirm the key is genuinely a "
+                               "poor fit (not a transient load pattern) before applying.")
+                    st.code("\n".join(suspend_recluster_sql(str(fqn))
+                                      for fqn in _churny["TABLE_FQN"].head(20)), language="sql")
                 result_caption(clu)
 
     elif opt_section == "Remediation & ledger":
