@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.291.0 - Stored-procedure regression advisor (2026-08-25)
+
+Operations ▸ Queries gains a toggle-gated "Stored-procedure regression" section
+(Upgrade Board P0 #7). Two new live `ops_sql` builders over
+`ACCOUNT_USAGE.QUERY_HISTORY` CALL rows:
+
+- `proc_sla_rollup` — per-proc calls / success-only avg / p95 / max / total-minutes,
+  ranked by SLA impact (frequency × duration).
+- `proc_regression` — this window's success-only p95/avg vs the prior equal-length
+  window, per proc, as a percent change, so a proc that got slower surfaces even
+  if it's cheap. Both windows are scoped by one `_query_scope` call (over 2× the
+  days) so current and prior partition identically; a proc must clear a min-call
+  floor in BOTH windows before it's compared.
+
+Latency is success-only (a proc that starts failing fast must not read as
+"faster"); the fail-rate delta is surfaced so a new pure classifier
+(`app/logic/proc_regression.py`) can flag "Faster but failing" alongside
+Regressed / Slower / Stable / Improved. Verdict + `P95_DELTA_PCT` auto-tint via
+the shared status palette. Rides the same query-stats surface as the per-query
+optimization advisor (4.288.0). App-only — no migration.
+
 ## 4.290.1 - CI floor-compat green: raise pinned floors to match 1.52 runtime (2026-08-25)
 
 Hotfix for the red CI gate on 4.290.0. The `width='stretch'` migration raised the

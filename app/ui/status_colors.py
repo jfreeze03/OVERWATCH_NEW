@@ -86,6 +86,8 @@ _VERDICTS = {
     # change-impact registry (V010)
     "REGRESSED": _BAD, "IMPROVED": _OK, "NEUTRAL": _MUTED, "PENDING": _INFO,
     "NO_BASELINE": _MUTED, "INSUFFICIENT_AFTER": _MUTED,
+    # stored-procedure regression advisor (F7) — REGRESSED/IMPROVED reused above
+    "SLOWER": _WARN, "STABLE": _MUTED, "FASTER BUT FAILING": _BAD,
 }
 
 

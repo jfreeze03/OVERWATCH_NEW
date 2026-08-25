@@ -24,7 +24,7 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
-from app.logic import query_advisor, remediation, wh_change
+from app.logic import proc_regression, query_advisor, remediation, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -287,6 +287,75 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             st.caption("Ranked worst-first: remote spill, then poor partition pruning (SCAN_PCT), then "
                        "large cold-cache scans. 'Real work' only — CALL wrappers and app queries excluded. "
                        "Click a row to load it in the drill-through below.")
+
+    # A third live QUERY_HISTORY read: per-proc CALL rollup (which procs dominate
+    # the workload, with fail rate) plus a p95-vs-prior-window degradation view.
+    # Toggle-gated like the triage scan above — a live round-trip only when asked;
+    # the two reads submit async via run_batch.
+    section_header("Stored-procedure regression", "warn", "optimize")
+    _proc_reg_on = st.toggle(
+        "Roll up stored-proc runtimes and compare to the prior window",
+        key="ops_proc_reg_toggle",
+        help="A live scan that rolls up CALL statements per stored procedure "
+             "(success-only p95/avg, ranked by SLA impact) and flags the ones whose "
+             "p95 crept up versus the previous equal-length window.")
+    if _proc_reg_on:
+        _pb = run_batch([
+            {"key": "roll", "sql": ops_sql.proc_sla_rollup(
+                days, company, wh_filter, user_filter, database, schema_contains),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY (proc SLA-impact rollup)", "max_rows": 200},
+            {"key": "reg", "sql": ops_sql.proc_regression(
+                days, company, wh_filter, user_filter, database, schema_contains,
+                min_calls=proc_regression.MIN_CALLS),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY (proc p95 vs prior window)", "max_rows": 200},
+        ], page=_PAGE, tier="recent")
+
+        _roll = _pb.get("roll")
+        if _roll is not None and _roll.ok and _roll.empty:
+            st.success("No stored-procedure CALLs in this window/scope.")
+        elif _roll is not None and guard(_roll, "No stored-procedure CALLs in this window/scope."):
+            st.markdown("**Busiest procedures — by SLA impact (calls × p95)**")
+            _roll_cols = [c for c in ["PROC_NAME", "DATABASE_NAME", "SCHEMA_NAME", "CALLS",
+                                      "FAIL_PCT", "AVG_S", "P95_S", "MAX_S", "TOTAL_MIN"]
+                          if c in _roll.df.columns]
+            styled_table(_roll.df[_roll_cols], slug="proc_sla_rollup", days=days,
+                         sort_label="calls × p95 desc")
+            st.caption("Success-only latency; FAIL_PCT surfaces procs that are failing rather "
+                       "than slow (including a proc broken enough to drop out of the regression "
+                       "view below). Ranked by frequency × p95.")
+
+        _reg = _pb.get("reg")
+        st.markdown("**Runtime regression — this window vs the prior window**")
+        if _reg is not None and _reg.ok and _reg.empty:
+            st.success(
+                f"No stored procedure with at least {proc_regression.MIN_CALLS} successful "
+                "calls in both windows moved materially — proc runtimes are stable.")
+        elif _reg is not None and guard(_reg, "Not enough repeated proc calls to compare windows."):
+            _pr = proc_regression.annotate(_reg.df)
+            _regressed = int((_pr["VERDICT"] == "Regressed").sum())
+            _failing = int((_pr["VERDICT"] == "Faster but failing").sum())
+            kpi_row([
+                {"label": "Procs compared", "value": f"{len(_pr):,}"},
+                {"label": "Regressed", "value": f"{_regressed:,}",
+                 "severity": ("bad" if _regressed else "ok")},
+                {"label": "Faster but failing", "value": f"{_failing:,}",
+                 "severity": ("warn" if _failing else "ok")},
+            ])
+            _pr_cols = [c for c in ["VERDICT", "PROC_NAME", "DATABASE_NAME", "SCHEMA_NAME",
+                                    "CUR_CALLS", "PRIOR_CALLS", "CUR_P95_S", "PRIOR_P95_S",
+                                    "P95_DELTA_PCT", "CUR_FAIL_PCT", "PRIOR_FAIL_PCT"]
+                        if c in _pr.columns]
+            styled_table(_pr[_pr_cols], slug="proc_regression", days=days,
+                         sort_label="p95 growth desc")
+            st.caption(
+                "Success-only p95 this window vs the prior equal-length window (percent change "
+                "from the unrounded values). A proc needs at least "
+                f"{proc_regression.MIN_CALLS} successful calls in BOTH windows to be compared — a "
+                "now-fully-failing proc has no latency signal, so watch the rollup's FAIL_PCT "
+                "above. 'Faster but failing' flags a proc that only looks quicker because it now "
+                "errors out. Proc name is parsed from the CALL text and grouped with DB+schema; a "
+                "bare vs fully-qualified CALL can split one proc. ~6h ACCOUNT_USAGE latency, so "
+                "the newest hours under-report.")
 
     section_header("Query drill-through", "info", "search")
     candidate_ids: list[str] = []

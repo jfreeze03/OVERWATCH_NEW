@@ -108,6 +108,8 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("cost.cloud_services_ratio", lambda: cost_sql.cloud_services_ratio_by_warehouse(1, "ALFA")),
     ("cost.compile_heavy_families", lambda: cost_sql.compile_heavy_families(1, "ALFA")),
     ("ops.poor_pruning_queries", lambda: ops_sql.poor_pruning_queries(1, "ALFA")),
+    ("ops.proc_sla_rollup", lambda: ops_sql.proc_sla_rollup(1, "ALFA")),
+    ("ops.proc_regression", lambda: ops_sql.proc_regression(1, "ALFA")),
     ("ops.result_cache_daily", lambda: ops_sql.result_cache_daily(1, "ALFA")),
     ("ops.warehouse_concurrency_peaks", lambda: ops_sql.warehouse_concurrency_peaks(1, "ALFA")),
     ("ops.copy_load_failures", lambda: ops_sql.copy_load_failures(1, "ALFA")),

@@ -442,6 +442,143 @@ LIMIT {limit}
 """
 
 
+def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "",
+                    user_contains: str = "", database: str = "",
+                    schema_contains: str = "", limit: int = 50) -> str:
+    """Per-stored-procedure runtime rollup, ranked by SLA impact (calls x p95).
+
+    Rolls up QUERY_TYPE='CALL' rows into calls / avg / p95 / max / total-minutes
+    per proc. Latency percentiles are computed over SUCCESSFUL calls only — a proc
+    that starts failing fast must not read as 'faster' — and the fail rate is
+    surfaced separately. Proc identity is REGEXP_SUBSTR'd from QUERY_TEXT (there is
+    no proc-name column) and grouped with DB+SCHEMA to partially disambiguate
+    same-named procs, mirroring insights_sql.procedure_costs_usd. App-issued CALLs
+    (QUERY_TAG 'OVERWATCH%') are dropped as self-noise; the task-issued proc runs a
+    DBA cares about are kept. Ranked by frequency x duration so the procs that
+    dominate the CALL workload surface first. ~6h ACCOUNT_USAGE latency applies.
+    """
+    days = bounded_days(days)
+    limit = max(5, min(int(limit or 50), 200))
+    where = and_where(
+        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains),
+        "QUERY_TYPE = 'CALL'",
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+    )
+    return f"""
+WITH calls AS (
+    SELECT
+        REGEXP_SUBSTR(UPPER(QUERY_TEXT), 'CALL[[:space:]]+([A-Z0-9_.$]+)', 1, 1, 'e', 1) AS PROC_NAME,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        EXECUTION_STATUS,
+        IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) AS OK_MS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+)
+SELECT
+    PROC_NAME,
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    COUNT(*) AS CALLS,
+    ROUND(100 * COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') / COUNT(*), 1) AS FAIL_PCT,
+    ROUND(AVG(OK_MS) / 1000, 1) AS AVG_S,
+    ROUND(APPROX_PERCENTILE(OK_MS, 0.95) / 1000, 1) AS P95_S,
+    ROUND(MAX(OK_MS) / 1000, 1) AS MAX_S,
+    ROUND(SUM(COALESCE(OK_MS, 0)) / 60000, 1) AS TOTAL_MIN
+FROM calls
+WHERE PROC_NAME IS NOT NULL
+GROUP BY 1, 2, 3
+ORDER BY CALLS * COALESCE(P95_S, 0) DESC
+LIMIT {limit}
+"""
+
+
+def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "",
+                    user_contains: str = "", database: str = "",
+                    schema_contains: str = "", min_calls: int = 5) -> str:
+    """Stored procedures whose runtime crept up vs the prior equal-length window.
+
+    Emits, per proc, this window's vs the previous window's success-only p95/avg
+    and the percent change, so a proc that got slower surfaces even if it is cheap.
+    Both windows are scoped by ONE _query_scope call (over 2x the days) so current
+    and prior are partitioned identically; a proc must clear ``min_calls`` SUCCESSFUL
+    calls in BOTH windows before it is compared (a p95 over a handful of successes is
+    one slow run, not a trend — and a now-fully-failing proc has no latency signal,
+    so it is left to proc_sla_rollup's FAIL_PCT rather than shown as a false regression).
+    The percent deltas are computed from the UNROUNDED millisecond percentiles (the
+    *_S columns are display-only) so a sub-second proc is not distorted by 0.1s
+    rounding. Latency is success-only, and the fail-rate delta is surfaced so 'faster
+    because it now errors out' is not mistaken for an improvement. The current window
+    is the trailing ``days`` days including today so far; the prior window is exactly
+    ``days`` full days before it. Ranked by p95 growth, worst first. ~6h ACCOUNT_USAGE
+    latency applies to the current window's most recent hours.
+    """
+    days = bounded_days(days)
+    min_calls = max(1, min(int(min_calls or 5), 10000))
+    where = and_where(
+        _query_scope(2 * days, company, warehouse_contains, user_contains, database, schema_contains),
+        "QUERY_TYPE = 'CALL'",
+        "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+    )
+    return f"""
+WITH calls AS (
+    SELECT
+        REGEXP_SUBSTR(UPPER(QUERY_TEXT), 'CALL[[:space:]]+([A-Z0-9_.$]+)', 1, 1, 'e', 1) AS PROC_NAME,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        EXECUTION_STATUS,
+        IFF(START_TIME >= DATEADD('day', -{days}, CURRENT_DATE()), 'CUR', 'PRIOR') AS WIN,
+        IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) AS OK_MS
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+),
+agg AS (
+    SELECT
+        PROC_NAME,
+        DATABASE_NAME,
+        SCHEMA_NAME,
+        COUNT_IF(WIN = 'CUR') AS CUR_CALLS,
+        COUNT_IF(WIN = 'PRIOR') AS PRIOR_CALLS,
+        -- Unrounded ms percentiles/means drive the delta; the *_S columns below
+        -- are display-only. Rounding to 0.1s before the ratio would null a fast
+        -- proc's prior p95 to 0.0 and hide a real regression.
+        APPROX_PERCENTILE(IFF(WIN = 'CUR', OK_MS, NULL), 0.95) AS CUR_P95_MS,
+        APPROX_PERCENTILE(IFF(WIN = 'PRIOR', OK_MS, NULL), 0.95) AS PRIOR_P95_MS,
+        AVG(IFF(WIN = 'CUR', OK_MS, NULL)) AS CUR_AVG_MS,
+        AVG(IFF(WIN = 'PRIOR', OK_MS, NULL)) AS PRIOR_AVG_MS,
+        ROUND(100 * COUNT_IF(WIN = 'CUR' AND EXECUTION_STATUS <> 'SUCCESS')
+              / NULLIF(COUNT_IF(WIN = 'CUR'), 0), 1) AS CUR_FAIL_PCT,
+        ROUND(100 * COUNT_IF(WIN = 'PRIOR' AND EXECUTION_STATUS <> 'SUCCESS')
+              / NULLIF(COUNT_IF(WIN = 'PRIOR'), 0), 1) AS PRIOR_FAIL_PCT
+    FROM calls
+    WHERE PROC_NAME IS NOT NULL
+    GROUP BY 1, 2, 3
+    -- Require enough SUCCESSFUL samples in BOTH windows: the p95 the delta is
+    -- built on is success-only, so gating on total calls would let a single
+    -- successful run (amid failures) drive a bogus regression.
+    HAVING COUNT_IF(WIN = 'CUR' AND EXECUTION_STATUS = 'SUCCESS') >= {min_calls}
+       AND COUNT_IF(WIN = 'PRIOR' AND EXECUTION_STATUS = 'SUCCESS') >= {min_calls}
+)
+SELECT
+    PROC_NAME,
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    CUR_CALLS,
+    PRIOR_CALLS,
+    ROUND(CUR_P95_MS / 1000, 1) AS CUR_P95_S,
+    ROUND(PRIOR_P95_MS / 1000, 1) AS PRIOR_P95_S,
+    ROUND(CUR_AVG_MS / 1000, 1) AS CUR_AVG_S,
+    ROUND(PRIOR_AVG_MS / 1000, 1) AS PRIOR_AVG_S,
+    ROUND((CUR_P95_MS - PRIOR_P95_MS) / NULLIF(PRIOR_P95_MS, 0) * 100, 1) AS P95_DELTA_PCT,
+    ROUND((CUR_AVG_MS - PRIOR_AVG_MS) / NULLIF(PRIOR_AVG_MS, 0) * 100, 1) AS AVG_DELTA_PCT,
+    CUR_FAIL_PCT,
+    PRIOR_FAIL_PCT
+FROM agg
+ORDER BY P95_DELTA_PCT DESC NULLS LAST
+LIMIT 200
+"""
+
+
 def result_cache_daily(days: int, company: str = "ALL") -> str:
     """Share of successful queries answered without scanning (result cache /
     metadata answers). A falling line means redundant recomputation."""
