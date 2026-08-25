@@ -191,7 +191,9 @@ def test_builder_bounds_window():
 
 def test_panel_wired_on_operations():
     assert "def _dq_row_volume_panel(" in _OPS
-    assert "_dq_row_volume_panel()" in _OPS
+    # def + wired call site (the call now feeds the panel its prefetched result from the
+    # Pipeline SLA run_batch: _dq_row_volume_panel(_psb.get("rv")), so match the call, not "()").
+    assert _OPS.count("_dq_row_volume_panel(") >= 2
     assert "row_volume_anomalies(" in _OPS
     assert "product_row_volume(" in _OPS
     assert "Row-volume anomalies" in _OPS

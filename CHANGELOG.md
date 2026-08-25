@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.282.0 - Performance: batch the Operations Pipeline SLA tab's four serial scans (2026-08-24)
+
+The flagship follow-up to the v4.281.0 perf batch (cross-repo review finding #6). The Operations
+Pipeline SLA tab issued its four independent `recent` reads serially, so cold section latency was
+the SUM of four ACCOUNT_USAGE scans on one XS warehouse.
+
+- **Operations ▸ Pipeline SLA**: COPY-load failures, volume deltas, registered-product
+  row-volume, and dynamic-table refresh health now prefetch in ONE `run_batch`; cold latency
+  drops to ~MAX(scan) instead of SUM(scans). All four reads were unconditional at their call
+  sites and share the `recent` tier, so exactly the same scans fire and the render order is
+  unchanged. The row-volume helper (`_dq_row_volume_panel`) gained a `preloaded` param so its
+  read joins the batch while keeping its run() fallback. (`app/ui/pages/operations.py`)
+
+Perf-budget pin +4 (operations.py): the four batch-spec source labels duplicate the reads'
+existing `ACCOUNT_USAGE` labels — no new scans (reachable-table set unchanged per test_v451_trust).
+
 ## 4.281.0 - Performance: batch serial ACCOUNT_USAGE reads + cache-tier + settings memo (2026-08-24)
 
 The S-effort performance batch from the cross-repo review. Every change is behavior-preserving —

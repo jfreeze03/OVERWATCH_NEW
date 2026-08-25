@@ -660,7 +660,7 @@ def _release_compare_tab(company: str) -> None:
         )
 
 
-def _dq_row_volume_panel() -> None:
+def _dq_row_volume_panel(preloaded=None) -> None:
     """rec#26: robust-z row-volume data-quality monitor for registered products.
 
     Complements the 50%-cliff Volume drops alert with an outlier-resistant
@@ -687,7 +687,7 @@ def _dq_row_volume_panel() -> None:
         "marks a row scored on an old load. The DQ_BREACH alert, plus null-rate and "
         "schema-drift monitors, are the deferred owner-migration half."
     )
-    rv = run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
+    rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG")
     if rv.ok and rv.empty:
         st.info("No registered-product tables added rows in the window. Register data products in the catalog (Decision Studio) to monitor their volume here.")
@@ -797,8 +797,21 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         if not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
+    # Perf: the tab's FOUR independent 'recent' reads (COPY failures, volume deltas,
+    # registered-product row-volume, dynamic-table health) prefetch in ONE parallel batch instead
+    # of four serial account-usage scans; each keeps its render point and run() fallback, so which
+    # scans fire and the render order are unchanged. Cold latency ~MAX(scan) instead of SUM(scans).
+    _psb = run_batch([
+        {"key": "cpf", "sql": ops_sql.copy_load_failures(7, company), "source": "ACCOUNT_USAGE.COPY_HISTORY"},
+        {"key": "vd", "sql": ops_sql.volume_deltas(), "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY"},
+        {"key": "rv", "sql": dq_sql.product_row_volume(28),
+         "source": "ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG"},
+        {"key": "dth", "sql": ops_sql.dynamic_table_health(7),
+         "source": "ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY"},
+    ], page=_PAGE, tier="recent")
+
     section_header("File-load failures (COPY / Snowpipe, 7d)", "warn", "pipeline")
-    cpf = run(ops_sql.copy_load_failures(7, company), page=_PAGE,
+    cpf = _psb.get("cpf") or run(ops_sql.copy_load_failures(7, company), page=_PAGE,
               key=f"copy_fails_{company}", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
     if cpf.ok and cpf.empty:
         st.success("No failed or partial file loads in the last 7 days.")
@@ -821,7 +834,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         "TASK_ANOMALY_SWEEP, HIGH, gated on ALERT_CONFIG.ENABLED). DAYS_ACTIVE_7D shows how "
         "many of the prior 7 days the table actually moved."
     )
-    vd = run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
+    vd = _psb.get("vd") or run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
     if vd.ok and vd.empty:
         st.success("Every moving table is within its normal daily volume.")
@@ -829,7 +842,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         styled_table(vd.df, height=240)
         result_caption(vd)
 
-    _dq_row_volume_panel()
+    _dq_row_volume_panel(_psb.get("rv"))
 
     section_header("Dynamic table refresh health (7d)", "info", "pipeline")
     panel_help(
@@ -837,7 +850,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         "row means every downstream consumer is reading stale data. The daily "
         "PIPE_DT_FAILURES alert fires on 24h failures; this is the weekly picture."
     )
-    dth = run(ops_sql.dynamic_table_health(7), page=_PAGE, key="dt_health", tier="recent",
+    dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7), page=_PAGE, key="dt_health", tier="recent",
               source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
     if dth.ok and dth.empty:
         st.info("No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
