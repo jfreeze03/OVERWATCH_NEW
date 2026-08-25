@@ -1,4 +1,13 @@
 -- ===========================================================================
+--  OWNER ACTION: apply migration V091 (auto-resolve cleared alerts) in Snowsight
+--  Open snowflake/migrations/V091__alert_auto_clear.sql on GitHub -> Copy raw
+--  contents -> paste into a Snowsight worksheet -> run. Apply AFTER V090 (you are
+--  current through V090). It ADDs 2 ALERT_CONFIG columns, seeds 3 PERF rules, and
+--  re-derives SP_ALERT_SCAN with the auto-clear sweep. Scanner not fired at apply.
+--  https://github.com/jfreeze03/OVERWATCH_NEW/blob/main/snowflake/migrations/V091__alert_auto_clear.sql
+-- ===========================================================================
+
+-- ===========================================================================
 --  OVERWATCH  -  RUN BOX  (RUN_NEXT.sql)          updated: 2026-08-25
 -- ===========================================================================
 --  WHAT THIS IS
