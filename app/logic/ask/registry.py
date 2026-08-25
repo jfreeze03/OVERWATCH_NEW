@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.data import mart27_sql, mart_sql
-from app.data.common import resolve_effective_window
+from app.data import insights_sql, mart27_sql, mart_sql
+from app.data.common import bounded_days, resolve_effective_window
 from app.logic.anomaly import robust_zscores
 from app.logic.ask.types import (
     OUTLIER_Z,
@@ -327,6 +327,182 @@ def _analyze_cs_by_query(
 
 
 # --------------------------------------------------------------------------- #
+# Answerer 3 — "which warehouse is wasting credits?"
+# --------------------------------------------------------------------------- #
+_WASTE_INTENT = "warehouse_idle_waste"
+
+
+def _needs_warehouse_waste(params: AskParams) -> list[QuerySpec]:
+    return [
+        QuerySpec(
+            key="idle",
+            sql=insights_sql.idle_warehouse_analysis(params.days, params.company),
+            tier="recent",
+        )
+    ]
+
+
+def _analyze_warehouse_waste(
+    params: AskParams, frames: dict[str, pd.DataFrame]
+) -> AnswerResult:
+    # idle_warehouse_analysis is a LIVE builder clamped to 90d (bounded_days
+    # default) — label the effective window, never the raw request (see the spend
+    # answerer for the same discipline).
+    eff = bounded_days(params.days)
+    src = f"insights_sql.idle_warehouse_analysis({eff}d)"
+    meta: dict[str, object] = {"days": eff, "company": params.company}
+    df = frames.get("idle")
+    if (df is None or df.empty or "IDLE_CREDITS" not in df.columns
+            or "WAREHOUSE_NAME" not in df.columns):
+        return AnswerResult(
+            intent=_WASTE_INTENT,
+            headline=f"No metered warehouse activity in the last {eff}d.",
+            source=src, confidence="no_data", params=meta,
+        )
+
+    d = df.copy()
+    for c in ("IDLE_CREDITS", "TOTAL_CREDITS", "IDLE_HOURS", "METERED_HOURS"):
+        if c in d.columns:
+            d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
+    d = d.sort_values("IDLE_CREDITS", ascending=False).reset_index(drop=True)
+    total_idle = float(d["IDLE_CREDITS"].sum())
+
+    cap_note = (
+        [f"Idle analysis is capped to the live {eff}-day window (you asked for {params.days}d)."]
+        if eff < params.days else []
+    )
+    if total_idle <= 0:
+        # Honest good news, not a false "no data": warehouses are well-utilized.
+        return AnswerResult(
+            intent=_WASTE_INTENT,
+            headline=(
+                f"No idle-credit waste in the last {eff}d — every metered warehouse "
+                "ran queries in the hours it was billed for."
+            ),
+            bullets=cap_note,
+            evidence=d.head(15),
+            source=src, confidence="grounded", params=meta,
+        )
+
+    top = d.iloc[0]
+    wh = str(top["WAREHOUSE_NAME"])
+    idle_cr = float(top["IDLE_CREDITS"])
+    tot_cr = float(top.get("TOTAL_CREDITS", 0.0))
+    idle_h = int(_num(top.get("IDLE_HOURS", 0)))
+    met_h = int(_num(top.get("METERED_HOURS", 0)))
+    idle_share = idle_cr / tot_cr if tot_cr > 0 else 0.0
+
+    headline = (
+        f"Over the last {eff}d, {wh} wastes the most: {_fmt(idle_cr)} idle credits "
+        f"— {idle_share * 100:.0f}% of its {_fmt(tot_cr)} credits, idle {idle_h} of "
+        f"{met_h} metered hours."
+    )
+    bullets: list[str] = []
+    for i in range(min(5, len(d))):
+        r = d.iloc[i]
+        rc = float(r["IDLE_CREDITS"])
+        if rc <= 0:
+            break
+        rt = float(r.get("TOTAL_CREDITS", 0.0))
+        pct = rc / rt * 100 if rt > 0 else 0.0
+        bullets.append(f"{r['WAREHOUSE_NAME']}: {_fmt(rc)} idle credits ({pct:.0f}% of its spend)")
+    bullets.append(
+        f"Account-wide idle waste this window: {_fmt(total_idle)} credits."
+    )
+    bullets.extend(cap_note)
+
+    ev_cols = [c for c in ("WAREHOUSE_NAME", "IDLE_CREDITS", "TOTAL_CREDITS", "IDLE_HOURS", "METERED_HOURS") if c in d.columns]
+    return AnswerResult(
+        intent=_WASTE_INTENT,
+        headline=headline, bullets=bullets, evidence=d.head(15)[ev_cols].copy(),
+        source=src, confidence="grounded", params=meta,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Answerer 4 — "which task is failing most?"
+# --------------------------------------------------------------------------- #
+_TASK_INTENT = "task_failures"
+
+
+def _needs_task_failures(params: AskParams) -> list[QuerySpec]:
+    return [
+        QuerySpec(
+            key="tasks",
+            sql=mart_sql.fact_task_daily(params.days, params.company),
+            tier="recent",
+        )
+    ]
+
+
+def _analyze_task_failures(
+    params: AskParams, frames: dict[str, pd.DataFrame]
+) -> AnswerResult:
+    src = f"mart_sql.fact_task_daily({params.days}d, aggregated by task)"
+    meta: dict[str, object] = {"days": params.days, "company": params.company}
+    df = frames.get("tasks")
+    if (df is None or df.empty or "TASK_NAME" not in df.columns
+            or "FAILED" not in df.columns):
+        return AnswerResult(
+            intent=_TASK_INTENT,
+            headline=f"No task activity in the last {params.days}d.",
+            source=src, confidence="no_data", params=meta,
+        )
+
+    d = df.copy()
+    d["FAILED"] = pd.to_numeric(d["FAILED"], errors="coerce").fillna(0)
+    d["RUNS"] = pd.to_numeric(d.get("RUNS", 0), errors="coerce").fillna(0)
+    keys = [c for c in ("DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME") if c in d.columns]
+    agg = d.groupby(keys, dropna=False, as_index=False).agg(
+        FAILED=("FAILED", "sum"), RUNS=("RUNS", "sum"))
+    if "LAST_ERROR" in d.columns and "DAY" in d.columns:
+        last = d.sort_values("DAY").groupby(keys, dropna=False, as_index=False).agg(
+            LAST_ERROR=("LAST_ERROR", "last"))
+        agg = agg.merge(last, on=keys, how="left")
+
+    fails = agg[agg["FAILED"] > 0].sort_values("FAILED", ascending=False).reset_index(drop=True)
+    if fails.empty:
+        return AnswerResult(
+            intent=_TASK_INTENT,
+            headline=(
+                f"No task failures in the last {params.days}d — every task run that "
+                "was recorded succeeded."
+            ),
+            source=src, confidence="grounded", params=meta,
+        )
+
+    top = fails.iloc[0]
+    task = str(top["TASK_NAME"])
+    failed = int(top["FAILED"])
+    runs = int(top["RUNS"])
+    rate = failed / runs * 100 if runs > 0 else 0.0
+    headline = (
+        f"Over the last {params.days}d, {task} is failing most: {failed:,} failures "
+        f"across {runs:,} runs ({rate:.0f}%)."
+    )
+    bullets: list[str] = []
+    for i in range(min(5, len(fails))):
+        r = fails.iloc[i]
+        rf = int(r["FAILED"])
+        rr = int(r["RUNS"])
+        rrate = rf / rr * 100 if rr > 0 else 0.0
+        bullets.append(f"{r['TASK_NAME']}: {rf:,} failures / {rr:,} runs ({rrate:.0f}%)")
+    if "LAST_ERROR" in top.index:
+        err = _sample(top.get("LAST_ERROR"), 160)
+        if err and err != "(no sample text)":
+            bullets.append(f"Latest error on {task}: {err}")
+
+    ev = fails.head(15).copy()
+    ev["FAIL_RATE_PCT"] = (ev["FAILED"] / ev["RUNS"].where(ev["RUNS"] > 0) * 100).round(0)
+    ev_cols = [c for c in ("DATABASE_NAME", "TASK_NAME", "FAILED", "RUNS", "FAIL_RATE_PCT", "LAST_ERROR") if c in ev.columns]
+    return AnswerResult(
+        intent=_TASK_INTENT,
+        headline=headline, bullets=bullets, evidence=ev[ev_cols],
+        source=src, confidence="grounded", params=meta,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # the registry
 # --------------------------------------------------------------------------- #
 REGISTRY: tuple[Answerer, ...] = (
@@ -380,5 +556,44 @@ REGISTRY: tuple[Answerer, ...] = (
         # A question that names "cloud services" is a specific intent — it must win
         # over the generic spend answerer even when it also carries user/spend words.
         priority=1,
+    ),
+    Answerer(
+        intent=_WASTE_INTENT,
+        title="Which warehouse is wasting credits",
+        examples=(
+            "which warehouse is wasting credits",
+            "which warehouse is idle the most",
+            "where am I paying for idle warehouses",
+        ),
+        keywords=(
+            "warehouse", "warehouses", "wh", "idle", "wast", "unused",
+            "paying", "credits", "underused",
+        ),
+        require_all=(
+            ("warehouse", "warehouses", "wh"),
+            # "wast" stems waste/wasting/wasted (router._STEMS).
+            ("wast", "idle", "unused", "underused", "paying", "burn"),
+        ),
+        needs=_needs_warehouse_waste,
+        analyze=_analyze_warehouse_waste,
+    ),
+    Answerer(
+        intent=_TASK_INTENT,
+        title="Which task is failing most",
+        examples=(
+            "what task is failing most",
+            "which task fails the most",
+            "which pipeline task keeps failing",
+        ),
+        keywords=(
+            "task", "tasks", "pipeline", "job", "fail", "error", "broken",
+        ),
+        require_all=(
+            ("task", "tasks", "pipeline", "pipelines", "job", "jobs"),
+            # "fail" stems fail/failing/failed/failure/failures (router._STEMS).
+            ("fail", "error", "errors", "broken"),
+        ),
+        needs=_needs_task_failures,
+        analyze=_analyze_task_failures,
     ),
 )

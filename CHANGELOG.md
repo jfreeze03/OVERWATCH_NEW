@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.287.0 - Ask OVERWATCH: warehouse-waste + task-failure answerers (2026-08-25)
+
+Two more grounded answerers on the Ask page, same pattern (existing tested builders,
+real numbers, honest refusal / good-news paths):
+
+- **"which warehouse is wasting credits"** -> `insights_sql.idle_warehouse_analysis`
+  ranks warehouses by idle credits (hours billed with no queries); names the top
+  waster with its idle share and idle/metered hours, and the account-wide idle total.
+  Live builder, so the window is labeled at its effective 90-day cap. Zero idle
+  returns honest good news, not a false "no data".
+- **"which task is failing most"** -> `mart_sql.fact_task_daily` aggregated by task:
+  names the task with the most failures over the window, its failure rate, and its
+  latest error message. No failures returns honest good news.
+
+Routing adds `wast`/`fail` prefix stems; the four answerers stay disjoint (a
+warehouse-waste question needs a waste/idle term, a task question needs a task +
+failure term), so none steals another's intent.
+
 ## 4.286.0 - Ask OVERWATCH: grounded answerer registry (2026-08-25)
 
 A narrow, grounded question-answering page — NOT generic text-to-SQL over semantic

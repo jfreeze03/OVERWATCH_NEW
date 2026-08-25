@@ -344,6 +344,60 @@ def test_spend_window_label_reflects_the_mart_effective_horizon():
     assert not any("capped" in b for b in res30.bullets)
 
 
+# ============================ answerers 3 & 4: warehouse waste / task fails ==
+
+def test_warehouse_waste_and_task_failures_route():
+    for q in ("which warehouse is wasting credits", "which warehouse is idle the most",
+              "where am I paying for idle warehouses"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == "warehouse_idle_waste", q
+    for q in ("what task is failing most", "which task fails the most",
+              "which pipeline task keeps failing"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == "task_failures", q
+    # a per-warehouse spend-spike question (no waste/idle term) has no grounded path
+    assert route("which warehouse is causing spend spikes", default_days=30, company="ALL").answerer is None
+
+
+def test_warehouse_waste_names_top_waster_and_shows_good_news():
+    from app.logic.ask.registry import _analyze_warehouse_waste
+    idf = pd.DataFrame({"WAREHOUSE_NAME": ["WH_ETL", "WH_BI"], "METERED_HOURS": [720, 720],
+                        "IDLE_HOURS": [500, 50], "TOTAL_CREDITS": [1000., 800], "IDLE_CREDITS": [600., 40]})
+    res = _analyze_warehouse_waste(AskParams(30, "ALL"), {"idle": idf})
+    assert res.confidence == "grounded"
+    assert "WH_ETL" in res.headline and "600" in res.headline and "60%" in res.headline
+    # zero idle -> honest good news, not a false "no data"
+    clean = pd.DataFrame({"WAREHOUSE_NAME": ["WH"], "METERED_HOURS": [100], "IDLE_HOURS": [0],
+                          "TOTAL_CREDITS": [50.], "IDLE_CREDITS": [0.]})
+    gn = _analyze_warehouse_waste(AskParams(30, "ALL"), {"idle": clean})
+    assert gn.confidence == "grounded" and "No idle-credit waste" in gn.headline
+
+
+def test_warehouse_waste_window_capped_to_the_live_90d_horizon():
+    from app.logic.ask.registry import _analyze_warehouse_waste
+    idf = pd.DataFrame({"WAREHOUSE_NAME": ["WH"], "METERED_HOURS": [100], "IDLE_HOURS": [50],
+                        "TOTAL_CREDITS": [50.], "IDLE_CREDITS": [25.]})
+    res = _analyze_warehouse_waste(AskParams(365, "ALL"), {"idle": idf})
+    assert res.params["days"] == 90
+    assert "over the last 90d" in res.headline.lower() and "365d" not in res.headline
+    assert any("capped" in b for b in res.bullets)
+
+
+def test_task_failures_aggregates_by_task_and_names_worst():
+    from app.logic.ask.registry import _analyze_task_failures
+    tf = pd.DataFrame({"DAY": ["2026-08-20", "2026-08-21", "2026-08-21"],
+                       "DATABASE_NAME": ["D", "D", "D"], "SCHEMA_NAME": ["S", "S", "S"],
+                       "TASK_NAME": ["LOAD", "LOAD", "REFRESH"], "RUNS": [10, 10, 5], "FAILED": [3, 4, 1],
+                       "LAST_STATE": ["FAILED", "FAILED", "FAILED"],
+                       "LAST_ERROR": ["timeout", "oom", "perm denied"]})
+    res = _analyze_task_failures(AskParams(30, "ALL"), {"tasks": tf})
+    assert res.confidence == "grounded"
+    assert "LOAD is failing most" in res.headline and "7 failures" in res.headline  # 3+4 summed
+    assert any("oom" in b for b in res.bullets)   # most-recent error surfaces
+    # no failures -> honest good news
+    gn = _analyze_task_failures(AskParams(30, "ALL"),
+                                {"tasks": pd.DataFrame({"TASK_NAME": ["A"], "FAILED": [0], "RUNS": [5]})})
+    assert gn.confidence == "grounded" and "No task failures" in gn.headline
+
+
 # ================================================= wiring lock ==============
 
 def test_ask_page_is_wired_and_isolated():

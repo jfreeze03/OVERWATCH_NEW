@@ -40,8 +40,9 @@ _MAX_DAYS = 365
 # "whole" and "cs" never inside "docs"); deliberate prefix stems match a word's
 # start; multi-word / hyphenated phrases fall back to substring.
 _WORD_RE = re.compile(r"[a-z0-9]+")
-# spik -> spike/spikes/spiking; spend -> spends/spending/spender/spenders/spent.
-_STEMS = frozenset({"spik", "spend"})
+# prefix stems: spik->spike/spiking, spend->spends/spender, wast->waste/wasting,
+# fail->failing/failed/failure/failures.
+_STEMS = frozenset({"spik", "spend", "wast", "fail"})
 
 
 @dataclass(frozen=True)
