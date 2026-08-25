@@ -571,6 +571,86 @@ def task_duration_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     return worst.sort_values("SLOWER_X", ascending=False).reset_index(drop=True)[keep]
 
 
+DURATION_FORECAST_RECENT_DAYS = 3   # trailing days that form the "recent level"
+DURATION_FORECAST_AT_RISK_X = 1.3   # recent-median >= this x baseline (+ climb) -> At risk
+DURATION_FORECAST_MISS_X = 2.0      # recent-median >= this x baseline (+ climb) -> Predicted miss
+
+
+def duration_sla_forecast(df: pd.DataFrame) -> pd.DataFrame:
+    """Tasks whose daily runtime is CLIMBING toward a likely SLA miss (Upgrade Board
+    #5) — the leading half of the duration signal, complementary to
+    ``task_duration_anomalies`` (which flags a task that was ALREADY an outlier on
+    some day).
+
+    From FACT_TASK_DAILY rows (DAY, DATABASE_NAME[, SCHEMA_NAME], TASK_NAME, AVG_SEC):
+    each task (identified by its full grain — DB, schema, name, and company when the
+    frame carries them — deduped to one value per calendar day) needs
+    >= DURATION_MIN_ACTIVE_DAYS distinct days and a baseline (median of the days BEFORE
+    the last DURATION_FORECAST_RECENT_DAYS) of >= DURATION_MIN_SEC. It is flagged when
+    the last day is above the start of the recent window (a climb, not a recovery) AND
+    the recent-window MEDIAN — robust, so a single spike on any one day cannot fake a
+    trend — is materially above the baseline: 'Predicted miss' at >= MISS_X, 'At risk'
+    at >= AT_RISK_X. The tier is taken from the SAME rounded ratio shown as SLOWER_X,
+    so the label never contradicts the number. One row per flagged task (its latest
+    day), worst first. ACCOUNT_USAGE only sees COMPLETED runs, so this is a
+    trailing-window forecast, not a live in-flight detector. Empty in -> empty out.
+    """
+    cols = ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME", "DAY", "BASELINE_SEC",
+            "LATEST_SEC", "SLOWER_X", "FORECAST", "SEVERITY"]
+    if (df is None or df.empty
+            or not {"DAY", "AVG_SEC", "TASK_NAME", "DATABASE_NAME"}.issubset(df.columns)):
+        return pd.DataFrame(columns=cols)
+    work = df.copy()
+    work["AVG_SEC"] = pd.to_numeric(work["AVG_SEC"], errors="coerce")
+    work["DAY"] = pd.to_datetime(work["DAY"], errors="coerce").dt.normalize()
+    work = work.dropna(subset=["AVG_SEC", "DAY"])
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    # Full-grain identity: the same task name can exist across schemas/companies —
+    # keying only on DB.TASK_NAME would interleave their series into one. Use every
+    # grain column the frame carries, then reduce to one value per calendar day so a
+    # duplicate mart row can neither inflate the day count nor distort the window.
+    grain = (["DATABASE_NAME"]
+             + (["SCHEMA_NAME"] if "SCHEMA_NAME" in work.columns else [])
+             + ["TASK_NAME"]
+             + (["COMPANY"] if "COMPANY" in work.columns else []))
+    daily = work.groupby([*grain, "DAY"], as_index=False)["AVG_SEC"].mean()
+    rows = []
+    for _key, group in daily.groupby(grain):
+        g = group.sort_values("DAY")
+        series = g["AVG_SEC"].to_numpy()
+        if len(series) < DURATION_MIN_ACTIVE_DAYS:      # distinct days after the dedup
+            continue
+        recent = series[-DURATION_FORECAST_RECENT_DAYS:]
+        prior = series[:-DURATION_FORECAST_RECENT_DAYS]
+        baseline = float(pd.Series(prior).median())
+        if baseline < DURATION_MIN_SEC:
+            continue
+        recent_level = float(pd.Series(recent).median())   # robust to a one-day spike
+        latest = float(recent[-1])
+        climbing = latest > float(recent[0])               # ended above the window start
+        ratio = round(recent_level / baseline, 1) if baseline > 0 else 0.0
+        if not (climbing and ratio >= DURATION_FORECAST_AT_RISK_X):
+            continue
+        forecast, severity = (("Predicted miss", "High") if ratio >= DURATION_FORECAST_MISS_X
+                              else ("At risk", "Medium"))
+        last = g.iloc[-1]
+        rows.append({
+            "DATABASE_NAME": last["DATABASE_NAME"],
+            "SCHEMA_NAME": (last["SCHEMA_NAME"] if "SCHEMA_NAME" in work.columns else None),
+            "TASK_NAME": last["TASK_NAME"],
+            "DAY": last["DAY"],
+            "BASELINE_SEC": round(baseline, 1),
+            "LATEST_SEC": round(latest, 1),
+            "SLOWER_X": ratio,
+            "FORECAST": forecast,
+            "SEVERITY": severity,
+        })
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    return pd.DataFrame(rows).sort_values("SLOWER_X", ascending=False).reset_index(drop=True)[cols]
+
+
 def flag_clustering_churn(df: pd.DataFrame, *, rate: float | None = None,
                           min_credits: float = 1.0) -> pd.DataFrame:
     """Auto-clustering churn (repo wave-2 #6): tables paying credits to recluster

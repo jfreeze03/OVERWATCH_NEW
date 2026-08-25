@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.293.0 - Predictive SLA miss: tasks trending slower (2026-08-25)
+
+Operations ▸ Tasks ▸ Health gains a "Predicted SLA miss — tasks trending slower"
+panel (Upgrade Board P0 #5), the leading half of the duration signal beside the
+existing retrospective "Duration drift". A new pure function
+`insights.duration_sla_forecast` reuses the FACT_TASK_DAILY frame already loaded
+(no new scan): for each task with a real baseline (median >= 30s, >= 7 active
+days) it flags one whose last few days are climbing (the latest day is the recent
+peak and above the recent start) and materially above the task's own median —
+"At risk" at >= 1.3×, "Predicted miss" at >= 2×. Complements the drift, which
+flags a task already slow on some day.
+
+Scope note: ACCOUNT_USAGE only sees completed runs (TASK_HISTORY lags ~45min), so
+this is a trailing-window trend forecast, not a live in-flight "still running past
+p95" detector (which would need INFORMATION_SCHEMA table functions and is subject
+to SiS owner's-rights scoping). App-only — no migration.
+
 ## 4.292.0 - Billed-vs-attributed gap panel (2026-08-25)
 
 Cost & Contract ▸ Spend gains a "Billed vs attributed" panel (Upgrade Board P0

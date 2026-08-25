@@ -48,6 +48,7 @@ from app.logic.insights import (
     build_failure_timeline,
     cluster_failures_by_family,
     compare_release_periods,
+    duration_sla_forecast,
     pipeline_sla_forecast,
     rank_release_candidates,
     task_duration_anomalies,
@@ -1037,6 +1038,32 @@ def _task_health_view(company: str, days: int, database: str = "",
                      "delta_color": "inverse"},
                 ])
                 styled_table(_drift, slug="task-duration-drift", sort_label="x slower desc")
+            # #5 (Upgrade Board): the LEADING half of the duration signal — tasks
+            # whose daily runtime is climbing toward a miss, before they cross. Same
+            # already-loaded daily frame as the drift above; no extra scan.
+            _fc = duration_sla_forecast(res.df)
+            section_header("Predicted SLA miss — tasks trending slower", "warn", "schedule")
+            if _fc.empty:
+                st.caption("No task's recent runtime is climbing toward a miss.")
+            else:
+                _miss = int((_fc["FORECAST"] == "Predicted miss").sum())
+                kpi_row([
+                    {"label": "Tasks trending late", "value": f"{len(_fc)}",
+                     "delta_color": "inverse"},
+                    {"label": "Predicted miss", "value": f"{_miss}",
+                     "severity": ("bad" if _miss else "ok")},
+                ])
+                _fc_cols = [c for c in ["FORECAST", "SEVERITY", "DATABASE_NAME", "SCHEMA_NAME",
+                                        "TASK_NAME", "BASELINE_SEC", "LATEST_SEC", "SLOWER_X", "DAY"]
+                            if c in _fc.columns]
+                styled_table(_fc[_fc_cols], slug="task-duration-forecast",
+                             sort_label="x over baseline desc")
+                st.caption(
+                    "Latest daily runtime vs the task's own median baseline, shown only when the "
+                    "last few days are climbing — a leading indicator that complements the drift "
+                    "above (which flags a task already slow on some day). Trailing completed-run "
+                    "averages; ACCOUNT_USAGE.TASK_HISTORY lags ~45min, so this forecasts a trend, "
+                    "not a live in-flight run.")
     st.divider()
     _failure_timeline_section(company, database, schema_contains,
                               known_failures=known_failed if days >= 7 else None)
