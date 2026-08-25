@@ -58,7 +58,7 @@ from app.ui.icons import icon  # noqa: E402
 from app.ui.pages import (  # noqa: E402
     admin,
     alerts,
-    ask,  # ASK-OVERWATCH (isolated feature — revert: remove this line)
+    ask,
     brief,
     control_room,
     cost,
@@ -82,9 +82,7 @@ _RENDERERS = {
     "Security": security.render,
     "Admin": admin.render,
     "Brief": brief.render,
-    # ASK-OVERWATCH (isolated feature — revert: remove this line + the `ask` import
-    # above + the "Ask" entry in app/config.py PAGES_BY_PROFILE["DBA"]).
-    "Ask": ask.render,
+    "Ask": ask.render,   # grounded Q&A (app/logic/ask + app/ui/pages/ask.py)
 }
 
 

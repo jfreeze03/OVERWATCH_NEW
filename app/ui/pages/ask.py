@@ -1,4 +1,4 @@
-"""Ask-OVERWATCH — the page (ISOLATED, revertible test surface).
+"""Ask-OVERWATCH — the page (self-contained; the only file touching Streamlit).
 
 The ONLY file in the feature that touches Streamlit and app.core.query.run. It
 routes the question (app.logic.ask.route), runs the chosen answerer's builder

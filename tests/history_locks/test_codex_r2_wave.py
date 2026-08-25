@@ -416,19 +416,16 @@ def test_rec19_alerts_renders_backlog_and_expired():
 # ---------------------------------------------------------------------------
 def test_rec14_nav_groups_partition_and_preserve_role_scope():
     from app.config import PAGES_BY_PROFILE, nav_groups_for
-    # DBA sees everything -> the three groups in order.
+    # DBA sees everything -> Ask leads the sidebar in its own group, then the three.
     dba = nav_groups_for(PAGES_BY_PROFILE["DBA"])
-    # ASK-OVERWATCH (isolated feature): "Ask" is a DBA-only page in no NAV_GROUP,
-    # so nav_groups_for trails it under "More". Revert: drop "More" from the list
-    # below and delete the dict(dba)["More"] assertion.
-    assert [g for g, _ in dba] == ["Watch", "Analyze", "Govern", "More"]
+    assert [g for g, _ in dba] == ["Ask OVERWATCH", "Watch", "Analyze", "Govern"]
+    assert dict(dba)["Ask OVERWATCH"] == ["Ask"]     # DBA-only grounded Q&A front door
     assert dict(dba)["Watch"] == ["Brief", "Overview", "Alerts"]
     assert dict(dba)["Govern"] == ["Security", "Admin"]
-    assert dict(dba)["More"] == ["Ask"]
-    # EXECUTIVE cannot see Operations/Control Room/Security/Admin -> no Govern group,
-    # and only the allowed Analyze member (Cost & Contract) appears
+    # EXECUTIVE cannot see Operations/Control Room/Security/Admin/Ask -> no Govern
+    # or Ask group, and only the allowed Analyze member (Cost & Contract) appears
     exe = dict(nav_groups_for(PAGES_BY_PROFILE["EXECUTIVE"]))
-    assert "Govern" not in exe
+    assert "Govern" not in exe and "Ask OVERWATCH" not in exe
     assert exe["Analyze"] == ["Cost & Contract"]
     assert exe["Watch"] == ["Brief", "Overview", "Alerts"]
     # a page in no group is never dropped -- it trails under "More"

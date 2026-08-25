@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.286.0 - Ask OVERWATCH: grounded answerer registry (2026-08-25)
+
+A narrow, grounded question-answering page — NOT generic text-to-SQL over semantic
+views. A plain-English question is routed to one of a small set of hand-built
+"answerers", each of which runs EXISTING tested builders and returns a result where
+every number is real query output; unmapped questions get an honest refusal, never a
+plausible guess. DBA-only for now; leads the sidebar in its own "Ask OVERWATCH" nav
+group as the ask-first front door.
+
+- **Two answerers** wired to existing builders (no new marts, no migration):
+  `spend_spike_by_user` (`mart27_sql.alloc_attribution` USER + `robust_zscores` —
+  names the top spender, flags a true peer-outlier, drops unattributed NONE/UNKNOWN)
+  and `cloud_services_spike_by_query` (`cloud_svc_top_shapes` / `cloud_svc_by_user` /
+  `fact_cloud_services_ratio` — names the driving query shape, heaviest user, elevated
+  warehouses).
+- **Router** (`app/logic/ask`): deterministic word-boundary keyword matching with an
+  honesty gate; no strong match → refusal. Company scope always comes from the page
+  filter, never the free text.
+- **Optional Cortex phrasing** only rewords the already-grounded result (off by
+  default, changes no number). A query FAILURE renders an honest refusal, never a
+  false "no data" (branches on `run().ok`).
+- Built additively (`app/logic/ask/` + `app/ui/pages/ask.py`), hardened by a
+  5-dimension adversarial review, and covered by `tests/test_ask_registry.py`.
+
 ## 4.285.0 - Performance: per-distinct-user company scope in live security builders (2026-08-24)
 
 Cross-repo review finding #15. `companies.user_clause` emits `COMPANY_FOR_USER(col) = 'X'` — one
