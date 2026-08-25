@@ -13,8 +13,10 @@ manually resolving stale "over threshold yesterday" rows.
   scope drops below the CLEAR hysteresis floor (default 0.9 × THRESHOLD_NUM).
   OPEN-only (never ACK/RESOLVED/SNOOZED); ≥1h dwell + hysteresis prevent flapping;
   today's-bucket only, so a historical day-stamped exceedance is never rewritten;
-  the sweep is wrapped so a failure never breaks alerting. Byte-derived from V087
-  (removing the sweep + the two columns reproduces V087).
+  the sweep is wrapped so a failure never breaks alerting. The three rules' dedupe
+  guard ignores `AUTO_CLEARED` rows so a same-day **recurrence re-alerts** (a manual
+  resolve still suppresses re-raise) — caught in adversarial review. Byte-derived
+  from V087.
 - **App read-path**: `AUTO_CLEARED` is excluded from per-rule precision, MTTR, and
   resolved-counts exactly like the existing machine-close `SUPERSEDED`, so machine
   closes never distort operator metrics. Auto-cleared events simply drop off the

@@ -50,10 +50,12 @@ _V091_HEADER = (
     "--     a >=1h dwell + the below-CLEAR hysteresis prevent a raise-then-clear flap;\n"
     "--     today's-bucket only, so a historical day-stamped exceedance is never rewritten.\n"
     "--\n"
-    "-- The ONLY SP_ALERT_SCAN edit vs V087 is the [auto-clear sweep] block; removing it\n"
-    "-- (and the two new columns/seed) reproduces V087 byte-for-byte. AUTO_CLEARED is\n"
-    "-- excluded from per-rule precision/MTTR in the app read-path exactly like SUPERSEDED.\n"
-    "-- The scanner is NOT fired at apply time. Owner applies in Snowsight after V090."
+    "--   * Add 'AND RESOLUTION_KIND <> AUTO_CLEARED' to the dedupe guard of those three\n"
+    "--     raise arms so a same-day RECURRENCE re-alerts after an auto-clear (a manual\n"
+    "--     RESOLVE still suppresses re-raise). Every other arm is byte-identical to V087.\n"
+    "--\n"
+    "-- AUTO_CLEARED is excluded from per-rule precision/MTTR in the app read-path exactly\n"
+    "-- like SUPERSEDED. The scanner is NOT fired at apply time. Owner applies after V090."
 )
 sub(_V087_HEADER_END, _V091_HEADER)
 
@@ -161,6 +163,27 @@ _SWEEP = "\n" + r"""
 sub(_RETURN_ANCHOR,
     _SWEEP + "\n    RETURN 'alert scan v11 (V091: + auto-clear sweep): '"
     " || (16 - :fails) || '/16 rule blocks ok';")
+
+# ---- 5b. recurrence: the three auto-clear rules' dedupe guard must ignore an
+#          AUTO_CLEARED row, so a same-day recurrence re-alerts (a manual RESOLVE
+#          still suppresses re-raise). Every other arm's guard is left untouched. ----
+_GUARD = ("\n\n        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)\n"
+          "        WHERE NOT EXISTS (\n"
+          "            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
+          "            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY\n"
+          "        );")
+_GUARD_FIX = ("\n\n        ) b (RULE_ID, COMPANY, SEVERITY, TITLE, DETAIL, METRIC_VALUE, DEDUPE_KEY)\n"
+              "        WHERE NOT EXISTS (\n"
+              "            SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e\n"
+              "            WHERE e.DEDUPE_KEY = b.DEDUPE_KEY\n"
+              "              AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'   -- V091: recurrence re-alerts after an auto-clear\n"
+              "        );")
+for _on in (
+    "        ) q ON c.RULE_ID = 'PERF_QUERY_FAIL_PCT' AND q.FAIL_PCT >= c.THRESHOLD_NUM",
+    "        ) q ON c.RULE_ID = 'PERF_QUEUED_MINUTES' AND q.QUEUED_MIN >= c.THRESHOLD_NUM",
+    "        ) q ON c.RULE_ID = 'PERF_SPILL_GB' AND q.SPILL_GB >= c.THRESHOLD_NUM",
+):
+    sub(_on + _GUARD, _on + _GUARD_FIX)
 
 # ---- 6. SCHEMA_VERSION footer ----
 sub("SELECT 87 AS VERSION,", "SELECT 91 AS VERSION,")

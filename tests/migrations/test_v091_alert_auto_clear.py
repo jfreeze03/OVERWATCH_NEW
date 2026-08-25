@@ -55,9 +55,19 @@ def test_v091_auto_clear_sweep_is_safe():
     assert "fails := fails + 1" not in _sweep   # a sweep failure is not a rule-block failure
 
 
+def test_v091_auto_clear_rules_re_alert_on_same_day_recurrence():
+    # review fix: an auto-cleared scope MUST be able to re-raise the same day if the
+    # condition recurs — the 3 seeded raise arms' dedupe guard ignores AUTO_CLEARED rows.
+    assert _V091.count("AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'") == 3
+    # ...but a MANUAL resolve still suppresses re-raise (exclusion is AUTO_CLEARED-only,
+    # never the broad STATUS <> 'RESOLVED' which would re-raise human-closed alerts).
+    assert "e.STATUS <> 'RESOLVED'" not in _V091
+
+
 def test_v091_is_byte_derived_from_v087():
-    # the SP body between V087 and V091 differs ONLY by the added sweep: every V087
-    # raise arm + the SUPERSEDED escalation sweep survive verbatim (CR-normalized).
+    # the SP body between V087 and V091 differs ONLY by the added sweep + the 3 auto-clear
+    # arms' one-line recurrence guard: every V087 raise arm label + the SUPERSEDED
+    # escalation sweep survive (CR-normalized).
     v087 = _V087.replace("\r\n", "\n")
     v091 = _V091.replace("\r\n", "\n")
     superseded_sweep = ("UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS lo\n"

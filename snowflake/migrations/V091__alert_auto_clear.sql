@@ -27,10 +27,12 @@
 --     a >=1h dwell + the below-CLEAR hysteresis prevent a raise-then-clear flap;
 --     today's-bucket only, so a historical day-stamped exceedance is never rewritten.
 --
--- The ONLY SP_ALERT_SCAN edit vs V087 is the [auto-clear sweep] block; removing it
--- (and the two new columns/seed) reproduces V087 byte-for-byte. AUTO_CLEARED is
--- excluded from per-rule precision/MTTR in the app read-path exactly like SUPERSEDED.
--- The scanner is NOT fired at apply time. Owner applies in Snowsight after V090.
+--   * Add 'AND RESOLUTION_KIND <> AUTO_CLEARED' to the dedupe guard of those three
+--     raise arms so a same-day RECURRENCE re-alerts after an auto-clear (a manual
+--     RESOLVE still suppresses re-raise). Every other arm is byte-identical to V087.
+--
+-- AUTO_CLEARED is excluded from per-rule precision/MTTR in the app read-path exactly
+-- like SUPERSEDED. The scanner is NOT fired at apply time. Owner applies after V090.
 
 EXECUTE IMMEDIATE
 $$
@@ -205,6 +207,7 @@ BEGIN
         WHERE NOT EXISTS (
             SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
             WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+              AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'   -- V091: recurrence re-alerts after an auto-clear
         );
     EXCEPTION
         WHEN OTHER THEN
@@ -242,6 +245,7 @@ BEGIN
         WHERE NOT EXISTS (
             SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
             WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+              AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'   -- V091: recurrence re-alerts after an auto-clear
         );
     EXCEPTION
         WHEN OTHER THEN
@@ -279,6 +283,7 @@ BEGIN
         WHERE NOT EXISTS (
             SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS e
             WHERE e.DEDUPE_KEY = b.DEDUPE_KEY
+              AND COALESCE(e.RESOLUTION_KIND, '') <> 'AUTO_CLEARED'   -- V091: recurrence re-alerts after an auto-clear
         );
     EXCEPTION
         WHEN OTHER THEN
