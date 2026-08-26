@@ -127,3 +127,100 @@ HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
 ORDER BY DAY, SERVERLESS_CREDITS DESC
 LIMIT 2000
 """
+
+
+def object_dependency_edges(limit: int = 10000) -> str:
+    """#19: declared object-dependency edges (REFERENCED -> REFERENCING) for the
+    downstream blast-radius walk.
+
+    OBJECT_DEPENDENCIES records that a REFERENCING object depends on a REFERENCED
+    object (a view REFERENCING a table). The downstream dependents of X are the
+    objects that REFERENCE X — transitively — and those are what break if X changes.
+    This returns the raw edge list account-wide; the transitive walk from a chosen
+    root runs in pure Python (``lineage.downstream_dependents``) so it is unit-tested
+    and cycle-safe, and one cached fetch serves every object viewed in a session.
+
+    UNVERIFIED view (no prior reader on this account) — callers run it probe=True and
+    degrade to 'dependency graph unavailable'. OBJECT_DEPENDENCIES records declared
+    view/matview/policy references but NOT stored-proc bodies or dynamic SQL, so the
+    declared graph is PARTIAL — it is deliberately paired with observed ACCESS_HISTORY
+    consumers, and the panel says so. Deterministic ORDER BY so that if the account-
+    wide edge set exceeds the row cap the retained subset is stable; the caller passes
+    an explicit max_rows and surfaces ``truncated`` as a lower-bound warning (the count
+    is never silently cut)."""
+    n = int(max(1, min(50000, limit)))
+    return f"""
+SELECT
+    REFERENCED_DATABASE  || '.' || REFERENCED_SCHEMA  || '.' || REFERENCED_OBJECT_NAME  AS REFERENCED_FQN,
+    REFERENCED_OBJECT_ID  AS REFERENCED_ID,
+    REFERENCING_DATABASE || '.' || REFERENCING_SCHEMA || '.' || REFERENCING_OBJECT_NAME AS REFERENCING_FQN,
+    REFERENCING_OBJECT_ID AS REFERENCING_ID,
+    REFERENCING_OBJECT_DOMAIN AS REFERENCING_DOMAIN
+FROM SNOWFLAKE.ACCOUNT_USAGE.OBJECT_DEPENDENCIES
+WHERE REFERENCED_OBJECT_NAME IS NOT NULL
+  AND REFERENCING_OBJECT_NAME IS NOT NULL
+ORDER BY REFERENCED_FQN, REFERENCING_FQN
+LIMIT {n}
+"""
+
+
+def object_blast_consumers(fqns: tuple[str, ...], days: int = 30, limit: int = 200) -> str:
+    """#19: OBSERVED consumers (ACCESS_HISTORY) of the root object + its declared
+    dependents. Per objectName: distinct queries, distinct users, the read/write
+    split, last touch, and a sample user. This is the observed half that catches the
+    stored-proc / dynamic-SQL consumers the declared OBJECT_DEPENDENCIES graph misses.
+
+    Enterprise-edition only (ACCESS_HISTORY) — callers run probe=True and degrade to
+    'dependency graph only, no measured consumers'. ``days`` bounded; the FQN IN-list
+    is whitelisted through sql_literal (the FQNs are ACCOUNT_USAGE-derived, but they
+    are literal-guarded anyway — never raw text into SQL).
+
+    Two coverage details that matter for a view-heavy dependent set: (1) the objectName
+    is UPPER-folded on BOTH sides of the match so a quoted mixed-case dependent still
+    joins (the IN-list is already uppercase; the walk's FQNs are too). (2) The READ arm
+    flattens BOTH BASE_OBJECTS_ACCESSED and DIRECT_OBJECTS_ACCESSED — a view read by
+    name lands in DIRECT (only its base tables land in BASE), so a BASE-only scan would
+    miss exactly the view dependents this feature is built to surface. COUNT(DISTINCT
+    QUERY_ID) dedups an object that appears in both arrays for one query."""
+    from app.core.sqlsafe import sql_literal
+    days = bounded_days(days, 90)
+    clean = tuple(dict.fromkeys(str(f).strip().upper() for f in fqns if str(f).strip()))
+    if not clean:
+        clean = ("\x00__none__",)   # matches nothing -> empty result, never a syntax error
+    in_list = ", ".join(sql_literal(f) for f in clean)
+    n = int(max(1, min(1000, limit)))
+    return f"""
+WITH touches AS (
+    SELECT UPPER(f.value:"objectName"::STRING) AS FQN, a.QUERY_ID, a.USER_NAME,
+           a.QUERY_START_TIME, 'READ' AS KIND
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND UPPER(f.value:"objectName"::STRING) IN ({in_list})
+    UNION ALL
+    SELECT UPPER(f.value:"objectName"::STRING), a.QUERY_ID, a.USER_NAME,
+           a.QUERY_START_TIME, 'READ'
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.DIRECT_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND UPPER(f.value:"objectName"::STRING) IN ({in_list})
+    UNION ALL
+    SELECT UPPER(f.value:"objectName"::STRING), a.QUERY_ID, a.USER_NAME,
+           a.QUERY_START_TIME, 'WRITE'
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.OBJECTS_MODIFIED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+      AND UPPER(f.value:"objectName"::STRING) IN ({in_list})
+)
+SELECT FQN,
+       COUNT(DISTINCT QUERY_ID)                            AS QUERIES,
+       COUNT(DISTINCT USER_NAME)                           AS USERS,
+       COUNT(DISTINCT IFF(KIND = 'READ', QUERY_ID, NULL))  AS READ_QUERIES,
+       COUNT(DISTINCT IFF(KIND = 'WRITE', QUERY_ID, NULL)) AS WRITE_QUERIES,
+       MAX(QUERY_START_TIME)                               AS LAST_TOUCH,
+       ANY_VALUE(USER_NAME)                                AS SAMPLE_USER
+FROM touches
+GROUP BY FQN
+ORDER BY QUERIES DESC
+LIMIT {n}
+"""

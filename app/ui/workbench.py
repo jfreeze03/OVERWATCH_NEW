@@ -12,7 +12,8 @@ from app.core.identity import viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
-from app.data import mart27_sql, mart_sql, workbench_sql
+from app.data import graph_sql, mart27_sql, mart_sql, workbench_sql
+from app.logic import lineage
 from app.logic.actions import rank_actions
 from app.logic.formulas import (
     account_today,
@@ -678,6 +679,99 @@ def render_entity_360(company: str) -> None:
             styled_table(linked, height=240, column_config=cfg)
         if all(r.ok and r.empty for r in (remediations, savings, links)):
             empty_state("no_data_yet", "No evidence, remediation, or savings outcome is linked yet.")
+
+        if kind == "OBJECT":
+            _object_blast_radius_panel(key)
+
+
+_BLAST_WINDOW_DAYS = 30
+
+
+def _object_blast_radius_panel(key: str) -> None:
+    """#19: downstream blast radius for a table/view — its DECLARED dependents
+    (OBJECT_DEPENDENCIES) paired with the OBSERVED consumers who actually touch them
+    (ACCESS_HISTORY). Answers "if I ALTER this — or it breaks — what depends on it?"
+    as a count of recorded facts, never a 'safe to change' verdict. Both sources are
+    probe-gated (OBJECT_DEPENDENCIES is unverified here; ACCESS_HISTORY is Enterprise-
+    only), so each half degrades on its own."""
+    st.markdown("**Downstream blast radius**")
+    # max_rows honors the builder's own 50k clamp instead of the 5k default, and
+    # `truncated` is surfaced below — the declared-dependent count is never silently cut.
+    edges = run(graph_sql.object_dependency_edges(), page=_PAGE, key="object_dep_edges",
+                tier="historical", source="ACCOUNT_USAGE.OBJECT_DEPENDENCIES",
+                probe=True, max_rows=50000)
+    if not edges.ok:
+        st.caption("Declared object lineage needs ACCOUNT_USAGE.OBJECT_DEPENDENCIES, "
+                   "which isn't available to this role/account yet — blast radius hidden.")
+        return
+    if edges.truncated:
+        st.warning("The account-wide dependency graph hit the row cap, so 'Declared "
+                   "dependents' is a LOWER BOUND and may omit real downstream dependents.")
+    deps = lineage.downstream_dependents(edges.df if edges.usable() else pd.DataFrame(), key)
+    if deps.empty:
+        st.info("No DECLARED downstream dependents recorded for this object. Note that "
+                "OBJECT_DEPENDENCIES records view/matview/policy references, not "
+                "stored-procedure or dynamic-SQL usage — this is not proof nothing "
+                "depends on it, and not a 'safe to ALTER' verdict.")
+        # The declared graph is blind exactly in the proc/dynamic-SQL case — still fetch
+        # the object's OWN observed consumers, the evidence that matters most here.
+        root_cons = run(graph_sql.object_blast_consumers((key,), _BLAST_WINDOW_DAYS),
+                        page=_PAGE, key=f"object_blast_root_{key}", tier="recent",
+                        source="ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)", probe=True)
+        if root_cons.usable() and not root_cons.empty:
+            r = root_cons.df.iloc[0]
+            q, u = int(safe_float(r.get("QUERIES"))), int(safe_float(r.get("USERS")))
+            st.caption(f"Observed directly: {q} queries by {u} user(s) touched this object "
+                       f"in {_BLAST_WINDOW_DAYS}d (ACCESS_HISTORY, includes proc/dynamic SQL) "
+                       "— a count of recorded facts, not a safe-to-ALTER verdict.")
+        elif not root_cons.ok:
+            st.caption("Observed-consumer evidence (ACCESS_HISTORY, Enterprise-only) is "
+                       "unavailable here, so proc/dynamic-SQL usage can't be measured.")
+        return
+    # observed consumers for the object itself + its declared dependents
+    fqns = (key, *deps["FQN"].tolist())
+    cons = run(graph_sql.object_blast_consumers(tuple(fqns), _BLAST_WINDOW_DAYS),
+               page=_PAGE, key=f"object_blast_cons_{key}", tier="recent",
+               source="ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)", probe=True)
+    measured_half = cons.ok   # False => could NOT measure (never conflate with "measured zero")
+    consumers_df = cons.df if cons.usable() else pd.DataFrame()
+    summary = lineage.blast_summary(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
+    radius = lineage.build_blast_radius(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
+    kpi_row([
+        {"label": "Declared dependents",
+         "value": f"{summary['dependents']}" + (" (lower bound)" if edges.truncated else ""),
+         "help": "Objects that reference this one (transitively) per OBJECT_DEPENDENCIES "
+                 "— declared view/matview/policy refs only, not procs/dynamic SQL."},
+        {"label": "Observed in last 30d",
+         "value": (f"{summary['measured']}" if measured_half else "n/a"),
+         "help": ("Dependents actually touched in ACCESS_HISTORY in the window. The rest "
+                  "are recorded but unqueried here."
+                  if measured_half else
+                  "Not measured — ACCESS_HISTORY (Enterprise-only) is unavailable on this "
+                  "account/role, so this is 'could not measure', not 'measured zero'.")},
+        {"label": "Deepest chain", "value": f"{summary['deepest_level']} hop(s)"},
+    ])
+    if measured_half and not consumers_df.empty:
+        view = radius[[c for c in ("FQN", "DOMAIN", "DEPTH", "QUERIES", "USERS", "LAST_TOUCH",
+                                   "MEASURED") if c in radius.columns]]
+    else:
+        view = radius[[c for c in ("FQN", "DOMAIN", "DEPTH") if c in radius.columns]]
+    styled_table(view, height=300, sort_label="observed first, then depth")
+    if measured_half:
+        st.caption(
+            f"{summary['dependents']} recorded dependents; "
+            f"{summary['measured']} observed touching in {_BLAST_WINDOW_DAYS}d "
+            f"({summary['observed_queries']} queries), {summary['unmeasured']} recorded but "
+            "not seen. Declared dependents (OBJECT_DEPENDENCIES) miss procs/dynamic SQL; "
+            "observed consumers (ACCESS_HISTORY) catch them but lag a few hours. "
+            "A count of what depends on this — never a 'safe to ALTER' verdict.")
+    else:
+        st.caption(
+            f"{summary['dependents']} recorded dependents. The OBSERVED half could not be "
+            "measured here — ACCESS_HISTORY (Enterprise-only) is unavailable on this "
+            "account/role — so whether these dependents are actually queried is UNKNOWN, "
+            "not zero. Declared dependents also miss procs/dynamic SQL. A count of what "
+            "depends on this — never a 'safe to ALTER' verdict.")
 
 
 # Watch automation (owner ask 2026-08-17): "when I click Watch, does it do

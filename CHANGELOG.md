@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.301.0 - Object lineage downstream blast radius (2026-08-25)
+
+Upgrade Board P1 #19. Entity 360 gains a "Downstream blast radius" panel for OBJECT
+entities (inside the evidence gate): for a chosen table/view, its DECLARED downstream
+dependents (ACCOUNT_USAGE.OBJECT_DEPENDENCIES — the objects that reference it,
+transitively) paired with the OBSERVED consumers who actually touch those dependents
+(ACCESS_HISTORY, last 30d), answering "if I ALTER this — or it breaks — what depends
+on it?". New builders `graph_sql.object_dependency_edges` (flat edge list) +
+`object_blast_consumers` (per-object queries/users/read-write split), and a new pure
+module `app/logic/lineage.py` doing the transitive BFS (`downstream_dependents`,
+cycle-safe, depth-capped), the consumer merge (`build_blast_radius` — an un-queried
+dependent is NOT-MEASURED, never a measured 0) and headline counts (`blast_summary`).
+
+Honesty by construction: the declared graph misses stored procs / dynamic SQL, so it
+is deliberately paired with the observed half — the panel says "a count of what
+depends on this", never a "safe to ALTER" verdict. Both sources probe-gated
+(OBJECT_DEPENDENCIES unverified on this account; ACCESS_HISTORY Enterprise-only) and
+degrade independently. App-only, no migration.
+
 ## 4.300.0 - Object-tag governance coverage (2026-08-25)
 
 Upgrade Board P1 #20. Security ▸ Decision queue ▸ Operational governance gains an
