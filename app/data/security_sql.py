@@ -1135,6 +1135,72 @@ LIMIT 300
 """
 
 
+def unload_risk_events(days: int = 30, company: str = "ALL", database: str = "",
+                       schema_contains: str = "") -> str:
+    """#18: per-EVENT unload egress for the behavioral exfiltration score.
+
+    Sibling to ``unload_activity``, which GROUPs BY day and so discards the three
+    things the score needs: the hour of each event, its individual destination, and
+    a per-user volume baseline. This keeps each COPY INTO <location> as its own row
+    plus the account-local hour/weekday (CONVERT_TIMEZONE to America/Chicago, matching
+    insights_sql so "off-hours" means the operator's clock, not UTC) and a per-user
+    MEDIAN(GB_OUT) over the same window, so "unusual volume" is judged user-relative
+    rather than against one global threshold. Same company/db/schema scoping as
+    ``unload_activity`` (no new grants). The row cap serves the detector: each user
+    is capped to its 50 highest-volume unloads (QUALIFY) and then the 500 largest
+    events overall are returned — so one busy loader can't evict everyone else's
+    events (a global recency cap would), and the retained set favours the big,
+    exfil-like events the score exists to rank. The per-user MEDIAN/COUNT baselines
+    are computed over the full window before the cap, so they stay accurate."""
+    days = bounded_days(days)
+    where = and_where(
+        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        "QUERY_TYPE = 'UNLOAD'",
+        "EXECUTION_STATUS = 'SUCCESS'",
+        companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+        companies.database_equals_clause(database),
+        contains_filter("SCHEMA_NAME", schema_contains),
+    )
+    return f"""
+WITH ev AS (
+    SELECT
+        QUERY_ID,
+        USER_NAME,
+        ROLE_NAME,
+        START_TIME,
+        HOUR(CONVERT_TIMEZONE('America/Chicago', START_TIME)) AS HOUR_OF_DAY,
+        DAYOFWEEKISO(CONVERT_TIMEZONE('America/Chicago', START_TIME)) AS DOW_ISO,
+        ROUND((COALESCE(BYTES_WRITTEN, 0)
+              + COALESCE(BYTES_WRITTEN_TO_RESULT, 0)) / POWER(1024, 3), 3) AS GB_OUT,
+        REGEXP_SUBSTR(
+            QUERY_TEXT,
+            'COPY[[:space:]]+INTO[[:space:]]+([^[:space:]()]+)',
+            1, 1, 'ie', 1
+        ) AS TARGET_LOCATION,
+        LEFT(QUERY_TEXT, 120) AS SAMPLE_TARGET
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {where}
+)
+SELECT
+    QUERY_ID,
+    USER_NAME,
+    ROLE_NAME,
+    START_TIME,
+    HOUR_OF_DAY,
+    DOW_ISO,
+    GB_OUT,
+    TARGET_LOCATION,
+    SAMPLE_TARGET,
+    MEDIAN(GB_OUT) OVER (PARTITION BY USER_NAME) AS USER_MEDIAN_GB,
+    COUNT(*)       OVER (PARTITION BY USER_NAME) AS USER_UNLOAD_COUNT
+FROM ev
+QUALIFY ROW_NUMBER() OVER (PARTITION BY USER_NAME ORDER BY GB_OUT DESC) <= 50
+ORDER BY GB_OUT DESC
+LIMIT 500
+"""
+
+
 def _local_company_clause(company: str, column: str = "COMPANY") -> str:
     value = str(company or "ALL").strip().upper()
     return "" if value == "ALL" else f"(UPPER({column}) = {sql_literal(value)} OR UPPER({column}) = 'ALL')"

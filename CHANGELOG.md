@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.299.0 - Exfiltration composite behavioral score (2026-08-25)
+
+Upgrade Board P1 #18. Security ▸ Egress gains a toggle-gated "Score unload events
+for exfiltration risk" panel. New per-event builder `security_sql.unload_risk_events`
+(sibling to `unload_activity` — keeps each COPY INTO <location> as its own row with
+the account-local hour/weekday and a per-user `MEDIAN(GB_OUT)` baseline) feeds a new
+pure scorer `insights.egress_exfil_severity`. Four auditable sub-signals — unusual
+volume (absolute floor OR user-relative spike), off-hours, personal/ad-hoc
+destination, human (non-service) principal — fuse into a transparent 0-100 SCORE +
+High/Medium/Low SEVERITY + a REASON enumerating every factor that fired. The
+human/service split is a GATE, not a weight: an ETL/service role is capped at Low, so
+a routine nightly bulk export can never rank as an incident. App-only, no migration;
+same company/db/schema scoping and canary coverage as the sibling builder.
+
 ## 4.298.0 - Budget burndown chart (2026-08-25)
 
 Upgrade Board P1 #57. Overview gains a "Budget burndown" chart: cumulative actual

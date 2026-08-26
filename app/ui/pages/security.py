@@ -16,7 +16,12 @@ from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
 from app.logic.governance import governance_drift, resolve_gov_weights
-from app.logic.insights import dormant_severity, reawakening_severity, takeover_severity
+from app.logic.insights import (
+    dormant_severity,
+    egress_exfil_severity,
+    reawakening_severity,
+    takeover_severity,
+)
 from app.logic.least_privilege import (
     classify_grant_scopes,
     recommend_for_sheet,
@@ -461,6 +466,44 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
                      sort_label="day then GB written")
         st.caption("Every name here should have a business reason to move data out. New names are the finding.")
         result_caption(unl)
+
+    # #18: composite behavioral exfiltration score. The day-grain table above answers
+    # "who moved a lot?"; a big number there isn't automatically an incident. This
+    # ranks individual unload events by how much each one LOOKS like exfiltration —
+    # unusual volume (vs the user's own baseline) + off-hours + a personal/ad-hoc
+    # destination + a human (non-ETL) principal — so the one 500 GB dump to a personal
+    # bucket at 2am rises above a routine nightly loader. Gated behind an explicit
+    # toggle because it is an event-grain scan (500 rows) most visits don't need.
+    if st.toggle("Score unload events for exfiltration risk", key="sec_exfil_toggle",
+                 help="Ranks each unload event by a transparent 0-100 behavioral score "
+                      "(volume vs the user's baseline, off-hours, personal destination, "
+                      "human vs service role). Service/ETL roles are capped at Low."):
+        ev = run(security_sql.unload_risk_events(days, company, database, schema_contains),
+                 page=_PAGE, key=f"exfil_{company}_{days}_{database}_{schema_contains}",
+                 tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD, per event)")
+        if ev.ok and ev.empty:
+            st.success("No unload events to score in this window for this scope.")
+        elif guard(ev, ""):
+            scored = egress_exfil_severity(ev.df)
+            highs = int((scored["SEVERITY"] == "High").sum())
+            meds = int((scored["SEVERITY"] == "Medium").sum())
+            kpi_row([
+                {"label": "High-risk events", "value": f"{highs}",
+                 "delta_color": "inverse" if highs else "off"},
+                {"label": "Medium-risk events", "value": f"{meds}",
+                 "delta_color": "inverse" if meds else "off"},
+                {"label": "Events scored", "value": f"{len(scored)}"},
+            ])
+            show_cols = ["SEVERITY", "SCORE", "USER_NAME", "ROLE_NAME", "GB_OUT",
+                         "START_TIME", "TARGET_LOCATION", "REASON"]
+            view = scored[[c for c in show_cols if c in scored.columns]]
+            styled_table(with_user_names(view, _PAGE), height=340,
+                         sort_label="severity then score")
+            st.caption("Heuristic score, not a verdict — it ranks events for review. A service/ETL "
+                       "role is capped at Low so a nightly bulk export never masquerades as an "
+                       "incident; the trade-off is that a *compromised* service credential won't "
+                       "surface here, so monitor service-account egress separately.")
+            result_caption(ev)
 
 
 def _exposure_tab() -> None:

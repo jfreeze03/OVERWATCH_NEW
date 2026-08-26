@@ -63,6 +63,16 @@ def test_egress_builders_contract():
     assert "COMPANY_FOR_" not in security_sql.unload_activity(30, "ALL")   # ALL = no arm
     assert security_sql.unload_activity(30, "ALFA") != security_sql.unload_activity(30, "TREXIS")
     assert "DATEADD('day', -90," in security_sql.unload_activity(9999)   # clamp
+    # #18: per-event sibling keeps the hour/dow/destination/baseline the score needs
+    re_ = security_sql.unload_risk_events(30, "ALFA")
+    assert "QUERY_TYPE = 'UNLOAD'" in re_ and "EXECUTION_STATUS = 'SUCCESS'" in re_
+    assert "HOUR_OF_DAY" in re_ and "DOW_ISO" in re_          # per-event time-of-day
+    assert "CONVERT_TIMEZONE('America/Chicago'" in re_        # account-local, not UTC
+    assert "MEDIAN(GB_OUT) OVER (PARTITION BY USER_NAME)" in re_   # per-user baseline
+    # per-user fairness cap: one busy loader can't evict everyone else's events
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY USER_NAME ORDER BY GB_OUT DESC)" in re_
+    assert "COMPANY_FOR_USER(USER_NAME) = 'ALFA'" in re_      # same scoping as sibling
+    assert "COMPANY_FOR_" not in security_sql.unload_risk_events(30, "ALL")
 
 
 def test_egress_section_and_new_network_panel_wired():
@@ -77,9 +87,14 @@ def test_egress_section_and_new_network_panel_wired():
     # honest empty states — silence must read as "checked, clean", never blank
     assert "No break-glass account logged in from a network unseen" in sec
     assert "No unloads to stages in this window" in sec
+    # #18: the exfiltration-score subsection is toggle-gated and wired into the egress tab
+    assert "sec_exfil_toggle" in sec
+    assert "egress_exfil_severity(" in sec
+    assert "security_sql.unload_risk_events(" in sec
+    assert "No unload events to score in this window" in sec
 
 
 def test_r25_builders_are_canaried():
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
-    for fn in ("new_network_logins", "egress_daily", "unload_activity"):
+    for fn in ("new_network_logins", "egress_daily", "unload_activity", "unload_risk_events"):
         assert f"security_sql.{fn}" in canary, f"{fn} has no canary — every reader gets one"

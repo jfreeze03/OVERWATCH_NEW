@@ -17,6 +17,7 @@ import pandas as pd
 
 from app.data import ops_sql, security_sql
 from app.logic.insights import (
+    egress_exfil_severity,
     takeover_severity,
     task_failure_streaks,
     task_freshness_status,
@@ -221,3 +222,126 @@ def test_takeover_wired_into_security():
     sec = Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "security.py"
     src = sec.read_text(encoding="utf-8")
     assert "login_takeover_candidates(" in src and "sec_takeover_toggle" in src
+
+
+# ================================ #18. exfiltration composite score ====
+
+def _ev(user="ANALYST", role="ANALYST_ROLE", gb=5.0, median=5.0, hour=12,
+        dow=3, target="@CORP_STAGE/exports"):
+    """One unload event row shaped like unload_risk_events output."""
+    return {
+        "USER_NAME": user, "ROLE_NAME": role, "GB_OUT": gb,
+        "USER_MEDIAN_GB": median, "HOUR_OF_DAY": hour, "DOW_ISO": dow,
+        "TARGET_LOCATION": target, "START_TIME": "2026-08-24 12:00:00",
+    }
+
+
+def test_exfil_empty_is_safe():
+    assert egress_exfil_severity(pd.DataFrame()).empty
+    assert egress_exfil_severity(None).empty
+
+
+def test_exfil_human_bigvolume_offhours_personal_is_high():
+    # 500 GB (100x this user's 5 GB median), 02:00 local, dumped to a personal stage,
+    # by a human role — every signal fires -> the textbook exfiltration profile.
+    row = _ev(gb=500.0, median=5.0, hour=2, dow=6, target="@~/leak")
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "SEVERITY"] == "High"
+    assert out.loc[0, "SCORE"] >= 70
+    assert out.loc[0, "VOL_UNUSUAL"] and out.loc[0, "OFF_HOURS"]
+    assert out.loc[0, "PERSONAL_DEST"] and out.loc[0, "HUMAN_USER"]
+    assert "user median" in out.loc[0, "REASON"]
+
+
+def test_exfil_service_role_is_capped_low_even_when_egregious():
+    # Same egregious event but a service/ETL principal -> the GATE caps it at Low,
+    # so a nightly bulk export never masquerades as an incident.
+    row = _ev(user="TF_LOADER_SVC", role="ETL_LOADER", gb=800.0, median=4.0,
+              hour=2, dow=7, target="s3://dump/x")
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "HUMAN_USER"] is False or not out.loc[0, "HUMAN_USER"]
+    assert out.loc[0, "SEVERITY"] == "Low"
+    assert out.loc[0, "SCORE"] <= 35
+    assert "service role (capped)" in out.loc[0, "REASON"]
+
+
+def test_exfil_volume_is_user_relative_not_just_absolute():
+    # 20 GB is under the 50 GB floor, but it is 10x this user's 2 GB median -> unusual.
+    row = _ev(gb=20.0, median=2.0, hour=12, dow=3, target="@CORP/exp")
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert bool(out.loc[0, "VOL_UNUSUAL"]) is True
+
+
+def test_exfil_routine_business_hours_named_stage_is_low():
+    # A human, ordinary volume, mid-afternoon, governed named stage -> nothing fires.
+    row = _ev(gb=6.0, median=5.0, hour=14, dow=3, target="@CORP_STAGE/daily")
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "SEVERITY"] == "Low"
+    assert not out.loc[0, "OFF_HOURS"] and not out.loc[0, "PERSONAL_DEST"]
+
+
+def test_exfil_null_destination_is_unknown_not_personal():
+    row = _ev(gb=6.0, median=5.0, target=None)
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "DEST_CLASS"] == "unknown"
+    assert not out.loc[0, "PERSONAL_DEST"]
+
+
+def test_exfil_sorted_worst_first():
+    rows = [
+        _ev(user="LOW", gb=6.0, median=5.0, hour=14, target="@CORP/x"),          # Low
+        _ev(user="HIGH", gb=900.0, median=3.0, hour=1, dow=7, target="@~/y"),    # High
+    ]
+    out = egress_exfil_severity(pd.DataFrame(rows))
+    assert out.loc[0, "USER_NAME"] == "HIGH"        # worst-first ordering
+
+
+def test_exfil_quoted_cloud_target_fires_personal_dest():
+    # PRODUCTION SHAPE: Snowflake external locations are single-quoted, and the SQL
+    # regex captures the quotes verbatim, so TARGET_LOCATION arrives as "'s3://...'".
+    # The classifier must strip the quotes or the entire cloud-URL arm is dead.
+    row = _ev(gb=60.0, median=5.0, hour=14, dow=3, target="'s3://evil-bucket/dump/'")
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "DEST_CLASS"] == "personal"
+    assert bool(out.loc[0, "PERSONAL_DEST"]) is True
+    assert out.loc[0, "SEVERITY"] == "High"          # 35 vol + 25 dest + 15 human = 75
+
+
+def test_exfil_human_role_with_service_word_is_not_capped():
+    # A human whose role/team name merely CONTAINS a service-ish word (CUSTOMER_SERVICE,
+    # SYSTEMS_ENGINEER, SALES_PIPELINE) must NOT be mis-classified as a service account —
+    # that would cap a real human exfil at Low (the worst error this detector can make).
+    for role in ("CUSTOMER_SERVICE_LEAD", "SYSTEMS_ENGINEER", "SALES_PIPELINE_ANALYST",
+                 "PROF_SERVICES_ANALYST"):
+        row = _ev(user="ALICE", role=role, gb=500.0, median=5.0, hour=2, dow=6,
+                  target="@~/leak")
+        out = egress_exfil_severity(pd.DataFrame([row]))
+        assert bool(out.loc[0, "HUMAN_USER"]) is True, role
+        assert out.loc[0, "SEVERITY"] == "High", role
+
+
+def test_exfil_real_service_names_still_capped():
+    # The tighter matcher must still catch genuine service accounts.
+    for user, role in (("SVC_LOADER", "ETL_ROLE"), ("TF_ANALYTICS", "TF_LOADER"),
+                       ("DBT_TRANSFORMER", "DBT"), ("REPLICATION_SVC", "REPLICATOR")):
+        row = _ev(user=user, role=role, gb=800.0, median=4.0, hour=2, dow=7,
+                  target="s3://dump/x")
+        out = egress_exfil_severity(pd.DataFrame([row]))
+        assert bool(out.loc[0, "HUMAN_USER"]) is False, (user, role)
+        assert out.loc[0, "SEVERITY"] == "Low", (user, role)
+
+
+def test_exfil_missing_numeric_column_does_not_raise():
+    # "never raises" contract: a frame lacking GB_OUT/USER_MEDIAN_GB/HOUR_OF_DAY/DOW_ISO
+    # must degrade to defaults, not blow up (numeric columns are now absence-safe).
+    df = pd.DataFrame([{"USER_NAME": "X", "ROLE_NAME": "Y", "TARGET_LOCATION": "@~/z"}])
+    out = egress_exfil_severity(df)
+    assert not out.empty
+    assert "SCORE" in out.columns and "SEVERITY" in out.columns
+
+
+def test_exfil_nan_destination_is_unknown():
+    row = _ev(gb=6.0, median=5.0, target=float("nan"))
+    out = egress_exfil_severity(pd.DataFrame([row]))
+    assert out.loc[0, "DEST_CLASS"] == "unknown"
+    assert not out.loc[0, "PERSONAL_DEST"]

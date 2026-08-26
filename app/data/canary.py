@@ -80,6 +80,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("security.new_network_logins", lambda: security_sql.new_network_logins(7)),
     ("security.egress_daily", lambda: security_sql.egress_daily(30)),
     ("security.unload_activity", lambda: security_sql.unload_activity(30, "ALFA")),
+    ("security.unload_risk_events", lambda: security_sql.unload_risk_events(30, "ALFA")),
     ("security.failed_logins", lambda: security_sql.failed_logins(1, "ALFA")),
     ("security.single_factor_logins", lambda: security_sql.single_factor_logins(30, "ALFA")),
     ("security.recent_role_grants", lambda: security_sql.recent_role_grants(1)),

@@ -873,6 +873,174 @@ def takeover_severity(df: pd.DataFrame) -> pd.DataFrame:
             .drop(columns="_o").reset_index(drop=True))
 
 
+# ---- #18. Data-exfiltration composite behavioral score ----------------------
+
+# Whole-token markers of an automated (non-human) principal. Extends the account's
+# existing LIKE 'TF~_%' convention: a role or user is a service account when, after
+# splitting ROLE_NAME/USER_NAME on non-alphanumeric boundaries, ANY token EXACTLY
+# matches one of these. Whole-token (not substring) matching is deliberate and
+# load-bearing — an unanchored `"SERVICE" in text` wrongly caps a human whose role
+# is CUSTOMER_SERVICE_LEAD or PROF_SERVICES_ANALYST, and the false negative (a real
+# human exfil filed as Low) is the worst error this detector can make. Generic
+# dictionary words that collide with human departments (SERVICE, SYSTEM, PIPELINE)
+# are therefore intentionally NOT here.
+_EXFIL_SERVICE_TOKENS = frozenset({
+    "TF", "SVC", "ETL", "DBT", "SNOWPIPE", "FIVETRAN", "AIRFLOW", "AIRBYTE",
+    "MELTANO", "STITCH", "MATILLION", "INGEST", "INGESTION", "LOADER", "LOAD",
+    "PIPE",
+})
+# Prefix markers: a token STARTING with one of these is a service principal, which
+# covers a family without listing every variant (REPLICATION / REPLICATOR / ...).
+# Kept short on purpose — a prefix is looser than a whole token, so only unambiguous
+# stems belong here (not 'SVC', which would also catch a human like 'SVCARSON').
+_EXFIL_SERVICE_PREFIXES = ("REPLICAT",)
+
+# Weighted contribution of each sub-signal to the 0-100 score. Deliberately a
+# transparent additive model (not an opaque ML score) so every point on the board
+# is explainable from the REASON column — an auditor can see exactly which factors
+# fired. Volume is the heaviest single factor; the human/service split is a GATE
+# rather than just a weight (see below).
+_EXFIL_W_VOLUME = 35
+_EXFIL_W_OFFHOURS = 25
+_EXFIL_W_DEST = 25
+_EXFIL_W_HUMAN = 15
+# A service (automated) principal is capped strictly below the Medium band, so
+# routine ETL egress can never rank above Low no matter how big or how off-hours —
+# "does a nightly bulk load look like an incident?" answers "no" by construction.
+_EXFIL_SERVICE_CAP = 35
+
+
+def _exfil_is_service(role: object, user: object) -> bool:
+    # Join with a separator so a marker sitting at the role/user boundary can't be
+    # merged into a neighbouring token, then match whole tokens (+ a few prefixes).
+    text = (str(role or "") + "_" + str(user or "")).upper()
+    tokens = [t for t in re.split(r"[^A-Z0-9]+", text) if t]
+    if _EXFIL_SERVICE_TOKENS.intersection(tokens):
+        return True
+    return any(t.startswith(_EXFIL_SERVICE_PREFIXES) for t in tokens)
+
+
+def _exfil_dest_class(target: object) -> str:
+    """Classify a COPY INTO target. 'personal' = a user (personal) stage or an
+    ad-hoc cloud URL — data leaving to a location no curated pipeline owns.
+    'named' = a named stage (the normal, governed path). 'unknown' = NULL/unparsed
+    (the regex found nothing) — treated as neither safe nor damning."""
+    # NULL destination (regex found nothing) arrives as None or a float NaN.
+    if target is None or (not isinstance(target, str) and pd.isna(target)):
+        return "unknown"
+    # Snowflake external locations are SINGLE-QUOTED literals (COPY INTO 's3://…'),
+    # and the SQL regex captures the token verbatim — so the value arrives WITH its
+    # surrounding quotes. Strip them (and whitespace) before the prefix checks, or
+    # the entire cloud-URL arm silently never fires on real unload syntax (the exact
+    # data-leaving-the-account case this feature exists to catch).
+    t = str(target).strip().strip("'\"").strip().lower()
+    if not t:
+        return "unknown"
+    if t.startswith("@~"):
+        return "personal"
+    if t.startswith(("s3://", "azure://", "gcs://", "gs://", "https://", "http://")):
+        return "personal"
+    return "named"
+
+
+def egress_exfil_severity(
+    df: pd.DataFrame,
+    *,
+    high_gb: float = 50.0,
+    spike_mult: float = 3.0,
+    business_start_hour: int = 7,
+    business_end_hour: int = 19,
+) -> pd.DataFrame:
+    """#18: composite behavioral exfiltration score for unload events (heuristic).
+
+    ``egress_review`` already answers "who unloaded, and how much?". A big number
+    there is not automatically an incident — a scheduled export is supposed to be
+    big. This fuses four independently auditable sub-signals per event —
+
+      * VOL_UNUSUAL  — GB_OUT clears an absolute floor (``high_gb``) OR is
+        ``spike_mult``x this user's own median (the OR matters: a user whose median
+        is tiny is caught by the multiple; a whale with a huge median is still
+        caught by the floor).
+      * OFF_HOURS    — the account-local event hour is a weekend or outside
+        ``business_start_hour``..``business_end_hour``.
+      * PERSONAL_DEST — the COPY INTO target is a personal stage or ad-hoc cloud
+        URL rather than a governed named stage.
+      * HUMAN_USER   — the principal is not an automated service/ETL role.
+
+    into a 0-100 ``SCORE`` (transparent weighted sum), a ``SEVERITY``
+    (High>=70 / Medium>=40 / Low), and a ``REASON`` enumerating every factor that
+    fired. HUMAN_USER is a GATE, not just a weight: a service principal is capped at
+    ``_EXFIL_SERVICE_CAP`` (Low), so routine ETL egress never outranks a human doing
+    the same thing. Empty in -> empty out; never raises."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+
+    def _num(col: str, default: float) -> pd.Series:
+        # Absence-safe: out.get(missing) is None, and pd.to_numeric(None) returns a
+        # bare scalar NaN whose .fillna would raise — so fall back to an index-aligned
+        # Series first. Mirrors the defensive column handling below (honors the
+        # "never raises" contract even if the SQL projection ever changes).
+        s = out.get(col)
+        if s is None:
+            s = pd.Series(default, index=out.index)
+        return pd.to_numeric(s, errors="coerce").fillna(default)
+
+    gb = _num("GB_OUT", 0.0)
+    med = _num("USER_MEDIAN_GB", 0.0)
+    hour = _num("HOUR_OF_DAY", 12.0)
+    dow = _num("DOW_ISO", 1.0)
+    out["GB_OUT"] = gb
+
+    spike = (med > 0) & (gb >= spike_mult * med)
+    out["VOL_UNUSUAL"] = (gb >= high_gb) | spike
+    out["OFF_HOURS"] = (dow >= 6) | (hour < business_start_hour) | (hour >= business_end_hour)
+    dest = out.get("TARGET_LOCATION")
+    out["DEST_CLASS"] = (dest.map(_exfil_dest_class) if dest is not None
+                         else pd.Series("unknown", index=out.index))
+    out["PERSONAL_DEST"] = out["DEST_CLASS"] == "personal"
+    role_s = (out["ROLE_NAME"].astype(str) if "ROLE_NAME" in out.columns
+              else pd.Series("", index=out.index))
+    user_s = (out["USER_NAME"].astype(str) if "USER_NAME" in out.columns
+              else pd.Series("", index=out.index))
+    out["HUMAN_USER"] = [not _exfil_is_service(r, u)
+                         for r, u in zip(role_s, user_s, strict=False)]
+
+    score = (_EXFIL_W_VOLUME * out["VOL_UNUSUAL"].astype(int)
+             + _EXFIL_W_OFFHOURS * out["OFF_HOURS"].astype(int)
+             + _EXFIL_W_DEST * out["PERSONAL_DEST"].astype(int)
+             + _EXFIL_W_HUMAN * out["HUMAN_USER"].astype(int))
+    # Service-role GATE: cap strictly below Medium so ETL can't rank as an incident.
+    score = score.where(out["HUMAN_USER"], score.clip(upper=_EXFIL_SERVICE_CAP))
+    out["SCORE"] = score.clip(0, 100).round().astype(int)
+    out["SEVERITY"] = out["SCORE"].map(
+        lambda s: "High" if s >= 70 else "Medium" if s >= 40 else "Low")
+    out["REASON"] = out.apply(_exfil_reason, axis=1)
+
+    rank = {"High": 0, "Medium": 1, "Low": 2}
+    return (out.assign(_o=out["SEVERITY"].map(rank))
+            .sort_values(["_o", "SCORE", "GB_OUT"], ascending=[True, False, False])
+            .drop(columns="_o").reset_index(drop=True))
+
+
+def _exfil_reason(r: pd.Series) -> str:
+    parts: list[str] = []
+    gb = safe_float(r.get("GB_OUT"))
+    med = safe_float(r.get("USER_MEDIAN_GB"))
+    if bool(r.get("VOL_UNUSUAL")):
+        if med > 0 and gb >= 3 * med:
+            parts.append(f"{gb:,.0f} GB ({gb / med:.0f}x user median)")
+        else:
+            parts.append(f"{gb:,.0f} GB")
+    if bool(r.get("OFF_HOURS")):
+        parts.append(f"{int(safe_float(r.get('HOUR_OF_DAY'))):02d}:00 local, off-hours")
+    if bool(r.get("PERSONAL_DEST")):
+        dest = str(r.get("TARGET_LOCATION") or "")[:40]
+        parts.append(f"personal/ad-hoc destination {dest}".rstrip())
+    parts.append("human user" if bool(r.get("HUMAN_USER")) else "service role (capped)")
+    return "; ".join(parts)
+
+
 def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.DataFrame:
     """Turn the reactive freshness SLA into a forward-looking tier (O10).
 
