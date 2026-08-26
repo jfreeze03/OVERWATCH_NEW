@@ -592,6 +592,81 @@ LIMIT 500
 """
 
 
+def product_consumer_reads(days: int = 30, company: str = "ALL") -> str:
+    """#28: per data-product consumer reach + reads trend from ACCESS_HISTORY.
+
+    For each catalogued DATA_PRODUCT: how many DISTINCT users read its objects, and how
+    the read volume trends — this window (RECENT) vs the equal window before it (PRIOR)
+    — so a costly product nobody reads any more surfaces as a retirement candidate.
+    Consumers = distinct accounts whose queries READ the product's objects
+    (BASE_OBJECTS_ACCESSED); write-only ETL targets (OBJECTS_MODIFIED) are excluded,
+    but a service/pipeline account that READS the data is still counted. Reads are
+    mapped to a product the SAME way ``data_product_economics`` maps object cost
+    (object_map on the FQN, then database_map on the FQN's database) and cover the same
+    object domains the cost ETL charges (Table + Materialized view), so the numerator
+    and denominator of cost-per-consumer describe the same objects. A view read resolves
+    to its base tables in BASE_OBJECTS_ACCESSED, so usage through views still counts.
+    DISTINCT_CONSUMERS is scoped to the RECENT window to align with the object cost's
+    own window. Returns raw counts + LAST_READ only — NO dollars (rate lives in the UI).
+
+    Enterprise-edition only (ACCESS_HISTORY) — callers run probe=True and degrade.
+    Company scoping is ENTIRELY via the catalog CTE (ENTITY_CATALOG.COMPANY); NEVER a
+    COMPANY_FOR_USER predicate on ACCESS_HISTORY (that is one UDF call per scanned row —
+    the per-row blowup companies.py warns against). ACCESS_HISTORY has no COMPANY."""
+    recent = bounded_days(days, 200)
+    horizon = bounded_days(2 * recent, 400)
+    cv = str(company or "ALL").upper()
+    catalog_company = "" if cv == "ALL" else f"AND UPPER(COMPANY) = {sql_literal(cv, 40)}"
+    return f"""
+WITH catalog AS (
+    SELECT ENTITY_TYPE, ENTITY_KEY, DATA_PRODUCT
+    FROM {core_object('ENTITY_CATALOG')}
+    WHERE NULLIF(TRIM(DATA_PRODUCT), '') IS NOT NULL
+      {catalog_company}
+), object_map AS (
+    SELECT ENTITY_KEY, DATA_PRODUCT FROM catalog WHERE ENTITY_TYPE = 'OBJECT'
+), database_map AS (
+    SELECT ENTITY_KEY, DATA_PRODUCT FROM catalog WHERE ENTITY_TYPE = 'DATABASE'
+), reads AS (
+    SELECT UPPER(f.value:"objectName"::STRING) AS FQN,
+           a.USER_NAME, a.QUERY_ID, a.QUERY_START_TIME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
+         LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
+    WHERE a.QUERY_START_TIME >= DATEADD('day', -{horizon}, CURRENT_TIMESTAMP())
+      -- match the domains the cost ETL (V048) attributes credits to, or an
+      -- actively-queried materialized view would show cost with zero reads and be
+      -- falsely flagged for retirement.
+      AND f.value:"objectDomain"::STRING IN ('Table', 'Materialized view')
+), product_reads AS (
+    SELECT COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT) AS DATA_PRODUCT,
+           r.USER_NAME, r.QUERY_ID, r.QUERY_START_TIME
+    FROM reads r
+    LEFT JOIN object_map om ON UPPER(om.ENTITY_KEY) = r.FQN
+    LEFT JOIN database_map dm
+      ON om.DATA_PRODUCT IS NULL
+     AND UPPER(dm.ENTITY_KEY) = SPLIT_PART(r.FQN, '.', 1)
+    WHERE COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT) IS NOT NULL
+)
+SELECT DATA_PRODUCT,
+       -- DISTINCT_CONSUMERS is scoped to the RECENT window so it aligns with the same
+       -- `days`-window object cost it is divided by (data_product_economics scans
+       -- `days`, not 2*days); a 2*days reach figure over a `days` cost understates
+       -- $/consumer. RECENT/PRIOR reads keep the full horizon for the trend.
+       COUNT(DISTINCT IFF(QUERY_START_TIME >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+                          USER_NAME, NULL)) AS DISTINCT_CONSUMERS,
+       COUNT(DISTINCT QUERY_ID)  AS TOTAL_READS,
+       COUNT(DISTINCT IFF(QUERY_START_TIME >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+                          QUERY_ID, NULL)) AS RECENT_READS,
+       COUNT(DISTINCT IFF(QUERY_START_TIME <  DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+                          QUERY_ID, NULL)) AS PRIOR_READS,
+       MAX(QUERY_START_TIME) AS LAST_READ
+FROM product_reads
+GROUP BY DATA_PRODUCT
+ORDER BY TOTAL_READS DESC
+LIMIT 500
+"""
+
+
 def cost_truth(days: int = 30, company: str = "ALL") -> str:
     """One non-additive inventory of billed, metered, measured and allocated credits."""
     horizon = bounded_days(days, 400)

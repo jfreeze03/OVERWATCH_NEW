@@ -324,6 +324,76 @@ def storage_movers(df: pd.DataFrame, usd_per_tb_month: float) -> pd.DataFrame:
     return out.sort_values("GROWTH_USD_30D", ascending=False).reset_index(drop=True)
 
 
+def product_retirement(cost_df: pd.DataFrame, reads_df: pd.DataFrame,
+                       credit_rate_usd: float, *, min_cost_usd: float = 100.0,
+                       decline_pct: float = -50.0, min_window_reads: int = 5) -> pd.DataFrame:
+    """#28: cost-per-consumer + retirement candidates per data product.
+
+    Joins per-product measured object cost (``data_product_economics``) with per-product
+    consumer reach + reads trend (``product_consumer_reads``) to answer "what does this
+    product cost per person who actually uses it, and is anyone still using it?".
+
+    COST_USD = MEASURED_OBJECT_CREDITS * rate. COST_PER_CONSUMER_USD = COST_USD /
+    DISTINCT_CONSUMERS with a NULLIF-style guard so 0 consumers => NA, never inf (a
+    costly product with 0 consumers is the STRONGEST retire signal, routed to the
+    verdict, not a divide-by-zero). READ_TREND_PCT = (RECENT-PRIOR)/PRIOR*100, NA when
+    PRIOR==0 (a brand-new product has no trend, not a -100%).
+
+    RETIREMENT_VERDICT (advisory only, evidence-gated like decision.prioritize_workloads):
+      * INSUFFICIENT_DATA — reads unavailable/degraded, or a product has SOME but fewer
+        than ``min_window_reads`` reads across the window: too little to judge, so never
+        recommend retiring off it.
+      * RETIRE_CANDIDATE — COST_USD>=min_cost_usd AND (0 consumers OR 0 recent reads OR
+        READ_TREND_PCT<=decline_pct): costing real money, usage gone or collapsing.
+      * REVIEW — COST_USD>=min_cost_usd AND declining (READ_TREND_PCT<0): worth a look.
+      * KEEP — otherwise. Sorted by COST_USD desc. Empty cost_df -> empty; never raises."""
+    if cost_df is None or cost_df.empty or "DATA_PRODUCT" not in cost_df.columns:
+        return pd.DataFrame()
+    out = cost_df.copy()
+    rate = max(safe_float(credit_rate_usd, 3.68), 0.0)
+    reads = reads_df.copy() if (reads_df is not None and not reads_df.empty) else pd.DataFrame()
+    reads_available = not reads.empty and "DATA_PRODUCT" in reads.columns
+    if reads_available:
+        keep_cols = ["DATA_PRODUCT", "DISTINCT_CONSUMERS", "TOTAL_READS", "RECENT_READS",
+                     "PRIOR_READS", "LAST_READ"]
+        out = out.merge(reads[[c for c in keep_cols if c in reads.columns]],
+                        on="DATA_PRODUCT", how="left")
+    for col in ("MEASURED_OBJECT_CREDITS", "DISTINCT_CONSUMERS", "TOTAL_READS",
+                "RECENT_READS", "PRIOR_READS"):
+        out[col] = out[col].map(safe_float) if col in out.columns else 0.0
+
+    out["COST_USD"] = (out["MEASURED_OBJECT_CREDITS"] * rate).round(2)
+    # replace(0, NA) can yield an object-dtype divisor, so coerce the quotient back to a
+    # numeric Series before rounding (0 consumers / 0 prior -> NA, never inf, never raise).
+    consumers = out["DISTINCT_CONSUMERS"].replace(0, pd.NA)
+    out["COST_PER_CONSUMER_USD"] = pd.to_numeric(
+        out["COST_USD"] / consumers, errors="coerce").round(2)
+    prior = out["PRIOR_READS"].replace(0, pd.NA)
+    out["READ_TREND_PCT"] = pd.to_numeric(
+        (out["RECENT_READS"] - out["PRIOR_READS"]) / prior * 100, errors="coerce").round(1)
+
+    window_reads = out["RECENT_READS"] + out["PRIOR_READS"]
+    costly = out["COST_USD"] >= float(min_cost_usd)
+    no_usage = (out["DISTINCT_CONSUMERS"] <= 0) | (out["RECENT_READS"] <= 0)
+    trend = out["READ_TREND_PCT"].fillna(0.0)   # NA trend (new product) is not a decline
+    collapsing = trend <= float(decline_pct)
+    declining = trend < 0
+
+    verdict = pd.Series("KEEP", index=out.index)
+    verdict = verdict.mask(costly & declining, "REVIEW")
+    verdict = verdict.mask(costly & (no_usage | collapsing), "RETIRE_CANDIDATE")
+    # INSUFFICIENT overrides: reads absent entirely, OR present-but-too-sparse to judge.
+    # A measured 0 (reads available, window_reads==0) is NOT insufficient — it is a real
+    # 'nobody touched it' signal and stays RETIRE_CANDIDATE.
+    if reads_available:
+        sparse = (window_reads > 0) & (window_reads < float(min_window_reads))
+    else:
+        sparse = pd.Series(True, index=out.index)
+    verdict = verdict.mask(sparse, "INSUFFICIENT_DATA")
+    out["RETIREMENT_VERDICT"] = verdict
+    return out.sort_values("COST_USD", ascending=False).reset_index(drop=True)
+
+
 # ---- 4. Release compare --------------------------------------------------------
 
 _RELEASE_METRICS = (

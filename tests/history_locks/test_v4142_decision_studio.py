@@ -114,6 +114,35 @@ def test_products_board_surfaces_owner_conflict() -> None:
     assert "Owner conflicts" in src       # KPI
 
 
+def test_product_consumer_reads_scopes_catalog_not_access_history() -> None:
+    # #28: consumer reach maps ACCESS_HISTORY reads to products via the catalog; company
+    # scoping lives ENTIRELY on the catalog CTE — NEVER a per-row COMPANY_FOR_USER on the
+    # huge ACCESS_HISTORY (that is the per-row UDF blowup companies.py warns against).
+    scoped = workbench_sql.product_consumer_reads(30, "Trexis")
+    cat = scoped.split("WITH catalog AS (", 1)[1].split("), object_map AS (", 1)[0]
+    assert "UPPER(COMPANY)" in cat and "TREXIS" in cat.upper()
+    assert "COMPANY_FOR_USER" not in scoped
+    assert "UPPER(COMPANY)" not in workbench_sql.product_consumer_reads(30, "ALL")
+    # reads, not writes: BASE_OBJECTS_ACCESSED, never OBJECTS_MODIFIED
+    assert "BASE_OBJECTS_ACCESSED" in scoped and "OBJECTS_MODIFIED" not in scoped
+    # match the domains the cost ETL charges, or an MV shows cost with zero reads
+    assert "IN ('Table', 'Materialized view')" in scoped
+    # the cost denominator (DISTINCT_CONSUMERS) is scoped to the RECENT window so it
+    # aligns with the `days`-window object cost it is divided by (not the 2*days horizon)
+    assert "USER_NAME, NULL)) AS DISTINCT_CONSUMERS" in scoped
+    for col in ("DISTINCT_CONSUMERS", "TOTAL_READS", "RECENT_READS", "PRIOR_READS", "LAST_READ"):
+        assert col in scoped, col
+
+
+def test_cost_per_consumer_wired_into_products_board() -> None:
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "app" / "ui"
+           / "decision_studio.py").read_text(encoding="utf-8")
+    assert "product_consumer_reads(" in src and "insights.product_retirement(" in src
+    assert "RETIREMENT_VERDICT" in src and "Retire candidates" in src
+    assert "decision_product_consumers_" in src and "probe=True" in src
+
+
 def test_mark_watched_flags_watchlist_by_type_case_insensitively() -> None:
     from app.logic.workbench import mark_watched
     frame = pd.DataFrame({"FINGERPRINT": ["abc", "def", "ghi"]})
@@ -210,6 +239,8 @@ def test_slo_summary_keeps_breach_and_missing_evidence_distinct() -> None:
         workbench_sql.slo_cockpit,
         lambda: workbench_sql.data_product_economics(30, "Trexis"),
         lambda: workbench_sql.cost_truth(30, "Trexis"),
+        lambda: workbench_sql.product_consumer_reads(30, "Trexis"),
+        lambda: workbench_sql.product_consumer_reads(30, "ALL"),
     ),
 )
 def test_decision_sql_builders_parse(builder) -> None:

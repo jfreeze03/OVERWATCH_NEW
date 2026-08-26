@@ -493,3 +493,59 @@ def test_reawakening_severity():
     ])
     assert list(insights.reawakening_severity(df)["SEVERITY"]) == ["High", "Medium", "High", "Low"]
     assert insights.reawakening_severity(pd.DataFrame()).empty
+
+
+# ---- #28 cost-per-consumer + retirement candidates --------------------------
+
+def _cost(products):
+    return pd.DataFrame([{"DATA_PRODUCT": p, "MEASURED_OBJECT_CREDITS": c} for p, c in products])
+
+
+def test_product_retirement_flags_costly_unread_as_candidate():
+    cost = _cost([("Dead", 100.0), ("Live", 100.0)])
+    reads = pd.DataFrame([
+        # Dead: costly, reads collapsed to zero recently -> RETIRE
+        {"DATA_PRODUCT": "Dead", "DISTINCT_CONSUMERS": 2, "RECENT_READS": 0, "PRIOR_READS": 80},
+        # Live: costly, growing -> KEEP
+        {"DATA_PRODUCT": "Live", "DISTINCT_CONSUMERS": 9, "RECENT_READS": 120, "PRIOR_READS": 90},
+    ])
+    out = insights.product_retirement(cost, reads, 3.0)
+    v = dict(zip(out["DATA_PRODUCT"], out["RETIREMENT_VERDICT"], strict=False))
+    assert v["Dead"] == "RETIRE_CANDIDATE"
+    assert v["Live"] == "KEEP"
+    # sorted by COST_USD desc, both equal credits -> both present
+    assert set(out["DATA_PRODUCT"]) == {"Dead", "Live"}
+
+
+def test_product_retirement_zero_consumers_is_na_not_inf():
+    cost = _cost([("Ghost", 200.0)])
+    reads = pd.DataFrame([{"DATA_PRODUCT": "Ghost", "DISTINCT_CONSUMERS": 0,
+                           "RECENT_READS": 0, "PRIOR_READS": 0}])
+    out = insights.product_retirement(cost, reads, 3.0)
+    row = out.iloc[0]
+    assert pd.isna(row["COST_PER_CONSUMER_USD"])          # 0 consumers -> NA, never inf
+    assert row["RETIREMENT_VERDICT"] == "RETIRE_CANDIDATE"  # costly + nobody -> retire
+
+
+def test_product_retirement_sparse_reads_are_insufficient():
+    cost = _cost([("Thin", 500.0)])
+    reads = pd.DataFrame([{"DATA_PRODUCT": "Thin", "DISTINCT_CONSUMERS": 1,
+                           "RECENT_READS": 1, "PRIOR_READS": 1}])   # 2 total < min 5
+    out = insights.product_retirement(cost, reads, 3.0, min_window_reads=5)
+    assert out.iloc[0]["RETIREMENT_VERDICT"] == "INSUFFICIENT_DATA"
+
+
+def test_product_retirement_no_reads_frame_all_insufficient():
+    cost = _cost([("A", 300.0), ("B", 1.0)])
+    out = insights.product_retirement(cost, pd.DataFrame(), 3.0)
+    assert (out["RETIREMENT_VERDICT"] == "INSUFFICIENT_DATA").all()
+    assert insights.product_retirement(pd.DataFrame(), pd.DataFrame(), 3.0).empty
+
+
+def test_product_retirement_cheap_declining_is_not_retire():
+    # declining but BELOW the cost floor -> never a retire candidate (not worth it)
+    cost = _cost([("Cheap", 1.0)])
+    reads = pd.DataFrame([{"DATA_PRODUCT": "Cheap", "DISTINCT_CONSUMERS": 3,
+                           "RECENT_READS": 5, "PRIOR_READS": 50}])
+    out = insights.product_retirement(cost, reads, 3.0, min_cost_usd=100.0)
+    assert out.iloc[0]["RETIREMENT_VERDICT"] == "KEEP"

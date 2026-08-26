@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.302.0 - Cost-per-consumer & retirement candidates (2026-08-25)
+
+Upgrade Board P1 #28. Decision Studio ▸ Products gains a "Cost per consumer &
+retirement candidates" block below the coverage KPIs: for each data product, its
+object-attributed cost, the distinct consumers who actually read it, cost-per-consumer,
+the reads trend (recent window vs the equal window before), and an advisory
+RETIREMENT_VERDICT. New builder `workbench_sql.product_consumer_reads` (consumer reach
++ reads trend from ACCESS_HISTORY.BASE_OBJECTS_ACCESSED — readers, not writers/ETL —
+mapped to products through the catalog exactly as object cost is; company-scoped via
+the catalog CTE, never a per-row COMPANY_FOR_USER on ACCESS_HISTORY) and pure logic
+`insights.product_retirement` (COST_PER_CONSUMER guards 0 consumers to NA not inf;
+verdict is evidence-gated — INSUFFICIENT_DATA when usage can't be measured or is too
+sparse, RETIRE_CANDIDATE only for costly products with usage gone or collapsing).
+Enterprise-only (ACCESS_HISTORY) and probe-gated: on Standard the block degrades to
+INSUFFICIENT_DATA rather than a false "unused". App-only, no migration.
+
 ## 4.301.0 - Object lineage downstream blast radius (2026-08-25)
 
 Upgrade Board P1 #19. Entity 360 gains a "Downstream blast radius" panel for OBJECT

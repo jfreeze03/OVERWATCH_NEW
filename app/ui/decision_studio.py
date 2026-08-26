@@ -10,6 +10,7 @@ from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
 from app.data import mart_sql, workbench_sql
+from app.logic import insights
 from app.logic.actions import ledger_totals, savings_by_lever, savings_by_month
 from app.logic.decision import prioritize_workloads, scenario_projection, slo_summary
 from app.logic.formulas import (
@@ -385,6 +386,75 @@ def _products(company: str, days: int, rate: float) -> None:
         st.caption("Coverage first: the per-product economics below covers only the mapped share "
                    "above, so read its totals as a floor — not the whole account — until coverage "
                    "is high.")
+
+    # #28: cost-per-consumer + retirement candidates. Which products cost real money but
+    # have lost their readers? Consumer reach + reads trend from ACCESS_HISTORY
+    # (Enterprise-only, degrade-safe) joined to the object cost above.
+    reads = run(workbench_sql.product_consumer_reads(days, company), page=_PAGE,
+                key=f"decision_product_consumers_{company}_{days}", tier="recent",
+                source="ENTITY_CATALOG + ACCESS_HISTORY reads", probe=True)
+    verdicts = insights.product_retirement(
+        result.df, reads.df if reads.usable() else pd.DataFrame(), rate)
+    if not verdicts.empty:
+        st.markdown("**Cost per consumer & retirement candidates**")
+        # Three degrade states, distinguished honestly: ACCESS_HISTORY absent (edition/
+        # permission), present-but-empty (queried, no reads for mapped products), or
+        # measured. `_measured` gates the consumer surfaces so "couldn't measure" never
+        # renders as a measured 0 (unlike a genuine measured-zero product).
+        _measured = reads.usable()
+        if not reads.ok:
+            st.caption("Consumer reach needs Enterprise ACCESS_HISTORY, which isn't available here "
+                       "— every verdict shows INSUFFICIENT_DATA (usage can't be measured, not zero).")
+        elif reads.empty:
+            st.caption("ACCESS_HISTORY returned no reads for mapped products in this window "
+                       "(recent-read ingestion lag, or none were read) — verdicts show "
+                       "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
+        _retire = int((verdicts["RETIREMENT_VERDICT"] == "RETIRE_CANDIDATE").sum())
+        _served = int(safe_float(verdicts.get("DISTINCT_CONSUMERS", pd.Series(dtype=float)).sum()))
+        _cpc = verdicts["COST_PER_CONSUMER_USD"].dropna()
+        kpi_row([
+            {"label": "Consumers served", "value": f"{_served:,}" if _measured else "—",
+             "help": "Distinct accounts that read these products' objects in the cost window "
+                     "(any read, incl. service/pipeline; write-only ETL excluded). Blank when "
+                     "consumer reach can't be measured (no Enterprise ACCESS_HISTORY)."},
+            {"label": "Median $/consumer",
+             "value": format_usd(float(_cpc.median())) if not _cpc.empty else "—",
+             "help": "Object-attributed cost per distinct consumer. Blank when no product has consumers."},
+            {"label": "Retire candidates", "value": f"{_retire:,}",
+             "severity": "warn" if _retire else "",
+             "help": "Costly products with no or collapsing reads — a candidate to review, not an order."},
+        ])
+
+        def open_retire(index: int) -> None:
+            _open_entity("DATA_PRODUCT", str(verdicts.iloc[int(index)]["DATA_PRODUCT"]))
+
+        # Drop the consumer column when unmeasured — every value is a meaningless 0 that
+        # would contradict the INSUFFICIENT_DATA verdict on the same row.
+        _rcols = [c for c in ("DATA_PRODUCT", "COST_USD", "DISTINCT_CONSUMERS",
+                              "COST_PER_CONSUMER_USD", "READ_TREND_PCT", "RETIREMENT_VERDICT")
+                  if c in verdicts.columns and (c != "DISTINCT_CONSUMERS" or _measured)]
+        selectable_nav_table(
+            verdicts[_rcols], key="decision_retire_table", on_select=open_retire, height=320,
+            column_config={
+                "COST_USD": st.column_config.NumberColumn(
+                    "Object cost $", format="$%.2f",
+                    help="Measured object-attributed cost over the window (credit rate applied)."),
+                "DISTINCT_CONSUMERS": st.column_config.NumberColumn(
+                    "Consumers", help="Distinct accounts that read the product in the cost window."),
+                "COST_PER_CONSUMER_USD": st.column_config.NumberColumn(
+                    "$ / consumer", format="$%.2f",
+                    help="Object cost divided by distinct consumers; blank when a product has 0 consumers."),
+                "READ_TREND_PCT": st.column_config.NumberColumn(
+                    "Reads trend", format="%.0f%%",
+                    help="Recent-window reads vs the equal window before; blank for a brand-new product."),
+            },
+            sort_label="object cost",
+        )
+        st.caption("Advisory: RETIRE_CANDIDATE = costly with usage gone or collapsing; "
+                   "INSUFFICIENT_DATA = usage couldn't be measured (never a retire call). Consumers "
+                   "count read accesses from ACCESS_HISTORY (Enterprise) — write-only ETL targets are "
+                   "excluded, but service/pipeline reads still count. A candidate to review with the "
+                   "owner, not an order.")
 
     def open_product(index: int) -> None:
         _open_entity("DATA_PRODUCT", str(frame.iloc[int(index)]["DATA_PRODUCT"]))
