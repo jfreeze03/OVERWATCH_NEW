@@ -15,7 +15,7 @@ from app.core.state import filters, request_navigation
 from app.data import cortex_sql, insights_sql, mart27_sql, security_sql
 from app.logic.directory import resolve_display
 from app.logic.exposure import classify_share_exposure, summarize_exposure
-from app.logic.governance import governance_drift, resolve_gov_weights
+from app.logic.governance import governance_drift, resolve_gov_weights, tag_coverage_score
 from app.logic.insights import (
     dormant_severity,
     egress_exfil_severity,
@@ -900,6 +900,65 @@ def _governance_score_panel():
     return post
 
 
+def _tag_governance_panel(company: str) -> None:
+    """#20: object-tag governance coverage — what fraction of base tables carry the
+    governance tags (COST_OWNER / SENSITIVITY / SERVICE_TIER / APP_OWNER), scored,
+    with a per-tag breakdown and an untagged-asset worklist. Coverage is a current-
+    state fact, so the window filter does not apply (only Company scopes it)."""
+    section_header("Object-tag governance coverage", "info", "security")
+    probe = run(security_sql.object_tag_probe(), page=_PAGE, key="tag_probe",
+                tier="metadata", source="ACCOUNT_USAGE.TAG_REFERENCES (probe)", probe=True)
+    if not probe.ok:
+        st.caption("Object-tag coverage needs ACCOUNT_USAGE.TAG_REFERENCES (tag lineage), "
+                   "which isn't available to this role/edition yet — panel hidden until it is. "
+                   "This is object tags, distinct from the query-tag coverage on Cost.")
+        st.divider()
+        return
+    cov = run(security_sql.object_tag_coverage(company), page=_PAGE,
+              key=f"tag_cov_{company}", tier="historical",
+              source="ACCOUNT_USAGE.TABLES join TAG_REFERENCES (DOMAIN=TABLE)")
+    if not guard(cov, "No base tables in scope to measure tag coverage against."):
+        st.divider()
+        return
+    score = tag_coverage_score(cov.df.to_dict("records"))
+    if score.state == "No data":
+        st.info("No base tables in scope to measure tag coverage against.")
+        st.divider()
+        return
+    kpi_row([
+        {"label": "Tag coverage score", "value": f"{score.score}/100",
+         "delta": score.state, "delta_color": "off",
+         "help": "Share of in-scope base tables carrying the four governance tags "
+                 "(COST_OWNER, SENSITIVITY, SERVICE_TIER, APP_OWNER), pooled across "
+                 "keys. Healthy >=90 / Watch >=75 / Act. TABLE domain only — this "
+                 "account exposes no warehouse/database inventory view to score against."},
+        {"label": "Tag keys tracked", "value": f"{len(cov.df)}"},
+    ])
+    styled_table(cov.df, height=200, sort_label="lowest coverage first")
+    if score.drivers:
+        with st.expander(f"Coverage gaps ({score.score}/100 · {score.state})"):
+            for d in score.drivers:
+                st.markdown(f"- **{d.driver}** — {d.evidence}")
+            st.caption("Ranked widest gap first. Coverage is a current-state fact — "
+                       "the window filter does not apply.")
+    st.markdown("**Untagged tables (worklist)**")
+    tag_choice = st.selectbox(
+        "List the in-scope tables missing which tag?",
+        options=list(cov.df["TAG_NAME"].astype(str)),
+        key=f"tag_untagged_pick_{company}")
+    if tag_choice:
+        un = run(security_sql.untagged_objects(company, str(tag_choice)), page=_PAGE,
+                 key=f"tag_untagged_{company}_{tag_choice}", tier="historical",
+                 source="ACCOUNT_USAGE.TABLES minus TAG_REFERENCES")
+        if un.ok and un.empty:
+            st.success(f"Every in-scope base table carries {tag_choice}.")
+        elif guard(un, ""):
+            styled_table(un.df, height=280, sort_label="largest untagged first")
+            result_caption(un)
+    result_caption(cov)
+    st.divider()
+
+
 def _export_pack(company: str, days: int, window_label: str) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
     section_header("Auditor export pack", "info", "security")
@@ -1375,11 +1434,13 @@ def render() -> None:
         render_security_overview(f["company"])
         section_header("Operational governance", "info", "security")
         section_filter_contract(
-            f, applies=(),
-            note="Governance score and trend are account-wide fixed-horizon posture metrics.",
+            f, applies=("company",),
+            note="Governance score and posture trend are account-wide fixed-horizon "
+                 "metrics; object-tag coverage below scopes to the selected Company.",
         )
         _post90 = _governance_score_panel()
         _posture_trend_panel(_post90)
+        _tag_governance_panel(f["company"])
     elif section == "Access":
         _access_tab(f["company"], f["days"])
         st.divider()

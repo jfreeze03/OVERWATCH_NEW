@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.300.0 - Object-tag governance coverage (2026-08-25)
+
+Upgrade Board P1 #20. Security ▸ Decision queue ▸ Operational governance gains an
+"Object-tag governance coverage" panel: for each governance tag
+(COST_OWNER / SENSITIVITY / SERVICE_TIER / APP_OWNER), the share of in-scope base
+tables that carry it, a pooled 0-100 coverage score (Healthy ≥90 / Watch ≥75 / Act),
+a per-tag breakdown, ranked coverage gaps, and an untagged-table worklist (biggest
+first). New builders `security_sql.object_tag_coverage` / `untagged_objects` /
+`object_tag_probe` (ACCOUNT_USAGE.TABLES as the verified denominator LEFT-joined to
+TAG_REFERENCES; TABLE domain only — this account exposes no warehouse/database
+inventory view) and pure scorer `governance.tag_coverage_score` (empty inventory
+reads "No data", never a false 100/Healthy). Probe-gated so an account/edition
+without TAG_REFERENCES degrades to an honest hidden panel. This is object-tag
+governance, distinct from the existing query-tag coverage on Cost. App-only, no
+migration.
+
 ## 4.299.0 - Exfiltration composite behavioral score (2026-08-25)
 
 Upgrade Board P1 #18. Security ▸ Egress gains a toggle-gated "Score unload events

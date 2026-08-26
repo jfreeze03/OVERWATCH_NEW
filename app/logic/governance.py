@@ -94,3 +94,42 @@ def governance_drift(inputs: dict, weights: dict | None = None) -> GovernanceDri
     # biggest deduction at the top, or the reader fixes the wrong thing first.
     ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
     return GovernanceDrift(score=score, state=state, drivers=ranked)
+
+
+def tag_coverage_score(rows) -> GovernanceDrift:
+    """#20: object-tag governance coverage as a scored GovernanceDrift.
+
+    ``rows`` = ``security_sql.object_tag_coverage`` output — one record per governance
+    tag key with TAG_NAME / TOTAL / TAGGED / COVERAGE_PCT. The score is the OVERALL
+    coverage, round(sum(TAGGED) / sum(TOTAL) * 100), banded identically to
+    ``governance_drift`` (Healthy>=90 / Watch>=75 / Act). One driver per tag that has
+    a gap, its ``penalty`` = the coverage gap in percentage points (100 - that tag's
+    coverage) so the widest gap ranks first; the evidence names the shortfall.
+
+    Empty inventory (no base tables in scope) must NOT read as 100/Healthy — absence
+    is not a clean bill of health (the C8 anti-pattern). It returns score=0 with a
+    'No data' state and no drivers, and the caller shows an honest empty branch. Pure;
+    never raises."""
+    recs = list(rows or [])
+    total = sum(safe_float(r.get("TOTAL")) for r in recs)
+    if not recs or total <= 0:
+        return GovernanceDrift(score=0, state="No data", drivers=())
+    tagged = sum(safe_float(r.get("TAGGED")) for r in recs)
+    score = round(tagged / total * 100.0)
+
+    drivers: list[ScoreDriver] = []
+    for r in recs:
+        key = str(r.get("TAG_NAME") or "").upper() or "TAG"
+        tot = safe_float(r.get("TOTAL"))
+        tag = safe_float(r.get("TAGGED"))
+        raw_cov = r.get("COVERAGE_PCT")
+        cov = safe_float(raw_cov) if raw_cov is not None else (100.0 * tag / tot if tot else 0.0)
+        missing = round(tot - tag)
+        if missing > 0:
+            drivers.append(ScoreDriver(
+                key, round(_cap(100.0 - cov, 100.0), 1),
+                f"{missing:,} of {round(tot):,} tables missing {key} ({cov:.0f}% covered)."))
+
+    state = "Healthy" if score >= 90 else ("Watch" if score >= 75 else "Act")
+    ranked = tuple(sorted(drivers, key=lambda d: d.penalty, reverse=True))
+    return GovernanceDrift(score=score, state=state, drivers=ranked)

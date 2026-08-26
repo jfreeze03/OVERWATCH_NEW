@@ -471,6 +471,113 @@ FROM (SELECT COUNT_IF(EXPIRATION_DATE < CURRENT_TIMESTAMP()) AS EXPIRED_CREDENTI
 """
 
 
+#: #20: the governance tag keys whose object-level coverage is scored. Whitelisted
+#: (never raw UI text) and injected through sql_literal.
+_GOV_TAG_KEYS: tuple[str, ...] = ("COST_OWNER", "SENSITIVITY", "SERVICE_TIER", "APP_OWNER")
+
+
+def object_tag_probe() -> str:
+    """#20: cheap existence probe for TAG_REFERENCES. The view is UNVERIFIED on this
+    account (no prior reader in the repo), so callers run this with probe=True and
+    degrade to an honest 'not available' branch when it errors, instead of a red row."""
+    return "SELECT TAG_NAME, DOMAIN FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES LIMIT 1"
+
+
+def object_tag_coverage(company: str = "ALL",
+                        tags: tuple[str, ...] = _GOV_TAG_KEYS) -> str:
+    """#20: per-governance-tag coverage over the base-table inventory.
+
+    For each governance tag key, what fraction of in-scope base tables carry it.
+    ACCOUNT_USAGE.TABLES (the verified inventory) is the DENOMINATOR; TAG_REFERENCES
+    (the tag-assignment side) is LEFT-joined so an untagged table still counts toward
+    TOTAL. A stale tag reference to a since-dropped table simply never matches a live
+    ``tbls`` row, so no OBJECT_DELETED filter is needed on the (unverified) tag view.
+    Scoped to DOMAIN='TABLE' — this account has no ACCOUNT_USAGE.WAREHOUSES/DATABASES
+    views (see ``show_warehouses_sql``), so warehouse/database tag coverage has no
+    honest denominator and is deliberately out of v1. Company scope via
+    ``database_clause`` on TABLE_CATALOG (same mechanism as insights_sql.storage_waste).
+    Tag keys are whitelisted through sql_literal — never raw UI text."""
+    # dict.fromkeys de-dups while preserving order: a duplicate or case-variant tag
+    # key would otherwise fan out the keys CTE and double every TOTAL/TAGGED count.
+    keys = tuple(dict.fromkeys(str(t).strip().upper() for t in tags if str(t).strip())) \
+        or _GOV_TAG_KEYS
+    in_list = ", ".join(sql_literal(k) for k in keys)
+    key_rows = " UNION ALL ".join(f"SELECT {sql_literal(k)} AS TAG_NAME" for k in keys)
+    where = and_where(
+        "t.DELETED IS NULL",
+        "t.TABLE_TYPE = 'BASE TABLE'",
+        companies.database_clause(company, "t.TABLE_CATALOG"),
+    )
+    return f"""
+WITH tbls AS (
+    -- DISTINCT so TOTAL is provably the count of distinct live base-table FQNs,
+    -- independent of any duplicate rows the inventory view might carry.
+    SELECT DISTINCT t.TABLE_CATALOG, t.TABLE_SCHEMA, t.TABLE_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES t
+    WHERE {where}
+),
+tagged AS (
+    SELECT DISTINCT
+        r.OBJECT_DATABASE, r.OBJECT_SCHEMA, r.OBJECT_NAME, UPPER(r.TAG_NAME) AS TAG_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES r
+    WHERE r.DOMAIN = 'TABLE'
+      AND UPPER(r.TAG_NAME) IN ({in_list})
+),
+keys AS ({key_rows})
+SELECT
+    k.TAG_NAME,
+    COUNT(*)             AS TOTAL,
+    COUNT(g.OBJECT_NAME) AS TAGGED,
+    ROUND(100.0 * COUNT(g.OBJECT_NAME) / NULLIF(COUNT(*), 0), 1) AS COVERAGE_PCT
+FROM keys k
+CROSS JOIN tbls t
+LEFT JOIN tagged g
+    ON g.OBJECT_DATABASE = t.TABLE_CATALOG
+   AND g.OBJECT_SCHEMA   = t.TABLE_SCHEMA
+   AND g.OBJECT_NAME     = t.TABLE_NAME
+   AND g.TAG_NAME        = k.TAG_NAME
+GROUP BY k.TAG_NAME
+ORDER BY COVERAGE_PCT ASC, k.TAG_NAME
+"""
+
+
+def untagged_objects(company: str = "ALL", tag_name: str = "COST_OWNER",
+                     limit: int = 200) -> str:
+    """#20: the in-scope base tables MISSING a given governance tag — the worklist
+    behind a coverage gap. LEFT JOIN TAG_REFERENCES for that one key and keep the
+    tables with no match, biggest first (largest untagged asset = highest-value fix).
+    One tag key, whitelisted via sql_literal; company-scoped like object_tag_coverage."""
+    key = str(tag_name or "").strip().upper() or "COST_OWNER"
+    n = int(max(1, min(1000, limit)))
+    where = and_where(
+        "t.DELETED IS NULL",
+        "t.TABLE_TYPE = 'BASE TABLE'",
+        companies.database_clause(company, "t.TABLE_CATALOG"),
+    )
+    return f"""
+WITH tagged AS (
+    SELECT DISTINCT r.OBJECT_DATABASE, r.OBJECT_SCHEMA, r.OBJECT_NAME
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES r
+    WHERE r.DOMAIN = 'TABLE' AND UPPER(r.TAG_NAME) = {sql_literal(key)}
+)
+SELECT
+    t.TABLE_CATALOG || '.' || t.TABLE_SCHEMA || '.' || t.TABLE_NAME AS FQN,
+    t.TABLE_CATALOG AS DATABASE_NAME,
+    t.TABLE_SCHEMA  AS SCHEMA_NAME,
+    t.ROW_COUNT,
+    t.BYTES
+FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES t
+LEFT JOIN tagged g
+    ON g.OBJECT_DATABASE = t.TABLE_CATALOG
+   AND g.OBJECT_SCHEMA   = t.TABLE_SCHEMA
+   AND g.OBJECT_NAME     = t.TABLE_NAME
+WHERE {where}
+  AND g.OBJECT_NAME IS NULL
+ORDER BY t.BYTES DESC NULLS LAST
+LIMIT {n}
+"""
+
+
 def show_warehouses_sql() -> str:
     """SHOW-based (WAREHOUSES view absent on this account); LIMIT keeps the
     row-cap rewrite away. resource_monitor/auto_suspend parsed client-side."""

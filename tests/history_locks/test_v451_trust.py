@@ -102,11 +102,14 @@ _REACHABLE = {
         # v4.246 (owner ask, CoCo ~13% of spend): + the AI-guardrails section —
         # CORTEX_CODE_* (shared cache with Cost's chargeback scan) and the
         # probe-gated optional CORTEX_AI_GUARDRAILS_USAGE_HISTORY.
+        # v4.300 (Upgrade Board P1 #20): + TABLES & TAG_REFERENCES for the
+        # object-tag governance coverage panel (probe-gated; TABLES is the verified
+        # inventory denominator, TAG_REFERENCES the unverified tag-assignment side).
         "ACCESS_HISTORY", "CORTEX_AI_GUARDRAILS_USAGE_HISTORY",
         "CORTEX_CODE_CLI_USAGE_HISTORY", "CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY",
         "CREDENTIALS", "DATA_TRANSFER_HISTORY", "GRANTS_TO_ROLES",
         "GRANTS_TO_USERS", "LOGIN_HISTORY", "QUERY_HISTORY", "ROLES", "SESSIONS",
-        "TABLE_STORAGE_METRICS", "USERS"),
+        "TABLES", "TABLE_STORAGE_METRICS", "TAG_REFERENCES", "USERS"),
     "app/ui/pages/alerts.py": (),
     # v4.52: + the object-ledger recon builder (Codex #7) — QAH and the five
     # maintenance-arm source histories, click-gated on the Canary tab.
