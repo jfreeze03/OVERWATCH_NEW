@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.305.0 - UI/UX Wave 1 leftovers: data-derived severity, quieter chrome (2026-08-28)
+
+Completes Wave 1 of the UI/UX master list (C23 / C13 / C24 / F31), app-only:
+
+* **C23** section-header severity now derives from the section's OWN data via a new
+  `components.alarm_health()` (amber only when there ARE findings, verified-clean
+  green, neutral when the read didn't resolve — never a false alarm or a false
+  all-clear). Rewired: Security MFA gaps + single-factor logins, Operations failures
+  by error / RCA timeline / file-load failures / duration drift / predicted SLA miss
+  / failure streaks / task freshness / resource-monitor coverage (calm under an
+  account-level cap), Cost unmapped entities ("empty is the goal state" now reads
+  green when it is), Brief Fires. Toggle-gated TOOLS (optimization triage,
+  stored-proc regression, wasted spend) go neutral; the kill-switch and Emergency
+  levers stay DELIBERATELY amber (dangerous controls, not findings counts).
+* **C13** the blue filter-contract banner renders only when it prevents a misread -
+  a sharp active filter (warehouse/database/schema/user) the section ignores or
+  applies panel-dependently; otherwise the contract is a quiet caption. Company/days
+  always carry a value, so they never trigger the banner alone (the judgment
+  `section_scope_note` already codified).
+* **C24** verified-clean renders as the compact `.ow-exception--ok` row instead of a
+  full-width green banner - a page of clean sections reads as a quiet checklist,
+  while clean stays visually distinct from unavailable.
+* **F31** routine row-cap truncation is a quiet caption, not a yellow alarm over a
+  table working as designed.
+
 ## 4.304.0 - UI/UX Wave 1: severity, a11y, and chart legibility (2026-08-25)
 
 The first wave of the UI/UX master list (docs/reviews/UIUX_MASTER_LIST_2026-08-25.md

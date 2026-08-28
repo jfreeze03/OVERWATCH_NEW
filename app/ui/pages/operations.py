@@ -66,6 +66,7 @@ from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
     add_to_case_button,
+    alarm_health,
     confirm_gate,
     entity_nav_table,
     evidence_gate,
@@ -259,7 +260,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     # A second live QUERY_HISTORY scan (ranked by inefficiency, not elapsed). It is a
     # deliberate drill, so toggle-gate it off first paint — the Heaviest-queries scan
     # above already pays one live round-trip for this section.
-    section_header("Optimization triage", "warn", "optimize")
+    # C23: a toggle-gated TOOL, not a findings surface — neutral until it runs.
+    section_header("Optimization triage", "", "optimize")
     _triage_on = st.toggle(
         "Run optimization triage (rank statements by spill / pruning / cold scan)",
         key="ops_triage_toggle",
@@ -300,7 +302,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     # the workload, with fail rate) plus a p95-vs-prior-window degradation view.
     # Toggle-gated like the triage scan above — a live round-trip only when asked;
     # the two reads submit async via run_batch.
-    section_header("Stored-procedure regression", "warn", "optimize")
+    section_header("Stored-procedure regression", "", "optimize")   # C23: tool, not alarm
     _proc_reg_on = st.toggle(
         "Roll up stored-proc runtimes and compare to the prior window",
         key="ops_proc_reg_toggle",
@@ -476,20 +478,21 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     st.error(f"{row.get('ERROR_CODE')}: {row.get('ERROR_MESSAGE')}")
                 result_caption(detail)
 
-    section_header("Failures by error", "warn", "alerts")
     fails = _qb.get("fails")
     if fails is None or not fails.ok:
         fails = run(
             ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
             page=_PAGE, key=f"q_fails_{company}_{days}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY")
+    # C23: amber only when failures exist; a clean window reads verified-green.
+    section_header("Failures by error", alarm_health(fails), "alerts")
     if guard(fails, "No failed queries in this window."):
         styled_table(fails.df)
 
     # rec#17: failed / killed / aborted queries that consumed warehouse compute produced
     # zero value — allocate the hour-share credits to non-success queries and rank the
     # repeat offenders, so a retrier hammering a broken query surfaces as $ wasted.
-    section_header("Wasted spend (failed / killed / aborted)", "warn", "cost")
+    section_header("Wasted spend (failed / killed / aborted)", "", "cost")   # C23: toggle-gated tool
     st.caption(
         "Allocated, not billed: each non-success query's execution-time share of its "
         "warehouse-hour credits — money spent on runs that produced nothing. Grouped by "
@@ -554,7 +557,10 @@ def _query_insights_panel() -> None:
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
                               known_failures: float | None = None) -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
-    section_header("Failure root-cause timeline (7d)", "warn", "alerts")
+    # C23: the caller passes the already-known failure count when it has one.
+    section_header("Failure root-cause timeline (7d)",
+                   alarm_health(None if known_failures is None else int(known_failures)),
+                   "alerts")
     if known_failures is not None and known_failures <= 0:
         st.success("No task failures in the last 7 days for this scope.")
         return
@@ -916,9 +922,9 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
          "source": "ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY"},
     ], page=_PAGE, tier="recent")
 
-    section_header("File-load failures (COPY / Snowpipe, 7d)", "warn", "pipeline")
     cpf = _psb.get("cpf") or run(ops_sql.copy_load_failures(7, company), page=_PAGE,
               key=f"copy_fails_{company}", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
+    section_header("File-load failures (COPY / Snowpipe, 7d)", alarm_health(cpf), "pipeline")
     if cpf.ok and cpf.empty:
         st.success("No failed or partial file loads in the last 7 days.")
     elif guard(cpf, ""):
@@ -1034,7 +1040,8 @@ def _task_health_view(company: str, days: int, database: str = "",
         # path only — the live task_runs fallback carries no daily AVG_SEC series).
         if {"DAY", "AVG_SEC", "TASK_NAME"}.issubset(res.df.columns):
             _drift = task_duration_anomalies(res.df)
-            section_header("Duration drift — tasks slower than their own baseline", "warn", "clock")
+            section_header("Duration drift — tasks slower than their own baseline",
+                           alarm_health(len(_drift)), "clock")
             if _drift.empty:
                 st.caption("No task is running materially slower than its own recent baseline.")
             else:
@@ -1049,7 +1056,8 @@ def _task_health_view(company: str, days: int, database: str = "",
             # whose daily runtime is climbing toward a miss, before they cross. Same
             # already-loaded daily frame as the drift above; no extra scan.
             _fc = duration_sla_forecast(res.df)
-            section_header("Predicted SLA miss — tasks trending slower", "warn", "schedule")
+            section_header("Predicted SLA miss — tasks trending slower",
+                           alarm_health(len(_fc)), "schedule")
             if _fc.empty:
                 st.caption("No task's recent runtime is climbing toward a miss.")
             else:
@@ -1095,12 +1103,14 @@ def _task_sla_view(company: str, days: int, database: str = "",
          "source": "ACCOUNT_USAGE.TASK_HISTORY (cadence + silence)"},
     ], page=_PAGE, tier="recent")
 
-    section_header("Actively broken tasks (failure streaks)", "warn", "alerts")
     _sres = _b.get("streak")
-    if _sres is None or not _sres.usable():
+    _streaks_known = _sres is not None and _sres.usable()
+    streaks = task_failure_streaks(_sres.df) if _streaks_known else None
+    section_header("Actively broken tasks (failure streaks)",
+                   alarm_health(len(streaks)) if _streaks_known else "", "alerts")
+    if not _streaks_known:
         st.caption("No SUCCEEDED/FAILED task runs in this window/scope.")
     else:
-        streaks = task_failure_streaks(_sres.df)
         if streaks.empty:
             st.success("No task is in a failure streak — every task's newest run succeeded.")
         else:
@@ -1119,14 +1129,16 @@ def _task_sla_view(company: str, days: int, database: str = "",
         result_caption(_sres)
 
     st.divider()
-    section_header("Task freshness — silent-stop detection", "warn", "clock")
     _fres = _b.get("fresh")
-    if _fres is None or not _fres.usable():
+    _fresh_known = _fres is not None and _fres.usable()
+    fresh = task_freshness_status(_fres.df) if _fresh_known else None
+    late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
+            if _fresh_known and not fresh.empty else fresh)
+    section_header("Task freshness — silent-stop detection",
+                   alarm_health(len(late)) if _fresh_known else "", "clock")
+    if not _fresh_known:
         st.caption("Not enough scheduled history to derive task cadence in this window/scope.")
     else:
-        fresh = task_freshness_status(_fres.df)
-        late = (fresh[fresh["STATUS"].isin(["Late", "Stale"])]
-                if not fresh.empty else fresh)
         if fresh.empty or late.empty:
             st.success("Every task with a derivable cadence is on-time against its own schedule.")
         else:
@@ -1807,15 +1819,20 @@ def _monitor_coverage_panel() -> None:
     at all — the governance blind spot Snowsight never rolls up."""
     from app.logic.wave2 import monitor_coverage
 
-    section_header("Resource-monitor coverage", "warn", "cost")
     _whs = run(security_sql.show_warehouses_sql(), page=_PAGE, key="rmcov_wh",
                tier="metadata", source="SHOW WAREHOUSES", max_rows=0)
     _mons = run(ops_sql.show_resource_monitors_sql(), page=_PAGE, key="rmcov_mons",
                 tier="metadata", source="SHOW RESOURCE MONITORS", max_rows=0, probe=True)
     if not _whs.ok:
+        section_header("Resource-monitor coverage", "", "cost")
         st.caption("SHOW WAREHOUSES failed — coverage can't be assessed this pass.")
         return
     cov = monitor_coverage(_whs.df, _mons.df if _mons.ok else None)
+    # C23: amber only when warehouses are genuinely uncapped — an ACCOUNT-level
+    # monitor caps everything, so per-warehouse non-assignment stays calm.
+    section_header("Resource-monitor coverage",
+                   alarm_health(0 if bool(cov.get("account_monitor"))
+                                else int(cov["uncovered"])), "cost")
     # Review #4: a LEVEL=ACCOUNT monitor caps every warehouse — per-warehouse
     # non-assignment is then a detail, not an "uncapped" alarm.
     _acct = bool(cov.get("account_monitor"))
@@ -2267,6 +2284,7 @@ def _emergency_tab(is_operator: bool) -> None:
 
 def _emergency_extras(is_operator: bool) -> None:
     st.divider()
+    # C23: deliberately amber — a destructive control surface, not a findings count.
     section_header("Running queries (kill-switch)", "warn", "bolt")
     panel_help(
         "Live in-flight statements via INFORMATION_SCHEMA (real time). Cancel needs "
@@ -2396,6 +2414,7 @@ def render() -> None:
     elif section == "Pipeline SLA":
         _pipeline_sla_tab(is_operator, f["company"])
     elif section == "Emergency":
+        # C23: deliberately amber — dangerous controls warrant standing caution.
         section_header("Emergency levers", "warn", "warehouse")
         _emergency_fragment(is_operator)
     else:

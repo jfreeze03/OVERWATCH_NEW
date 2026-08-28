@@ -399,13 +399,28 @@ def section_filter_contract(
     partial: tuple[str, ...] = (),
     note: str = "",
 ) -> str:
-    """Render a section-level scope contract next to the metrics it governs."""
+    """Render a section-level scope contract next to the metrics it governs.
+
+    C13: the blue banner renders ONLY when it prevents a misread — a sharp active
+    filter (warehouse / database / schema / user) this section ignores or applies
+    only panel-dependently. Otherwise the full contract stays one glance away as a
+    quiet caption, so the banner keeps meaning "your filter doesn't bite here"
+    instead of wallpapering every section. Company/days always carry a value
+    (defaults), so they never trigger the banner on their own — the same judgment
+    ``section_scope_note`` codified."""
     text = filter_contract_text(filters, applies=applies, partial=partial, note=note)
-    st.markdown(
-        f'<div class="ow-filter-contract" role="note" aria-label="Filter contract">'
-        f'{html.escape(text)}</div>',
-        unsafe_allow_html=True,
-    )
+    at_risk = [
+        key for key in _active_scope_dimensions(filters)
+        if key not in ("company", "days") and key not in applies
+    ]
+    if at_risk:
+        st.markdown(
+            f'<div class="ow-filter-contract" role="note" aria-label="Filter contract">'
+            f'{html.escape(text)}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption(text)
     return text
 
 
@@ -474,6 +489,25 @@ def section_header(title: str, health: str = "", icon_name: str = "",
         f'<span class="ow-section__title">{html.escape(title)}</span>{bdg}</h2>',
         unsafe_allow_html=True,
     )
+
+
+def alarm_health(source: object) -> str:
+    """C23: derive a section header's severity from its own data. Amber ONLY when
+    there ARE findings; a verified-clean section renders green; a read that didn't
+    resolve renders neutral — never a false alarm, never a false all-clear.
+    Accepts a row count or a QueryResult-shaped object (.ok / .empty); None
+    (an unknown count) is neutral, never a false all-clear."""
+    if source is None:
+        return ""
+    ok = getattr(source, "ok", None)
+    if ok is not None:
+        if not ok:
+            return ""
+        return "ok" if getattr(source, "empty", False) else "warn"
+    try:
+        return "warn" if int(source or 0) > 0 else "ok"
+    except (TypeError, ValueError):
+        return ""
 
 
 def page_verdict_line(verdict: dict) -> None:
@@ -1020,7 +1054,11 @@ def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool
             st.caption(setup_hint)
         return False
     if result.truncated:
-        st.warning(
+        # F31: a quiet line, not a yellow alarm — for capped scans (heaviest
+        # queries, triage) truncation is the NORMAL working state, and a warning
+        # banner over a table behaving as designed trains the eye to ignore
+        # yellow where it matters.
+        st.caption(
             f"Showing the first {len(result.df):,} rows — the result was larger. "
             "Narrow the window or filters to see everything."
         )
@@ -1048,12 +1086,18 @@ def confirm_gate(expected: str, action_label: str, *, key: str, prompt: str = ""
 
 def empty_state(kind: str, message: str, *, hint: str = "") -> None:
     """One vocabulary for the three empty states so COLOR carries meaning
-    (house rule 8): 'clean' = verified-clean (green success), 'needs_setup' =
+    (house rule 8): 'clean' = verified-clean (compact green row), 'needs_setup' =
     not installed / configure something (blue info), 'no_data_yet' = nothing has
-    loaded yet (quiet caption). Green must never mean 'nothing loaded'."""
+    loaded yet (quiet caption). Green must never mean 'nothing loaded'.
+
+    C24: 'clean' renders as the compact ``.ow-exception--ok`` row (via
+    exception_summary's clean path) instead of a full-width st.success banner —
+    a page of verified-clean sections reads as a quiet green checklist, not a
+    wall of alert-sized banners, while clean stays visually distinct from
+    unavailable."""
     kind = str(kind).lower()
     if kind == "clean":
-        st.success(message)
+        exception_summary([], message)
     elif kind == "needs_setup":
         st.info(message)
     else:  # "no_data_yet" + any unknown kind -> the quiet, non-green caption

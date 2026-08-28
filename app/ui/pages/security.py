@@ -34,6 +34,7 @@ from app.logic.security import (
 from app.ui import charts
 from app.ui.components import (
     add_to_case_button,
+    alarm_health,
     entity_nav_table,
     export_button,
     guard,
@@ -121,8 +122,9 @@ def _access_tab(company: str, days: int) -> None:
                        source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
         if live_mfa.ok:
             mfa = live_mfa
-    section_header("MFA gaps with password-login evidence (30d)", "warn", "security",
-                   anchor="sec-mfa")
+    # C23: severity comes from the data — amber only when the gap list has rows.
+    section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
+                   "security", anchor="sec-mfa")
     if mfa.ok and mfa.empty:
         st.success("No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
@@ -138,11 +140,12 @@ def _access_tab(company: str, days: int) -> None:
     # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
     # surfaces an ENROLLED user (HAS_MFA=TRUE) who still landed single-factor (a real
     # bypass/misconfig). Live LOGIN_HISTORY, companion to MFA gaps.
-    section_header("Single-factor logins (MFA-bypassed, 30d)", "warn", "security",
-                   anchor="sec-single-factor")
     sf = run(security_sql.single_factor_logins(min(days, 30), company), page=_PAGE,
              key=f"single_factor_{company}_{days}", tier="recent",
              source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
+    # C23: the (cached) read moves above the header so severity is data-derived.
+    section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
+                   "security", anchor="sec-single-factor")
     if sf.ok and sf.empty:
         st.success("No successful password login landed without a second factor in this window "
                    "(reader capped at 30d).")

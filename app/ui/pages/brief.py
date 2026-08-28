@@ -33,6 +33,7 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, oldest_open_hours, page_verdict
 from app.ui import charts
 from app.ui.components import (
+    alarm_health,
     contract_runway_bar,
     daily_spend_wide,
     download_text_button,
@@ -300,11 +301,14 @@ def render() -> None:
                           width="stretch"):
         request_navigation("Alerts", "Native delivery")
 
-    section_header("Fires", "warn", "alerts")
     # Honor the company filter (live finding 2026-07-08: Trexis warehouse
     # fires showed under an ALFA scope). Account-level events always show.
     events = _b_live.get("events") or run(mart_sql.open_alert_events(50, company), page=_PAGE,
                  key=f"brief_events_{company}", tier="live", source="ALERT_EVENTS")
+    # C23: "Fires" is amber only when critical/high fires EXIST.
+    _crit_n = (int(events.df["SEVERITY"].astype(str).isin(["CRITICAL", "HIGH"]).sum())
+               if events.ok and not events.empty else (0 if events.ok else None))
+    section_header("Fires", alarm_health(_crit_n), "alerts")
     if events.ok and not events.empty:
         crit = events.df[events.df["SEVERITY"].astype(str).isin(["CRITICAL", "HIGH"])]
         if crit.empty:

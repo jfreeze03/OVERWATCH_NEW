@@ -19,6 +19,7 @@ from app.logic.directory import resolve_display
 from app.logic.formulas import format_usd, humanize_duration, humanize_minutes_ago, safe_float
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
+    alarm_health,
     guard,
     kpi_row,
     lazy_sections,
@@ -218,12 +219,14 @@ def render() -> None:
             section_header("Storage", "info", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings)
             st.divider()
-            section_header("Unmapped entities", "warn", "chargeback", anchor="cost-unmapped")
-            st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
-                       "silently billing ALFA. Empty is the goal state.")
             unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
                       key=f"unmapped_{f['days']}", tier="hourly",
                       source="FACT_WAREHOUSE_DAILY + FACT_QUERY_SCHEMA_HOURLY + FACT_LOGIN_DAILY (COMPANY='UNKNOWN')")
+            # C23: "empty is the goal state" — so the header is green when it is.
+            section_header("Unmapped entities", alarm_health(unm), "chargeback",
+                           anchor="cost-unmapped")
+            st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
+                       "silently billing ALFA. Empty is the goal state.")
             if unm.ok and unm.empty:
                 st.success("Every entity in the window carries company evidence — nothing is billed blind.")
             elif guard(unm, ""):
