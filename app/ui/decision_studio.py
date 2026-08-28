@@ -66,6 +66,13 @@ def _open_entity(kind: str, key: str) -> None:
     )
 
 
+def _open_action_center() -> None:
+    """F56: experiments are created from a work item's 'Start optimization
+    experiment' expander on Action Center — the jump target for the
+    Experiments empty state (same request_navigation idiom the scorecard uses)."""
+    request_navigation("Control Room", "Action Center")
+
+
 _PORTFOLIO_CAP = 200
 
 
@@ -728,9 +735,10 @@ def _roi(company: str) -> None:
             + (f", closing the loop in **{_avgd:g} days** on average." if _avgd is not None else ".")
             + f" **{format_usd(totals['estimated_usd'])}** more is estimated, awaiting proof."))
     else:
-        st.info(f"No savings verified yet — {format_usd(totals['estimated_usd'])} is estimated across "
-                f"{totals['estimated_count']:,} item(s). Verify optimizations on Experiments (below) "
-                "or Cost ▸ Optimize to start the track record.")
+        empty_state("no_data_yet",
+                    f"No savings verified yet — {format_usd(totals['estimated_usd'])} is estimated across "
+                    f"{totals['estimated_count']:,} item(s). Verify optimizations on Experiments (below) "
+                    "or Cost ▸ Optimize to start the track record.")
 
     month_df = savings_by_month(ledger.df, 12)
     lever_df = savings_by_lever(ledger.df)
@@ -859,7 +867,25 @@ def _experiments() -> None:
         empty_state("needs_setup", "Apply V074 to track optimization experiments.")
         return
     if result.empty:
-        empty_state("no_data_yet", "No optimization experiments have been started.")
+        # F56: point the empty state at where an experiment is actually created —
+        # a selected work item's "Start optimization experiment" expander.
+        # review fix: that expander is OPERATOR-gated, so the doorway renders
+        # only for operators; viewers get accurate read-only wording.
+        if is_operator():
+            empty_state(
+                "no_data_yet", "No optimization experiments have been started.",
+                hint="Start one from a work item on Action Center — select an item and "
+                     "use its 'Start optimization experiment' expander.",
+                action_label="Open Action Center",
+                on_action=_open_action_center,
+                action_key="es_experiments_create",
+            )
+        else:
+            empty_state(
+                "no_data_yet", "No optimization experiments have been started.",
+                hint="An operator starts one from a work item on Action Center; "
+                     "results appear here for every viewer.",
+            )
         return
     frame = result.df.reset_index(drop=True)
     status = frame["STATUS"].astype(str).str.upper()

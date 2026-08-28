@@ -103,7 +103,7 @@ A primary-styled button that only appears when a critical alert reached nobody �
 | **⚠ N critical alert(s) reached nobody (oldest …)** | Count of OPEN criticals >=30 min old with no delivery row, plus the oldest such age. Shown only when count>0. | UNDELIVERED_CRITICAL / UNDELIVERED_OLDEST_MIN from health_strip crit CTE: COUNT_IF(STATUS='OPEN' AND RAISED_AT<=now-30min AND no ALERT_DELIVERIES row); MAX(DATEDIFF minute) for oldest. Age rendered humanize_duration(min,'min'). | count + humanized minutes | health_strip() -> ALERT_EVENTS LEFT JOIN DISTINCT ALERT_DELIVERIES (core) |
 
 ### Fires (open critical/high alerts table)
-The top-5 open critical+high alert events, company-scoped, most-severe first. Green success line when none; needs_setup empty-state when alerting not installed. Button navigates to Alerts > Open events.
+The top-5 open critical+high alert events, company-scoped, most-severe first. Compact verified-clean row (empty_state 'clean') when none; needs_setup empty-state when alerting not installed. Button navigates to Alerts > Open events.
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
@@ -112,7 +112,7 @@ The top-5 open critical+high alert events, company-scoped, most-severe first. Gr
 *Columns:* **RAISED_AT** — Timestamp the alert event was raised (account-time NTZ from ALERT_EVENTS.RAISED_AT).; **SEVERITY** — Alert severity token (CRITICAL/HIGH shown here) from ALERT_EVENTS.SEVERITY.; **TITLE** — Human-readable alert title from ALERT_EVENTS.TITLE.
 
 ### Asks (top-3 action queue)
-The top three owner-pending actions as a markdown list — the asks-third half of the contract. Green success when nothing waits; 'not installed' when the queue is absent.
+The top three owner-pending actions as a markdown list — the asks-third half of the contract. Compact verified-clean row when nothing waits ('Action queue is empty.'); blue needs_setup 'Action queue not installed yet.' when the queue is absent.
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|

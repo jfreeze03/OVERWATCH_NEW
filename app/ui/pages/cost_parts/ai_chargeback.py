@@ -34,6 +34,7 @@ from app.logic.cortex import (
 from app.logic.formulas import account_today, credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import (
+    empty_state,
     export_button,
     guard,
     kpi_row,
@@ -145,9 +146,11 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             # internally call SYSTEM$GET_CORTEX_CODE_CLI_SUBSCRIPTION; without a
             # Cortex Code subscription that function does not exist (002139), so
             # OUR read throws even though our SQL never names it.
-            st.info("Cortex Code usage telemetry is not available in this account/region yet - "
-                    "Snowflake's usage views probe a subscription that is not present (002139). "
-                    "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
+            empty_state(
+                "needs_setup",
+                "Cortex Code usage telemetry is not available in this account/region yet - "
+                "Snowflake's usage views probe a subscription that is not present (002139). "
+                "This tab lights up on its own if Cortex Code lands; nothing is misconfigured.")
             return
         # Keep the live result's source/freshness/error for the caption and the
         # guard; swap in the window-sliced rollup the panel actually renders.
@@ -250,10 +253,12 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     st.markdown("**Exceptions**")
     if exceptions.empty:
         if ai_budget > 0:
-            st.success("No users over 25% of the AI budget, scope total inside budget, "
-                       "and no cost-per-request spikes.")
+            empty_state("clean",
+                        "No users over 25% of the AI budget, scope total inside budget, "
+                        "and no cost-per-request spikes.")
         else:
-            st.info("No cost-per-request spikes. Configure AI_MONTHLY_BUDGET_USD to also flag budget pressure.")
+            empty_state("needs_setup",
+                        "No cost-per-request spikes. Configure AI_MONTHLY_BUDGET_USD to also flag budget pressure.")
         st.caption(md_dollars(_rules))
     else:
         styled_table(
@@ -336,7 +341,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
         return
     econ = token_economics(te_res.df)
     if econ.empty:
-        st.info("No token-type rows in the selected window.")
+        empty_state("no_data_yet", "No token-type rows in the selected window.")
         return
     # Per-user daily credits drive the credit / session / over-cap signals. Same days-independent
     # cache key as _ai_users_tab's live leg, so this reuses that fetch when it ran.
@@ -610,7 +615,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     if bud.ok and not bud.empty:
         styled_table(with_user_names(bud.df, _PAGE, user_col="UPDATED_BY", display_col="Updated by"))
     elif bud.ok:
-        st.info("No department budgets set yet — add one below and the pace alert goes live.")
+        empty_state("needs_setup", "No department budgets set yet — add one below and the pace alert goes live.")
     if is_operator:
         dmap = run(chargeback_sql.department_map(), page=_PAGE, key="cb_dmap_bud", tier="recent",
                    source="DEPARTMENT_MAP")

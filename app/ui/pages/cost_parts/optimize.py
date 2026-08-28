@@ -1001,10 +1001,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 + "Measured query compute is split equally across a query's base objects "
                 "(additive); full-query 'influenced cost' is a separate non-additive lens.")
         elif _oc.ok:
-            st.success("No object-cost rows yet (loads after V048 + the first daily run).")
+            empty_state("no_data_yet", "No object-cost rows yet (loads after V048 + the first daily run).")
         else:
-            st.info("Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
-                    "can apply it on Admin → Migrations & freshness.")
+            empty_state("needs_setup",
+                        "Object cost arrives with migration V048 (FACT_OBJECT_COST_DAILY) — an admin "
+                        "can apply it on Admin → Migrations & freshness.")
         st.divider()
         st.markdown("**Storage growth movers**")
         days_storage = max(days, 30)
@@ -1021,7 +1022,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             if _sg_db and not movers.empty and "DATABASE_NAME" in movers.columns:
                 movers = movers[movers["DATABASE_NAME"].astype(str).str.upper() == _sg_db.upper()]
             if _sg_db and movers.empty:
-                st.info("No storage history for the selected database in this window.")
+                empty_state("no_data_yet", "No storage history for the selected database in this window.")
             else:
                 # D4: the chart's top-10 cut is by projected DOLLARS — the database adding
                 # the most TB is not necessarily the one adding the most money, and this
@@ -1128,7 +1129,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         key=f"prune_{company}_{days}", tier="historical",
                         source="ACCOUNT_USAGE.QUERY_HISTORY (PARTITIONS_SCANNED)")
             if prune.ok and prune.empty:
-                st.success("No query family scans >80% of a 100+-partition table in this window.")
+                empty_state("clean", "No query family scans >80% of a 100+-partition table in this window.")
             elif guard(prune, ""):
                 st.caption("These families read almost every micro-partition — clustering keys or "
                            "better predicates would cut both runtime and credits.")
@@ -1162,7 +1163,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                 key=f"waste_{company}", tier="historical",
                                 source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
             if waste.ok and waste.empty:
-                st.success("No table above 1 GB of combined active + retention bytes in this scope.")
+                empty_state("clean", "No table above 1 GB of combined active + retention bytes in this scope.")
             elif guard(waste, ""):
                 sdf = waste.df.copy()
                 if "DML_STATUS" in sdf.columns:
@@ -1306,7 +1307,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                       key=f"clustering_{company}_{days}", tier="historical",
                       source="ACCOUNT_USAGE.AUTOMATIC_CLUSTERING_HISTORY")
             if clu.ok and clu.empty:
-                st.success("No automatic-clustering credits in this window.")
+                empty_state("clean", "No automatic-clustering credits in this window.")
             elif guard(clu, ""):
                 _clu = flag_clustering_churn(clu.df, rate=rate)
                 _clu_cols = [c for c in ["TABLE_FQN", "CREDITS", "SPEND_USD", "RECOVERABLE_USD",
@@ -1404,9 +1405,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     mine = prof.df[prof.df["WAREHOUSE_NAME"].astype(str) == wh_pick]
                     proposal = remediation.propose_quiet_window(mine.to_dict("records"))
                     if proposal is None:
-                        st.info("No defensible recurring 4h+ window where this warehouse burns credits with "
-                                "~no queries. Sparse or all-day idle profiles are routed to auto-suspend, "
-                                "consolidation, or retirement instead of an invalid schedule pair.")
+                        empty_state("no_data_yet",
+                                    "No defensible recurring 4h+ window where this warehouse burns credits with "
+                                    "~no queries. Sparse or all-day idle profiles are routed to auto-suspend, "
+                                    "consolidation, or retirement instead of an invalid schedule pair.")
                     else:
                         st.caption(
                             f"Highest-value quiet window {proposal['start']:02d}:00–{proposal['end']:02d}:00 "
@@ -1465,7 +1467,7 @@ def _savings_tab() -> None:
     res = run(mart_sql.savings_ledger(), page=_PAGE, key="savings_ledger",
               tier="live", source="SAVINGS_LEDGER")
     if not res.ok:
-        st.info("Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+        empty_state("needs_setup", "Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
         return
     st.caption("Books itself since V038: the daily scan detects cost-lever changes "
                "(auto-suspend, size, clusters, scaling policy) wherever they were "
@@ -1477,8 +1479,9 @@ def _savings_tab() -> None:
     if st.button("Open the ROI story → Decision Studio", key="savings_roi_link"):
         request_navigation("Decision Studio", "ROI")
     if res.empty:
-        st.info("Nothing booked yet — the autobook task fills this as warehouse "
-                "cost-lever changes are detected (needs migration V038).")
+        empty_state("no_data_yet",
+                    "Nothing booked yet — the autobook task fills this as warehouse "
+                    "cost-lever changes are detected (needs migration V038).")
     else:
         styled_table(res.df[[c for c in ("CREATED_AT", "SOURCE", "DESCRIPTION", "STATE",
                                           "ESTIMATED_USD", "VERIFIED_USD", "VERIFIED_BY")

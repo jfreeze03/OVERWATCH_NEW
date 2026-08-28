@@ -447,7 +447,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     # dataframe highlights, typed confirm text) — a fresh key is the one reliable reset.
     _sel_nonce = int(st.session_state.get("_ow_alert_sel_nonce", 0))
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
-             setup_hint=_SETUP_HINT):
+             setup_hint=_SETUP_HINT, kind="clean"):
         edf = severity_sort(events.df)  # worst first, newest within — triage order
         requested_event = str(navigation_context().get("event_id") or "").strip()
         # C44: a RESOLVE/SNOOZE queues the NEXT open event by IDENTITY; it rides
@@ -1049,8 +1049,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                              source="ACCOUNT_USAGE / marts (per-alert evidence)")
                     if not ev.ok or ev.empty:
                         st.session_state.pop(_expl_prompt_key, None)
-                        st.info("No evidence rows for this alert's scope — the driver may be "
-                                "outside the window, or the family/service label didn't match.")
+                        empty_state("no_data_yet",
+                                    "No evidence rows for this alert's scope — the driver may be "
+                                    "outside the window, or the family/service label didn't match.")
                     else:
                         st.session_state[_expl_prompt_key] = alert_evidence_prompt(
                             plan.kind, str(row["TITLE"]), detail_text, ev.df, plan.window_label)
@@ -1299,10 +1300,11 @@ def render() -> None:
             prec = run(mart_sql.rule_precision(90), page=_PAGE, key="rule_precision",
                        tier="recent", source="ALERT_EVENTS.RESOLUTION_KIND")
             if not prec.ok:
-                st.info("Precision is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
+                empty_state("needs_setup", "Precision is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
             elif prec.empty:
-                st.info("No resolved events in 90d — precision appears once alerts get closed "
-                        "with a resolution kind.")
+                empty_state("no_data_yet",
+                            "No resolved events in 90d — precision appears once alerts get closed "
+                            "with a resolution kind.")
             else:
                 pdf_ = prec.df.copy()
                 _prec_sel = selectable_table(pdf_, key="rule_prec_sel", column_config={

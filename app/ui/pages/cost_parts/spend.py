@@ -679,6 +679,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     mart_source="MART_QUERY_FAMILY_DAILY (mart, run-weighted averages)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
             _fam_floor = 5 if _sel_wh else 20
+            # review fix: NOT kind="clean" — this probe renders under "Why is it
+            # elevated?" while the ratio anomaly is still open; an empty is a
+            # failed diagnosis redirecting the reader, not a good outcome.
             if guard(comp, f"No query family with {_fam_floor}+ runs averages >0.5s compile time — the "
                            "ratio driver is likely many tiny/metadata queries (see statement types below)."):
                 styled_table(comp.df)
@@ -1033,7 +1036,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                 "and the **Wasted spend** board show the queries that drove it."
             )
         else:
-            st.success("No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
+            empty_state("clean", "No daily spend anomalies in the last 30 days (median/MAD z < 3.5).")
     else:
         st.caption("Anomaly flags appear once 30 days of per-warehouse daily facts have loaded.")
     # Repo review wave 2: Snowflake's managed ML anomaly feed as an INDEPENDENT
@@ -1052,7 +1055,7 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                        "(it appears once Snowflake's cost-anomaly detection is active). The "
                        "z-score sweep above still runs.")
         elif na.empty:
-            st.success("Snowflake's native model reports no cost anomalies.")
+            empty_state("clean", "Snowflake's native model reports no cost anomalies.")
         else:
             styled_table(na.df, height=240)
             st.caption("Snowflake's own ML anomaly verdicts, raw. A day flagged by BOTH this "

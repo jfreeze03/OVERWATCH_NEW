@@ -61,7 +61,16 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    labels say which path served (mart vs live fallback); mart-first with
    live fallback via `run_mart_first` (empty mart → fallback, never lying
    zeros). No `") or {}"` after run_batch (r8 lock). Qualify columns
-   (alias-shadow rule). Declared-exception guards only.
+   (alias-shadow rule). Declared-exception guards only. Absence renders ONLY
+   through `components.empty_state` (C25): `clean` green ok-row = verified
+   clean, `needs_setup` blue info, `no_data_yet` quiet caption, `unavailable`
+   red lead + detail expander; `guard()` routes both its branches through it
+   (pass `kind="clean"` when the empty IS the good outcome), and a workflow
+   empty can carry its next best action (`action_label`/`on_action`, F56).
+   Never a raw `st.info`/`st.success` for an absence — this covers absence
+   OUTCOMES of a read (zero rows / not configured / unavailable); action
+   receipts, direct answers to a submitted question, and context notes
+   about data that structurally cannot exist stay raw.
 9. **Identity:** owner's-rights SiS — `CURRENT_USER()` = app owner. Viewer
    identity via `app/core/identity.py` (`st.user`, CURRENT_USER() fallback)
    for prefs/usage/audit. Executor allow-list: one statement, OVERWATCH
@@ -79,7 +88,15 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
     account-touching write — alert RESOLVE (feeds per-rule precision),
     incident declare/close, warehouse levers. `st.form` stays declined (it
     hides the preview). `notify()` is the receipt: toast on success,
-    persistent inline error on failure (rec48).
+    persistent inline error on failure (rec48). EVERY write click block also
+    pairs the C48 latch: `write_gate_open(<key>)` as the click gate's LAST
+    condition + `stamp_write(<key>, ok)` after the block's last write, BEFORE
+    any `st.rerun` (which raises). The latch arms on gate-open (a duplicate
+    click preempts the script after the write commits), is run-seq aware and
+    success-only; scope the key by action/target when a fixed key could
+    swallow a genuinely different action (fragments freeze the run seq —
+    emergency surfaces use scoped keys + short backstops). The query-layer
+    spinners in `execute_*` are the in-flight state; don't add per-site ones.
 
 ## Owner decisions (do not relitigate)
 

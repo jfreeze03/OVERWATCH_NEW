@@ -735,8 +735,13 @@ def _object_blast_radius_panel(key: str) -> None:
                    "dependents' is a LOWER BOUND and may omit real downstream dependents.")
     deps = lineage.downstream_dependents(edges.df if edges.usable() else pd.DataFrame(), key)
     if deps.empty:
-        st.info("No DECLARED downstream dependents recorded for this object. Note that "
-                "OBJECT_DEPENDENCIES records view/matview/policy references, not "
+        # review fix: split the fused message — the zero-rows FACT takes the
+        # vocabulary's quiet caption, but the safety caveat gates a destructive
+        # decision (the safe-to-ALTER inference this empty invites) and keeps
+        # its info weight. Deliberate exception to the C25 single-call shape.
+        empty_state("no_data_yet",
+                    "No DECLARED downstream dependents recorded for this object.")
+        st.info("OBJECT_DEPENDENCIES records view/matview/policy references, not "
                 "stored-procedure or dynamic-SQL usage — this is not proof nothing "
                 "depends on it, and not a 'safe to ALTER' verdict.")
         # The declared graph is blind exactly in the proc/dynamic-SQL case — still fetch
@@ -864,6 +869,18 @@ def render_watch_badge(viewer: str, rate: float) -> None:
         request_navigation("Control Room", "Entity 360")
 
 
+def _watchlist_browse_catalog() -> None:
+    """F56: next best action for an empty watchlist — land on the Entity sub-tab
+    with no key chosen, which renders the catalog browser. Same jump idiom as
+    render_watch_badge and the watchlist row-click (request_navigation reruns)."""
+    st.session_state["_ow_entity_view_pending"] = "Entity"
+    # Clear any lingering key so the Entity sub-tab opens on the catalog table,
+    # not a previously viewed entity (pre-render seeding, rec12's own pattern —
+    # the Entity widgets are not mounted while the Watchlist sub-tab renders).
+    st.session_state["entity_360_key"] = ""
+    request_navigation("Control Room", "Entity 360")
+
+
 def render_watchlist() -> None:
     viewer = viewer_name()
     if not viewer:
@@ -873,6 +890,19 @@ def render_watchlist() -> None:
         workbench_sql.watchlist(viewer), page=_PAGE, key="watchlist_all",
         tier="live", source="USER_WATCHLIST",
     )
+    if result.ok and result.empty:
+        # F56: the empty watchlist is a doorway, not a dead end — offer the
+        # catalog browser as the next step (guard's empty branch cannot carry
+        # the action params, so the empty case is intercepted here; guard below
+        # still owns the error and truncation branches).
+        empty_state(
+            "no_data_yet", "No entities are on your watchlist yet.",
+            hint="Open an entity from the catalog and press Watch to add it here.",
+            action_label="Browse the catalog",
+            on_action=_watchlist_browse_catalog,
+            action_key="es_watchlist_browse",
+        )
+        return
     if not guard(result, "No entities are on your watchlist yet."):
         return
     frame = result.df.reset_index(drop=True)

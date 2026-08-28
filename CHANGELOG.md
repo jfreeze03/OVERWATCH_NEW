@@ -1,5 +1,53 @@
 # Changelog
 
+## 4.311.0 - UI/UX Wave 2 (6): the empty-state conversion (C25 + F56) (2026-08-28)
+
+Absence now speaks ONE vocabulary app-wide, so color carries meaning:
+
+* **empty_state gained 'unavailable'** (red lead line, full error one click
+  away via a detail expander) and an optional NEXT BEST ACTION (a small button
+  under the message) - an empty panel is a doorway, not a dead end.
+* **guard() routes BOTH branches through the vocabulary**: the empty branch
+  defaults to the quiet no_data_yet caption (a successful zero-row read is not
+  a setup prompt - the old blue st.info banner said otherwise) with
+  kind="clean" for verified-good empties; the error branch renders as
+  'unavailable' (absence-of-setup stays a calm needs_setup). One seam change
+  converts ~145 guard callers.
+* **131 raw st.info/st.success absences converted** across 16 UI files by a
+  10-agent classify-and-convert sweep (69 verified-clean green rows, 36 quiet
+  captions, 26 setup prompts); 31 receipts/context notes deliberately stayed
+  raw; 8 guard callers marked verified-clean.
+* **F56**: the Watchlist empty offers "Browse the catalog" (jumps to the
+  Entity 360 catalog) and the Experiments empty offers "Open Action Center"
+  (operator-gated - viewers get accurate read-only wording).
+* **Docs now carry the contracts**: ARCHITECTURE.md's error-handling contract,
+  CLAUDE.md laws 8/11, and AGENTS.md document the empty-state vocabulary AND
+  the v4.310 C48 write seam (latch pairing rule, arm-on-open, run-seq,
+  scoped keys); FEATURE_GLOSSARY's Brief render descriptions updated.
+
+Adversarial review (4 find dimensions, 23 agents) confirmed 15 findings
+(deduped to 10), all fixed pre-commit:
+
+* **MED** guard now SUPPRESSES the setup hint under a verified-clean empty - a
+  successful read proves setup exists, so "verified clean" + "not installed
+  yet" was a contradiction on the alerts triage surface.
+* **MED** two kind="clean" miscalls reverted: the compile-heavy-families probe
+  (renders under "Why is it elevated?" while the anomaly is still open - a
+  failed diagnosis is not a green all-clear) and the account-wide pattern-
+  movers leg (its empty also covers a not-yet-loaded mart; clean is now
+  reserved for the live per-warehouse scan).
+* **MED** Ask's no_data headline reverted to info weight - it IS the answer to
+  a typed question (conditional feedback), not a panel absence.
+* **MED** admin's failed drill-history read now renders as 'unavailable'
+  instead of a calm blue info with the raw error inline.
+* **LOW** the blast-radius empty split: the zero-rows fact keeps the quiet
+  caption, but the safety caveat ("not proof nothing depends on it, not a
+  'safe to ALTER' verdict") keeps its info weight - it gates a destructive
+  decision.
+* **LOW** the Experiments doorway is operator-gated; doc wording gained the
+  receipts/answers/notes carve-out; the raw-absence regression test now pins
+  ALL 16 swept files at their post-sweep counts.
+
 ## 4.310.0 - UI/UX Wave 2 (5): C48 app-wide in-flight action state (2026-08-28)
 
 Every operator write in the app now shows an honest in-flight state and is

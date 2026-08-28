@@ -42,6 +42,7 @@ from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     confirm_gate,
+    empty_state,
     exception_summary,
     guard,
     kpi_row,
@@ -282,14 +283,14 @@ def _day_replay() -> None:
         crit_n, rate,
     )
     if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
-        st.info(f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
+        empty_state("no_data_yet", f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
         return
     if heads:
         for h in heads:
             (st.error if h["severity"] == "bad" else
              st.warning if h["severity"] == "warn" else st.info)(h["text"])
     else:
-        st.success(f"{day_iso}: a quiet day — no notable movement in any domain.")
+        empty_state("clean", f"{day_iso}: a quiet day — no notable movement in any domain.")
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Spend movers vs 14d baseline**")
@@ -297,23 +298,23 @@ def _day_replay() -> None:
             styled_table(movers.df, height=240)
         st.markdown("**Task failures**")
         if tasks.ok and tasks.empty:
-            st.success("No task failures that day.")
+            empty_state("clean", "No task failures that day.")
         elif guard(tasks, ""):
             styled_table(tasks.df, height=200)
     with c2:
         st.markdown("**DDL that landed**")
         if ddl.ok and ddl.empty:
-            st.success("No DDL that day.")
+            empty_state("clean", "No DDL that day.")
         elif guard(ddl, ""):
             styled_table(with_user_names(ddl.df, _PAGE), height=240)
         st.markdown("**Grant changes**")
         if grants.ok and grants.empty:
-            st.success("No grant changes that day.")
+            empty_state("clean", "No grant changes that day.")
         elif guard(grants, ""):
             styled_table(with_user_names(grants.df, _PAGE, user_col="GRANTEE_NAME"), height=200)
     st.markdown("**Alerts raised that day**")
     if alerts_d.ok and alerts_d.empty:
-        st.success("No alerts raised that day.")
+        empty_state("clean", "No alerts raised that day.")
     elif guard(alerts_d, ""):
         styled_table(alerts_d.df, height=200)
     st.caption(f"Scoped to {rp_company} (alerts include account-level rows). Baselines are "
@@ -329,10 +330,10 @@ def _freshness_board() -> None:
         mart_tier="recent", live_tier="recent")   # state moves every 10 min (r14 #13)
     section_header("Telemetry freshness")
     if not res.ok:
-        st.info("Freshness board is not installed yet; the live fallbacks on this page still work.")
+        empty_state("needs_setup", "Freshness board is not installed yet; the live fallbacks on this page still work.")
         return
     if res.empty:
-        st.info("Freshness view exists but has no rows — have the loader tasks run yet?")
+        empty_state("no_data_yet", "Freshness view exists but has no rows — have the loader tasks run yet?")
         return
     df = res.df.copy()
     # C3: a source that has NEVER loaded comes back with a NULL LAST_LOAD_TS →
@@ -358,7 +359,7 @@ def _freshness_board() -> None:
     if stale_count:
         st.warning(f"{stale_count} source(s) stale — numbers built on them are labeled accordingly.")
     if not (not_loaded or stale_count):
-        st.success("All telemetry sources fresh.")
+        empty_state("clean", "All telemetry sources fresh.")
     # Admin ▸ Migrations & freshness owns the full per-source freshness table; this
     # is just the at-a-glance count, so link there instead of repeating the table.
     if st.button("Full freshness table → Admin", key="cr_freshness_admin"):
@@ -572,7 +573,7 @@ def render() -> None:
         elif not pulse.ok:
             st.error(f"Pulse unavailable: {pulse.error}")
         else:
-            st.info("No queries recorded since yesterday 00:00 for this scope.")
+            empty_state("no_data_yet", "No queries recorded since yesterday 00:00 for this scope.")
         # The pulse is the distinct "since yesterday" glance; Operations ▸ Queries
         # owns the full query metrics (and their definitions), so link there rather
         # than repeat them here.
@@ -592,7 +593,7 @@ def render() -> None:
         elif act.usable():
             st.warning("Activity trend returned an unexpected data shape.")
         else:
-            st.info("No query activity recorded in the last 14 days for this scope.")
+            empty_state("no_data_yet", "No query activity recorded in the last 14 days for this scope.")
 
     elif section == "Incidents & triage":
         # ---- Incidents (V032) ------------------------------------------------------
@@ -672,7 +673,7 @@ def render() -> None:
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
         if oi.ok and oi.empty:
-            st.success("No open incidents.")
+            empty_state("clean", "No open incidents.")
         elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
             sel_i = selectable_table(
                 with_user_names(oi.df, _PAGE, user_col="DECLARED_BY", display_col="Declared by"),
@@ -837,7 +838,7 @@ def render() -> None:
             # demote the all-clear (a runaway-warehouse day must never hide behind green).
             sources_ok = alerts.ok and tasks.ok and wh_daily.ok
             if sources_ok:
-                st.success("Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
+                empty_state("clean", "Nothing to triage: no open alerts, task failures, or spend anomalies in scope.")
             else:
                 st.info("Triage inputs incomplete: "
                         + ("alert tables not installed; " if not alerts.ok else "")
@@ -946,7 +947,7 @@ def render() -> None:
                      source="ALERT_EVENTS + TASK_HISTORY + QUERY_HISTORY (DDL"
                             + (", live fallback)" if tl_win.startswith("48h") else ")"))
         if tl.ok and tl.empty:
-            st.success("Quiet week: no alerts, task failures, or DDL in the window.")
+            empty_state("clean", "Quiet week: no alerts, task failures, or DDL in the window.")
         elif guard(tl, ""):
             tdf = tl.df.copy()
             tdf, tz_note = localize_timestamps(tdf, ["AT"])

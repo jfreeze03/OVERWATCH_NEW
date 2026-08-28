@@ -62,6 +62,30 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   invisibly; the Admin page lists recent errors.
 - Ruff `BLE001` bans blind `except Exception:` everywhere except the three
   sanctioned runtime modules that record what they catch.
+- **Empty/absent-state vocabulary (C25):** `components.empty_state(kind, ...)`
+  is the one rendering of absence, so color carries meaning — `clean` =
+  verified-clean compact green row, `needs_setup` = blue info (configure or
+  install first), `no_data_yet` = quiet caption (a successful read returned
+  zero rows), `unavailable` = red lead line with the full error one click away.
+  `guard()` routes its empty branch through it (callers whose empty is the
+  verified-good outcome pass `kind="clean"`; a setup hint is suppressed under
+  a clean empty — a successful read proves setup exists) and its error branch
+  renders as `unavailable` — except absence-of-setup (the missing-migrations
+  error), which stays a calm `needs_setup`. An empty state may carry its next best action (`action_label`
+  + `on_action`, F56) so an empty panel is a doorway, not a dead end.
+- **Operator-write seam (C48):** `execute_statement` / `execute_action` /
+  `execute_cancel_query` paint an in-flight spinner around the round-trip, and
+  every write CLICK BLOCK pairs `components.write_gate_open(<key>)` (last
+  condition of the click gate) with `components.stamp_write(<key>, ok)` (after
+  the block's last write, before any `st.rerun`). The latch ARMS ON GATE-OPEN
+  — a duplicate click on a non-fragment page preempts the running script after
+  the write commits, before any end-of-block stamp could land — is
+  run-sequence aware (`_ow_run_seq` bumps once per full script run; the queued
+  duplicate always lands on the very next run, however long its cold render
+  takes), per-key, and success-only (a failed write's entry is deleted so the
+  retry re-executes). Keys scope by action/target wherever a fixed key would
+  swallow a genuinely distinct action; fragment surfaces (where the run seq
+  freezes) use scoped keys, and idempotent emergency actions short backstops.
 
 ## Cost formula contract
 

@@ -24,6 +24,7 @@ from app.logic.directory import resolve_display
 from app.logic.formulas import credits_to_usd, format_usd, md_dollars, safe_float
 from app.ui import charts
 from app.ui.components import (
+    empty_state,
     guard,
     kpi_row,
     panel_help,
@@ -218,10 +219,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare.")
     elif _pc.ok:
-        st.success("No repeated pattern crossed the $0.01 floor in this window.")
+        empty_state("clean", "No repeated pattern crossed the $0.01 floor in this window.")
     else:
-        st.info("Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "
-                "an admin can apply the pending schema update on Admin → Migrations & freshness.")
+        empty_state("needs_setup",
+                    "Pattern costs arrive with migration V037 (MART_PATTERN_COST_DAILY v2) — "
+                    "an admin can apply the pending schema update on Admin → Migrations & freshness.")
 
     # $-escape: expander LABELS render markdown+LaTeX too — "total $ and $/call" paired
     with st.expander(md_dollars("Trend one procedure — total $ and $/call over time")):

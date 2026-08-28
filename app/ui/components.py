@@ -1093,34 +1093,44 @@ def toggle_cost_hint(key_contains: str) -> str:
         return ""
 
 
-def guard(result: QueryResult, empty_message: str, setup_hint: str = "") -> bool:
+def guard(result: QueryResult, empty_message: str, setup_hint: str = "",
+          kind: str = "no_data_yet") -> bool:
     """Standard render gate: labeled error / labeled empty / truncation banner.
 
     Returns True when the caller should render the data.
+
+    C25: both absence branches route through the shared ``empty_state``
+    vocabulary. The EMPTY branch defaults to the quiet 'no_data_yet' caption
+    (a successful query with zero rows is not a setup prompt — the old blue
+    st.info banner said otherwise); callers whose empty IS the verified-good
+    outcome ("scan ran, nothing over threshold") pass ``kind="clean"``. The
+    ERROR branch renders as 'unavailable' (red lead line, full error one
+    click away), except absence-of-setup, which stays a calm 'needs_setup'.
     """
     if not result.ok:
         # Absence-of-setup is a state, not a failure: fresh deployments show
         # one calm line instead of a wall of red while marts install.
         if "run the migrations and roles.sql" in str(result.error):
-            st.info("This panel needs OVERWATCH's objects installed — an admin can see "
-                    "what's pending on Admin → Migrations & freshness.")
+            empty_state("needs_setup",
+                        "This panel needs OVERWATCH's objects installed — an admin can see "
+                        "what's pending on Admin → Migrations & freshness.",
+                        hint=setup_hint)
         else:
             # rec49: Snowflake compile errors run hundreds of chars with embedded
             # SQL and dominate the panel. Lead with the first line; keep the full
             # text one click away (same idiom as the connection-error screen).
             _err = str(result.error or "").strip()
             _first = _err.splitlines()[0] if _err else ""
-            st.error(f"Query failed: {_first}" if _first else "Query failed")
-            if _err and _err != _first:
-                with st.expander("Error detail"):
-                    st.code(_err)
-        if setup_hint:
-            st.caption(setup_hint)
+            empty_state("unavailable",
+                        f"Query failed: {_first}" if _first else "Query failed",
+                        detail=_err if _err and _err != _first else "",
+                        hint=setup_hint)
         return False
     if result.empty:
-        st.info(empty_message)
-        if setup_hint:
-            st.caption(setup_hint)
+        # review fix: a successful read PROVES setup exists — a setup hint
+        # under a verified-clean green row is always a contradiction.
+        empty_state(kind, empty_message,
+                    hint="" if kind == "clean" else setup_hint)
         return False
     if result.truncated:
         # F31: a quiet line, not a yellow alarm — for capped scans (heaviest
@@ -1153,26 +1163,43 @@ def confirm_gate(expected: str, action_label: str, *, key: str, prompt: str = ""
                      disabled=not (match and enabled), **button_kwargs)
 
 
-def empty_state(kind: str, message: str, *, hint: str = "") -> None:
-    """One vocabulary for the three empty states so COLOR carries meaning
+def empty_state(kind: str, message: str, *, hint: str = "", detail: str = "",
+                action_label: str = "", on_action=None, action_key: str = "") -> None:
+    """One vocabulary for the empty/absent states so COLOR carries meaning
     (house rule 8): 'clean' = verified-clean (compact green row), 'needs_setup' =
     not installed / configure something (blue info), 'no_data_yet' = nothing has
-    loaded yet (quiet caption). Green must never mean 'nothing loaded'.
+    loaded yet (quiet caption), 'unavailable' (C25) = the read itself failed
+    right now (red lead line; the full error one click away via ``detail``).
+    Green must never mean 'nothing loaded'; red must never mean 'zero rows'.
 
     C24: 'clean' renders as the compact ``.ow-exception--ok`` row (via
     exception_summary's clean path) instead of a full-width st.success banner —
     a page of verified-clean sections reads as a quiet green checklist, not a
     wall of alert-sized banners, while clean stays visually distinct from
-    unavailable."""
+    unavailable.
+
+    F56: an empty state can carry its NEXT BEST ACTION — pass ``action_label``
+    + ``on_action`` (and a stable ``action_key``) and a small button renders
+    under the message ("Watchlist is empty" → "Browse the catalog"). The empty
+    panel becomes a doorway instead of a dead end."""
     kind = str(kind).lower()
     if kind == "clean":
         exception_summary([], message)
     elif kind == "needs_setup":
         st.info(message)
+    elif kind == "unavailable":
+        st.error(message)
+        if detail:
+            with st.expander("Error detail"):
+                st.code(detail)
     else:  # "no_data_yet" + any unknown kind -> the quiet, non-green caption
         st.caption(message)
     if hint:
         st.caption(hint)
+    if action_label and on_action is not None and st.button(
+            action_label,
+            key=action_key or f"es_act_{abs(hash((kind, message, action_label))) % 10**8}"):
+        on_action()
 
 
 SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}

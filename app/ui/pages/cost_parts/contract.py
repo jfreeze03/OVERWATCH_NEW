@@ -31,6 +31,7 @@ from app.logic.insights import idle_advisor, with_auto_suspend_settings
 from app.ui import charts
 from app.ui.components import (
     daily_spend_wide,
+    empty_state,
     guard,
     kpi_row,
     panel_help,
@@ -284,10 +285,11 @@ def _rate_card_reconciliation(settings: dict) -> None:
         if not _compute_rows.empty:
             contract_compute_rate = safe_float(_compute_rows.iloc[0].get("EFFECTIVE_RATE"))
     if not org_m.usable():
-        st.info("Needs ORGANIZATION_USAGE visibility (the org accounts panel below "
-                "has the grant).")
+        empty_state("needs_setup",
+                    "Needs ORGANIZATION_USAGE visibility (the org accounts panel below "
+                    "has the grant).")
     elif not model_m.usable():
-        st.info("Needs the daily metering facts (V002) for the model side.")
+        empty_state("needs_setup", "Needs the daily metering facts (V002) for the model side.")
     else:
         rate_now = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
         mdf = model_m.df.copy()
@@ -384,14 +386,15 @@ def _org_accounts_spend() -> None:
     res = run(cost_sql.org_usage_in_currency(30), page=_PAGE, key="org_spend",
               tier="historical", source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY")
     if not res.ok:
-        st.info(
+        empty_state(
+            "needs_setup",
             "ORGANIZATION_USAGE is not visible to this role/account. Grant the "
             "ORGANIZATION_USAGE_VIEWER application role (or enable org views on this account) "
             f"to light this up. Detail: {res.error}"
         )
         return
     if res.empty:
-        st.info("No org usage rows in the last 30 days.")
+        empty_state("no_data_yet", "No org usage rows in the last 30 days.")
         return
     df = res.df.copy()
     df["USAGE_IN_CURRENCY"] = pd.to_numeric(df["USAGE_IN_CURRENCY"], errors="coerce").fillna(0)
@@ -436,7 +439,8 @@ def _contract_tab(settings: dict) -> None:
                 "CONTRACT_CREDITS, CONTRACT_START_DATE and CONTRACT_END_DATE on the Admin page."
             )
         else:
-            st.info(
+            empty_state(
+                "needs_setup",
                 "Contract pacing is not configured. Set CONTRACT_CREDITS, CONTRACT_START_DATE and "
                 "CONTRACT_END_DATE on the Admin page. Nothing is assumed."
             )
@@ -639,7 +643,8 @@ def _contract_tab(settings: dict) -> None:
         # returns empty — there is no complete-day burn baseline, so withhold the
         # planner instead of projecting a term from a fraction of a day.
         if bdf is None or bdf.empty:
-            st.info(
+            empty_state(
+                "no_data_yet",
                 "Only today's partial metering row is available — that is not a "
                 "complete-day burn baseline, so the renewal planner is withheld "
                 "until at least one whole day of history lands."

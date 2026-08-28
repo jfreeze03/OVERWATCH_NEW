@@ -35,6 +35,7 @@ from app.ui import charts
 from app.ui.components import (
     add_to_case_button,
     alarm_health,
+    empty_state,
     entity_nav_table,
     export_button,
     guard,
@@ -126,7 +127,7 @@ def _access_tab(company: str, days: int) -> None:
     section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
                    "security", anchor="sec-mfa")
     if mfa.ok and mfa.empty:
-        st.success("No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
+        empty_state("clean", "No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
         kpi_row([{
             "label": "Users needing MFA now",
@@ -147,8 +148,8 @@ def _access_tab(company: str, days: int) -> None:
     section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
                    "security", anchor="sec-single-factor")
     if sf.ok and sf.empty:
-        st.success("No successful password login landed without a second factor in this window "
-                   "(reader capped at 30d).")
+        empty_state("clean", "No successful password login landed without a second factor in this window "
+                             "(reader capped at 30d).")
     elif guard(sf, ""):
         _bypass = sf.df[sf.df["HAS_MFA"].astype(bool)]
         kpi_row([
@@ -174,7 +175,7 @@ def _access_tab(company: str, days: int) -> None:
             tier="hourly" if use_security_fact else "recent", source=_activity_source,
         )
         if res.ok and res.empty:
-            st.success("No failed logins in this window (reader capped at 30d).")
+            empty_state("clean", "No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
             styled_table(with_user_names(res.df, _PAGE))
     with right:
@@ -207,7 +208,7 @@ def _access_tab(company: str, days: int) -> None:
                   page=_PAGE, key=f"takeover_{company}_{days}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
         if ato.ok and ato.empty:
-            st.success("No user shows a failed-login burst in this window (reader capped at 30d).")
+            empty_state("clean", "No user shows a failed-login burst in this window (reader capped at 30d).")
         elif guard(ato, ""):
             ranked = takeover_severity(ato.df)
             broke = ranked[ranked["SUCCEEDED_AFTER"].astype(bool)]
@@ -245,7 +246,7 @@ def _access_tab(company: str, days: int) -> None:
         tier="hourly" if use_security_fact else "recent", source=_activity_source,
     )
     if reasons.ok and reasons.empty:
-        st.success("No failed logins in the window.")
+        empty_state("clean", "No failed logins in the window.")
     elif guard(reasons, ""):
         styled_table(reasons.df)
         result_caption(reasons)
@@ -256,7 +257,7 @@ def _access_tab(company: str, days: int) -> None:
               key=f"newnet_{days}", tier="recent",
               source=_network_source)
     if nn.ok and nn.empty:
-        st.success("No break-glass account logged in from a network unseen in the last 90 days.")
+        empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
     elif guard(nn, ""):
         kpi_row([{
             "label": "New networks", "value": f"{len(nn.df)}", "delta_color": "inverse",
@@ -273,7 +274,7 @@ def _access_tab(company: str, days: int) -> None:
                 key=f"creds_{company}", tier="recent",
                 source="ACCOUNT_USAGE.CREDENTIALS")
     if creds.ok and creds.empty:
-        st.success("No credentials expiring within 10 days for this scope.")
+        empty_state("clean", "No credentials expiring within 10 days for this scope.")
     elif guard(creds, "", setup_hint="Needs the ACCOUNT_USAGE.CREDENTIALS view (newer accounts expose it by default)."):
         cdf = creds.df.copy()
         expired = int((cdf["STATUS"].astype(str).str.upper() == "EXPIRED").sum())
@@ -299,7 +300,7 @@ def _access_tab(company: str, days: int) -> None:
         res = run(insights_sql.dormant_users(90, company), page=_PAGE, key=f"dormant_{company}",
                   tier="historical", source="ACCOUNT_USAGE.USERS + GRANTS_TO_USERS")
         if res.ok and res.empty:
-            st.success("No enabled users dormant 90+ days in this scope.")
+            empty_state("clean", "No enabled users dormant 90+ days in this scope.")
         elif guard(res, ""):
             ranked = dormant_severity(res.df)
             high = ranked[ranked["SEVERITY"] == "High"]
@@ -331,7 +332,7 @@ def _access_tab(company: str, days: int) -> None:
                    key=f"reawakening_{company}", tier="historical",
                    source="ACCOUNT_USAGE.LOGIN_HISTORY (login-gap scan)")
         if wres.ok and wres.empty:
-            st.success("No dormant account woke up in the last 7 days in this scope.")
+            empty_state("clean", "No dormant account woke up in the last 7 days in this scope.")
         elif guard(wres, ""):
             wranked = reawakening_severity(wres.df)
             whigh = wranked[wranked["SEVERITY"] == "High"]
@@ -360,7 +361,7 @@ def _access_tab(company: str, days: int) -> None:
         mart_source="ROLES x FACT_QUERY_ROLE_HOURLY (mart — active once 90d coverage exists)",
         live_source="ROLES x QUERY_HISTORY (90d, live fallback)")
     if ur.ok and ur.empty:
-        st.success("Every active role was assumed in the last 90 days.")
+        empty_state("clean", "Every active role was assumed in the last 90 days.")
     elif guard(ur, ""):
         # #26: click a role -> who holds it + what it grants (confirm before revoke).
         # ur.df arrives index-reset from run, but reset again defensively so
@@ -389,14 +390,16 @@ def _access_tab(company: str, days: int) -> None:
                     key=f"sec_role_holders_{role}", tier="historical",
                     source="ACCOUNT_USAGE.GRANTS_TO_USERS (role holders)")
             st.markdown("**Holders**")
-            if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis)."):
+            if guard(h, f"No active user currently holds {role} (revoke-safe on the holder axis).",
+                     kind="clean"):
                 styled_table(with_user_names(h.df, _PAGE) if "USER_NAME" in h.df.columns else h.df,
                              height=200)
             p = _rb.get("p") or run(security_sql.role_privileges(role), page=_PAGE,
                     key=f"sec_role_privs_{role}", tier="historical",
                     source="ACCOUNT_USAGE.GRANTS_TO_ROLES (role privileges)")
             st.markdown("**Privileges this role grants**")
-            if guard(p, f"{role} grants no object privileges — it confers no direct access."):
+            if guard(p, f"{role} grants no object privileges — it confers no direct access.",
+                     kind="clean"):
                 styled_table(p.df, height=240, sort_label="by object type")
             st.caption("This reports; it revokes nothing. Confirm holders and privileges "
                        "with the owner first (up to ~2h usage-view latency).")
@@ -428,7 +431,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
             source="DATA_TRANSFER_HISTORY current vs prior (on demand)",
         )
         if baseline.ok and baseline.empty:
-            st.success("No outbound transfer appeared in either comparison period.")
+            empty_state("clean", "No outbound transfer appeared in either comparison period.")
         elif guard(baseline, ""):
             bdf = baseline.df.copy()
             unusual = int(bdf["BEHAVIOR"].astype(str).isin(("NEW", "SPIKE")).sum())
@@ -453,7 +456,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
               key=f"unload_{company}_{days}_{database}_{schema_contains}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD only)")
     if unl.ok and unl.empty:
-        st.success("No unloads to stages in this window for this scope.")
+        empty_state("clean", "No unloads to stages in this window for this scope.")
     elif guard(unl, ""):
         from app.logic.formulas import humanize_gb
         udf = unl.df.copy()
@@ -485,7 +488,7 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
                  page=_PAGE, key=f"exfil_{company}_{days}_{database}_{schema_contains}",
                  tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD, per event)")
         if ev.ok and ev.empty:
-            st.success("No unload events to score in this window for this scope.")
+            empty_state("clean", "No unload events to score in this window for this scope.")
         elif guard(ev, ""):
             scored = egress_exfil_severity(ev.df)
             highs = int((scored["SEVERITY"] == "High").sum())
@@ -523,7 +526,8 @@ def _exposure_tab() -> None:
     shares = run(security_sql.show_shares_sql(), page=_PAGE, key="sec_shares",
                  tier="metadata", source="SHOW SHARES", max_rows=0)
     if shares.ok and shares.empty:
-        st.info(
+        empty_state(
+            "needs_setup",
             "No shares are visible to the current role. That can mean none are defined, "
             "or the role can't list them (needs MANAGE SHARE / IMPORT SHARE) — an empty "
             "result here is not proof that nothing is exposed."
@@ -534,7 +538,8 @@ def _exposure_tab() -> None:
         return
     classified = classify_share_exposure(shares.df)
     if classified.empty:
-        st.info(
+        empty_state(
+            "needs_setup",
             "No shares are visible to the current role. That can mean none are defined, "
             "or the role can't list them (needs MANAGE SHARE / IMPORT SHARE) — an empty "
             "result here is not proof that nothing is exposed."
@@ -581,9 +586,10 @@ def _exposure_tab() -> None:
                     key=f"sec_share_grants_{share}", tier="metadata",
                     source=f"SHOW GRANTS TO SHARE {share}", max_rows=0)
             if g.ok and g.empty:
-                st.info("This share grants USAGE to consumers but exposes no objects yet, "
-                        "or the current role can't read its grants — an empty result here is "
-                        "a privilege gap, not proof of no objects.")
+                empty_state("needs_setup",
+                            "This share grants USAGE to consumers but exposes no objects yet, "
+                            "or the current role can't read its grants — an empty result here is "
+                            "a privilege gap, not proof of no objects.")
             elif guard(g, ""):
                 cols = [c for c in ("PRIVILEGE", "GRANTED_ON", "NAME", "GRANT_OPTION")
                         if c in g.df.columns]
@@ -671,7 +677,7 @@ def _least_privilege_tab() -> None:
     have_evidence = False
     _scope_sel: int | None = None
     if scopes.ok and scopes.empty:
-        st.info("No direct table data-privilege grants resolve to a live table — nothing to review here.")
+        empty_state("no_data_yet", "No direct table data-privilege grants resolve to a live table — nothing to review here.")
     elif guard(scopes, "", setup_hint="Needs GRANTS_TO_ROLES and TABLE_STORAGE_METRICS alongside ACCESS_HISTORY."):
         classified = classify_grant_scopes(scopes.df)
         have_evidence = True
@@ -699,7 +705,7 @@ def _least_privilege_tab() -> None:
                      tier="historical",
                      source="ACCESS_HISTORY x GRANTS_TO_ROLES x TABLE_STORAGE_METRICS")
         if unused.ok and unused.empty:
-            st.success("Every granted table was read or modified within the covered window.")
+            empty_state("clean", "Every granted table was read or modified within the covered window.")
         elif guard(unused, ""):
             section_header("Untouched table grants — review before revoking", "warn", "security")
             # #4: when a scope row is selected above, post-filter this same loaded
@@ -760,7 +766,7 @@ def _trust_center_tab() -> None:
     )
     if delta.ok and _domain_covered(coverage, "TRUST CENTER"):
         if delta.empty:
-            st.success("No Trust Center findings in the latest materialized snapshot.")
+            empty_state("clean", "No Trust Center findings in the latest materialized snapshot.")
             result_caption(delta)
             return
         fdf = delta.df.copy()
@@ -785,7 +791,7 @@ def _trust_center_tab() -> None:
     tcf = run(security_sql.trust_center_findings(), page=_PAGE, key="trust_center",
               tier="historical", source="SNOWFLAKE.TRUST_CENTER.FINDINGS (pre-V075 fallback)")
     if tcf.ok and tcf.empty:
-        st.success("No findings — every scanner came back clean.")
+        empty_state("clean", "No findings — every scanner came back clean.")
     elif guard(tcf, "", setup_hint="Grant SNOWFLAKE.TRUST_CENTER_VIEWER to your role and enable Trust Center scanners."):
         fdf = tcf.df.copy()
         sev = fdf["SEVERITY"].astype(str).str.upper()
@@ -925,7 +931,7 @@ def _tag_governance_panel(company: str) -> None:
         return
     score = tag_coverage_score(cov.df.to_dict("records"))
     if score.state == "No data":
-        st.info("No base tables in scope to measure tag coverage against.")
+        empty_state("no_data_yet", "No base tables in scope to measure tag coverage against.")
         st.divider()
         return
     kpi_row([
@@ -954,7 +960,7 @@ def _tag_governance_panel(company: str) -> None:
                  key=f"tag_untagged_{company}_{tag_choice}", tier="historical",
                  source="ACCOUNT_USAGE.TABLES minus TAG_REFERENCES")
         if un.ok and un.empty:
-            st.success(f"Every in-scope base table carries {tag_choice}.")
+            empty_state("clean", f"Every in-scope base table carries {tag_choice}.")
         elif guard(un, ""):
             styled_table(un.df, height=280, sort_label="largest untagged first")
             result_caption(un)
@@ -1136,7 +1142,7 @@ def _clients_tab(company: str, days: int) -> None:
               key=f"clients_{company}_{days}", tier="historical",
               source="ACCOUNT_USAGE.SESSIONS")
     if res.ok and res.empty:
-        st.info("No sessions recorded in this window for this scope.")
+        empty_state("no_data_yet", "No sessions recorded in this window for this scope.")
         return
     if not guard(res, "", setup_hint="Needs the ACCOUNT_USAGE.SESSIONS view (IMPORTED PRIVILEGES on the SNOWFLAKE db)."):
         return
@@ -1194,7 +1200,7 @@ def _ai_guardrails_tab(company: str) -> None:
         if st.button("Open Cost ▸ Chargeback & AI →", key="sec_ai_cost_link"):
             request_navigation("Cost & Contract", "Chargeback & AI")
         if behavior.empty:
-            st.success("No Cortex Code activity in the last 7 days.")
+            empty_state("clean", "No Cortex Code activity in the last 7 days.")
         else:
             styled_table(with_user_names(behavior, _PAGE), height=320, column_config={
                 "CREDITS_7D": st.column_config.NumberColumn("Credits 7d", format="%.2f"),
@@ -1213,11 +1219,12 @@ def _ai_guardrails_tab(company: str) -> None:
     gr = run(cortex_sql.guardrails_daily(30), page=_PAGE, key="ai_guardrails_daily",
              tier="historical", source="CORTEX_AI_GUARDRAILS_USAGE_HISTORY", probe=True)
     if not gr.ok:
-        st.info("Cortex Guardrails telemetry isn't available on this account (the usage view "
-                "appears only once Guardrails is enabled on Cortex functions). Behavioral "
-                "monitoring above still runs; enable Guardrails to add prompt-flag telemetry.")
+        empty_state("needs_setup",
+                    "Cortex Guardrails telemetry isn't available on this account (the usage view "
+                    "appears only once Guardrails is enabled on Cortex functions). Behavioral "
+                    "monitoring above still runs; enable Guardrails to add prompt-flag telemetry.")
     elif gr.empty:
-        st.success("Guardrails is enabled and recorded no flagged requests in 30 days.")
+        empty_state("clean", "Guardrails is enabled and recorded no flagged requests in 30 days.")
     else:
         _g = gr.df.copy()
         _req = float(pd.to_numeric(_g["REQUESTS"], errors="coerce").fillna(0).sum())
@@ -1249,7 +1256,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
              key=f"grant_changes_feed_{company}_{_gc_days}", tier="historical",
              source="ACCOUNT_USAGE.GRANTS_TO_USERS + GRANTS_TO_ROLES")
     if gc.ok and gc.empty:
-        st.success(f"No grant or revoke changes in the last {_gc_days} days.")
+        empty_state("clean", f"No grant or revoke changes in the last {_gc_days} days.")
     elif guard(gc, ""):
         _g = gc.df.copy()
         _chg = _g["CHANGE"].astype(str)
@@ -1313,7 +1320,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # No early return on an empty window (v4.49): the bare `return` here used
     # to hide every panel below whenever a quiet week had no DDL.
     if res.ok and res.empty:
-        st.success("No DDL/DCL changes recorded in this window for this scope.")
+        empty_state("clean", "No DDL/DCL changes recorded in this window for this scope.")
     elif guard(res, ""):
         # Redesign 2026-07-09: the flat total/day bar answered neither of the
         # questions people ask ("what kind of change?", "who?"). Stack by
@@ -1368,7 +1375,7 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
             source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
         )
     if bga.ok and bga.empty:
-        st.success("No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
+        empty_state("clean", "No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):
         styled_table(bga.df)
         st.caption("Evidence only — no alert fires on admin-role use. Routine work "

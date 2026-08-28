@@ -34,6 +34,7 @@ from app.logic.formulas import (
 )
 from app.ui import charts
 from app.ui.components import (
+    empty_state,
     guard,
     kpi_row,
     panel_help,
@@ -203,7 +204,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     if kpis:
         kpi_row(kpis)
     elif all(r.ok for r in (wh, act, bill)):
-        st.info("No fact rows in either window yet — the hourly loaders fill these.")
+        empty_state("no_data_yet", "No fact rows in either window yet — the hourly loaders fill these.")
 
     # ---- warehouse movers ---------------------------------------------------
     st.markdown("**Warehouse movers — who moved the bill**")
@@ -269,9 +270,13 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         _pat_note = ("Measured QUERY_ATTRIBUTION_HISTORY credits per parameterized hash — "
                      "new-in-A patterns show B = $0.")
     if not _sel_wh and not pat.ok:
-        st.info("Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
-                "an admin can apply the pending schema update on Admin → Migrations & freshness.")
-    elif guard(_pat, _pat_empty):
+        empty_state("needs_setup",
+                    "Pattern movers need migration V037 (MART_PATTERN_COST_DAILY v2) — "
+                    "an admin can apply the pending schema update on Admin → Migrations & freshness.")
+    # review fix: verified-clean green only for the LIVE per-warehouse scan;
+    # the account-wide mart leg's empty also covers installed-but-not-yet-
+    # loaded windows, which must not read as an all-clear.
+    elif guard(_pat, _pat_empty, kind="clean" if _sel_wh else "no_data_yet"):
         pv = _pat.df.copy()
         pv["A_USD"] = pv["A_CREDITS"].map(safe_float) * rate
         pv["B_USD"] = pv["B_CREDITS"].map(safe_float) * rate

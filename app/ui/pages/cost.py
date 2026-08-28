@@ -20,6 +20,7 @@ from app.logic.formulas import format_usd, humanize_duration, humanize_minutes_a
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     alarm_health,
+    empty_state,
     guard,
     kpi_row,
     lazy_sections,
@@ -231,7 +232,7 @@ def render() -> None:
             st.caption("V044: entities with no company evidence classify UNKNOWN instead of "
                        "silently billing ALFA. Empty is the goal state.")
             if unm.ok and unm.empty:
-                st.success("Every entity in the window carries company evidence — nothing is billed blind.")
+                empty_state("clean", "Every entity in the window carries company evidence — nothing is billed blind.")
             elif guard(unm, ""):
                 import pandas as pd
 

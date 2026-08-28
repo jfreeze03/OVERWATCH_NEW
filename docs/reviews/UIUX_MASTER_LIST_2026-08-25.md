@@ -224,10 +224,10 @@ cross-cutting risk.
   ("Set RUNNING → VERIFIED and book $X to the ledger"). `app/ui/pages/workbench.py:178`
 
 ### Empty states & consistency
-- [ ] **C25 · P1/M · Finish the shared empty-state conversion** — route `guard()`'s
+- [x] **C25 · P1/M · Finish the shared empty-state conversion** — route `guard()`'s
   empty/error branches + the ~150 remaining raw `st.success`/`st.info` through
   `empty_state`; add an "unavailable" kind.
-- [ ] **F56 · P2/M · Give workflow empty states a next-best-action** (Watchlist empty →
+- [x] **F56 · P2/M · Give workflow empty states a next-best-action** (Watchlist empty →
   "Browse the catalog"; Experiments empty → create one). `app/ui/pages/workbench.py:287`
 - [ ] **F5 · P2/M · Unify the selected/active visual grammar** across nav / section pills /
   status cards (three different "active" languages today). `app/theme.py:166-264`

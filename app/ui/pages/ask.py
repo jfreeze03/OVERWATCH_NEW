@@ -72,6 +72,9 @@ def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
 def _render_result(result: AnswerResult, company: str, params: AskParams,
                    use_ai: bool, model: str) -> None:
     if result.confidence == "no_data":
+        # review fix: Ask's no_data headline IS the answer to a question the
+        # user just typed — conditional feedback, not a panel absence, so the
+        # empty-state vocabulary (quiet caption) does not apply here.
         st.info(result.headline)
     else:
         st.success(result.headline)

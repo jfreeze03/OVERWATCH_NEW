@@ -312,7 +312,7 @@ def render() -> None:
     if events.ok and not events.empty:
         crit = events.df[events.df["SEVERITY"].astype(str).isin(["CRITICAL", "HIGH"])]
         if crit.empty:
-            st.success("No open critical or high alerts.")
+            empty_state("clean", "No open critical or high alerts.")
         else:
             _fires = crit.head(5)
             _fire_sel = selectable_table(_fires[["RAISED_AT", "SEVERITY", "TITLE"]],
@@ -330,7 +330,7 @@ def render() -> None:
     else:
         # rec23/house-rule-8: green means VERIFIED CLEAN, never "nothing loaded".
         if events.ok:
-            st.success("No open alerts.")
+            empty_state("clean", "No open alerts.")
         else:
             empty_state("needs_setup", "Alerting not installed yet.")
 
@@ -341,7 +341,7 @@ def render() -> None:
     if actions.ok and not actions.empty:
         ranked = rank_actions(actions.df, limit=3)
         if ranked.empty:
-            st.success("Nothing waiting on an owner.")
+            empty_state("clean", "Nothing waiting on an owner.")
         else:
             for _, a in ranked.iterrows():
                 est = safe_float(a.get("ESTIMATED_USD"))
@@ -362,7 +362,10 @@ def render() -> None:
             # a $-ordered one and asks why the biggest number is not on top.
             st.caption("Top 3 by severity, then overdue, then estimated $, then age.")
     else:
-        st.success("Action queue is empty." if actions.ok else "Action queue not installed yet.")
+        if actions.ok:
+            empty_state("clean", "Action queue is empty.")
+        else:
+            empty_state("needs_setup", "Action queue not installed yet.")
 
     # Watch automation (owner ask 2026-08-17): the proactive half of "watch". If
     # any watched entity moved (cost spike/drop or health drop), the badge leads

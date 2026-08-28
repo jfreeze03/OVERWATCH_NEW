@@ -68,6 +68,7 @@ from app.ui.components import (
     add_to_case_button,
     alarm_health,
     confirm_gate,
+    empty_state,
     entity_nav_table,
     evidence_gate,
     exception_summary,
@@ -276,7 +277,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             page=_PAGE, key=f"q_triage_{company}_{days}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY (spill / pruning / scan)", max_rows=50)
         if _triage.ok and _triage.empty:
-            st.success("No spill-heavy or poorly-pruned statements in this window — nothing to optimize first.")
+            empty_state("clean", "No spill-heavy or poorly-pruned statements in this window — nothing to optimize first.")
         elif guard(_triage, "No queries in this window/scope."):
             _tr, _tr_cfg = snowsight_profile_column(_triage.df, _PAGE)
             _tr = with_user_names(_tr, _PAGE)
@@ -324,7 +325,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
 
         _roll = _pb.get("roll")
         if _roll is not None and _roll.ok and _roll.empty:
-            st.success("No stored-procedure CALLs in this window/scope.")
+            empty_state("no_data_yet", "No stored-procedure CALLs in this window/scope.")
         elif _roll is not None and guard(_roll, "No stored-procedure CALLs in this window/scope."):
             st.markdown("**Busiest procedures — by SLA impact (calls × p95)**")
             _roll_cols = [c for c in ["PROC_NAME", "DATABASE_NAME", "SCHEMA_NAME", "CALLS",
@@ -339,7 +340,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         _reg = _pb.get("reg")
         st.markdown("**Runtime regression — this window vs the prior window**")
         if _reg is not None and _reg.ok and _reg.empty:
-            st.success(
+            empty_state(
+                "clean",
                 f"No stored procedure with at least {proc_regression.MIN_CALLS} successful "
                 "calls in both windows moved materially — proc runtimes are stable.")
         elif _reg is not None and guard(_reg, "Not enough repeated proc calls to compare windows."):
@@ -488,7 +490,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             source="ACCOUNT_USAGE.QUERY_HISTORY")
     # C23: amber only when failures exist; a clean window reads verified-green.
     section_header("Failures by error", alarm_health(fails), "alerts")
-    if guard(fails, "No failed queries in this window."):
+    if guard(fails, "No failed queries in this window.", kind="clean"):
         styled_table(fails.df)
 
     # rec#17: failed / killed / aborted queries that consumed warehouse compute produced
@@ -509,7 +511,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                                                 database, schema_contains),
             page=_PAGE, key=f"q_waste_{company}_{days}", tier="historical",
             source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share, non-success)")
-        if guard(waste, "No failed/killed queries consumed warehouse compute in this window."):
+        if guard(waste, "No failed/killed queries consumed warehouse compute in this window.", kind="clean"):
             wdf = waste.df.copy()
             wdf["WASTED_USD"] = wdf["WASTED_CREDITS"].map(
                 lambda c: round(credits_to_usd(safe_float(c), rate, round_cents=False), 2))
@@ -547,7 +549,7 @@ def _query_insights_panel() -> None:
                    "here automatically.")
         return
     if qi.empty:
-        st.success("Snowflake recorded no query-improvement insights in the last 7 days.")
+        empty_state("clean", "Snowflake recorded no query-improvement insights in the last 7 days.")
         return
     styled_table(qi.df, height=260)
     st.caption("Snowflake's OWN analysis of your queries (account-wide, 7d) — each row is a "
@@ -564,7 +566,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
                    alarm_health(None if known_failures is None else int(known_failures)),
                    "alerts")
     if known_failures is not None and known_failures <= 0:
-        st.success("No task failures in the last 7 days for this scope.")
+        empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     # P6: hourly, not recent. This is the page's most expensive read (~15s: a 7-day
     # TASK_HISTORY failure scan) and ACCOUNT_USAGE.TASK_HISTORY lags up to ~45 min
@@ -578,7 +580,7 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
         st.error(f"Failure detail unavailable: {res.error}")
         return
     if res.empty:
-        st.success("No task failures in the last 7 days for this scope.")
+        empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     timeline = build_failure_timeline(res.df)
     roots = timeline[timeline["ROLE_IN_GRAPH"] == "Root cause"]
@@ -654,7 +656,7 @@ def _incident_routing_panel(timeline) -> None:
     catalog_df = cat.df if cat.ok else None
     incidents = route_incidents(timeline, catalog_df)
     if incidents.empty:
-        st.info("No root-cause failures to route.")
+        empty_state("no_data_yet", "No root-cause failures to route.")
         return
     stats = summarize_incidents(incidents)
     kpi_row([
@@ -738,9 +740,9 @@ def _release_compare_tab(company: str) -> None:
             if worse:
                 st.warning("Regressed after release: " + ", ".join(worse))
             else:
-                st.success("No query-health regression beyond the 10% flat tolerance.")
+                empty_state("clean", "No query-health regression beyond the 10% flat tolerance.")
         else:
-            st.info("Need data on both sides of the release date to compare.")
+            empty_state("no_data_yet", "Need data on both sides of the release date to compare.")
         result_caption(q_res)
 
     section_header("Task regressions", "info", "operations")
@@ -751,7 +753,7 @@ def _release_compare_tab(company: str) -> None:
         deltas = task_release_deltas(t_res.df)
         worse = deltas[deltas["GOT_WORSE"]]
         if worse.empty:
-            st.success("No task gained failures or slowed >25% after the release.")
+            empty_state("clean", "No task gained failures or slowed >25% after the release.")
         else:
             st.warning(f"{len(worse)} task(s) regressed after the release:")
         _delta_cols = [c for c in ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
@@ -804,13 +806,13 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     rv = preloaded or run(dq_sql.product_row_volume(28), page=_PAGE, key="dq_row_volume", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY x ENTITY_CATALOG")
     if rv.ok and rv.empty:
-        st.info("No registered-product tables added rows in the window. Register data products in the catalog (Decision Studio) to monitor their volume here.")
+        empty_state("needs_setup", "No registered-product tables added rows in the window. Register data products in the catalog (Decision Studio) to monitor their volume here.")
         return
     if not guard(rv, "", setup_hint="Needs TABLE_DML_HISTORY and a populated ENTITY_CATALOG with DATA_PRODUCT."):
         return
     anomalies = row_volume_anomalies(rv.df)
     if anomalies.empty:
-        st.info("No registered-product table has enough load history yet (needs >=10 prior loads and a >=100 rows/day baseline median).")
+        empty_state("no_data_yet", "No registered-product table has enough load history yet (needs >=10 prior loads and a >=100 rows/day baseline median).")
         result_caption(rv)
         return
     stats = summarize_row_volume(anomalies)
@@ -830,7 +832,7 @@ def _dq_row_volume_panel(preloaded=None) -> None:
         st.caption(f"{stats['stale']} monitored table(s) last loaded >=3 days behind the freshest registered load (see DAYS_STALE) — scored on that older load, so the freshness panel above is the live view.")
     flagged = anomalies[anomalies["FLAGGED"]]
     if flagged.empty:
-        st.success("Every monitored product table's most recent load is within its normal volume (no robust-z breach).")
+        empty_state("clean", "Every monitored product table's most recent load is within its normal volume (no robust-z breach).")
     else:
         styled_table(flagged, height=280, slug="dq-row-volume",
                      sort_label="largest robust-z deviation first")
@@ -846,10 +848,10 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
     res = run(insights_sql.pipeline_sla_forecast(14), page=_PAGE, key="sla_status", tier="recent",
               source="ACCOUNT_USAGE.TABLE_DML_HISTORY x PIPELINE_SLA_STATUS")
     if not res.ok:
-        st.info("Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
+        empty_state("needs_setup", "Pipeline SLAs are not installed yet — an admin can verify on Admin → Migrations & freshness.")
         return
     if res.empty:
-        st.info("No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
+        empty_state("needs_setup", "No tables registered. Add rows to PIPELINE_SLA_CONFIG below; the view scores them automatically.")
     else:
         # O10: fold each table's refresh cadence into a forward-looking tier so the
         # tab warns BEFORE a miss, not only after. On-track/at-risk/overdue/breached.
@@ -930,7 +932,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
               key=f"copy_fails_{company}", tier="recent", source="ACCOUNT_USAGE.COPY_HISTORY")
     section_header("File-load failures (COPY / Snowpipe, 7d)", alarm_health(cpf), "pipeline")
     if cpf.ok and cpf.empty:
-        st.success("No failed or partial file loads in the last 7 days.")
+        empty_state("clean", "No failed or partial file loads in the last 7 days.")
     elif guard(cpf, ""):
         styled_table(cpf.df, height=240)
         st.caption("The PIPE_COPY_FAILURES alert fires on these within the hour; "
@@ -953,7 +955,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
     vd = _psb.get("vd") or run(ops_sql.volume_deltas(), page=_PAGE, key="volume_deltas", tier="recent",
              source="ACCOUNT_USAGE.TABLE_DML_HISTORY")
     if vd.ok and vd.empty:
-        st.success("Every moving table is within its normal daily volume.")
+        empty_state("clean", "Every moving table is within its normal daily volume.")
     elif guard(vd, "", setup_hint="Needs TABLE_DML_HISTORY (standard on current accounts)."):
         styled_table(vd.df, height=240)
         result_caption(vd)
@@ -969,7 +971,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
     dth = _psb.get("dth") or run(ops_sql.dynamic_table_health(7), page=_PAGE, key="dt_health", tier="recent",
               source="ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY")
     if dth.ok and dth.empty:
-        st.info("No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
+        empty_state("no_data_yet", "No dynamic-table refreshes recorded in 7 days (none defined, or the view is empty).")
     elif guard(dth, "", setup_hint="Needs the DYNAMIC_TABLE_REFRESH_HISTORY view (standard on current accounts)."):
         styled_table(dth.df, height=240)
         result_caption(dth)
@@ -984,7 +986,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         strm = run(ops_sql.show_streams_sql(), page=_PAGE, key="streams_show", tier="live",
                    source="SHOW STREAMS IN ACCOUNT", max_rows=0)
         if strm.ok and strm.empty:
-            st.success("No streams in the account.")
+            empty_state("no_data_yet", "No streams in the account.")
         elif guard(strm, ""):
             sdf = strm.df.copy()
             sdf.columns = [str(c).upper() for c in sdf.columns]
@@ -1116,7 +1118,7 @@ def _task_sla_view(company: str, days: int, database: str = "",
         st.caption("No SUCCEEDED/FAILED task runs in this window/scope.")
     else:
         if streaks.empty:
-            st.success("No task is in a failure streak — every task's newest run succeeded.")
+            empty_state("clean", "No task is in a failure streak — every task's newest run succeeded.")
         else:
             broken = streaks[streaks["ACTIVELY_BROKEN"]]
             kpi_row([
@@ -1144,7 +1146,7 @@ def _task_sla_view(company: str, days: int, database: str = "",
         st.caption("Not enough scheduled history to derive task cadence in this window/scope.")
     else:
         if fresh.empty or late.empty:
-            st.success("Every task with a derivable cadence is on-time against its own schedule.")
+            empty_state("clean", "Every task with a derivable cadence is on-time against its own schedule.")
         else:
             stale = late[late["STATUS"] == "Stale"]
             kpi_row([
@@ -1315,7 +1317,7 @@ def _task_version_compare(root_id: str) -> None:
     options = [int(safe_float(value)) for value in versions.df["GRAPH_VERSION"]]
     options = list(dict.fromkeys(options))
     if len(options) < 2:
-        st.info("Only one graph version exists, so there is nothing to compare yet.")
+        empty_state("no_data_yet", "Only one graph version exists, so there is nothing to compare yet.")
         return
     c1, c2 = st.columns(2)
     with c1:
@@ -1357,7 +1359,7 @@ def _task_version_compare(root_id: str) -> None:
         {"label": "Rewired", "value": f"{rewired:,}", "severity": "warn" if rewired else "ok"},
     ])
     if changes.empty:
-        st.success("These versions have the same tasks and dependency edges.")
+        empty_state("clean", "These versions have the same tasks and dependency edges.")
         return
 
     def _open_changed_task(index: int) -> None:
@@ -1409,7 +1411,7 @@ def _task_graph_view() -> None:
     }
     root_ids = list(root_rows)
     if not root_ids:
-        st.info("No current root tasks were found.")
+        empty_state("no_data_yet", "No current root tasks were found.")
         return
 
     def _root_label(root_id: str) -> str:
@@ -1432,7 +1434,7 @@ def _task_graph_view() -> None:
     if root_filter:
         matches = [rid for rid in root_ids if root_filter in _root_label(rid).upper()]
         if not matches:
-            st.info(f"No root task graph matches '{root_filter}'.")
+            empty_state("no_data_yet", f"No root task graph matches '{root_filter}'.")
             return
         root_ids = matches
 
@@ -1603,7 +1605,7 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
                 column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")})
     anomalies = flagged[flagged["IS_ANOMALY"]]
     if anomalies.empty:
-        st.success("No per-warehouse daily anomalies (30d, median/MAD z ≥ 3.5).")
+        empty_state("clean", "No per-warehouse daily anomalies (30d, median/MAD z ≥ 3.5).")
     else:
         st.warning(f"{len(anomalies)} anomalous warehouse-day(s):")
         # N10: rank by |z| so spend COLLAPSES (large negative z — a stalled-loader
@@ -1629,7 +1631,7 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
                 key=f"conc_peaks_{company}", tier="recent",
                 source="ACCOUNT_USAGE.WAREHOUSE_LOAD_HISTORY")
     if peaks.ok and peaks.empty:
-        st.info("No warehouse load intervals recorded in the last 14 days.")
+        empty_state("no_data_yet", "No warehouse load intervals recorded in the last 14 days.")
     elif guard(peaks, ""):
         st.caption("PEAK_QUEUED above ~1 on a sustained basis is the signal to add a cluster "
                    "or split workloads — before users feel it. Select a warehouse to open its "
@@ -1879,7 +1881,7 @@ def _contention_tab(company: str, days: int) -> None:
             mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
             live_source="QUERY_HISTORY (live fallback)",
             mart_tier="hourly", live_tier="recent")
-        if guard(res, "No queueing or spill pressure in this window."):
+        if guard(res, "No queueing or spill pressure in this window.", kind="clean"):
             import pandas as pd
             pdf = res.df.copy()
             if {"QUEUED_SEC", "QUERY_COUNT"}.issubset(pdf.columns):
@@ -1950,7 +1952,8 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
               page=_PAGE, key=f"whchg_{company}_{wh_contains}", tier="recent",
               source="WAREHOUSE_CHANGE_REGISTRY")
     if res.ok and res.empty:
-        st.info(
+        empty_state(
+            "no_data_yet",
             "No warehouse setting changes detected yet. The daily scan "
             "(TASK_WAREHOUSE_CHANGE_SCAN) seeds its first snapshot on the first run "
             "and detects changes from the second snapshot onward."
@@ -2040,7 +2043,8 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
               page=_PAGE, key=f"chg_reg_{company}_{database}_{schema_contains}",
               tier="recent", source="OBJECT_CHANGE_REGISTRY")
     if res.ok and res.empty:
-        st.info(
+        empty_state(
+            "no_data_yet",
             "No procedure/task changes registered for this scope yet. The daily scan "
             "(TASK_CHANGE_IMPACT_SCAN) registers changes within a day of the ALTER / "
             "CREATE OR REPLACE, then tracks each one for 14 days."
@@ -2328,7 +2332,7 @@ def _emergency_extras(is_operator: bool) -> None:
                  source=f"INFORMATION_SCHEMA.QUERY_HISTORY_BY_WAREHOUSE ({_rq_pick}, live)",
                  max_rows=0)
         if rq.ok and rq.empty:
-            st.success("Nothing running or queued right now.")
+            empty_state("clean", "Nothing running or queued right now.")
         elif guard(rq, ""):
             _rqdf, _rq_cfg = snowsight_profile_column(rq.df, _PAGE)
             _rqdf = with_user_names(_rqdf, _PAGE)   # who you'd cancel

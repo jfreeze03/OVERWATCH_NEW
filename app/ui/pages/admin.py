@@ -27,6 +27,7 @@ from app.data import cost_sql, mart_sql
 from app.logic.formulas import humanize_duration, md_dollars, safe_float
 from app.ui.components import (
     confirm_gate,
+    empty_state,
     guard,
     kpi_row,
     lazy_sections,
@@ -463,7 +464,7 @@ def _migrations_tab() -> None:
               source="SCHEMA_VERSION")
     if not res.ok:
         st.error(f"Cannot read SCHEMA_VERSION: {res.error}")
-        st.info("Run snowflake/migrations/V001__core.sql first.")
+        empty_state("needs_setup", "Run snowflake/migrations/V001__core.sql first.")
         return
     applied = set()
     if not res.empty:
@@ -475,7 +476,7 @@ def _migrations_tab() -> None:
         # joined into one warning they pair into a math span on exactly the fresh-install path
         st.warning(md_dollars("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md)."))
     else:
-        st.success(f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
+        empty_state("clean", f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
 
     fh = run(mart_sql.flyway_history(), page=_PAGE, key="flyway_history", tier="recent",  # r24 #8: external ledger probe
              source="flyway_schema_history (Flyway ledger)", probe=True)
@@ -517,7 +518,7 @@ def _migrations_tab() -> None:
             except (KeyError, TypeError, ValueError):
                 stale = fresh.df.iloc[0:0]
             if stale.empty:
-                st.success("Nothing stale past 26h — the loaders are keeping up.")
+                empty_state("clean", "Nothing stale past 26h — the loaders are keeping up.")
             for _, s in stale.iterrows():
                 name = str(s["SOURCE_NAME"])
                 hint = ""
@@ -621,7 +622,7 @@ def _access_self_check() -> None:
     _df = pd.DataFrame(rows)
     blocked = int((_df["STATUS"] == "BLOCKED").sum())
     if blocked == 0:
-        st.success(f"All {len(_df)} sources reachable.")
+        empty_state("clean", f"All {len(_df)} sources reachable.")
     else:
         st.error(f"{blocked} source(s) blocked — fixes below.")
     styled_table(_df)
@@ -633,14 +634,14 @@ def _observability_tab() -> None:
     st.markdown("**Recent app errors (this session)**")
     buffer = error_buffer()
     if not buffer:
-        st.success("No errors recorded in this session.")
+        empty_state("clean", "No errors recorded in this session.")
     else:
         styled_table(pd.DataFrame(buffer)[["at", "page", "type", "message"]])
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
                source="APP_ERROR_LOG")
     st.markdown("**Persisted error log (all sessions)**")
     if sink.ok and sink.empty:
-        st.success("Error sink is empty.")
+        empty_state("clean", "Error sink is empty.")
     elif guard(sink, "", setup_hint="Sink table comes from V001."):
         # r27 H4: repeated identical errors read as ONE family, not N rows.
         _e = sink.df.copy()
@@ -800,7 +801,7 @@ def _performance_tab() -> None:
     usage = run(mart_sql.app_usage_summary(30), page=_PAGE, key="app_usage", tier="recent",
                 source="APP_USAGE")
     if usage.ok and usage.empty:
-        st.info("No visits logged yet (logging starts after V016 + a roles.sql re-run).")
+        empty_state("needs_setup", "No visits logged yet (logging starts after V016 + a roles.sql re-run).")
     elif guard(usage, "", setup_hint="APP_USAGE comes with migration V016; re-run roles.sql for the grant."):
         styled_table(usage.df)
         st.caption("Merging or retiring sections should follow this table, not opinions.")
@@ -814,10 +815,10 @@ def _performance_tab() -> None:
     fq = run(mart_sql.fleet_query_stats(7), page=_PAGE, key="fleet_qstats", tier="recent",
              source="APP_QUERY_TELEMETRY (V021)")
     if not fq.ok:
-        st.info("Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant).")
+        empty_state("needs_setup", "Needs migration V021 + a roles.sql re-run (APP_QUERY_TELEMETRY INSERT grant).")
     elif fq.empty:
-        st.success("No slow (≥2s) or failed fetches persisted in 7 days — every viewer is "
-                   "riding the cache.")
+        empty_state("clean", "No slow (≥2s) or failed fetches persisted in 7 days — every viewer is "
+                    "riding the cache.")
     else:
         _fq, _fq_cfg = snowsight_profile_column(
             fq.df, _PAGE, id_col="SLOWEST_QUERY_ID", label="Slowest profile")
@@ -1001,7 +1002,7 @@ def _canary_tab() -> None:
                        "subscription/region) — absence, not drift. Anything absent "
                        "WITHOUT a declaration fails instead.")
         if failed.empty:
-            st.success(f"All {len(frame) - len(gaps)} applicable canary statements passed.")
+            empty_state("clean", f"All {len(frame) - len(gaps)} applicable canary statements passed.")
         else:
             st.error(f"{len(failed)} of {len(frame)} canary statements failed — see errors below.")
         st.session_state["_adm_canary_results"] = frame
@@ -1050,13 +1051,20 @@ def _canary_tab() -> None:
     drills = run(mart_sql.drill_history(14), page=_PAGE, key="drill_hist", tier="recent",
                  source="ALERT_EVENTS (OPS_ALERT_DRILL)")
     if not drills.ok:
-        st.info("Drill history unavailable: " + drills.error)
+        # review fix: a FAILED read renders as 'unavailable', never a calm blue
+        # info with the raw error inline (rec49 lead-line + detail idiom).
+        _derr = str(drills.error or "").strip()
+        _dfirst = _derr.splitlines()[0] if _derr else ""
+        empty_state("unavailable",
+                    f"Drill history unavailable: {_dfirst}" if _dfirst
+                    else "Drill history unavailable",
+                    detail=_derr if _derr and _derr != _dfirst else "")
     else:
         report = drill_report(drills.df if not drills.empty else None)
         if not report["ran"]:
-            st.info("No drills yet — enable the monthly fire drill with the opt-in "
-                    "snowflake/alert_drill.sql (one synthetic CRITICAL on the 1st; "
-                    "the notify chain must deliver it and on-call must ACK it).")
+            empty_state("needs_setup", "No drills yet — enable the monthly fire drill with the opt-in "
+                        "snowflake/alert_drill.sql (one synthetic CRITICAL on the 1st; "
+                        "the notify chain must deliver it and on-call must ACK it).")
         else:
             last = report["last"]
             kpi_row([
@@ -1079,8 +1087,8 @@ def _canary_tab() -> None:
     rest = run(mart_sql.metering_restatements(60), page=_PAGE, key="restatements",
                tier="recent", source="FACT_METERING_DAILY LOAD_TS lag")
     if rest.ok and rest.empty:
-        st.success("No metering day was restated ≥48h after close in the last 60 days — "
-                   "numbers reported from this app have stayed put.")
+        empty_state("clean", "No metering day was restated ≥48h after close in the last 60 days — "
+                    "numbers reported from this app have stayed put.")
     elif guard(rest, ""):
         styled_table(rest.df, height=220)
         st.caption(
@@ -1186,7 +1194,7 @@ def _setup_progress_tab() -> None:
     df = pd.DataFrame(rows)
     pending = int((df["STATUS"] != "Done").sum())
     if pending == 0:
-        st.success("Setup complete — every checklist item is satisfied.")
+        empty_state("clean", "Setup complete — every checklist item is satisfied.")
     else:
         st.warning(f"{pending} setup item(s) still pending — see the FIX column.")
     styled_table(df, height=360)

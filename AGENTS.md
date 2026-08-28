@@ -40,6 +40,21 @@ small and self-contained; don't restructure or "clean up" beyond the task you we
   AI/Cortex credits price at the AI rate via `blended_billed_usd`, not the flat
   compute rate. Metric semantics → `app/logic/metric_registry.py`.
 - **Charts** → `app/ui/charts.py`; **shared UI** → `app/ui/components.py`.
+- **Absence renders through `components.empty_state(kind, ...)`** (C25): `clean`
+  green ok-row = verified clean, `needs_setup` blue info, `no_data_yet` quiet
+  caption, `unavailable` red lead + detail expander. `guard()` already routes
+  both branches through it — pass `kind="clean"` when the empty IS the good
+  outcome. Never a raw `st.info`/`st.success` for an absence; a workflow empty
+  can carry its next best action (`action_label`/`on_action`, F56). The rule
+  covers absence OUTCOMES of a read; action receipts, direct answers to a
+  submitted question, and notes about data that structurally cannot exist
+  stay raw `st.info`/`st.success`.
+- **Every operator-write click block pairs the C48 latch**:
+  `write_gate_open(<key>)` as the click gate's LAST condition +
+  `stamp_write(<key>, ok)` after the block's last write, BEFORE any `st.rerun`.
+  Scope the key by action/target when a fixed key could swallow a genuinely
+  different action (fragments freeze the run seq). The in-flight spinner lives
+  in the `execute_*` query layer — don't add per-site spinners.
 - **Cross-page jumps** → `app/core/state.request_navigation(page, section,
   filters)`. Do **not** wire a filter-bearing nav to a page a profile can't see
   (`PAGES_BY_PROFILE` in `app/config.py`) — it clamps the page but still applies

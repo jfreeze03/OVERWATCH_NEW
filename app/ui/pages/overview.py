@@ -47,6 +47,7 @@ from app.ui.components import (
     contract_runway_bar,
     daily_spend_wide,
     download_text_button,
+    empty_state,
     entity_nav_table,
     export_button,
     kpi_row,
@@ -791,13 +792,13 @@ def render() -> None:
         )
         # actions_res loaded above the score (triage #3) — reused here.
         if not actions_res.ok:
-            st.info("Action queue isn't installed yet — no placeholder rows.")
+            empty_state("needs_setup", "Action queue isn't installed yet — no placeholder rows.")
         elif actions_res.empty:
-            st.success("Action queue is empty — nothing is waiting on an owner.")
+            empty_state("clean", "Action queue is empty — nothing is waiting on an owner.")
         else:
             ranked = rank_actions(actions_res.df, limit=5)
             if ranked.empty:
-                st.success("No OPEN actions — everything in the queue is done or dropped.")
+                empty_state("clean", "No OPEN actions — everything in the queue is done or dropped.")
             else:
                 # rec10: a clickable surface, not a dead read-only wall — a row click
                 # jumps to the Control Room where the queue is triaged (matching CR).
@@ -879,7 +880,7 @@ def render() -> None:
         elif not using_mart and not daily.empty:
             st.caption("Driver ranking appears once the exec board mart is installed.")
         else:
-            st.info("No cost-driver rows for this scope/window.")
+            empty_state("no_data_yet", "No cost-driver rows for this scope/window.")
 
         # V069 (audit C5): serverless & AI/Cortex drivers on a DISTINCT board panel
         # (COST_DRIVER_SVC), rendered as their own small table beneath the warehouse
@@ -970,7 +971,8 @@ def render() -> None:
         if not trend_source.ok:
             st.error(f"Spend history unavailable: {trend_source.error}")
         else:
-            st.info(
+            empty_state(
+                "needs_setup",
                 "No spend history for this scope yet — the hourly task fills it in "
                 "once installed. Empty until then, never invented."
             )
@@ -1027,9 +1029,9 @@ def render() -> None:
                        "Account-wide backtest — metering has no company grain.")
         with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
             if not _bt_hist.usable() or len(_bt_hist.df) < 50:
-                st.info("Needs ~2 months of daily facts before a backtest says anything.")
+                empty_state("no_data_yet", "Needs ~2 months of daily facts before a backtest says anything.")
             elif _bt.empty:
-                st.info("No complete months in the window yet.")
+                empty_state("no_data_yet", "No complete months in the window yet.")
             else:
                 styled_table(_bt, height=TABLE_H_MD, column_config={
                     "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
