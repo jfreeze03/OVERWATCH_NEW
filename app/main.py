@@ -148,6 +148,12 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             page = current
         st.session_state["_ow_page"] = page
         remember_page(page)
+        # C44 review fix: leaving Alerts expires the momentum queue — returning
+        # later must not surprise-open a drawer from a spent triage chain. Gated
+        # on the queue key so real deep-link arming semantics are untouched.
+        if page != "Alerts" and st.session_state.get("_ow_alert_next_up"):
+            st.session_state.pop("_ow_alert_next_up", None)
+            st.session_state.pop("_ow_alert_deeplink_armed", None)
         # the ?page= we just wrote is NOT a new deep-link request — record it as seen so
         # its stale echo next rerun can't override a fresh nav click (the _req reconcile
         # above runs after the click callback, so an un-seeded seen clobbered the click).

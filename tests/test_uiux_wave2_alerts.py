@@ -84,8 +84,10 @@ def test_bulk_set_binds_by_identity_and_disarms_on_feed_shift():
     assert _SRC.count('st.session_state.pop("_ow_alert_bulk_bind", None)') >= 4
 
 
-def test_recheck_copy_points_at_the_decide_bar_above():
-    assert "resolve as ACTIONED in the" in _SRC and "decide bar above" in _SRC
+def test_recheck_delivers_one_click_resolve_not_a_pointer():
+    # F50 upgraded the directional copy into the real thing: a persisted verdict
+    # plus a one-click "Resolve as ACTIONED" that prefills the decide bar.
+    assert "Resolve as ACTIONED with this evidence" in _SRC
     assert "resolve as ACTIONED below" not in _SRC
 
 

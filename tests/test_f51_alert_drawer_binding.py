@@ -132,7 +132,7 @@ def test_deeplink_fallback_is_armed_per_arrival_and_nonce_gated():
 def test_only_resolve_and_snooze_reset_the_selection():
     # ACK keeps the event in the feed at its index — the drawer stays open.
     idx = _SRC.index("ok, msg = execute_action(call, stmts, page=_PAGE)")
-    block = _SRC[idx:idx + 1800]
+    block = _SRC[idx:idx + 4600]   # C44 queue-next + review fixes widened the block
     assert 'if action in ("RESOLVE", "SNOOZE"):' in block
     assert '"_ow_alert_sel_nonce"] = _sel_nonce + 1' in block
     assert '"_ow_alert_receipt"' in block

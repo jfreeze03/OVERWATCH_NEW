@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -431,6 +432,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     _stale_note = st.session_state.pop("_ow_alert_stale_note", "")
     if _stale_note:
         st.caption(_stale_note)
+    # F50: apply a queued decide-bar prefill BEFORE any widget mounts (setting an
+    # instantiated widget's key raises) — the re-check's one-click resolve stashes
+    # RESOLVE + ACTIONED + the measured evidence here and reruns.
+    _prefill = st.session_state.pop("_ow_alert_prefill", None)
+    if isinstance(_prefill, dict):
+        for _pk, _pv in _prefill.items():
+            st.session_state[_pk] = _pv
     # F51: every selection/write widget in this fragment mounts under a nonce-suffixed
     # key so a write can RESET it. Popping session keys is NOT a reset: the frontend
     # keeps values by element id and re-sends them on the next interaction (sticky
@@ -440,7 +448,22 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
              setup_hint=_SETUP_HINT):
         edf = severity_sort(events.df)  # worst first, newest within — triage order
         requested_event = str(navigation_context().get("event_id") or "").strip()
-        event_signature = f"alert:{requested_event}"
+        # C44: a RESOLVE/SNOOZE queues the NEXT open event by IDENTITY; it rides
+        # the deep-link machinery below (armed per arrival, disarmed by the next
+        # write's nonce bump), so triage keeps momentum with zero positional risk.
+        _next_up = str(st.session_state.get("_ow_alert_next_up") or "")
+        if not requested_event and _next_up:
+            requested_event = _next_up
+            # review fix: the nonce folds the ARRIVAL EPOCH into the signature —
+            # re-queuing the same id after a write must read as a NEW arrival
+            # (the applied-gate only re-arms on signature CHANGE).
+            event_signature = f"alert-next:{_next_up}:{_sel_nonce}"
+        else:
+            if _next_up:
+                # review fix: a real deep-link supersedes the queue — the miss
+                # is final, never a surprise drawer later.
+                st.session_state.pop("_ow_alert_next_up", None)
+            event_signature = f"alert:{requested_event}"
         if (requested_event
                 and st.session_state.get("_ow_alert_context_applied") != event_signature):
             st.session_state["alert_rollup"] = False
@@ -540,7 +563,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             # fragment rerun (the table emits no selection while the user works in
             # the drawer), which is exactly what keeps the deep-linked drawer open.
             _armed = st.session_state.get("_ow_alert_deeplink_armed")
-            if _armed is None or _armed == (event_signature, _sel_nonce):
+            _is_next = event_signature.startswith("alert-next:")
+            if _is_next and _bulk_mode:
+                # C44 review fix: bulk mode supersedes the queue — a funneled
+                # drawer must never render beneath the checkbox table.
+                st.session_state.pop("_ow_alert_next_up", None)
+                st.session_state.pop("_ow_alert_deeplink_armed", None)
+            elif _armed is None or _armed == (event_signature, _sel_nonce):
                 matches = [
                     index for index, value in enumerate(edf["EVENT_ID"].astype(str))
                     if value == requested_event
@@ -551,6 +580,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     if _armed is None:
                         st.session_state["_ow_alert_deeplink_armed"] = (
                             event_signature, _sel_nonce)
+                elif _is_next:
+                    # C44 review fix: the queued event left the feed (colleague
+                    # write / V091 auto-resolver) or is filtered out — the miss
+                    # is FINAL, never a zombie drawer when the id returns.
+                    st.session_state.pop("_ow_alert_next_up", None)
+                    st.session_state.pop("_ow_alert_deeplink_armed", None)
         # F51: bind the drawer by EVENT IDENTITY, not position. When the live feed
         # shrinks or reorders under a sticky selection (a resolve here, the V091
         # auto-resolver, a filter change), the same positional index silently lands
@@ -606,8 +641,25 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                          else f"{row['SEVERITY']} alert on rule {row['RULE_ID']}"),
                 next_action=f"Ack/resolve or investigate rule {row['RULE_ID']} (status {row['STATUS']}).",
                 key=f"ow_case_add_alert_{event_id[:8]}")
-            rules_res = run(mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
-                            tier="recent", source="ALERT_CONFIG")
+            # F57: the drawer's four supporting reads (rule config, deliveries,
+            # rule history, prior resolutions) submit as ONE async batch instead
+            # of four serial round-trips — each row click used to stall in four
+            # visible steps. The spinner names the wait on a cold open; cache
+            # hits render instantly.
+            with st.spinner("Assembling event context…"):
+                _dr = run_batch([
+                    {"key": "rules", "sql": mart_sql.alert_rules(),
+                     "source": "ALERT_CONFIG"},
+                    {"key": "deliv", "sql": mart_sql.deliveries_for_event(event_id),
+                     "source": "ALERT_DELIVERIES + ALERT_ROUTES"},
+                    {"key": "hist", "sql": mart_sql.events_for_rule(str(row["RULE_ID"]), 90),
+                     "source": "ALERT_EVENTS (90d, this rule)"},
+                    {"key": "res", "sql": mart_sql.resolutions_for_rule(str(row["RULE_ID"])),
+                     "source": "ALERT_EVENTS (resolved, this rule)"},
+                ], page=_PAGE, tier="recent") or {}
+            rules_res = _dr.get("rules") or run(
+                mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
+                tier="recent", source="ALERT_CONFIG")
             if rules_res.usable():
                 rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
                 if not rmatch.empty:
@@ -616,9 +668,10 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
             # rec38: did THIS event reach anyone? ALERT_DELIVERIES keys per event+route,
             # so the drawer can answer directly instead of only History's aggregate SLO.
-            _deliv = run(mart_sql.deliveries_for_event(event_id), page=_PAGE,
-                         key=f"alert_deliv_{event_id}", tier="recent",
-                         source="ALERT_DELIVERIES + ALERT_ROUTES")
+            _deliv = _dr.get("deliv") or run(
+                mart_sql.deliveries_for_event(event_id), page=_PAGE,
+                key=f"alert_deliv_{event_id}", tier="recent",
+                source="ALERT_DELIVERIES + ALERT_ROUTES")
             if _deliv.ok and not _deliv.empty:
                 st.caption("Delivered — " + " · ".join(
                     f"{r['INTEGRATION_NAME']} at {r['SENT_AT']}" for _, r in _deliv.df.iterrows()))
@@ -672,6 +725,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     help="The event leaves the triage feed now and returns to it automatically "
                          "when the timer expires — no ack, no resolve. The underlying rule keeps "
                          "firing for other entities.")]
+                try:
+                    _wake = account_now() + timedelta(hours=float(snooze_hours))
+                    # review fix: past a day out "%a %H:%M" misleads — a 1-week
+                    # snooze lands on the SAME weekday, reading as later today.
+                    _wfmt = "%a %H:%M" if float(snooze_hours) <= 24 else "%a %b %d, %H:%M"
+                    st.caption(f"→ wakes ~{_wake.strftime(_wfmt)} account time, "
+                               "returning to this feed automatically.")
+                except (TypeError, ValueError):  # F52: the timer caption is cosmetic
+                    pass
             if action == "SNOOZE":
                 stmts = _snooze_stmts(event_id, snooze_hours, note)
             else:
@@ -726,13 +788,38 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             # identity guard protects it if the feed shifts anyway. The
                             # full rerun is notify()'s own contract: the re-read feed is
                             # the durable receipt.
+                            _nxt_label = ""
                             if action in ("RESOLVE", "SNOOZE"):
                                 st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
                                 st.session_state.pop("_ow_alert_drawer_bind", None)
                                 st.session_state.pop("_ow_alert_bulk_bind", None)
+                                # F50 review fix: the verdict dies with the triage
+                                # interaction — a snooze that wakes must not
+                                # resurface a stale CLEAR with a live one-click.
+                                st.session_state.pop(f"_ow_recheck_{event_id[:8]}", None)
+                                # C44 review fix (HIGH): consume the spent drill
+                                # identity — navigation_context() is read WITHOUT
+                                # consume and nothing else ever clears it, so a
+                                # lingering event_id would shadow the queued
+                                # next-up on every later run (dead advance, lying
+                                # receipt). ACK keeps it: the drawer stays open.
+                                _nav = st.session_state.get("_ow_nav_context")
+                                if isinstance(_nav, dict) and _nav.get("event_id"):
+                                    st.session_state["_ow_nav_context"] = {
+                                        k: v for k, v in _nav.items() if k != "event_id"}
+                                # C44: queue the next open event (identity, not
+                                # position) so the queue advances instead of
+                                # landing back on an unselected feed.
+                                if int(sel) + 1 < len(edf):
+                                    _nrow = edf.iloc[int(sel) + 1]
+                                    st.session_state["_ow_alert_next_up"] = str(_nrow["EVENT_ID"])
+                                    _nxt_label = (f" — next: [{_nrow['SEVERITY']}] "
+                                                  f"{str(_nrow['TITLE'])[:60]}")
+                                else:
+                                    st.session_state.pop("_ow_alert_next_up", None)
                             st.session_state["_ow_alert_receipt"] = (
                                 f"{action} recorded — [{row['SEVERITY']}] "
-                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})")
+                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
                             st.rerun()
                 else:
                     st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
@@ -742,6 +829,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             _rid = str(row["RULE_ID"]).upper()
             _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
             _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
+            _rc_key = f"_ow_recheck_{event_id[:8]}"
             if _rc_sql and st.button(
                     "Re-check condition now", key=f"recheck_{event_id[:8]}",
                     help="Runs this rule's condition against TODAY's data for "
@@ -749,37 +837,99 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 rc = run(_rc_sql, page=_PAGE, key=f"recheck_{event_id[:8]}", tier="live",
                          source="live re-check (today)")
                 if rc.usable():
-                    current_v = safe_float(rc.df.iloc[0].get("CURRENT_VALUE"))
-                    thr = None
-                    if rules_res.usable():
-                        _rm = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
-                        if not _rm.empty:
-                            thr = safe_float(_rm.iloc[0].get("THRESHOLD_NUM"))
-                    label = recheck_sql.recheck_label(_rid)
-                    if thr is not None and thr > 0:
-                        if current_v < thr:
-                            st.success(f"Condition clear: {label} = {current_v:,.2f} vs "
-                                       f"threshold {thr:,.2f} — resolve as ACTIONED in the "
-                                       "decide bar above with this as evidence.")
-                        else:
-                            st.warning(f"Still over: {label} = {current_v:,.2f} vs "
-                                       f"threshold {thr:,.2f}.")
+                    # review fix: NULL (idle warehouse, zero-row window) must not
+                    # coerce to a fabricated "clear 0.00" that the one-click then
+                    # writes into the audit note — route it to the error branch.
+                    current_v = safe_float(rc.df.iloc[0].get("CURRENT_VALUE"),
+                                           default=float("nan"))
+                    if math.isnan(current_v):
+                        st.session_state[_rc_key] = {
+                            "error": "no data today — condition not evaluable "
+                                     "for this target (idle/suspended?).",
+                            "at": account_now().strftime("%H:%M"),
+                        }
                     else:
-                        st.info(f"{label}: {current_v:,.2f} (rule threshold unavailable).")
+                        thr = None
+                        if rules_res.usable():
+                            _rm = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                            if not _rm.empty:
+                                thr = safe_float(_rm.iloc[0].get("THRESHOLD_NUM"))
+                        # F50: PERSIST the verdict per event — it used to vanish on the
+                        # very next rerun, the moment the operator touched the decide bar.
+                        # at_dt (full datetime) is the freshness gate; "at" is display.
+                        st.session_state[_rc_key] = {
+                            "value": current_v, "thr": thr,
+                            "label": recheck_sql.recheck_label(_rid),
+                            "at": account_now().strftime("%H:%M"),
+                            "at_dt": account_now(),
+                        }
                 else:
-                    st.info("Re-check unavailable right now: " + (rc.error or "no data today."))
-            hist = run(mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
-                       key=f"hist_rule_{event_id[:8]}", tier="recent",
-                       source="ALERT_EVENTS (90d, this rule)")
+                    st.session_state[_rc_key] = {"error": rc.error or "no data today.",
+                                                 "at": account_now().strftime("%H:%M")}
+            _rc_state = st.session_state.get(_rc_key)
+            if isinstance(_rc_state, dict):
+                if "error" in _rc_state:
+                    # review fix: stamped — "right now" aged poorly on a verdict
+                    # that persists across reruns.
+                    st.info(f"Re-check unavailable (as of {_rc_state.get('at') or '—'!s}): "
+                            + str(_rc_state["error"]))
+                else:
+                    _rcv = safe_float(_rc_state.get("value"), default=float("nan"))
+                    _rct = _rc_state.get("thr")
+                    _rcl = str(_rc_state.get("label") or "")
+                    _rca = str(_rc_state.get("at") or "")
+                    # review fix: the one-click resolve is evidence for an AUDIT
+                    # note — gate it on freshness (30 min) so a persisted CLEAR
+                    # can't resurface days later as if measured just now.
+                    try:
+                        _rc_fresh = (account_now() - _rc_state["at_dt"]) <= timedelta(minutes=30)
+                    except (KeyError, TypeError):
+                        _rc_fresh = False
+                    if math.isnan(_rcv):
+                        st.info("Re-check result unreadable — run it again.")
+                    elif _rct is not None and safe_float(_rct) > 0:
+                        if _rcv >= safe_float(_rct):
+                            st.warning(f"Still over: {_rcl} = {_rcv:,.2f} vs "
+                                       f"threshold {safe_float(_rct):,.2f} "
+                                       f"(re-checked {_rca}).")
+                        elif not _rc_fresh:
+                            st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
+                                    f"{_rcv:,.2f} vs threshold {safe_float(_rct):,.2f} "
+                                    "— re-check again before resolving.")
+                        else:
+                            st.success(f"Condition clear: {_rcl} = {_rcv:,.2f} vs "
+                                       f"threshold {safe_float(_rct):,.2f} "
+                                       f"(re-checked {_rca}).")
+                            # F50: close the loop the copy promises — one click
+                            # prefills RESOLVE + ACTIONED + the measured evidence
+                            # (applied at the fragment top, before widgets mount).
+                            if is_operator and st.button(
+                                    "Resolve as ACTIONED with this evidence",
+                                    key=f"recheck_resolve_{event_id[:8]}_{_sel_nonce}"):
+                                st.session_state["_ow_alert_prefill"] = {
+                                    f"alert_action_{event_id[:8]}_{_sel_nonce}": "RESOLVE",
+                                    f"alert_kind_{event_id[:8]}_{_sel_nonce}": "ACTIONED",
+                                    f"alert_note_{event_id[:8]}_{_sel_nonce}": (
+                                        f"Re-check clear at {_rca}: {_rcl} {_rcv:,.2f} "
+                                        f"vs threshold {safe_float(_rct):,.2f}")[:500],
+                                }
+                                st.rerun()
+                    else:
+                        st.info(f"{_rcl}: {_rcv:,.2f} (rule threshold unavailable).")
+            hist = _dr.get("hist") or run(
+                mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
+                key=f"hist_rule_{event_id[:8]}", tier="recent",
+                source="ALERT_EVENTS (90d, this rule)")
             if hist.usable() and len(hist.df) > 1:
                 with st.expander(f"This rule recently ({len(hist.df)} events)"):
                     styled_table(hist.df, height=220)
             # rec26: how was this resolved last time? The kind + note from the account's
             # own history is a playbook this exact alert has earned. styled_table (not
             # markdown) so a note can't inject formatting.
-            _res = run(mart_sql.resolutions_for_rule(str(row["RULE_ID"])), page=_PAGE,
-                       key=f"resolved_rule_{event_id[:8]}", tier="recent",
-                       source="ALERT_EVENTS (resolved, this rule)")
+            _res = _dr.get("res") or run(
+                mart_sql.resolutions_for_rule(str(row["RULE_ID"])), page=_PAGE,
+                key=f"resolved_rule_{event_id[:8]}", tier="recent",
+                source="ALERT_EVENTS (resolved, this rule)")
             if _res.usable():
                 with st.expander(f"How this was resolved before ({len(_res.df)})"):
                     styled_table(_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
@@ -977,7 +1127,31 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                    source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
         if _snz.usable() and not _snz.empty:
             with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
-                styled_table(_snz.df[["SEVERITY", "TITLE", "SNOOZED_UNTIL", "SNOOZE_BY", "SNOOZE_REASON"]])
+                # F52: a relative countdown, soonest wake first — a snooze reads as
+                # a running timer, not a black-hole timestamp.
+                _sdf = _snz.df.copy()
+                _sn_now = account_now()
+
+                def _wakes_in(value: object) -> str:
+                    try:
+                        _secs = (value - _sn_now).total_seconds()
+                    except (TypeError, AttributeError):
+                        return "—"
+                    if _secs != _secs:  # NaT
+                        return "—"
+                    _secs = max(0.0, _secs)
+                    if _secs >= 86400:
+                        # review fix: humanize_duration caps at hours by design
+                        # (query durations) — "167h 59m" is not a countdown.
+                        _d, _rem = divmod(round(_secs), 86400)
+                        _h = int(_rem // 3600)
+                        return f"{_d}d {_h}h" if _h else f"{_d}d"
+                    return humanize_duration(_secs)
+
+                _sdf["WAKES_IN"] = _sdf["SNOOZED_UNTIL"].map(_wakes_in)
+                _sdf = _sdf.sort_values("SNOOZED_UNTIL")
+                styled_table(_sdf[["WAKES_IN", "SEVERITY", "TITLE", "SNOOZED_UNTIL",
+                                   "SNOOZE_BY", "SNOOZE_REASON"]])
                 if is_operator:
                     _snz_opts = {
                         f"[{r['SEVERITY']}] {str(r['TITLE'])[:60]} (wakes {r['SNOOZED_UNTIL']})": str(r["EVENT_ID"])

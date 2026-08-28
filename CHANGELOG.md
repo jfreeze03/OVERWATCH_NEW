@@ -1,5 +1,57 @@
 # Changelog
 
+## 4.309.0 - UI/UX Wave 2 (4): alerts triage momentum (2026-08-28)
+
+Fourth Wave-2 batch of the UI/UX master list (C44 + F50 + F57 + F52), app-only -
+the alert drawer becomes a triage QUEUE, not a series of separate visits:
+
+* **C44** a RESOLVE/SNOOZE advances to the NEXT open event automatically: the
+  write queues the next event by IDENTITY (never position) and the receipt names
+  it ("... - next: [HIGH] ..."); the queued event rides the existing deep-link
+  arming machinery, so every F51 protection (identity guard, nonce reset,
+  armed-per-arrival) applies unchanged.
+* **F50** the live re-check verdict now PERSISTS per event (it used to vanish on
+  the next rerun, the moment the operator touched the decide bar) - and a CLEAR
+  verdict gains a one-click "Resolve as ACTIONED with this evidence" that
+  prefills the decide bar (RESOLVE + ACTIONED + the measured numbers as the
+  audit note), applied at the fragment top before widgets mount.
+* **F57** the drawer's four supporting reads (rule config, deliveries, 90-day
+  history, prior resolutions) submit as ONE async batch under a named spinner
+  ("Assembling event context...") instead of four serial round-trips.
+* **F52** a snooze is a visible timer: the picker shows the computed wake time
+  ("- wakes ~Wed Sep 04, 09:15 account time") and the snoozed tray gains a
+  WAKES_IN countdown column, soonest wake first.
+
+Adversarial review (3 find dimensions - 15 verify agents) confirmed 14 findings
+(deduped to 7 fixes), all fixed pre-commit:
+
+* **HIGH** the C44 advance was DEAD after any deep-linked arrival: the nav
+  context's event_id is read without consume and nothing ever cleared it, so it
+  shadowed the queued next-up on every later run while the receipt kept
+  promising an advance. RESOLVE/SNOOZE now consumes the spent drill identity
+  (ACK keeps it - the drawer intentionally stays open).
+* **MED** re-queuing the same event id after a nonce bump stranded the advance
+  (the applied-gate only re-arms on signature CHANGE) - the next-up signature
+  now folds in the arrival epoch (the selection nonce).
+* **MED** the persisted verdict had no expiry and a time-of-day-only stamp - a
+  days-old CLEAR resurfaced as fresh with a live one-click writing the stale
+  measurement into the audit note. The verdict now dies with the write, stores
+  the full datetime, and the one-click is freshness-gated at 30 minutes (older
+  CLEARs render "re-check again before resolving").
+* **MED** a NULL CURRENT_VALUE (idle warehouse, zero-row window) coerced to
+  0.00 and rendered "Condition clear: 0.00" with the one-click offering to
+  audit the fabricated number - NULL now routes to the not-evaluable branch,
+  plus a render-side NaN guard for stale entries.
+* **LOW** queue hygiene: a missed funnel (real deep-link superseding it, the
+  queued event leaving the feed, bulk mode, or a page switch) now POPS the
+  queue instead of leaving it to surprise-open a drawer arbitrarily later.
+* **LOW** multi-day snooze copy: the wake caption showed only "%a %H:%M" (a
+  1-week snooze lands on the SAME weekday - it read as later today) and
+  WAKES_IN rendered "167h 59m"; the caption now carries the date past a day
+  out and WAKES_IN rolls into day grain ("6d 23h").
+* **LOW** the persisted re-check ERROR verdict claimed "unavailable right now"
+  indefinitely - now stamped and rendered "as of HH:MM".
+
 ## 4.308.0 - UI/UX Wave 2 (3): Snowsight links everywhere they belong (2026-08-28)
 
 Third Wave-2 batch of the UI/UX master list (C35 + F27), app-only:
