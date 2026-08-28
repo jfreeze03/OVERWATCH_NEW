@@ -123,13 +123,14 @@ cross-cutting risk.
   board's #1 scan question is "where's the weight" — today it's a wall of flat numbers.
   Wrap the primary ranked column in a native `ProgressColumn(max=col max)` so the top few
   dominate visibly. `app/ui/components.py:1277-1322`
-- [ ] **C35 + F27 · P1/M · Centralize Snowsight links; extend to warehouse/db/table.**
+- [x] **C35 + F27 · P1/M · Centralize Snowsight links; extend to warehouse/db/table.**
   Auto-attach the query-profile link whenever a non-blank `QUERY_ID` column exists (remove
   per-site wiring); add a sibling "Open in Snowsight ↗" for `WAREHOUSE_NAME`/`DATABASE_NAME`/
   table objects. `app/ui/components.py:651-698`
 - [ ] **C34 + F34 · P1/M · Standardize selectable-table affordances.** *(rank
   ordinal `#` shipped in v4.307.0; the row-action cue + shared empty-detail
-  placeholder remain.)* Add a visible
+  placeholder remain — adoption targets proved thin post-F49/F51: the drill
+  captions carry ranking context a bare placeholder would lose.)* Add a visible
   row-action cue, a shared "select a row to see detail here" empty-detail placeholder, and
   a `#` rank ordinal on ranked tables (owner's "I don't know the query id to select" pain).
   `app/ui/components.py:1634-1641`
