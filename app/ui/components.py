@@ -178,6 +178,19 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     st.session_state["_ow_dl_seq"] = 0
     st.session_state["_ow_tz_note_shown"] = False   # rec34: tz note prints once per page
     st.session_state["_ow_dl_page"] = str(title)   # T1.6: page identity for the CSV-prep slot
+    # C9: one-hop return after a cross-page drill — "Back to Alerts · Open events"
+    # with the origin's section restored (its drill selection survives naturally in
+    # session state). Offered only while this page IS the jump's destination;
+    # wandering off via the sidebar drops it, so it can never linger stale.
+    from app.core import state as _state
+    _origin = _state.nav_return_target(title)
+    if _origin:
+        _olabel = _origin["page"] + (f" · {_origin['section']}" if _origin.get("section") else "")
+        if st.button(f"← Back to {_olabel}", key="ow_nav_return",
+                     help="Return to where this drill started, with its section restored."):
+            _state.pop_nav_origin()
+            _state.request_navigation(_origin["page"], _origin.get("section", ""),
+                                      capture_origin=False)
     # rec5: no per-page OVERWATCH kicker — the sidebar brand + browser tab are the one
     # brand anchor; repeating it above every header was orientation noise, not signal.
     if icon_name:
@@ -1500,10 +1513,10 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
                   size_note: bool = True, sort_label: str = "",
-                  totals: tuple = ()) -> int | None:
+                  totals: tuple = (), multi: bool = False) -> int | list[int] | None:
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, width="stretch")
-        return None
+        return [] if multi else None
     display_df = df
     try:  # display-timezone conversion is display-only; the CSV keeps account time
         ts_cols = [] if getattr(df, "attrs", {}).get("_ow_tz_converted") else timestampish_columns(df.columns)
@@ -1614,22 +1627,23 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         kwargs["height"] = height
     if totals:
         st.caption("Σ " + " · ".join(f"{label}: {value}" for label, value in totals))
-    selected: int | None = None
+    selected: int | list[int] | None = [] if multi else None
     if selectable and key:
         try:
             event = st.dataframe(data, key=key, on_select="rerun",
-                                 selection_mode="single-row", **kwargs)
+                                 selection_mode="multi-row" if multi else "single-row",
+                                 **kwargs)
             rows = list(getattr(getattr(event, "selection", None), "rows", None) or [])
-            selected = int(rows[0]) if rows else None
             # st.dataframe's row selection is STICKY: it re-emits its raw positional index
             # on every rerun, even after the frame shrinks (a row resolved, the company/
             # window filter narrowed, or a live frame was re-read smaller). An index past
-            # the current end is a stale selection, so report it as no-selection. `data`
-            # has the same row count as `df`, so this one clamp immunizes every caller's
-            # `frame.iloc[sel]` against an out-of-range IndexError instead of a bounds guard
-            # repeated at each of ~40 drill sites.
-            if selected is not None and not (0 <= selected < len(df)):
-                selected = None
+            # the current end is a stale selection, so drop it here. `data` has the same
+            # row count as `df`, so this one clamp immunizes every caller's
+            # `frame.iloc[sel]` against an out-of-range IndexError instead of a bounds
+            # guard repeated at each of ~40 drill sites. C43: multi-row mode returns the
+            # clamped index LIST (possibly empty) instead of one index-or-None.
+            _valid = [int(r) for r in rows if 0 <= int(r) < len(df)]
+            selected = _valid if multi else (_valid[0] if _valid else None)
         except TypeError:  # runtime without selection support: render, no selection
             st.dataframe(data, **kwargs)
     else:
@@ -1736,15 +1750,16 @@ def styled_table(df, *, height: int | None = None, column_config: dict | None = 
 def selectable_table(df, key: str, *, height: int | None = None,
                      column_config: dict | None = None, slug: str | None = None,
                      days: int | None = None, size_note: bool = True,
-                     sort_label: str = "") -> int | None:
-    """styled_table + single-row click selection; returns the positional row
-    index into ``df``, or None. A stale sticky selection whose index is past the
-    current frame end is reported as None (not the raw out-of-range index), so a
-    caller's ``df.iloc[sel]`` is always in-bounds. Degrades to a plain table on
-    runtimes without selections."""
+                     sort_label: str = "", multi: bool = False) -> int | list[int] | None:
+    """styled_table + row click selection. Single mode (default) returns the
+    positional row index into ``df`` or None; ``multi=True`` (C43) returns the
+    clamped index LIST (possibly empty) from st.dataframe's multi-row selection.
+    A stale sticky index past the current frame end is dropped, so a caller's
+    ``df.iloc[sel]`` is always in-bounds. Degrades to a plain table on runtimes
+    without selections."""
     return _render_table(df, height=height, column_config=column_config,
                          key=key, selectable=True, slug=slug, days=days,
-                         size_note=size_note, sort_label=sort_label)
+                         size_note=size_note, sort_label=sort_label, multi=multi)
 
 
 def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,

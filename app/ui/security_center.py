@@ -24,11 +24,14 @@ from app.logic.security import (
     grant_anomaly_flags,
     posture_alert_rule_sql,
 )
+from app.logic.verdict import Signal, page_verdict
 from app.logic.workbench import create_action_sql
 from app.ui.components import (
+    alarm_health,
     empty_state,
     kpi_row,
     notify,
+    page_verdict_line,
     panel_help,
     result_caption,
     section_header,
@@ -127,7 +130,6 @@ def _render_change_risk_diagnostic() -> None:
 
 def render_security_overview(company: str) -> None:
     """Exceptions-first domain posture with Action Center and Entity 360 drills."""
-    section_header("Security decision queue", "warn", "security")
     queue = _optional_result(
         security_sql.security_exception_queue(company, 100),
         f"sec_exception_queue_{company}",
@@ -139,6 +141,7 @@ def render_security_overview(company: str) -> None:
         "Security domain coverage contract",
     )
     if not queue.ok and not coverage.ok:
+        section_header("Security decision queue", "", "security")
         _setup_state("The security decision queue")
         return
 
@@ -146,6 +149,17 @@ def render_security_overview(company: str) -> None:
         queue.df if queue.ok else pd.DataFrame(),
         coverage.df if coverage.ok else pd.DataFrame(),
     )
+    # C17: one "should I worry?" line from the posture the queue already computed,
+    # and (C23) the section header's severity derives from the same data.
+    _act = [p for p in posture if p.state == "Act"]
+    _open_n = sum(int(safe_float(getattr(p, "findings", 0))) for p in posture)
+    page_verdict_line(page_verdict([
+        Signal("bad", f"{len(_act)} domain(s) need action: "
+                      + ", ".join(p.domain.title() for p in _act[:3])) if _act else None,
+        Signal("warn", f"{_open_n} open finding(s)") if _open_n else None,
+    ], healthy="no security domain needs action"))
+    section_header("Security decision queue",
+                   alarm_health(len(_act) or _open_n), "security")
     kpi_row([
         {
             "label": item.domain.title(),

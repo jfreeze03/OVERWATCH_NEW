@@ -27,6 +27,7 @@ from app.logic.alert_evidence import plan_for_alert
 from app.logic.formulas import account_now, humanize_age, humanize_duration, md_dollars, safe_float
 from app.logic.navigate import fix_target, inline_fix_warehouse, investigation_target
 from app.logic.playbooks import playbook_for
+from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
 from app.ui.components import (
@@ -40,6 +41,7 @@ from app.ui.components import (
     load_settings,
     notify,
     page_header,
+    page_verdict_line,
     panel_help,
     result_caption,
     section_filter_contract,
@@ -482,20 +484,56 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 st.session_state.pop("_ow_alert_rollup_bind", None)
             st.caption("Dedupe semantics are untouched — this is a display rollup. "
                        "Toggle off to open a drawer, bulk-ack, or investigate.")
-            # F51: the drawer's selection widget unmounts on this path — its bind
-            # must not outlive the selection it mirrors.
+            # F51: the selection widgets unmount on this path — their binds must
+            # not outlive the selections they mirror.
             st.session_state.pop("_ow_alert_drawer_bind", None)
+            st.session_state.pop("_ow_alert_bulk_bind", None)
             return
         # rec27: an "Age" companion ("3h ago") reads at a glance; RAISED_AT stays the
         # real, sortable, tz-converted column. rec30: declare the severity-then-newest order.
         _now = account_now()
         _feed = with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")
         _feed = _feed.assign(AGE=_feed["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
-        sel = selectable_table(
+        # C43: operator-gated BULK MODE — off (the default) keeps the one-click
+        # single-row drawer; on, the table takes checkbox multi-selection that arms
+        # the bulk panel below (replacing the old duplicate multiselect lookup).
+        # The mode suffix on the key mounts a fresh table on every flip so selection
+        # state can never leak across modes; non-operators never see the toggle, so
+        # bulk is never promised to a viewer who cannot execute it.
+        _bulk_mode = bool(is_operator and st.toggle(
+            "Bulk select", key=f"alert_bulk_mode_{_sel_nonce}",
+            help="Check several rows and acknowledge/resolve them together; "
+                 "switch off for single-click drawer triage."))
+        _raw_sel = selectable_table(
             _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
-            key=f"alert_events_sel_{_sel_nonce}", sort_label="severity, then newest")
+            key=f"alert_events_sel_{_sel_nonce}_{'m' if _bulk_mode else 's'}",
+            sort_label="severity, then newest", multi=_bulk_mode)
+        if _bulk_mode:
+            _bulk_rows = [int(r) for r in (_raw_sel or [])]
+            sel = None
+        else:
+            _bulk_rows = []
+            sel = int(_raw_sel) if _raw_sel is not None else None
+        # C43+F51: the bulk SET binds by identity too — a feed shift under checked
+        # rows (same positions, different events) disarms the panel instead of
+        # silently re-targeting the write the operator reviewed and typed to confirm.
+        if _bulk_rows:
+            _ids_here = tuple(str(edf.iloc[i]["EVENT_ID"]) for i in _bulk_rows)
+            _bbind = st.session_state.get("_ow_alert_bulk_bind")
+            if (isinstance(_bbind, tuple) and len(_bbind) == 2
+                    and tuple(_bbind[0]) == tuple(_bulk_rows)
+                    and tuple(_bbind[1]) != _ids_here):
+                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                st.session_state.pop("_ow_alert_bulk_bind", None)
+                st.session_state["_ow_alert_stale_note"] = (
+                    "The feed changed under the previous selection — re-select rows "
+                    "to arm a bulk action.")
+                st.rerun()
+            st.session_state["_ow_alert_bulk_bind"] = (tuple(_bulk_rows), _ids_here)
+        else:
+            st.session_state.pop("_ow_alert_bulk_bind", None)
         _from_deeplink = False
-        if sel is None and requested_event:
+        if sel is None and not _bulk_rows and requested_event:
             # F51: the identity fallback is armed per ARRIVAL and disarmed by the next
             # write's nonce bump — un-gated it re-fired on every paint, reopening the
             # acted drawer after each write. While armed it re-applies on every
@@ -539,8 +577,14 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             st.session_state.pop("_ow_alert_drawer_bind", None)
         result_caption(events)
         if sel is None or not (0 <= int(sel) < len(edf)):
-            st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
-                       "one-click investigate, ack/resolve.")
+            if _bulk_rows:
+                st.caption(f"{len(_bulk_rows)} row(s) checked — the bulk action panel is below.")
+            elif _bulk_mode:
+                st.caption("Bulk select is on — check rows to arm a bulk acknowledge/resolve.")
+            else:
+                st.caption("Click a row to open its drawer (detail, rule, history, playbook, "
+                           "ack/resolve)."
+                           + (" Flip Bulk select for multi-row actions." if is_operator else ""))
         else:
             row = edf.iloc[sel]
             event_id = str(row["EVENT_ID"])
@@ -583,7 +627,117 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 # enabled route matches, not necessarily a delivery miss.
                 st.caption("No delivery recorded (a route may not match this event's "
                            "severity or family).")
-            with st.expander("Playbook — what to do first", expanded=True):
+            # F49: the DECIDE bar leads the drawer — the operator's verb (ack/resolve/
+            # snooze + investigate/fix) was the LAST thing rendered, below six
+            # evidence panels, so every triage required scrolling the whole drawer.
+            # The evidence panels follow, demoted into a supporting group.
+            target = investigation_target(str(row["RULE_ID"]),
+                                          f"{row['TITLE']} {detail_text}")
+            fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+            wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+            # rec18: two rows — nav buttons + action radio share one row; the note
+            # gets a full-width row of its own instead of a cramped ~30% column.
+            c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
+            with c_inv:
+                if st.button("Investigate →", key="alert_investigate", width="stretch",
+                             help=f"Jump to {target['page']} · {target['section'] or 'top'} "
+                                  "with filters applied from this event"):
+                    # rec24: only claim "filters applied" when the jump actually reshapes
+                    # them, so the arrival note on the destination is never misleading.
+                    _inv_ctx = None
+                    if target["filters"]:
+                        _inv_ctx = {"filter_note": (f"Filters applied from alert "
+                                                    f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
+                    request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
+            with c_fix:
+                if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
+                                     help="Lands on the remediation surface with this event's "
+                                          "scope applied — generate, confirm, execute, audited."):
+                    request_navigation(fix["page"], fix["section"], fix["filters"])
+            with c_act:
+                action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
+                                  key=f"alert_action_{event_id[:8]}_{_sel_nonce}")
+            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}_{_sel_nonce}", max_chars=500)
+            kind = ""
+            snooze_hours = 0.0
+            if action == "RESOLVE":
+                kind = st.radio(
+                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}_{_sel_nonce}",
+                    help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
+                         "EXPECTED = known/maintenance. Feeds the per-rule precision score "
+                         "on the Rules section.")
+            elif action == "SNOOZE":
+                snooze_hours = SNOOZE_PRESETS[st.selectbox(
+                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}",
+                    help="The event leaves the triage feed now and returns to it automatically "
+                         "when the timer expires — no ack, no resolve. The underlying rule keeps "
+                         "firing for other entities.")]
+            if action == "SNOOZE":
+                stmts = _snooze_stmts(event_id, snooze_hours, note)
+            else:
+                stmts = _lifecycle_stmts(event_id, action, note, kind)
+            with st.container(border=True):
+                with st.expander("SQL that will run"):
+                    st.code("\n".join(stmts), language="sql")
+                if is_operator:
+                    # rec14 write-friction policy: ACK is a reversible OPEN->ACK move on
+                    # OVERWATCH's own audit trail, so it is ONE CLICK (the SQL preview
+                    # above stays visible). RESOLVE classifies the event — it feeds the
+                    # per-rule precision score — so it is the consequential write and
+                    # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
+                    # confirm field nor the button state carries across events.
+                    # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
+                    # one click; RESOLVE classifies the event, so it keeps the confirm gate.
+                    if action in ("ACK", "SNOOZE"):
+                        _fire = st.button("Execute with audit row", type="primary",
+                                          width="stretch",
+                                          key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
+                    else:
+                        _fire = confirm_gate(action, "Execute with audit row",
+                                             key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
+                                             prompt=f"Type {action} to confirm execution")
+                    if _fire:
+                        # V051/V086: one atomic proc (update + audit in a transaction);
+                        # the legacy path is the split script, unchanged.
+                        if action == "SNOOZE":
+                            call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
+                                    f"{sql_literal(event_id)}, {snooze_hours}, {sql_literal(note)}, "
+                                    f"{identity_sql()}, "
+                                    f"{sql_literal(idempotency_key('ALERT_SNOOZE', event_id))})")
+                        else:
+                            call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                                    f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
+                                    f"{sql_literal(kind)}, {identity_sql()}, "
+                                    f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
+                        # codex#9: pass the structured statement list straight through — a ';'
+                        # inside the note no longer fractures the legacy fallback.
+                        ok, msg = execute_action(call, stmts, page=_PAGE)
+                        notify(ok, msg)
+                        if ok:
+                            from app.ui.components import log_ui_event
+                            _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
+                            log_ui_event(_ev, page=_PAGE)
+                            # F51 post-write hygiene. RESOLVE/SNOOZE remove the event
+                            # from the feed, so the selection resets via the nonce bump
+                            # (which remounts every nonce-keyed widget fresh — session-
+                            # key pops don't survive the frontend's state resend). ACK
+                            # keeps the event at its index, so the drawer STAYS OPEN to
+                            # continue triage (ack -> investigate -> resolve); the
+                            # identity guard protects it if the feed shifts anyway. The
+                            # full rerun is notify()'s own contract: the re-read feed is
+                            # the durable receipt.
+                            if action in ("RESOLVE", "SNOOZE"):
+                                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                                st.session_state.pop("_ow_alert_drawer_bind", None)
+                                st.session_state.pop("_ow_alert_bulk_bind", None)
+                            st.session_state["_ow_alert_receipt"] = (
+                                f"{action} recorded — [{row['SEVERITY']}] "
+                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})")
+                            st.rerun()
+                else:
+                    st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
+            st.markdown("**Supporting evidence**")
+            with st.expander("Playbook — what to do first", expanded=False):
                 st.markdown(playbook_for(str(row["RULE_ID"])))
             _rid = str(row["RULE_ID"]).upper()
             _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
@@ -605,8 +759,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     if thr is not None and thr > 0:
                         if current_v < thr:
                             st.success(f"Condition clear: {label} = {current_v:,.2f} vs "
-                                       f"threshold {thr:,.2f} — resolve as ACTIONED below "
-                                       "with this as evidence.")
+                                       f"threshold {thr:,.2f} — resolve as ACTIONED in the "
+                                       "decide bar above with this as evidence.")
                         else:
                             st.warning(f"Still over: {label} = {current_v:,.2f} vs "
                                        f"threshold {thr:,.2f}.")
@@ -632,10 +786,6 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                  height=180, slug="rule-resolutions")
                     st.caption("The last few times this rule was closed — kind and note from "
                                "your own history, the playbook this alert has earned.")
-            target = investigation_target(str(row["RULE_ID"]),
-                                          f"{row['TITLE']} {detail_text}")
-            fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
-            wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
             if wh_inline:
                 with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
                     st.caption("Playbook above says what; this generates the how. Execute is "
@@ -769,115 +919,17 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         on_save=_append_hypothesis if is_operator else None,
                         save_label="Append hypothesis to the event",
                     )
-            # rec18: two rows — nav buttons + action radio share one row; the note
-            # gets a full-width row of its own instead of a cramped ~30% column.
-            c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
-            with c_inv:
-                if st.button("Investigate →", key="alert_investigate", width="stretch",
-                             help=f"Jump to {target['page']} · {target['section'] or 'top'} "
-                                  "with filters applied from this event"):
-                    # rec24: only claim "filters applied" when the jump actually reshapes
-                    # them, so the arrival note on the destination is never misleading.
-                    _inv_ctx = None
-                    if target["filters"]:
-                        _inv_ctx = {"filter_note": (f"Filters applied from alert "
-                                                    f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
-                    request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
-            with c_fix:
-                if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
-                                     help="Lands on the remediation surface with this event's "
-                                          "scope applied — generate, confirm, execute, audited."):
-                    request_navigation(fix["page"], fix["section"], fix["filters"])
-            with c_act:
-                action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
-                                  key=f"alert_action_{event_id[:8]}_{_sel_nonce}")
-            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}_{_sel_nonce}", max_chars=500)
-            kind = ""
-            snooze_hours = 0.0
-            if action == "RESOLVE":
-                kind = st.radio(
-                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}_{_sel_nonce}",
-                    help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
-                         "EXPECTED = known/maintenance. Feeds the per-rule precision score "
-                         "on the Rules section.")
-            elif action == "SNOOZE":
-                snooze_hours = SNOOZE_PRESETS[st.selectbox(
-                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}",
-                    help="The event leaves the triage feed now and returns to it automatically "
-                         "when the timer expires — no ack, no resolve. The underlying rule keeps "
-                         "firing for other entities.")]
-            if action == "SNOOZE":
-                stmts = _snooze_stmts(event_id, snooze_hours, note)
-            else:
-                stmts = _lifecycle_stmts(event_id, action, note, kind)
-            with st.container(border=True):
-                with st.expander("SQL that will run"):
-                    st.code("\n".join(stmts), language="sql")
-                if is_operator:
-                    # rec14 write-friction policy: ACK is a reversible OPEN->ACK move on
-                    # OVERWATCH's own audit trail, so it is ONE CLICK (the SQL preview
-                    # above stays visible). RESOLVE classifies the event — it feeds the
-                    # per-rule precision score — so it is the consequential write and
-                    # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
-                    # confirm field nor the button state carries across events.
-                    # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
-                    # one click; RESOLVE classifies the event, so it keeps the confirm gate.
-                    if action in ("ACK", "SNOOZE"):
-                        _fire = st.button("Execute with audit row", type="primary",
-                                          width="stretch",
-                                          key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
-                    else:
-                        _fire = confirm_gate(action, "Execute with audit row",
-                                             key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
-                                             prompt=f"Type {action} to confirm execution")
-                    if _fire:
-                        # V051/V086: one atomic proc (update + audit in a transaction);
-                        # the legacy path is the split script, unchanged.
-                        if action == "SNOOZE":
-                            call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
-                                    f"{sql_literal(event_id)}, {snooze_hours}, {sql_literal(note)}, "
-                                    f"{identity_sql()}, "
-                                    f"{sql_literal(idempotency_key('ALERT_SNOOZE', event_id))})")
-                        else:
-                            call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
-                                    f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
-                                    f"{sql_literal(kind)}, {identity_sql()}, "
-                                    f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
-                        # codex#9: pass the structured statement list straight through — a ';'
-                        # inside the note no longer fractures the legacy fallback.
-                        ok, msg = execute_action(call, stmts, page=_PAGE)
-                        notify(ok, msg)
-                        if ok:
-                            from app.ui.components import log_ui_event
-                            _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
-                            log_ui_event(_ev, page=_PAGE)
-                            # F51 post-write hygiene. RESOLVE/SNOOZE remove the event
-                            # from the feed, so the selection resets via the nonce bump
-                            # (which remounts every nonce-keyed widget fresh — session-
-                            # key pops don't survive the frontend's state resend). ACK
-                            # keeps the event at its index, so the drawer STAYS OPEN to
-                            # continue triage (ack -> investigate -> resolve); the
-                            # identity guard protects it if the feed shifts anyway. The
-                            # full rerun is notify()'s own contract: the re-read feed is
-                            # the durable receipt.
-                            if action in ("RESOLVE", "SNOOZE"):
-                                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
-                                st.session_state.pop("_ow_alert_drawer_bind", None)
-                            st.session_state["_ow_alert_receipt"] = (
-                                f"{action} recorded — [{row['SEVERITY']}] "
-                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})")
-                            st.rerun()
-                else:
-                    st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
 
-        if is_operator and len(edf):
+        if is_operator and _bulk_rows:
             st.divider()
-            st.markdown("**Bulk acknowledge / resolve**")
-            options = {
-                f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
-                for _, r in edf.iterrows()
-            }
-            chosen = st.multiselect("Events", list(options), key=f"alert_bulk_pick_{_sel_nonce}")
+            _bdf = edf.iloc[_bulk_rows]
+            st.markdown(f"**Bulk acknowledge / resolve — {len(_bdf)} selected**")
+            # F53 (lite): confirm knowing exactly what the write hits — the severity
+            # mix and the rows themselves, not just a count in the confirm prompt.
+            _sevc = _bdf["SEVERITY"].astype(str).str.upper().value_counts()
+            st.caption("Selected: " + " · ".join(f"{int(n)} {sev}" for sev, n in _sevc.items()))
+            styled_table(_bdf[["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS"]],
+                         height=160)
             b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
                                 key=f"alert_bulk_action_{_sel_nonce}")
             b_kind = ""
@@ -888,20 +940,20 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                        "precision score.")
             b_note = st.text_input("Bulk note (applies to every selected event)",
                                    key=f"alert_bulk_note_{_sel_nonce}", max_chars=500)
+            _bulk_ids = _bdf["EVENT_ID"].astype(str).tolist()
             if confirm_gate(f"BULK {b_action}", f"Execute bulk {b_action}",
                             key=f"alert_bulk_exec_{_sel_nonce}",
-                            prompt=f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
-                            enabled=bool(chosen), type="primary"):
+                            prompt=f"Type BULK {b_action} to confirm ({len(_bulk_ids)} selected)",
+                            enabled=bool(_bulk_ids), type="primary"):
                 # V051: one atomic proc for the whole selection; the
                 # pre-V051 legacy path is the set-based 2-statement pair.
-                _bulk_ids = [options[c] for c in chosen]
                 upd, aud = _bulk_lifecycle_sql(_bulk_ids, b_action, b_note, b_kind)
                 call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
                         f"{sql_literal(','.join(str(e) for e in _bulk_ids))}, {sql_literal(b_action)}, "
                         f"{sql_literal(b_note)}, {sql_literal(b_kind)}, {identity_sql()}, "
                         f"{sql_literal(idempotency_key('ALERT_BULK_' + b_action, ''.join(_bulk_ids)))})")
                 ok_u, msg_u = execute_action(call, [upd, aud], page=_PAGE)
-                notify(ok_u, f"Bulk {b_action}: {len(chosen)} event(s) — {msg_u}")
+                notify(ok_u, f"Bulk {b_action}: {len(_bulk_ids)} event(s) — {msg_u}")
                 if ok_u:
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
@@ -913,8 +965,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     # feed as the durable receipt.
                     st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
                     st.session_state.pop("_ow_alert_drawer_bind", None)
+                    st.session_state.pop("_ow_alert_bulk_bind", None)
                     st.session_state["_ow_alert_receipt"] = (
-                        f"Bulk {b_action} recorded — {len(chosen)} event(s)")
+                        f"Bulk {b_action} recorded — {len(_bulk_ids)} event(s)")
                     st.rerun()
 
         # V086: snoozed events are hidden from the feed above until their wake time.
@@ -973,6 +1026,15 @@ def render() -> None:
         total_n = int(safe_float(_c0.get("TOTAL")))
     else:
         crit_n = high_n = total_n = 0
+    # C17: the page answers "should I worry?" BEFORE the section bar, from the
+    # uncapped counts it already reads. Rendered only when the counts resolved —
+    # a failed read must never manufacture a green all-clear.
+    if counts.usable():
+        page_verdict_line(page_verdict([
+            Signal("bad", f"{crit_n} open critical(s)") if crit_n else None,
+            Signal("warn", f"{high_n} open high(s)") if high_n else None,
+        ], healthy=(f"{total_n} open event(s), none critical or high"
+                    if total_n else "the alert queue is empty")))
     section = lazy_sections(["Open events", "Rules", "History", "Native delivery"],
                             key="alerts_section",
                             counts={"Open events": total_n} if counts.usable() else None)

@@ -58,21 +58,21 @@ def test_no_or_garbage_binding_is_not_stale():
 
 def test_every_selection_and_write_widget_is_nonce_keyed():
     for needle in (
-        'key=f"alert_events_sel_{_sel_nonce}"',
+        'key=f"alert_events_sel_{_sel_nonce}_',
         'key=f"alert_rollup_sel_{_sel_nonce}"',
         'key=f"alert_action_{event_id[:8]}_{_sel_nonce}"',
         'key=f"alert_note_{event_id[:8]}_{_sel_nonce}"',
         'key=f"alert_kind_{event_id[:8]}_{_sel_nonce}"',
         'key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}"',
         'key=f"alert_exec_{event_id[:8]}_{_sel_nonce}"',
-        'key=f"alert_bulk_pick_{_sel_nonce}"',
         'key=f"alert_bulk_note_{_sel_nonce}"',
         'key=f"alert_bulk_exec_{_sel_nonce}"',
     ):
         assert needle in _SRC, needle
     # the old fixed keys must not linger anywhere
+    # C43 replaced the bulk multiselect with in-table multi-row selection.
     for stale in ('key="alert_events_sel"', 'key="alert_rollup_sel"',
-                  'key="alert_bulk_pick"'):
+                  'key="alert_bulk_pick"', 'st.multiselect("Events"'):
         assert stale not in _SRC, stale
     # pops of widget keys are NOT a reset — none may remain
     assert 'st.session_state.pop(f"alert_' not in _SRC

@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.306.0 - UI/UX Wave 2 (1): alert decide-bar, bulk mode, verdicts, one-hop return (2026-08-28)
+
+First Wave-2 batch of the UI/UX master list (F49 / C43+F53 / C17 / C9), app-only:
+
+* **F49** the DECIDE bar leads the alert drawer - Investigate/Generate-fix +
+  ack/resolve/snooze + note + Execute render directly under the event's title and
+  detail; the six evidence panels (playbook now collapsed, re-check, rule history,
+  prior resolutions, closed-loop Respond, AI) follow under a "Supporting evidence"
+  heading. Triage stops requiring a full-drawer scroll per event.
+* **C43+F53** bulk acknowledge/resolve runs off in-table selection: an operator-only
+  "Bulk select" toggle flips the feed into checkbox multi-row mode (single-click
+  drawer triage stays the default gesture) and the selected rows arm a bulk panel
+  showing the severity mix and the exact rows above the typed confirm gate; the old
+  duplicate multiselect picker is deleted. `selectable_table` grew a clamped
+  `multi=` mode.
+* The adversarial review of the batch confirmed 9 findings, all fixed pre-commit:
+  the bulk SET now binds by identity like the drawer (a feed shift under checked
+  rows disarms the typed gate instead of silently re-targeting the write), bulk is
+  never promised to viewers who cannot execute it, the re-check copy points at the
+  decide bar above, the empty-frame multi return honors the list contract, and
+  bulk-mode state can never leak across mode flips (mode-suffixed table key).
+* **C17** data-derived "should I worry?" verdict lines: Alerts renders one at page
+  level from the uncapped severity counts (before the section bar, never from a
+  failed read), and Security composes one from the decision-queue posture - whose
+  section header severity is now also data-derived instead of static amber.
+  (Control Room / Brief / Cost / Overview already had verdicts; Decision Studio's
+  scorecard carries proof_verdict; Operations needs a page-level aggregate first.)
+* **C9** one-hop contextual return: a cross-page drill captures its origin (page +
+  active section), and the destination's header offers "<- Back to Alerts - Open
+  events" - valid only while on the jump's destination (wandering off drops it),
+  consumed on use, and the return itself never creates a boomerang origin. The
+  origin section's own drill selection survives naturally in session state.
+
 ## 4.305.0 - UI/UX Wave 1 leftovers: data-derived severity, quieter chrome (2026-08-28)
 
 Completes Wave 1 of the UI/UX master list (C23 / C13 / C24 / F31), app-only:

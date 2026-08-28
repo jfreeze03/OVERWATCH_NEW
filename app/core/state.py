@@ -87,9 +87,15 @@ def apply_filters(**kwargs) -> None:
 
 
 def request_navigation(page: str, section: str = "", filters: dict | None = None,
-                       context: dict | None = None) -> None:
+                       context: dict | None = None, *,
+                       capture_origin: bool = True) -> None:
     """Queue a cross-page jump; consumed at the top of the NEXT run, before
-    any widget instantiates (Streamlit forbids touching a live widget's key)."""
+    any widget instantiates (Streamlit forbids touching a live widget's key).
+
+    C9: a cross-PAGE jump also captures its ORIGIN (the page + active section it
+    left), stamped with the destination, so the destination's header can offer a
+    one-hop "Back to <origin>". The return jump itself passes
+    ``capture_origin=False`` so returning never creates a boomerang origin."""
     # Clamp off-profile targets HERE (B8 also clamps on consume), then NO-OP a jump
     # that resolves to the current page with no section change. A sticky st.dataframe
     # selection re-fires request_navigation every rerun; without this, an EXECUTIVE
@@ -103,9 +109,19 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
             page = "Overview"  # offered by every profile
     if page == st.session_state.get("_ow_page") and not section and not filters and not context:
         return
+    # C9: origin only for a genuine page change — a section-only hop within the
+    # current page has nothing to "return" from.
+    _cur = str(st.session_state.get("_ow_page") or "")
+    origin = None
+    if capture_origin and page and _cur and page != _cur:
+        from app.logic.navigate import PAGE_SECTION_KEYS
+        _skey = PAGE_SECTION_KEYS.get(_cur)
+        origin = {"page": _cur,
+                  "section": str(st.session_state.get(_skey) or "") if _skey else "",
+                  "dest": page}
     st.session_state["_ow_nav_pending"] = {
         "page": page, "section": section, "filters": dict(filters or {}),
-        "context": dict(context or {}),
+        "context": dict(context or {}), "origin": origin,
     }
     st.rerun()
 
@@ -153,6 +169,32 @@ def consume_pending_navigation() -> None:
     # A selected action/query/entity should survive the navigation rerun without
     # silently reshaping every metric on the destination page.
     st.session_state["_ow_nav_context"] = dict(pending.get("context") or {})
+    # C9: persist the jump's origin for the destination's one-hop return; a jump
+    # without one (same-page hop, or the return itself) clears any stale origin.
+    if pending.get("origin"):
+        st.session_state["_ow_nav_origin"] = dict(pending["origin"])
+    else:
+        st.session_state.pop("_ow_nav_origin", None)
+
+
+def nav_return_target(current_page: str) -> dict | None:
+    """C9: the origin to offer a one-hop return to, or None.
+
+    Valid only while the viewer is still ON the jump's destination — wandering
+    off via the sidebar drops the origin, so a stale "Back to Alerts" can never
+    linger on unrelated pages."""
+    origin = st.session_state.get("_ow_nav_origin")
+    if not isinstance(origin, dict) or not str(origin.get("page") or ""):
+        return None
+    if str(origin.get("dest") or "") != str(current_page or ""):
+        st.session_state.pop("_ow_nav_origin", None)
+        return None
+    return dict(origin)
+
+
+def pop_nav_origin() -> None:
+    """C9: consume the origin (the return button fires exactly once)."""
+    st.session_state.pop("_ow_nav_origin", None)
 
 
 def navigation_context(*, consume: bool = False) -> dict:
