@@ -697,6 +697,72 @@ def result_caption(result: QueryResult, note: str = "") -> None:
 
 
 
+def _snowsight_ctx(page: str) -> tuple[str, str] | None:
+    """Resolve (org, account) for Snowsight deep links, once per session.
+
+    R3-3: a failed/empty probe is NOT cached — writing ('','') would pin the
+    not-None guard for the whole session and permanently disable the links;
+    leaving session_state unset lets the next rerun re-probe (metadata tier)."""
+    ctx = st.session_state.get("_ow_snowsight_ctx")
+    if ctx is not None:
+        return ctx
+    # C35 review: with the probe auto-wired into EVERY QUERY_ID table, a failing
+    # probe must not re-fire (and error-log) per table per rerun for the whole
+    # session. Back off for 5 minutes, then re-probe — R3-3's "never pin a
+    # permanent failure" survives as a retry window instead of a hot loop. The
+    # probe itself runs probe=True so an expected-absence failure never floods
+    # APP_ERROR_LOG.
+    import time
+    _failed_at = st.session_state.get("_ow_snowsight_ctx_failed_at")
+    if _failed_at is not None and (time.monotonic() - float(_failed_at)) < 300:
+        return None
+    from app.core.query import run
+    res = run("SELECT CURRENT_ORGANIZATION_NAME() AS ORG, CURRENT_ACCOUNT_NAME() AS ACCT",
+              page=page, key="snowsight_ctx", tier="metadata", source="session context",
+              probe=True)
+    org = str(res.df.iloc[0].get("ORG", "") or "") if res.usable() else ""
+    acct = str(res.df.iloc[0].get("ACCT", "") or "") if res.usable() else ""
+    if not org or not acct:
+        st.session_state["_ow_snowsight_ctx_failed_at"] = time.monotonic()
+        return None
+    st.session_state.pop("_ow_snowsight_ctx_failed_at", None)
+    ctx = (org.lower(), acct.lower())
+    st.session_state["_ow_snowsight_ctx"] = ctx
+    return ctx
+
+
+def snowsight_object_url(kind: str, key: str, page: str) -> str:
+    """F27: outbound Snowsight URL for a WAREHOUSE / DATABASE / OBJECT entity —
+    the native-console complement to the in-app Entity 360 drill (the owner
+    already values the query-profile links; objects get the same jump). Returns
+    '' when the entity kind has no stable Snowsight page or the session context
+    is unresolved. Best-effort by design: the name is not validated against the
+    account, so a typo lands on Snowsight's nearest listing page, not a 404."""
+    value = str(key or "").strip()
+    if not value:
+        return ""
+    ctx = _snowsight_ctx(page)
+    if ctx is None:
+        return ""
+    org, acct = ctx
+    base = f"https://app.snowflake.com/{org}/{acct}/#"
+    from urllib.parse import quote
+    k = str(kind or "").strip().upper()
+    # percent-encode every path segment: quoted Snowflake identifiers can carry
+    # spaces / parens / '#', which would otherwise break out of the URL (and the
+    # markdown that used to render it — the link now goes through st.link_button).
+    if k == "WAREHOUSE":
+        return f"{base}/compute/warehouses/{quote(value.upper(), safe='')}"
+    if k == "DATABASE":
+        return f"{base}/data/databases/{quote(value.upper(), safe='')}"
+    if k == "OBJECT":
+        parts = [p for p in value.split(".") if p]
+        if len(parts) == 3:
+            db, schema, table = (quote(p.upper(), safe="") for p in parts)
+            return f"{base}/data/databases/{db}/schemas/{schema}/table/{table}"
+    return ""
+
+
 def snowsight_profile_column(
     df,
     page: str,
@@ -710,7 +776,6 @@ def snowsight_profile_column(
     column renders — an honest degrade, never a dead link."""
     import pandas as pd
 
-    from app.core.query import run
     if df is None or df.empty or id_col not in df.columns:
         return df, {}
     # Cache hits and pre-V064 telemetry rows legitimately have no server query.
@@ -723,19 +788,9 @@ def snowsight_profile_column(
     query_ids = df[id_col].map(_query_id)
     if not query_ids.ne("").any():
         return df, {}
-    ctx = st.session_state.get("_ow_snowsight_ctx")
+    ctx = _snowsight_ctx(page)
     if ctx is None:
-        res = run("SELECT CURRENT_ORGANIZATION_NAME() AS ORG, CURRENT_ACCOUNT_NAME() AS ACCT",
-                  page=page, key="snowsight_ctx", tier="metadata", source="session context")
-        org = str(res.df.iloc[0].get("ORG", "") or "") if res.usable() else ""
-        acct = str(res.df.iloc[0].get("ACCT", "") or "") if res.usable() else ""
-        if not org or not acct:
-            # R3-3: a failed/empty probe must NOT be cached — writing ('','') pins the
-            # not-None guard for the whole session and permanently disables the links.
-            # Leave session_state unset so the next rerun re-probes (metadata tier).
-            return df, {}
-        ctx = (org.lower(), acct.lower())
-        st.session_state["_ow_snowsight_ctx"] = ctx
+        return df, {}
     org, acct = ctx
     if not org or not acct:
         return df, {}
@@ -1567,6 +1622,20 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     if df is None or getattr(df, "empty", True):
         st.dataframe(df, hide_index=True, width="stretch")
         return [] if multi else None
+    # C35: any table carrying real QUERY_IDs gets the Snowsight profile link
+    # AUTOMATICALLY — the helper no-ops on blank/absent ids, on manual call
+    # sites (the PROFILE column already exists), and when the org/account
+    # context is unresolved. The CSV gains the same PROFILE column the manual
+    # sites already export.
+    if "QUERY_ID" in getattr(df, "columns", ()) and "PROFILE" not in df.columns:
+        _prof_page = str(st.session_state.get("_ow_dl_page") or "")
+        if _prof_page:
+            try:
+                df, _prof_cfg = snowsight_profile_column(df, _prof_page)
+                if _prof_cfg:
+                    column_config = {**(column_config or {}), **_prof_cfg}
+            except Exception:  # noqa: BLE001 - the link column is a bonus, never a break
+                pass
     display_df = df
     try:  # display-timezone conversion is display-only; the CSV keeps account time
         ts_cols = [] if getattr(df, "attrs", {}).get("_ow_tz_converted") else timestampish_columns(df.columns)

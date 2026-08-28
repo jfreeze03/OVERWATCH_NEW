@@ -54,6 +54,7 @@ from app.ui.components import (
     section_header,
     selectable_table,
     served_days,
+    snowsight_object_url,
     snowsight_profile_column,
     status_chips,
     styled_table,
@@ -571,6 +572,14 @@ def render_entity_360(company: str) -> None:
             st.caption(str(catalog_row.get("NOTES")))
     else:
         empty_state("no_data_yet", "This entity has no ownership record yet.")
+    # F27: the native-console complement to this in-app 360 — warehouses,
+    # databases and table objects have stable Snowsight pages; other kinds
+    # (fingerprints, tasks, users) don't, so no link renders for them.
+    _ss_url = snowsight_object_url(kind, key, _PAGE)
+    if _ss_url:
+        # link_button keeps the URL out of markdown parsing entirely — a hostile
+        # or quoted-identifier key can't break the link or smuggle live markdown.
+        st.link_button("Open in Snowsight ↗", _ss_url)
 
     if kind in workbench_sql.ENTITY_METRIC_TYPES:
         scoped_days = int(filters().get("days") or 30)

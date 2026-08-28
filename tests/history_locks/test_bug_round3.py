@@ -25,9 +25,10 @@ def test_r3_2_query_detail_cache_pct_is_percent():
 
 def test_r3_3_snowsight_ctx_not_cached_on_failed_probe():
     cmp = _read("app/ui/components.py")
-    fn = cmp.split("def snowsight_profile_column", 1)[1].split("\ndef ", 1)[0]
-    # a failed/empty probe returns early WITHOUT writing session_state
-    assert "if not org or not acct:\n            " in fn
+    # C35/F27 moved the probe into the shared _snowsight_ctx helper; the R3-3
+    # guarantee (a failed/empty probe is NOT cached) lives there now.
+    fn = cmp.split("def _snowsight_ctx", 1)[1].split("\ndef ", 1)[0]
+    assert "if not org or not acct:" in fn
     i_guard = fn.index("if not org or not acct:")
     i_cache = fn.index('st.session_state["_ow_snowsight_ctx"] = ctx')
     assert i_guard < i_cache                              # the early-return guard precedes the cache write

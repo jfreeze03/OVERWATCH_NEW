@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.308.0 - UI/UX Wave 2 (3): Snowsight links everywhere they belong (2026-08-28)
+
+Third Wave-2 batch of the UI/UX master list (C35 + F27), app-only:
+
+* **C35** the table layer AUTO-attaches the Snowsight query-profile link to any
+  frame carrying real QUERY_IDs - the owner's most-praised affordance stops
+  depending on per-site wiring (the ~17 manual call sites no-op, the CSV gains the
+  same PROFILE column they already export, and blank-id/unresolved-context frames
+  degrade to no link, never a dead one).
+* **F27** warehouses, databases and 3-part table objects get an outbound "Open in
+  Snowsight" jump on Entity 360 - the native-console complement to the in-app
+  drill. Other kinds (fingerprints, tasks, users) have no stable Snowsight page
+  and render no link.
+* The org/account context probe is now ONE shared helper serving both link kinds,
+  and the focused review's two findings are fixed: a failing probe backs off for
+  five minutes instead of re-firing (and error-logging) per table per rerun
+  app-wide (probe=True keeps APP_ERROR_LOG clean; R3-3's never-pin-a-failure
+  intent survives as a retry window), and every URL path segment is
+  percent-encoded with the Entity-360 link rendered via st.link_button - a
+  quoted identifier or hostile entity key can neither break the URL nor smuggle
+  live markdown into the operator console.
+
+8 regression tests in test_uiux_wave2_links.py; 2 relocated locks updated.
+
 ## 4.307.0 - UI/UX Wave 2 (2): ranked tables read at a glance (2026-08-28)
 
 Second Wave-2 batch of the UI/UX master list (F26 + C34's rank half), app-only and

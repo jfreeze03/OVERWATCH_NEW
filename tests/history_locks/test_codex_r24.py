@@ -17,7 +17,10 @@ def test_profile_link_helper_is_shared_and_honest():
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     body = comp.split("def snowsight_profile_column", 1)[1].split("\ndef ", 1)[0]
     assert "app.snowflake.com" in body and "/profile" in body
-    assert "_ow_snowsight_ctx" in body                     # one context fetch per session
+    # C35/F27: the one-per-session context fetch moved into the shared
+    # _snowsight_ctx helper (profile links + object links use the same probe).
+    assert "_snowsight_ctx(page)" in body
+    assert "_ow_snowsight_ctx" in comp.split("def _snowsight_ctx", 1)[1].split("\ndef ", 1)[0]
     assert "return df, {}" in body                         # honest degrade, never a dead link
     assert "LinkColumn" in body
 
