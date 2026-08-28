@@ -205,16 +205,16 @@ cross-cutting risk.
   the title; demote playbook/history/AI to a supporting group. `app/ui/pages/alerts.py:459`
 - [x] **C43 · P1/M · Bulk-select alerts in the event table** (`selection_mode='multi-row'`
   → existing `_bulk_lifecycle_sql`/confirm gate), deleting the duplicate multiselect.
-- [ ] **C44 · P2/S · Advance to the next open item after ACK/resolve/snooze** + a one-line
+- [x] **C44 · P2/S · Advance to the next open item after ACK/resolve/snooze** + a one-line
   durable receipt ("Resolved X — next: Y"). `app/ui/pages/alerts.py`
-- [ ] **F50 · P1/M · Persist the alert re-check verdict + one-click "Resolve as ACTIONED
+- [x] **F50 · P1/M · Persist the alert re-check verdict + one-click "Resolve as ACTIONED
   with this evidence."** Today the "condition clear" result vanishes on the next rerun.
   `app/ui/pages/alerts.py:503`
-- [ ] **F57 · P2/M · Batch the drawer's 4 serial reads into one `run_batch` + named
+- [x] **F57 · P2/M · Batch the drawer's 4 serial reads into one `run_batch` + named
   progress** on first open. `app/ui/pages/alerts.py:477`
 - [x] **F53 · P2/M · Selection summary + severity quick-select before bulk confirm**
   ("6 selected · 2 CRITICAL, 3 HIGH"). `app/ui/pages/alerts.py:769`
-- [ ] **F52 · P2/S · Show the resolved wake time when picking a snooze + a relative
+- [x] **F52 · P2/S · Show the resolved wake time when picking a snooze + a relative
   countdown in the snoozed tray.** `app/ui/pages/alerts.py:715`
 - [ ] **C48 · P1/M · App-wide in-flight action state** (disable initiator, "Executing…",
   block duplicate clicks) — extend beyond lifecycle to unguarded remediation writes.
