@@ -216,7 +216,7 @@ cross-cutting risk.
   ("6 selected · 2 CRITICAL, 3 HIGH"). `app/ui/pages/alerts.py:769`
 - [x] **F52 · P2/S · Show the resolved wake time when picking a snooze + a relative
   countdown in the snoozed tray.** `app/ui/pages/alerts.py:715`
-- [ ] **C48 · P1/M · App-wide in-flight action state** (disable initiator, "Executing…",
+- [x] **C48 · P1/M · App-wide in-flight action state** (disable initiator, "Executing…",
   block duplicate clicks) — extend beyond lifecycle to unguarded remediation writes.
 - [ ] **F54 · P2/S · Dirty-check the Action Center "Save work item"** so no-op saves stop
   writing empty audit rows. `app/ui/pages/workbench.py:180`
