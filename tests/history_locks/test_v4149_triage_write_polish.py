@@ -102,12 +102,12 @@ def test_create_sites_rerun_on_success():
     other rerun) must st.rerun() on ok so the table is the receipt and a second
     click cannot double-insert."""
     wb = _src("app/ui/workbench.py")
-    after_action = wb.split('key="action_new_exec"', 1)[1][:600]
+    after_action = wb.split('key="action_new_exec"', 1)[1][:800]
     assert "notify(ok, msg)" in after_action and "st.rerun()" in after_action
-    after_exp = wb.split('key=f"exp_create_{action_id}"', 1)[1][:600]
+    after_exp = wb.split('key=f"exp_create_{action_id}"', 1)[1][:800]
     assert "notify(ok, msg)" in after_exp and "st.rerun()" in after_exp
     sec = _src("app/ui/security_center.py")
-    after_sec = sec.split('key="sec_exception_create"', 1)[1][:600]
+    after_sec = sec.split('key="sec_exception_create"', 1)[1][:800]
     assert "notify(ok, message)" in after_sec and "st.rerun()" in after_sec
 
 

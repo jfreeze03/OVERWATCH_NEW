@@ -141,7 +141,7 @@ def test_only_resolve_and_snooze_reset_the_selection():
 
 def test_bulk_write_bumps_nonce_and_reruns():
     idx = _SRC.index("ok_u, msg_u = execute_action(call, [upd, aud], page=_PAGE)")
-    block = _SRC[idx:idx + 1200]
+    block = _SRC[idx:idx + 1400]   # C48 stamp line widened the block
     assert '"_ow_alert_sel_nonce"] = _sel_nonce + 1' in block
     assert '"_ow_alert_receipt"' in block
     assert "st.rerun()" in block

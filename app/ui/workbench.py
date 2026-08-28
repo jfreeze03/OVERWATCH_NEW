@@ -56,8 +56,10 @@ from app.ui.components import (
     served_days,
     snowsight_object_url,
     snowsight_profile_column,
+    stamp_write,
     status_chips,
     styled_table,
+    write_gate_open,
 )
 
 _PAGE = "Control Room"
@@ -178,8 +180,10 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         )
         with st.expander("SQL preview"):
             st.code(statement, language="sql")
-        if st.button("Save work item", key=f"action_save_{action_id}", type="primary"):
+        if (st.button("Save work item", key=f"action_save_{action_id}", type="primary")
+                and write_gate_open(f"action_save_{action_id}")):
             ok, msg = execute_statement(statement, page=_PAGE)
+            stamp_write(f"action_save_{action_id}", ok)  # C48
             notify(ok, msg)
             if ok:
                 st.rerun()
@@ -222,8 +226,10 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
                     actor=viewer_name(),
                 )
                 st.code(link_sql, language="sql")
-                if st.button("Add evidence link", key=f"ev_add_{action_id}"):
+                if (st.button("Add evidence link", key=f"ev_add_{action_id}")
+                        and write_gate_open(f"ev_add_{action_id}")):
                     ok, msg = execute_statement(link_sql, page=_PAGE)
+                    stamp_write(f"ev_add_{action_id}", ok)  # C48
                     notify(ok, msg)
                     if ok:
                         st.rerun()
@@ -246,8 +252,10 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
                     actor=viewer_name(),
                 )
                 st.code(exp_sql, language="sql")
-                if st.button("Create experiment", key=f"exp_create_{action_id}"):
+                if (st.button("Create experiment", key=f"exp_create_{action_id}")
+                        and write_gate_open(f"exp_create_{action_id}")):
                     ok, msg = execute_statement(exp_sql, page=_PAGE)
+                    stamp_write(f"exp_create_{action_id}", ok)  # C48
                     notify(ok, msg)
                     # rec48: this INSERT is non-idempotent and the surface does not
                     # otherwise rerun — rerun so the table re-renders as the receipt and
@@ -414,8 +422,10 @@ def render_action_center(company: str) -> None:
                             "Annual": "ANNUAL", "Unspecified": ""}[period_label],
                 )
                 st.code(insert_sql, language="sql")
-                if st.button("Create work item", key="action_new_exec"):
+                if (st.button("Create work item", key="action_new_exec")
+                        and write_gate_open("action_new_exec")):
                     ok, msg = execute_statement(insert_sql, page=_PAGE)
+                    stamp_write("action_new_exec", ok)  # C48
                     notify(ok, msg)
                     # rec48: non-idempotent INSERT with no other rerun — rerun so the
                     # queue re-renders as the receipt and the form/button reset.
@@ -464,8 +474,9 @@ def _render_catalog_editor(kind: str, key: str, row: pd.Series | None, company: 
             notes=notes, actor=viewer_name(),
         )
         st.code(sql, language="sql")
-        if st.button("Save ownership", key="entity_save"):
+        if st.button("Save ownership", key="entity_save") and write_gate_open("entity_save"):
             ok, msg = execute_statement(sql, page=_PAGE)
+            stamp_write("entity_save", ok)  # C48
             notify(ok, msg)
 
 
@@ -616,12 +627,18 @@ def render_entity_360(company: str) -> None:
                  & (watched.df["ENTITY_KEY"].astype(str).str.upper() == key.upper())).any()
         )
         label = str(catalog_row.get("LABEL") or key) if catalog_row is not None else key
-        if st.button("Unwatch" if is_watched else "Watch", key="entity_watch_toggle", type="tertiary"):
+        # C48: encode the toggle direction in both keys — the label flip changes the
+        # widget's element identity (Streamlit drops a queued phantom click from a slow
+        # write), and the per-direction/per-entity latch never swallows a legit undo.
+        _dir = "rm" if is_watched else "add"
+        if (st.button("Unwatch" if is_watched else "Watch", key=f"entity_watch_toggle_{_dir}", type="tertiary")
+                and write_gate_open(f"entity_watch_{_dir}:{kind}:{key}")):
             try:
                 sql = watchlist_sql(viewer, kind, key, label, remove=is_watched)
                 ok, msg = execute_statement(sql, page=_PAGE)
             except ValueError as exc:
                 ok, msg = False, str(exc)
+            stamp_write(f"entity_watch_{_dir}:{kind}:{key}", ok)  # C48
             notify(ok, msg)
             if ok:
                 st.rerun()

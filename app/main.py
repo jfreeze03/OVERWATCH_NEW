@@ -622,6 +622,10 @@ def _topbar_scope() -> None:
 
 def main() -> None:
     _main_started = time.perf_counter()  # full render incl. chrome (Codex #18)
+    # C48: full-script run counter — the write latch's run-sequence check rides
+    # this (a queued duplicate click always lands on the very next run, however
+    # long its cold-cache render takes; fragment reruns don't advance it).
+    st.session_state["_ow_run_seq"] = int(st.session_state.get("_ow_run_seq", 0) or 0) + 1
     # N12: drain any telemetry/usage rows a PRIOR rerun buffered but couldn't
     # flush because st.rerun() unwound past its end-of-render flush (session_state
     # is the durability seam). Cheap no-op when the buffer is empty.

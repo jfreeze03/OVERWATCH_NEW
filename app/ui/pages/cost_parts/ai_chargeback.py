@@ -42,8 +42,10 @@ from app.ui.components import (
     result_caption,
     run_mart_first,
     served_days,
+    stamp_write,
     styled_table,
     with_user_names,
+    write_gate_open,
 )
 
 _PAGE = "Cost & Contract"
@@ -293,11 +295,13 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 )
             script = "\n".join(statements)
             st.code(script, language="sql")
-            if is_operator and st.button("Execute inserts", key="cortex_queue_exec"):
+            if (is_operator and st.button("Execute inserts", key="cortex_queue_exec")
+                    and write_gate_open("cortex_queue_exec")):
                 ok_all, count = True, 0
                 for stmt in statements:
                     ok, _msg = execute_statement(stmt.replace("\n", " "), page=_PAGE)
                     ok_all, count = ok_all and ok, count + int(ok)
+                stamp_write("cortex_queue_exec", ok_all)  # C48
                 (st.success if ok_all else st.error)(f"{count}/{len(statements)} action(s) queued.")
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
@@ -636,8 +640,9 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
                       f"WHERE DEPARTMENT = {sql_literal(str(pick_dept))};")
         if pick_dept:  # rec46: no SQL preview / save until a department is picked
             st.code(stmt_b, language="sql")
-            if st.button("Save budget", key="bud_save"):
+            if st.button("Save budget", key="bud_save") and write_gate_open(f"bud_save:{pick_dept}"):
                 ok, msg = execute_statement(stmt_b, page=_PAGE)
+                stamp_write(f"bud_save:{pick_dept}", ok)  # C48
                 notify(ok, msg if not ok else f"Budget saved for {pick_dept}.")
         else:
             st.caption("Pick a department to preview and save its budget.")
@@ -674,8 +679,10 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
             f"VALUES (s.MAP_TYPE, s.NAME, s.DEPARTMENT, s.OWNER, {identity_sql()});"
         )
         st.code(merge_sql, language="sql")
-        if is_operator and name and department and st.button("Execute mapping", key="cb_map_exec"):
+        if (is_operator and name and department and st.button("Execute mapping", key="cb_map_exec")
+                and write_gate_open(f"cb_map_exec:{name}")):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
+            stamp_write(f"cb_map_exec:{name}", ok)  # C48
             notify(ok, msg)
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")

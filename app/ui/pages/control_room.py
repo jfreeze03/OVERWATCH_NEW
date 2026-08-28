@@ -59,8 +59,10 @@ from app.ui.components import (
     section_header,
     selectable_nav_table,
     selectable_table,
+    stamp_write,
     styled_table,
     with_user_names,
+    write_gate_open,
 )
 from app.ui.workbench import render_action_center, render_entity_360, render_watchlist
 
@@ -715,8 +717,10 @@ def render() -> None:
                         _close = _incident_close_sql(_iid, _kind, _note)
                         st.code(_close, language="sql")
                         if confirm_gate("RESOLVE", "Execute close", key=f"inc_close_{_iid[:8]}",
-                                        prompt="Type RESOLVE to confirm"):
+                                        prompt="Type RESOLVE to confirm"
+                                        ) and write_gate_open(f"inc_close_{_iid[:8]}"):
                             ok, msg = execute_statement(_close, page=_PAGE)
+                            stamp_write(f"inc_close_{_iid[:8]}", ok)  # C48
                             notify(ok, msg)
                             if ok:
                                 log_ui_event("incident_close", page=_PAGE)
@@ -750,11 +754,17 @@ def render() -> None:
                                              str(_prow["COMPANY"]), _pick)
                 st.code(_dec, language="sql")
                 if confirm_gate("DECLARE", "Declare incident + link alerts", key="inc_prop_exec",
-                                prompt="Type DECLARE to confirm", type="primary"):
+                                prompt="Type DECLARE to confirm", type="primary"
+                                ) and write_gate_open("inc_prop_exec"):
                     _ok_all = True
                     for _stmt in [s for s in _dec.split(";") if s.strip()]:
                         _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
                         _ok_all = _ok_all and _ok
+                        if not _ok:
+                            # Stop at the first failure — running INCIDENT_MEMBERS
+                            # after a failed INCIDENTS insert half-applies the declare.
+                            break
+                    stamp_write("inc_prop_exec", _ok_all)  # C48
                     notify(_ok_all, "Incident declared with members linked." if _ok_all
                            else "Declare failed — see the error log.")
                     if _ok_all:

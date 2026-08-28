@@ -48,8 +48,10 @@ from app.ui.components import (
     section_filter_contract,
     selectable_table,
     severity_sort,
+    stamp_write,
     styled_table,
     with_user_names,
+    write_gate_open,
 )
 
 _PAGE = "Alerts"
@@ -758,7 +760,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         _fire = confirm_gate(action, "Execute with audit row",
                                              key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
                                              prompt=f"Type {action} to confirm execution")
-                    if _fire:
+                    if _fire and write_gate_open(f"alert_exec_{event_id[:8]}_{action}"):
                         # V051/V086: one atomic proc (update + audit in a transaction);
                         # the legacy path is the split script, unchanged.
                         if action == "SNOOZE":
@@ -774,6 +776,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         # codex#9: pass the structured statement list straight through — a ';'
                         # inside the note no longer fractures the legacy fallback.
                         ok, msg = execute_action(call, stmts, page=_PAGE)
+                        stamp_write(f"alert_exec_{event_id[:8]}_{action}", ok)  # C48
                         notify(ok, msg)
                         if ok:
                             from app.ui.components import log_ui_event
@@ -985,10 +988,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                      else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
                                      else "CLUSTER_RANGE")
                         st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
-                        if confirm_gate(wh_inline, "Execute + audit + book estimate",
-                                        key=f"clf_exec_{event_id[:8]}",
-                                        prompt="Type the warehouse name to confirm",
-                                        object_name=True):
+                        if (confirm_gate(wh_inline, "Execute + audit + book estimate",
+                                         key=f"clf_exec_{event_id[:8]}",
+                                         prompt="Type the warehouse name to confirm",
+                                         object_name=True)
+                                and write_gate_open(f"clf_exec_{event_id[:8]}")):
                             ok, msg = execute_statement(stmt_cl, page=_PAGE)
                             execute_statement(
                                 f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -1008,6 +1012,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                     f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
                                     f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}",
                                     page=_PAGE)
+                            stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
                             notify(ok, msg)
                     else:
                         st.caption("Copy the SQL; executing needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
@@ -1052,6 +1057,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 _expl_prompt = st.session_state.get(_expl_prompt_key)
                 if _expl_prompt:
                     def _append_hypothesis(answer: str) -> tuple[bool, str]:
+                        # C48 re-verify fix: content-scoped key — regenerate-and-
+                        # save-again inside this fragment is a NEW hypothesis, not
+                        # a duplicate; only a byte-identical re-save is swallowed.
+                        _ai_key = f"ai_save_{event_id[:8]}:{hash(answer) & 0xFFFFFF}"
+                        if not write_gate_open(_ai_key):  # C48
+                            return True, ""
                         appended = (
                             f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
                             f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
@@ -1059,6 +1070,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             f"WHERE EVENT_ID = {sql_literal(event_id)};"
                         )
                         ok_u, msg_u = execute_statement(appended, page=_PAGE)
+                        stamp_write(_ai_key, ok_u)  # C48
                         return ok_u, (msg_u if not ok_u else "Hypothesis stored on the event.")
                     ai_evaluation_panel(
                         key=f"alert_expl_{event_id[:8]}",
@@ -1091,10 +1103,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             b_note = st.text_input("Bulk note (applies to every selected event)",
                                    key=f"alert_bulk_note_{_sel_nonce}", max_chars=500)
             _bulk_ids = _bdf["EVENT_ID"].astype(str).tolist()
-            if confirm_gate(f"BULK {b_action}", f"Execute bulk {b_action}",
-                            key=f"alert_bulk_exec_{_sel_nonce}",
-                            prompt=f"Type BULK {b_action} to confirm ({len(_bulk_ids)} selected)",
-                            enabled=bool(_bulk_ids), type="primary"):
+            if (confirm_gate(f"BULK {b_action}", f"Execute bulk {b_action}",
+                             key=f"alert_bulk_exec_{_sel_nonce}",
+                             prompt=f"Type BULK {b_action} to confirm ({len(_bulk_ids)} selected)",
+                             enabled=bool(_bulk_ids), type="primary")
+                    and write_gate_open(f"alert_bulk_exec_{_sel_nonce}")):
                 # V051: one atomic proc for the whole selection; the
                 # pre-V051 legacy path is the set-based 2-statement pair.
                 upd, aud = _bulk_lifecycle_sql(_bulk_ids, b_action, b_note, b_kind)
@@ -1103,6 +1116,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         f"{sql_literal(b_note)}, {sql_literal(b_kind)}, {identity_sql()}, "
                         f"{sql_literal(idempotency_key('ALERT_BULK_' + b_action, ''.join(_bulk_ids)))})")
                 ok_u, msg_u = execute_action(call, [upd, aud], page=_PAGE)
+                stamp_write(f"alert_bulk_exec_{_sel_nonce}", ok_u)  # C48
                 notify(ok_u, f"Bulk {b_action}: {len(_bulk_ids)} event(s) — {msg_u}")
                 if ok_u:
                     from app.ui.components import log_ui_event
@@ -1160,13 +1174,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     _snz_pick = st.multiselect("Wake now (un-snooze early)", list(_snz_opts),
                                                key="alert_unsnooze_pick")
                     _uids = [_snz_opts[c] for c in _snz_pick]
-                    if st.button("Wake selected now", key="alert_unsnooze_exec",
-                                 disabled=not _uids, type="primary"):
+                    # C48 re-verify fix: scope the latch by the SELECTION — inside
+                    # this fragment the run seq never advances, so a bare key would
+                    # swallow "wake these… and that one too" for the whole backstop.
+                    _unsz_key = "alert_unsnooze:" + "".join(str(e) for e in _uids)[:64]
+                    if (st.button("Wake selected now", key="alert_unsnooze_exec",
+                                  disabled=not _uids, type="primary")
+                            and write_gate_open(_unsz_key)):
                         # hours=0 tells SP_ALERT_SNOOZE to un-snooze now (restore prior status).
                         call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
                                 f"{sql_literal(','.join(str(e) for e in _uids))}, 0, '', {identity_sql()}, "
                                 f"{sql_literal(idempotency_key('ALERT_UNSNOOZE', ''.join(_uids)))})")
                         ok_s, msg_s = execute_action(call, _unsnooze_stmts(_uids), page=_PAGE)
+                        stamp_write(_unsz_key, ok_s)  # C48
                         notify(ok_s, f"Un-snooze: {len(_uids)} event(s) — {msg_s}")
                         if ok_s:
                             from app.ui.components import log_ui_event

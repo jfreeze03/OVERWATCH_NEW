@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 
 import streamlit as st
 
@@ -2077,6 +2078,91 @@ def blast_radius(warehouse: str, page: str) -> None:
         + ". Review before executing."
     )
     styled_table(with_user_names(df, page), height=TABLE_H_SM)   # show WHO you'd interrupt
+
+
+# C48: a click during a slow write QUEUES a second rerun, and on it the same
+# button/gate returns True again unless the key changed or the row vanished —
+# so an un-latched click block re-executes: double-booked SAVINGS_LEDGER rows,
+# duplicate ACTION_QUEUE items, a second incident under a fresh uuid. Session
+# runs are SERIAL, so the queued duplicate always lands on the run right after
+# the stamping one — however long that run takes (a write's global cache bump
+# can cold-start the whole page render, far past any wall-clock grace). The
+# run-sequence check is therefore the load-bearing swallow; wall-clock covers
+# only the impatient re-click across a repaint, and the backstop bounds a
+# stale latch in fragment-heavy sessions where the seq never advances.
+_WRITE_GRACE_S = 6.0
+_WRITE_BACKSTOP_S = 120.0
+
+
+def _run_seq() -> int:
+    """Full-script run counter (bumped at the top of main(); fragment-scoped
+    reruns deliberately do NOT advance it)."""
+    return int(st.session_state.get("_ow_run_seq", 0) or 0)
+
+
+def write_gate_open(key: str, backstop: float = _WRITE_BACKSTOP_S) -> bool:
+    """C48 duplicate-click latch: True unless this click block just ran.
+
+    Call it as the LAST condition of a write block's click gate
+    (``if _fire and write_gate_open("sizing"):``) and pair it with
+    ``stamp_write`` at the end of the block. A swallowed duplicate gets an
+    explanatory toast — never a silent nothing, never an error banner.
+
+    OPENING THE GATE ARMS THE LATCH IMMEDIATELY — before the write. A
+    duplicate click on a NON-fragment page does not wait its turn: Streamlit
+    PREEMPTS the running script at its next yield point (RerunException is
+    BaseException-based, sailing past every except Exception), which lands
+    after the Snowflake write committed but before any end-of-block stamp —
+    an arm-at-end latch never arms in exactly the scenario it exists for.
+    ``stamp_write`` then settles the armed entry: refreshed on success,
+    DELETED on failure. Sites where a same-key repeat is legitimate soon
+    (idempotent cancels on an emergency surface) pass a shorter ``backstop``.
+    """
+    latch = st.session_state.get("_ow_write_latch")
+    latch = dict(latch) if isinstance(latch, dict) else {}
+    entry = latch.get(key)
+    now = time.monotonic()
+    try:
+        if isinstance(entry, tuple) and len(entry) == 2:
+            elapsed = now - float(entry[0])
+            if elapsed < float(backstop) and (
+                    _run_seq() <= int(entry[1]) + 1 or elapsed < _WRITE_GRACE_S):
+                try:
+                    st.toast("That action just ran — click again to repeat it.", icon="⏳")
+                except Exception:  # noqa: BLE001 - the swallow itself must never break a page
+                    pass
+                return False
+    except (TypeError, ValueError):
+        pass  # malformed entry from an older shape — treat as absent
+    latch[key] = (now, _run_seq())   # arm BEFORE the write
+    st.session_state["_ow_write_latch"] = latch
+    return True
+
+
+def stamp_write(key: str, ok: bool = True) -> None:
+    """C48: settle the entry ``write_gate_open`` armed — place immediately
+    after the click block's LAST execute_* call (after conditional
+    audit/ledger follow-ons), and always BEFORE any st.rerun(), which raises
+    and would skip the settle. Success refreshes the entry (the grace clause
+    runs from write END); failure DELETES it, so the operator's natural retry
+    re-executes instead of reading 'just ran'."""
+    latch = st.session_state.get("_ow_write_latch")
+    latch = dict(latch) if isinstance(latch, dict) else {}
+    if not ok:
+        latch.pop(key, None)
+        st.session_state["_ow_write_latch"] = latch
+        return
+    now = time.monotonic()
+
+    def _fresh(v: object) -> bool:
+        try:
+            return isinstance(v, tuple) and now - float(v[0]) < _WRITE_BACKSTOP_S
+        except (TypeError, ValueError):
+            return False
+
+    latch = {k: v for k, v in latch.items() if _fresh(v)}
+    latch[key] = (now, _run_seq())
+    st.session_state["_ow_write_latch"] = latch
 
 
 def notify(ok: bool, msg: str) -> None:

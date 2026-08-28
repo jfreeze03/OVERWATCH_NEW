@@ -71,9 +71,11 @@ from app.ui.components import (
     selectable_table,
     served_days,
     snowsight_profile_column,
+    stamp_write,
     styled_table,
     toggle_cost_hint,
     with_user_names,
+    write_gate_open,
 )
 
 _PAGE = "Cost & Contract"
@@ -504,8 +506,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
                 from app.logic import remediation as _remediation
                 st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))
-                if confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
-                                prompt="Type the warehouse name to confirm resize", object_name=True):
+                if (confirm_gate(str(srow["WAREHOUSE_NAME"]), "Execute resize + log", key="sizing",
+                                 prompt="Type the warehouse name to confirm resize", object_name=True)
+                        and write_gate_open("sizing")):
                     ok, msg = execute_statement(stmt_sz, page=_PAGE)
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -524,6 +527,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             f"'ESTIMATED', {sql_number(est_sz)}, {sql_literal(stmt_sz)}, "
                             "'Booked from sizing simulator; verify with a proof run on the Savings ledger.', "
                             f"'RESIZE', {sql_literal(str(srow['WAREHOUSE_NAME']))}", page=_PAGE)
+                    stamp_write("sizing", ok)  # C48
                     notify(ok, msg)
             _whatif_panel(sized, sizing_days, rate)
             result_caption(prof_res)
@@ -1272,8 +1276,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                             "failsafe is NOT included: it drains on a fixed 7-day schedule regardless of "
                             "this setting."
                         )
-                        if confirm_gate(str(wrow["TABLE_NAME"]), "Execute retention change + log", key="waste",
-                                        prompt="Type the table name to confirm", object_name=True):
+                        if (confirm_gate(str(wrow["TABLE_NAME"]), "Execute retention change + log", key="waste",
+                                         prompt="Type the table name to confirm", object_name=True)
+                                and write_gate_open("waste")):
                             ok, msg = execute_statement(stmt_w, page=_PAGE)
                             execute_statement(
                                 f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -1289,6 +1294,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                     f"'ESTIMATED', {sql_number(est_w)}, {sql_literal(stmt_w)}, "
                                     "'Booked from storage-waste scan.', "
                                     f"'RETENTION', {sql_literal('.'.join([str(wrow['DATABASE_NAME']), str(wrow['SCHEMA_NAME']), str(wrow['TABLE_NAME'])]))}", page=_PAGE)
+                            stamp_write("waste", ok)  # C48
                             notify(ok, msg)
 
         st.markdown("**Automatic clustering spend (per table)**")
@@ -1421,8 +1427,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             if stmt:
                 st.code(stmt, language="sql")
                 if is_operator:
-                    if confirm_gate(wh_pick, "Execute + log + book estimated savings", key="remed",
-                                    prompt="Type the warehouse name to confirm execution", object_name=True):
+                    if (confirm_gate(wh_pick, "Execute + log + book estimated savings", key="remed",
+                                     prompt="Type the warehouse name to confirm execution", object_name=True)
+                            and write_gate_open("remed")):
                         ok, msg = execute_statement(stmt, page=_PAGE)
                         log_sql = (
                             f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -1443,6 +1450,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                 f"{sql_literal('AUTO_SUSPEND' if fix_kind.startswith('Tighten') else 'SCHEDULE')}, {sql_literal(wh_pick)}"
                             )
                             execute_statement(ledger_sql, page=_PAGE)
+                        stamp_write("remed", ok)  # C48
                         notify(ok, msg)
                 else:
                     st.caption("Copy the SQL freely; executing from the app requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
@@ -1503,8 +1511,10 @@ def _savings_tab() -> None:
             f"VALUES ({sql_literal(desc)}, {sql_literal(LEDGER_ESTIMATED)}, {sql_number(est)}, {sql_literal(proof)});"
         )
         st.code(insert_sql, language="sql")
-        if is_operator and desc and st.button("Execute insert", key="ledger_add_exec"):
+        if (is_operator and desc and st.button("Execute insert", key="ledger_add_exec")
+                and write_gate_open("ledger_add_exec")):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
+            stamp_write("ledger_add_exec", ok)  # C48
             notify(ok, msg)
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app execution needs an admin profile.")
@@ -1534,6 +1544,8 @@ def _savings_tab() -> None:
                 st.code(update_sql, language="sql")
                 if not allowed:
                     st.warning(why)
-                elif is_operator and st.button("Execute verification", key="ledger_verify_exec"):
+                elif (is_operator and st.button("Execute verification", key="ledger_verify_exec")
+                        and write_gate_open("ledger_verify_exec")):
                     ok, msg = execute_statement(update_sql, page=_PAGE)
+                    stamp_write("ledger_verify_exec", ok)  # C48
                     notify(ok, msg)

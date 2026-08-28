@@ -32,9 +32,11 @@ from app.ui.components import (
     section_filter_contract,
     section_header,
     selectable_table,
+    stamp_write,
     styled_table,
     user_display_map,
     with_user_names,
+    write_gate_open,
 )
 
 _PAGE = "Cost & Contract"
@@ -97,8 +99,9 @@ def _unmapped_mapper(df, is_operator: bool) -> None:
             f"Maps **{pick}** ({scope_type}) → **{company_choice}**. Go-forward facts stamp "
             "immediately; the nightly reconcile re-stamps the trailing 3 days. Older history "
             "keeps its original stamp until a full loader backfill re-run.")
-        if is_operator and st.button("Apply mapping", key="unmap_apply"):
+        if is_operator and st.button("Apply mapping", key="unmap_apply") and write_gate_open(f"unmap_apply:{pick}:{company_choice}"):
             ok, msg = execute_statement(merge_sql.replace("\n", " "), page=_PAGE)
+            stamp_write(f"unmap_apply:{pick}:{company_choice}", ok)  # C48
             notify(ok, msg if not ok else f"Mapped {pick} → {company_choice}.")
         elif not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS — in-app "

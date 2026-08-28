@@ -1,5 +1,64 @@
 # Changelog
 
+## 4.310.0 - UI/UX Wave 2 (5): C48 app-wide in-flight action state (2026-08-28)
+
+Every operator write in the app now shows an honest in-flight state and is
+protected against duplicate-click double-execution. Built from a 10-agent
+audit that cataloged all 42 execute_* call sites (32 click blocks) and their
+duplicate-click exposure - 12 HIGH (double-booked SAVINGS_LEDGER rows,
+duplicate ACTION_QUEUE items, a second incident under a fresh uuid).
+
+* **In-flight state at the one seam every write crosses**: execute_statement /
+  execute_action / execute_cancel_query wrap their round-trip in a spinner
+  ("Executing write..." / "Executing action..." / "Cancelling query...") - the
+  initiating button freezes for the round-trip and the spinner is what the
+  operator watches instead.
+* **Duplicate-click latch on all 32 write click blocks**: write_gate_open(key)
+  as the click gate's last condition + stamp_write(key, ok) after the block's
+  last write (always before any st.rerun). A swallowed duplicate gets an
+  explanatory toast ("That action just ran - click again to repeat it") -
+  never a silent nothing, never an error banner.
+* Bonus surgical fix from the audit: the declare-incident loop now stops at
+  the first failed statement (INCIDENT_MEMBERS never runs after a failed
+  INCIDENTS insert).
+
+Two adversarial review rounds hardened the mechanism (18 + 3 agents; 10 + 9
+confirmed findings, all fixed pre-commit):
+
+* **HIGH (round 2)** a duplicate click on a non-fragment page PREEMPTS the
+  running script at its next yield point - after the Snowflake write committed
+  but before any end-of-block stamp - so an arm-at-end latch never armed in
+  exactly the scenario it exists for. The gate now ARMS THE LATCH ON OPEN
+  (before the write); stamp_write settles it: refreshed on success, DELETED on
+  failure so a failed write's natural retry re-executes.
+* **HIGH (round 1)** wall-clock grace alone loses to the write's own global
+  cache invalidation (the queued duplicate lands on the NEXT run however long
+  its cold render takes) - the latch is run-sequence aware: main() bumps a
+  full-run counter (fragment reruns deliberately do not), and the seq clause
+  is the load-bearing swallow with wall-clock as the impatient-reclick
+  backstop and a 120s stale-latch bound.
+* **HIGH (round 2)** the emergency tab runs inside a fragment/dialog where the
+  run seq never advances - a bare "emg" latch key would have locked out EVERY
+  subsequent emergency action for 2 minutes after one success. The lever key
+  now scopes by lever+target, and both emergency surfaces carry a short 15s
+  backstop (idempotent levers/cancels, back-to-back actions under pressure).
+* **MED** fixed keys swallowed genuinely distinct actions: the alerts decide
+  bar now scopes by event+action (ack -> investigate -> resolve on one event
+  flows freely), the kill-switch by query id, budget/mapping/company-scope
+  saves by target, the un-snooze by selection, the AI-hypothesis save by
+  content, and the entity watch toggle encodes its direction in the WIDGET key
+  (the label flip drops a queued phantom click at element-identity level)
+  plus a direction+entity latch key.
+* **MED** stamps are success-only and the latch is a per-key dict (an
+  interleaved write on another block can never evict a pending swallow);
+  malformed entries from older sessions parse defensively.
+* Accepted residuals (documented): a mid-write preemption that loses the
+  aborted run's audit/ledger follow-ons while the primary write stands; a
+  deliberate same-key re-click on the immediately-next run is swallowed once
+  (the toast names the recovery); the declare-incident INCIDENTS insert stays
+  unguarded (a NOT EXISTS guard would orphan members on the shared-uuid
+  no-op path).
+
 ## 4.309.0 - UI/UX Wave 2 (4): alerts triage momentum (2026-08-28)
 
 Fourth Wave-2 batch of the UI/UX master list (C44 + F50 + F57 + F52), app-only -

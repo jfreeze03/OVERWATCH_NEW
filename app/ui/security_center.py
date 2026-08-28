@@ -36,7 +36,9 @@ from app.ui.components import (
     result_caption,
     section_header,
     selectable_table,
+    stamp_write,
     styled_table,
+    write_gate_open,
 )
 
 _PAGE = "Security"
@@ -287,8 +289,10 @@ def render_security_overview(company: str) -> None:
                                "open one from Action Center instead of duplicating, or continue if "
                                "this is genuinely separate.")
             st.code(statement, language="sql")
-            if st.button("Create work item", key="sec_exception_create"):
+            if (st.button("Create work item", key="sec_exception_create")
+                    and write_gate_open("sec_exception_create")):
                 ok, message = execute_statement(statement, page=_PAGE)
+                stamp_write("sec_exception_create", ok)  # C48
                 notify(ok, message)
                 # rec48: non-idempotent INSERT into OVERWATCH's own queue with no other
                 # rerun — rerun so the surface refreshes and the form/button reset, or a
@@ -317,9 +321,11 @@ def render_security_overview(company: str) -> None:
                 st.warning(str(exc))
             else:
                 st.code(_prule, language="sql")
-                if is_operator() and st.button("Create posture monitor rule",
-                                               key="sec_posture_create"):
+                if (is_operator() and st.button("Create posture monitor rule",
+                                                key="sec_posture_create")
+                        and write_gate_open("sec_posture_create")):
                     ok, message = execute_statement(_prule, page=_PAGE)
+                    stamp_write("sec_posture_create", ok)  # C48
                     notify(ok, message)
                     if ok:
                         st.rerun()

@@ -1248,9 +1248,13 @@ def execute_statement(sql: str, *, page: str) -> tuple[bool, str]:
     if not ok:
         return False, why
     try:
-        session = get_session()
-        apply_query_tag(session, build_query_tag(page=page, tier="write"))
-        session.sql(sql).collect()
+        # C48: the in-flight state lives HERE, at the one seam every write
+        # crosses — the initiating button freezes for the round-trip, and the
+        # spinner is the honest "Executing…" the operator watches instead.
+        with st.spinner("Executing write…"):
+            session = get_session()
+            apply_query_tag(session, build_query_tag(page=page, tier="write"))
+            session.sql(sql).collect()
         # r24 #8 + r27 #14: a successful action invalidates cached reads —
         # domain-scoped when the write target is a known app table, global
         # otherwise — so post-action freshness never depends on live tiers.
@@ -1275,9 +1279,10 @@ def execute_cancel_query(query_id: str, *, page: str) -> tuple[bool, str]:
         return False, f"Invalid query id: {query_id!r}"
     from app.core.sqlsafe import sql_literal
     try:
-        session = get_session()
-        apply_query_tag(session, build_query_tag(page=page, tier="write"))
-        session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})").collect()
+        with st.spinner("Cancelling query…"):   # C48 in-flight state
+            session = get_session()
+            apply_query_tag(session, build_query_tag(page=page, tier="write"))
+            session.sql(f"SELECT SYSTEM$CANCEL_QUERY({sql_literal(qid)})").collect()
         return True, f"Cancel requested for {qid}."
     except Exception as exc:
         record_error(page, exc, context=f"execute_cancel_query: {qid}")
@@ -1336,9 +1341,10 @@ def execute_action(call_sql: str, fallback: list[str], *, page: str) -> tuple[bo
     if not ok:
         return False, why
     try:
-        session = get_session()
-        apply_query_tag(session, build_query_tag(page=page, tier="write"))
-        rows = session.sql(call_sql).collect()
+        with st.spinner("Executing action…"):   # C48 in-flight state
+            session = get_session()
+            apply_query_tag(session, build_query_tag(page=page, tier="write"))
+            rows = session.sql(call_sql).collect()
         verdict = str(rows[0][0]) if rows and rows[0] else ""
         _bump_refresh(call_sql)
         # codex#7: ALLOWLIST explicit success verdicts. Only OK / VERIFIED / DUPLICATE

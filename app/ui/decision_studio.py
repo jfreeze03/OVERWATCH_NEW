@@ -51,7 +51,9 @@ from app.ui.components import (
     section_header,
     selectable_nav_table,
     selectable_table,
+    stamp_write,
     styled_table,
+    write_gate_open,
 )
 
 _PAGE = "Decision Studio"
@@ -234,8 +236,10 @@ def _slo_editor() -> None:
                 notes=notes, actor=viewer_name(),
             )
             st.code(statement, language="sql")
-            if st.button("Create objective", key="slo_new_execute", type="primary"):
+            if (st.button("Create objective", key="slo_new_execute", type="primary")
+                    and write_gate_open("slo_new_execute")):
                 ok, message = execute_statement(statement, page=_PAGE)
+                stamp_write("slo_new_execute", ok)  # C48
                 notify(ok, message)
                 if ok:
                     st.rerun()
@@ -931,9 +935,11 @@ def _experiments() -> None:
             st.warning("Can't verify without proof — still needs: " + ", ".join(_proof_gaps)
                        + ". A verified experiment books the savings ledger and feeds the "
                        "'Verified savings' headline, so it must be evidence-backed.")
-        if st.button("Save experiment", key=f"experiment_save_{experiment_id}",
-                     type="primary", disabled=bool(_proof_gaps)):
+        if (st.button("Save experiment", key=f"experiment_save_{experiment_id}",
+                      type="primary", disabled=bool(_proof_gaps))
+                and write_gate_open(f"experiment_save_{experiment_id}")):
             ok, message = execute_statement(statement, page=_PAGE)
+            stamp_write(f"experiment_save_{experiment_id}", ok)  # C48
             notify(ok, message)
             if ok:
                 st.rerun()

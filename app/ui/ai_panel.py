@@ -51,7 +51,8 @@ def ai_evaluation_panel(*, key: str, prompt: str, settings: dict, page: str,
                 download_text_button("Download evaluation (.txt)", answer, f"overwatch_ai_{key}.txt")
                 if on_save is not None and st.button(save_label, key=f"ai_save_{key}"):
                     ok_s, msg_s = on_save(answer)
-                    notify(ok_s, msg_s)
+                    if msg_s:
+                        notify(ok_s, msg_s)
             else:
                 st.error(f"AI evaluation failed: {answer}")
                 st.caption("Check that the role has SNOWFLAKE.CORTEX_USER and the model is enabled in this region.")

@@ -88,9 +88,11 @@ from app.ui.components import (
     selectable_table,
     served_days,
     snowsight_profile_column,
+    stamp_write,
     status_chips,
     styled_table,
     with_user_names,
+    write_gate_open,
 )
 
 _PAGE = "Operations"
@@ -902,9 +904,11 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
             f"{sql_literal(table.upper())}, {max_age}, {sql_literal(owner)});"
         )
         st.code(insert_sql, language="sql")
-        if is_operator and st.button("Execute insert", key="sla_exec",
-                                     disabled=not (db and schema and table)):
+        if (is_operator and st.button("Execute insert", key="sla_exec",
+                                      disabled=not (db and schema and table))
+                and write_gate_open("sla_exec")):
             ok, msg = execute_statement(insert_sql, page=_PAGE)
+            stamp_write("sla_exec", ok)  # C48
             notify(ok, msg)
         if not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
@@ -2010,9 +2014,11 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
         else:
             st.caption("Select a change above to load its 28-day credits/day history.")
     if is_operator:
-        if st.button("Run warehouse scan now", key="whchg_scan_now",
-                     help="Snapshots settings, registers diffs, and re-evaluates verdicts immediately."):
+        if (st.button("Run warehouse scan now", key="whchg_scan_now",
+                      help="Snapshots settings, registers diffs, and re-evaluates verdicts immediately.")
+                and write_gate_open("whchg_scan_now")):
             ok, msg = execute_statement(change_impact_sql.run_wh_scan_call(), page=_PAGE)
+            stamp_write("whchg_scan_now", ok)  # C48
             notify(ok, msg)
     else:
         st.caption("The warehouse scan runs daily at 06:40; admins can trigger it on demand.")
@@ -2118,9 +2124,11 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                 result_caption(hist)
 
     if is_operator:
-        if st.button("Run change-impact scan now", key="chg_scan_now",
-                     help="Registers fresh changes and re-evaluates verdicts without waiting for the daily task."):
+        if (st.button("Run change-impact scan now", key="chg_scan_now",
+                      help="Registers fresh changes and re-evaluates verdicts without waiting for the daily task.")
+                and write_gate_open("chg_scan_now")):
             ok, msg = execute_statement(change_impact_sql.run_scan_call(), page=_PAGE)
+            stamp_write("chg_scan_now", ok)  # C48
             notify(ok, msg)
     else:
         st.caption("The scan runs daily at 06:50; admins can also trigger it on demand.")
@@ -2251,9 +2259,17 @@ def _emergency_tab(is_operator: bool) -> None:
 
         def _emg_confirm() -> None:
             _emg_preview()
+            # C48 re-verify fix: the latch key MUST scope by lever+target — this
+            # runs inside a fragment/dialog where the run seq never advances, so
+            # a bare "emg" key would lock out EVERY subsequent emergency action
+            # for the whole backstop after one success. Short backstop: levers
+            # are idempotent state-sets and this surface exists for back-to-back
+            # actions under pressure.
+            _emg_key = f"emg:{action}:{stmt[:64]}"
             # rec42: one type-to-confirm gate (input + button); EMERGENCY matches EXACT case.
-            if confirm_gate("EMERGENCY", "Execute + audit", key="emg",
-                            prompt="Type EMERGENCY to confirm execution", enabled=is_operator):
+            if (confirm_gate("EMERGENCY", "Execute + audit", key="emg",
+                             prompt="Type EMERGENCY to confirm execution", enabled=is_operator)
+                    and write_gate_open(_emg_key, backstop=15.0)):
                 ok, msg = execute_statement(stmt, page=_PAGE)
                 log_sql = (
                     f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -2262,6 +2278,7 @@ def _emergency_tab(is_operator: bool) -> None:
                     f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}"
                 )
                 execute_statement(log_sql, page=_PAGE)
+                stamp_write(_emg_key, ok)  # C48
                 notify(ok, msg)
 
         if not is_operator:
@@ -2321,8 +2338,12 @@ def _emergency_extras(is_operator: bool) -> None:
                 qrow = rq.df.iloc[int(sel_rq)]
                 qid = str(qrow["QUERY_ID"])
                 st.code(f"SELECT SYSTEM$CANCEL_QUERY('{qid}');", language="sql")
+                # C48: short backstop — SYSTEM$CANCEL_QUERY is async and idempotent;
+                # re-cancelling a query that survived the first request must not
+                # sit behind the default 120s bound (fragment seq never advances).
                 if confirm_gate("CANCEL", "Cancel query + audit", key="emg_rq",
-                                prompt="Type CANCEL to confirm"):
+                                prompt="Type CANCEL to confirm") and write_gate_open(
+                                    f"emg_rq_{qid[:8]}", backstop=15.0):
                     ok, msg = execute_cancel_query(qid, page=_PAGE)   # B2: SELECT is outside the write allow-list
                     execute_statement(
                         f"INSERT INTO {core_object('REMEDIATION_LOG')} "
@@ -2331,6 +2352,7 @@ def _emergency_extras(is_operator: bool) -> None:
                         f"{sql_literal('SYSTEM$CANCEL_QUERY ' + qid)}, "
                         f"{sql_literal('EXECUTED' if ok else 'FAILED')}, {sql_literal(msg[:2000])}, {identity_sql()}",
                         page=_PAGE)
+                    stamp_write(f"emg_rq_{qid[:8]}", ok)  # C48
                     notify(ok, msg)
 
 

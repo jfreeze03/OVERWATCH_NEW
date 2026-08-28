@@ -39,8 +39,10 @@ from app.ui.components import (
     section_filter_contract,
     selectable_table,
     snowsight_profile_column,
+    stamp_write,
     styled_table,
     with_user_names,
+    write_gate_open,
 )
 from app.ui.sizing import TABLE_H_LG
 
@@ -440,8 +442,9 @@ def _settings_tab(is_operator: bool) -> None:
     if is_operator:
         # rec42: one type-to-confirm gate (setting KEY, EXACT case) + action button.
         if confirm_gate(key, "Execute update", key="adm_setting",
-                        prompt="Type the setting key to confirm"):
+                        prompt="Type the setting key to confirm") and write_gate_open("adm_setting"):
             ok, msg = execute_statement(update_sql, page=_PAGE)
+            stamp_write("adm_setting", ok)  # C48
             notify(ok, msg)
             if ok:
                 st.caption("New value takes effect within one cache cycle (≤5 min) or after Refresh.")
