@@ -20,7 +20,7 @@ visible payoff · `P2` coherence/craft · `P3` nit. **Effort** `S`/`M`/`L`.
 
 ## ⚠ Fix first — interaction correctness (not cosmetic)
 
-- [ ] **F51 · P0/M · Alerts drawer rebinds to the wrong event after a write.**
+- [x] **F51 · P0/M · Alerts drawer rebinds to the wrong event after a write.**
   The open-events drawer selects by a **positional** `st.dataframe` index; after
   ACK/RESOLVE/SNOOZE the 500-row feed re-reads smaller, every row below shifts up, and
   the same index silently binds the drawer to a *different* event — while the per-event
@@ -40,36 +40,36 @@ cross-cutting risk.
   when clean. Thread each section's already-computed row/finding count into
   `section_header(health=…)`; when amber/red, also tint the icon and count badge (today
   they stay neutral, so severity rests on one thin left border). `app/theme.py:113-122`
-- [ ] **F13 · P1/S · Neutralize the default KPI stripe; reserve hue for real severity.**
+- [x] **F13 · P1/S · Neutralize the default KPI stripe; reserve hue for real severity.**
   `st.metric` cards get a teal→blue gradient stripe *by default* that looks semantic but
   isn't; `metric_card_html` gets a neutral slate stripe. A viewer can never learn
   "colored stripe = severity". Make the resting stripe neutral on **both**, tint only on
   real severity, align size/padding. `app/theme.py:59-91`; `app/ui/components.py:280-337`
-- [ ] **C22 · P1/S · Remove hover elevation from non-interactive cards.** Hover
+- [x] **C22 · P1/S · Remove hover elevation from non-interactive cards.** Hover
   box-shadow/border on `.ow-card`/`stMetric` implies clickability no card has. Delete the
   `:hover` rules (and the dead transition); keep hover only if a card becomes a button.
   `app/theme.py:230-244`
-- [ ] **F16 · P2/S · Reconcile severity hues between tables and charts.** `LOW`/`INFO`
+- [x] **F16 · P2/S · Reconcile severity hues between tables and charts.** `LOW`/`INFO`
   are slate in `STATUS_COLOR_MAP` but blue/slate in `SEVERITY_HUES` — an INFO event is
   grey in a table and blue in the chart beside it. One hue per severity name, one shared
   map. `app/ui/status_colors.py:48` vs `app/ui/palette.py:49`
 
 ### Accessibility
-- [ ] **F14 · P1/S · Focus-visible rings on every interactive control.** Keyboard focus
+- [x] **F14 · P1/S · Focus-visible rings on every interactive control.** Keyboard focus
   is styled only on the section pill-group and help badge; primary/Execute buttons,
   sidebar nav radios, and scope selects have **no** focus rule. Add one shared
   `:focus-visible` (2px accent, offset). This is a keyboard-heavy DBA tool. `app/theme.py:230-232`
-- [ ] **C28 · P1/S · KPI help target 18→24px.** Raise `.ow-help` to 24×24, keep the
+- [x] **C28 · P1/S · KPI help target 18→24px.** Raise `.ow-help` to 24×24, keep the
   focus ring + tooltip anchoring, don't let it push the card title. `app/theme.py:98`
-- [ ] **F21 · P2/S · Stop the KPI help tooltip clipping off-screen.** 300px tooltip
+- [x] **F21 · P2/S · Stop the KPI help tooltip clipping off-screen.** 300px tooltip
   anchored `left:0` overflows the right-edge/last-wrapped card (exactly where dense $
   cards sit). Right-anchor or clamp into the viewport. `app/theme.py:104-111`
-- [ ] **F29-a11y (C29) · P2/S · Mark decorative sparklines `aria-hidden`.** The
+- [x] **F29-a11y (C29) · P2/S · Mark decorative sparklines `aria-hidden`.** The
   number+delta already convey the trend; add `aria-hidden="true" focusable="false"` to
   `spark_svg`. `app/ui/components.py:241`
 
 ### Orientation & chrome
-- [ ] **F1 · P1/S · Reconcile nav labels with the page titles they open.** Sidebar says
+- [x] **F1 · P1/S · Reconcile nav labels with the page titles they open.** Sidebar says
   "Brief" → page H1 says "Morning brief"; "Security" → "Security & Governance"; "Ask" →
   "Ask OVERWATCH". The sidebar label *is* the "you are here" anchor — make click target
   and landing H1 read identically. `app/main.py:75`; `brief.py:73`; `security.py:1379`
@@ -77,7 +77,7 @@ cross-cutting risk.
   `filter_contract_text` already computes applies/partial/ignored — render the blue
   banner only when partial/ignored is non-empty; tuck the full "Applies:" contract behind
   a small Evidence popover. `app/ui/components.py:393`
-- [ ] **C4 + F22 · P2/S · Make the brand dot mean something + give the wordmark a solid
+- [x] **C4 + F22 · P2/S · Make the brand dot mean something + give the wordmark a solid
   fallback.** The dot pulses unconditionally (implies liveness it doesn't represent) —
   bind a connected/degraded state class or drop the animation. The gradient text-clip
   wordmark can render transparent on a host that skips `background-clip:text` — set
@@ -88,28 +88,28 @@ cross-cutting risk.
   caption for routine `max_rows` caps. `app/ui/components.py:1020-1024`
 
 ### Chart clarity (all `S`, high payoff)
-- [ ] **F38 · P1/S · Add a color/dash legend to the task DAG.** Nodes are red/blue/
+- [x] **F38 · P1/S · Add a color/dash legend to the task DAG.** Nodes are red/blue/
   green/dashed with no key — meaning lives only in per-node hover. Add a static
   bottom-left legend reusing the same palette hexes. `app/ui/charts.py:378`
-- [ ] **F37 · P1/S · Highlight critical-path EDGES, not just nodes.** The DAG marks
+- [x] **F37 · P1/S · Highlight critical-path EDGES, not just nodes.** The DAG marks
   critical *nodes* but draws every edge grey, so the "longest path" reads as scattered
   boxes with no traceable route. Give edges whose endpoints are both critical an accent
   stroke. `app/ui/charts.py:235`
-- [ ] **F40 · P2/S · Day-grain tooltips stop showing "12:00:00 AM".** Day charts pass
+- [x] **F40 · P2/S · Day-grain tooltips stop showing "12:00:00 AM".** Day charts pass
   `Day:T` with no format → hover reads "August 14, 2026, 12:00:00 AM". Set `%b %d, %Y`.
   `app/ui/charts.py:645`
-- [ ] **F39 · P2/S · Compact SI dollar axes.** `$,.0f` prints "$1,240,000" per tick;
+- [x] **F39 · P2/S · Compact SI dollar axes.** `$,.0f` prints "$1,240,000" per tick;
   switch large-magnitude axes to `$,.3~s` ("$1.24M"), keep tooltip precision to the cent.
   `app/ui/charts.py:738`
-- [ ] **F47 · P2/S · Force a full 0–23 domain on the hour heatmap.** Zero-activity hours
+- [x] **F47 · P2/S · Force a full 0–23 domain on the hour heatmap.** Zero-activity hours
   are omitted, sliding columns left and shifting the daily shape — defeating an
   hour-of-day view. Pin `scale=domain(range(24))`. `app/ui/charts.py:975`
 
 ### Tables (cheap correctness)
-- [ ] **F28 · P2/S · Byte-column headers contradict their cells.** Cells auto-scale
+- [x] **F28 · P2/S · Byte-column headers contradict their cells.** Cells auto-scale
   (512 MB, 1.2 GB, 3 TB) but the header still appends a fixed "(GB)". Suppress the
   parenthesized unit on auto-humanized byte columns. `app/ui/components.py:1360-1389`
-- [ ] **F25 · P1/S · Apply `COLUMN_HELP` to caller-configured columns too.** The
+- [x] **F25 · P1/S · Apply `COLUMN_HELP` to caller-configured columns too.** The
   billed/measured/allocated "which dollar is this" help is skipped exactly on the columns
   a page hands an explicit `NumberColumn` — i.e. the ones that need it. Merge help into
   the caller's column instead of `continue`. `app/ui/components.py:1529-1544`
