@@ -557,7 +557,11 @@ def _cost_truth(company: str, days: int) -> None:
          "value": format_usd(credits_to_usd(allocated, rate)) if present.get("ALLOCATED") else _no_ev,
          "delta": f"{allocated:,.0f} cr" if present.get("ALLOCATED") else "—", "delta_color": "off"},
     ])
-    styled_table(frame, height=300, sort_label="semantic basis order")
+    # F26/C34 review: NO sort_label here — the four rows are LENSES over cost
+    # ("do not add", DS #4's No-evidence discipline), so a rank ordinal and a
+    # credits race bar would invite exactly the cross-basis comparison this
+    # table forbids. The label was invisible on a 4-row table anyway.
+    styled_table(frame, height=300)
     st.caption(
         "Dollars primary, credits secondary. Rows are lenses over cost, not addends: "
         "billed credits include the cloud-services adjustment but modeled $ uses configured "

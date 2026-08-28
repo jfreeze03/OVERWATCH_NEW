@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.307.0 - UI/UX Wave 2 (2): ranked tables read at a glance (2026-08-28)
+
+Second Wave-2 batch of the UI/UX master list (F26 + C34's rank half), app-only and
+central - every ranked table in the app benefits:
+
+* **F26** the primary dollar column of a RANKED table draws a native in-cell
+  magnitude bar, so "where's the weight" reads at a glance instead of from a wall
+  of flat numbers. The picker is deliberately conservative: USD-first (a credits
+  column can be non-monotonic against the declared "$ desc" order when the AI and
+  standard credit rates coexist - the review caught the Spend coverage table doing
+  exactly that), and it never bars rates ($/TiB, credit price), signed movement
+  columns, sparse settlement columns whose leading rows are NULL (an Experiments
+  board's VERIFIED_USD would have rendered active work as empty zero-looking
+  bars), or mixed-time-base tables carrying a PERIOD column (a shared 0..max bar
+  is exactly the cross-row comparison those boards forbid). The bar's format
+  leaves the Styler map so the two never fight over the cell, and the
+  which-dollar-is-this column help survives.
+* **C34 (rank half)** a ranked table shows a display-only pinned `#` ordinal -
+  "the 3rd heaviest" becomes nameable (the owner's own pain: "I don't know the
+  query id to select"). The CSV keeps raw columns and row order is untouched, so
+  positional selections stay valid; the wide-table identity pin now counts the
+  ordinal toward display width (the review caught a 7-raw-column table freezing
+  rank without identity).
+* The Decision Studio cost-truth "lenses" table explicitly opts out - its four
+  rows are non-comparable bases ("do not add"), so it takes neither an ordinal
+  nor a credits race bar, preserving the DS #4 No-evidence discipline.
+
+Focused adversarial review confirmed 5 findings, all fixed pre-commit. 11
+regression tests in test_uiux_wave2_tables.py.
+
 ## 4.306.0 - UI/UX Wave 2 (1): alert decide-bar, bulk mode, verdicts, one-hop return (2026-08-28)
 
 First Wave-2 batch of the UI/UX master list (F49 / C43+F53 / C17 / C9), app-only:

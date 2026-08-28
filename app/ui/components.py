@@ -1509,6 +1509,56 @@ def _export_filename(seq: int, slug: str | None) -> str:
     return "-".join(p for p in parts if p) + ".csv"
 
 
+def _rank_bar_column(df, sort_label: str, skip: set) -> str | None:
+    """F26: the $/credits column a RANKED table draws an in-cell magnitude bar
+    behind — a cost board's first scan question is "where's the weight", and a
+    flat wall of numbers hides it. USD-FIRST: dollars are the app's ranking
+    currency, and a credits column can be non-monotonic against the declared
+    "$ desc" order when two credit rates coexist (AI vs standard), so credits
+    only bar when no dollar column qualifies. None when the table isn't ranked
+    (no sort_label), is tiny, the caller configured the column themselves, the
+    frame carries a PERIOD column (mixed time bases — a shared 0..max bar is
+    exactly the cross-row comparison those tables forbid), or nothing
+    dollar-like exists."""
+    if not sort_label or df is None or len(df) < 4:
+        return None
+    if any(str(c).upper() == "PERIOD" for c in df.columns):
+        return None
+
+    def _qualifies(col, want_usd: bool) -> bool:
+        if col in skip:
+            return False
+        name = str(col).upper()
+        tokens = name.split("_")
+        # rates ($/TiB, credit price) and signed movement columns are NOT
+        # magnitudes — a 0-floored bar on them misleads.
+        if "PER" in tokens or "PRICE" in tokens or "RATE" in tokens or is_delta_column(col):
+            return False
+        usdish = name.endswith("_USD") or name == "USD"
+        creditish = "CREDITS" in tokens
+        if not (usdish if want_usd else (creditish and not usdish)):
+            return False
+        try:
+            series = df[col]
+            # sparse settlement columns (NULL on the leading rows — e.g. a
+            # VERIFIED_USD that fills only after close) render the TOP of a
+            # ranked table as empty bars that read as zero; a genuinely
+            # $-ranked table always leads with a value.
+            if series.head(1).isna().any() or float(series.notna().mean()) < 0.5:
+                return False
+            if float(series.min()) < 0 or not float(series.max()) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    for want_usd in (True, False):
+        for col in df.columns:
+            if _qualifies(col, want_usd):
+                return col
+    return None
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
@@ -1533,8 +1583,47 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 st.session_state["_ow_tz_note_shown"] = True
     except Exception:  # noqa: BLE001 - conversion is cosmetic
         display_df = df
+    # C34/F34: a ranked table shows its RANK — "the 3rd heaviest" becomes
+    # nameable (the owner's own pain: "I don't know the query id to select").
+    # Display-only: the CSV keeps raw columns, and row order is untouched so
+    # positional selections stay valid.
+    if sort_label and len(df) >= 4 and "#" not in display_df.columns:
+        try:
+            display_df = display_df.copy()
+            display_df.insert(0, "#", range(1, len(display_df) + 1))
+            _rank_cfg = dict(column_config or {})
+            try:
+                _rank_cfg["#"] = st.column_config.NumberColumn(
+                    "#", width="small", format="%d", pinned=True)
+            except TypeError:  # runtime predates pinned=
+                _rank_cfg["#"] = st.column_config.NumberColumn(
+                    "#", width="small", format="%d")
+            column_config = _rank_cfg
+        except Exception:  # noqa: BLE001 - the ordinal is cosmetic
+            pass
     data = display_df
+    data_columns = list(display_df.columns)
     fmts = _auto_formats(df, set(column_config or {}))
+    # F26: wrap the ranked table's primary $/credits column in a native progress
+    # bar so magnitude reads at a glance. The bar carries its own printf format,
+    # so the column leaves the Styler format map (the two would fight over the
+    # cell); everything else formats exactly as before.
+    _bar_col = _rank_bar_column(df, sort_label, set(column_config or {}))
+    if _bar_col is not None:
+        try:
+            _bmax = float(df[_bar_col].max())   # non-numeric -> the except keeps the plain cell
+            if _bmax > 0:
+                fmts.pop(_bar_col, None)
+                _bar_cfg = dict(column_config or {})
+                _usdish = str(_bar_col).upper().endswith("_USD") or str(_bar_col).upper() == "USD"
+                _bar_cfg[_bar_col] = st.column_config.ProgressColumn(
+                    _prettify_header(_bar_col),
+                    format=("$%.2f" if _usdish else "%.2f"),
+                    min_value=0.0, max_value=_bmax,
+                    help=COLUMN_HELP.get(str(_bar_col).upper()))
+                column_config = _bar_cfg
+        except Exception:  # noqa: BLE001 - the bar is cosmetic, the table must render
+            pass
     _cell_count = len(df) * max(1, len(df.columns))
     if len(df) <= STYLER_MAX_ROWS and _cell_count <= STYLER_MAX_CELLS:
         try:
@@ -1594,7 +1683,10 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     # (built off the CALLER config, not the prettifier's, so a caller override still wins).
     caller_cfg = set(column_config or {})
     _cfg = dict(column_config or {})
-    _pin_col = df.columns[0] if len(df.columns) >= 8 and df.columns[0] not in caller_cfg else None
+    # F26/C34 review: gate on the DISPLAY width — the "#" insert makes a 7-raw-
+    # column ranked table 8 columns wide, and freezing only the rank while the
+    # identity column scrolls away defeats the pin's whole purpose.
+    _pin_col = df.columns[0] if len(data_columns) >= 8 and df.columns[0] not in caller_cfg else None
     for _col in df.columns:
         if _col in caller_cfg:
             # F25: a caller-configured column (units, custom label) used to lose its
