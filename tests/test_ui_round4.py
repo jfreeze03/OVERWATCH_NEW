@@ -44,7 +44,9 @@ def test_alerts_kpis_carry_severity():
     assert '"severity": "warn" if high_n else "ok"' in src
     # rec42: bulk execute is a confirm_gate(...) call now; it still carries the
     # primary-action hierarchy (type="primary" flows through as a button kwarg).
-    assert 'key="alert_bulk_exec"' in src and 'type="primary"' in src
+    # F51: the bulk gate mounts under the selection nonce so an executed
+    # selection can't linger and re-arm it against a shifted feed.
+    assert 'key=f"alert_bulk_exec_{_sel_nonce}"' in src and 'type="primary"' in src
 
 
 def test_contains_filters_use_a_count_badged_compact_popover():

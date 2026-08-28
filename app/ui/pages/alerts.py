@@ -399,9 +399,41 @@ def _delivery_status() -> None:
                  "or repoint the route in ALERT_ROUTES.")
 
 
+def _stale_rebind(sel: int, event_id: str, bound: object) -> bool:
+    """F51: True when a sticky positional selection now points at a DIFFERENT event
+    than the one the drawer was bound to — the feed shrank or reordered underneath it
+    (a resolve here, the V091 auto-resolver, a filter change). st.dataframe re-emits
+    its raw positional index verbatim on every rerun, so after a shift the same index
+    silently lands on whatever event slid into the slot. A CHANGED index is a genuine
+    new click; the SAME index with a changed event id is the frame moving under the
+    selection, and the drawer must not open the wrong event. Pure; never raises."""
+    if not isinstance(bound, (tuple, list)) or len(bound) != 2:
+        return False
+    try:
+        bound_idx = int(bound[0])
+    except (TypeError, ValueError):
+        return False
+    return bound_idx == int(sel) and str(bound[1]) != str(event_id)
+
+
 @st.fragment
 def _open_events_section(events, is_operator: bool, company: str = "ALL") -> None:
     """Fragment: drawer/bulk interactions rerun this section only, not the page."""
+    # F51: the write receipt / feed-shift notice render FIRST — before the guard and
+    # the rollup early-return — so resolving the LAST open event still shows its
+    # receipt (above the empty state) and nothing strands in session state to
+    # resurface stale against a later, unrelated feed.
+    _receipt = st.session_state.pop("_ow_alert_receipt", "")
+    if _receipt:
+        st.success(_receipt, icon="✅")
+    _stale_note = st.session_state.pop("_ow_alert_stale_note", "")
+    if _stale_note:
+        st.caption(_stale_note)
+    # F51: every selection/write widget in this fragment mounts under a nonce-suffixed
+    # key so a write can RESET it. Popping session keys is NOT a reset: the frontend
+    # keeps values by element id and re-sends them on the next interaction (sticky
+    # dataframe highlights, typed confirm text) — a fresh key is the one reliable reset.
+    _sel_nonce = int(st.session_state.get("_ow_alert_sel_nonce", 0))
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT):
         edf = severity_sort(events.df)  # worst first, newest within — triage order
@@ -411,6 +443,8 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 and st.session_state.get("_ow_alert_context_applied") != event_signature):
             st.session_state["alert_rollup"] = False
             st.session_state["_ow_alert_context_applied"] = event_signature
+            # F51: a NEW deep-link arrival re-arms the identity fallback below.
+            st.session_state.pop("_ow_alert_deeplink_armed", None)
         if st.toggle("Group by rule (storm view)", key="alert_rollup",
                      help="5 warehouses over budget = 1 row here. Toggle off for drawers."):
             sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -424,16 +458,33 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                        .reset_index().sort_values(["WORST", "EVENTS"], ascending=False))
             rev = {v: k for k, v in sev_rank.items()}
             rolled["SEVERITY"] = rolled["WORST"].map(rev).fillna("LOW")
+            # F51: the rollup selection is positional too — same nonce key + identity
+            # binding as the drawer, so a storm collapsing under the selection can't
+            # silently relabel the expanded rule.
             sel_g = selectable_table(
                 rolled[["SEVERITY", "RULE_ID", "EVENTS", "NEWEST", "SAMPLE"]],
-                key="alert_rollup_sel", height=280)
+                key=f"alert_rollup_sel_{_sel_nonce}", height=280)
             if sel_g is not None and 0 <= int(sel_g) < len(rolled):
                 rid_pick = str(rolled.iloc[int(sel_g)]["RULE_ID"])
+                if _stale_rebind(int(sel_g), rid_pick,
+                                 st.session_state.get("_ow_alert_rollup_bind")):
+                    st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                    st.session_state.pop("_ow_alert_rollup_bind", None)
+                    st.session_state["_ow_alert_stale_note"] = (
+                        "The feed changed under the previous selection — click a row "
+                        "to reopen it.")
+                    st.rerun()
+                st.session_state["_ow_alert_rollup_bind"] = (int(sel_g), rid_pick)
                 st.markdown(f"**Events for `{rid_pick}`**")
                 styled_table(edf[edf["RULE_ID"].astype(str) == rid_pick]
                              [["RAISED_AT", "SEVERITY", "COMPANY", "TITLE", "STATUS"]], height=240)
+            else:
+                st.session_state.pop("_ow_alert_rollup_bind", None)
             st.caption("Dedupe semantics are untouched — this is a display rollup. "
                        "Toggle off to open a drawer, bulk-ack, or investigate.")
+            # F51: the drawer's selection widget unmounts on this path — its bind
+            # must not outlive the selection it mirrors.
+            st.session_state.pop("_ow_alert_drawer_bind", None)
             return
         # rec27: an "Age" companion ("3h ago") reads at a glance; RAISED_AT stays the
         # real, sortable, tz-converted column. rec30: declare the severity-then-newest order.
@@ -442,13 +493,50 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
         _feed = _feed.assign(AGE=_feed["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
         sel = selectable_table(
             _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
-            key="alert_events_sel", sort_label="severity, then newest")
+            key=f"alert_events_sel_{_sel_nonce}", sort_label="severity, then newest")
+        _from_deeplink = False
         if sel is None and requested_event:
-            matches = [
-                index for index, value in enumerate(edf["EVENT_ID"].astype(str))
-                if value == requested_event
-            ]
-            sel = matches[0] if matches else None
+            # F51: the identity fallback is armed per ARRIVAL and disarmed by the next
+            # write's nonce bump — un-gated it re-fired on every paint, reopening the
+            # acted drawer after each write. While armed it re-applies on every
+            # fragment rerun (the table emits no selection while the user works in
+            # the drawer), which is exactly what keeps the deep-linked drawer open.
+            _armed = st.session_state.get("_ow_alert_deeplink_armed")
+            if _armed is None or _armed == (event_signature, _sel_nonce):
+                matches = [
+                    index for index, value in enumerate(edf["EVENT_ID"].astype(str))
+                    if value == requested_event
+                ]
+                sel = matches[0] if matches else None
+                if sel is not None:
+                    _from_deeplink = True
+                    if _armed is None:
+                        st.session_state["_ow_alert_deeplink_armed"] = (
+                            event_signature, _sel_nonce)
+        # F51: bind the drawer by EVENT IDENTITY, not position. When the live feed
+        # shrinks or reorders under a sticky selection (a resolve here, the V091
+        # auto-resolver, a filter change), the same positional index silently lands
+        # on a DIFFERENT event — drop the rebind instead of opening the wrong drawer.
+        if sel is not None and 0 <= int(sel) < len(edf):
+            _ev_here = str(edf.iloc[int(sel)]["EVENT_ID"])
+            # An identity-derived deep-link selection can never be a stale POSITIONAL
+            # rebind — only the widget's sticky index gets the guard.
+            if not _from_deeplink and _stale_rebind(
+                    int(sel), _ev_here, st.session_state.get("_ow_alert_drawer_bind")):
+                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                st.session_state.pop("_ow_alert_drawer_bind", None)
+                st.session_state["_ow_alert_stale_note"] = (
+                    "The feed changed under the previous selection — click a row "
+                    "to reopen its drawer.")
+                # Rerun NOW so the fresh, unselected table mounts in this same
+                # interaction — without it the wrong-row highlight survives the paint
+                # and the retired key swallows the user's next click.
+                st.rerun()
+            st.session_state["_ow_alert_drawer_bind"] = (int(sel), _ev_here)
+        else:
+            # F51: no live selection -> no bind may outlive it (an orphaned bind
+            # would falsely veto a later genuine click that lands on the same index).
+            st.session_state.pop("_ow_alert_drawer_bind", None)
         result_caption(events)
         if sel is None or not (0 <= int(sel) < len(edf)):
             st.caption("Click a row to open its drawer: detail, rule, history, playbook, "
@@ -702,19 +790,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     request_navigation(fix["page"], fix["section"], fix["filters"])
             with c_act:
                 action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
-                                  key=f"alert_action_{event_id[:8]}")
-            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}", max_chars=500)
+                                  key=f"alert_action_{event_id[:8]}_{_sel_nonce}")
+            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}_{_sel_nonce}", max_chars=500)
             kind = ""
             snooze_hours = 0.0
             if action == "RESOLVE":
                 kind = st.radio(
-                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}",
+                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}_{_sel_nonce}",
                     help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
                          "EXPECTED = known/maintenance. Feeds the per-rule precision score "
                          "on the Rules section.")
             elif action == "SNOOZE":
                 snooze_hours = SNOOZE_PRESETS[st.selectbox(
-                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}",
+                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}",
                     help="The event leaves the triage feed now and returns to it automatically "
                          "when the timer expires — no ack, no resolve. The underlying rule keeps "
                          "firing for other entities.")]
@@ -737,10 +825,10 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     if action in ("ACK", "SNOOZE"):
                         _fire = st.button("Execute with audit row", type="primary",
                                           width="stretch",
-                                          key=f"alert_exec_ack_{event_id[:8]}")
+                                          key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
                     else:
                         _fire = confirm_gate(action, "Execute with audit row",
-                                             key=f"alert_exec_{event_id[:8]}",
+                                             key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
                                              prompt=f"Type {action} to confirm execution")
                     if _fire:
                         # V051/V086: one atomic proc (update + audit in a transaction);
@@ -763,6 +851,22 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             from app.ui.components import log_ui_event
                             _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
                             log_ui_event(_ev, page=_PAGE)
+                            # F51 post-write hygiene. RESOLVE/SNOOZE remove the event
+                            # from the feed, so the selection resets via the nonce bump
+                            # (which remounts every nonce-keyed widget fresh — session-
+                            # key pops don't survive the frontend's state resend). ACK
+                            # keeps the event at its index, so the drawer STAYS OPEN to
+                            # continue triage (ack -> investigate -> resolve); the
+                            # identity guard protects it if the feed shifts anyway. The
+                            # full rerun is notify()'s own contract: the re-read feed is
+                            # the durable receipt.
+                            if action in ("RESOLVE", "SNOOZE"):
+                                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                                st.session_state.pop("_ow_alert_drawer_bind", None)
+                            st.session_state["_ow_alert_receipt"] = (
+                                f"{action} recorded — [{row['SEVERITY']}] "
+                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})")
+                            st.rerun()
                 else:
                     st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
 
@@ -773,19 +877,19 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                 f"[{r['SEVERITY']}] {str(r['TITLE'])[:70]} ({str(r['EVENT_ID'])[:8]})": str(r["EVENT_ID"])
                 for _, r in edf.iterrows()
             }
-            chosen = st.multiselect("Events", list(options), key="alert_bulk_pick")
+            chosen = st.multiselect("Events", list(options), key=f"alert_bulk_pick_{_sel_nonce}")
             b_action = st.radio("Bulk action", ["ACK", "RESOLVE"], horizontal=True,
-                                key="alert_bulk_action")
+                                key=f"alert_bulk_action_{_sel_nonce}")
             b_kind = ""
             if b_action == "RESOLVE":
                 b_kind = st.radio("How were these closed?", RESOLUTION_KINDS, horizontal=True,
-                                  key="alert_bulk_kind",
+                                  key=f"alert_bulk_kind_{_sel_nonce}",
                                   help="Required — untagged closes drop out of the per-rule "
                                        "precision score.")
             b_note = st.text_input("Bulk note (applies to every selected event)",
-                                   key="alert_bulk_note", max_chars=500)
+                                   key=f"alert_bulk_note_{_sel_nonce}", max_chars=500)
             if confirm_gate(f"BULK {b_action}", f"Execute bulk {b_action}",
-                            key="alert_bulk_exec",
+                            key=f"alert_bulk_exec_{_sel_nonce}",
                             prompt=f"Type BULK {b_action} to confirm ({len(chosen)} selected)",
                             enabled=bool(chosen), type="primary"):
                 # V051: one atomic proc for the whole selection; the
@@ -802,6 +906,16 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
                                  page=_PAGE)
+                    # F51: same post-write hygiene as the drawer — the nonce bump
+                    # remounts the bulk widgets (picks, note, typed confirm) fresh, so
+                    # an executed selection can never linger visually and re-arm the
+                    # gate against the shifted feed; the full rerun re-reads the live
+                    # feed as the durable receipt.
+                    st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                    st.session_state.pop("_ow_alert_drawer_bind", None)
+                    st.session_state["_ow_alert_receipt"] = (
+                        f"Bulk {b_action} recorded — {len(chosen)} event(s)")
+                    st.rerun()
 
         # V086: snoozed events are hidden from the feed above until their wake time.
         # Surface them so a snooze is never a black hole, with an early un-snooze.

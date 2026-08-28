@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.303.0 - Alert drawer binds by event identity (2026-08-25)
+
+UI/UX master list **F51** — an interaction-correctness fix, not polish. The
+open-events drawer selected by a sticky POSITIONAL `st.dataframe` index; when the
+live feed shrank or reordered under it (a resolve here, the V091 auto-resolver, a
+filter change), the same index silently rebound the drawer to a DIFFERENT event —
+whose ACK/RESOLVE/SNOOZE controls were then live against the wrong target. Now the
+drawer binds by EVENT IDENTITY (pure `_stale_rebind` drops a same-index/changed-event
+rebind), and EVERY selection/write widget in the fragment — the feed, the storm-rollup
+selection, the drawer's action/note/kind/snooze/confirm, the bulk picks — mounts under
+a generation NONCE, because popping session keys is not a reset (the frontend re-sends
+values by element id). An adversarial review of the first cut confirmed 13 follow-on
+defects, all fixed: the receipt/feed-shift notice render BEFORE the guard (resolving
+the LAST event shows its receipt instead of stranding it to resurface stale); the
+deep-link identity fallback is armed per arrival and disarmed by a write's nonce bump
+(it used to re-fire every paint, reopening the acted drawer) and bypasses the
+positional-staleness guard; a guard trip parks its notice and RERUNS so the fresh
+table mounts in the same interaction; an orphaned bind never outlives its selection;
+ACK keeps the drawer open (the event stays in the feed — triage continues to resolve)
+while RESOLVE/SNOOZE reset it; and every write triggers the full rerun `notify()`'s
+contract already required, so the re-read feed is the durable receipt. App-only, no
+migration.
+
 ## 4.302.0 - Cost-per-consumer & retirement candidates (2026-08-25)
 
 Upgrade Board P1 #28. Decision Studio ▸ Products gains a "Cost per consumer &
