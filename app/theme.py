@@ -59,21 +59,26 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 div[data-testid="stMetric"] {
   position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 12px 18px;
-  box-shadow:var(--ow-shadow); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); overflow:hidden; }
+  box-shadow:var(--ow-shadow); overflow:hidden; }
+/* F13: the RESTING stripe is neutral (matching .ow-card::before) so a colored
+   stripe always MEANS severity — the old default accent gradient looked semantic
+   on every card and taught the eye that color carries nothing. */
 div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px;
-  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); opacity:0.85; }
-div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
+  background:var(--ow-ink-mute); opacity:0.55; }
 [data-testid="stMetricLabel"] p { font-size:0.76rem !important; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute) !important; font-weight:640; }
-[data-testid="stMetricValue"] { font-size:1.62rem; font-weight:720; color:var(--ow-ink); }
+/* F13: one KPI value size on both KPI surfaces (st.metric + metric_card_html). */
+[data-testid="stMetricValue"] { font-size:1.55rem; font-weight:720; color:var(--ow-ink); }
 .ow-sev-bad div[data-testid="stMetric"]::before { background:var(--ow-bad); opacity:1; }
 .ow-sev-warn div[data-testid="stMetric"]::before { background:var(--ow-warn); opacity:1; }
 .ow-sev-ok div[data-testid="stMetric"]::before { background:var(--ow-ok); opacity:1; }
 .ow-sev-bad div[data-testid="stMetric"] { border-color:rgba(248,113,113,0.35); }
 
+/* C22: no hover elevation on KPI/status cards — none of them is clickable, and
+   hover motion falsely implies it. Interactive surfaces (buttons, rows, pills)
+   keep their own hover states; a card that BECOMES a button earns hover back. */
 .ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
-  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); transition:box-shadow var(--ow-ease),border-color var(--ow-ease); }
-.ow-card:hover { box-shadow:var(--ow-shadow2); border-color:var(--ow-hairline2); }
+  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); }
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
@@ -95,15 +100,20 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
    hover-only card title= tooltip (invisible on touch, unreachable by keyboard).
    The affordance is a focusable '?' badge; the tooltip fires on hover AND focus,
    so Tab-users and touch-users both get it. CSP-safe (no JS): content:attr(). */
-.ow-help { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px;
-  flex:0 0 auto; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2);
+/* C28 (a11y): 24px hit target (was 18px). The negative vertical margin keeps the
+   larger badge from growing the title row's line box, so card layout is unchanged. */
+.ow-help { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px;
+  margin:-4px 0; flex:0 0 auto; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2);
   color:var(--ow-ink-mute); font-size:0.75rem; font-weight:700; line-height:1; cursor:help;
   position:relative; outline:none; text-transform:none; letter-spacing:0; }
 .ow-help:hover, .ow-help:focus-visible { color:var(--ow-ink); border-color:var(--ow-accent); }
 .ow-help:focus-visible { box-shadow:0 0 0 2px rgba(96,165,250,0.45); }
+/* F21: right-anchor the tooltip (the badge sits at the END of a card title, so a
+   left-anchored 300px box overflowed the viewport on right-edge cards — exactly
+   where the dense $ cards live) and clamp its width to the viewport. */
 .ow-help[data-help]::after {
-  content:attr(data-help); position:absolute; left:0; top:calc(100% + 6px);
-  min-width:200px; max-width:300px; padding:8px 10px; border-radius:var(--ow-r-sm);
+  content:attr(data-help); position:absolute; right:-4px; left:auto; top:calc(100% + 6px);
+  min-width:200px; max-width:min(300px, 74vw); padding:8px 10px; border-radius:var(--ow-r-sm);
   background:var(--ow-raised); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft);
   font-size:0.72rem; line-height:1.42; font-weight:500; letter-spacing:0; text-transform:none;
   text-align:left; white-space:normal; box-shadow:var(--ow-shadow2); z-index:60;
@@ -120,6 +130,16 @@ div[data-testid="stMetric"]:hover { box-shadow:var(--ow-shadow2); border-color:v
 .ow-section__title { font-weight:700; color:var(--ow-ink); font-size:1.02rem; }
 .ow-section__icon { display:inline-flex; color:var(--ow-ink-soft); }
 .ow-section__badge { margin-left:auto; font-size:0.72rem; font-weight:650; letter-spacing:0.04em; text-transform:uppercase; padding:2px 9px; border-radius:var(--ow-r-pill); border:1px solid var(--ow-hairline2); color:var(--ow-ink-soft); }
+/* F19: when a section carries real severity, the glyph and count badge read it too —
+   the old stripe-only tint left the header 97% neutral on a red section. */
+.ow-section--ok .ow-section__icon { color:var(--ow-ok); }
+.ow-section--warn .ow-section__icon { color:var(--ow-warn); }
+.ow-section--bad .ow-section__icon { color:var(--ow-bad); }
+.ow-section--info .ow-section__icon { color:var(--ow-info); }
+.ow-section--ok .ow-section__badge { color:var(--ow-ok); border-color:rgba(52,211,153,0.42); }
+.ow-section--warn .ow-section__badge { color:var(--ow-warn); border-color:rgba(245,158,11,0.42); }
+.ow-section--bad .ow-section__badge { color:var(--ow-bad); border-color:rgba(248,113,113,0.42); }
+.ow-section--info .ow-section__badge { color:var(--ow-info); border-color:rgba(96,165,250,0.42); }
 
 .ow-filter-contract { margin:-2px 0 10px 0; padding:5px 10px; border-left:2px solid var(--ow-info);
   color:var(--ow-ink-mute); background:rgba(96,165,250,0.07); font-size:0.72rem; line-height:1.45; }
@@ -198,13 +218,23 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   font-weight:600;letter-spacing:0;text-transform:none;white-space:nowrap;}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
+/* C4: the pulse now MEANS "connected to Snowflake" — _sidebar binds the class to
+   the live connection, and the disconnected dot is static grey, so the animation
+   no longer implies a liveness the app isn't asserting. */
 .ow-brand-dot { width:11px; height:11px; border-radius:999px;
   background:radial-gradient(circle at 30% 30%,var(--ow-accent2),var(--ow-accent));
   box-shadow:0 0 10px rgba(96,165,250,0.72),0 0 2px rgba(45,212,191,0.82); animation:ow-pulse 2.8s ease-in-out infinite; }
+.ow-brand-dot--off { background:var(--ow-ink-mute); box-shadow:none; animation:none; opacity:0.6; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
+/* F22: solid-ink base; the gradient text-clip applies ONLY where the engine
+   supports it — otherwise the wordmark rendered as a transparent hole (the
+   single brand anchor in the chrome). */
 .ow-brand-word { font-weight:850; letter-spacing:0.08em; font-size:1.55rem; line-height:1.02;
-  background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent)); -webkit-background-clip:text;
-  -webkit-text-fill-color:transparent; background-clip:text; }
+  color:var(--ow-ink); }
+@supports ((-webkit-background-clip:text) or (background-clip:text)) {
+  .ow-brand-word { background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent));
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+}
 .ow-brand-sub { font-size:0.72rem; font-weight:600; color:var(--ow-ink-mute);
   letter-spacing:0.04em; margin:1px 0 0 20px; text-transform:uppercase; }
 
@@ -230,6 +260,21 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
 .stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(96,165,250,0.52); }
+/* F14 (a11y): ONE keyboard-focus grammar on every interactive control. Before
+   this, only the section pill-group and the help badge had a focus rule — a Tab
+   user lost the indicator on Execute buttons, nav radios, and every scope
+   select/input in a keyboard-heavy DBA tool. */
+.stButton > button:focus-visible, .stDownloadButton > button:focus-visible,
+.stTextInput input:focus-visible, .stNumberInput input:focus-visible,
+.stTextArea textarea:focus-visible {
+  outline:2px solid var(--ow-accent) !important; outline-offset:2px; }
+div[data-baseweb="select"]:focus-within,
+.stMultiSelect [data-baseweb="select"]:focus-within {
+  outline:2px solid var(--ow-accent); outline-offset:1px; border-radius:var(--ow-r-sm); }
+div[role="radiogroup"] label:has(input:focus-visible),
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:focus-visible),
+.stCheckbox label:has(input:focus-visible), .stToggle label:has(input:focus-visible) {
+  outline:2px solid var(--ow-accent); outline-offset:2px; }
 .stButton > button[kind="primary"],
 .stButton > button[data-testid="stBaseButton-primary"],
 button[data-testid="stBaseButton-primary"],

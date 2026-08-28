@@ -30,6 +30,21 @@ _FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont,
 # series looks bad the same way it does on every card and chip.
 SEV_COLORS = dict(palette.SEVERITY_HUES)
 
+# F40: day-grain hovers name the day — the unformatted Vega default rendered
+# "August 14, 2026, 12:00:00 AM" on data that has no time component.
+_DAY_TIP_FMT = "%b %d, %Y"
+
+
+def _usd_fmt(max_value: object) -> str:
+    """F39: compact SI dollar ticks ("$1.24M") once the magnitude would crowd the
+    gutter with 7-digit labels; small charts keep exact dollars. The 10k gate also
+    keeps d3's milli-suffix away from sub-dollar values, and tooltips everywhere
+    keep full precision — the axis is for reading shape, the hover for the number."""
+    try:
+        return "$,.3~s" if float(max_value) >= 10_000 else "$,.0f"
+    except (TypeError, ValueError):
+        return "$,.0f"
+
 # rec38: heat = orange (intuitive "hotness" for the hour x entity heatmap). ONE
 # ramp, referenced by the theme range AND hour_heatmap, so it is not a one-off
 # scheme string a shade off from everything else.
@@ -232,6 +247,14 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
                 28 + offset + index * (node_h + y_gap),
             )
 
+    # F37: the critical path is a ROUTE — highlighting only its nodes left scattered
+    # dashed boxes with no traceable line between them. An edge whose BOTH endpoints
+    # sit on the critical path gets the accent stroke + accent arrowhead, so the
+    # "longest observed dependency path" the caption promises reads start-to-finish.
+    critical_nodes = {
+        name for name, row in lookup.items()
+        if str(row.get("CRITICAL_PATH") or "").lower() == "true"
+    }
     edge_markup: list[str] = []
     for predecessor, child in shape.edges:
         if predecessor not in positions or child not in positions:
@@ -241,8 +264,10 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
         start_x, start_y = x1 + node_w, y1 + node_h / 2
         end_x, end_y = x2, y2 + node_h / 2
         bend = max(42.0, (end_x - start_x) * 0.48)
+        _critical = predecessor in critical_nodes and child in critical_nodes
+        edge_cls = "edge edge-critical" if _critical else "edge"
         edge_markup.append(
-            f'<path class="edge" d="M {start_x:.1f} {start_y:.1f} '
+            f'<path class="{edge_cls}" d="M {start_x:.1f} {start_y:.1f} '
             f'C {start_x + bend:.1f} {start_y:.1f}, '
             f'{end_x - bend:.1f} {end_y:.1f}, {end_x:.1f} {end_y:.1f}"/>'
         )
@@ -293,6 +318,12 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
         .replace("__GRAPH_HEIGHT__", str(int(graph_height)))
         .replace("__EDGES__", "".join(edge_markup))
         .replace("__NODES__", "".join(node_markup))
+        # F37/F38: legend + critical-route hues come FROM the palette, so the key
+        # cannot drift from the node styling (and the palette guards stay green).
+        .replace("__C_BAD__", palette.BAD)
+        .replace("__C_ACCENT__", palette.ACCENT)
+        .replace("__C_OK__", palette.OK)
+        .replace("__C_MUTED__", palette.MUTED)
     )
 
 
@@ -358,6 +389,25 @@ svg.dragging { cursor: grabbing; }
   fill: none; stroke: #94a3b8; stroke-width: 1.5; opacity: .72;
   marker-end: url(#arrow);
 }
+/* F37: edges BETWEEN critical-path nodes carry the accent so the longest path
+   reads as one continuous route, not scattered highlighted boxes. */
+.edge-critical {
+  stroke: __C_ACCENT__; stroke-width: 2.5; opacity: 1; marker-end: url(#arrowCritical);
+}
+/* F38: static key for the node colors — the meaning used to live only in
+   per-node hover tooltips. Same literals as _task_node_style's palette hues. */
+.dag-legend {
+  position: absolute; z-index: 4; bottom: 10px; left: 10px; display: flex;
+  gap: 12px; align-items: center; flex-wrap: wrap; padding: 6px 10px;
+  background: rgba(15,23,41,.94); border: 1px solid rgba(148,163,184,.28);
+  border-radius: 6px; font: 500 11px Inter, "Segoe UI", sans-serif; color: #cbd5e1;
+}
+.dag-legend .k { display: inline-flex; align-items: center; }
+.dag-legend i {
+  display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+  border: 2px solid; background: #1f2937; margin-right: 5px;
+}
+.dag-legend .dash { border-style: dashed; }
 .node rect {
   fill: #1f2937; stroke: var(--node-color); stroke-width: 2;
   filter: url(#shadow);
@@ -384,12 +434,22 @@ svg.dragging { cursor: grabbing; }
     <button id="full" title="Full screen" aria-label="Full screen">Full</button>
     <button id="download" title="Download SVG" aria-label="Download SVG">SVG</button>
   </div>
+  <div class="dag-legend" role="note" aria-label="Node color legend">
+    <span class="k"><i style="border-color:__C_BAD__"></i>failed</span>
+    <span class="k"><i class="dash" style="border-color:__C_ACCENT__"></i>critical path</span>
+    <span class="k"><i style="border-color:__C_OK__"></i>healthy</span>
+    <span class="k"><i style="border-color:__C_MUTED__"></i>suspended</span>
+  </div>
   <svg id="dag" tabindex="0" role="img"
        aria-label="Task dependency graph. Use mouse wheel or plus and minus to zoom; drag to pan.">
     <defs>
       <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3"
               orient="auto" markerUnits="strokeWidth">
         <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8"/>
+      </marker>
+      <marker id="arrowCritical" markerWidth="8" markerHeight="8" refX="7" refY="3"
+              orient="auto" markerUnits="strokeWidth">
+        <path d="M0,0 L0,6 L8,3 z" fill="__C_ACCENT__"/>
       </marker>
       <filter id="shadow" x="-20%" y="-30%" width="140%" height="160%">
         <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000"
@@ -641,12 +701,13 @@ def spend_trend(
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
     bar_size = max(4, min(20, int(660 / max(len(data), 1))))
     enc_x = alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"]))
-    tip = [alt.Tooltip("Day:T"),
+    tip = [alt.Tooltip("Day:T", format=_DAY_TIP_FMT),
            alt.Tooltip("USD:Q", format="$,.2f", title="Spend"),
            alt.Tooltip("AVG7:Q", format="$,.0f", title="7-day avg")]
     bars = (alt.Chart().mark_bar(color=grad, cornerRadiusEnd=2, size=bar_size)
             .encode(x=enc_x,
-                    y=alt.Y("USD:Q", title="Spend (USD)", axis=alt.Axis(format="$,.0f")),
+                    y=alt.Y("USD:Q", title="Spend (USD)",
+                            axis=alt.Axis(format=_usd_fmt(data["USD"].max()))),
                     opacity=alt.condition("datum.PROVISIONAL",
                                           alt.value(0.45), alt.value(1.0)),
                     # UI23: DayStr is 1:1 with Day (no visual change), and encoding it
@@ -687,7 +748,7 @@ def spend_trend(
                 alt.Chart(md).mark_rule(color=SEV_COLORS["HIGH"], strokeDash=[3, 3],
                                         opacity=0.75, size=1.5)
                 .encode(x=alt.X("yearmonthdate(Day):T"),
-                        tooltip=[alt.Tooltip("Day:T", title="Day"),
+                        tooltip=[alt.Tooltip("Day:T", title="Day", format=_DAY_TIP_FMT),
                                  alt.Tooltip("LABEL:N", title="Flagged")])
             )
     chart = alt.layer(*layers) if len(layers) > 1 else layers[0]
@@ -735,13 +796,14 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     enc_y = alt.Y("Label:N", sort="-x", title=None,
                   axis=alt.Axis(labelLimit=260))  # full names (hover for longer)
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
-    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"),
+    _fmt = _usd_fmt(dmax)
+    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format=_fmt),
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
     base = _base(data, height=max(_HEIGHT, 30 * len(data)))
     bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
-        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
+        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
     st.altair_chart(bars + labels, width="stretch")
     if takeaway:
         # Share denominator is the FULL frame's total, not the head(top_n) sum — else
@@ -768,13 +830,14 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
     enc_y = alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260))
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
-    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format="$,.0f"),
+    _fmt = _usd_fmt(dmax)
+    enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format=_fmt),
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
     base = _base(data, height=max(_HEIGHT, 30 * len(data)))
     bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
-        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format="$,.0f"))
+        y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
     plain = bars + labels
     try:
         sel = alt.selection_point(fields=["Label"], name="pt", on="click", clear="dblclick")
@@ -802,7 +865,7 @@ def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str 
         .encode(
             x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
-            tooltip=[alt.Tooltip("Day:T", title="Day"),
+            tooltip=[alt.Tooltip("Day:T", title="Day", format=_DAY_TIP_FMT),
                      alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
         )
     )
@@ -853,7 +916,7 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
             y=alt.Y("sum(Value):Q", title=title, axis=alt.Axis(format=",.0f")),
             color=_stable_color("Category", data["Category"],
                                 legend=_legend(wide=True)),
-            tooltip=[alt.Tooltip("Day:T"), alt.Tooltip("Category:N"),
+            tooltip=[alt.Tooltip("Day:T", format=_DAY_TIP_FMT), alt.Tooltip("Category:N"),
                      alt.Tooltip("sum(Value):Q", format=",.0f", title=title)],
         )
     )
@@ -906,7 +969,7 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     _max_stack = float(
         pd.to_numeric(data["USD"], errors="coerce").groupby(data["Day"]).sum().max() or 0.0
     )
-    _yfmt = "$,.2f" if 0 < _max_stack < 1 else "$,.0f"
+    _yfmt = "$,.2f" if 0 < _max_stack < 1 else _usd_fmt(_max_stack)  # F39
     chart = (
         _base(data)
         .mark_bar()
@@ -916,7 +979,7 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
             color=_stable_color("Category", data["Category"],
                                 legend=_legend(wide=True)),
             tooltip=[
-                alt.Tooltip("Day:T"),
+                alt.Tooltip("Day:T", format=_DAY_TIP_FMT),
                 alt.Tooltip("Category:N"),
                 alt.Tooltip("sum(USD):Q", format="$,.2f", title="Spend"),
             ],
@@ -973,7 +1036,11 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
         _base(data)
         .mark_rect()
         .encode(
-            x=alt.X("Hour:O", title="hour of day"),
+            # F47: every hour keeps its column — omitting zero-activity hours
+            # slid the day's shape left and idle windows vanished instead of
+            # reading as unlit gaps in their true clock position.
+            x=alt.X("Hour:O", title="hour of day",
+                    scale=alt.Scale(domain=list(range(24)))),
             y=alt.Y("Row:N", title=None),
             color=alt.Color("Value:Q", title=title or value_col,
                             scale=alt.Scale(range=_HEATMAP_RANGE)),  # rec38: one orange heat ramp
@@ -1018,7 +1085,8 @@ def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 1
         .mark_bar()
         .encode(
             x=alt.X("Label:N", sort=alt.SortField("Order"), title=None),
-            y=alt.Y("Start:Q", title="Cumulative spend (USD)", axis=alt.Axis(format="$,.0f")),
+            y=alt.Y("Start:Q", title="Cumulative spend (USD)",
+                    axis=alt.Axis(format=_usd_fmt(data[["Start", "End"]].max().max()))),
             y2="End:Q",
             tooltip=["Label:N", alt.Tooltip("USD:Q", format="$,.0f"),
                      alt.Tooltip("End:Q", format="$,.0f", title="Cumulative")],
@@ -1131,7 +1199,8 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
             .mark_bar(color=palette.ACCENT, opacity=0.55)
             .encode(
                 x=alt.X("HOUR_TS:T", title=None, scale=xdom),
-                y=alt.Y("USD:Q", title="Spend $/hr", axis=alt.Axis(format="$,.0f")),
+                y=alt.Y("USD:Q", title="Spend $/hr",
+                    axis=alt.Axis(format=_usd_fmt(credit_data["USD"].max()))),
                 tooltip=[alt.Tooltip("HOUR_TS:T", title="Hour"),
                          alt.Tooltip("USD:Q", title="Spend", format="$,.2f")],
             )
@@ -1213,7 +1282,8 @@ def workload_portfolio(df: pd.DataFrame) -> None:
         .encode(
             x=alt.X(
                 "IMPACT_USD_30D:Q", title="Measured impact normalized to 30d (USD)",
-                axis=alt.Axis(format="$,.0f"), scale=alt.Scale(zero=True),
+                axis=alt.Axis(format=_usd_fmt(data["IMPACT_USD_30D"].max())),
+                scale=alt.Scale(zero=True),
             ),
             y=alt.Y("CONFIDENCE:Q", title="Evidence confidence", scale=alt.Scale(domain=[0, 1])),
             size=alt.Size(
@@ -1363,7 +1433,7 @@ def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,
             # rec41: dollar unit -> format axis + tooltip like every sibling
             # ($,.0f axis, $,.2f tooltip); a non-$ unit keeps the plain format.
             y=alt.Y("Value:Q", title=unit or None,
-                    axis=alt.Axis(format="$,.0f") if unit == "$" else alt.Axis()),
+                    axis=alt.Axis(format=_usd_fmt(folded["Value"].max())) if unit == "$" else alt.Axis()),
             color=alt.Color("Side:N",
                             scale=alt.Scale(domain=[a_label, b_label],
                                             range=[_ACCENT, "#64748b"]),

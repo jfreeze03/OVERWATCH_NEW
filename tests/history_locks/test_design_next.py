@@ -71,7 +71,9 @@ def test_rec13_prettify_header():
     assert _prettify_header("LATENCY_MS") == "Latency"
     assert _prettify_header("QUEUED_MIN_PER_DAY") == "Queued Per Day"
     assert _prettify_header("HOURS_SINCE_LOAD") == "Since Load"
-    assert _prettify_header("SPILL_REMOTE_GB") == "Spill Remote (GB)"
+    # F28 (UI/UX wave 1): byte MAGNITUDE cells self-humanize per row (512 MB /
+    # 1.2 GB), so the header no longer pins a fixed "(GB)" that contradicts them.
+    assert _prettify_header("SPILL_REMOTE_GB") == "Spill Remote"
     assert _prettify_header("HIT_PCT") == "Hit (%)"
     comp = _src("app/ui/components.py")
     assert "st.column_config.Column(_label, help=_help)" in comp          # relabel-only path (+ rec32 help)

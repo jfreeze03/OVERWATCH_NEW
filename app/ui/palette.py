@@ -46,5 +46,8 @@ INK_MUTE = "#94a3b8"  # muted labels         (--ow-ink-mute)
 # State-keyed (sidebar health strip): OK/WARN/BAD/INFO/MUTED.
 STATE_HUES = {"OK": OK, "WARN": WARN, "BAD": BAD, "INFO": INFO, "MUTED": MUTED}
 # Severity-keyed (chart series): CRITICAL/HIGH/MEDIUM/LOW/INFO/OK.
+# F16: INFO severity is SLATE, matching STATUS_COLOR_MAP's table cells — an INFO
+# event must not be grey in the table and blue in the chart beside it. Blue
+# (INFO/ACCENT) stays the in-motion lifecycle hue (ACK/RUNNING), not a severity.
 SEVERITY_HUES = {"CRITICAL": BAD, "HIGH": HIGH, "MEDIUM": WARN,
-                 "LOW": LOW, "INFO": INFO, "OK": OK}
+                 "LOW": LOW, "INFO": LOW, "OK": OK}

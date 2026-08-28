@@ -252,8 +252,10 @@ def spark_svg(values, width: int = 84, height: int = 24, color: str = palette.IN
                 f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
                 f'<polygon points="1,{height-1} {line} {width-1},{height-1}" fill="url(#g{uid})"/>')
     last = pts[-1]
+    # F29 (a11y): the spark is decorative — the card's number + delta already
+    # state the trend — so screen readers and Tab order skip it.
     return (f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-            f'style="display:block">{area}'
+            f'aria-hidden="true" focusable="false" style="display:block">{area}'
             f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="1.6" '
             f'stroke-linecap="round" stroke-linejoin="round"/>'
             f'<circle cx="{last[0]}" cy="{last[1]}" r="1.9" fill="{color}"/></svg>')
@@ -1381,9 +1383,16 @@ def _prettify_header(col: object) -> str:
         parts = [part for part in parts if part not in matching]
     elif len(parts) > 1:
         tail = parts[-1]
-        if tail in _HEADER_UNITS:             # rec31: show the unit in the header
-            unit_suffix = f" ({_HEADER_UNITS[tail]})"
-            parts = parts[:-1]
+        if tail in _HEADER_UNITS:
+            # F28: a byte MAGNITUDE column's cells self-humanize per row
+            # (512 MB / 1.2 GB / 3 TB), so a fixed "(GB)" header would contradict
+            # the cells it labels — drop the token with NO suffix. Fixed-unit
+            # tokens (%, h, min) and byte RATES (…_PER_…) keep the header unit.
+            if tail in _BYTE_UNIT_FACTOR and _byte_unit_for_column(col):
+                parts = parts[:-1]
+            else:                             # rec31: show the unit in the header
+                unit_suffix = f" ({_HEADER_UNITS[tail]})"
+                parts = parts[:-1]
     _keep = {"USD", "AI", "ID", "MB", "GB", "TB", "TIB", "MS", "SEC", "PCT", "P95", "P50", "SLA", "CS", "QAS"}
     words = [w if w in _keep else w.capitalize() for w in parts]
     return " ".join(words) + unit_suffix
@@ -1531,6 +1540,15 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     _pin_col = df.columns[0] if len(df.columns) >= 8 and df.columns[0] not in caller_cfg else None
     for _col in df.columns:
         if _col in caller_cfg:
+            # F25: a caller-configured column (units, custom label) used to lose its
+            # metric-registry help entirely — yet BILLED/MEASURED/ALLOCATED are
+            # exactly the columns pages hand an explicit NumberColumn, where the
+            # "which dollar is this" hover matters most. Merge the help in; a help
+            # the caller set themselves always wins.
+            _help = COLUMN_HELP.get(str(_col).upper())
+            _cc = _cfg.get(_col)
+            if _help and isinstance(_cc, dict) and not _cc.get("help"):
+                _cc["help"] = _help
             continue
         _pretty = _prettify_header(_col)
         _label = _pretty if _pretty != str(_col) else None

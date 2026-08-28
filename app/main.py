@@ -91,8 +91,11 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
     with st.sidebar:
         # Branding, pronounced. Version lives on Admin (App version); the connected role
         # is operator detail that belongs off the primary chrome, not the sidebar.
+        # C4: the pulse is BOUND to the live Snowflake connection — a static grey
+        # dot when disconnected, so the animation asserts a state that is real.
+        _dot = "ow-brand-dot" if connected else "ow-brand-dot ow-brand-dot--off"
         st.markdown(
-            '<div class="ow-brand"><span class="ow-brand-dot"></span>'
+            f'<div class="ow-brand"><span class="{_dot}"></span>'
             '<span class="ow-brand-word">OVERWATCH</span></div>'
             '<div class="ow-brand-sub">Snowflake Command Center</div>',
             unsafe_allow_html=True,

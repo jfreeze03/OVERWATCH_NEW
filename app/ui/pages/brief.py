@@ -70,7 +70,9 @@ def _stalest_label(vals: dict) -> str:
 def render() -> None:
     f = filters()
     company = f["company"]
-    page_header("Morning brief", "The one-scroll version. Numbers first, fires second, asks third.", icon_name="brief")
+    # F1: H1 matches the sidebar nav label verbatim; the subtitle keeps the
+    # morning identity.
+    page_header("Brief", "Your morning one-scroll: numbers first, fires second, asks third.", icon_name="brief")
     section_filter_contract(
         f,
         applies=(),

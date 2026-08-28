@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.304.0 - UI/UX Wave 1: severity, a11y, and chart legibility (2026-08-25)
+
+The first wave of the UI/UX master list (docs/reviews/UIUX_MASTER_LIST_2026-08-25.md
+- Codex's 50 recommendations ground-truthed against the code + 60 fresh, triaged
+into waves). This batch = the highest payoff-to-effort visual/severity/a11y/chart
+items, app-only:
+
+* **F13** the resting KPI stripe is neutral on BOTH KPI surfaces, so a colored
+  stripe always MEANS severity (the default accent gradient looked semantic on
+  every card); one KPI value size (1.55rem) on both.
+* **C22** hover elevation removed from non-interactive cards - motion no longer
+  implies clickability nothing has.
+* **F14** one keyboard-focus grammar on every interactive control (buttons, nav
+  radios, selects, inputs, toggles) - Tab users kept the indicator only on the
+  section pills before.
+* **C28/F21** the KPI help badge is a 24px target and its tooltip right-anchors +
+  clamps to the viewport (it clipped exactly on the right-edge $ cards).
+* **C4/F22** the brand dot's pulse now MEANS "connected to Snowflake" (static grey
+  when disconnected), and the gradient wordmark carries a solid-ink fallback behind
+  an @supports gate (it could render as a transparent hole).
+* **F19** section-header severity reaches the icon and count badge, not just the
+  3px stripe. **F16** one severity hue map: INFO is slate in tables AND charts
+  (blue stays the in-motion lifecycle hue). **F29** decorative sparklines are
+  aria-hidden.
+* **F37/F38** the task DAG highlights critical-path EDGES (the longest path reads
+  as one continuous accent route, not scattered dashed boxes) and gains a static
+  color legend - hues substituted FROM the palette so the key cannot drift.
+* **F39** dollar axes compact to SI ("$1.24M") once magnitude crowds the gutter;
+  tooltips keep cent precision. **F40** day-grain hovers show the day, not
+  "12:00:00 AM". **F47** the hour heatmap pins all 24 clock columns, so idle hours
+  read as gaps in their true position instead of sliding the shape left.
+* **F28** byte-column headers stop contradicting their self-humanizing cells (a
+  "(GB)" header over "512 MB" cells). **F25** metric-registry column help now
+  reaches caller-configured columns - billed/measured/allocated were exactly the
+  ones losing their "which dollar is this" hover.
+* **F1** sidebar nav labels and page H1s now read identically (Brief, Security) -
+  the click target is the "you are here" anchor.
+
+App-only, no migration. 24 new regression tests across three Wave-1 test files.
+
 ## 4.303.0 - Alert drawer binds by event identity (2026-08-25)
 
 UI/UX master list **F51** — an interaction-correctness fix, not polish. The
