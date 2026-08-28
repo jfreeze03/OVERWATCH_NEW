@@ -40,6 +40,7 @@ from app.ui.components import (
     kpi_row,
     notify,
     panel_help,
+    reconciliation_footer,
     result_caption,
     run_mart_first,
     served_days,
@@ -232,6 +233,11 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             "CREDITS_PER_REQUEST": st.column_config.NumberColumn("Cr/request", format="%.4f"),
         },
     )
+    # C37: exact per-user token metering — the rows sum to the Cortex Code
+    # spend KPI above by construction (rollup_summary sums this same column).
+    # review fix: sum-only — the section KPI derives from this SAME frame, so a
+    # "parent" here was a tautological 100%, not an independent check (law 8).
+    reconciliation_footer(float(enriched["SPEND_USD"].sum()), label="user rows")
     result_caption(rollup_res, note="Cortex Code token metering is exact per user; no allocation involved.")
 
     # C7: the per-user ladder plus the SCOPE-wide breach. Ten users at 20% of
@@ -547,8 +553,11 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
     styled_table(
         df[["DEPARTMENT", "WAREHOUSE_NAME", "COMPANY", "CREDITS_TOTAL", "USD"]],
         column_config={"USD": st.column_config.NumberColumn("Spend $", format="$%.0f")},
-        totals=(("Total spend", format_usd(total_usd)),),
     )
+    # C37: the rows are the exact metering the KPI sums, so coverage is 100% by
+    # construction — the footer proves the tie-out instead of asserting it.
+    # review fix: sum-only — total_usd sums this SAME frame (tautological 100%).
+    reconciliation_footer(float(df["USD"].sum()), label="department rows")
     result_caption(dept_res, note="Idle credits stay with the owning department - that is the point of chargeback.")
 
     st.markdown("**Role usage within warehouses (allocated)**")

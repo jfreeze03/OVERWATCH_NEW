@@ -48,6 +48,7 @@ from app.ui.components import (
     section_filter_contract,
     selectable_table,
     severity_sort,
+    since_last_visit_opener,
     stamp_write,
     styled_table,
     with_user_names,
@@ -1200,6 +1201,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
 def render() -> None:
     f = filters()
     page_header("Alerts", "Open events, lifecycle with audit, and the rules that raise them.", icon_name="alerts")
+    # C18: shared since-last-visit opener (renders nothing mid-session or for
+    # anonymous viewers; the helper skips the "Open events" jump on this page).
+    since_last_visit_opener(_PAGE, f["company"])
     section_filter_contract(
         f,
         applies=("company",),

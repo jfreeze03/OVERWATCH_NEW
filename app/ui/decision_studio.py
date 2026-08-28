@@ -52,6 +52,7 @@ from app.ui.components import (
     selectable_nav_table,
     selectable_table,
     stamp_write,
+    stash_section_count,
     styled_table,
     write_gate_open,
 )
@@ -889,6 +890,11 @@ def _experiments() -> None:
         return
     frame = result.df.reset_index(drop=True)
     status = frame["STATUS"].astype(str).str.upper()
+    # C16: park the running/observing count for the section bar's "Experiments (n)" badge.
+    # review fix: experiments are account-wide — no filter changes this count,
+    # so the badge declares no scope dims and survives every filter flip.
+    stash_section_count(_PAGE, "Experiments", status.isin(("RUNNING", "OBSERVING")).sum(),
+                        dims=())
     # DS #24: show how long each experiment has existed — a long-running active one is a
     # stale-experiment signal ("RUNNING 38d") worth a look, not silent progress.
     frame["AGE_DAYS"] = experiment_age_days(frame, account_now())

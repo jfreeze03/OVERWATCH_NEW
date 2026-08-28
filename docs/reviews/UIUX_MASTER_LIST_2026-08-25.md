@@ -136,7 +136,7 @@ cross-cutting risk.
   `app/ui/components.py:1634-1641`
 - [ ] **C31 · P2/M · Compact table toolbar.** Lay CSV button + size caption + a
   Summary/Diagnostics/All view toggle (**C32**) into one flex row. `app/ui/components.py:1660`
-- [ ] **C37 · P1/M · Reconciliation footers on additive cost tables.** Extend the
+- [x] **C37 · P1/M · Reconciliation footers on additive cost tables.** Extend the
   `totals` mechanism into a footer: visible total, expected parent, variance, coverage %;
   a `nonadditive=True` flag suppresses it on lens tables. `app/ui/components.py`
 - [ ] **F29 · P2/M · Magnitude-aware $ precision.** Cents only below ~$100, whole dollars
@@ -178,7 +178,7 @@ cross-cutting risk.
 - [x] **C17 · P1/M · One data-derived verdict line per analytical page.** The mechanism
   exists (`page_verdict_line`) and Alerts already has the counts; compose a verdict from
   signals Security/Operations/Decision-Studio already compute, above the section bar.
-- [ ] **C16 · P2/S · Section count badges from already-loaded values** (overdue on
+- [x] **C16 · P2/S · Section count badges from already-loaded values** (overdue on
   Operations, open findings on Security, running experiments on Decision Studio) via the
   existing `counts=` badge.
 - [ ] **F9 · P2/M · Section kicker/breadcrumb in the header** ("Analyze ▸ Operations ▸
@@ -189,9 +189,9 @@ cross-cutting risk.
 - [x] **C9 · P1/M · One-hop contextual return.** Push an origin tuple (page, section,
   selection) into nav context on each jump; render a single "Return to …" in `page_header`,
   restoring section + drill. `app/core/state.py:89-163`
-- [ ] **C15 · P2/S · Show resolved calendar dates** ("Current month → Aug 1–25"). The
+- [x] **C15 · P2/S · Show resolved calendar dates** ("Current month → Aug 1–25"). The
   boundary computation already exists and is passed to headers; the render discards it.
-- [ ] **C18 · P2/M · "Since your last visit" on Alerts / Action Center / Security /
+- [x] **C18 · P2/M · "Since your last visit" on Alerts / Action Center / Security /
   Decision Studio**, with direct links to changed items (`since_last_visit` opener already
   ships).
 - [ ] **F6 · P2/S · Data-aware ACCOUNT_USAGE lag caption** — it prints on every page

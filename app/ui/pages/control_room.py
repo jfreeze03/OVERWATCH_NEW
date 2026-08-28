@@ -60,6 +60,7 @@ from app.ui.components import (
     section_header,
     selectable_nav_table,
     selectable_table,
+    since_last_visit_opener,
     stamp_write,
     styled_table,
     with_user_names,
@@ -465,6 +466,10 @@ def render() -> None:
     section_filter_contract(f, **_contracts[section])
 
     if section == "Action Center":
+        # C18: the shared "since your last visit" opener — first thing a returning
+        # DBA sees on the triage console. Skips its Action Center jump here (we're
+        # already on it) and renders nothing mid-session or for anonymous viewers.
+        since_last_visit_opener(_PAGE, company)
         render_action_center(company)
 
     elif section == "Pulse":

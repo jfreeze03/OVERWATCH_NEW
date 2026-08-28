@@ -55,6 +55,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     panel_help,
+    reconciliation_footer,
     result_caption,
     run_mart_first,
     section_header,
@@ -255,6 +256,10 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     ])
     styled_table(coverage, height=300, sort_label="$ desc",
                  column_config={"SHARE_PCT": st.column_config.NumberColumn("Share %", format="%.1f%%")})
+    # C37: per-service rows price the SAME billed credits x category rate as the
+    # Credit-spend KPI above, so they must tie out to it exactly.
+    reconciliation_footer(float(coverage["BILLED_USD"].sum()), billed_usd,
+                          label="services shown", expected_label=f"credit spend ({days}d)")
     st.caption(
         "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
         "charges use organization currency data and appear in the on-demand detail below."
@@ -789,6 +794,8 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             totals=(("Current spend", format_usd(window_usd)),
                     ("Prior spend", format_usd(prior_window_usd))),
         )
+        # C37: sum-only — this table IS the tab's parent pool (exact usage);
+        # the billed KPI upstream is a different basis, so no expected= here.
         # r4: settle the allocated-share vs pool WINDOW mismatch. The live-share
         # fallback scans only <= MAX_LIVE_WINDOW_DAYS of QUERY_HISTORY (a deliberate
         # cost guardrail we KEEP), so for a >90d window its shares are 90d-scoped;

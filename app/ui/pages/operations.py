@@ -90,6 +90,8 @@ from app.ui.components import (
     served_days,
     snowsight_profile_column,
     stamp_write,
+    stash_section_count,
+    stashed_counts,
     status_chips,
     styled_table,
     with_user_names,
@@ -1161,6 +1163,27 @@ def _task_sla_view(company: str, days: int, database: str = "",
                 sort_label="overdue desc")
         result_caption(_fres)
     st.caption(f"Cadence is each task's own median scheduled-gap. {ACCOUNT_USAGE_LAG_NOTE}")
+    # C16: park the Tasks pill badge — tasks needing attention across BOTH panels
+    # above (failure streaks + late-vs-cadence), deduplicated on the task's
+    # fully-qualified name where both frames carry it. Values already computed
+    # above; zero new queries. Skipped when neither feed was usable, so the badge
+    # never asserts "0" on missing data.
+    if _streaks_known and _fresh_known:   # review fix: half the evidence must not badge
+        _frames = [_fr for _fr in (streaks if _streaks_known else None,
+                                   late if _fresh_known else None)
+                   if _fr is not None and not _fr.empty]
+        _key_cols = ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME"]
+        if all(set(_key_cols) <= set(_fr.columns) for _fr in _frames):
+            _attn: set[tuple] = set()
+            for _fr in _frames:
+                _attn.update(_fr[_key_cols].itertuples(index=False, name=None))
+            _n = len(_attn)
+        else:  # a frame lost the shared task columns — sum rather than guess a join
+            _n = sum(len(_fr) for _fr in _frames)
+        # review fix: the SLA feeds honor database/schema filters too — the
+        # badge declares all four dims so a filter flip never serves it stale.
+        stash_section_count(_PAGE, "Tasks", _n,
+                            dims=("company", "days", "database", "schema_contains"))
 
 
 def _task_runs_view(company: str, days: int, database: str = "",
@@ -2380,7 +2403,8 @@ def render() -> None:
     # contention it causes read together.
     section = lazy_sections(
         ["Queries", "Tasks", "Warehouses", "Change impact",
-         "Pipeline SLA", "Release compare", "Emergency"], key="ops_section")
+         "Pipeline SLA", "Release compare", "Emergency"], key="ops_section",
+        counts=stashed_counts(_PAGE) or None)
     _contracts = {
         "Queries": {
             "applies": ("company", "days", "database", "warehouse_contains",

@@ -65,7 +65,7 @@ def test_the_sweep_left_no_raw_absence_regression_hotspots():
         "app/ui/workbench.py": 1,            # blast-radius safety caveat (deliberate info)
         "app/ui/decision_studio.py": 0,
         "app/ui/pages/ask.py": 2,            # answer headlines (direct answers, not absences)
-        "app/ui/pages/cost.py": 1,           # since-last-visit status opener
+        "app/ui/pages/cost.py": 0,           # opener moved to the shared component (C18)
         "app/ui/pages/cost_parts/spend.py": 3,      # SPCS structural notes
         "app/ui/pages/cost_parts/contract.py": 2,   # rate-context notes
         "app/ui/pages/cost_parts/compare.py": 0,

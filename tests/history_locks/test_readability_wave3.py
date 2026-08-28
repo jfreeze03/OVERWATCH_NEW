@@ -46,7 +46,13 @@ def test_rec33_cost_tables_wire_additive_totals():
     assert "sort_label=sort_label, totals=totals" in components
 
     chargeback = _src("app/ui/pages/cost_parts/ai_chargeback.py")
-    assert 'totals=(("Total spend", format_usd(total_usd)),),' in chargeback
+    # C37 upgraded the department table's additive-total caption into a
+    # reconciliation FOOTER tied to the section's own chargeback-total KPI
+    # (visible sum · parent · variance · coverage) — the stronger form of
+    # the same rec33 contract.
+    # (adversarial review: total_usd sums this SAME frame — a tautological
+    # 100% is not a check, so the footer is the additive sum alone.)
+    assert 'reconciliation_footer(float(df["USD"].sum()), label="department rows")' in chargeback
 
     spend = _src("app/ui/pages/cost_parts/spend.py")
     current_total = 'window_usd = float(view["USD_CURRENT"].sum())'

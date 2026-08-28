@@ -444,6 +444,11 @@ def _bump_refresh(sql: str) -> None:
             salts[d] = stamp
     else:
         st.session_state["_ow_refresh_salt"] = stamp
+    # C16 review fix: a write can drain the very queue a section-bar badge
+    # counts, and the shell reads badges BEFORE the section recomputes — drop
+    # them all so the next paint renders unbadged instead of one run behind.
+    for _k in [k for k in st.session_state if str(k).startswith("_ow_badge_")]:
+        st.session_state.pop(_k, None)
 
 
 # r27 #10 (light): operator writes are app-constructed and confirmation-gated,

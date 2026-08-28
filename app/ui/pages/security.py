@@ -49,7 +49,9 @@ from app.ui.components import (
     section_filter_contract,
     section_header,
     selectable_table,
+    since_last_visit_opener,
     snowsight_profile_column,
+    stashed_counts,
     styled_table,
     user_display_map,
     with_user_names,
@@ -1394,10 +1396,13 @@ def render() -> None:
         "nothing. Its one write is logging a posture exception to OVERWATCH's own work queue "
         "(operators only). Company scoping is a shared-account view filter, not isolation."
     )
+    # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
+    since_last_visit_opener(_PAGE, f["company"])
     section = lazy_sections(
         ["Decision queue", "Access", "AI guardrails", "Changes", "Clients", "Egress",
          "Exposure", "Least privilege", "Trust Center"],
         key="sec_section",
+        counts=stashed_counts(_PAGE) or None,
     )
     _contracts = {
         "Decision queue": {

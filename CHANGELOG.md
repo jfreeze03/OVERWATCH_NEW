@@ -1,5 +1,47 @@
 # Changelog
 
+## 4.312.0 - UI/UX Wave 2 (7): the quick cluster (C37 + C15 + C16 + C18) (2026-08-28)
+
+Four small orientation/trust wins in one batch:
+
+* **C15** the header scope chip shows RESOLVED calendar boundaries - "Current
+  month (Aug 1 - Aug 28)" instead of the raw day-offset chip that read "27d"
+  for a month window (lossy AND wrong-looking). Rolling windows keep "30d".
+* **C16** section pills badge decision-bearing counts with ZERO extra queries:
+  a section parks its computed count in a scope-keyed stash the bar reads -
+  Operations "Tasks (n)" (failure streaks + late-vs-cadence), Security
+  "Decision queue (n)" (open exceptions), Decision Studio "Experiments (n)"
+  (running/observing).
+* **C18** the Cost "since your last visit" opener is a shared component on
+  FIVE surfaces (Cost, Alerts, Security, Decision Studio, Control Room >
+  Action Center) from one cached query, now with profile-gated one-hop jumps
+  to the changed items (Open events / Action Center), skipping the page you
+  are on.
+* **C37** additive cost tables carry a reconciliation footer (visible sum ·
+  expected parent · variance · coverage) - the spend service-coverage table
+  reconciles against the section's own billed KPI; sum-only where no
+  independent parent exists (never a fabricated ratio). The chargeback
+  department table's totals caption upgraded into the footer.
+* Docs: FEATURE_GLOSSARY updated for the opener's five surfaces, the jump
+  buttons, and the footer.
+
+Adversarial review (3 find dimensions, 17 agents) confirmed 12 findings
+(deduped to 8), all fixed pre-commit:
+
+* **MED** the badge stash keyed only (company, days) while the Operations
+  Tasks count honors database/schema filters too - a filter flip served the
+  badge stale. Each stash now DECLARES the dims its count varies with
+  (Tasks: all four; Security queue: company only; Experiments: none), fixing
+  both staleness and needless invalidation, plus a 900s TTL and a post-write
+  sweep (a write that drains a counted queue drops every badge so the next
+  paint renders unbadged, never one run behind).
+* **LOW** the Tasks badge required BOTH feeds (half the evidence must not
+  badge); the actions-only overnight had a dead Action Center doorway (jumps
+  now gate on quiet, not severity); two self-referential footers (parent
+  summed from the SAME frame = tautological 100%) became sum-only; the spend
+  attribution table's duplicate sum line removed; the C25 ceiling for cost.py
+  tightened to its new count.
+
 ## 4.311.0 - UI/UX Wave 2 (6): the empty-state conversion (C25 + F56) (2026-08-28)
 
 Absence now speaks ONE vocabulary app-wide, so color carries meaning:

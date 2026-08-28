@@ -29,7 +29,13 @@ def _scope_chip_html() -> str:
         f = filters()
     except Exception:  # noqa: BLE001 - header chrome must never break a page
         return ""
-    chips = [chip(html.escape(f["company"]), "ok"), chip(f"{f['days']}d")]
+    # C15: calendar windows show their RESOLVED boundaries ("Current month
+    # (Aug 1 - Aug 28)") — the raw day-offset chip read "27d" for a month
+    # window, which was both lossy and wrong-looking. Plain rolling windows
+    # keep the compact "30d" chip.
+    _wl = str(f.get("window_label") or "")
+    chips = [chip(html.escape(f["company"]), "ok"),
+             chip(html.escape(_wl) if "(" in _wl else f"{f['days']}d")]
     # Environment is a hidden compatibility field fixed to ALL, so it is not scope.
     for key, label in (("database", ""), ("schema_contains", "schema~"),
                         ("warehouse_contains", "wh~"), ("user_contains", "user~")):
@@ -2105,6 +2111,145 @@ def blast_radius(warehouse: str, page: str) -> None:
         + ". Review before executing."
     )
     styled_table(with_user_names(df, page), height=TABLE_H_SM)   # show WHO you'd interrupt
+
+
+# review fix: a badge may be at most one recent-cache-tier stale — after that
+# the pill renders unbadged (the honest "unknown"), never an hours-old number.
+_BADGE_TTL_S = 900.0
+
+
+def _badge_scope(dims: tuple = ("company", "days")) -> tuple:
+    """The active filter values a stashed badge count is valid for, as
+    ((dim, value), ...) — each stash DECLARES which global filters its count
+    actually varies with (review fix: the Operations Tasks count honors
+    database/schema too, while the DS experiments count varies with nothing,
+    so one fixed key both went stale and over-invalidated)."""
+    try:
+        from app.core.state import filters  # local import: avoid module cycle
+        f = filters()
+    except Exception:  # noqa: BLE001 - badges are chrome, never break a page
+        return tuple((d, None) for d in dims)
+    def _val(d: str) -> object:
+        return int(safe_float(f.get("days"))) if d == "days" else str(f.get(d) or "")
+    return tuple((d, _val(d)) for d in dims)
+
+
+def stash_section_count(page: str, label: str, count: object,
+                        dims: tuple = ("company", "days")) -> None:
+    """C16: a section that just computed a decision-bearing count parks it here
+    for the section bar's ``counts=`` badge — keyed by the filter dims the
+    count varies with, so a scope change never shows a stale number. Zero
+    extra queries by design: the badge appears once the section has computed
+    it this session, and expires after ``_BADGE_TTL_S``."""
+    entry = dict(st.session_state.get(f"_ow_badge_{page}") or {})
+    entry[str(label)] = (int(safe_float(count)), _badge_scope(tuple(dims)), time.monotonic())
+    st.session_state[f"_ow_badge_{page}"] = entry
+
+
+def stashed_counts(page: str) -> dict[str, int]:
+    """C16: the scope-matched, unexpired badge counts sections stashed (see
+    above). Returns {} until a section has computed its count under the
+    current scope, so the bar simply renders unbadged — never a wrong number."""
+    out: dict[str, int] = {}
+    raw = st.session_state.get(f"_ow_badge_{page}")
+    if isinstance(raw, dict):
+        now = time.monotonic()
+        for label, entry in raw.items():
+            try:
+                if not (isinstance(entry, tuple) and len(entry) == 3):
+                    continue
+                count, scope, at = entry
+                if now - float(at) > _BADGE_TTL_S:
+                    continue
+                dims = tuple(d for d, _ in scope)
+                if _badge_scope(dims) == scope:
+                    out[str(label)] = int(count)
+            except (TypeError, ValueError):
+                continue  # malformed entry — unbadged beats wrong
+    return out
+
+
+def since_last_visit_opener(page: str, company: str) -> None:
+    """C18: the Cost3 "what changed since your last visit" opener as a shared
+    component — the viewer's own APP_USAGE trail plus the alerts/actions raised
+    while they were away, severity-mapped, with one-hop jumps to the changed
+    items. The SQL is identical across pages, so the tier cache serves every
+    page from one query. Renders nothing mid-session (the builder requires a
+    genuine idle gap) or for anonymous viewers."""
+    from app.core.identity import viewer_name
+    from app.logic.actions import since_last_visit_summary
+    from app.logic.formulas import humanize_minutes_ago
+    if not viewer_name():
+        return
+    from app.core.query import run
+    slv = run(mart_sql.since_last_visit(company), page=page,
+              key="since_last_visit", tier="recent",
+              source="APP_USAGE + ALERT_EVENTS + ACTION_QUEUE")
+    if not slv.usable():
+        return
+    row = slv.df.iloc[0]
+    _lv = row.get("LAST_VISIT")
+    if _lv is None or _lv != _lv:      # NaT-safe without a pandas import
+        return
+    s = since_last_visit_summary(row.get("NEW_ALERTS"), row.get("NEW_CRIT"),
+                                 row.get("NEW_HIGH"), row.get("NEW_ACTIONS"))
+    msg = (f"Since your last visit ({humanize_minutes_ago(row.get('MINUTES_AGO'))}): "
+           f"{s['text']}.")
+    sev = str(s["severity"])
+    if sev == "bad":
+        st.warning(msg)
+    elif sev == "warn":
+        st.info(msg)                    # new highs/actions stay visible, not muted
+    else:
+        st.caption(msg)
+    # review fix: gate the jumps on QUIET, not severity — new actions alone
+    # keep severity "ok" (calm caption) but the Action Center jump must still
+    # render, or the actions-only overnight has a dead doorway on every page.
+    if bool(s.get("quiet")):
+        return
+    # Direct links to the changed items — never to the page we are already on,
+    # and never to a page this viewer's profile cannot open (the C9/AGENTS rule).
+    try:
+        from app.config import PAGES_BY_PROFILE, resolve_role_profile
+        from app.core.session import current_role
+        _allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+    except Exception:  # noqa: BLE001 - the opener is chrome; jumps degrade to text
+        _allowed = ()
+    jumps = []
+    n_alerts = int(safe_float(row.get("NEW_ALERTS")))
+    n_actions = int(safe_float(row.get("NEW_ACTIONS")))
+    if n_alerts > 0 and page != "Alerts" and (not _allowed or "Alerts" in _allowed):
+        jumps.append((f"Open events ({n_alerts}) →", "Alerts", "Open events"))
+    if n_actions > 0 and page != "Control Room" and (not _allowed or "Control Room" in _allowed):
+        jumps.append((f"Action Center ({n_actions}) →", "Control Room", "Action Center"))
+    if jumps:
+        cols = st.columns(max(len(jumps), 1) + 2)
+        for i, (lbl, pg, sect) in enumerate(jumps):
+            with cols[i]:
+                if st.button(lbl, key=f"slv_jump_{page}_{pg}".replace(" ", "_"),
+                             type="tertiary"):
+                    from app.core.state import request_navigation
+                    request_navigation(pg, sect)   # reruns itself
+
+
+def reconciliation_footer(visible_usd: object, expected_usd: object = None, *,
+                          label: str = "shown", expected_label: str = "window total") -> None:
+    """C37: one reconciliation line under an ADDITIVE cost table — what the
+    visible rows sum to, the parent figure they should reconcile against, the
+    variance, and coverage. Never a fabricated ratio: without a real positive
+    parent the line is the visible sum alone (house law 8). Lens tables mixing
+    non-comparable bases simply don't call it — there is no automatic summing
+    to suppress."""
+    v = safe_float(visible_usd)
+    e = safe_float(expected_usd, default=float("nan"))
+    parts = [f"Σ {label}: {format_usd(v)}"]
+    if e == e and e > 0:
+        diff = v - e
+        parts.append(f"{expected_label}: {format_usd(e)}")
+        parts.append(f"variance {'+' if diff >= 0 else '-'}{format_usd(abs(diff))} "
+                     f"({diff / e * 100:+.1f}%)")
+        parts.append(f"coverage {min(v / e * 100.0, 999.0):.0f}%")
+    st.caption(" · ".join(parts))
 
 
 # C48: a click during a slow write QUEUES a second rerun, and on it the same

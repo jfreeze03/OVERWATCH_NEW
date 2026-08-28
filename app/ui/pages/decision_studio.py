@@ -15,6 +15,8 @@ from app.ui.components import (
     load_settings,
     page_header,
     section_filter_contract,
+    since_last_visit_opener,
+    stashed_counts,
 )
 from app.ui.decision_studio import (
     _cost_truth,
@@ -40,9 +42,12 @@ def render() -> None:
         icon_name="target",
         scope_note=f"{f['company']} · {f['window_label']}",
     )
+    # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
+    since_last_visit_opener(_PAGE, f["company"])
     section = lazy_sections(
         ["Scorecard", "ROI", "Portfolio", "SLOs", "Products", "Cost Truth", "Scenarios", "Experiments"],
         key="decision_section",
+        counts=stashed_counts(_PAGE) or None,
     )
     # #13: each section declares which of the page filters it actually honors, instead
     # of one blanket "Company + Window" contract that overclaimed for the sections that

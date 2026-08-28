@@ -37,6 +37,7 @@ from app.ui.components import (
     section_header,
     selectable_table,
     stamp_write,
+    stash_section_count,
     styled_table,
     write_gate_open,
 )
@@ -188,6 +189,11 @@ def render_security_overview(company: str) -> None:
     if not queue.ok:
         empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")
         return
+    # C16: park the open-exception count for the section bar's "Decision queue (n)"
+    # badge — stashed only once the queue actually resolved, so 0 means clean, not unknown.
+    # review fix: the queue SQL is company-filtered but window-independent —
+    # keying by days would clear the badge on a window flip for no reason.
+    stash_section_count(_PAGE, "Decision queue", len(queue.df), dims=("company",))
     if queue.empty:
         unresolved = [
             item.domain for item in posture
