@@ -35,7 +35,7 @@ Cheap, high-visibility coherence + a11y wins. Mostly `S`, a few small `M`. No
 cross-cutting risk.
 
 ### Severity & color legibility
-- [ ] **C23 + F19 · P1/M · Data-derive section-header severity (stripe + icon + badge).**
+- [x] **C23 + F19 · P1/M · Data-derive section-header severity (stripe + icon + badge).**
   Hard-coded amber headers ("failures", "MFA gaps", "unused roles") look alarming even
   when clean. Thread each section's already-computed row/finding count into
   `section_header(health=…)`; when amber/red, also tint the icon and count badge (today
@@ -73,7 +73,7 @@ cross-cutting risk.
   "Brief" → page H1 says "Morning brief"; "Security" → "Security & Governance"; "Ask" →
   "Ask OVERWATCH". The sidebar label *is* the "you are here" anchor — make click target
   and landing H1 read identically. `app/main.py:75`; `brief.py:73`; `security.py:1379`
-- [ ] **C13 · P1/S · Show the filter-contract banner only when it prevents a misread.**
+- [x] **C13 · P1/S · Show the filter-contract banner only when it prevents a misread.**
   `filter_contract_text` already computes applies/partial/ignored — render the blue
   banner only when partial/ignored is non-empty; tuck the full "Applies:" contract behind
   a small Evidence popover. `app/ui/components.py:393`
@@ -82,7 +82,7 @@ cross-cutting risk.
   bind a connected/degraded state class or drop the animation. The gradient text-clip
   wordmark can render transparent on a host that skips `background-clip:text` — set
   `color:var(--ow-ink)` base. `app/theme.py:201-207`; `app/main.py:95-99`
-- [ ] **C24 + F31 · P2/S · Compact verified-clean rows + demote the truncation banner.**
+- [x] **C24 + F31 · P2/S · Compact verified-clean rows + demote the truncation banner.**
   Replace large green success banners with an `.ow-exception--ok` one-liner (collapses the
   Security "green wall"); fold the yellow "showing first N rows" warning into the size
   caption for routine `max_rows` caps. `app/ui/components.py:1020-1024`
@@ -172,7 +172,7 @@ cross-cutting risk.
   `app/ui/components.py:241,290`
 
 ### Orientation & metric ownership
-- [ ] **C17 · P1/M · One data-derived verdict line per analytical page.** The mechanism
+- [x] **C17 · P1/M · One data-derived verdict line per analytical page.** The mechanism
   exists (`page_verdict_line`) and Alerts already has the counts; compose a verdict from
   signals Security/Operations/Decision-Studio already compute, above the section bar.
 - [ ] **C16 · P2/S · Section count badges from already-loaded values** (overdue on
@@ -183,7 +183,7 @@ cross-cutting risk.
 - [ ] **F3 · P2/M · Stop double-stating scope** — the header chip row repeats the toolbar
   ~20px above; make it a sticky mini-scope that appears only once the toolbar scrolls away.
   `app/ui/components.py:23-38`
-- [ ] **C9 · P1/M · One-hop contextual return.** Push an origin tuple (page, section,
+- [x] **C9 · P1/M · One-hop contextual return.** Push an origin tuple (page, section,
   selection) into nav context on each jump; render a single "Return to …" in `page_header`,
   restoring section + drill. `app/core/state.py:89-163`
 - [ ] **C15 · P2/S · Show resolved calendar dates** ("Current month → Aug 1–25"). The
@@ -196,11 +196,11 @@ cross-cutting risk.
   to metering surfaces or fold into the card `as_of` stamp. `app/ui/components.py:199-201`
 
 ### Alerts & workflow interactions
-- [ ] **F49 · P1/M · Hoist a "decide bar" to the top of the alert drawer.** The
+- [x] **F49 · P1/M · Hoist a "decide bar" to the top of the alert drawer.** The
   ACK/RESOLVE/SNOOZE controls render *last*, below six evidence panels — an operator
   scrolls a long drawer to act on every event. Put the decision controls directly under
   the title; demote playbook/history/AI to a supporting group. `app/ui/pages/alerts.py:459`
-- [ ] **C43 · P1/M · Bulk-select alerts in the event table** (`selection_mode='multi-row'`
+- [x] **C43 · P1/M · Bulk-select alerts in the event table** (`selection_mode='multi-row'`
   → existing `_bulk_lifecycle_sql`/confirm gate), deleting the duplicate multiselect.
 - [ ] **C44 · P2/S · Advance to the next open item after ACK/resolve/snooze** + a one-line
   durable receipt ("Resolved X — next: Y"). `app/ui/pages/alerts.py`
@@ -209,7 +209,7 @@ cross-cutting risk.
   `app/ui/pages/alerts.py:503`
 - [ ] **F57 · P2/M · Batch the drawer's 4 serial reads into one `run_batch` + named
   progress** on first open. `app/ui/pages/alerts.py:477`
-- [ ] **F53 · P2/M · Selection summary + severity quick-select before bulk confirm**
+- [x] **F53 · P2/M · Selection summary + severity quick-select before bulk confirm**
   ("6 selected · 2 CRITICAL, 3 HIGH"). `app/ui/pages/alerts.py:769`
 - [ ] **F52 · P2/S · Show the resolved wake time when picking a snooze + a relative
   countdown in the snoozed tray.** `app/ui/pages/alerts.py:715`
