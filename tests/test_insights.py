@@ -24,6 +24,21 @@ def test_every_insight_scan_is_bounded(builder):
     assert re.search(r"DATEADD\('(day|hour)',\s*-?\d+", builder())
 
 
+def test_query_history_builders_scope_by_warehouse_only_not_user():
+    # SQL bug-hunt: the C10 doctrine — QUERY_HISTORY is scoped by WAREHOUSE company
+    # only, never warehouse AND user. The intersection dropped cross-company activity
+    # (a Trexis/UNKNOWN principal on an ALFA warehouse vanished from both scoped views,
+    # showing only under ALL), so the scoped repeat-query / release views under-reported.
+    for sql in (insights_sql.repeat_query_fingerprints(30, "ALFA"),
+                insights_sql.release_query_compare("2026-08-01", 7, "ALFA")):
+        assert "WAREHOUSE_NAME" in sql               # warehouse company scope kept
+        assert "COMPANY_FOR_USER" not in sql         # user-scope subquery removed
+        assert "USER_NAME IN (" not in sql
+    # ALL is unscoped either way (no warehouse or user narrowing)
+    _all = insights_sql.repeat_query_fingerprints(30, "ALL")
+    assert "COMPANY_FOR_USER" not in _all
+
+
 def test_idle_analysis_joins_metering_to_query_hours():
     sql = insights_sql.idle_warehouse_analysis(14, "Trexis")
     assert "WAREHOUSE_METERING_HISTORY" in sql and "QUERY_HISTORY" in sql

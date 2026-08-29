@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.333.0 - SQL bug hunt fixes (2026-08-29)
+
+* **Two repeat-query / release-health panels under-reported per-company activity.**
+  `insights_sql.repeat_query_fingerprints` and `release_query_compare` scoped
+  QUERY_HISTORY by warehouse company AND user company in one hard-AND — the exact
+  intersection the C10 fix removed elsewhere. It dropped cross-company activity (a
+  Trexis/UNKNOWN principal — e.g. a service account — running on an ALFA warehouse
+  vanished from BOTH the ALFA and Trexis scoped views, appearing only under ALL), so
+  the scoped repeat-query (cache-candidate) list and post-release query-health compare
+  silently under-counted. Now scoped by WAREHOUSE company only, matching
+  `ops_sql._query_scope`, the V082 mart twin, and the C10 doctrine.
+* Doc: the rebuild runbook said "all 90 migrations" — there are 91 (V001..V091).
+
 ## 4.332.0 - Bug hunt round 3 fix (2026-08-29)
 
 * **The active tab's accent text color was a silent no-op.** F5 set the accent ink

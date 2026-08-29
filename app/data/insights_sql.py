@@ -136,9 +136,12 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         "QUERY_TYPE = 'SELECT'",
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
+        # C10 doctrine (ops_sql._query_scope): scope QUERY_HISTORY by WAREHOUSE
+        # company only — NOT warehouse AND user. The old intersection dropped
+        # cross-company activity (a Trexis/UNKNOWN principal on an ALFA warehouse
+        # vanished from BOTH scoped views, appearing only under ALL), so the scoped
+        # repeat-query list under-reported. Matches the V082 mart twin.
         companies.warehouse_clause(company),
-        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
-                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -228,9 +231,10 @@ def release_query_compare(release_date: str, window_days: int, company: str = "A
     where = and_where(
         f"START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
         f"START_TIME < DATEADD('day', {window}, DATE '{release}')",
+        # C10 doctrine: QUERY_HISTORY scopes by WAREHOUSE company only, never
+        # warehouse AND user — the intersection dropped cross-company rows from both
+        # scoped views (see repeat_query_fingerprints / ops_sql._query_scope).
         companies.warehouse_clause(company),
-        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
-                                      distinct_where=f"START_TIME >= DATEADD('day', -{window}, DATE '{release}') AND START_TIME < DATEADD('day', {window}, DATE '{release}')"),
     )
     return f"""
 SELECT
