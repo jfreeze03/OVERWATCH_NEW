@@ -137,6 +137,13 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   single-value surfaces (the Entity 360 header) keep `confidence_badge`. Authored
   confidence carries one shared help string (`AUTHORED_CONFIDENCE_HELP`) so its
   provenance wording (operator *or* recommendation engine) never drifts per surface.
+- **Chart mark provenance (C38, `charts.PROVISIONAL_OPACITY` / `_provisional_opacity`):**
+  a chart's marks encode how trustworthy the number is — measured-and-complete is
+  solid; measured-but-provisional (newest metering day, in-flight month) dims to the
+  one shared `PROVISIONAL_OPACITY`; the month-end spend forecast is a KPI, not a
+  chart band. Dashed *rules* (budget, flagged days, F46 gates, F48 change dates) are
+  a separate annotation category. Known gap: Cost▸Optimize's projected storage-growth
+  bars aren't yet mark-distinguished from measured spend (labeled "Projected" in text).
 
 ## Cost formula contract
 

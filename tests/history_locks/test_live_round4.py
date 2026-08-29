@@ -132,7 +132,9 @@ def test_clients_panel_wired_and_canaried():
 def test_spend_trend_is_bars_plus_average_not_wash():
     seg = _CHARTS.split("def spend_trend", 1)[1].split("def bar_usd", 1)[0]
     assert "mark_bar" in seg and "rolling(7" in seg
-    assert "PROVISIONAL" in seg and "0.45" in seg             # newest partial day dims
+    # C38: the newest partial day dims via the shared provisional helper (the 0.45
+    # now lives once in PROVISIONAL_OPACITY, not inline here).
+    assert "PROVISIONAL" in seg and '_provisional_opacity("PROVISIONAL")' in seg
     assert "mark_area" not in seg                             # the unreadable wash is gone
     assert "partial, not a drop" in seg                       # caption answers the question
     assert "band" not in seg                                  # forecast rect retired

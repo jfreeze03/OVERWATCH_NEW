@@ -1,6 +1,20 @@
 # Changelog
 
-## 4.326.0 - UI/UX Wave 2: one confidence encoding across the decision workbenches (F60) (2026-08-29)
+## 4.327.0 - UI/UX Wave 2: name the chart mark grammar (C38) (2026-08-29)
+
+* **C38** the chart mark grammar for data *provenance* is now named and reusable.
+  A chart's marks say how trustworthy the number is: measured-and-complete renders
+  solid; measured-but-provisional (the newest metering day, an in-flight month —
+  the window closed but the data hasn't) dims to one shared `PROVISIONAL_OPACITY`
+  via `_provisional_opacity(flag_field)`, so every chart's "partial, not a drop"
+  reads identically (the magic 0.45 now lives in one place, applied at the spend
+  trend and the monthly boss chart). This is a byte-identical refactor — the
+  compiled Vega spec is unchanged. Adversarial review corrected an over-claim in
+  the new grammar docs: it isn't true that *no* projected value is ever charted —
+  Cost▸Optimize's storage-growth bars draw a least-squares projection
+  (`GROWTH_USD_30D`) solid, told apart from measured spend only by their
+  "Projected"/"Estimate" text; the docs now say so, and a background task tracks
+  giving those bars a distinct modeled mark.
 
 * **F60** a 0-1 confidence was shown three ways — a ProgressColumn bar on some
   decision boards, a raw float column on others, and a chips+caption badge on the

@@ -1,6 +1,9 @@
-"""Altair charts with executive-grade formatting: dollar axes, tooltips,
-budget rule, forecast band. Every chart renders real series or nothing —
-callers use components.guard() first."""
+"""Altair charts with executive-grade formatting: dollar axes, tooltips, budget
+rules. Every chart renders real series or nothing — callers use components.guard()
+first — and marks encode PROVENANCE: measured-complete is solid, measured-but-
+provisional dims (see PROVISIONAL_OPACITY / _provisional_opacity, C38). The month-end
+spend forecast is a KPI, not a chart band; the one projected series that IS charted
+(Cost▸Optimize storage growth) is not yet mark-distinguished — see the C38 note."""
 
 from __future__ import annotations
 
@@ -25,6 +28,32 @@ _ACCENT2 = palette.ACCENT2
 _GRID = "rgba(148,163,184,0.14)"
 _LABEL = palette.LOW
 _TITLE = palette.INK_SOFT
+
+# --- C38: the mark grammar for data PROVENANCE -----------------------------
+# A chart's marks say how trustworthy the number under them is:
+#   * MEASURED & COMPLETE  -> solid, full opacity (the default for every series)
+#   * MEASURED but PROVISIONAL (the newest metering day, an in-flight month — the
+#     window closed, the data hasn't) -> dimmed to PROVISIONAL_OPACITY, never a gap
+#     or a crash. "Partial, not a drop." Use `_provisional_opacity(flag_field)`.
+#   * MODELED / PROJECTED  -> not yet a distinct mark. The month-end SPEND forecast
+#     is deliberately a KPI (Projected month-end), not a floating band — the old
+#     floating rectangle was removed. But a projected series that IS charted is not
+#     yet provenance-distinguished: Cost▸Optimize "Storage growth movers" draws
+#     GROWTH_USD_30D (a least-squares projection) as solid bars via bar_usd, told
+#     apart from measured spend only by its "Projected"/"Estimate" text labels. A
+#     future modeled mark should reuse this grammar (a dashed line, or a dimmed bar)
+#     so the distinction is visual, not just captioned.
+# Dashed *rules* (budget threshold, flagged-day markers, F46 gates, F48 change date)
+# are a SEPARATE category — annotations over the data, not the data — so they carry
+# their own per-annotation dash, and are deliberately not folded into this scale.
+PROVISIONAL_OPACITY = 0.45
+
+
+def _provisional_opacity(flag_field: str = "PROVISIONAL"):
+    """C38: the one opacity encoding for measured-but-provisional rows — a row whose
+    boolean ``flag_field`` is true dims to PROVISIONAL_OPACITY, complete rows stay
+    solid. Shared so every chart's "partial, not a drop" reads identically."""
+    return alt.condition(f"datum.{flag_field}", alt.value(PROVISIONAL_OPACITY), alt.value(1.0))
 _FONT = ("Inter var, Inter, 'SF Pro Display', -apple-system, BlinkMacSystemFont, "
          "'Segoe UI', Roboto, sans-serif")
 # severity series hues from the single palette source (rec50), so a "bad"
@@ -709,8 +738,7 @@ def spend_trend(
             .encode(x=enc_x,
                     y=alt.Y("USD:Q", title="Spend (USD)",
                             axis=alt.Axis(format=_usd_fmt(data["USD"].max()))),
-                    opacity=alt.condition("datum.PROVISIONAL",
-                                          alt.value(0.45), alt.value(1.0)),
+                    opacity=_provisional_opacity("PROVISIONAL"),   # C38
                     # UI23: DayStr is 1:1 with Day (no visual change), and encoding it
                     # guarantees Vega carries it into the click-selection tuple.
                     detail=alt.Detail("DayStr:N"),
@@ -1497,7 +1525,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
                                               columns=4, symbolLimit=top_n + 1,
                                               labelLimit=160)),
         order=alt.Order("_RANK:Q"),
-        opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
+        opacity=_provisional_opacity("_PARTIAL"),   # C38
         tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
     ))
@@ -1517,7 +1545,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
             x=alt.X(f"{month_col}:O"),
             y=alt.Y(f"{usd_col}:Q"),
             text=alt.Text(f"{usd_col}:Q", format=_lblfmt),
-            opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
+            opacity=_provisional_opacity("_PARTIAL"),   # C38: label dims with its bar
         )
     )
     st.altair_chart((bars + labels).properties(height=280), width="stretch")

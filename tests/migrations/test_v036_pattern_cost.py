@@ -54,7 +54,8 @@ def test_monthly_boss_chart_mart_first_and_honest():
     assert "partial, not a drop" in ov                           # house honesty rule
     ch = (_ROOT / "app" / "ui" / "charts.py").read_text(encoding="utf-8")
     assert "def monthly_stacked_usd" in ch
-    assert 'alt.condition("datum._PARTIAL"' in ch                # dimmed in-flight month
+    # C38: the in-flight month dims via the shared provisional mark-grammar helper
+    assert '_provisional_opacity("_PARTIAL")' in ch               # dimmed in-flight month
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     for name in ("monthly_spend_by_warehouse", "live_monthly_spend_by_warehouse", "pattern_cost"):
         assert f"mart27_sql.{name}" in canary, name

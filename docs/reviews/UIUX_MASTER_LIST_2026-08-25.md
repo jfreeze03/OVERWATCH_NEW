@@ -153,8 +153,13 @@ cross-cutting risk.
 ### Charts — one visual grammar
 - [ ] **C40 · P1/M · DAG minimap + fit-to-selection.** Corner viewport overview + a
   button that fits to the failed/critical bounding box. `app/ui/charts.py`
-- [ ] **C38 · P2/M · Document a measured/modeled/projected mark grammar** (solid vs
+- [x] **C38 · P2/M · Document a measured/modeled/projected mark grammar** (solid vs
   dashed vs band). Provisional-dimming already ships; make the convention reusable.
+  — v4.327.0: named the grammar in `charts.py` — `PROVISIONAL_OPACITY` +
+  `_provisional_opacity(flag)` (byte-identical refactor of the two dim sites); module
+  docstring + a grammar comment + ARCHITECTURE bullet. Review caught + fixed a doc
+  over-claim (Cost▸Optimize projected-growth bars ARE charted solid — now documented
+  as a known gap; task_d438f0f1 tracks giving them a distinct modeled mark).
 - [x] **F44 · P2/M · Label the stack total above each stacked bar** (incl. the monthly
   "boss chart") so the primary per-period number is legible without hovering segments.
   `app/ui/charts.py:895`
