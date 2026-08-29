@@ -162,10 +162,18 @@ cross-cutting risk.
   (house `_usd_fmt` compact SI; partial month dims to match its bar). Daily stacked
   charts excluded (28+ bars collide; they already lead with a takeaway caption).
   Review 0 confirmed; adopted `_usd_fmt` + partial-dim from cosmetic feedback.
-- [ ] **F46 · P2/M · Quadrant guides + region labels on the workload scatter** so a dot's
+- [x] **F46 · P2/M · Quadrant guides + region labels on the workload scatter** so a dot's
   *position* states its ACT NOW / PLAN / VALIDATE lane, color merely confirms. `app/ui/charts.py:1200`
-- [ ] **F45 · P2/M · Waterfall connector lines + a muted "Other" bar** so it reads as a
+  — v4.324.0: confidence-axis lane gates (shared `LANE_CONF_FLOOR`/`LANE_ACTNOW_CONF`
+  constants). NO impact quadrant drawn — ACT NOW is a PRIORITY_SCORE percentile, not
+  an impact threshold. Review caught a HIGH: a blind high-cost family is VALIDATE at
+  high confidence (amber dot high on the axis) → fixed via axis rename ("Run/cost
+  confidence"), necessary-not-sufficient gate labels, and a caption stating the full rule.
+- [~] **F45 · P2/M · Waterfall connector lines + a muted "Other" bar** so it reads as a
   running total, not scattered bars. `app/ui/charts.py:999`
+  — DECLINED: `waterfall_usd` is dead code (no callers), deliberately removed from the
+  UI per rec12 (see `cost_parts/spend.py:893`) because it plotted the same top-10 twice
+  and its cumulative form misled. Background task tracks deleting the leftover function.
 - [x] **F41 · P2/S · Unit-aware `daily_metric_line` tooltips/peak** ($ line hover shows
   "742389.5" with no `$`; % line shows "93.1" with no `%`). `app/ui/charts.py:1240`
   — v4.322.0: `unit` arg (usd/credits/pct/sec/count) spells the tooltip (formatted

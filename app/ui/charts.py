@@ -12,6 +12,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from app.logic.decision import LANE_ACTNOW_CONF, LANE_CONF_FLOOR
 from app.logic.task_graph import TaskGraphShape, canonical_task_name
 from app.ui import palette
 from app.ui.sizing import CHART_H_MD, CHART_H_SM
@@ -1276,7 +1277,7 @@ def workload_portfolio(df: pd.DataFrame) -> None:
         data[column] = pd.to_numeric(data[column], errors="coerce").fillna(0.0)
     lane_domain = ["ACT NOW", "PLAN", "VALIDATE"]
     lane_colors = [palette.BAD, palette.ACCENT, palette.WARN]
-    chart = (
+    points = (
         alt.Chart(data)
         .mark_circle(opacity=0.82, stroke=palette.BG, strokeWidth=0.8)
         .encode(
@@ -1285,7 +1286,7 @@ def workload_portfolio(df: pd.DataFrame) -> None:
                 axis=alt.Axis(format=_usd_fmt(data["IMPACT_USD_30D"].max())),
                 scale=alt.Scale(zero=True),
             ),
-            y=alt.Y("CONFIDENCE:Q", title="Evidence confidence", scale=alt.Scale(domain=[0, 1])),
+            y=alt.Y("CONFIDENCE:Q", title="Run/cost confidence", scale=alt.Scale(domain=[0, 1])),
             size=alt.Size(
                 "BLAST_RADIUS:Q", title="Users + databases", scale=alt.Scale(range=[70, 780]),
             ),
@@ -1302,9 +1303,38 @@ def workload_portfolio(df: pd.DataFrame) -> None:
                 alt.Tooltip("NEXT_MOVE:N", title="Next move"),
             ],
         )
-        .properties(height=330)
     )
+    # F46: mark the CONFIDENCE axis's lane gates so a dot's vertical position helps
+    # explain its lane, not just its colour. Only confidence has axis-aligned gates
+    # — ACT NOW keys off a PRIORITY_SCORE percentile, NOT an impact threshold, so we
+    # deliberately draw NO vertical impact quadrant (it would misrepresent the lane).
+    # The gates are NECESSARY-not-sufficient markers, not lane regions: below 0.5 a
+    # dot is always VALIDATE, but VALIDATE ALSO appears HIGH on the axis when a
+    # high-cost family has no behavioural evidence (~has_behavior) — the caption below
+    # states that full rule so an amber dot above the floors isn't an unexplained
+    # contradiction. Colour stays authoritative.
+    _guides = pd.DataFrame([
+        {"_y": LANE_CONF_FLOOR, "_t": "below · always validate"},
+        {"_y": LANE_ACTNOW_CONF, "_t": "act-now floor"},
+    ])
+    rules = (
+        alt.Chart(_guides)
+        .mark_rule(strokeDash=[4, 4], color=palette.INK_MUTE, opacity=0.55)
+        .encode(y="_y:Q")
+    )
+    glabels = (
+        alt.Chart(_guides)
+        .mark_text(align="left", baseline="bottom", dx=4, dy=-2, fontSize=11, color=palette.INK_MUTE)
+        .encode(y="_y:Q", x=alt.value(4), text="_t:N")
+    )
+    chart = (rules + points + glabels).properties(height=330)
     st.altair_chart(chart, width="stretch")
+    st.caption(
+        "Lanes: **ACT NOW** = top-priority above the 0.65 confidence floor · "
+        "**VALIDATE** = under 0.5 confidence *or* missing behavioural evidence "
+        "(so an amber dot can sit high on the axis) · **PLAN** = everything else. "
+        "The axis is run/cost confidence; impact drives priority, not the lane cut."
+    )
 
 
 # F41: unit spelling for daily_metric_line tooltips + peak caption. (prefix,

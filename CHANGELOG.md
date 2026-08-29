@@ -1,6 +1,25 @@
 # Changelog
 
-## 4.323.0 - UI/UX Wave 2: stack-total labels on the boss chart (F44) (2026-08-28)
+## 4.324.0 - UI/UX Wave 2: portfolio scatter lane gates (F46) (2026-08-29)
+
+* **F46** the Decision-Studio portfolio scatter (impact × confidence, colored by
+  lane) now draws the **confidence-axis lane gates** so a dot's vertical position
+  helps explain its lane, not just its color. Only the confidence axis has
+  axis-aligned gates — ACT NOW keys off a PRIORITY_SCORE percentile, **not** an
+  impact threshold — so no vertical impact quadrant is drawn (it would misrepresent
+  the lane). The gate values are shared named constants (`LANE_CONF_FLOOR`,
+  `LANE_ACTNOW_CONF`) that the lane logic itself uses, so guides and colors can
+  never drift. Adversarial review caught a real trap pre-ship: because confidence
+  is built from run/cost evidence only, a high-cost family with missing behavioral
+  evidence is forced to VALIDATE at *high* confidence — an amber dot sitting high on
+  the axis. Fixed by renaming the axis to "Run/cost confidence" (it collided with
+  the "Validate evidence" next-move), making the gate labels necessary-not-sufficient
+  markers, and adding a caption that states the full lane rule (VALIDATE = low
+  confidence *or* missing behavioral evidence).
+* **F45 declined** — the waterfall chart it targeted (`waterfall_usd`) is dead code:
+  it was deliberately removed from the UI (per "rec 12"; see the note at
+  `cost_parts/spend.py`) because it plotted the same top-10 twice and its cumulative
+  form misled. A background task tracks deleting the leftover function.
 
 * **F44** the monthly "boss chart" (spend stacked by warehouse) now labels each
   month's **stack total** above the bar, so the primary per-period number is

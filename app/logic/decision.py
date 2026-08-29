@@ -8,6 +8,15 @@ import pandas as pd
 
 from app.logic.formulas import safe_float
 
+# Lane gates for the Decision-Studio portfolio. Named so the scatter's confidence
+# guide lines (F46) stay in lockstep with the lane assignment in prioritize_workloads.
+# NOTE: ACT NOW keys off a PRIORITY_SCORE percentile (a composite of impact,
+# confidence, reliability and effort) — NOT an impact threshold — so only the
+# confidence axis has an axis-aligned gate the scatter can honestly draw.
+LANE_CONF_FLOOR = 0.5     # confidence below this -> VALIDATE (evidence too thin to act)
+LANE_ACTNOW_CONF = 0.65   # ACT NOW additionally requires at least this confidence...
+LANE_ACTNOW_PCTL = 0.8    # ...AND a top-20% PRIORITY_SCORE percentile
+
 
 def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
                          days: int) -> pd.DataFrame:
@@ -65,8 +74,9 @@ def prioritize_workloads(frame: pd.DataFrame | None, rate: float,
     ).round(2)
     percentile = out["PRIORITY_SCORE"].rank(method="min", pct=True)
     out["LANE"] = "PLAN"
-    out.loc[out["CONFIDENCE"] < 0.5, "LANE"] = "VALIDATE"
-    out.loc[(percentile >= 0.8) & (out["CONFIDENCE"] >= 0.65), "LANE"] = "ACT NOW"
+    out.loc[out["CONFIDENCE"] < LANE_CONF_FLOOR, "LANE"] = "VALIDATE"
+    out.loc[(percentile >= LANE_ACTNOW_PCTL) & (out["CONFIDENCE"] >= LANE_ACTNOW_CONF),
+            "LANE"] = "ACT NOW"
     # #2: with no behavioral evidence we cannot know WHAT to do, so a high-cost-but-blind
     # family must never reach ACT NOW off cost signals alone — send it to VALIDATE.
     out.loc[~has_behavior, "LANE"] = "VALIDATE"

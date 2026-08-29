@@ -340,5 +340,11 @@ def test_workload_portfolio_chart_compiles(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert len(rendered) == 1
     spec = rendered[0].to_dict()
-    assert spec["encoding"]["x"]["field"] == "IMPACT_USD_30D"
-    assert spec["encoding"]["y"]["field"] == "CONFIDENCE"
+    # F46 layered confidence-gate guides onto the scatter, so the point encoding
+    # now lives in the circle-mark layer, not at the top level.
+    def _mark_type(layer):
+        mark = layer.get("mark")
+        return mark.get("type") if isinstance(mark, dict) else mark
+    points = next(lyr for lyr in spec["layer"] if _mark_type(lyr) in ("circle", "point"))
+    assert points["encoding"]["x"]["field"] == "IMPACT_USD_30D"
+    assert points["encoding"]["y"]["field"] == "CONFIDENCE"
