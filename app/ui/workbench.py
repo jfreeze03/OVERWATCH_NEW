@@ -484,20 +484,25 @@ def _render_catalog_editor(kind: str, key: str, row: pd.Series | None, company: 
         return
     with st.expander("Ownership and service contract"):
         current = row if row is not None else pd.Series(dtype=object)
-        label = st.text_input("Label", value=str(current.get("LABEL") or key), key="entity_label", max_chars=500)
-        team = st.text_input("Team", value=str(current.get("TEAM") or ""), key="entity_team", max_chars=200)
-        owner = st.text_input("Owner", value=str(current.get("OWNER_NAME") or ""), key="entity_owner", max_chars=200)
-        steward = st.text_input("Steward", value=str(current.get("STEWARD") or ""), key="entity_steward", max_chars=200)
-        on_call = st.text_input("On-call contact", value=str(current.get("ON_CALL") or ""), key="entity_oncall", max_chars=500)
+        # Scope every widget key to the entity (kind+key). Streamlit ignores value=
+        # once a key exists in session_state, so fixed keys would leave the PREVIOUS
+        # entity's ownership in the form after switching — and Save's MERGE (targeting
+        # the NEW entity_key) would write those stale values onto the wrong record.
+        _sig = f"{kind}_{key}"
+        label = st.text_input("Label", value=str(current.get("LABEL") or key), key=f"entity_label_{_sig}", max_chars=500)
+        team = st.text_input("Team", value=str(current.get("TEAM") or ""), key=f"entity_team_{_sig}", max_chars=200)
+        owner = st.text_input("Owner", value=str(current.get("OWNER_NAME") or ""), key=f"entity_owner_{_sig}", max_chars=200)
+        steward = st.text_input("Steward", value=str(current.get("STEWARD") or ""), key=f"entity_steward_{_sig}", max_chars=200)
+        on_call = st.text_input("On-call contact", value=str(current.get("ON_CALL") or ""), key=f"entity_oncall_{_sig}", max_chars=500)
         crit_now = str(current.get("CRITICALITY") or "STANDARD").upper()
         criticality = st.selectbox(
             "Criticality", CRITICALITIES,
             index=CRITICALITIES.index(crit_now) if crit_now in CRITICALITIES else 2,
-            key="entity_criticality",
+            key=f"entity_criticality_{_sig}",
         )
-        product = st.text_input("Data product", value=str(current.get("DATA_PRODUCT") or ""), key="entity_product", max_chars=300)
-        slo_name = st.text_input("SLO", value=str(current.get("SLO_NAME") or ""), key="entity_slo", max_chars=300)
-        notes = st.text_area("Notes", value=str(current.get("NOTES") or ""), key="entity_notes", max_chars=4000)
+        product = st.text_input("Data product", value=str(current.get("DATA_PRODUCT") or ""), key=f"entity_product_{_sig}", max_chars=300)
+        slo_name = st.text_input("SLO", value=str(current.get("SLO_NAME") or ""), key=f"entity_slo_{_sig}", max_chars=300)
+        notes = st.text_area("Notes", value=str(current.get("NOTES") or ""), key=f"entity_notes_{_sig}", max_chars=4000)
         sql = entity_catalog_merge_sql(
             entity_type=kind, entity_key=key, label=label, company=company,
             team=team, owner=owner, steward=steward, on_call=on_call,

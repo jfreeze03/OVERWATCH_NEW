@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.337.0 - UI-layer bug hunt round 2: seven correctness/UX fixes (2026-08-29)
+
+Second adversarial multi-agent hunt over `app/ui/*` — per-file-cluster deep audits
+plus a degenerate-input crash sweep, each finding independently verified. Seven
+confirmed, each fixed and locked:
+
+* **[high] Control Room RCA blanked its flagship panel for manual incidents.**
+  `onset = STARTED_AT or DETECTED_AT` — but a manually-declared incident has a NULL
+  `STARTED_AT` (→ `pd.NaT`), and `bool(pd.NaT)` is True, so the `or` returned NaT and
+  the `pd.isna` guard skipped the whole "Auto-investigation — ranked root cause"
+  section. Now falls back on `DETECTED_AT` NA-safely.
+* **[med] Alerts snoozed-events tray hid on an empty open feed.** The "💤 Snoozed
+  (n)" tray rendered inside the `if guard(events, …)` block, so when the open feed
+  was empty the page showed a green "found nothing over threshold" all-clear while a
+  snoozed CRITICAL sat invisible until auto-wake. The tray now renders outside the
+  guard.
+* **[med] Entity 360 catalog editor could write ownership onto the wrong entity.**
+  Its nine edit widgets used fixed keys, so switching entities left the prior
+  entity's values in the form (Streamlit ignores `value=` once a key exists) and Save
+  MERGE'd them onto the newly-selected entity. Keys are now scoped per entity.
+* **[med] Overview budget burndown faked an "under pace" gap.** It was fed the
+  company-scoped, `days`-windowed `daily_complete` (default 7 days) while the
+  straight-line budget reflected the full elapsed month, so past ~the 8th the
+  cumulative actual covered only the last week. Now fed the account-wide full-month
+  frame (`proj_daily`), today's partial excluded.
+* **[med] Compare "Incomplete coverage" warning fired on fully-loaded data.** It
+  compared active-day `COUNT(DISTINCT DAY)` against the calendar span, but
+  `FACT_WAREHOUSE_DAILY` is sparse (no date spine), so a weekend-suspended workload
+  tripped a false banner on correct month-over-month data. The check now judges
+  loader reach: a new `LOADED_THROUGH` (the scope's global last loaded day) vs each
+  window's end, so idle days never read as unloaded days.
+* **[low] Operations Queries sparklines ignored active warehouse/user/schema
+  filters.** The trend feed honors only company+database, so a filtered KPI number
+  was paired with a company-wide trend. The sparkline is now suppressed when one of
+  those filters is active (database is honored, so it doesn't suppress).
+* **[low] Operations failure-timeline header alarmed over a clean body.** The "(7d)"
+  header alarm was driven by the window-wide failure count (up to 365d) while the
+  body scans a fixed 7 days, so a >7-day-old failure painted an amber header over a
+  verified-clean body. The alarm now reflects the actual 7-day failures.
+
 ## 4.336.0 - UI-layer bug hunt: three presentation corrections (2026-08-29)
 
 Adversarial multi-agent hunt over `app/ui/*` (six diverse finder lenses, each

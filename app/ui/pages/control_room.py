@@ -145,7 +145,13 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
         rca_summary,
     )
 
-    onset_dt = pd.to_datetime(inc_row.get("STARTED_AT") or inc_row.get("DETECTED_AT"), errors="coerce")
+    # NA-safe fallback: STARTED_AT is NULL for manually-declared incidents, and a
+    # Python `or` can't gate it — bool(pd.NaT) is True, so `NaT or DETECTED_AT`
+    # returns NaT and the guard below would blank the whole flagship RCA panel for
+    # every manual incident. Fall back on DETECTED_AT only when STARTED_AT is absent.
+    _started = inc_row.get("STARTED_AT")
+    onset_dt = pd.to_datetime(
+        _started if pd.notna(_started) else inc_row.get("DETECTED_AT"), errors="coerce")
     if pd.isna(onset_dt):
         return
     section_header("Auto-investigation — ranked root cause", "info", "incident")

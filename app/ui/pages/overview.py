@@ -741,9 +741,20 @@ def render() -> None:
     )
     kpi_row(account_kpis)
     # P1 #57: cumulative-actual-vs-straight-line-budget burndown — the CFO-friendly
-    # 'are we pacing over budget' view. Budget-gated, reuses daily_complete (no scan).
+    # 'are we pacing over budget' view. Budget-gated (no extra scan).
     if budget > 0:
-        _burn = budget_burndown(daily_complete, budget, account_today())
+        # Triage #3: the burndown must span the FULL month-to-date and match the
+        # ACCOUNT-WIDE budget. Feeding the company-scoped, `days`-windowed
+        # daily_complete truncated the cumulative actual to the last ~week while the
+        # straight-line budget reflects the whole elapsed month — faking a large
+        # "under pace" gap past ~the 8th. Use the same account-wide full-month frame
+        # the Projected month-end KPI uses (proj_daily), today's partial excluded to
+        # match the caption and budget_burndown's complete-days convention.
+        _burn_src = (
+            proj_daily[pd.to_datetime(proj_daily["DAY"], errors="coerce").dt.date < account_today()]
+            if not proj_daily.empty else proj_daily
+        )
+        _burn = budget_burndown(_burn_src, budget, account_today())
         if len(_burn) >= 2:
             st.markdown("**Budget burndown — cumulative spend vs the straight-line budget**")
             st.line_chart(_burn.set_index("DAY")[["CUM_ACTUAL_USD", "BUDGET_LINE_USD"]])

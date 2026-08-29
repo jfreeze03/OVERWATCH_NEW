@@ -819,8 +819,11 @@ def compare_warehouse_credits(a_start: str, a_end: str, b_start: str, b_end: str
     either side's day count is short of its window length."""
     in_a, in_b, either = _side_windows(a_start, a_end, b_start, b_end)
     comp = ""
+    comp_where = ""
     if company and company != "ALL":
-        comp = f"  AND COMPANY = {companies.sql_literal(company)}\n"
+        _clit = companies.sql_literal(company)
+        comp = f"  AND COMPANY = {_clit}\n"
+        comp_where = f"\n    WHERE COMPANY = {_clit}"
     return f"""WITH movers AS (
     SELECT
         WAREHOUSE_NAME,
@@ -838,7 +841,12 @@ cov AS (
         MIN(CASE WHEN {in_a} THEN DAY END) AS A_MIN_DAY,
         MAX(CASE WHEN {in_a} THEN DAY END) AS A_MAX_DAY,
         MIN(CASE WHEN {in_b} THEN DAY END) AS B_MIN_DAY,
-        MAX(CASE WHEN {in_b} THEN DAY END) AS B_MAX_DAY
+        MAX(CASE WHEN {in_b} THEN DAY END) AS B_MAX_DAY,
+        -- Loader's GLOBAL reach for this company scope (NOT window-bounded): idle
+        -- calendar days inside a window don't lower it, so it separates "loader
+        -- hasn't reached this window's end yet" (real partial backfill) from "no
+        -- warehouse activity that day" (sparse fact, not a gap). #34 coverage check.
+        (SELECT MAX(DAY) FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY{comp_where}) AS LOADED_THROUGH
     FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
     WHERE {either}
 {comp})
@@ -851,7 +859,8 @@ SELECT
     cov.A_MIN_DAY,
     cov.A_MAX_DAY,
     cov.B_MIN_DAY,
-    cov.B_MAX_DAY
+    cov.B_MAX_DAY,
+    cov.LOADED_THROUGH
 FROM movers m
 CROSS JOIN cov
 ORDER BY ABS(m.A_CREDITS - m.B_CREDITS) DESC

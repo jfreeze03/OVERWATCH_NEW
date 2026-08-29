@@ -175,10 +175,16 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         if activity is None or not activity.ok:
             activity = run(_activity_sql, page=_PAGE, key="ops_spark_activity",
                            tier="hourly", source="FACT_QUERY_HOURLY (daily)")
+        # The activity feed (fact_daily_activity) honors only company + database, but
+        # the KPI VALUES beside these sparks are also scoped by warehouse/user/schema.
+        # Suppress the trend glyph when one of those filters is active rather than pair
+        # a filtered number with a company/DB-wide shape it doesn't describe. (database
+        # IS honored by the feed, so it does not suppress.)
+        _spark_ok = not (wh_filter or user_filter or schema_contains)
         q_spark = (activity.df["QUERIES"].tolist()
-                   if activity.usable() and "QUERIES" in activity.df.columns else None)
+                   if _spark_ok and activity.usable() and "QUERIES" in activity.df.columns else None)
         f_spark = (activity.df["FAILS"].tolist()
-                   if activity.usable() and "FAILS" in activity.df.columns else None)
+                   if _spark_ok and activity.usable() and "FAILS" in activity.df.columns else None)
         kpi_row([
             {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
@@ -563,11 +569,15 @@ def _query_insights_panel() -> None:
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
                               known_failures: float | None = None) -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
-    # C23: the caller passes the already-known failure count when it has one.
-    section_header("Failure root-cause timeline (7d)",
-                   alarm_health(None if known_failures is None else int(known_failures)),
-                   "alerts")
+    # C23: a verified-clean section renders green, never a false alarm. The body scans
+    # a FIXED 7 days, so the header alarm must reflect 7-DAY failures — NOT the caller's
+    # window-wide known_failures (up to 365d), which would paint the header amber over a
+    # clean 7d body when the only failure is >7 days ago. known_failures is used only as
+    # a perf short-circuit: 0 over the whole window means 0 in the 7d subset too, so skip
+    # the ~15s scan and render clean.
+    _TITLE = "Failure root-cause timeline (7d)"
     if known_failures is not None and known_failures <= 0:
+        section_header(_TITLE, alarm_health(0), "alerts")
         empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     # P6: hourly, not recent. This is the page's most expensive read (~15s: a 7-day
@@ -579,12 +589,16 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
               key=f"t_rca_{company}", tier="hourly",
               source="ACCOUNT_USAGE.TASK_HISTORY (failures, ~45 min source lag)")
     if not res.ok:
+        section_header(_TITLE, alarm_health(None), "alerts")   # unknown — no data, no claim
         st.error(f"Failure detail unavailable: {res.error}")
         return
     if res.empty:
+        section_header(_TITLE, alarm_health(0), "alerts")
         empty_state("clean", "No task failures in the last 7 days for this scope.")
         return
     timeline = build_failure_timeline(res.df)
+    # Alarm driven by the ACTUAL 7d failures the body shows (matches the "Failures (7d)" KPI).
+    section_header(_TITLE, alarm_health(len(timeline)), "alerts")
     roots = timeline[timeline["ROLE_IN_GRAPH"] == "Root cause"]
     kpi_row([
         {"label": "Failures (7d)", "value": f"{len(timeline)}"},

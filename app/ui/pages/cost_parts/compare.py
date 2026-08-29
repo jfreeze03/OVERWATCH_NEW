@@ -67,40 +67,42 @@ def _delta_chip(a: float, b: float, decimals: int = 1) -> str:
 
 
 def _coverage_warning(df: pd.DataFrame, pair: dict) -> str:
-    """#34: per-side coverage contract. compare_warehouse_credits now returns
-    A_DAYS/B_DAYS (COUNT(DISTINCT DAY)) and A_MAX_DAY/B_MAX_DAY per side. When
-    either side's loaded-day count is short of its window length, a partial
-    backfill is manufacturing false movers / 100% deltas — say so rather than
-    presenting the deltas as real movement. Returns '' when both sides are
-    complete (the normal case: full-month/prior windows are fully loaded)."""
-    from datetime import date
+    """#34: per-side coverage contract. A side is 'incomplete' only when the loader
+    has NOT yet reached that side's window end — judged against LOADED_THROUGH (the
+    company scope's GLOBAL last loaded day), not against a per-side active-day count.
+    FACT_WAREHOUSE_DAILY is sparse (built from metering, no date spine): a
+    weekend-suspended workload has fewer active DISTINCT days than the calendar span
+    even when fully loaded, so the old COUNT(DISTINCT DAY) < span test raised a false
+    'Incomplete coverage' banner on correct month-over-month data. Idle days never
+    lower LOADED_THROUGH, so it cleanly separates an unfinished backfill (real) from a
+    quiet day (not a gap). Returns '' when the loader has reached both window ends."""
+    from datetime import date, timedelta
 
-    def _expected(lo: object, hi: object) -> int:
-        try:
-            return (date.fromisoformat(str(hi)) - date.fromisoformat(str(lo))).days
-        except ValueError:
-            return 0
-
-    if df.empty:
+    if df.empty or "LOADED_THROUGH" not in df.columns:
         return ""
+    loaded = pd.to_datetime(df["LOADED_THROUGH"].iloc[0], errors="coerce")
+    if pd.isna(loaded):
+        return ""
+    loaded = loaded.date()
+
+    def _last_expected(hi: object) -> date | None:
+        # windows are end-EXCLUSIVE, so the last day that could carry data is hi - 1
+        try:
+            return date.fromisoformat(str(hi)) - timedelta(days=1)
+        except ValueError:
+            return None
+
     msgs = []
-    for side, window, label in (("A", pair["a"], pair["label_a"]),
-                                ("B", pair["b"], pair["label_b"])):
-        days_col, max_col = f"{side}_DAYS", f"{side}_MAX_DAY"
-        if days_col not in df.columns:
-            continue
-        got = int(safe_float(df[days_col].iloc[0]))
-        expected = _expected(window[0], window[1])
-        if expected > 0 and got < expected:
-            through = ""
-            if max_col in df.columns and pd.notna(df[max_col].iloc[0]):
-                through = f", through {str(df[max_col].iloc[0])[:10]}"
-            msgs.append(f"{label}: {got} of {expected} days loaded{through}")
+    for _side, window, label in (("A", pair["a"], pair["label_a"]),
+                                 ("B", pair["b"], pair["label_b"])):
+        last_expected = _last_expected(window[1])
+        if last_expected is not None and loaded < last_expected:
+            msgs.append(f"{label}: loaded through {loaded}, window ends {last_expected}")
     if not msgs:
         return ""
     return ("Incomplete coverage — " + "; ".join(msgs)
-            + ". Movers and Δ% below are provisional until both windows finish "
-              "loading; a side missing days shows false 100% moves.")
+            + ". Movers and Δ% below are provisional until the backfill reaches both "
+              "window ends; a side missing its tail days can show false 100% moves.")
 
 
 def _compare_tab(company: str, rate: float, ai_rate: float) -> None:

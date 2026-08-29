@@ -32,9 +32,13 @@ def test_feed_and_drawer_are_columns_in_the_shared_container():
 
 def test_bulk_and_snoozed_stay_full_width():
     frag = _SRC.split("def _open_events_section", 1)[1]
-    # the bulk panel + snoozed tray are 8-space siblings, OUTSIDE the container
+    # the bulk panel is an 8-space sibling, OUTSIDE the columns container (full width)
     assert "\n        if is_operator and _bulk_rows:" in frag
-    assert "\n        _snz = run(mart_sql.snoozed_alert_events" in frag
+    # the snoozed tray renders at 4-space — OUTSIDE the `if guard(events, ...)` block —
+    # so an empty open feed still surfaces pending snoozed events rather than a false
+    # green all-clear while a snoozed CRITICAL is invisible until its auto-wake.
+    assert "\n    _snz = run(mart_sql.snoozed_alert_events" in frag
+    assert "\n        _snz = run(mart_sql.snoozed_alert_events" not in frag  # not back inside the guard
 
 
 def test_drawer_placeholder_is_single_mode_and_not_duplicated():

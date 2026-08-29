@@ -1154,65 +1154,68 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         f"Bulk {b_action} recorded — {len(_bulk_ids)} event(s)")
                     st.rerun()
 
-        # V086: snoozed events are hidden from the feed above until their wake time.
-        # Surface them so a snooze is never a black hole, with an early un-snooze.
-        _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
-                   key=f"alert_snoozed_{company}", tier="live",
-                   source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
-        if _snz.usable() and not _snz.empty:
-            with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
-                # F52: a relative countdown, soonest wake first — a snooze reads as
-                # a running timer, not a black-hole timestamp.
-                _sdf = _snz.df.copy()
-                _sn_now = account_now()
+    # V086: snoozed events are hidden from the OPEN/ACK feed until their wake time.
+    # Surface them so a snooze is never a black hole, with an early un-snooze. This
+    # renders OUTSIDE the `if guard(events, ...)` block on purpose: an empty open
+    # feed must not present a green "found nothing over threshold" all-clear while a
+    # snoozed CRITICAL is still pending (it would be invisible until its auto-wake).
+    _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
+               key=f"alert_snoozed_{company}", tier="live",
+               source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
+    if _snz.usable() and not _snz.empty:
+        with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
+            # F52: a relative countdown, soonest wake first — a snooze reads as
+            # a running timer, not a black-hole timestamp.
+            _sdf = _snz.df.copy()
+            _sn_now = account_now()
 
-                def _wakes_in(value: object) -> str:
-                    try:
-                        _secs = (value - _sn_now).total_seconds()
-                    except (TypeError, AttributeError):
-                        return "—"
-                    if _secs != _secs:  # NaT
-                        return "—"
-                    _secs = max(0.0, _secs)
-                    if _secs >= 86400:
-                        # review fix: humanize_duration caps at hours by design
-                        # (query durations) — "167h 59m" is not a countdown.
-                        _d, _rem = divmod(round(_secs), 86400)
-                        _h = int(_rem // 3600)
-                        return f"{_d}d {_h}h" if _h else f"{_d}d"
-                    return humanize_duration(_secs)
+            def _wakes_in(value: object) -> str:
+                try:
+                    _secs = (value - _sn_now).total_seconds()
+                except (TypeError, AttributeError):
+                    return "—"
+                if _secs != _secs:  # NaT
+                    return "—"
+                _secs = max(0.0, _secs)
+                if _secs >= 86400:
+                    # review fix: humanize_duration caps at hours by design
+                    # (query durations) — "167h 59m" is not a countdown.
+                    _d, _rem = divmod(round(_secs), 86400)
+                    _h = int(_rem // 3600)
+                    return f"{_d}d {_h}h" if _h else f"{_d}d"
+                return humanize_duration(_secs)
 
-                _sdf["WAKES_IN"] = _sdf["SNOOZED_UNTIL"].map(_wakes_in)
-                _sdf = _sdf.sort_values("SNOOZED_UNTIL")
-                styled_table(_sdf[["WAKES_IN", "SEVERITY", "TITLE", "SNOOZED_UNTIL",
-                                   "SNOOZE_BY", "SNOOZE_REASON"]])
-                if is_operator:
-                    _snz_opts = {
-                        f"[{r['SEVERITY']}] {str(r['TITLE'])[:60]} (wakes {r['SNOOZED_UNTIL']})": str(r["EVENT_ID"])
-                        for _, r in _snz.df.iterrows()
-                    }
-                    _snz_pick = st.multiselect("Wake now (un-snooze early)", list(_snz_opts),
-                                               key="alert_unsnooze_pick")
-                    _uids = [_snz_opts[c] for c in _snz_pick]
-                    # C48 re-verify fix: scope the latch by the SELECTION — inside
-                    # this fragment the run seq never advances, so a bare key would
-                    # swallow "wake these… and that one too" for the whole backstop.
-                    _unsz_key = "alert_unsnooze:" + "".join(str(e) for e in _uids)[:64]
-                    if (st.button("Wake selected now", key="alert_unsnooze_exec",
-                                  disabled=not _uids, type="primary")
-                            and write_gate_open(_unsz_key)):
-                        # hours=0 tells SP_ALERT_SNOOZE to un-snooze now (restore prior status).
-                        call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
-                                f"{sql_literal(','.join(str(e) for e in _uids))}, 0, '', {identity_sql()}, "
-                                f"{sql_literal(idempotency_key('ALERT_UNSNOOZE', ''.join(_uids)))})")
-                        ok_s, msg_s = execute_action(call, _unsnooze_stmts(_uids), page=_PAGE)
-                        stamp_write(_unsz_key, ok_s)  # C48
-                        notify(ok_s, f"Un-snooze: {len(_uids)} event(s) — {msg_s}")
-                        if ok_s:
-                            from app.ui.components import log_ui_event
-                            log_ui_event("alert_unsnooze", page=_PAGE)
-                else:
-                    st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+            _sdf["WAKES_IN"] = _sdf["SNOOZED_UNTIL"].map(_wakes_in)
+            _sdf = _sdf.sort_values("SNOOZED_UNTIL")
+            styled_table(_sdf[["WAKES_IN", "SEVERITY", "TITLE", "SNOOZED_UNTIL",
+                               "SNOOZE_BY", "SNOOZE_REASON"]])
+            if is_operator:
+                _snz_opts = {
+                    f"[{r['SEVERITY']}] {str(r['TITLE'])[:60]} (wakes {r['SNOOZED_UNTIL']})": str(r["EVENT_ID"])
+                    for _, r in _snz.df.iterrows()
+                }
+                _snz_pick = st.multiselect("Wake now (un-snooze early)", list(_snz_opts),
+                                           key="alert_unsnooze_pick")
+                _uids = [_snz_opts[c] for c in _snz_pick]
+                # C48 re-verify fix: scope the latch by the SELECTION — inside
+                # this fragment the run seq never advances, so a bare key would
+                # swallow "wake these… and that one too" for the whole backstop.
+                _unsz_key = "alert_unsnooze:" + "".join(str(e) for e in _uids)[:64]
+                if (st.button("Wake selected now", key="alert_unsnooze_exec",
+                              disabled=not _uids, type="primary")
+                        and write_gate_open(_unsz_key)):
+                    # hours=0 tells SP_ALERT_SNOOZE to un-snooze now (restore prior status).
+                    call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
+                            f"{sql_literal(','.join(str(e) for e in _uids))}, 0, '', {identity_sql()}, "
+                            f"{sql_literal(idempotency_key('ALERT_UNSNOOZE', ''.join(_uids)))})")
+                    ok_s, msg_s = execute_action(call, _unsnooze_stmts(_uids), page=_PAGE)
+                    stamp_write(_unsz_key, ok_s)  # C48
+                    notify(ok_s, f"Un-snooze: {len(_uids)} event(s) — {msg_s}")
+                    if ok_s:
+                        from app.ui.components import log_ui_event
+                        log_ui_event("alert_unsnooze", page=_PAGE)
+            else:
+                st.caption("Un-snoozing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
 
 
 @safe_page(_PAGE)
