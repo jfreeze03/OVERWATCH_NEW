@@ -1471,7 +1471,26 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
         tooltip=[alt.Tooltip(f"{month_col}:O"), alt.Tooltip(f"{category_col}:N"),
                  alt.Tooltip(f"{usd_col}:Q", format="$,.0f")],
     ))
-    st.altair_chart(bars, width="stretch")
+    # F44: label each month's STACK TOTAL above the bar, so the primary per-period
+    # number is legible without hovering + summing the segments by eye. Format via
+    # the house _usd_fmt (F39): compact SI once >= $10k ("$742k"/"$1.24M") so ~12
+    # labels don't collide, exact dollars below — which also keeps d3's milli-suffix
+    # ("$500m") away from any sub-dollar total. The partial month's total dims to
+    # MATCH its bar (0.45) so a running total never reads brighter or more finished
+    # than the bar it caps.
+    _tot = d.groupby(month_col, as_index=False)[usd_col].sum()
+    _tot["_PARTIAL"] = _tot[month_col].astype(str) == str(partial_month)
+    _lblfmt = _usd_fmt(float(pd.to_numeric(_tot[usd_col], errors="coerce").max() or 0.0))
+    labels = (
+        alt.Chart(_tot).mark_text(dy=-6, baseline="bottom", fontSize=11, color=_TITLE)
+        .encode(
+            x=alt.X(f"{month_col}:O"),
+            y=alt.Y(f"{usd_col}:Q"),
+            text=alt.Text(f"{usd_col}:Q", format=_lblfmt),
+            opacity=alt.condition("datum._PARTIAL", alt.value(0.45), alt.value(1.0)),
+        )
+    )
+    st.altair_chart((bars + labels).properties(height=280), width="stretch")
     # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
     if takeaway and float(totals.sum()) > 0:
         st.caption(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum())))

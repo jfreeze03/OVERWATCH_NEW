@@ -1,6 +1,17 @@
 # Changelog
 
-## 4.322.0 - UI/UX Wave 2: unit-aware metric lines + labeled reference rule (F41 + F48) (2026-08-28)
+## 4.323.0 - UI/UX Wave 2: stack-total labels on the boss chart (F44) (2026-08-28)
+
+* **F44** the monthly "boss chart" (spend stacked by warehouse) now labels each
+  month's **stack total** above the bar, so the primary per-period number is
+  legible without hovering every segment and summing by eye. The label uses the
+  house `_usd_fmt` (compact SI — "$742k"/"$1.24M" — once the total clears $10k,
+  exact dollars below, which also keeps d3's milli-suffix away from any sub-dollar
+  total), and the in-flight (partial) month's total dims to match its bar so a
+  running total never reads brighter or more finished than the bar it caps. Daily
+  stacked charts are deliberately excluded — 28+ bars would collide, and they
+  already lead with a takeaway caption. Adversarial review: 0 confirmed (6 findings,
+  all cosmetic; the `_usd_fmt` switch + partial-dim were adopted from that feedback).
 
 * **F41** `daily_metric_line` tooltips, peak caption, and y-axis now carry the
   metric's unit. A dollar line's tooltip showed "742389.5" (no `$`, no separators)

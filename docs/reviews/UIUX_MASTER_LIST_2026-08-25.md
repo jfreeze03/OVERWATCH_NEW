@@ -155,9 +155,13 @@ cross-cutting risk.
   button that fits to the failed/critical bounding box. `app/ui/charts.py`
 - [ ] **C38 · P2/M · Document a measured/modeled/projected mark grammar** (solid vs
   dashed vs band). Provisional-dimming already ships; make the convention reusable.
-- [ ] **F44 · P2/M · Label the stack total above each stacked bar** (incl. the monthly
+- [x] **F44 · P2/M · Label the stack total above each stacked bar** (incl. the monthly
   "boss chart") so the primary per-period number is legible without hovering segments.
   `app/ui/charts.py:895`
+  — v4.323.0: `monthly_stacked_usd` (boss chart) layers a stack-total text mark
+  (house `_usd_fmt` compact SI; partial month dims to match its bar). Daily stacked
+  charts excluded (28+ bars collide; they already lead with a takeaway caption).
+  Review 0 confirmed; adopted `_usd_fmt` + partial-dim from cosmetic feedback.
 - [ ] **F46 · P2/M · Quadrant guides + region labels on the workload scatter** so a dot's
   *position* states its ACT NOW / PLAN / VALIDATE lane, color merely confirms. `app/ui/charts.py:1200`
 - [ ] **F45 · P2/M · Waterfall connector lines + a muted "Other" bar** so it reads as a
