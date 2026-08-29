@@ -94,7 +94,7 @@ def test_guard_trip_parks_notice_and_reruns():
     # the stale branch must NOT render inline and continue — it parks the notice
     # and reruns so the fresh unselected table mounts in the same interaction.
     idx = _SRC.index("can never be a stale POSITIONAL")
-    block = _SRC[idx:idx + 900]
+    block = _SRC[idx:idx + 1100]   # C42 columns reindent widened the block
     assert '"_ow_alert_stale_note"' in block
     assert "st.rerun()" in block
 

@@ -247,7 +247,7 @@ cross-cutting risk.
 
 ## Wave 3 — bigger bets (`L` / cross-cutting)
 
-- [ ] **C42 · P1/L · Desktop master-detail layout for Alerts** (feed left, drawer right)
+- [x] **C42 · P1/L · Desktop master-detail layout for Alerts** (feed left, drawer right)
   — wrap the existing `@st.fragment` in `st.columns`, stacked fallback on narrow viewports.
 - [x] **C47 · P1/L · Shared master-detail for Action Center + Decision Studio** (ranked
   work left, ownership/evidence/lifecycle right). Accepts Streamlit's whole-page rerun on

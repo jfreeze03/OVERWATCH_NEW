@@ -517,573 +517,591 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
             return
         # rec27: an "Age" companion ("3h ago") reads at a glance; RAISED_AT stays the
         # real, sortable, tz-converted column. rec30: declare the severity-then-newest order.
-        _now = account_now()
-        _feed = with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")
-        _feed = _feed.assign(AGE=_feed["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
-        # C43: operator-gated BULK MODE — off (the default) keeps the one-click
-        # single-row drawer; on, the table takes checkbox multi-selection that arms
-        # the bulk panel below (replacing the old duplicate multiselect lookup).
-        # The mode suffix on the key mounts a fresh table on every flip so selection
-        # state can never leak across modes; non-operators never see the toggle, so
-        # bulk is never promised to a viewer who cannot execute it.
-        _bulk_mode = bool(is_operator and st.toggle(
-            "Bulk select", key=f"alert_bulk_mode_{_sel_nonce}",
-            help="Check several rows and acknowledge/resolve them together; "
-                 "switch off for single-click drawer triage."))
-        _raw_sel = selectable_table(
-            _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
-            key=f"alert_events_sel_{_sel_nonce}_{'m' if _bulk_mode else 's'}",
-            sort_label="severity, then newest", multi=_bulk_mode)
-        if _bulk_mode:
-            _bulk_rows = [int(r) for r in (_raw_sel or [])]
-            sel = None
-        else:
-            _bulk_rows = []
-            sel = int(_raw_sel) if _raw_sel is not None else None
-        # C43+F51: the bulk SET binds by identity too — a feed shift under checked
-        # rows (same positions, different events) disarms the panel instead of
-        # silently re-targeting the write the operator reviewed and typed to confirm.
-        if _bulk_rows:
-            _ids_here = tuple(str(edf.iloc[i]["EVENT_ID"]) for i in _bulk_rows)
-            _bbind = st.session_state.get("_ow_alert_bulk_bind")
-            if (isinstance(_bbind, tuple) and len(_bbind) == 2
-                    and tuple(_bbind[0]) == tuple(_bulk_rows)
-                    and tuple(_bbind[1]) != _ids_here):
-                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
-                st.session_state.pop("_ow_alert_bulk_bind", None)
-                st.session_state["_ow_alert_stale_note"] = (
-                    "The feed changed under the previous selection — re-select rows "
-                    "to arm a bulk action.")
-                st.rerun()
-            st.session_state["_ow_alert_bulk_bind"] = (tuple(_bulk_rows), _ids_here)
-        else:
-            st.session_state.pop("_ow_alert_bulk_bind", None)
-        _from_deeplink = False
-        if sel is None and not _bulk_rows and requested_event:
-            # F51: the identity fallback is armed per ARRIVAL and disarmed by the next
-            # write's nonce bump — un-gated it re-fired on every paint, reopening the
-            # acted drawer after each write. While armed it re-applies on every
-            # fragment rerun (the table emits no selection while the user works in
-            # the drawer), which is exactly what keeps the deep-linked drawer open.
-            _armed = st.session_state.get("_ow_alert_deeplink_armed")
-            _is_next = event_signature.startswith("alert-next:")
-            if _is_next and _bulk_mode:
-                # C44 review fix: bulk mode supersedes the queue — a funneled
-                # drawer must never render beneath the checkbox table.
-                st.session_state.pop("_ow_alert_next_up", None)
-                st.session_state.pop("_ow_alert_deeplink_armed", None)
-            elif _armed is None or _armed == (event_signature, _sel_nonce):
-                matches = [
-                    index for index, value in enumerate(edf["EVENT_ID"].astype(str))
-                    if value == requested_event
-                ]
-                sel = matches[0] if matches else None
-                if sel is not None:
-                    _from_deeplink = True
-                    if _armed is None:
-                        st.session_state["_ow_alert_deeplink_armed"] = (
-                            event_signature, _sel_nonce)
-                elif _is_next:
-                    # C44 review fix: the queued event left the feed (colleague
-                    # write / V091 auto-resolver) or is filtered out — the miss
-                    # is FINAL, never a zombie drawer when the id returns.
-                    st.session_state.pop("_ow_alert_next_up", None)
-                    st.session_state.pop("_ow_alert_deeplink_armed", None)
-        # F51: bind the drawer by EVENT IDENTITY, not position. When the live feed
-        # shrinks or reorders under a sticky selection (a resolve here, the V091
-        # auto-resolver, a filter change), the same positional index silently lands
-        # on a DIFFERENT event — drop the rebind instead of opening the wrong drawer.
-        if sel is not None and 0 <= int(sel) < len(edf):
-            _ev_here = str(edf.iloc[int(sel)]["EVENT_ID"])
-            # An identity-derived deep-link selection can never be a stale POSITIONAL
-            # rebind — only the widget's sticky index gets the guard.
-            if not _from_deeplink and _stale_rebind(
-                    int(sel), _ev_here, st.session_state.get("_ow_alert_drawer_bind")):
-                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
-                st.session_state.pop("_ow_alert_drawer_bind", None)
-                st.session_state["_ow_alert_stale_note"] = (
-                    "The feed changed under the previous selection — click a row "
-                    "to reopen its drawer.")
-                # Rerun NOW so the fresh, unselected table mounts in this same
-                # interaction — without it the wrong-row highlight survives the paint
-                # and the retired key swallows the user's next click.
-                st.rerun()
-            st.session_state["_ow_alert_drawer_bind"] = (int(sel), _ev_here)
-        else:
-            # F51: no live selection -> no bind may outlive it (an orphaned bind
-            # would falsely veto a later genuine click that lands on the same index).
-            st.session_state.pop("_ow_alert_drawer_bind", None)
-        result_caption(events)
-        if sel is None or not (0 <= int(sel) < len(edf)):
-            if _bulk_rows:
-                st.caption(f"{len(_bulk_rows)} row(s) checked — the bulk action panel is below.")
-            elif _bulk_mode:
-                st.caption("Bulk select is on — check rows to arm a bulk acknowledge/resolve.")
-            else:
-                st.caption("Click a row to open its drawer (detail, rule, history, playbook, "
-                           "ack/resolve)."
-                           + (" Flip Bulk select for multi-row actions." if is_operator else ""))
-        else:
-            row = edf.iloc[sel]
-            event_id = str(row["EVENT_ID"])
-            st.divider()
-            st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
-            st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
-                       f"event {event_id[:8]} · status {row['STATUS']}")
-            detail_text = str(row.get("DETAIL") or "").strip()
-            if detail_text:
-                # Plain text on purpose: DETAIL originates in Snowflake data;
-                # rendering it as markdown let object names inject formatting.
-                st.text(detail_text)
-            add_to_case_button(
-                # Scope the preview to the SELECTED alert, not the whole feed, so the
-                # captured evidence matches the item's title/summary.
-                "Alerts", replace(events, df=edf.iloc[[sel]]),
-                title=f"[{row['SEVERITY']}] {row['TITLE']}",
-                summary=(detail_text[:200] if detail_text
-                         else f"{row['SEVERITY']} alert on rule {row['RULE_ID']}"),
-                next_action=f"Ack/resolve or investigate rule {row['RULE_ID']} (status {row['STATUS']}).",
-                key=f"ow_case_add_alert_{event_id[:8]}")
-            # F57: the drawer's four supporting reads (rule config, deliveries,
-            # rule history, prior resolutions) submit as ONE async batch instead
-            # of four serial round-trips — each row click used to stall in four
-            # visible steps. The spinner names the wait on a cold open; cache
-            # hits render instantly.
-            with st.spinner("Assembling event context…"):
-                _dr = run_batch([
-                    {"key": "rules", "sql": mart_sql.alert_rules(),
-                     "source": "ALERT_CONFIG"},
-                    {"key": "deliv", "sql": mart_sql.deliveries_for_event(event_id),
-                     "source": "ALERT_DELIVERIES + ALERT_ROUTES"},
-                    {"key": "hist", "sql": mart_sql.events_for_rule(str(row["RULE_ID"]), 90),
-                     "source": "ALERT_EVENTS (90d, this rule)"},
-                    {"key": "res", "sql": mart_sql.resolutions_for_rule(str(row["RULE_ID"])),
-                     "source": "ALERT_EVENTS (resolved, this rule)"},
-                ], page=_PAGE, tier="recent") or {}
-            rules_res = _dr.get("rules") or run(
-                mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
-                tier="recent", source="ALERT_CONFIG")
-            if rules_res.usable():
-                rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
-                if not rmatch.empty:
-                    rrow = rmatch.iloc[0]
-                    st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
-                               f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
-            # rec38: did THIS event reach anyone? ALERT_DELIVERIES keys per event+route,
-            # so the drawer can answer directly instead of only History's aggregate SLO.
-            _deliv = _dr.get("deliv") or run(
-                mart_sql.deliveries_for_event(event_id), page=_PAGE,
-                key=f"alert_deliv_{event_id}", tier="recent",
-                source="ALERT_DELIVERIES + ALERT_ROUTES")
-            if _deliv.ok and not _deliv.empty:
-                st.caption("Delivered — " + " · ".join(
-                    f"{r['INTEGRATION_NAME']} at {r['SENT_AT']}" for _, r in _deliv.df.iterrows()))
-            elif _deliv.ok:
-                # Neutral wording: an empty result is normal for a severity/family no
-                # enabled route matches, not necessarily a delivery miss.
-                st.caption("No delivery recorded (a route may not match this event's "
-                           "severity or family).")
-            # F49: the DECIDE bar leads the drawer — the operator's verb (ack/resolve/
-            # snooze + investigate/fix) was the LAST thing rendered, below six
-            # evidence panels, so every triage required scrolling the whole drawer.
-            # The evidence panels follow, demoted into a supporting group.
-            target = investigation_target(str(row["RULE_ID"]),
-                                          f"{row['TITLE']} {detail_text}")
-            fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
-            wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
-            # rec18: two rows — nav buttons + action radio share one row; the note
-            # gets a full-width row of its own instead of a cramped ~30% column.
-            c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
-            with c_inv:
-                if st.button("Investigate →", key="alert_investigate", width="stretch",
-                             help=f"Jump to {target['page']} · {target['section'] or 'top'} "
-                                  "with filters applied from this event"):
-                    # rec24: only claim "filters applied" when the jump actually reshapes
-                    # them, so the arrival note on the destination is never misleading.
-                    _inv_ctx = None
-                    if target["filters"]:
-                        _inv_ctx = {"filter_note": (f"Filters applied from alert "
-                                                    f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
-                    request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
-            with c_fix:
-                if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
-                                     help="Lands on the remediation surface with this event's "
-                                          "scope applied — generate, confirm, execute, audited."):
-                    request_navigation(fix["page"], fix["section"], fix["filters"])
-            with c_act:
-                action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
-                                  key=f"alert_action_{event_id[:8]}_{_sel_nonce}")
-            note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}_{_sel_nonce}", max_chars=500)
-            kind = ""
-            snooze_hours = 0.0
-            if action == "RESOLVE":
-                kind = st.radio(
-                    "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}_{_sel_nonce}",
-                    help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
-                         "EXPECTED = known/maintenance. Feeds the per-rule precision score "
-                         "on the Rules section.")
-            elif action == "SNOOZE":
-                snooze_hours = SNOOZE_PRESETS[st.selectbox(
-                    "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}",
-                    help="The event leaves the triage feed now and returns to it automatically "
-                         "when the timer expires — no ack, no resolve. The underlying rule keeps "
-                         "firing for other entities.")]
-                try:
-                    _wake = account_now() + timedelta(hours=float(snooze_hours))
-                    # review fix: past a day out "%a %H:%M" misleads — a 1-week
-                    # snooze lands on the SAME weekday, reading as later today.
-                    _wfmt = "%a %H:%M" if float(snooze_hours) <= 24 else "%a %b %d, %H:%M"
-                    st.caption(f"→ wakes ~{_wake.strftime(_wfmt)} account time, "
-                               "returning to this feed automatically.")
-                except (TypeError, ValueError):  # F52: the timer caption is cosmetic
-                    pass
-            if action == "SNOOZE":
-                stmts = _snooze_stmts(event_id, snooze_hours, note)
-            else:
-                stmts = _lifecycle_stmts(event_id, action, note, kind)
-            with st.container(border=True):
-                with st.expander("SQL that will run"):
-                    st.code("\n".join(stmts), language="sql")
-                if is_operator:
-                    # rec14 write-friction policy: ACK is a reversible OPEN->ACK move on
-                    # OVERWATCH's own audit trail, so it is ONE CLICK (the SQL preview
-                    # above stays visible). RESOLVE classifies the event — it feeds the
-                    # per-rule precision score — so it is the consequential write and
-                    # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
-                    # confirm field nor the button state carries across events.
-                    # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
-                    # one click; RESOLVE classifies the event, so it keeps the confirm gate.
-                    if action in ("ACK", "SNOOZE"):
-                        _fire = st.button("Execute with audit row", type="primary",
-                                          width="stretch",
-                                          key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
+        # C42: feed LEFT, the selected drawer RIGHT (a desktop console layout;
+        # the columns restack on narrow viewports via the shared st-key-ow_md_*
+        # CSS). Pure render-location split — every F51/C44/C48 guard is session
+        # state and layout-agnostic; sel/_bulk_rows are fragment locals in scope
+        # across both columns, and the bulk panel + snoozed tray stay full-width.
+        with st.container(key="ow_md_alerts"):
+            col_feed, col_drawer = st.columns(
+                (1.15, 1.0), gap="large", vertical_alignment="top")
+            with col_feed:
+                _now = account_now()
+                _feed = with_user_names(edf, _PAGE, user_col="ACK_BY", display_col="Ack by")
+                _feed = _feed.assign(AGE=_feed["RAISED_AT"].map(lambda t: humanize_age(t, _now)))
+                # C43: operator-gated BULK MODE — off (the default) keeps the one-click
+                # single-row drawer; on, the table takes checkbox multi-selection that arms
+                # the bulk panel below (replacing the old duplicate multiselect lookup).
+                # The mode suffix on the key mounts a fresh table on every flip so selection
+                # state can never leak across modes; non-operators never see the toggle, so
+                # bulk is never promised to a viewer who cannot execute it.
+                _bulk_mode = bool(is_operator and st.toggle(
+                    "Bulk select", key=f"alert_bulk_mode_{_sel_nonce}",
+                    help="Check several rows and acknowledge/resolve them together; "
+                         "switch off for single-click drawer triage."))
+                _raw_sel = selectable_table(
+                    _feed[["RAISED_AT", "AGE", "SEVERITY", "COMPANY", "TITLE", "STATUS", "Ack by", "ACK_BY"]],
+                    key=f"alert_events_sel_{_sel_nonce}_{'m' if _bulk_mode else 's'}",
+                    sort_label="severity, then newest", multi=_bulk_mode)
+                if _bulk_mode:
+                    _bulk_rows = [int(r) for r in (_raw_sel or [])]
+                    sel = None
+                else:
+                    _bulk_rows = []
+                    sel = int(_raw_sel) if _raw_sel is not None else None
+                # C43+F51: the bulk SET binds by identity too — a feed shift under checked
+                # rows (same positions, different events) disarms the panel instead of
+                # silently re-targeting the write the operator reviewed and typed to confirm.
+                if _bulk_rows:
+                    _ids_here = tuple(str(edf.iloc[i]["EVENT_ID"]) for i in _bulk_rows)
+                    _bbind = st.session_state.get("_ow_alert_bulk_bind")
+                    if (isinstance(_bbind, tuple) and len(_bbind) == 2
+                            and tuple(_bbind[0]) == tuple(_bulk_rows)
+                            and tuple(_bbind[1]) != _ids_here):
+                        st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                        st.session_state.pop("_ow_alert_bulk_bind", None)
+                        st.session_state["_ow_alert_stale_note"] = (
+                            "The feed changed under the previous selection — re-select rows "
+                            "to arm a bulk action.")
+                        st.rerun()
+                    st.session_state["_ow_alert_bulk_bind"] = (tuple(_bulk_rows), _ids_here)
+                else:
+                    st.session_state.pop("_ow_alert_bulk_bind", None)
+                _from_deeplink = False
+                if sel is None and not _bulk_rows and requested_event:
+                    # F51: the identity fallback is armed per ARRIVAL and disarmed by the next
+                    # write's nonce bump — un-gated it re-fired on every paint, reopening the
+                    # acted drawer after each write. While armed it re-applies on every
+                    # fragment rerun (the table emits no selection while the user works in
+                    # the drawer), which is exactly what keeps the deep-linked drawer open.
+                    _armed = st.session_state.get("_ow_alert_deeplink_armed")
+                    _is_next = event_signature.startswith("alert-next:")
+                    if _is_next and _bulk_mode:
+                        # C44 review fix: bulk mode supersedes the queue — a funneled
+                        # drawer must never render beneath the checkbox table.
+                        st.session_state.pop("_ow_alert_next_up", None)
+                        st.session_state.pop("_ow_alert_deeplink_armed", None)
+                    elif _armed is None or _armed == (event_signature, _sel_nonce):
+                        matches = [
+                            index for index, value in enumerate(edf["EVENT_ID"].astype(str))
+                            if value == requested_event
+                        ]
+                        sel = matches[0] if matches else None
+                        if sel is not None:
+                            _from_deeplink = True
+                            if _armed is None:
+                                st.session_state["_ow_alert_deeplink_armed"] = (
+                                    event_signature, _sel_nonce)
+                        elif _is_next:
+                            # C44 review fix: the queued event left the feed (colleague
+                            # write / V091 auto-resolver) or is filtered out — the miss
+                            # is FINAL, never a zombie drawer when the id returns.
+                            st.session_state.pop("_ow_alert_next_up", None)
+                            st.session_state.pop("_ow_alert_deeplink_armed", None)
+                # F51: bind the drawer by EVENT IDENTITY, not position. When the live feed
+                # shrinks or reorders under a sticky selection (a resolve here, the V091
+                # auto-resolver, a filter change), the same positional index silently lands
+                # on a DIFFERENT event — drop the rebind instead of opening the wrong drawer.
+                if sel is not None and 0 <= int(sel) < len(edf):
+                    _ev_here = str(edf.iloc[int(sel)]["EVENT_ID"])
+                    # An identity-derived deep-link selection can never be a stale POSITIONAL
+                    # rebind — only the widget's sticky index gets the guard.
+                    if not _from_deeplink and _stale_rebind(
+                            int(sel), _ev_here, st.session_state.get("_ow_alert_drawer_bind")):
+                        st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                        st.session_state.pop("_ow_alert_drawer_bind", None)
+                        st.session_state["_ow_alert_stale_note"] = (
+                            "The feed changed under the previous selection — click a row "
+                            "to reopen its drawer.")
+                        # Rerun NOW so the fresh, unselected table mounts in this same
+                        # interaction — without it the wrong-row highlight survives the paint
+                        # and the retired key swallows the user's next click.
+                        st.rerun()
+                    st.session_state["_ow_alert_drawer_bind"] = (int(sel), _ev_here)
+                else:
+                    # F51: no live selection -> no bind may outlive it (an orphaned bind
+                    # would falsely veto a later genuine click that lands on the same index).
+                    st.session_state.pop("_ow_alert_drawer_bind", None)
+                result_caption(events)
+                if sel is None or not (0 <= int(sel) < len(edf)):
+                    # C42: in the master-detail layout the DRAWER pane (right) owns
+                    # the "select an event to open its drawer" prompt, so the feed
+                    # keeps only the bulk-relevant lines and the single-mode tip.
+                    if _bulk_rows:
+                        st.caption(f"{len(_bulk_rows)} row(s) checked — the bulk action panel is below.")
+                    elif _bulk_mode:
+                        st.caption("Bulk select is on — check rows to arm a bulk acknowledge/resolve.")
+                    elif is_operator:
+                        st.caption("Flip Bulk select for multi-row actions.")
+            with col_drawer:
+                if sel is not None and 0 <= int(sel) < len(edf):
+                    row = edf.iloc[sel]
+                    event_id = str(row["EVENT_ID"])
+                    # C42: no leading divider — the column edge separates the feed
+                    # from the drawer now (the old rule was a stacked-flow separator).
+                    st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
+                    st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
+                               f"event {event_id[:8]} · status {row['STATUS']}")
+                    detail_text = str(row.get("DETAIL") or "").strip()
+                    if detail_text:
+                        # Plain text on purpose: DETAIL originates in Snowflake data;
+                        # rendering it as markdown let object names inject formatting.
+                        st.text(detail_text)
+                    add_to_case_button(
+                        # Scope the preview to the SELECTED alert, not the whole feed, so the
+                        # captured evidence matches the item's title/summary.
+                        "Alerts", replace(events, df=edf.iloc[[sel]]),
+                        title=f"[{row['SEVERITY']}] {row['TITLE']}",
+                        summary=(detail_text[:200] if detail_text
+                                 else f"{row['SEVERITY']} alert on rule {row['RULE_ID']}"),
+                        next_action=f"Ack/resolve or investigate rule {row['RULE_ID']} (status {row['STATUS']}).",
+                        key=f"ow_case_add_alert_{event_id[:8]}")
+                    # F57: the drawer's four supporting reads (rule config, deliveries,
+                    # rule history, prior resolutions) submit as ONE async batch instead
+                    # of four serial round-trips — each row click used to stall in four
+                    # visible steps. The spinner names the wait on a cold open; cache
+                    # hits render instantly.
+                    with st.spinner("Assembling event context…"):
+                        _dr = run_batch([
+                            {"key": "rules", "sql": mart_sql.alert_rules(),
+                             "source": "ALERT_CONFIG"},
+                            {"key": "deliv", "sql": mart_sql.deliveries_for_event(event_id),
+                             "source": "ALERT_DELIVERIES + ALERT_ROUTES"},
+                            {"key": "hist", "sql": mart_sql.events_for_rule(str(row["RULE_ID"]), 90),
+                             "source": "ALERT_EVENTS (90d, this rule)"},
+                            {"key": "res", "sql": mart_sql.resolutions_for_rule(str(row["RULE_ID"])),
+                             "source": "ALERT_EVENTS (resolved, this rule)"},
+                        ], page=_PAGE, tier="recent") or {}
+                    rules_res = _dr.get("rules") or run(
+                        mart_sql.alert_rules(), page=_PAGE, key="rules_for_drawer",
+                        tier="recent", source="ALERT_CONFIG")
+                    if rules_res.usable():
+                        rmatch = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                        if not rmatch.empty:
+                            rrow = rmatch.iloc[0]
+                            st.caption(f"Rule: {rrow.get('NAME', '')} · family {rrow.get('FAMILY', '')} · "
+                                       f"threshold {rrow.get('THRESHOLD_NUM', '')} · enabled {rrow.get('ENABLED', '')}")
+                    # rec38: did THIS event reach anyone? ALERT_DELIVERIES keys per event+route,
+                    # so the drawer can answer directly instead of only History's aggregate SLO.
+                    _deliv = _dr.get("deliv") or run(
+                        mart_sql.deliveries_for_event(event_id), page=_PAGE,
+                        key=f"alert_deliv_{event_id}", tier="recent",
+                        source="ALERT_DELIVERIES + ALERT_ROUTES")
+                    if _deliv.ok and not _deliv.empty:
+                        st.caption("Delivered — " + " · ".join(
+                            f"{r['INTEGRATION_NAME']} at {r['SENT_AT']}" for _, r in _deliv.df.iterrows()))
+                    elif _deliv.ok:
+                        # Neutral wording: an empty result is normal for a severity/family no
+                        # enabled route matches, not necessarily a delivery miss.
+                        st.caption("No delivery recorded (a route may not match this event's "
+                                   "severity or family).")
+                    # F49: the DECIDE bar leads the drawer — the operator's verb (ack/resolve/
+                    # snooze + investigate/fix) was the LAST thing rendered, below six
+                    # evidence panels, so every triage required scrolling the whole drawer.
+                    # The evidence panels follow, demoted into a supporting group.
+                    target = investigation_target(str(row["RULE_ID"]),
+                                                  f"{row['TITLE']} {detail_text}")
+                    fix = fix_target(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+                    wh_inline = inline_fix_warehouse(str(row["RULE_ID"]), f"{row['TITLE']} {detail_text}")
+                    # rec18: two rows — nav buttons + action radio share one row; the note
+                    # gets a full-width row of its own instead of a cramped ~30% column.
+                    c_inv, c_fix, c_act = st.columns([1.1, 1.1, 0.9])
+                    with c_inv:
+                        if st.button("Investigate →", key="alert_investigate", width="stretch",
+                                     help=f"Jump to {target['page']} · {target['section'] or 'top'} "
+                                          "with filters applied from this event"):
+                            # rec24: only claim "filters applied" when the jump actually reshapes
+                            # them, so the arrival note on the destination is never misleading.
+                            _inv_ctx = None
+                            if target["filters"]:
+                                _inv_ctx = {"filter_note": (f"Filters applied from alert "
+                                                            f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
+                            request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
+                    with c_fix:
+                        if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
+                                             help="Lands on the remediation surface with this event's "
+                                                  "scope applied — generate, confirm, execute, audited."):
+                            request_navigation(fix["page"], fix["section"], fix["filters"])
+                    with c_act:
+                        action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,
+                                          key=f"alert_action_{event_id[:8]}_{_sel_nonce}")
+                    note = st.text_input("Note (what was done / why)", key=f"alert_note_{event_id[:8]}_{_sel_nonce}", max_chars=500)
+                    kind = ""
+                    snooze_hours = 0.0
+                    if action == "RESOLVE":
+                        kind = st.radio(
+                            "How was it closed?", RESOLUTION_KINDS, horizontal=True, key=f"alert_kind_{event_id[:8]}_{_sel_nonce}",
+                            help="ACTIONED = a real fix followed · NOISE = threshold cried wolf · "
+                                 "EXPECTED = known/maintenance. Feeds the per-rule precision score "
+                                 "on the Rules section.")
+                    elif action == "SNOOZE":
+                        snooze_hours = SNOOZE_PRESETS[st.selectbox(
+                            "Snooze for", list(SNOOZE_PRESETS), key=f"alert_snooze_{event_id[:8]}_{_sel_nonce}",
+                            help="The event leaves the triage feed now and returns to it automatically "
+                                 "when the timer expires — no ack, no resolve. The underlying rule keeps "
+                                 "firing for other entities.")]
+                        try:
+                            _wake = account_now() + timedelta(hours=float(snooze_hours))
+                            # review fix: past a day out "%a %H:%M" misleads — a 1-week
+                            # snooze lands on the SAME weekday, reading as later today.
+                            _wfmt = "%a %H:%M" if float(snooze_hours) <= 24 else "%a %b %d, %H:%M"
+                            st.caption(f"→ wakes ~{_wake.strftime(_wfmt)} account time, "
+                                       "returning to this feed automatically.")
+                        except (TypeError, ValueError):  # F52: the timer caption is cosmetic
+                            pass
+                    if action == "SNOOZE":
+                        stmts = _snooze_stmts(event_id, snooze_hours, note)
                     else:
-                        _fire = confirm_gate(action, "Execute with audit row",
-                                             key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
-                                             prompt=f"Type {action} to confirm execution")
-                    if _fire and write_gate_open(f"alert_exec_{event_id[:8]}_{action}"):
-                        # V051/V086: one atomic proc (update + audit in a transaction);
-                        # the legacy path is the split script, unchanged.
-                        if action == "SNOOZE":
-                            call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
-                                    f"{sql_literal(event_id)}, {snooze_hours}, {sql_literal(note)}, "
-                                    f"{identity_sql()}, "
-                                    f"{sql_literal(idempotency_key('ALERT_SNOOZE', event_id))})")
-                        else:
-                            call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
-                                    f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
-                                    f"{sql_literal(kind)}, {identity_sql()}, "
-                                    f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
-                        # codex#9: pass the structured statement list straight through — a ';'
-                        # inside the note no longer fractures the legacy fallback.
-                        ok, msg = execute_action(call, stmts, page=_PAGE)
-                        stamp_write(f"alert_exec_{event_id[:8]}_{action}", ok)  # C48
-                        notify(ok, msg)
-                        if ok:
-                            from app.ui.components import log_ui_event
-                            _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
-                            log_ui_event(_ev, page=_PAGE)
-                            # F51 post-write hygiene. RESOLVE/SNOOZE remove the event
-                            # from the feed, so the selection resets via the nonce bump
-                            # (which remounts every nonce-keyed widget fresh — session-
-                            # key pops don't survive the frontend's state resend). ACK
-                            # keeps the event at its index, so the drawer STAYS OPEN to
-                            # continue triage (ack -> investigate -> resolve); the
-                            # identity guard protects it if the feed shifts anyway. The
-                            # full rerun is notify()'s own contract: the re-read feed is
-                            # the durable receipt.
-                            _nxt_label = ""
-                            if action in ("RESOLVE", "SNOOZE"):
-                                st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
-                                st.session_state.pop("_ow_alert_drawer_bind", None)
-                                st.session_state.pop("_ow_alert_bulk_bind", None)
-                                # F50 review fix: the verdict dies with the triage
-                                # interaction — a snooze that wakes must not
-                                # resurface a stale CLEAR with a live one-click.
-                                st.session_state.pop(f"_ow_recheck_{event_id[:8]}", None)
-                                # C44 review fix (HIGH): consume the spent drill
-                                # identity — navigation_context() is read WITHOUT
-                                # consume and nothing else ever clears it, so a
-                                # lingering event_id would shadow the queued
-                                # next-up on every later run (dead advance, lying
-                                # receipt). ACK keeps it: the drawer stays open.
-                                _nav = st.session_state.get("_ow_nav_context")
-                                if isinstance(_nav, dict) and _nav.get("event_id"):
-                                    st.session_state["_ow_nav_context"] = {
-                                        k: v for k, v in _nav.items() if k != "event_id"}
-                                # C44: queue the next open event (identity, not
-                                # position) so the queue advances instead of
-                                # landing back on an unselected feed.
-                                if int(sel) + 1 < len(edf):
-                                    _nrow = edf.iloc[int(sel) + 1]
-                                    st.session_state["_ow_alert_next_up"] = str(_nrow["EVENT_ID"])
-                                    _nxt_label = (f" — next: [{_nrow['SEVERITY']}] "
-                                                  f"{str(_nrow['TITLE'])[:60]}")
+                        stmts = _lifecycle_stmts(event_id, action, note, kind)
+                    with st.container(border=True):
+                        with st.expander("SQL that will run"):
+                            st.code("\n".join(stmts), language="sql")
+                        if is_operator:
+                            # rec14 write-friction policy: ACK is a reversible OPEN->ACK move on
+                            # OVERWATCH's own audit trail, so it is ONE CLICK (the SQL preview
+                            # above stays visible). RESOLVE classifies the event — it feeds the
+                            # per-rule precision score — so it is the consequential write and
+                            # keeps the type-to-confirm gate. rec42: key PER EVENT so neither the
+                            # confirm field nor the button state carries across events.
+                            # ACK (reversible OPEN->ACK) and SNOOZE (auto-reverses on wake) are
+                            # one click; RESOLVE classifies the event, so it keeps the confirm gate.
+                            if action in ("ACK", "SNOOZE"):
+                                _fire = st.button("Execute with audit row", type="primary",
+                                                  width="stretch",
+                                                  key=f"alert_exec_ack_{event_id[:8]}_{_sel_nonce}")
+                            else:
+                                _fire = confirm_gate(action, "Execute with audit row",
+                                                     key=f"alert_exec_{event_id[:8]}_{_sel_nonce}",
+                                                     prompt=f"Type {action} to confirm execution")
+                            if _fire and write_gate_open(f"alert_exec_{event_id[:8]}_{action}"):
+                                # V051/V086: one atomic proc (update + audit in a transaction);
+                                # the legacy path is the split script, unchanged.
+                                if action == "SNOOZE":
+                                    call = (f"CALL {core_object('SP_ALERT_SNOOZE')}("
+                                            f"{sql_literal(event_id)}, {snooze_hours}, {sql_literal(note)}, "
+                                            f"{identity_sql()}, "
+                                            f"{sql_literal(idempotency_key('ALERT_SNOOZE', event_id))})")
                                 else:
-                                    st.session_state.pop("_ow_alert_next_up", None)
-                            st.session_state["_ow_alert_receipt"] = (
-                                f"{action} recorded — [{row['SEVERITY']}] "
-                                f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
-                            st.rerun()
-                else:
-                    st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
-            st.markdown("**Supporting evidence**")
-            with st.expander("Playbook — what to do first", expanded=False):
-                st.markdown(playbook_for(str(row["RULE_ID"])))
-            _rid = str(row["RULE_ID"]).upper()
-            _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
-            _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
-            _rc_key = f"_ow_recheck_{event_id[:8]}"
-            if _rc_sql and st.button(
-                    "Re-check condition now", key=f"recheck_{event_id[:8]}",
-                    help="Runs this rule's condition against TODAY's data for "
-                         f"{_wh_guess or 'the account'} — is this still true?"):
-                rc = run(_rc_sql, page=_PAGE, key=f"recheck_{event_id[:8]}", tier="live",
-                         source="live re-check (today)")
-                if rc.usable():
-                    # review fix: NULL (idle warehouse, zero-row window) must not
-                    # coerce to a fabricated "clear 0.00" that the one-click then
-                    # writes into the audit note — route it to the error branch.
-                    current_v = safe_float(rc.df.iloc[0].get("CURRENT_VALUE"),
-                                           default=float("nan"))
-                    if math.isnan(current_v):
-                        st.session_state[_rc_key] = {
-                            "error": "no data today — condition not evaluable "
-                                     "for this target (idle/suspended?).",
-                            "at": account_now().strftime("%H:%M"),
-                        }
-                    else:
-                        thr = None
-                        if rules_res.usable():
-                            _rm = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
-                            if not _rm.empty:
-                                thr = safe_float(_rm.iloc[0].get("THRESHOLD_NUM"))
-                        # F50: PERSIST the verdict per event — it used to vanish on the
-                        # very next rerun, the moment the operator touched the decide bar.
-                        # at_dt (full datetime) is the freshness gate; "at" is display.
-                        st.session_state[_rc_key] = {
-                            "value": current_v, "thr": thr,
-                            "label": recheck_sql.recheck_label(_rid),
-                            "at": account_now().strftime("%H:%M"),
-                            "at_dt": account_now(),
-                        }
-                else:
-                    st.session_state[_rc_key] = {"error": rc.error or "no data today.",
-                                                 "at": account_now().strftime("%H:%M")}
-            _rc_state = st.session_state.get(_rc_key)
-            if isinstance(_rc_state, dict):
-                if "error" in _rc_state:
-                    # review fix: stamped — "right now" aged poorly on a verdict
-                    # that persists across reruns.
-                    st.info(f"Re-check unavailable (as of {_rc_state.get('at') or '—'!s}): "
-                            + str(_rc_state["error"]))
-                else:
-                    _rcv = safe_float(_rc_state.get("value"), default=float("nan"))
-                    _rct = _rc_state.get("thr")
-                    _rcl = str(_rc_state.get("label") or "")
-                    _rca = str(_rc_state.get("at") or "")
-                    # review fix: the one-click resolve is evidence for an AUDIT
-                    # note — gate it on freshness (30 min) so a persisted CLEAR
-                    # can't resurface days later as if measured just now.
-                    try:
-                        _rc_fresh = (account_now() - _rc_state["at_dt"]) <= timedelta(minutes=30)
-                    except (KeyError, TypeError):
-                        _rc_fresh = False
-                    if math.isnan(_rcv):
-                        st.info("Re-check result unreadable — run it again.")
-                    elif _rct is not None and safe_float(_rct) > 0:
-                        if _rcv >= safe_float(_rct):
-                            st.warning(f"Still over: {_rcl} = {_rcv:,.2f} vs "
-                                       f"threshold {safe_float(_rct):,.2f} "
-                                       f"(re-checked {_rca}).")
-                        elif not _rc_fresh:
-                            st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
-                                    f"{_rcv:,.2f} vs threshold {safe_float(_rct):,.2f} "
-                                    "— re-check again before resolving.")
+                                    call = (f"CALL {core_object('SP_ALERT_LIFECYCLE')}("
+                                            f"{sql_literal(event_id)}, {sql_literal(action)}, {sql_literal(note)}, "
+                                            f"{sql_literal(kind)}, {identity_sql()}, "
+                                            f"{sql_literal(idempotency_key('ALERT_' + action, event_id))})")
+                                # codex#9: pass the structured statement list straight through — a ';'
+                                # inside the note no longer fractures the legacy fallback.
+                                ok, msg = execute_action(call, stmts, page=_PAGE)
+                                stamp_write(f"alert_exec_{event_id[:8]}_{action}", ok)  # C48
+                                notify(ok, msg)
+                                if ok:
+                                    from app.ui.components import log_ui_event
+                                    _ev = {"RESOLVE": "alert_resolve", "SNOOZE": "alert_snooze"}.get(action, "alert_ack")
+                                    log_ui_event(_ev, page=_PAGE)
+                                    # F51 post-write hygiene. RESOLVE/SNOOZE remove the event
+                                    # from the feed, so the selection resets via the nonce bump
+                                    # (which remounts every nonce-keyed widget fresh — session-
+                                    # key pops don't survive the frontend's state resend). ACK
+                                    # keeps the event at its index, so the drawer STAYS OPEN to
+                                    # continue triage (ack -> investigate -> resolve); the
+                                    # identity guard protects it if the feed shifts anyway. The
+                                    # full rerun is notify()'s own contract: the re-read feed is
+                                    # the durable receipt.
+                                    _nxt_label = ""
+                                    if action in ("RESOLVE", "SNOOZE"):
+                                        st.session_state["_ow_alert_sel_nonce"] = _sel_nonce + 1
+                                        st.session_state.pop("_ow_alert_drawer_bind", None)
+                                        st.session_state.pop("_ow_alert_bulk_bind", None)
+                                        # F50 review fix: the verdict dies with the triage
+                                        # interaction — a snooze that wakes must not
+                                        # resurface a stale CLEAR with a live one-click.
+                                        st.session_state.pop(f"_ow_recheck_{event_id[:8]}", None)
+                                        # C44 review fix (HIGH): consume the spent drill
+                                        # identity — navigation_context() is read WITHOUT
+                                        # consume and nothing else ever clears it, so a
+                                        # lingering event_id would shadow the queued
+                                        # next-up on every later run (dead advance, lying
+                                        # receipt). ACK keeps it: the drawer stays open.
+                                        _nav = st.session_state.get("_ow_nav_context")
+                                        if isinstance(_nav, dict) and _nav.get("event_id"):
+                                            st.session_state["_ow_nav_context"] = {
+                                                k: v for k, v in _nav.items() if k != "event_id"}
+                                        # C44: queue the next open event (identity, not
+                                        # position) so the queue advances instead of
+                                        # landing back on an unselected feed.
+                                        if int(sel) + 1 < len(edf):
+                                            _nrow = edf.iloc[int(sel) + 1]
+                                            st.session_state["_ow_alert_next_up"] = str(_nrow["EVENT_ID"])
+                                            _nxt_label = (f" — next: [{_nrow['SEVERITY']}] "
+                                                          f"{str(_nrow['TITLE'])[:60]}")
+                                        else:
+                                            st.session_state.pop("_ow_alert_next_up", None)
+                                    st.session_state["_ow_alert_receipt"] = (
+                                        f"{action} recorded — [{row['SEVERITY']}] "
+                                        f"{str(row['TITLE'])[:80]} (event {event_id[:8]})" + _nxt_label)
+                                    st.rerun()
                         else:
-                            st.success(f"Condition clear: {_rcl} = {_rcv:,.2f} vs "
-                                       f"threshold {safe_float(_rct):,.2f} "
-                                       f"(re-checked {_rca}).")
-                            # F50: close the loop the copy promises — one click
-                            # prefills RESOLVE + ACTIONED + the measured evidence
-                            # (applied at the fragment top, before widgets mount).
-                            if is_operator and st.button(
-                                    "Resolve as ACTIONED with this evidence",
-                                    key=f"recheck_resolve_{event_id[:8]}_{_sel_nonce}"):
-                                st.session_state["_ow_alert_prefill"] = {
-                                    f"alert_action_{event_id[:8]}_{_sel_nonce}": "RESOLVE",
-                                    f"alert_kind_{event_id[:8]}_{_sel_nonce}": "ACTIONED",
-                                    f"alert_note_{event_id[:8]}_{_sel_nonce}": (
-                                        f"Re-check clear at {_rca}: {_rcl} {_rcv:,.2f} "
-                                        f"vs threshold {safe_float(_rct):,.2f}")[:500],
+                            st.caption("Executing requires SNOW_ACCOUNTADMINS / SNOW_SYSADMINS; the SQL is copyable for review.")
+                    st.markdown("**Supporting evidence**")
+                    with st.expander("Playbook — what to do first", expanded=False):
+                        st.markdown(playbook_for(str(row["RULE_ID"])))
+                    _rid = str(row["RULE_ID"]).upper()
+                    _wh_guess = inline_fix_warehouse(_rid, f"{row['TITLE']} {detail_text}")
+                    _rc_sql = recheck_sql.recheck_sql(_rid, _wh_guess, str(row.get("COMPANY", "")))
+                    _rc_key = f"_ow_recheck_{event_id[:8]}"
+                    if _rc_sql and st.button(
+                            "Re-check condition now", key=f"recheck_{event_id[:8]}",
+                            help="Runs this rule's condition against TODAY's data for "
+                                 f"{_wh_guess or 'the account'} — is this still true?"):
+                        rc = run(_rc_sql, page=_PAGE, key=f"recheck_{event_id[:8]}", tier="live",
+                                 source="live re-check (today)")
+                        if rc.usable():
+                            # review fix: NULL (idle warehouse, zero-row window) must not
+                            # coerce to a fabricated "clear 0.00" that the one-click then
+                            # writes into the audit note — route it to the error branch.
+                            current_v = safe_float(rc.df.iloc[0].get("CURRENT_VALUE"),
+                                                   default=float("nan"))
+                            if math.isnan(current_v):
+                                st.session_state[_rc_key] = {
+                                    "error": "no data today — condition not evaluable "
+                                             "for this target (idle/suspended?).",
+                                    "at": account_now().strftime("%H:%M"),
                                 }
-                                st.rerun()
-                    else:
-                        st.info(f"{_rcl}: {_rcv:,.2f} (rule threshold unavailable).")
-            hist = _dr.get("hist") or run(
-                mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
-                key=f"hist_rule_{event_id[:8]}", tier="recent",
-                source="ALERT_EVENTS (90d, this rule)")
-            if hist.usable() and len(hist.df) > 1:
-                with st.expander(f"This rule recently ({len(hist.df)} events)"):
-                    styled_table(hist.df, height=220)
-            # rec26: how was this resolved last time? The kind + note from the account's
-            # own history is a playbook this exact alert has earned. styled_table (not
-            # markdown) so a note can't inject formatting.
-            _res = _dr.get("res") or run(
-                mart_sql.resolutions_for_rule(str(row["RULE_ID"])), page=_PAGE,
-                key=f"resolved_rule_{event_id[:8]}", tier="recent",
-                source="ALERT_EVENTS (resolved, this rule)")
-            if _res.usable():
-                with st.expander(f"How this was resolved before ({len(_res.df)})"):
-                    styled_table(_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
-                                 height=180, slug="rule-resolutions")
-                    st.caption("The last few times this rule was closed — kind and note from "
-                               "your own history, the playbook this alert has earned.")
-            if wh_inline:
-                with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
-                    st.caption("Playbook above says what; this generates the how. Execute is "
-                               "operator-gated, audited to REMEDIATION_LOG, and books an "
-                               "ESTIMATED ledger item — verify it on Cost & Contract > "
-                               "Optimization & Savings. The change scan settles its own "
-                               "measured row for warehouse-setting changes (V038).")
-                    try:
-                        prior = run(mart_sql.ledger_for_event(event_id[:8].lower()), page=_PAGE,
-                                    key=f"clf_led_{event_id[:8]}", tier="live",
-                                    source="SAVINGS_LEDGER")
-                        if prior.ok and not prior.empty:
-                            st.markdown("**Loop status — fixes already booked from this event:**")
-                            for _, li in prior.df.iterrows():
-                                state = str(li.get("STATE") or "")
-                                usd = li.get("VERIFIED_USD") if state == "VERIFIED" else li.get("ESTIMATED_USD")
-                                try:
-                                    usd_s = f"${float(usd):,.0f}"
-                                except (TypeError, ValueError):
-                                    usd_s = "n/a"
-                                # $-escape: DESCRIPTION is data — a '$' in it pairs with usd_s
-                                st.markdown(md_dollars(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})"))
-                            st.caption("VERIFIED comes from a manual proof-backed verify on the "
-                                       "Savings ledger; the change scan (V038) additionally books "
-                                       "and settles its own measured row for warehouse-setting "
-                                       "changes.")
-                    except ValueError:
-                        pass  # non-uuid event id shapes: chip simply doesn't render
-                    fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
-                                                "Statement timeout 1h",
-                                                "Cap clusters at 1"],
-                                        horizontal=True, key=f"clf_kind_{event_id[:8]}")
-                    if fix_kind.startswith("Tighten"):
-                        stmt_cl = remediation.auto_suspend_fix(wh_inline, 60)
-                    elif fix_kind.startswith("Statement"):
-                        stmt_cl = remediation.statement_timeout_fix(wh_inline, 3600)
-                    else:
-                        stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
-                    st.code(stmt_cl, language="sql")
-                    if is_operator:
-                        from app.ui.components import blast_radius
-                        blast_radius(wh_inline, _PAGE)
-                        # R3-6: key the reverse-hint off the SAME fix_kind branching that
-                        # built stmt_cl (the old binary ternary mislabeled an auto-suspend
-                        # fix as a cluster-range change — its token matched neither arm).
-                        _rev_kind = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
-                                     else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
-                                     else "CLUSTER_RANGE")
-                        st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
-                        if (confirm_gate(wh_inline, "Execute + audit + book estimate",
-                                         key=f"clf_exec_{event_id[:8]}",
-                                         prompt="Type the warehouse name to confirm",
-                                         object_name=True)
-                                and write_gate_open(f"clf_exec_{event_id[:8]}")):
-                            ok, msg = execute_statement(stmt_cl, page=_PAGE)
-                            execute_statement(
-                                f"INSERT INTO {core_object('REMEDIATION_LOG')} "
-                                "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "
-                                f"SELECT 'ALERT_CLOSED_LOOP', {sql_literal(wh_inline)}, "
-                                f"{sql_literal(stmt_cl)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, "
-                                f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}, {identity_sql()}",
-                                page=_PAGE)
-                            if ok:
-                                from app.ui.components import log_ui_event
-                                log_ui_event("remediation_exec", page=_PAGE)
-                            if ok:
-                                execute_statement(
-                                    f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
-                                    "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
-                                    f"SELECT {sql_literal(fix_kind + ' on ' + wh_inline + ' (alert closed loop)')}, "
-                                    f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
-                                    f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}",
-                                    page=_PAGE)
-                            stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
-                            notify(ok, msg)
-                    else:
-                        st.caption("Copy the SQL; executing needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
-                    booked = run(mart_sql.ledger_for_event(event_id[:8]), page=_PAGE,
-                                 key=f"clf_led_{event_id[:8]}", tier="live",
-                                 source="SAVINGS_LEDGER")
-                    if booked.usable():
-                        st.markdown("**Savings booked from this alert**")
-                        styled_table(booked.df[["DESCRIPTION", "STATE", "ESTIMATED_USD",
-                                                "VERIFIED_USD", "CREATED_AT"]], height=140)
-                        st.caption("ESTIMATED flips to VERIFIED when verified on the Savings "
-                                   "ledger (proof + measured amount). Warehouse-setting changes "
-                                   "also get a separate change-scan row that settles itself (V038).")
-            # Per-family evidence: each alert gets the evidence pack that matches
-            # the metric it fired on, not one query-latency pack for everything
-            # (which fed cost/serverless/Cortex alerts unrelated latency rows).
-            plan = plan_for_alert(str(row["RULE_ID"]), str(row["TITLE"]),
-                                  detail_text, str(row["RAISED_AT"]))
-            if plan is not None:
-                _scope = plan.scope_note
-                st.caption(
-                    f"Explain with AI — evidence: {plan.label} · {plan.window_label}"
-                    + (f" · {_scope}" if _scope else ""))
-                # The evidence pack is a historical ACCOUNT_USAGE/mart query, so it
-                # stays button-gated; once assembled, the shared ai_evaluation_panel
-                # owns the AI run, cost disclosure, grounding popover, download, and
-                # the operator-only save-to-event hook.
-                _expl_prompt_key = f"_ai_expl_prompt_{event_id}"
-                if st.button("Assemble the evidence", key=f"ai_expl_go_{event_id[:8]}",
-                             help="Runs the evidence pack that matches THIS alert's metric, "
-                                  "then unlocks a grounded AI evaluation over exactly those rows."):
-                    ev = run(alert_evidence_sql.build(plan),
-                             page=_PAGE, key=f"ai_ev_{plan.kind}_{event_id[:8]}", tier="historical",
-                             source="ACCOUNT_USAGE / marts (per-alert evidence)")
-                    if not ev.ok or ev.empty:
-                        st.session_state.pop(_expl_prompt_key, None)
-                        empty_state("no_data_yet",
-                                    "No evidence rows for this alert's scope — the driver may be "
-                                    "outside the window, or the family/service label didn't match.")
-                    else:
-                        st.session_state[_expl_prompt_key] = alert_evidence_prompt(
-                            plan.kind, str(row["TITLE"]), detail_text, ev.df, plan.window_label)
-                _expl_prompt = st.session_state.get(_expl_prompt_key)
-                if _expl_prompt:
-                    def _append_hypothesis(answer: str) -> tuple[bool, str]:
-                        # C48 re-verify fix: content-scoped key — regenerate-and-
-                        # save-again inside this fragment is a NEW hypothesis, not
-                        # a duplicate; only a byte-identical re-save is swallowed.
-                        _ai_key = f"ai_save_{event_id[:8]}:{hash(answer) & 0xFFFFFF}"
-                        if not write_gate_open(_ai_key):  # C48
-                            return True, ""
-                        appended = (
-                            f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
-                            f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
-                            f"{sql_literal(answer[:800])}, 2000) "
-                            f"WHERE EVENT_ID = {sql_literal(event_id)};"
-                        )
-                        ok_u, msg_u = execute_statement(appended, page=_PAGE)
-                        stamp_write(_ai_key, ok_u)  # C48
-                        return ok_u, (msg_u if not ok_u else "Hypothesis stored on the event.")
-                    ai_evaluation_panel(
-                        key=f"alert_expl_{event_id[:8]}",
-                        prompt=_expl_prompt,
-                        settings=load_settings(_PAGE),
-                        page=_PAGE,
-                        subject=str(row["TITLE"]),
-                        on_save=_append_hypothesis if is_operator else None,
-                        save_label="Append hypothesis to the event",
-                    )
+                            else:
+                                thr = None
+                                if rules_res.usable():
+                                    _rm = rules_res.df[rules_res.df["RULE_ID"].astype(str) == str(row["RULE_ID"])]
+                                    if not _rm.empty:
+                                        thr = safe_float(_rm.iloc[0].get("THRESHOLD_NUM"))
+                                # F50: PERSIST the verdict per event — it used to vanish on the
+                                # very next rerun, the moment the operator touched the decide bar.
+                                # at_dt (full datetime) is the freshness gate; "at" is display.
+                                st.session_state[_rc_key] = {
+                                    "value": current_v, "thr": thr,
+                                    "label": recheck_sql.recheck_label(_rid),
+                                    "at": account_now().strftime("%H:%M"),
+                                    "at_dt": account_now(),
+                                }
+                        else:
+                            st.session_state[_rc_key] = {"error": rc.error or "no data today.",
+                                                         "at": account_now().strftime("%H:%M")}
+                    _rc_state = st.session_state.get(_rc_key)
+                    if isinstance(_rc_state, dict):
+                        if "error" in _rc_state:
+                            # review fix: stamped — "right now" aged poorly on a verdict
+                            # that persists across reruns.
+                            st.info(f"Re-check unavailable (as of {_rc_state.get('at') or '—'!s}): "
+                                    + str(_rc_state["error"]))
+                        else:
+                            _rcv = safe_float(_rc_state.get("value"), default=float("nan"))
+                            _rct = _rc_state.get("thr")
+                            _rcl = str(_rc_state.get("label") or "")
+                            _rca = str(_rc_state.get("at") or "")
+                            # review fix: the one-click resolve is evidence for an AUDIT
+                            # note — gate it on freshness (30 min) so a persisted CLEAR
+                            # can't resurface days later as if measured just now.
+                            try:
+                                _rc_fresh = (account_now() - _rc_state["at_dt"]) <= timedelta(minutes=30)
+                            except (KeyError, TypeError):
+                                _rc_fresh = False
+                            if math.isnan(_rcv):
+                                st.info("Re-check result unreadable — run it again.")
+                            elif _rct is not None and safe_float(_rct) > 0:
+                                if _rcv >= safe_float(_rct):
+                                    st.warning(f"Still over: {_rcl} = {_rcv:,.2f} vs "
+                                               f"threshold {safe_float(_rct):,.2f} "
+                                               f"(re-checked {_rca}).")
+                                elif not _rc_fresh:
+                                    st.info(f"Was clear when re-checked {_rca}: {_rcl} = "
+                                            f"{_rcv:,.2f} vs threshold {safe_float(_rct):,.2f} "
+                                            "— re-check again before resolving.")
+                                else:
+                                    st.success(f"Condition clear: {_rcl} = {_rcv:,.2f} vs "
+                                               f"threshold {safe_float(_rct):,.2f} "
+                                               f"(re-checked {_rca}).")
+                                    # F50: close the loop the copy promises — one click
+                                    # prefills RESOLVE + ACTIONED + the measured evidence
+                                    # (applied at the fragment top, before widgets mount).
+                                    if is_operator and st.button(
+                                            "Resolve as ACTIONED with this evidence",
+                                            key=f"recheck_resolve_{event_id[:8]}_{_sel_nonce}"):
+                                        st.session_state["_ow_alert_prefill"] = {
+                                            f"alert_action_{event_id[:8]}_{_sel_nonce}": "RESOLVE",
+                                            f"alert_kind_{event_id[:8]}_{_sel_nonce}": "ACTIONED",
+                                            f"alert_note_{event_id[:8]}_{_sel_nonce}": (
+                                                f"Re-check clear at {_rca}: {_rcl} {_rcv:,.2f} "
+                                                f"vs threshold {safe_float(_rct):,.2f}")[:500],
+                                        }
+                                        st.rerun()
+                            else:
+                                st.info(f"{_rcl}: {_rcv:,.2f} (rule threshold unavailable).")
+                    hist = _dr.get("hist") or run(
+                        mart_sql.events_for_rule(str(row["RULE_ID"]), 90), page=_PAGE,
+                        key=f"hist_rule_{event_id[:8]}", tier="recent",
+                        source="ALERT_EVENTS (90d, this rule)")
+                    if hist.usable() and len(hist.df) > 1:
+                        with st.expander(f"This rule recently ({len(hist.df)} events)"):
+                            styled_table(hist.df, height=220)
+                    # rec26: how was this resolved last time? The kind + note from the account's
+                    # own history is a playbook this exact alert has earned. styled_table (not
+                    # markdown) so a note can't inject formatting.
+                    _res = _dr.get("res") or run(
+                        mart_sql.resolutions_for_rule(str(row["RULE_ID"])), page=_PAGE,
+                        key=f"resolved_rule_{event_id[:8]}", tier="recent",
+                        source="ALERT_EVENTS (resolved, this rule)")
+                    if _res.usable():
+                        with st.expander(f"How this was resolved before ({len(_res.df)})"):
+                            styled_table(_res.df[["RESOLVED_AT", "RESOLUTION_KIND", "RESOLUTION_NOTE"]],
+                                         height=180, slug="rule-resolutions")
+                            st.caption("The last few times this rule was closed — kind and note from "
+                                       "your own history, the playbook this alert has earned.")
+                    if wh_inline:
+                        with st.expander(f"Respond — closed loop on {wh_inline}", expanded=False):
+                            st.caption("Playbook above says what; this generates the how. Execute is "
+                                       "operator-gated, audited to REMEDIATION_LOG, and books an "
+                                       "ESTIMATED ledger item — verify it on Cost & Contract > "
+                                       "Optimization & Savings. The change scan settles its own "
+                                       "measured row for warehouse-setting changes (V038).")
+                            try:
+                                prior = run(mart_sql.ledger_for_event(event_id[:8].lower()), page=_PAGE,
+                                            key=f"clf_led_{event_id[:8]}", tier="live",
+                                            source="SAVINGS_LEDGER")
+                                if prior.ok and not prior.empty:
+                                    st.markdown("**Loop status — fixes already booked from this event:**")
+                                    for _, li in prior.df.iterrows():
+                                        state = str(li.get("STATE") or "")
+                                        usd = li.get("VERIFIED_USD") if state == "VERIFIED" else li.get("ESTIMATED_USD")
+                                        try:
+                                            usd_s = f"${float(usd):,.0f}"
+                                        except (TypeError, ValueError):
+                                            usd_s = "n/a"
+                                        # $-escape: DESCRIPTION is data — a '$' in it pairs with usd_s
+                                        st.markdown(md_dollars(f"- **{state}** — {li.get('DESCRIPTION')} ({usd_s})"))
+                                    st.caption("VERIFIED comes from a manual proof-backed verify on the "
+                                               "Savings ledger; the change scan (V038) additionally books "
+                                               "and settles its own measured row for warehouse-setting "
+                                               "changes.")
+                            except ValueError:
+                                pass  # non-uuid event id shapes: chip simply doesn't render
+                            fix_kind = st.radio("Fix", ["Tighten auto-suspend to 60s",
+                                                        "Statement timeout 1h",
+                                                        "Cap clusters at 1"],
+                                                horizontal=True, key=f"clf_kind_{event_id[:8]}")
+                            if fix_kind.startswith("Tighten"):
+                                stmt_cl = remediation.auto_suspend_fix(wh_inline, 60)
+                            elif fix_kind.startswith("Statement"):
+                                stmt_cl = remediation.statement_timeout_fix(wh_inline, 3600)
+                            else:
+                                stmt_cl = remediation.cluster_range_fix(wh_inline, 1, 1)
+                            st.code(stmt_cl, language="sql")
+                            if is_operator:
+                                from app.ui.components import blast_radius
+                                blast_radius(wh_inline, _PAGE)
+                                # R3-6: key the reverse-hint off the SAME fix_kind branching that
+                                # built stmt_cl (the old binary ternary mislabeled an auto-suspend
+                                # fix as a cluster-range change — its token matched neither arm).
+                                _rev_kind = ("AUTO_SUSPEND" if fix_kind.startswith("Tighten")
+                                             else "STATEMENT_TIMEOUT" if fix_kind.startswith("Statement")
+                                             else "CLUSTER_RANGE")
+                                st.caption(remediation.reverse_hint(_rev_kind, wh_inline))
+                                if (confirm_gate(wh_inline, "Execute + audit + book estimate",
+                                                 key=f"clf_exec_{event_id[:8]}",
+                                                 prompt="Type the warehouse name to confirm",
+                                                 object_name=True)
+                                        and write_gate_open(f"clf_exec_{event_id[:8]}")):
+                                    ok, msg = execute_statement(stmt_cl, page=_PAGE)
+                                    execute_statement(
+                                        f"INSERT INTO {core_object('REMEDIATION_LOG')} "
+                                        "(FINDING_TYPE, TARGET_OBJECT, STATEMENT_SQL, STATUS, RESULT_NOTE, EXECUTED_BY) "
+                                        f"SELECT 'ALERT_CLOSED_LOOP', {sql_literal(wh_inline)}, "
+                                        f"{sql_literal(stmt_cl)}, {sql_literal('EXECUTED' if ok else 'FAILED')}, "
+                                        f"{sql_literal(('event ' + event_id[:8] + ': ' + msg)[:2000])}, {identity_sql()}",
+                                        page=_PAGE)
+                                    if ok:
+                                        from app.ui.components import log_ui_event
+                                        log_ui_event("remediation_exec", page=_PAGE)
+                                    if ok:
+                                        execute_statement(
+                                            f"INSERT INTO {core_object('SAVINGS_LEDGER')} "
+                                            "(DESCRIPTION, STATE, ESTIMATED_USD, PROOF_SQL, NOTES) "
+                                            f"SELECT {sql_literal(fix_kind + ' on ' + wh_inline + ' (alert closed loop)')}, "
+                                            f"'ESTIMATED', 0, {sql_literal(stmt_cl)}, "
+                                            f"{sql_literal('From alert event ' + event_id[:8] + '; verifier measures actuals.')}",
+                                            page=_PAGE)
+                                    stamp_write(f"clf_exec_{event_id[:8]}", ok)  # C48
+                                    notify(ok, msg)
+                            else:
+                                st.caption("Copy the SQL; executing needs SNOW_ACCOUNTADMINS / SNOW_SYSADMINS.")
+                            booked = run(mart_sql.ledger_for_event(event_id[:8]), page=_PAGE,
+                                         key=f"clf_led_{event_id[:8]}", tier="live",
+                                         source="SAVINGS_LEDGER")
+                            if booked.usable():
+                                st.markdown("**Savings booked from this alert**")
+                                styled_table(booked.df[["DESCRIPTION", "STATE", "ESTIMATED_USD",
+                                                        "VERIFIED_USD", "CREATED_AT"]], height=140)
+                                st.caption("ESTIMATED flips to VERIFIED when verified on the Savings "
+                                           "ledger (proof + measured amount). Warehouse-setting changes "
+                                           "also get a separate change-scan row that settles itself (V038).")
+                    # Per-family evidence: each alert gets the evidence pack that matches
+                    # the metric it fired on, not one query-latency pack for everything
+                    # (which fed cost/serverless/Cortex alerts unrelated latency rows).
+                    plan = plan_for_alert(str(row["RULE_ID"]), str(row["TITLE"]),
+                                          detail_text, str(row["RAISED_AT"]))
+                    if plan is not None:
+                        _scope = plan.scope_note
+                        st.caption(
+                            f"Explain with AI — evidence: {plan.label} · {plan.window_label}"
+                            + (f" · {_scope}" if _scope else ""))
+                        # The evidence pack is a historical ACCOUNT_USAGE/mart query, so it
+                        # stays button-gated; once assembled, the shared ai_evaluation_panel
+                        # owns the AI run, cost disclosure, grounding popover, download, and
+                        # the operator-only save-to-event hook.
+                        _expl_prompt_key = f"_ai_expl_prompt_{event_id}"
+                        if st.button("Assemble the evidence", key=f"ai_expl_go_{event_id[:8]}",
+                                     help="Runs the evidence pack that matches THIS alert's metric, "
+                                          "then unlocks a grounded AI evaluation over exactly those rows."):
+                            ev = run(alert_evidence_sql.build(plan),
+                                     page=_PAGE, key=f"ai_ev_{plan.kind}_{event_id[:8]}", tier="historical",
+                                     source="ACCOUNT_USAGE / marts (per-alert evidence)")
+                            if not ev.ok or ev.empty:
+                                st.session_state.pop(_expl_prompt_key, None)
+                                empty_state("no_data_yet",
+                                            "No evidence rows for this alert's scope — the driver may be "
+                                            "outside the window, or the family/service label didn't match.")
+                            else:
+                                st.session_state[_expl_prompt_key] = alert_evidence_prompt(
+                                    plan.kind, str(row["TITLE"]), detail_text, ev.df, plan.window_label)
+                        _expl_prompt = st.session_state.get(_expl_prompt_key)
+                        if _expl_prompt:
+                            def _append_hypothesis(answer: str) -> tuple[bool, str]:
+                                # C48 re-verify fix: content-scoped key — regenerate-and-
+                                # save-again inside this fragment is a NEW hypothesis, not
+                                # a duplicate; only a byte-identical re-save is swallowed.
+                                _ai_key = f"ai_save_{event_id[:8]}:{hash(answer) & 0xFFFFFF}"
+                                if not write_gate_open(_ai_key):  # C48
+                                    return True, ""
+                                appended = (
+                                    f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
+                                    f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
+                                    f"{sql_literal(answer[:800])}, 2000) "
+                                    f"WHERE EVENT_ID = {sql_literal(event_id)};"
+                                )
+                                ok_u, msg_u = execute_statement(appended, page=_PAGE)
+                                stamp_write(_ai_key, ok_u)  # C48
+                                return ok_u, (msg_u if not ok_u else "Hypothesis stored on the event.")
+                            ai_evaluation_panel(
+                                key=f"alert_expl_{event_id[:8]}",
+                                prompt=_expl_prompt,
+                                settings=load_settings(_PAGE),
+                                page=_PAGE,
+                                subject=str(row["TITLE"]),
+                                on_save=_append_hypothesis if is_operator else None,
+                                save_label="Append hypothesis to the event",
+                            )
 
+                elif not _bulk_mode:
+                    # C42: single-mode empty drawer owns the "select an event" prompt;
+                    # in bulk mode there IS no drawer, so the right pane stays quiet
+                    # (the feed's bulk caption + the full-width bulk panel guide it).
+                    st.caption("Select an event on the left to open its drawer "
+                               "(detail, rule, history, playbook, ack/resolve).")
         if is_operator and _bulk_rows:
             st.divider()
             _bdf = edf.iloc[_bulk_rows]

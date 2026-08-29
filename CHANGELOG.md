@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.316.0 - UI/UX Wave 2: desktop master-detail for Alerts (C42) (2026-08-28)
+
+The alert triage surface joins the master-detail layout: the open-events feed
+renders LEFT and the selected event's drawer RIGHT (was stacked top-to-bottom).
+
+* The open-events `@st.fragment` now wraps its feed + drawer in the shared
+  `st.container(key="ow_md_alerts")` + `st.columns((1.15,1.0))`, so it restacks
+  on narrow viewports with every other master-detail surface (the C47 CSS
+  already covered it). A pure render-location split — every F51/C44/C48 guard
+  (identity binds, nonce resets, deep-link arming, next-up queue, write latches)
+  is unchanged session state, verified by an adversarial review that confirmed
+  correct nesting depth, preserved scope, and intact guards.
+* The bulk panel and the snoozed tray stay full-width below the columns; the
+  storm/rollup path still renders full-width (it early-returns before the split).
+
+Review polish, all fixed pre-commit: the drawer's leading `st.divider()` (a
+stacked-flow separator) became an orphaned rule at the top of the right pane —
+removed (the column edge separates now); the empty-drawer placeholder showed
+"select an event" even in bulk mode where there is no drawer — gated to single
+mode; and the feed no longer duplicates the "open its drawer" prompt (the drawer
+pane owns it, the feed keeps only the bulk tip).
+
 ## 4.315.0 - UI/UX Wave 2: shared master-detail (C47) (2026-08-28)
 
 Ranked work LEFT, the selected item's editor RIGHT — a desktop-console layout
