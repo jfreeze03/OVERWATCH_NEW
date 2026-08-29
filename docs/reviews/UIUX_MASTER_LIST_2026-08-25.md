@@ -218,9 +218,9 @@ cross-cutting risk.
   countdown in the snoozed tray.** `app/ui/pages/alerts.py:715`
 - [x] **C48 · P1/M · App-wide in-flight action state** (disable initiator, "Executing…",
   block duplicate clicks) — extend beyond lifecycle to unguarded remediation writes.
-- [ ] **F54 · P2/S · Dirty-check the Action Center "Save work item"** so no-op saves stop
+- [x] **F54 · P2/S · Dirty-check the Action Center "Save work item"** so no-op saves stop
   writing empty audit rows. `app/ui/pages/workbench.py:180`
-- [ ] **F58 · P2/S · Plain-English effect line above every write's SQL preview**
+- [x] **F58 · P2/S · Plain-English effect line above every write's SQL preview**
   ("Set RUNNING → VERIFIED and book $X to the ledger"). `app/ui/pages/workbench.py:178`
 
 ### Empty states & consistency

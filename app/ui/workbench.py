@@ -161,19 +161,51 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             "Comment or resolution evidence", key=f"action_note_{action_id}",
             max_chars=4000, height=90,
         )
+        # F58/F54: a plain-English effect line derived from a diff of the form
+        # against the current row — it names exactly what the write ACTUALLY
+        # does, and its emptiness is the dirty check (nothing changed and no
+        # comment = nothing to save; a no-op save would otherwise write an empty
+        # audit row). Review fix: SP_ACTION_LIFECYCLE uses COALESCE-keep
+        # semantics, so a BLANK owner and a toggled-OFF defer are no-ops it
+        # cannot perform — the line must not promise an unassign / un-defer the
+        # write silently drops, and an undated row must not be sent a fabricated
+        # due (the widget defaults to today+7). Clearing an owner/defer needs an
+        # explicit SP path (a follow-up migration).
+        _cur_owner = str(row.get("OWNER") or "").strip()
+        _cur_defer_on = bool(row.get("DEFER_UNTIL") and not pd.isna(row.get("DEFER_UNTIL")))
+        _had_due = not pd.isna(row.get("DUE_DATE"))
+        _due_changed = due != _date_value(row.get("DUE_DATE"))
+        # only send a due when it's real (the row had one, or the operator picked
+        # one on a previously-undated row) — else NULL, so the SP keeps NULL.
+        _due_arg = due if (_had_due or _due_changed) else None
+        _effects: list[str] = []
+        if status != current_status:
+            _effects.append(f"set status {current_status} → {status}")
+        if owner.strip() and owner.strip() != _cur_owner:
+            _effects.append(f"assign to {owner.strip()}")
+        if _due_changed:
+            _effects.append(f"set due → {due}")
+        if defer_on and (not _cur_defer_on or defer != _date_value(row.get("DEFER_UNTIL"), 1)):
+            _effects.append(f"defer until {defer}")
+        if str(note or "").strip():
+            _effects.append("add a comment")
+        _dirty = bool(_effects)
         statement = action_transition_sql(
             action_id,
             status=status,
             owner=owner,
-            due_date=due,
+            due_date=_due_arg,
             defer_until=defer,
             note=note,
             actor=viewer_name(),
             request_key=f"ui:{action_id}:{uuid4()}",
         )
+        st.caption("This will " + ", ".join(_effects) + " — audited." if _dirty
+                   else "No changes to save yet — edit a field or add a comment.")
         with st.expander("SQL preview"):
             st.code(statement, language="sql")
-        if (st.button("Save work item", key=f"action_save_{action_id}", type="primary")
+        if (st.button("Save work item", key=f"action_save_{action_id}", type="primary",
+                      disabled=not _dirty)
                 and write_gate_open(f"action_save_{action_id}")):
             ok, msg = execute_statement(statement, page=_PAGE)
             stamp_write(f"action_save_{action_id}", ok)  # C48

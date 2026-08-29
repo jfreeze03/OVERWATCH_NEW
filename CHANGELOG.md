@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.318.0 - UI/UX Wave 2: write polish (F54 + F58) (2026-08-28)
+
+* **F58** a plain-English effect line above every operator write's SQL preview,
+  derived from a diff of the form against the current row: the Action Center
+  "Save work item" names its status / owner / due / defer / comment changes,
+  and the Decision Studio experiment save names its ledger consequence ("book
+  $X to the savings ledger").
+* **F54** that same diff IS the dirty check: the Action Center Save is disabled
+  when nothing changed and no comment is entered, so a no-op save can no longer
+  write an empty audit row ("No changes to save yet — edit a field or add a
+  comment").
+
+Adversarial review confirmed the effect line was making PROMISES the stored
+proc can't keep — all fixed pre-commit so the line only claims what the write
+actually does:
+
+* SP_ACTION_LIFECYCLE uses COALESCE-keep semantics, so a BLANK owner and a
+  toggled-OFF defer are silent no-ops — the line no longer offers "unassign" or
+  "clear the defer" as savable effects (a follow-up migration will add explicit
+  clear paths so those operator actions actually work).
+* An undated row's Due field defaults to today+7; the save now sends NULL for a
+  previously-undated row the operator didn't set, instead of stamping a
+  fabricated due date the caption never mentioned.
+* The experiment effect line claims a status move only on a real transition, and
+  reserves "— audited" for the settle path (VERIFIED/REJECTED/ROLLED_BACK write
+  an activity row; an in-flight save is a plain UPDATE with no audit trail).
+
 ## 4.317.0 - UI/UX Wave 2: table-layer polish (F32/F33/F35/F36) (2026-08-28)
 
 Four low-risk refinements at the shared table layer (`_render_table`):

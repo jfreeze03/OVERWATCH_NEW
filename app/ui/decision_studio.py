@@ -905,6 +905,24 @@ def _render_experiment_detail(row) -> None:
             verified_usd=verified_value if update_status == "VERIFIED" else None,
             actor=viewer_name(),
         )
+        # F58: a plain-English effect line above the SQL — name the status move
+        # and the ledger consequence a VERIFIED save carries ("book $X to the
+        # savings ledger"). Review fix: only claim a status move when it's real
+        # (current != update_status), and reserve "— audited" for the SETTLE
+        # path (VERIFIED/REJECTED/ROLLED_BACK write an ACTION_ACTIVITY row) — an
+        # in-flight PLANNED/RUNNING/OBSERVING save is a plain UPDATE with no
+        # activity trail, so it must not claim to be audited.
+        _settle = update_status in ("VERIFIED", "REJECTED", "ROLLED_BACK")
+        _parts = []
+        if update_status != current:
+            _parts.append(f"set status {current} → {update_status}")
+        if update_status == "VERIFIED":
+            _parts.append(f"book {format_usd(safe_float(verified_value))} to the savings ledger")
+        elif update_status in ("REJECTED", "ROLLED_BACK") and safe_float(row.get("VERIFIED_USD")) > 0:
+            _parts.append("reverse its prior ledger booking")
+        elif not _parts:
+            _parts.append("record the edited result / evidence")
+        st.caption("This will " + ", ".join(_parts) + (" — audited." if _settle else "."))
         with st.expander("SQL preview"):
             st.code(statement, language="sql")
         if _proof_gaps:
