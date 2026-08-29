@@ -209,7 +209,8 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
         score = _W_PROX * prox + _W_MAG * mag + _W_MATCH * match
         band = "HIGH" if score >= _BAND_HIGH else ("MEDIUM" if score >= _BAND_MED else "LOW")
         when = c.get("when")
-        _timing_unknown = when is None or when != when   # None or NaN/NaT
+        when_dt = _to_dt(when)               # None for missing / NaN / NaT
+        _timing_unknown = when_dt is None
         # Timing gates causation: a change outside the plausible trigger window (proximity 0),
         # one that happened AFTER onset, OR one with NO timing at all cannot be a confident
         # cause however big or on-entity it is — a cause must precede the effect, and an
@@ -217,12 +218,12 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
         # NOR an untimed change can headline as "most likely cause (high confidence)"
         # (bug-hunt: an untimed candidate got proximity 0.3 and, with magnitude + entity
         # match, crossed HIGH while its own reason read "timing unknown").
-        _after_onset = (not _timing_unknown and onset_dt is not None
-                        and (onset_dt - when).total_seconds() < 0)
+        _after_onset = (when_dt is not None and onset_dt is not None
+                        and (onset_dt - when_dt).total_seconds() < 0)
         if prox <= 0.0 or _after_onset or _timing_unknown:
             band = "LOW"
-        if not _timing_unknown and onset_dt is not None:
-            lead_h = (onset_dt - when).total_seconds() / 3600.0
+        if when_dt is not None and onset_dt is not None:
+            lead_h = (onset_dt - when_dt).total_seconds() / 3600.0
             lead_text = (f"{lead_h:.1f}h before onset" if lead_h >= 0
                          else f"{-lead_h:.1f}h AFTER onset")
         else:
