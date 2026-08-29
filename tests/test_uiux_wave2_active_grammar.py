@@ -66,8 +66,12 @@ def test_f5_active_tab_joins_the_accent_grammar():
     # bug-hunt r3: the accent must be forced onto the tab's text NODE (a markdown
     # <p>), not just the button — else line 56's direct ink-soft on <p> wins and the
     # accent ink is a silent no-op, like the pills would have been without the force.
+    # bug-hunt r4: pin the DECLARATION, not just the selector — a selector-only check
+    # stays green if a future edit copies the wrong colour token (e.g. the nav's ink),
+    # silently reintroducing the r3 no-op. Split on the text-node rule specifically.
     assert 'button[data-baseweb="tab"][aria-selected="true"] p' in _THEME
-    assert 'button[data-baseweb="tab"][aria-selected="true"] span' in _THEME
+    node = _THEME.split('button[data-baseweb="tab"][aria-selected="true"] p,', 1)[1][:160]
+    assert 'span' in node and 'color:var(--ow-accent) !important' in node
 
 
 def test_f5_every_variant_shares_the_one_accent():
