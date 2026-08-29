@@ -49,6 +49,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     load_settings,
+    master_detail,
     notify,
     read_model_caption,
     section_header,
@@ -90,14 +91,6 @@ def _date_value(value: object, fallback_days: int = 7):
     if pd.isna(parsed):
         return account_today() + timedelta(days=fallback_days)
     return parsed.date()
-
-
-def _apply_action_context(frame: pd.DataFrame) -> str:
-    ctx = navigation_context()
-    requested = str(ctx.get("action_id") or "").strip()
-    if requested and requested in set(frame.get("ACTION_ID", pd.Series(dtype=str)).astype(str)):
-        st.session_state["_ow_action_selected"] = requested
-    return str(st.session_state.get("_ow_action_selected") or requested)
 
 
 def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
@@ -341,36 +334,41 @@ def render_action_center(company: str) -> None:
             ranked = rank_actions(display, limit=1000)
             if not ranked.empty:
                 display = ranked.reset_index(drop=True)
-        selection = decision_rows(
-            display,
-            key="action_center_table",
-            decision_col="TITLE",
-            why_col="DETAIL",
-            impact_col="ESTIMATED_USD",
-            confidence_col="CONFIDENCE",
-            owner_col="OWNER",
-            status_col="STATUS",
-            next_col="DUE_DATE",
-            context_cols=("SEVERITY", "PERIOD", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
-            height=340,
-            sort_label="severity, overdue, estimated value, then age",
-            impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate these "
-                        "by entity and never mix them with verified savings.",
-            confidence_label="Confidence (authored)",
-            confidence_help="Authored confidence (0-1) set when the action was created (operator "
-                            "or recommendation engine) — a stated belief, not a measurement.",
-        )
-        selected_id = _apply_action_context(display)
-        if selection is not None:
-            try:
-                selected_id = str(display.iloc[int(selection)]["ACTION_ID"])
-                st.session_state["_ow_action_selected"] = selected_id
-            except (KeyError, IndexError, ValueError, TypeError):
-                pass
-        if selected_id:
-            matches = display[display["ACTION_ID"].astype(str) == selected_id]
-            if not matches.empty:
-                _render_action_detail(matches.iloc[0], extended=extended)
+        # C47: ranked work LEFT, the selected item's editor RIGHT (was stacked).
+        # master_detail owns the column split + identity-based sticky selection;
+        # the table flavor (decision_rows) and the editor (_render_action_detail,
+        # closing over `extended`) stay here. A deep-link action_id preselects it.
+        def _ac_list(display_df, list_key):
+            return decision_rows(
+                display_df, key=list_key,
+                decision_col="TITLE", why_col="DETAIL", impact_col="ESTIMATED_USD",
+                confidence_col="CONFIDENCE", owner_col="OWNER", status_col="STATUS",
+                next_col="DUE_DATE",
+                context_cols=("SEVERITY", "PERIOD", "SOURCE_ENTITY_TYPE", "SOURCE_ENTITY_KEY"),
+                height=340, sort_label="severity, overdue, estimated value, then age",
+                impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate "
+                            "these by entity and never mix them with verified savings.",
+                confidence_label="Confidence (authored)",
+                confidence_help="Authored confidence (0-1) set when the action was created "
+                                "(operator or recommendation engine) — "
+                                "a stated belief, not a measurement.")
+
+        # Deliver the deep-link action_id ONCE per arrival (review fix): consume
+        # it from the nav context so a later manual click sticks, and a repeat
+        # navigation to the SAME id re-focuses it (the id is re-populated then).
+        _ctx_id = str(navigation_context().get("action_id") or "").strip()
+        _preselect = _ctx_id if _ctx_id in set(display["ACTION_ID"].astype(str)) else ""
+        if _preselect:
+            _nav = st.session_state.get("_ow_nav_context")
+            if isinstance(_nav, dict) and _nav.get("action_id"):
+                st.session_state["_ow_nav_context"] = {
+                    k: v for k, v in _nav.items() if k != "action_id"}
+        master_detail(
+            display, key="action_center", id_col="ACTION_ID",
+            list_render_fn=_ac_list,
+            detail_render_fn=lambda r: _render_action_detail(r, extended=extended),
+            preselect_id=_preselect,
+            empty_detail_msg="Select a work item on the left to see and edit its detail.")
 
     if is_operator() and extended:
         with st.expander("Create work item"):

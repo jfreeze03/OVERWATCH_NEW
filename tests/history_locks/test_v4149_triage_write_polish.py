@@ -131,8 +131,14 @@ def test_confidence_columns_labelled_by_epistemics():
 def test_experiments_require_selection_and_scenarios_guard_empty():
     ds = _src("app/ui/decision_studio.py")
     exp = ds.split("def _experiments", 1)[1].split("\ndef ", 1)[0]
-    assert "if selected is None:" in exp and "return" in exp
+    # C47 (v4.315): rec17 "no silent row-0" now lives in the master_detail split —
+    # nothing selected renders the empty-detail hint (never row 0's editor). The
+    # detail body is _render_experiment_detail(row); the primitive shows
+    # empty_detail_msg when no row is bound.
+    assert "master_detail(" in exp and "empty_detail_msg=" in exp
     assert "index = int(selected) if selected is not None else 0" not in exp  # old row-0
+    comp = _src("app/ui/components.py").split("def master_detail(", 1)[1].split("\ndef ", 1)[0]
+    assert "if row is not None:" in comp and "empty_detail_msg" in comp
     scen = ds.split("def _scenarios", 1)[1].split("\ndef ", 1)[0]
     assert "if actions.empty:" in scen and 'empty_state("no_data_yet"' in scen
 

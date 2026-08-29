@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.315.0 - UI/UX Wave 2: shared master-detail (C47) (2026-08-28)
+
+Ranked work LEFT, the selected item's editor RIGHT — a desktop-console layout
+that replaces the stacked list-then-detail on Action Center and Decision Studio
+experiments:
+
+* **`components.master_detail`** is the shared primitive: it owns the column
+  split and the fragile positional-selection → stable-id → sticky-persistence
+  dance, while each caller keeps its own table flavor (list_render_fn) and
+  editor body (detail_render_fn). Selection binds by IDENTITY (id_col) via a
+  rec29 seen-guard, so a re-sorting list can't rebind the detail to the wrong
+  row; a deep-link preselect is one-shot and clears the sticky selection.
+* **Action Center** and **Decision Studio experiments** now render through it
+  (DS upgrades from raw positional selection to EXPERIMENT_ID identity). The
+  C48 write latches still key off the row id; rec17 "no silent row-0" is
+  preserved by the empty-detail hint.
+* **Narrow-viewport restack**: every master-detail surface wraps its columns in
+  a `st.container(key="ow_md_*")`, and one `@media(max-width:1180px)` rule in
+  theme.py restacks them full-width (Streamlit columns don't auto-stack until
+  unusably narrow). This same convention is ready for the Alerts feed/drawer
+  split (C42, next).
+* Docs: ARCHITECTURE.md carries the master-detail + restack contract.
+
+Adversarial review (3 dimensions) confirmed 4 selection defects, all fixed
+pre-commit — the HIGH: the sticky positional selection re-emits every rerun, so
+an unconditional position→id resolve rebound the detail to whatever row landed
+at that index after a re-sort (defeating the primitive's own identity claim).
+The rec29 seen-guard now resolves only on a genuine new click; a deep-link
+preselect wins and clears the sticky selection; the deep-link is consumed
+one-shot so a manual click sticks and a repeat nav to the same id re-focuses it.
+
 ## 4.314.0 - UI/UX Wave 2: Operator vs Audit presentation modes (C19) (2026-08-28)
 
 A per-viewer presentation mode, stored like the density pref:

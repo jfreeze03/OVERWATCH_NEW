@@ -45,6 +45,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     load_settings,
+    master_detail,
     notify,
     read_model_caption,
     result_caption,
@@ -859,68 +860,11 @@ def _scenarios(company: str) -> None:
         )
 
 
-def _experiments() -> None:
-    result = run(
-        workbench_sql.experiments(limit=300), page=_PAGE, key="decision_experiments",
-        tier="recent", source="OPTIMIZATION_EXPERIMENTS",
-    )
-    if not result.ok:
-        empty_state("needs_setup", "Apply V074 to track optimization experiments.")
-        return
-    if result.empty:
-        # F56: point the empty state at where an experiment is actually created —
-        # a selected work item's "Start optimization experiment" expander.
-        # review fix: that expander is OPERATOR-gated, so the doorway renders
-        # only for operators; viewers get accurate read-only wording.
-        if is_operator():
-            empty_state(
-                "no_data_yet", "No optimization experiments have been started.",
-                hint="Start one from a work item on Action Center — select an item and "
-                     "use its 'Start optimization experiment' expander.",
-                action_label="Open Action Center",
-                on_action=_open_action_center,
-                action_key="es_experiments_create",
-            )
-        else:
-            empty_state(
-                "no_data_yet", "No optimization experiments have been started.",
-                hint="An operator starts one from a work item on Action Center; "
-                     "results appear here for every viewer.",
-            )
-        return
-    frame = result.df.reset_index(drop=True)
-    status = frame["STATUS"].astype(str).str.upper()
-    # C16: park the running/observing count for the section bar's "Experiments (n)" badge.
-    # review fix: experiments are account-wide — no filter changes this count,
-    # so the badge declares no scope dims and survives every filter flip.
-    stash_section_count(_PAGE, "Experiments", status.isin(("RUNNING", "OBSERVING")).sum(),
-                        dims=())
-    # DS #24: show how long each experiment has existed — a long-running active one is a
-    # stale-experiment signal ("RUNNING 38d") worth a look, not silent progress.
-    frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
-    _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
-    _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
-    kpi_row([
-        {"label": "Experiments", "value": f"{len(frame):,}"},
-        {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
-        {"label": "Oldest active", "value": (f"{_oldest_active:,} d" if _oldest_active else "—"),
-         "severity": "warn" if _oldest_active >= 30 else "",
-         "help": "Longest-running planned/running/observing experiment (days since it was "
-                 "created). A long-lived active experiment may be stuck — verify or close it."},
-        {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
-        {"label": "Verified value",
-         "value": format_usd(
-             frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())},
-    ])
-    selected = selectable_table(frame, key="decision_experiment_table", height=340,
-                                sort_label="active status, observation end, then update")
-    # rec17: no silent row-0 — an unselected table must not render (and let an operator
-    # Save) the first experiment as if it were the chosen one. Require a selection.
-    if selected is None:
-        st.caption("Select an experiment above to view its hypothesis, open its entity, "
-                   "or record results.")
-        return
-    row = frame.iloc[int(selected)]
+def _render_experiment_detail(row) -> None:
+    """C47: the selected experiment's editor — rendered in the master-detail
+    right column (was stacked below the table). Selection identity + the
+    empty-state hint now live in master_detail; the C48 save latch keys off
+    EXPERIMENT_ID exactly as before."""
     experiment_id = str(row["EXPERIMENT_ID"])
     if st.button("Open experiment entity", key=f"experiment_entity_{experiment_id}",
                  type="tertiary"):
@@ -976,6 +920,73 @@ def _experiments() -> None:
             if ok:
                 st.rerun()
 
+
+
+def _experiments() -> None:
+    result = run(
+        workbench_sql.experiments(limit=300), page=_PAGE, key="decision_experiments",
+        tier="recent", source="OPTIMIZATION_EXPERIMENTS",
+    )
+    if not result.ok:
+        empty_state("needs_setup", "Apply V074 to track optimization experiments.")
+        return
+    if result.empty:
+        # F56: point the empty state at where an experiment is actually created —
+        # a selected work item's "Start optimization experiment" expander.
+        # review fix: that expander is OPERATOR-gated, so the doorway renders
+        # only for operators; viewers get accurate read-only wording.
+        if is_operator():
+            empty_state(
+                "no_data_yet", "No optimization experiments have been started.",
+                hint="Start one from a work item on Action Center — select an item and "
+                     "use its 'Start optimization experiment' expander.",
+                action_label="Open Action Center",
+                on_action=_open_action_center,
+                action_key="es_experiments_create",
+            )
+        else:
+            empty_state(
+                "no_data_yet", "No optimization experiments have been started.",
+                hint="An operator starts one from a work item on Action Center; "
+                     "results appear here for every viewer.",
+            )
+        return
+    frame = result.df.reset_index(drop=True)
+    status = frame["STATUS"].astype(str).str.upper()
+    # C16: park the running/observing count for the section bar's "Experiments (n)" badge.
+    # review fix: experiments are account-wide — no filter changes this count,
+    # so the badge declares no scope dims and survives every filter flip.
+    stash_section_count(_PAGE, "Experiments", status.isin(("RUNNING", "OBSERVING")).sum(),
+                        dims=())
+    # DS #24: show how long each experiment has existed — a long-running active one is a
+    # stale-experiment signal ("RUNNING 38d") worth a look, not silent progress.
+    frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
+    _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
+    _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
+    kpi_row([
+        {"label": "Experiments", "value": f"{len(frame):,}"},
+        {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
+        {"label": "Oldest active", "value": (f"{_oldest_active:,} d" if _oldest_active else "—"),
+         "severity": "warn" if _oldest_active >= 30 else "",
+         "help": "Longest-running planned/running/observing experiment (days since it was "
+                 "created). A long-lived active experiment may be stuck — verify or close it."},
+        {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
+        {"label": "Verified value",
+         "value": format_usd(
+             frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())},
+    ])
+    # C47: ranked experiments LEFT, the selected editor RIGHT (was stacked).
+    # master_detail keys selection on EXPERIMENT_ID (an upgrade over the old
+    # positional stickiness) and preserves rec17 "no silent row-0" via the
+    # empty-detail hint.
+    master_detail(
+        frame, key="ds_experiments", id_col="EXPERIMENT_ID",
+        list_render_fn=lambda d, k: selectable_table(
+            d, key=k, height=340,
+            sort_label="active status, observation end, then update"),
+        detail_render_fn=_render_experiment_detail,
+        empty_detail_msg="Select an experiment to view its hypothesis, open its "
+                         "entity, or record results.")
 
 # rec8: the page shell (header + primary section bar + dispatch) now lives in
 # app/ui/pages/decision_studio.py; this module keeps only the section bodies.

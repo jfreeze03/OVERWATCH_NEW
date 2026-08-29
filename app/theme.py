@@ -313,6 +313,19 @@ section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked)
   [data-testid="stMetricValue"] { font-size:1.32rem; }
   .ow-stat { flex-basis:46%; }
 }
+/* C42/C47: master-detail (feed/list LEFT, drawer/detail RIGHT via st.columns).
+   Streamlit columns are flex children that do NOT auto-stack until they hit a
+   tiny built-in min-width — a 2-pane split would shrink to unusable widths
+   first — so restack them explicitly on narrow viewports. The generous 1180px
+   breakpoint keys off VIEWPORT width while the content area is viewport minus
+   the sidebar, so it fires before the panes cramp. `st-key-ow_md_*` is the
+   shared container key every master-detail surface wraps its columns in. */
+@media (max-width:1180px) {
+  [class*="st-key-ow_md_"] [data-testid="stHorizontalBlock"] { flex-wrap:wrap; }
+  [class*="st-key-ow_md_"] [data-testid="stColumn"] {
+    flex:1 1 100% !important; min-width:100% !important; width:100% !important;
+  }
+}
 /* Crisp section switches: when the lazy-section radio changes, Streamlit marks
    the outgoing section's elements stale while the new ones render. Hide stale
    elements (opacity, so layout height doesn't thrash) so the previous section

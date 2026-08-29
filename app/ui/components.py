@@ -2112,6 +2112,67 @@ def decision_rows(
     return selection
 
 
+def master_detail(df, *, key: str, id_col: str, list_render_fn, detail_render_fn,
+                  ratio: tuple = (1.15, 1.0), preselect_id: str = "",
+                  empty_detail_msg: str = "Select a row on the left to see its detail.") -> None:
+    """C47: ranked work LEFT, selected-item detail RIGHT (a desktop console
+    layout; the columns restack on narrow viewports via the shared
+    ``st-key-ow_md_*`` CSS in theme.py). The primitive owns only the two things
+    that are identical and fragile across surfaces — the column split and the
+    positional-selection → stable-id → sticky-persistence dance — while each
+    caller keeps its own table flavor (``list_render_fn(display_df, list_key)``
+    returning a positional index or None) and its own editor body
+    (``detail_render_fn(row)``, rendered in the right column).
+
+    Selection binds by IDENTITY (``id_col``), never a positional index: the
+    ranked list re-sorts between runs, so a sticky positional index would point
+    the detail pane at the wrong row. The rec29 seen-guard makes that real — the
+    position→id resolution runs ONLY on a genuinely new click, so a sticky index
+    re-emitted after a re-sort can't rebind the detail to whatever row now sits
+    at that position. A ``preselect_id`` (a deep-link, delivered once per arrival
+    by a caller that consumes its nav context) wins: it sets the detail id and
+    clears the list's sticky selection so a stale highlight can't clobber it; a
+    later click then wins and persists. When nothing is selected the right column
+    shows ``empty_detail_msg`` — never row 0's editor (the DS 'no silent row-0')."""
+    import pandas as pd
+
+    display = (df if df is not None else pd.DataFrame()).reset_index(drop=True)
+    persist = f"_ow_md_sel_{key}"
+    seen_sel = f"_ow_md_seen_{key}"
+    table_key = f"{key}_table"
+    if preselect_id:
+        st.session_state[persist] = preselect_id
+        # Clear the list's sticky selection (popped BEFORE the widget mounts, so
+        # it's a legal reset) so its re-emitted index can't clobber the deep
+        # link; reset the seen-index so the next real click still registers.
+        st.session_state.pop(table_key, None)
+        st.session_state.pop(seen_sel, None)
+    with st.container(key=f"ow_md_{key}"):
+        col_list, col_detail = st.columns(ratio, gap="large", vertical_alignment="top")
+        with col_list:
+            sel = list_render_fn(display, table_key)
+        # rec29: resolve position→id only on a CHANGE. st.dataframe's selection
+        # is a sticky index that re-emits every rerun; an unconditional resolve
+        # would rebind the detail to a different row after a re-sort.
+        if sel is not None and sel != st.session_state.get(seen_sel):
+            st.session_state[seen_sel] = sel
+            try:
+                st.session_state[persist] = str(display.iloc[int(sel)][id_col])
+            except (KeyError, IndexError, ValueError, TypeError):
+                pass
+        selected_id = str(st.session_state.get(persist) or "")
+        with col_detail:
+            row = None
+            if selected_id and id_col in display.columns:
+                match = display[display[id_col].astype(str) == selected_id]
+                if not match.empty:
+                    row = match.iloc[0]
+            if row is not None:
+                detail_render_fn(row)
+            else:
+                st.caption(empty_detail_msg)
+
+
 def blast_radius(warehouse: str, page: str) -> None:
     """Who this operator action would hit: last-7d users/roles/tags on the
     warehouse. Rendered above every suspend/resize confirmation so the

@@ -174,8 +174,12 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
         "def _seed_entity_context", 1,
     )[0]
     assert action.index("exception_summary(") < action.index("kpi_row([")
-    assert "selection = decision_rows(" in action
+    # C47 (v4.315): the ranked list + selected detail became a master_detail
+    # split — decision_rows is now the list_render_fn, the detail is the
+    # detail_render_fn, but the decision-contract columns are unchanged.
+    assert "decision_rows(" in action and "master_detail(" in action
     assert 'decision_col="TITLE"' in action and 'why_col="DETAIL"' in action
+    assert 'id_col="ACTION_ID"' in action
     assert "confidence_badge(confidence)" in workbench
 
     studio = _source("app/ui/decision_studio.py")
@@ -195,7 +199,7 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
 
 
 def test_v4143_release_metadata_is_current() -> None:
-    assert 'APP_VERSION = "4.314.0"' in _source("app/config.py")
+    assert 'APP_VERSION = "4.315.0"' in _source("app/config.py")
     changelog = _source("CHANGELOG.md")
     assert "## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)" in changelog
     assert "## 4.143.0 - Decision-readable operating surfaces (2026-08-03)" in changelog

@@ -83,6 +83,17 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   blocks (and `methodology_note(text)` renders in audit only). The pref-write
   path (`prefs_sql.upsert_pref_sql`, an identity-scoped allowlist-gated MERGE)
   returned with this — it had been retired with the density toggle in v4.157.
+- **Master-detail layout (C42/C47):** `components.master_detail(df, *, key,
+  id_col, list_render_fn, detail_render_fn, ...)` is the shared ranked-work-LEFT
+  / selected-detail-RIGHT primitive (Action Center, Decision Studio experiments).
+  It owns only the column split and the fragile positional-selection → stable-id
+  → sticky-persistence dance (selection binds by identity via a rec29 seen-guard,
+  so a re-sort can't rebind the detail to the wrong row; a deep-link preselect is
+  one-shot and clears the sticky selection); each caller keeps its own table
+  flavor and editor body. Every master-detail surface wraps its columns in a
+  `st.container(key="ow_md_<name>")`, and one `@media(max-width:1180px)` rule in
+  `theme.py` restacks all `st-key-ow_md_*` columns to full-width on narrow
+  viewports (Streamlit columns don't auto-stack until unusably narrow).
 - **Operator-write seam (C48):** `execute_statement` / `execute_action` /
   `execute_cancel_query` paint an in-flight spinner around the round-trip, and
   every write CLICK BLOCK pairs `components.write_gate_open(<key>)` (last
