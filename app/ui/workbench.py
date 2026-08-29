@@ -476,15 +476,23 @@ def _seed_entity_context() -> None:
     ctx = navigation_context()
     kind = str(ctx.get("entity_type") or "").strip().upper()
     key = str(ctx.get("entity_key") or "").strip()
-    signature = f"{kind}:{key}"
-    if kind in ENTITY_TYPES and key and st.session_state.get("_ow_entity_context_applied") != signature:
+    if kind in ENTITY_TYPES and key:
         st.session_state["entity_360_type"] = kind
         st.session_state["entity_360_key"] = key
         # rec12: clear this kind's catalog pick so a stale earlier pick cannot shadow
         # the drilled key (the picker writes into entity_360_key, so a leftover pick
         # would otherwise re-populate the text box on the next render).
         st.session_state[f"entity_360_pick_{kind}"] = ""
-        st.session_state["_ow_entity_context_applied"] = signature
+        # Consume the entity identity from the nav context (mirrors Action Center's
+        # action_id, above) so a drill delivers ONCE per arrival: a later picker change
+        # or typed key then STICKS, and a repeat drill to the SAME entity re-seeds
+        # because the identity is re-populated on each navigation. The old
+        # _ow_entity_context_applied signature-dedup swallowed a re-drill after the
+        # viewed key had diverged, leaving the operator on the wrong entity.
+        _nav = st.session_state.get("_ow_nav_context")
+        if isinstance(_nav, dict):
+            st.session_state["_ow_nav_context"] = {
+                k: v for k, v in _nav.items() if k not in ("entity_type", "entity_key")}
 
 
 def _render_catalog_editor(kind: str, key: str, row: pd.Series | None, company: str) -> None:

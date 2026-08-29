@@ -835,7 +835,11 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     enc_y = alt.Y("Label:N", sort="-x", title=None,
                   axis=alt.Axis(labelLimit=260))  # full names (hover for longer)
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
-    _fmt = _usd_fmt(dmax)
+    # Sub-dollar spend (e.g. per-user Cortex/AI token cost) must keep its cents — else
+    # the whole-dollar format rounds a $0.58 bar's axis tick AND its always-visible data
+    # label to "$1"/"$0", contradicting the cents shown in the tooltip/caption. Same
+    # magnitude-aware fix daily_stacked_usd uses (v4.157.0, the "signal but $0" report).
+    _fmt = "$,.2f" if 0 < dmax < 1 else _usd_fmt(dmax)
     enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format=_fmt),
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     _usd_tip = alt.Tooltip("USD:Q", format="$,.2f",
@@ -880,7 +884,11 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
                                alt.GradientStop(color=_ACCENT, offset=1.0)])
     enc_y = alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260))
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
-    _fmt = _usd_fmt(dmax)
+    # Sub-dollar spend (e.g. per-user Cortex/AI token cost) must keep its cents — else
+    # the whole-dollar format rounds a $0.58 bar's axis tick AND its always-visible data
+    # label to "$1"/"$0", contradicting the cents shown in the tooltip/caption. Same
+    # magnitude-aware fix daily_stacked_usd uses (v4.157.0, the "signal but $0" report).
+    _fmt = "$,.2f" if 0 < dmax < 1 else _usd_fmt(dmax)
     enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format=_fmt),
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
@@ -1415,7 +1423,7 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
         _base(data)
         .mark_bar()
         .encode(
-            x=alt.X("Day:T", title=None),
+            x=alt.X("Day:T", title=None, axis=_day_axis(data["Day"])),
             y=alt.Y("sum(Events):Q", title="Alert events"),
             color=alt.Color(
                 "Severity:N",
@@ -1425,7 +1433,8 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
                 ),
                 legend=_legend(wide=True),
             ),
-            tooltip=["Day:T", "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
+            tooltip=[alt.Tooltip("Day:T", format=_DAY_TIP_FMT, title="Day"),
+                     "Severity:N", alt.Tooltip("sum(Events):Q", title="Events")],
         )
     )
     st.altair_chart(chart, width="stretch")

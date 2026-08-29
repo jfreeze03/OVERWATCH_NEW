@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.341.0 - Round-4 UI-layer bug hunt: 3 fixes (regression audit clean) (2026-08-29)
+
+Fourth adversarial hunt over `app/ui/*`, including a regression self-audit of this
+session's ~40 changes (which came back clean — no fix introduced a new bug). Four of
+seven finders were empty; three confirmed, each fixed and locked:
+
+* **[med] Entity 360 re-drill to an already-seeded entity was swallowed.**
+  `_seed_entity_context` deduped on a persistent `_ow_entity_context_applied`
+  signature that was only ever set, never consumed — so after the viewed key diverged
+  (via the catalogue picker or a typed key), a repeat drill to the same entity was
+  ignored and the operator was left on the wrong entity. It now consumes the entity
+  identity from the nav context (mirroring Action Center's `action_id`), so a drill
+  delivers once per arrival and a re-drill always re-seeds.
+* **[med] `bar_usd` flattened sub-dollar spend to "$0"/"$1".** The whole-dollar axis
+  and always-visible bar labels rounded a $0.58 per-user Cortex-token bar to "$1" (and
+  $0.30 → "$0"), contradicting the chart's own cents-showing tooltip/caption. Both
+  `bar_usd` and `clickable_bar_usd` now keep cents on a sub-dollar chart, the same
+  magnitude-aware format `daily_stacked_usd` already uses.
+* **[low] Alerts events-by-day tooltip showed "…, 12:00:00 AM".** The day tooltip was
+  an unformatted `Day:T` on day-grain data; it now uses the F40 `_DAY_TIP_FMT`
+  ("Aug 14, 2026") and the adaptive day axis, matching the sibling day-grain charts.
+
 ## 4.340.0 - Round-3 UI-layer bug hunt: 11 correctness/UX fixes (2026-08-29)
 
 Third adversarial multi-agent hunt over `app/ui/*` (per-file-cluster deep audits +
