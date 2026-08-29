@@ -257,8 +257,13 @@ cross-cutting risk.
   `empty_state`; add an "unavailable" kind.
 - [x] **F56 · P2/M · Give workflow empty states a next-best-action** (Watchlist empty →
   "Browse the catalog"; Experiments empty → create one). `app/ui/pages/workbench.py:287`
-- [ ] **F5 · P2/M · Unify the selected/active visual grammar** across nav / section pills /
+- [x] **F5 · P2/M · Unify the selected/active visual grammar** across nav / section pills /
   status cards (three different "active" languages today). `app/theme.py:166-264`
+  — v4.328.0: one accent-driven system via `--ow-active-tint`/`--ow-active-bar`;
+  shape-appropriate indicator (segmented_control + radio pills fill, nav left-rail,
+  tab underline). Review caught + fixed a HIGH (pale-on-accent pill text — forced dark
+  ink onto the text node) + the fill silently no-op'ing on the modern segmented_control.
+  ⚠ segmented_control active-segment selector is BaseWeb-version-specific — owner eyeballs live.
 - [x] **F17 · P2/S · Equalize KPI card heights in a row** (full-height flex so a row with
   one sparkline doesn't bottom-align raggedly). `app/ui/components.py:335`
   — v4.320.0: min-height floor on `.ow-card`. Adversarial review proved the

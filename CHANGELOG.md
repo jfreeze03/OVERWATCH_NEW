@@ -1,6 +1,22 @@
 # Changelog
 
-## 4.327.0 - UI/UX Wave 2: name the chart mark grammar (C38) (2026-08-29)
+## 4.328.0 - UI/UX Wave 2: one active/selected grammar (F5) (2026-08-29)
+
+* **F5** "this is the current one" was said four different ways — the section pills
+  filled with an accent gradient, the sidebar nav used a left rail, the tabs used
+  BaseWeb's own default (no app accent), and the Window pills had no active-fill rule
+  at all. They're now one accent-driven system: two shared tokens
+  (`--ow-active-tint` / `--ow-active-bar`) feed every "active" cue, and each control
+  keeps its shape-appropriate indicator — a filled segment for the pills (both the
+  modern `segmented_control` and the radio fallback), a left rail for the nav list,
+  an underline for tabs. Adversarial review caught a real legibility bug the fill
+  exposed: the dark ink never reached the option's text node (a direct global
+  `p,span` colour beat the label's inherited colour), leaving near-white text on the
+  bright accent fill — the same pale-on-accent failure the primary-button rule was
+  written to prevent; the dark ink is now forced onto the text node. Review also
+  confirmed the fill was silently no-op'ing on the modern `segmented_control` (it
+  only styled the radio fallback), now fixed. *Eyeball note: the segmented_control
+  active-segment selector is BaseWeb-version-specific and can't be verified headless.*
 
 * **C38** the chart mark grammar for data *provenance* is now named and reusable.
   A chart's marks say how trustworthy the number is: measured-and-complete renders

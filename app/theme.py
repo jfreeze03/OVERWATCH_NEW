@@ -29,6 +29,11 @@ _TOKENS = """
   --ow-ok:#34d399; --ow-warn:#f59e0b; --ow-bad:#f87171; --ow-info:#60a5fa;
   --ow-ok-dim:rgba(52,211,153,0.13); --ow-warn-dim:rgba(245,158,11,0.13);
   --ow-bad-dim:rgba(248,113,113,0.13); --ow-info-dim:rgba(96,165,250,0.13);
+  /* F5: ONE selected/active grammar. Every "this is the current one" cue is
+     accent-driven from these two tokens — the shape-appropriate indicator differs
+     (a filled segment for pills, a left rail for the nav list, an underline for
+     tabs) but the accent and the tint never do. */
+  --ow-active-tint:rgba(96,165,250,0.16); --ow-active-bar:#60a5fa;
   --ow-1:4px; --ow-2:8px; --ow-3:12px; --ow-4:16px; --ow-5:24px; --ow-6:32px;
   --ow-r:8px; --ow-r-sm:6px; --ow-r-lg:12px; --ow-r-pill:999px;
   --ow-shadow:0 1px 2px rgba(0,0,0,0.30),0 6px 20px -12px rgba(0,0,0,0.55);
@@ -261,14 +266,40 @@ div[data-testid="stButtonGroup"] button { flex:0 1 auto; min-width:44px; white-s
   border-radius:var(--ow-r-pill); }
 div[data-testid="stButtonGroup"] button:focus-visible { outline:2px solid var(--ow-accent);
   outline-offset:2px; z-index:2; }
+/* F5: the FILLED active grammar on the MODERN pills. lazy_sections renders the
+   Section picker as st.segmented_control (a stButtonGroup) when available, so the
+   radiogroup rule below only styles the old-radio fallback — the real active
+   segment lives here. Accent fill + dark ink FORCED onto the inner text node (a
+   direct global `p,span { color:ink-soft }` would otherwise leave it pale-on-accent,
+   the 2026-07-10 primary-button lesson). */
+div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"],
+div[data-testid="stButtonGroup"] button[aria-checked="true"] {
+  background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
+  border-color:transparent !important; }
+div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] p,
+div[data-testid="stButtonGroup"] button[data-testid="stBaseButton-segmented_controlActive"] span,
+div[data-testid="stButtonGroup"] button[aria-checked="true"] p,
+div[data-testid="stButtonGroup"] button[aria-checked="true"] span { color:#0f172a !important; }
 div[role="radiogroup"][aria-label="Section"], div[role="radiogroup"][aria-label^="Window"] {
   gap:4px; padding:4px; background:var(--ow-surface); border:1px solid var(--ow-hairline);
   border-radius:var(--ow-r-lg); flex-wrap:wrap; }
 div[role="radiogroup"][aria-label="Section"] label, div[role="radiogroup"][aria-label^="Window"] label {
   border-radius:var(--ow-r-pill); padding:3px 12px; margin:0; white-space:nowrap; transition:background var(--ow-ease),color var(--ow-ease); }
-div[role="radiogroup"][aria-label="Section"] label:hover { background:rgba(148,163,184,0.10); }
-div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
+div[role="radiogroup"][aria-label="Section"] label:hover,
+div[role="radiogroup"][aria-label^="Window"] label:hover { background:rgba(148,163,184,0.10); }
+/* F5: the FILLED variant of the active grammar — a segmented control fills its
+   current segment (accent gradient + dark ink on it), the convention for a compact
+   horizontal selector. Same accent as the nav rail and the tab underline. */
+div[role="radiogroup"][aria-label="Section"] label:has(input:checked),
+div[role="radiogroup"][aria-label^="Window"] label:has(input:checked) {
   background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)); color:#0f172a; }
+/* the dark ink must be FORCED onto the option's text node — a direct global
+   `p,span { color:ink-soft }` (line ~56) beats an inherited label colour, which
+   would leave near-white text on the bright accent fill (the primary-button lesson). */
+div[role="radiogroup"][aria-label="Section"] label:has(input:checked) p,
+div[role="radiogroup"][aria-label="Section"] label:has(input:checked) span,
+div[role="radiogroup"][aria-label^="Window"] label:has(input:checked) p,
+div[role="radiogroup"][aria-label^="Window"] label:has(input:checked) span { color:#0f172a !important; }
 
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
@@ -328,6 +359,12 @@ button[data-testid="stBaseButton-primary"] p, button[data-testid="stBaseButton-p
   color:#0f172a !important; }
 
 button[data-baseweb="tab"] { font-weight:640; }
+/* F5: the UNDERLINE variant of the active grammar — the active tab now speaks the
+   app accent (it defaulted to BaseWeb's own highlight colour). Recolour BaseWeb's
+   sliding highlight to the accent, and give the selected tab accent ink, so a tab,
+   a nav item and a section pill all say "current" in the same accent. */
+button[data-baseweb="tab"][aria-selected="true"] { color:var(--ow-accent) !important; font-weight:680; }
+div[data-baseweb="tab-highlight"] { background-color:var(--ow-active-bar) !important; }
 
 /* Multiselect chips: the default BaseWeb tag rendered as a pale wash —
    selections were unreadable (live finding 2026-07-10, Alerts bulk picker).
@@ -344,8 +381,17 @@ div[data-testid="stPopover"] > button { border-radius:var(--ow-r-pill); }
 section[data-testid="stSidebar"] { background:linear-gradient(180deg,var(--ow-bg),var(--ow-surface)); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label { border-radius:var(--ow-r-sm); padding:4px 10px; margin:1px 0; transition:background var(--ow-ease); }
 section[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:rgba(148,163,184,0.10); }
+/* F5: the LEFT-RAIL variant of the active grammar — a vertical nav list marks its
+   current item with an accent rail + accent tint + brighter, heavier ink (the
+   convention for a scannable list). Same accent as the section-pill fill. */
 section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
-  background:linear-gradient(90deg,rgba(96,165,250,0.18),transparent); box-shadow:inset 3px 0 0 var(--ow-accent); }
+  background:linear-gradient(90deg,var(--ow-active-tint),transparent);
+  box-shadow:inset 3px 0 0 var(--ow-active-bar); color:var(--ow-ink); font-weight:640; }
+/* the brighter ink must land on the text node, not just the label (same cascade
+   reason as the pills — harmless here, both are light on the dark tint, but kept
+   consistent so the active item reads a touch brighter). */
+section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p {
+  color:var(--ow-ink) !important; }
 
 @media (max-width:640px) {
   .block-container { padding-left:0.6rem; padding-right:0.6rem; }
