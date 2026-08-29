@@ -279,6 +279,11 @@ _EXPECTED_MIGRATIONS = {
         "sweep that resolves today's live-window events (PERF_QUERY_FAIL_PCT / "
         "PERF_QUEUED_MINUTES / PERF_SPILL_GB) once the condition drops below the "
         "hysteresis floor (AUTO_CLEARED)",
+    92: "Action lifecycle clear signals: SP_ACTION_LIFECYCLE re-derived from V074 "
+        "with P_CLEAR_OWNER / P_CLEAR_DEFER BOOLEAN parameters so an operator can "
+        "un-assign an owner and un-defer (resume) a work item — the COALESCE-keep "
+        "semantics could only keep, never clear (the v4.318 UI honesty gap). Both "
+        "flags FALSE = the old behaviour byte-for-byte; old 8-arg overload dropped",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

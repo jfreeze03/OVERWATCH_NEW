@@ -34,17 +34,24 @@ def test_action_save_is_dirty_checked_with_an_effect_line():
     assert block.index("_dirty = bool(_effects)") < block.index('st.expander("SQL preview")')
 
 
-def test_effect_line_only_claims_what_the_proc_actually_does():
-    # review fix: SP_ACTION_LIFECYCLE uses COALESCE-keep semantics, so a blank
-    # owner / toggled-off defer are no-ops it can't perform, and an undated row
-    # must not be sent a fabricated today+7 due. The line must not promise those.
+def test_effect_line_offers_clear_owner_and_defer_via_v092_flags():
+    # V092 gave SP_ACTION_LIFECYCLE explicit P_CLEAR_OWNER / P_CLEAR_DEFER, so
+    # blanking a set owner and toggling a set defer OFF are real savable effects
+    # again (v4.318 had dropped them while the proc could only COALESCE-keep). An
+    # undated row still must not be sent a fabricated today+7 due.
     wb = _src("app/ui/workbench.py")
     block = wb.split("def _render_action_detail", 1)[1].split("\ndef ", 1)[0]
-    assert 'if owner.strip() and owner.strip() != _cur_owner:' in block   # blank = no-op, not "unassign"
-    assert "owner → " not in block                                         # the old unassign phrasing is gone
-    assert "{owner.strip() or 'unassigned'}" not in block
-    assert "clear the defer" not in block                                  # SP can't null the defer
-    assert "_due_arg = due if (_had_due or _due_changed) else None" in block  # null-aware due
+    # clear signals derived from the diff: a SET owner blanked / a SET defer off
+    assert "_clear_owner = bool(_cur_owner) and not owner.strip()" in block
+    assert "_clear_defer = _cur_defer_on and not defer_on" in block
+    # the effect line names each clear; assign/defer are now the else-branch
+    assert '"unassign the owner"' in block
+    assert '"clear the defer (resume now)"' in block
+    assert 'elif owner.strip() and owner.strip() != _cur_owner:' in block
+    # the flags are threaded into the write
+    assert "clear_owner=_clear_owner," in block and "clear_defer=_clear_defer," in block
+    # unchanged: null-aware due (an undated row is never sent a fabricated today+7)
+    assert "_due_arg = due if (_had_due or _due_changed) else None" in block
     assert "due_date=_due_arg," in block
 
 

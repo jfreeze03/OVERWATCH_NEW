@@ -74,6 +74,8 @@ def action_transition_sql(
     note: str = "",
     actor: str = "",
     request_key: str = "",
+    clear_owner: bool = False,
+    clear_defer: bool = False,
 ) -> str:
     aid = str(action_id or "").strip()
     if not aid:
@@ -82,12 +84,16 @@ def action_transition_sql(
     if state and state not in ACTION_STATUSES:
         raise ValueError(f"Unsupported action status: {state}")
     key = str(request_key or f"action:{aid}:{uuid4()}")[:160]
+    # V092: explicit clear flags — SP_ACTION_LIFECYCLE's COALESCE-keep can only KEEP an
+    # owner/defer, so blanking the box / toggling defer off are no-ops without these.
+    # Both FALSE (the default) preserves the exact pre-V092 keep behaviour.
     return (
         f"CALL {core_object('SP_ACTION_LIFECYCLE')}("
         f"{sql_literal(aid, 80)}, {sql_literal(state, 30)}, "
         f"{sql_literal(str(owner or '').strip(), 200)}, {_date_sql(due_date)}, "
         f"{_date_sql(defer_until)}, {sql_literal(str(note or ''), 4000)}, "
-        f"{sql_literal(str(actor or '').strip(), 200)}, {sql_literal(key, 160)})"
+        f"{sql_literal(str(actor or '').strip(), 200)}, {sql_literal(key, 160)}, "
+        f"{'TRUE' if clear_owner else 'FALSE'}, {'TRUE' if clear_defer else 'FALSE'})"
     )
 
 

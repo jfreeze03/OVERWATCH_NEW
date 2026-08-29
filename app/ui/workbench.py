@@ -168,12 +168,11 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         # against the current row — it names exactly what the write ACTUALLY
         # does, and its emptiness is the dirty check (nothing changed and no
         # comment = nothing to save; a no-op save would otherwise write an empty
-        # audit row). Review fix: SP_ACTION_LIFECYCLE uses COALESCE-keep
-        # semantics, so a BLANK owner and a toggled-OFF defer are no-ops it
-        # cannot perform — the line must not promise an unassign / un-defer the
-        # write silently drops, and an undated row must not be sent a fabricated
-        # due (the widget defaults to today+7). Clearing an owner/defer needs an
-        # explicit SP path (a follow-up migration).
+        # audit row). An undated row must not be sent a fabricated due (the widget
+        # defaults to today+7). V092: SP_ACTION_LIFECYCLE now takes explicit
+        # P_CLEAR_OWNER / P_CLEAR_DEFER flags, so blanking a set owner and toggling
+        # a set defer OFF are real, savable effects again (they were dropped in
+        # v4.318 while the proc could only COALESCE-keep).
         _cur_owner = str(row.get("OWNER") or "").strip()
         _cur_defer_on = bool(row.get("DEFER_UNTIL") and not pd.isna(row.get("DEFER_UNTIL")))
         _had_due = not pd.isna(row.get("DUE_DATE"))
@@ -181,14 +180,21 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
         # only send a due when it's real (the row had one, or the operator picked
         # one on a previously-undated row) — else NULL, so the SP keeps NULL.
         _due_arg = due if (_had_due or _due_changed) else None
+        # clear signals: a set owner blanked / a set defer toggled off (V092).
+        _clear_owner = bool(_cur_owner) and not owner.strip()
+        _clear_defer = _cur_defer_on and not defer_on
         _effects: list[str] = []
         if status != current_status:
             _effects.append(f"set status {current_status} → {status}")
-        if owner.strip() and owner.strip() != _cur_owner:
+        if _clear_owner:
+            _effects.append("unassign the owner")
+        elif owner.strip() and owner.strip() != _cur_owner:
             _effects.append(f"assign to {owner.strip()}")
         if _due_changed:
             _effects.append(f"set due → {due}")
-        if defer_on and (not _cur_defer_on or defer != _date_value(row.get("DEFER_UNTIL"), 1)):
+        if _clear_defer:
+            _effects.append("clear the defer (resume now)")
+        elif defer_on and (not _cur_defer_on or defer != _date_value(row.get("DEFER_UNTIL"), 1)):
             _effects.append(f"defer until {defer}")
         if str(note or "").strip():
             _effects.append("add a comment")
@@ -202,6 +208,8 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             note=note,
             actor=viewer_name(),
             request_key=f"ui:{action_id}:{uuid4()}",
+            clear_owner=_clear_owner,
+            clear_defer=_clear_defer,
         )
         st.caption("This will " + ", ".join(_effects) + " — audited." if _dirty
                    else "No changes to save yet — edit a field or add a comment.")
