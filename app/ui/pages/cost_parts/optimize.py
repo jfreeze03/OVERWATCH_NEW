@@ -1044,7 +1044,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                      "help": f"Growing databases with >=7 observed days only; {_provisional} provisional "
                               f"gainer(s) and {_shrinking} shrinking one(s) are excluded. Estimate."},
                 ])
-                charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D", title="Projected growth $/mo")
+                # C38: this series is a least-squares PROJECTION (GROWTH_USD_30D), not
+                # measured spend — draw it as a modeled (hollow, dashed-outline) mark.
+                charts.bar_usd(growing.head(10), "DATABASE_NAME", "GROWTH_USD_30D",
+                               title="Projected growth $/mo", modeled=True)
                 _mv_cols = ["DATABASE_NAME", "COMPANY", "CURRENT_TB", "GROWTH_TB", "GROWTH_TB_30D",
                             "GROWTH_USD_30D", "FAILSAFE_SHARE_PCT"]
                 if "LOW_CONFIDENCE" in movers.columns:

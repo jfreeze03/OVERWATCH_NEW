@@ -36,18 +36,24 @@ _TITLE = palette.INK_SOFT
 #   * MEASURED but PROVISIONAL (the newest metering day, an in-flight month — the
 #     window closed, the data hasn't) -> dimmed to PROVISIONAL_OPACITY, never a gap
 #     or a crash. "Partial, not a drop." Use `_provisional_opacity(flag_field)`.
-#   * MODELED / PROJECTED  -> not yet a distinct mark. The month-end SPEND forecast
-#     is deliberately a KPI (Projected month-end), not a floating band — the old
-#     floating rectangle was removed. But a projected series that IS charted is not
-#     yet provenance-distinguished: Cost▸Optimize "Storage growth movers" draws
-#     GROWTH_USD_30D (a least-squares projection) as solid bars via bar_usd, told
-#     apart from measured spend only by its "Projected"/"Estimate" text labels. A
-#     future modeled mark should reuse this grammar (a dashed line, or a dimmed bar)
-#     so the distinction is visual, not just captioned.
+#   * MODELED / PROJECTED  -> a hollow, dashed-outline bar (`bar_usd(modeled=True)`,
+#     MODELED_FILL_OPACITY + _MODELED_DASH). A projection is not an observation, so it
+#     is drawn unlike one — and unlike a provisional one: it rides a DASHED STROKE and
+#     a HOLLOW flat fill, two channels a provisional bar never uses, so it can never be
+#     read as the 0.45 "measured-but-incomplete" dimming (a different state).
+#     Cost▸Optimize "Storage growth movers" (GROWTH_USD_30D, a least-squares
+#     projection) uses it. The month-end SPEND forecast stays a KPI (Projected
+#     month-end), not a floating band — the old floating rectangle was removed.
 # Dashed *rules* (budget threshold, flagged-day markers, F46 gates, F48 change date)
 # are a SEPARATE category — annotations over the data, not the data — so they carry
 # their own per-annotation dash, and are deliberately not folded into this scale.
 PROVISIONAL_OPACITY = 0.45
+# C38 MODELED bar: a hollow (low flat-fill opacity) body with a dashed accent outline.
+# Distinct from PROVISIONAL_OPACITY on purpose — provisional dims a SOLID gradient bar
+# on the whole-mark opacity channel and never carries a stroke, so the two never
+# collide. The dashed stroke is the primary "this is a projection" signal.
+MODELED_FILL_OPACITY = 0.20
+_MODELED_DASH = [5, 3]
 
 
 def _provisional_opacity(flag_field: str = "PROVISIONAL"):
@@ -813,7 +819,10 @@ def spend_trend(
     return picked_day
 
 def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top_n: int = 10,
-            *, takeaway: bool = False) -> None:
+            *, takeaway: bool = False, modeled: bool = False) -> None:
+    """``modeled=True`` (C38): draw the bars as a PROJECTION, not an observation — a
+    hollow, dashed-outline mark, so a least-squares forecast (Cost▸Optimize storage
+    growth) is never mistaken for measured spend. Measured callers leave it False."""
     data = df[[label_col, usd_col]].head(top_n).copy()
     data.columns = ["Label", "USD"]
     data["USD"] = pd.to_numeric(data["USD"], errors="coerce").fillna(0.0)
@@ -829,9 +838,20 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     _fmt = _usd_fmt(dmax)
     enc_x = alt.X("USD:Q", title=title or "USD", axis=alt.Axis(format=_fmt),
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
-    tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
+    _usd_tip = alt.Tooltip("USD:Q", format="$,.2f",
+                           title="Projected $/mo" if modeled else "USD")
+    tip = [alt.Tooltip("Label:N"), _usd_tip]
     base = _base(data, height=max(_HEIGHT, 30 * len(data)))
-    bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
+    if modeled:
+        # C38 MODELED mark: hollow flat fill + dashed accent outline. Not the 0.45
+        # provisional dimming (a solid gradient on the opacity channel, no stroke) —
+        # the dashed stroke + hollow body read unmistakably as "projection".
+        bars = base.mark_bar(
+            cornerRadiusEnd=4, fill=_ACCENT, fillOpacity=MODELED_FILL_OPACITY,
+            stroke=_ACCENT, strokeWidth=1.5, strokeDash=_MODELED_DASH,
+        ).encode(y=enc_y, x=enc_x, tooltip=tip)
+    else:
+        bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
     st.altair_chart(bars + labels, width="stretch")

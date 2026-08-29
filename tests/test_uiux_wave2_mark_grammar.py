@@ -2,10 +2,11 @@
 
 Charts encode data PROVENANCE in their marks: measured-and-complete is solid,
 measured-but-provisional (the newest metering day, an in-flight month — the window
-closed but the data hasn't) dims to one shared PROVISIONAL_OPACITY, and a guess is
-never drawn as an observation (the forecast is a KPI, not a chart band). C38 names
-that convention (`PROVISIONAL_OPACITY` + `_provisional_opacity`) so every chart's
-"partial, not a drop" reads identically and future charts reuse it.
+closed but the data hasn't) dims to one shared PROVISIONAL_OPACITY, and a MODELED /
+projected series is drawn as its own distinct mark (a hollow, dashed-outline bar),
+never like an observation and never confused with the provisional dimming. C38 names
+these conventions (`PROVISIONAL_OPACITY` + `_provisional_opacity`, `MODELED_FILL_OPACITY`
++ `_MODELED_DASH`) so every chart reads identically and future charts reuse them.
 """
 
 from __future__ import annotations
@@ -67,3 +68,36 @@ def test_c38_no_stray_inline_provisional_dimming_remains():
     assert 'alt.condition("datum._PARTIAL", alt.value(0.45)' not in src
     # the module docstring no longer claims a forecast BAND (the forecast is a KPI)
     assert "forecast band" not in src.split('"""', 2)[1]
+
+
+def test_c38_modeled_mark_is_distinct_from_measured_and_provisional():
+    # the modeled mark rides channels a provisional bar never uses, and its dim is a
+    # DIFFERENT value than 0.45 so the two provenance states can never be confused.
+    assert charts.MODELED_FILL_OPACITY == 0.20
+    assert charts.MODELED_FILL_OPACITY != charts.PROVISIONAL_OPACITY
+    assert charts._MODELED_DASH == [5, 3]
+    df = pd.DataFrame({"DB": ["A", "B", "C"], "USD": [1200.0, 800.0, 300.0]})
+    # projection: hollow flat fill + dashed accent outline, NOT the 0.45 opacity dim
+    modeled = _spec(charts.bar_usd, df, "DB", "USD", title="Projected growth $/mo", modeled=True)
+    md = json.loads(modeled)["layer"][0]["mark"]
+    assert md["strokeDash"] == [5, 3] and md["stroke"] and md["fill"]
+    assert md["fillOpacity"] == charts.MODELED_FILL_OPACITY
+    assert "color" not in md                         # no solid gradient fill
+    assert md.get("opacity") != charts.PROVISIONAL_OPACITY
+    assert '"title": "Projected $/mo"' in modeled    # hover confirms it's a projection
+    # measured (default) is UNCHANGED: solid gradient, no stroke/dash/fillOpacity
+    measured = _spec(charts.bar_usd, df, "DB", "USD", title="$ by cost arm")
+    mm = json.loads(measured)["layer"][0]["mark"]
+    assert "color" in mm and "strokeDash" not in mm and "fillOpacity" not in mm
+
+
+def test_c38_projected_storage_growth_call_site_is_modeled():
+    # the ONE charted projection (Cost▸Optimize storage growth movers, GROWTH_USD_30D)
+    # must pass the modeled treatment; measured bar_usd callers stay solid.
+    opt = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
+    assert "charts.bar_usd(growing" in opt              # the projected call exists
+    block = opt.split("charts.bar_usd(growing", 1)[1][:200]
+    assert '"GROWTH_USD_30D"' in block and "modeled=True" in block
+    # the measured object-cost bars on the same page are NOT modeled
+    meas = opt.split("charts.bar_usd(_adf", 1)[1][:200]
+    assert "modeled=True" not in meas

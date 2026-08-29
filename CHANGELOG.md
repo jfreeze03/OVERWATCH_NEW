@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.339.0 - C38: projected storage-growth bars get a modeled mark (2026-08-29)
+
+The Cost▸Optimize "Storage growth movers" panel drew `GROWTH_USD_30D` — a
+least-squares **projection** — as solid gradient bars identical to measured spend,
+violating the C38 data-provenance mark grammar (a guess drawn like an observation).
+
+* `charts.bar_usd` gains an optional `modeled: bool`. When set, the bars render as
+  the C38 **MODELED** mark: a hollow (flat fill at `MODELED_FILL_OPACITY = 0.20`),
+  dashed-outline (`_MODELED_DASH = [5, 3]`) bar, and the tooltip reads "Projected
+  $/mo". This rides a dashed stroke + hollow body — two channels a *provisional* bar
+  never uses — so it is never confused with the 0.45 "measured-but-incomplete"
+  dimming (a different provenance state). Measured `bar_usd` callers are unchanged
+  (solid gradient, default `modeled=False`).
+* The Cost▸Optimize storage-growth call site passes `modeled=True`; the measured
+  object-cost bars on the same page stay solid.
+* **Visual change** — the mark encoding is spec-verified, but its on-screen
+  appearance needs a live Streamlit-in-Snowflake eyeball.
+
 ## 4.338.0 - V092: Action lifecycle clear signals (un-assign / un-defer) (2026-08-29)
 
 Closes the v4.318 honesty gap in the Action Center. `SP_ACTION_LIFECYCLE` (V074)
