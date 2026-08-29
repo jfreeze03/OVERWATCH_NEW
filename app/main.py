@@ -311,13 +311,34 @@ def _global_jump(pages: tuple) -> None:
             options += [f"Rule · {r}" for r in sorted(rules.df["RULE_ID"].astype(str))]
     else:
         options += [f"WH · {w}" for w in TREXIS_WAREHOUSES]
+    # C3: recents strip — the destinations this session jumped to, as one-click
+    # buttons (the selectbox retains its last value, so re-picking the same
+    # place is inert; a recent button always re-dispatches).
+    # C3: after every jump the box remounts EMPTY under a bumped nonce key, so a
+    # retained selection can never re-fire, AND a jump to the page you are
+    # already on (request_navigation no-ops without a rerun) doesn't strand a
+    # stale, un-re-jumpable selection — the explicit st.rerun() clears the box
+    # even on that no-op path (review fix).
+    _jump_nonce = int(st.session_state.get("_ow_jump_nonce", 0))
+
+    def _go(dest: str) -> None:
+        st.session_state["_ow_jump_nonce"] = _jump_nonce + 1
+        _record_recent(dest)
+        _dispatch_jump(dest, pages)   # reruns for a real navigation
+        st.rerun()                    # covers the current-page no-op
+
+    _recents = [r for r in (st.session_state.get("_ow_jump_recents") or []) if r in options]
+    if _recents:
+        st.caption("Recent")
+        for _r in _recents[:4]:
+            if st.button(_r, key=f"_ow_recent_{abs(hash(_r)) % 10**8}",
+                         type="tertiary", width="stretch"):
+                _go(_r)
+    # C3: enter-to-go — picking a destination navigates immediately (no Open button).
     pick = st.selectbox("Jump to", options, index=None, placeholder="Jump to…",
-                        key="_ow_jump", label_visibility="collapsed")
-    open_jump = st.button(
-        "Open destination", key="_ow_jump_open", type="primary",
-        disabled=not bool(pick), width="stretch",
-        help="Open the selected page or section.",
-    )
+                        key=f"_ow_jump_{_jump_nonce}", label_visibility="collapsed")
+    if pick:
+        _go(pick)
     # rec16: an explicit button — not a fake "More …" OPTION that mutated state
     # when "selected" (surprising, and invisible unless you opened the list). The
     # `and` short-circuits so the button only RENDERS while not yet loaded.
@@ -337,19 +358,28 @@ def _global_jump(pages: tuple) -> None:
             "Task", "Query fingerprint", "User", "Role", "Data product",
         ])
     if investigation_kinds:
-        with st.expander("Investigate"):
+        # C3: the ID-lookup is folded into the same palette as a MODE (a type
+        # selector + one field), enter-to-go — no separate Open button. Typing
+        # an id and pressing Enter reruns; we dispatch when the value changes.
+        with st.expander("Look up an ID / entity"):
             target_kind = st.selectbox(
                 "Type", investigation_kinds, key="_ow_investigate_kind",
             )
             target_value = st.text_input(
-                "ID or entity", key="_ow_investigate_value", max_chars=500,
+                "ID or entity — press Enter to open", key="_ow_investigate_value",
+                max_chars=500,
             )
-            if st.button(
-                "Open investigation", key="_ow_investigate_open",
-                type="primary", width="stretch",
-            ):
+            # review fix: dispatch on a change to the VALUE only, under the
+            # CURRENT kind — folding the kind into the trigger meant merely
+            # switching Type re-fired navigation against leftover text (the
+            # selectbox blur re-commits the same value, so a kind change alone
+            # no longer navigates). Re-looking-up the same value as a different
+            # kind = clear and retype (the safe direction — no surprise jump).
+            _iv = str(target_value or "").strip()
+            if _iv and _iv != st.session_state.get("_ow_investigate_last"):
+                st.session_state["_ow_investigate_last"] = _iv
                 try:
-                    target = investigation_target(target_kind, target_value)
+                    target = investigation_target(target_kind, _iv)
                     if target.page not in pages:
                         st.warning("The active profile cannot open that investigation surface.")
                     else:
@@ -358,8 +388,22 @@ def _global_jump(pages: tuple) -> None:
                         )
                 except ValueError as exc:
                     st.warning(str(exc))
-    if not (pick and open_jump):
-        return
+            elif not _iv:
+                st.session_state.pop("_ow_investigate_last", None)
+
+
+def _record_recent(label: str) -> None:
+    """C3: keep the last few jump destinations for the recents strip (session
+    only — no query, no persistence)."""
+    recents = [r for r in (st.session_state.get("_ow_jump_recents") or []) if r != label]
+    recents.insert(0, label)
+    st.session_state["_ow_jump_recents"] = recents[:6]
+
+
+def _dispatch_jump(pick: str, pages: tuple) -> None:
+    """C3: resolve a 'Kind · name' jump selection to a navigation (shared by the
+    selectbox and the recents buttons)."""
+    from app.companies import ALFA_DATABASES, TREXIS_DATABASES
     kind, _, name = pick.partition(" · ")
     if kind == "Page":
         request_navigation(name)

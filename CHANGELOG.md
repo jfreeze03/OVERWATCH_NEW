@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.313.0 - UI/UX Wave 2: finish the command palette (C3) (2026-08-28)
+
+The sidebar "Jump to" palette becomes a real command palette:
+
+* **Enter-to-go** - picking a destination navigates immediately; the separate
+  "Open destination" button is gone. The box remounts empty under a bumped
+  nonce after every jump, so a retained selection can never re-fire and a jump
+  to the page you're already on can't strand a stale selection.
+* **Recents strip** - the destinations this session jumped to render as
+  one-click buttons above the box (session-only, capped, filtered to
+  still-valid options).
+* **ID lookup folded in as a mode** - the Investigate type + field lives in the
+  same palette and navigates on Enter (value change), no separate button.
+
+Adversarial review (3 probes) confirmed and fixed pre-commit: switching the
+lookup Type while the field held leftover text re-fired navigation against the
+stale value (now dispatches on a VALUE change only, under the current kind);
+the page-to-self no-op left an un-re-jumpable stale selection (the nonce
+remount + explicit rerun clears it). Also fixed a stray control character in
+the dedupe key the build caught.
+
 ## 4.312.0 - UI/UX Wave 2 (7): the quick cluster (C37 + C15 + C16 + C18) (2026-08-28)
 
 Four small orientation/trust wins in one batch:

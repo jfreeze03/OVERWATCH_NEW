@@ -114,7 +114,8 @@ def test_universal_search_and_exact_destination_contexts_are_wired() -> None:
     operations = _source("app/ui/pages/operations.py")
     alerts = _source("app/ui/pages/alerts.py")
     control = _source("app/ui/pages/control_room.py")
-    assert "investigation_target(target_kind, target_value)" in main
+    # C3 (v4.313): the ID lookup is enter-to-go — the stripped value is _iv.
+    assert "investigation_target(target_kind, _iv)" in main
     assert "target.page not in pages" in main
     assert 'navigation_context().get("query_id")' in operations
     assert 'navigation_context().get("event_id")' in alerts

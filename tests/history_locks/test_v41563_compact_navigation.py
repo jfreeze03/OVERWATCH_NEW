@@ -28,13 +28,22 @@ def test_toolbar_has_dedicated_compact_css() -> None:
     assert 'div[data-baseweb="select"]>div{min-height:2.28rem;}' in theme
 
 
-def test_sidebar_jump_requires_explicit_open_action() -> None:
+def test_sidebar_jump_is_enter_to_go_with_recents() -> None:
+    # C3 (v4.313): the command palette navigates on SELECTION — no separate
+    # "Open destination" button — guarded so the retained selectbox value can't
+    # re-fire on the post-navigation rerun; a recents strip re-dispatches the
+    # last destinations; the ID lookup is folded in as an enter-to-go mode.
     main = _read("app/main.py")
     body = main.split("def _global_jump", 1)[1].split("\ndef ", 1)[0]
-    assert '"Open destination", key="_ow_jump_open"' in body
-    assert "disabled=not bool(pick)" in body
-    assert "if not (pick and open_jump):" in body
-    assert body.index("if not (pick and open_jump):") < body.index('if kind == "Page":')
+    assert '"Open destination"' not in body            # the extra button is gone
+    assert 'key=f"_ow_jump_{_jump_nonce}"' in body      # box remounts empty per jump
+    assert "def _go(dest: str)" in body
+    assert "_ow_jump_recents" in body                  # recents strip
+    # the ID lookup navigates on Enter (value change), no Open-investigation button
+    assert '"Open investigation"' not in body
+    assert '_iv != st.session_state.get("_ow_investigate_last")' in body
+    dispatch = main.split("def _dispatch_jump", 1)[1].split("\ndef ", 1)[0]
+    assert dispatch.index('if kind == "Page":') < dispatch.index('elif kind == "DB":')
 
 
 def test_in_page_jump_chips_are_removed() -> None:
