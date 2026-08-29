@@ -1064,7 +1064,8 @@ def render() -> None:
 
     if not score_series.empty:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
-            charts.daily_metric_line(score_series, "DAY", "SCORE", title="Platform score (retro, account-wide)")
+            charts.daily_metric_line(score_series, "DAY", "SCORE",
+                                     title="Platform score (retro, account-wide)", unit="count")
             st.caption(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "

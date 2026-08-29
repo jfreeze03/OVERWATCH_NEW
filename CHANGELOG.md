@@ -1,6 +1,22 @@
 # Changelog
 
-## 4.321.0 - UI/UX Wave 2: sparkline honesty — magnitude + trend polarity (F42 + F43) (2026-08-28)
+## 4.322.0 - UI/UX Wave 2: unit-aware metric lines + labeled reference rule (F41 + F48) (2026-08-28)
+
+* **F41** `daily_metric_line` tooltips, peak caption, and y-axis now carry the
+  metric's unit. A dollar line's tooltip showed "742389.5" (no `$`, no separators)
+  and a percent line "93.1" (no `%`) — the tooltip is the one place a reader reads
+  the exact number, so it must be unit-spelled. A `unit` argument
+  (`usd`/`credits`/`pct`/`sec`/`count`) drives the formatting across all ten call
+  sites; omitting it keeps a bare number. Negative dollars read "-$1,234" (sign
+  before the symbol), and a missing/degenerate day reads as an em-dash, never
+  "nan"/"inf".
+* **F48** the optional reference rule (e.g. an object's change date) is now
+  labeled *on* the chart with a small text mark, instead of a bare dashed vertical
+  explained only by a caption underneath — the two Operations change-impact charts
+  drop their "Dashed line marks…" captions in favor of the on-chart label. A NaT
+  change-date is guarded (`pd.notna`) so it draws no rule at an invalid position.
+  Adversarial review (find→verify, 0 confirmed) — the NaT, non-finite, negative-$,
+  and non-unique-index edges were all hardened pre-ship.
 
 * **F42** the KPI-card sparkline no longer exaggerates tiny changes. It scaled to
   the series' own min..max, so *every* series filled the full height — a 99.1→99.4

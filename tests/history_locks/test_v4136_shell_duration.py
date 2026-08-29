@@ -34,8 +34,8 @@ def test_control_room_activity_shape_is_checked_before_column_reads():
     assert '_activity_cols = {"DAY", "QUERIES", "FAILS"}' in pulse
     assert guard in pulse
     assert pulse.index(guard) < pulse.index('act.df["QUERIES"]')
-    assert 'charts.daily_metric_line(act.df, "DAY", "QUERIES", "Queries")' in pulse
-    assert 'charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries")' in pulse
+    assert 'charts.daily_metric_line(act.df, "DAY", "QUERIES", "Queries", unit="count")' in pulse
+    assert 'charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries", unit="count")' in pulse
 
 
 def test_page_kpis_use_shared_duration_formatter():

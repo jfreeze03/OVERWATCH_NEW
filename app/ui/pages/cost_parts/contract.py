@@ -167,7 +167,7 @@ def _org_truth_panel() -> bool:
                      "help": "Usage past the capacity commitment, billed on demand."})
     kpi_row(kpis)
     daily = bal.df.groupby("DAY", as_index=False)["TOTAL_REMAINING"].sum()
-    charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING", title="Remaining balance ($)")
+    charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING", title="Remaining balance ($)", unit="usd")
     if items.usable():
         styled_table(items.df, height=160)
     # E1: the caption contradicted the (already corrected) math — the burn stopped

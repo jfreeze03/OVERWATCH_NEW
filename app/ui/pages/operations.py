@@ -2035,8 +2035,9 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                        source="WAREHOUSE_METERING_HISTORY + QUERY_HISTORY")
             if guard(hist, "No activity recorded for this warehouse in the last 28 days."):
                 charts.daily_metric_line(hist.df, "DAY", "CREDITS", title="credits/day",
-                                         rule_date=row.get("CHANGE_SEEN_AT"))
-                st.caption("Dashed line marks the detected change (seen within a day of the ALTER).")
+                                         unit="credits", rule_date=row.get("CHANGE_SEEN_AT"),
+                                         rule_label="detected change")
+                st.caption("Change detected within a day of the ALTER.")
         else:
             st.caption("Select a change above to load its 28-day credits/day history.")
     if is_operator:
@@ -2145,8 +2146,8 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
                 match = df[(df["OBJECT_TYPE"] == otype) & (df["OBJECT_NAME"] == name)]
                 if not match.empty:
                     rule_at = match["CHANGE_SEEN_AT"].max()
-                charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime (s)", rule_date=rule_at)
-                st.caption("Dashed line marks the registered change.")
+                charts.daily_metric_line(hist.df, "DAY", "P95_S", "p95 runtime (s)",
+                                         unit="sec", rule_date=rule_at, rule_label="registered change")
                 styled_table(hist.df)
                 result_caption(hist)
 

@@ -1139,7 +1139,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         key=f"cachehit_{company}_{days}", tier="historical",
                         source="ACCOUNT_USAGE.QUERY_HISTORY (BYTES_SCANNED = 0)")
             if guard(cache, "No queries in the window."):
-                charts.daily_metric_line(cache.df, "DAY", "HIT_PCT", "zero-scan answers %")
+                charts.daily_metric_line(cache.df, "DAY", "HIT_PCT", "zero-scan answers %", unit="pct")
                 # #33: result_cache_daily (outside this cluster) aggregates to day grain
                 # with no database/schema column, so unlike the pruning panel above it
                 # cannot honor the global filter — labelled company-wide so a scoped

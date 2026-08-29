@@ -162,10 +162,16 @@ cross-cutting risk.
   *position* states its ACT NOW / PLAN / VALIDATE lane, color merely confirms. `app/ui/charts.py:1200`
 - [ ] **F45 · P2/M · Waterfall connector lines + a muted "Other" bar** so it reads as a
   running total, not scattered bars. `app/ui/charts.py:999`
-- [ ] **F41 · P2/S · Unit-aware `daily_metric_line` tooltips/peak** ($ line hover shows
+- [x] **F41 · P2/S · Unit-aware `daily_metric_line` tooltips/peak** ($ line hover shows
   "742389.5" with no `$`; % line shows "93.1" with no `%`). `app/ui/charts.py:1240`
-- [ ] **F48 · P3/S · Label the reference rule on `daily_metric_line`** (bare dashed
+  — v4.322.0: `unit` arg (usd/credits/pct/sec/count) spells the tooltip (formatted
+  `_Label` col), peak caption, and y-axis across all 10 callers; negative-$ = "-$1,234",
+  non-finite = em-dash. Review 0 confirmed (NaT/inf/neg-$/non-unique-index hardened).
+- [x] **F48 · P3/S · Label the reference rule on `daily_metric_line`** (bare dashed
   vertical with no text). `app/ui/charts.py:1255`
+  — v4.322.0: `rule_label` renders a text mark on the chart (both Operations
+  change-impact charts drop their "Dashed line marks…" captions); NaT change-date
+  guarded via `pd.notna`.
 - [ ] **F30 · P2/M · Inline sparkline columns** (`LineChartColumn`) for per-entity daily
   series on movers/top-spend/warehouse grids. `app/ui/components.py:1660-1671`
 - [x] **F42 + F43 · P2/M · Fix sparkline magnitude scaling + polarity color.**

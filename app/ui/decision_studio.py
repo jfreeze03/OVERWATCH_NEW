@@ -746,7 +746,7 @@ def _roi(company: str) -> None:
     lever_df = savings_by_lever(ledger.df)
     if not month_df.empty:
         st.markdown("**Verified-savings run-rate — by month**")
-        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "verified $ / month")
+        charts.daily_metric_line(month_df, "MONTH", "VERIFIED_USD", "verified $ / month", unit="usd")
     if not lever_df.empty:
         st.markdown("**Where the realized savings come from — by lever**")
         charts.bar_usd(lever_df, "LEVER", "VERIFIED_USD", "verified $ by lever", top_n=10)

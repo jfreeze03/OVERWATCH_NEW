@@ -1307,28 +1307,91 @@ def workload_portfolio(df: pd.DataFrame) -> None:
     st.altair_chart(chart, width="stretch")
 
 
+# F41: unit spelling for daily_metric_line tooltips + peak caption. (prefix,
+# suffix, decimals). A $ line showed "742389.5" with no $, a % line "93.1" with
+# no % — the tooltip is the only place a reader reads the exact number, so it
+# must carry its unit. Vega's d3 "%" format multiplies by 100, and our values
+# are already percentages, so we format a string column instead of a d3 code.
+_METRIC_UNIT = {
+    "usd": ("$", "", 0), "credits": ("", " cr", 0),
+    "pct": ("", "%", 1), "sec": ("", "s", 1), "count": ("", "", 0),
+}
+# y-axis d3 format where a unit maps cleanly onto one (pct/sec carry the unit in
+# their title, so their axis stays a bare number).
+_METRIC_AXIS_FMT = {"usd": "$,.0f", "credits": ",.0f", "count": ",.0f"}
+
+
+def _fmt_metric_value(v: object, unit: str) -> str:
+    """Format one metric value with its unit (F41). Unknown unit falls back to
+    the legacy adaptive precision (0 dp at >=100, else 1 dp) so callers that pass
+    no unit are unchanged."""
+    try:
+        f = float(v)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return str(v)
+    if pd.isna(f) or abs(f) == float("inf"):   # missing/degenerate -> em-dash, never "nan"/"inf"
+        return "—"
+    spec = _METRIC_UNIT.get(unit)
+    if spec is None:
+        return f"{f:,.0f}" if abs(f) >= 100 else f"{f:,.1f}"
+    pre, suf, dec = spec
+    # the sign leads the unit prefix: a negative balance reads "-$1,234", not "$-1,234".
+    sign = "-" if f < 0 else ""
+    return f"{sign}{pre}{abs(f):,.{dec}f}{suf}"
+
+
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
                       title: str = "", rule_date: object = None,
-                      *, takeaway: bool = True) -> None:
-    """Single daily metric as a line; optional vertical rule (e.g. change date)."""
-    data = df[[day_col, value_col]].copy()
+                      *, unit: str = "", rule_label: str = "",
+                      takeaway: bool = True) -> None:
+    """Single daily metric as a line; optional vertical rule (e.g. change date).
+
+    ``unit`` (usd|credits|pct|sec|count) spells the tooltip/peak/axis so the exact
+    number carries its unit (F41); omit it for a bare number. ``rule_label`` names
+    the reference rule on the chart itself (F48)."""
+    # reset_index so the peak-caption idxmax->.loc lookup below is positional-safe
+    # even if the caller hands us a frame with a non-unique index.
+    data = df[[day_col, value_col]].copy().reset_index(drop=True)
     data.columns = ["Day", "Value"]
+    _known_unit = unit in _METRIC_UNIT
+    if _known_unit:
+        data["_Label"] = data["Value"].map(lambda v: _fmt_metric_value(v, unit))
+        _tt = ["Day:T", alt.Tooltip("_Label:N", title=title or value_col)]
+    else:
+        _tt = ["Day:T", "Value:Q"]
+    _yfmt = _METRIC_AXIS_FMT.get(unit)
     chart = (
         _base(data)
         .mark_line(point=True)
         .encode(
             x=alt.X("Day:T", title=None, axis=_day_axis(data["Day"])),
-            y=alt.Y("Value:Q", title=title or value_col),
-            tooltip=["Day:T", "Value:Q"],
+            y=alt.Y("Value:Q", title=title or value_col,
+                    axis=alt.Axis(format=_yfmt) if _yfmt else alt.Undefined),
+            tooltip=_tt,
         )
     )
-    if rule_date is not None:
+    if rule_date is not None and pd.notna(rule_date):
+        # pd.notna guards a NaT change-date (operations passes .max()/row.get(),
+        # either of which can be NaT) — NaT is not None, so it would otherwise
+        # render a rule + label at an invalid x-position.
+        _rday = pd.Timestamp(rule_date)
         rule = (
-            alt.Chart(pd.DataFrame({"Day": [pd.Timestamp(rule_date)]}))
+            alt.Chart(pd.DataFrame({"Day": [_rday]}))
             .mark_rule(strokeDash=[6, 3])
             .encode(x="Day:T")
         )
         chart = chart + rule
+        if rule_label:
+            # F48: name the reference rule ON the chart, so a bare dashed vertical
+            # isn't left for the reader to decode (or explained only by a caption
+            # below it). Anchored to the top, nudged right of the line.
+            label = (
+                alt.Chart(pd.DataFrame({"Day": [_rday], "_t": [rule_label]}))
+                .mark_text(align="left", baseline="top", dx=4, dy=2,
+                           fontSize=11, color=palette.INK_MUTE)
+                .encode(x="Day:T", y=alt.value(2), text="_t:N")
+            )
+            chart = chart + label
     st.altair_chart(chart.properties(height=CHART_H_SM), width="stretch")
     # rec35 / CoCo UI#14: name the peak day so the line leads with a conclusion.
     if takeaway and not data.empty:
@@ -1337,8 +1400,7 @@ def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,
             _peak = float(_v.max())
             _pday = pd.to_datetime(data.loc[_v.idxmax(), "Day"], errors="coerce")
             _ds = _pday.strftime("%b %d") if pd.notna(_pday) else str(data.loc[_v.idxmax(), "Day"])
-            _pf = f"{_peak:,.0f}" if abs(_peak) >= 100 else f"{_peak:,.1f}"
-            st.caption(f"Peak {_pf} on {_ds}.")
+            st.caption(f"Peak {_fmt_metric_value(_peak, unit)} on {_ds}.")
 
 
 def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "SEVERITY",

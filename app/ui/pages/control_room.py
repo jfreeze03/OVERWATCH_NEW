@@ -589,9 +589,9 @@ def render() -> None:
         if _activity_ready:
             c_queries, c_fails = st.columns(2)
             with c_queries:
-                charts.daily_metric_line(act.df, "DAY", "QUERIES", "Queries")
+                charts.daily_metric_line(act.df, "DAY", "QUERIES", "Queries", unit="count")
             with c_fails:
-                charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries")
+                charts.daily_metric_line(act.df, "DAY", "FAILS", "Failed queries", unit="count")
             result_caption(act)
         elif not act.ok:
             st.warning(f"Activity trend unavailable: {act.error}")

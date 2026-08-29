@@ -293,7 +293,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     _gap_trend = attribution_gap_trend(complete_days_only(df))
     if len(_gap_trend) >= 2:
         charts.daily_metric_line(_gap_trend, "DAY", "GAP_PCT",
-                                 title="Unattributed share % (new-workload canary)")
+                                 title="Unattributed share % (new-workload canary)", unit="pct")
     st.caption(
         "A DIFFERENT axis from 'Cost drill coverage' above: that measures object-level "
         "drillability (serverless has an object ledger, so it counts as covered there); this "
