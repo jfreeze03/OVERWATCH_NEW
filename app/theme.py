@@ -368,6 +368,12 @@ button[data-baseweb="tab"] { font-weight:640; }
    sliding highlight to the accent, and give the selected tab accent ink, so a tab,
    a nav item and a section pill all say "current" in the same accent. */
 button[data-baseweb="tab"][aria-selected="true"] { color:var(--ow-accent) !important; font-weight:680; }
+/* the accent must be FORCED onto the tab's text node too — the label renders as a
+   markdown <p> whose own declared ink-soft (line ~56) beats an inherited !important
+   from the button, so without this the accent ink is a no-op (bug-hunt r3; same
+   text-node force the pills/nav/primary all carry). */
+button[data-baseweb="tab"][aria-selected="true"] p, button[data-baseweb="tab"][aria-selected="true"] span {
+  color:var(--ow-accent) !important; }
 div[data-baseweb="tab-highlight"] { background-color:var(--ow-active-bar) !important; }
 
 /* Multiselect chips: the default BaseWeb tag rendered as a pale wash —

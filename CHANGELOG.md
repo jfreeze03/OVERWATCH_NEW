@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.332.0 - Bug hunt round 3 fix (2026-08-29)
+
+* **The active tab's accent text color was a silent no-op.** F5 set the accent ink
+  on the tab BUTTON, but a tab label renders as a markdown `<p>` whose own declared
+  ink-soft color beats an inherited `!important` from the button — the same cascade
+  trap the pills already guard against. The accent is now forced onto the tab's text
+  node too, so the selected tab's label actually turns accent (its underline and bold
+  weight already worked). Every F5 active variant now carries the matching text-node
+  force.
+
 ## 4.331.0 - Bug hunt round 2 fixes (2026-08-29)
 
 * **The boss chart's top total label could clip off the top.** F44 added a

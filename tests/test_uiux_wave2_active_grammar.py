@@ -63,6 +63,11 @@ def test_f5_active_tab_joins_the_accent_grammar():
     assert 'div[data-baseweb="tab-highlight"]' in _THEME
     hl = _THEME.split('div[data-baseweb="tab-highlight"]', 1)[1][:100]
     assert "var(--ow-active-bar)" in hl
+    # bug-hunt r3: the accent must be forced onto the tab's text NODE (a markdown
+    # <p>), not just the button — else line 56's direct ink-soft on <p> wins and the
+    # accent ink is a silent no-op, like the pills would have been without the force.
+    assert 'button[data-baseweb="tab"][aria-selected="true"] p' in _THEME
+    assert 'button[data-baseweb="tab"][aria-selected="true"] span' in _THEME
 
 
 def test_f5_every_variant_shares_the_one_accent():
