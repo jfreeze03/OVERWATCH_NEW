@@ -985,17 +985,6 @@ def stalest_day(df, col: str = "LATEST_DAY"):
     return d.date() if pd.notna(d) else None
 
 
-def min_covered_days(df, col: str = "DAYS_AVERAGED"):
-    """The SMALLEST per-scope covered-day count (worst database), so a short
-    peer reads as short instead of being masked by a fully-covered one. 0 when
-    the column/frame is absent."""
-    cols = getattr(df, "columns", [])
-    if df is None or getattr(df, "empty", True) or col not in cols:
-        return 0
-    vals = [safe_float(v) for v in df[col].tolist()]
-    return int(min(vals)) if vals else 0
-
-
 def coverage_contract(days: int, *, day_col: str = "DAY", freshness_days: int = 2):
     """A ``run_mart_first`` acceptance predicate enforcing the Cluster-3
     coverage contract on a DAY-grain mart frame:
@@ -1482,26 +1471,6 @@ def daily_spend_wide(page: str) -> QueryResult:
     return run(mart_sql.fact_daily_spend(mart_sql.WIDE_DAILY_SPEND_DAYS),
                page=page, key="fact_daily_wide", tier="hourly",
                source="FACT_METERING_DAILY (150d, shared)")
-
-
-def budget_kpi(settings: dict, spend_usd: float) -> dict:
-    """Budget KPI that refuses to invent a denominator (old-app finding)."""
-    budget = safe_float(settings.get("MONTHLY_BUDGET_USD"))
-    if budget <= 0:
-        return {
-            "label": "Monthly budget",
-            "value": "Not configured",
-            "help": "Set MONTHLY_BUDGET_USD on the Admin page. No default is assumed. "
-                    "MTD spend here is account-wide (metering-daily has no company split).",
-        }
-    pct = spend_usd / budget * 100 if budget else 0.0
-    return {
-        "label": "MTD spend vs budget",
-        "value": f"{format_usd(spend_usd)} / {format_usd(budget)}",
-        "delta": f"{pct:,.0f}% of budget",
-        "delta_color": "inverse" if pct >= 100 else "off",
-        "help": "Budget from SETTINGS; spend is account-wide billed credits (metering-daily has no company split).",
-    }
 
 
 _COUNT_SUFFIXES = ("_COUNT", "RUNS", "CALLS", "FAILS", "FAILED", "QUERIES", "EVENTS",

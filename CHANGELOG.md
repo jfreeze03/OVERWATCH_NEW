@@ -1,6 +1,19 @@
 # Changelog
 
-## 4.328.0 - UI/UX Wave 2: one active/selected grammar (F5) (2026-08-29)
+## 4.329.0 - Dead-code cleanup (2026-08-29)
+
+* Removed eight functions with zero callers, verified individually by grep and by a
+  green suite + clean lint after removal: `charts.waterfall_usd` (deliberately cut
+  from the UI per rec12 — it plotted the same top-10 twice; also carried a latent
+  `KeyError` proving it was untested in practice), `charts.daily_count_bars`,
+  `charts.event_timeline`, `components.budget_kpi`, `components.min_covered_days`,
+  `overview._board_metric`, `main._scope_is_active` (a redundant wrapper superseded
+  by `_active_filter_count`), and `query.telemetry_dropped_counts`. Their now-dead
+  tests were removed and the few source-anchored tests updated. Deliberately KEPT:
+  `sizing._unused_guard` (an intentional import keep-alive, `# pragma: no cover`),
+  `query._batch_member_cache_clear` (a documented test/hot-reload hook), and
+  `companies.classify_warehouse` / `insights.idle_suspend_sql` (small self-contained
+  APIs a future feature could wire).
 
 * **F5** "this is the current one" was said four different ways — the section pills
   filled with an accent gradient, the sidebar nav used a left rail, the tabs used

@@ -35,7 +35,6 @@ def test_usd_axes_are_magnitude_aware_at_the_big_sites():
     # deliberate sub-dollar stacked rule keeps its cents branch.
     for needle in ('_usd_fmt(data["USD"].max())', "_usd_fmt(dmax)",
                    "_usd_fmt(_max_stack)",
-                   '_usd_fmt(data[["Start", "End"]].max().max())',
                    '_usd_fmt(credit_data["USD"].max())',
                    '_usd_fmt(data["IMPACT_USD_30D"].max())',
                    '_usd_fmt(folded["Value"].max())'):

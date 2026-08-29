@@ -89,13 +89,6 @@ _SCORE_DRIVER_NAV = {
 _SCORE_HEALTH_WINDOW_DAYS = 1
 
 
-def _board_metric(board: pd.DataFrame, metric: str, column: str = "VALUE") -> float:
-    rows = board[(board["PANEL"] == "KPI") & (board["METRIC"] == metric)]
-    if rows.empty:
-        return 0.0
-    return safe_float(rows.iloc[0].get(column))
-
-
 def _board_panel(board: pd.DataFrame, panel: str) -> pd.DataFrame:
     return board[board["PANEL"] == panel].copy()
 

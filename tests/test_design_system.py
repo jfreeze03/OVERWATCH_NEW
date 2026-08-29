@@ -86,15 +86,6 @@ def test_pages_carry_svg_icons():
         assert f'icon_name="{ico}"' in src, pg
 
 
-def test_daily_count_bars_uses_time_axis():
-    """The DDL-changes chart must plot Day as time, not epoch-millis labels."""
-    import inspect
-
-    from app.ui import charts
-    src = inspect.getsource(charts.daily_count_bars)
-    assert '"Day:T"' in src and "pd.to_datetime" in src
-
-
 def test_role_based_user_scope_everywhere():
     """No user-grained builder should still scope by TRXS_ name prefix."""
     from app.data import cortex_sql, insights_sql, security_sql
@@ -119,7 +110,7 @@ def test_triage_filter_toolbar_compact():
     assert ".ow-scope-row{" in theme                        # page-header chips are intentionally laid out
     assert ".ow-scope-chips{" not in theme                 # retired chip band
     main = (root / "app" / "main.py").read_text(encoding="utf-8")
-    assert "_scope_is_active" in main and "_reset_scope" in main
+    assert "_active_filter_count" in main and "_reset_scope" in main
     assert '"Reset", key="flt_reset", on_click=_reset_scope' in main
     assert 'class="ow-scope-active"' in main               # glow marker still emitted when active
     assert 'key="ow_triage_toolbar"' in main

@@ -604,11 +604,6 @@ def _active_filter_count() -> int:
     return count
 
 
-def _scope_is_active() -> bool:
-    """True when any non-default filter is live (border glow + Reset button)."""
-    return _active_filter_count() > 0
-
-
 def _topbar_scope() -> None:
     """One-row operator scope strip: primary filters + a compact More popover.
 

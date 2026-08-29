@@ -563,17 +563,6 @@ def query_telemetry() -> pd.DataFrame:
     return pd.DataFrame(st.session_state.get(_TELEMETRY_KEY, []))
 
 
-def telemetry_dropped_counts() -> dict:
-    """#28: telemetry rows the per-session budget declined to persist, so a viewer of the
-    fleet board can distinguish a genuinely quiet page from one that is sampling-capped.
-    ``total`` counts every declined row; ``failures`` the subset that were failed fetches
-    (the loudest signal that _TELEMETRY_FAIL_CAP is too tight)."""
-    return {
-        "total": int(st.session_state.get("_ow_qtel_dropped", 0)),
-        "failures": int(st.session_state.get("_ow_qtel_dropped_fail", 0)),
-    }
-
-
 def bump_refresh_salt() -> None:
     """Invalidate OVERWATCH's cached reads (the Refresh button)."""
     st.session_state["_ow_refresh_salt"] = datetime.now().isoformat()

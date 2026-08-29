@@ -32,14 +32,6 @@ def test_a3_wired_into_table_renderer():
     assert "if is_delta_column(col):" in c and "delta_css(v)" in c
 
 
-# A2 — the event-timeline dots carry a redundant shape per severity
-def test_a2_event_timeline_redundant_shape():
-    ch = _src("app/ui/charts.py")
-    block = ch.split("def event_timeline", 1)[1].split("\ndef ", 1)[0]
-    assert 'alt.Shape("SEVERITY:N"' in block and "mark_point" in block
-    assert "triangle-up" in block and "diamond" in block   # distinct shapes, not all circles
-
-
 # rec11 — the lag note is once per page, not on every panel caption
 def test_rec11_lag_note_once_per_page():
     c = _src("app/ui/components.py")

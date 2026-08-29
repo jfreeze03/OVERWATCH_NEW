@@ -32,5 +32,5 @@ def test_fact_daily_activity_builder():
 def test_viz_helpers_exist():
     from app.ui import charts
 
-    for fn in ("sparkline_row", "hour_heatmap", "waterfall_usd", "event_timeline"):
+    for fn in ("sparkline_row", "hour_heatmap"):
         assert callable(getattr(charts, fn))

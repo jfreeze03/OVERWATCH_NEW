@@ -838,7 +838,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         # Share denominator is the FULL frame's total, not the head(top_n) sum — else
         # the top contributor's "% of $total" is overstated and the "$total" label
         # misrepresents the universe when the caller passes more than top_n rows
-        # (matches waterfall_usd / monthly_stacked_usd, which use the full total).
+        # (matches monthly_stacked_usd, which uses the full total).
         _full_total = float(pd.to_numeric(df[usd_col], errors="coerce").fillna(0).sum())
         if _full_total > 0:
             top = data.loc[data["USD"].idxmax()]
@@ -876,29 +876,6 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
         st.altair_chart(plain, width="stretch")
         return None
     return _read_click_selection(event, field="Label", seen_key=f"_ow_barsel_{key}")
-
-
-def daily_count_bars(df: pd.DataFrame, day_col: str, value_col: str, title: str = "") -> None:
-    """Per-day count as vertical gradient bars over a TIME axis. Use this for
-    'events/day' series — bar_count would render the date column as epoch
-    millis on a nominal axis (the DDL-changes bug)."""
-    data = df[[day_col, value_col]].copy()
-    data.columns = ["Day", "Value"]
-    data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
-    grad = alt.Gradient(gradient="linear", x1=0, x2=0, y1=1, y2=0,
-                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
-                               alt.GradientStop(color=_ACCENT, offset=1.0)])
-    chart = (
-        _base(data)
-        .mark_bar(color=grad, cornerRadiusEnd=3, size=18)
-        .encode(
-            x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
-            y=alt.Y("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
-            tooltip=[alt.Tooltip("Day:T", title="Day", format=_DAY_TIP_FMT),
-                     alt.Tooltip("Value:Q", format=",.0f", title=title or "Count")],
-        )
-    )
-    st.altair_chart(chart, width="stretch")
 
 
 # C15 (a11y): a fixed categorical palette + a NAME-stable index, so a given
@@ -1090,69 +1067,6 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             if pd.notna(_h.iloc[_p]):
                 st.caption(f"Hottest: {_r.iloc[_p]} at hour "
                            f"{int(_h.iloc[_p]):02d} ({float(_v.iloc[_p]):,.0f}).")
-
-
-def waterfall_usd(df: pd.DataFrame, label_col: str, usd_col: str, top_n: int = 10,
-                  takeaway: bool = True) -> None:
-    """Attribution waterfall: top-N contributors + Other, cumulative build-up."""
-    data = df[[label_col, usd_col]].copy()
-    data.columns = ["Label", "USD"]
-    data["USD"] = pd.to_numeric(data["USD"], errors="coerce")
-    data = data.groupby("Label", as_index=False)["USD"].sum().sort_values("USD", ascending=False)
-    if data.empty:
-        _empty_note()
-        return
-    top = data.head(top_n)
-    rest = float(data["USD"][top_n:].sum())
-    if rest > 0:
-        top = pd.concat([top, pd.DataFrame([{"Label": "Other", "USD": rest}])], ignore_index=True)
-    top["End"] = top["USD"].cumsum()
-    top["Start"] = top["End"] - top["USD"]
-    top["Order"] = range(len(top))
-    chart = (
-        _base(top)
-        .mark_bar()
-        .encode(
-            x=alt.X("Label:N", sort=alt.SortField("Order"), title=None),
-            y=alt.Y("Start:Q", title="Cumulative spend (USD)",
-                    axis=alt.Axis(format=_usd_fmt(data[["Start", "End"]].max().max()))),
-            y2="End:Q",
-            tooltip=["Label:N", alt.Tooltip("USD:Q", format="$,.0f"),
-                     alt.Tooltip("End:Q", format="$,.0f", title="Cumulative")],
-        )
-        .properties(height=CHART_H_MD)
-    )
-    st.altair_chart(chart, width="stretch")
-    if takeaway:  # rec35: name the top contributor (only when there is a real total)
-        _total = float(data["USD"].sum())
-        if _total > 0:
-            _t = data.iloc[0]
-            st.caption(_share_note(str(_t["Label"]), float(_t["USD"]), _total))
-
-
-def event_timeline(df: pd.DataFrame) -> None:
-    """Incident correlation strip: every event type on one time axis."""
-    data = df.copy()
-    dom = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    rng = [SEV_COLORS[s] for s in dom]
-    color = alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng),
-                      legend=alt.Legend(orient="top", title=None))
-    # A2: a redundant SHAPE per severity so the dots stay distinguishable without
-    # relying on the red->amber hue axis that red-green color-blindness compresses.
-    # Same field + title as the color legend, so Altair merges them into ONE legend
-    # showing each severity's shape AND color.
-    shape = alt.Shape("SEVERITY:N",
-                      scale=alt.Scale(domain=dom,
-                                      range=["circle", "diamond", "triangle-up", "square", "cross"]),
-                      legend=alt.Legend(orient="top", title=None))
-    common = {"x": alt.X("AT:T", title=None), "y": alt.Y("EVENT_TYPE:N", title=None),
-              "tooltip": ["AT:T", "EVENT_TYPE:N", "SEVERITY:N", "LABEL:N"]}
-    glow = alt.Chart().mark_circle(size=240, opacity=0.16).encode(
-        color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=dom, range=rng), legend=None), **common)
-    dots = alt.Chart().mark_point(size=110, opacity=0.95, filled=True,
-                stroke=palette.BG, strokeWidth=0.6).encode(color=color, shape=shape, **common)
-    st.altair_chart(alt.layer(glow, dots, data=data).properties(height=186),
-                    width="stretch")
 
 
 def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:
