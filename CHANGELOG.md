@@ -1,6 +1,21 @@
 # Changelog
 
-## 4.325.0 - UI/UX Wave 2: one watch affordance — a star everywhere (F59) (2026-08-29)
+## 4.326.0 - UI/UX Wave 2: one confidence encoding across the decision workbenches (F60) (2026-08-29)
+
+* **F60** a 0-1 confidence was shown three ways — a ProgressColumn bar on some
+  decision boards, a raw float column on others, and a chips+caption badge on the
+  Entity 360 header. The TABLE encoding is now one shared bar
+  (`confidence_progress_column`): the Decision Studio portfolio + scenarios tables,
+  the Action Center, and the Entity 360 "Work and outcomes" list all render
+  confidence as a 0-1 ProgressColumn; single-value surfaces keep the
+  `confidence_badge`. The authored-confidence help is one shared constant
+  (`AUTHORED_CONFIDENCE_HELP`) across every surface that shows it, so its wording —
+  and its honesty about provenance (operator *or* recommendation engine; a promoted
+  security finding isn't literally operator-authored) — never drifts. Adversarial
+  review confirmed the scenarios/work-list confidence is genuinely 0-1 (both write
+  paths clamp to [0,1]) so the bar is correct, and the extraction is
+  behavior-preserving; the Entity 360 work-list gap and the help-text precision were
+  both caught and fixed from that pass (0 confirmed defects).
 
 * **F59** "Watch" spoke three languages — a text button in Entity 360
   (Watch/Unwatch), a raw True/False column on the decision boards, and an 👁 eye

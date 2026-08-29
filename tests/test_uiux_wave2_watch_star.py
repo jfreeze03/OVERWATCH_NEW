@@ -48,7 +48,7 @@ def test_f59_scenarios_table_stars_its_watched_column():
     studio = _src("app/ui/decision_studio.py")
     # the scenarios board maps WATCHED through the shared star + passes the config
     assert 'display["WATCHED"] = display["WATCHED"].map(watch_star)' in studio
-    assert '"WATCHED": watch_star_column()' in studio
+    assert '_scen_cfg["WATCHED"] = watch_star_column()' in studio
 
 
 def test_f59_entity_360_button_and_brief_badge_use_the_star():

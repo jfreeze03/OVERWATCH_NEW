@@ -2220,6 +2220,24 @@ def watch_star_column(label: str = "Watch"):
         help="★ = on your watchlist (starred from an Entity 360).")
 
 
+# One accurate help string for the AUTHORED 0-1 confidence, shared by every table
+# that shows it (action center, scenarios, Entity 360 work) so the wording — and
+# the "operator OR recommendation engine" provenance (a security finding promoted
+# with RISK_SCORE/100 is not literally operator-authored) — never drifts per surface.
+AUTHORED_CONFIDENCE_HELP = (
+    "Authored confidence (0-1) set when the action was created "
+    "(operator or recommendation engine) — a stated belief, not a measurement.")
+
+
+def confidence_progress_column(label: str = "Confidence", help_text: str = ""):
+    """F60: ONE table encoding for a 0-1 confidence — a bar, never a raw float. Shared
+    by every decision-workbench table (portfolio, action center, scenarios, the Entity
+    360 work list) so confidence reads the same across them; single-value surfaces
+    (the Entity 360 header) keep `confidence_badge`."""
+    return st.column_config.ProgressColumn(
+        label, min_value=0, max_value=1, help=help_text or None)
+
+
 def decision_rows(
     df,
     *,
@@ -2272,9 +2290,7 @@ def decision_rows(
         config["Impact"] = st.column_config.NumberColumn(
             "Impact", format="$%.2f", help=impact_help or None)
     if confidence_label in view.columns:
-        config[confidence_label] = st.column_config.ProgressColumn(
-            confidence_label, min_value=0, max_value=1, help=confidence_help or None,
-        )
+        config[confidence_label] = confidence_progress_column(confidence_label, confidence_help)
     selection = selectable_table(
         view, key=key, height=height, column_config=config,
         sort_label=sort_label,

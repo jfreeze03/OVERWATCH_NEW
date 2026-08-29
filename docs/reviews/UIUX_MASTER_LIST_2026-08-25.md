@@ -268,8 +268,13 @@ cross-cutting risk.
   sort (counts/pinning untouched); NaN-guarded. Review 0 confirmed (7 findings, all
   out-of-scope: STALE sibling col, Action-Center watch-blindness — both feature gaps, not
   language conflicts).
-- [ ] **F60 · P3/S · Unify the three confidence encodings** across the decision
+- [x] **F60 · P3/S · Unify the three confidence encodings** across the decision
   workbenches (chips+caption vs ProgressColumn vs absent). `app/ui/pages/workbench.py:114`
+  — v4.326.0: shared `confidence_progress_column` → one 0-1 bar in every table
+  (portfolio, Action Center, DS scenarios, Entity 360 work list); single-values keep
+  `confidence_badge`. Shared `AUTHORED_CONFIDENCE_HELP` constant so provenance wording
+  never drifts. Review 0 confirmed; the Entity 360 work-list gap + help precision fixed
+  from review feedback (scenarios/work confidence verified 0-1: both write paths clamp).
 - [x] **F24 · P2/S · Explicit disabled treatment for gated actions** (a type-to-confirm
   Execute doesn't visibly read as locked). `app/theme.py:230-244`
   — v4.320.0: 0.55 opacity + dashed ink-mute edge + no hover lift + not-allowed

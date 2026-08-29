@@ -22,7 +22,8 @@ def test_decision_rows_threads_per_surface_column_help():
     assert "impact_help" in body and "confidence_help" in body
     # accepted AND actually wired into the column configs
     assert "help=impact_help or None" in body
-    assert "help=confidence_help or None" in body
+    # F60: confidence_help is threaded through the shared ProgressColumn helper
+    assert "confidence_progress_column(confidence_label, confidence_help)" in body
 
 
 def test_portfolio_names_measured_vs_heuristic():
@@ -36,4 +37,9 @@ def test_portfolio_names_measured_vs_heuristic():
 def test_action_center_names_estimate_and_authored_confidence():
     wb = _src("app/ui/workbench.py")
     assert "Authored ESTIMATE (modeled, not billed)" in wb
-    assert "stated belief, not a measurement" in wb
+    # F60: the authored-confidence help is one shared constant now (used by the
+    # action center, scenarios, and the Entity 360 work table); its framing lives
+    # in components.AUTHORED_CONFIDENCE_HELP.
+    assert "confidence_help=AUTHORED_CONFIDENCE_HELP" in wb
+    from app.ui.components import AUTHORED_CONFIDENCE_HELP
+    assert "stated belief, not a measurement" in AUTHORED_CONFIDENCE_HELP

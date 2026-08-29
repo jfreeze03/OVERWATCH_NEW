@@ -39,6 +39,8 @@ from app.logic.workbench import (
 )
 from app.ui import charts
 from app.ui.components import (
+    AUTHORED_CONFIDENCE_HELP,
+    confidence_progress_column,
     decision_rows,
     empty_state,
     exception_summary,
@@ -848,10 +850,13 @@ def _scenarios(company: str) -> None:
             "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
             "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
         ) if column in adf.columns]].copy()
-        _scen_cfg = None
+        _scen_cfg = {}
         if "WATCHED" in display.columns:          # F59: one star, not raw True/False
             display["WATCHED"] = display["WATCHED"].map(watch_star)
-            _scen_cfg = {"WATCHED": watch_star_column()}
+            _scen_cfg["WATCHED"] = watch_star_column()
+        if "CONFIDENCE" in display.columns:       # F60: one confidence encoding — a bar
+            _scen_cfg["CONFIDENCE"] = confidence_progress_column(
+                "Confidence (authored)", AUTHORED_CONFIDENCE_HELP)
 
         def open_scenario_entity(index: int) -> None:
             row = adf.iloc[int(index)]

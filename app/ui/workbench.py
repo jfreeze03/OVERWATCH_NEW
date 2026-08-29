@@ -41,7 +41,9 @@ from app.logic.workbench import (
     watchlist_threshold_status,
 )
 from app.ui.components import (
+    AUTHORED_CONFIDENCE_HELP,
     confidence_badge,
+    confidence_progress_column,
     decision_rows,
     empty_state,
     evidence_gate,
@@ -382,9 +384,7 @@ def render_action_center(company: str) -> None:
                 impact_help="Authored ESTIMATE (modeled, not billed). Scenarios de-duplicate "
                             "these by entity and never mix them with verified savings.",
                 confidence_label="Confidence (authored)",
-                confidence_help="Authored confidence (0-1) set when the action was created "
-                                "(operator or recommendation engine) — "
-                                "a stated belief, not a measurement.")
+                confidence_help=AUTHORED_CONFIDENCE_HELP)
 
         # Deliver the deep-link action_id ONCE per arrival (review fix): consume
         # it from the nav context so a later manual click sticks, and a repeat
@@ -703,7 +703,11 @@ def render_entity_360(company: str) -> None:
     )
     st.markdown("**Work and outcomes**")
     if related.ok and not related.empty:
-        styled_table(related.df, height=240)
+        # F60: the same authored 0-1 confidence reads as a bar here too, not a raw float.
+        _rel_cfg = ({"CONFIDENCE": confidence_progress_column("Confidence (authored)",
+                                                              AUTHORED_CONFIDENCE_HELP)}
+                    if "CONFIDENCE" in related.df.columns else None)
+        styled_table(related.df, height=240, column_config=_rel_cfg)
     else:
         empty_state("no_data_yet", "No action is linked to this entity.")
 

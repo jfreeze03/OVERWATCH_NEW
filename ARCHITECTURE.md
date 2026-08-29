@@ -131,6 +131,12 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   → ★ or blank, not raw True/False), the Brief badge and the Watchlist board. The
   star is display-only and applied after each board's watched-first sort, so pinning
   and the watched counts stay on the underlying bool; a NaN reads as not-watched.
+- **One confidence encoding (F60, `components.confidence_progress_column`):** a 0-1
+  confidence renders as ONE bar in every decision-workbench TABLE (portfolio, Action
+  Center, Decision Studio scenarios, Entity 360 work list), never a raw float;
+  single-value surfaces (the Entity 360 header) keep `confidence_badge`. Authored
+  confidence carries one shared help string (`AUTHORED_CONFIDENCE_HELP`) so its
+  provenance wording (operator *or* recommendation engine) never drifts per surface.
 
 ## Cost formula contract
 

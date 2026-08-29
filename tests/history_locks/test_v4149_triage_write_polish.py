@@ -122,7 +122,10 @@ def test_notify_success_falls_back_when_toast_unavailable():
 def test_confidence_columns_labelled_by_epistemics():
     comp = _src("app/ui/components.py")
     assert "confidence_label: str = \"Confidence\"" in comp
-    assert 'config[confidence_label] = st.column_config.ProgressColumn(' in comp
+    # F60: the ProgressColumn is now one shared helper (a bar, not a raw float or
+    # bare chip) that every decision board routes confidence through.
+    assert 'config[confidence_label] = confidence_progress_column(confidence_label' in comp
+    assert 'st.column_config.ProgressColumn(' in comp   # inside the shared helper
     assert 'confidence_label="Confidence (evidence)"' in _src("app/ui/decision_studio.py")
     assert 'confidence_label="Confidence (authored)"' in _src("app/ui/workbench.py")
 
