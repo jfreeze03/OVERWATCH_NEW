@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.319.0 - UI/UX Wave 2: header orientation (F9 + F6) (2026-08-28)
+
+* **F9** a "Group ▸ Page ▸ Section" breadcrumb kicker above the page title, so a
+  deep-link landing (from the palette or a cross-page drill) says where it is
+  above the fold — not just the page name. The section comes from the page's
+  remembered section label, so it matches the pills below it.
+* **F6** the ACCOUNT_USAGE lag caption now prints only on the metering surfaces
+  that actually read lagging data (Cost, Operations, Security, Overview, Control
+  Room, Brief) instead of on every page — so it registers where it matters
+  instead of being ignorable chrome everywhere.
+
+Adversarial review confirmed 2 findings, both fixed pre-commit:
+
+* **MED** F6 had dropped the note from Control Room (Pulse/Triage live-fallback
+  to QUERY_HISTORY / TASK_HISTORY) and Brief (its headline MTD credit spend is
+  FACT_METERING_DAILY, up to 24h behind) — both surface lagging data
+  prominently, so they were added back to the gated set.
+* **MED** F9's section segment was one rerun stale — it read the ?section= query
+  param that lazy_sections writes AFTER page_header (and shares across pages), so
+  a fresh nav/drill showed the previous page's section or dropped it. It now
+  reads the page's own remembered section session key (authoritative before the
+  bar renders), defaulting to the first section on a fresh visit.
+
 ## 4.318.0 - UI/UX Wave 2: write polish (F54 + F58) (2026-08-28)
 
 * **F58** a plain-English effect line above every operator write's SQL preview,

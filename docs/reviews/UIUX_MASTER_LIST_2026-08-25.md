@@ -181,7 +181,7 @@ cross-cutting risk.
 - [x] **C16 · P2/S · Section count badges from already-loaded values** (overdue on
   Operations, open findings on Security, running experiments on Decision Studio) via the
   existing `counts=` badge.
-- [ ] **F9 · P2/M · Section kicker/breadcrumb in the header** ("Analyze ▸ Operations ▸
+- [x] **F9 · P2/M · Section kicker/breadcrumb in the header** ("Analyze ▸ Operations ▸
   Warehouses") so a deep-link landing says where you are above the fold. `app/ui/components.py:177-201`
 - [ ] **F3 · P2/M · Stop double-stating scope** — the header chip row repeats the toolbar
   ~20px above; make it a sticky mini-scope that appears only once the toolbar scrolls away.
@@ -194,7 +194,7 @@ cross-cutting risk.
 - [x] **C18 · P2/M · "Since your last visit" on Alerts / Action Center / Security /
   Decision Studio**, with direct links to changed items (`since_last_visit` opener already
   ships).
-- [ ] **F6 · P2/S · Data-aware ACCOUNT_USAGE lag caption** — it prints on every page
+- [x] **F6 · P2/S · Data-aware ACCOUNT_USAGE lag caption** — it prints on every page
   including ones that read no lagging data, so it stops registering where it matters. Gate
   to metering surfaces or fold into the card `as_of` stamp. `app/ui/components.py:199-201`
 

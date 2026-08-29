@@ -181,6 +181,48 @@ def _section_slug(label: str) -> str:
     return str(label).lower().replace("&", "and").replace(" ", "-")
 
 
+# F6: the ACCOUNT_USAGE lag note is only true where the page actually reads
+# ACCOUNT_USAGE / metering data (directly or via a same-day live fallback).
+# Printing it on app-table pages (Admin, Ask, Decision Studio, ...) trained the
+# eye to skip it exactly where it matters — gate it to the metering surfaces.
+# Review fix: Control Room (Pulse/Triage live-fallback to QUERY_HISTORY /
+# TASK_HISTORY) and Brief (its headline MTD credit spend is FACT_METERING_DAILY,
+# up to 24h behind) both surface lagging data prominently, so they belong here.
+_LAGGING_SURFACES = {"Cost & Contract", "Operations", "Security", "Overview",
+                     "Control Room", "Brief"}
+
+# F9: the section bar's session key per page — lazy_sections stores the CHOSEN
+# LABEL here (and consume_pending_navigation seeds it on a drill), so it is the
+# authoritative section BEFORE the bar re-renders. The ?section= query param it
+# also writes lags a rerun and is shared across pages, so it is not used here.
+_PAGE_SECTION_KEY = {
+    "Control Room": "cr_section", "Cost & Contract": "cost_section",
+    "Operations": "ops_section", "Decision Studio": "decision_section",
+    "Alerts": "alerts_section", "Security": "sec_section", "Admin": "adm_section",
+}
+
+
+def _page_breadcrumb(title: str) -> str:
+    """F9: a 'Group ▸ Page ▸ Section' orientation kicker so a deep-link landing
+    says where you are above the fold. The nav group comes from NAV_GROUPS; the
+    section comes from the page's remembered section label (authoritative before
+    the section bar renders), defaulting to the first section on a fresh visit —
+    so it matches the pills below instead of lagging a rerun behind them."""
+    from app.config import NAV_GROUPS
+    group = next((g for g, pages in NAV_GROUPS.items() if title in pages), "")
+    parts = [p for p in (group, title) if p]
+    try:
+        from app.logic.navigate import PAGE_SECTION_LABELS
+        _labels = PAGE_SECTION_LABELS.get(title, ())
+        _key = _PAGE_SECTION_KEY.get(title)
+        if _key and _labels:
+            _sec = str(st.session_state.get(_key) or "")
+            parts.append(_sec if _sec in _labels else _labels[0])
+    except Exception:  # noqa: BLE001 - the breadcrumb is chrome, never break a page
+        pass
+    return " ▸ ".join(html.escape(p) for p in parts)
+
+
 def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str = "") -> None:
     st.session_state["_ow_dl_seq"] = 0
     st.session_state["_ow_tz_note_shown"] = False   # rec34: tz note prints once per page
@@ -198,8 +240,13 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
             _state.pop_nav_origin()
             _state.request_navigation(_origin["page"], _origin.get("section", ""),
                                       capture_origin=False)
-    # rec5: no per-page OVERWATCH kicker — the sidebar brand + browser tab are the one
-    # brand anchor; repeating it above every header was orientation noise, not signal.
+    # F9: a Group ▸ Page ▸ Section breadcrumb kicker above the title — a deep-link
+    # landing (from the palette or a cross-page drill) says where it is above the
+    # fold, not just the page name. (rec5's dropped kicker was the redundant
+    # OVERWATCH brand, not orientation — this adds the orientation back.)
+    _crumb = _page_breadcrumb(title)
+    if _crumb:
+        st.markdown(f'<div class="ow-breadcrumb">{_crumb}</div>', unsafe_allow_html=True)
     if icon_name:
         st.markdown(
             f'<div class="ow-page-heading">'
@@ -217,8 +264,10 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     if chips:
         st.markdown(f'<div class="ow-scope-row">{chips}</div>', unsafe_allow_html=True)
     # rec11: the ACCOUNT_USAGE lag note lives ONCE per page here, not appended verbatim
-    # to every panel's result_caption (it was on all ~76 of them).
-    st.caption(ACCOUNT_USAGE_LAG_NOTE)
+    # to every panel's result_caption (it was on all ~76 of them). F6: only on the
+    # metering surfaces that actually read lagging ACCOUNT_USAGE data.
+    if title in _LAGGING_SURFACES:
+        st.caption(ACCOUNT_USAGE_LAG_NOTE)
     # rec24: if this page was reached by a jump that reshaped the GLOBAL filters,
     # announce it ONCE on arrival — otherwise the scoped view reads as if the user
     # set it. Drop only the note; any drill identity (event_id, query_id) survives.

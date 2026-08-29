@@ -52,6 +52,9 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 [data-testid="stCaptionContainer"],.stCaption,small { color:var(--ow-ink-mute) !important; }
 [data-testid="stMetricValue"],.ow-num,td,th { font-variant-numeric:tabular-nums; }
 
+/* F9: Group ▸ Page ▸ Section orientation kicker above the page title. */
+.ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.06em;
+  text-transform:uppercase; color:var(--ow-ink-mute); margin:0 0 2px 1px; }
 .ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
 .ow-page-heading h1 { margin:0; padding:0; font-size:1.72rem; font-weight:750; letter-spacing:0; }
 .ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
