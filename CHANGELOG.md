@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.314.0 - UI/UX Wave 2: Operator vs Audit presentation modes (C19) (2026-08-28)
+
+A per-viewer presentation mode, stored like the density pref:
+
+* **Operator** (the default) keeps the daily-triage surface lean; **Audit**
+  shows the full evidence chain for reproducing or defending a number.
+* One seam does most of the work: `result_caption()` always shows the SOURCE
+  (the app's "show the source" ethos is load-bearing) but trims the per-panel
+  fetched-at stamp and methodology note in operator mode. `audit_mode()` /
+  `methodology_note()` gate the how-computed / reconciliation / backtest
+  blocks (4 expanders gated: spend "Why totals differ" + "Cost coverage
+  ladder", overview "Forecast accuracy", admin "Object-cost ledger
+  reconciliation").
+* Toggled from the sidebar ("Audit detail"), persisted per-viewer as
+  `PRESENT_MODE` in `USER_PREFS`. The pref-write MERGE
+  (`prefs_sql.upsert_pref_sql`, identity-scoped + allowlist-gated) returned for
+  it — it had been retired with the density toggle in v4.157.
+* Docs: ARCHITECTURE.md + CLAUDE.md carry the presentation-mode contract.
+
+Adversarial review (3 reviewers independently) caught a destructive bug fixed
+pre-commit: reading the toggle in the render body and diffing against the mode
+latched a pre-hydrate "operator" into the widget key, then OVERWROTE a
+returning auditor's saved "audit" pref back to operator on the hydration race.
+Persistence now fires only via on_change (a genuine user flip), and the
+hydrate seeds the toggle's widget key so a late "audit" hydration flips it
+instead of being clobbered.
+
 ## 4.313.0 - UI/UX Wave 2: finish the command palette (C3) (2026-08-28)
 
 The sidebar "Jump to" palette becomes a real command palette:

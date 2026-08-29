@@ -173,6 +173,32 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             if hasattr(st, "toast"):
                 st.toast("Caches cleared — fetching fresh data.")
             st.rerun()
+        # C19: operator vs audit presentation mode. Operator (default) keeps the
+        # daily surface lean; audit shows the full evidence chain (per-panel
+        # fetched-at, methodology notes, how-computed expanders). Persists to
+        # USER_PREFS via the same idempotent MERGE density used, scoped to the
+        # viewer — a personal display pref, so it's not operator-gated.
+        #
+        # Persist ONLY on a real user flip, via on_change. Review fix: reading
+        # the toggle in the render body and diffing against present_mode() was
+        # destructive — the widget key latches on a pre-hydrate render, and once
+        # PRESENT_MODE hydrates to 'audit' from USER_PREFS the stale toggle read
+        # 'operator' back OVER the saved pref. on_change never fires on a
+        # hydration re-render, and the hydrate seeds the widget key (below) so
+        # its displayed state matches the pref. No value= (the seeded key owns it).
+        def _on_present_toggle() -> None:
+            _m = "audit" if st.session_state.get("_ow_present_mode_toggle") else "operator"
+            st.session_state["_ow_present_mode"] = _m
+            if connected:
+                from app.core.query import execute_statement
+                from app.data import prefs_sql
+                execute_statement(prefs_sql.upsert_pref_sql("PRESENT_MODE", _m), page="Views")
+
+        st.toggle(
+            "Audit detail", key="_ow_present_mode_toggle", on_change=_on_present_toggle,
+            help="Show the full evidence chain — per-panel source timestamps, "
+                 "methodology notes, and how-computed detail — for reproducing or "
+                 "defending a number. Off keeps the daily surface lean.")
         # rec11: the ACCOUNT_USAGE lag note lives once per page in page_header now
         # (was duplicated here in the sidebar — same sentence twice is chrome noise).
     return page
@@ -230,6 +256,16 @@ def _apply_default_landing() -> None:
                          if str(r["PREF_KEY"]) == "DENSITY"), "")
     if density_pref in ("compact", "comfortable"):
         st.session_state["_ow_density"] = density_pref
+    # C19: hydrate the operator/audit presentation mode the same way density is.
+    mode_pref = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
+                      if str(r["PREF_KEY"]) == "PRESENT_MODE"), "")
+    if mode_pref in ("operator", "audit"):
+        st.session_state["_ow_present_mode"] = mode_pref
+        # Seed the sidebar toggle's widget key so a late hydration flips it to
+        # match the saved pref (review fix). This runs before _sidebar renders
+        # the toggle; programmatic assignment never fires its on_change, so the
+        # user's saved 'audit' can't be clobbered by a stale pre-hydrate False.
+        st.session_state["_ow_present_mode_toggle"] = (mode_pref == "audit")
     raw = next((str(r["PREF_VALUE"] or "") for _, r in prefs.df.iterrows()
                 if str(r["PREF_KEY"]) == "DEFAULT_VIEW"), "")
     data = _parse_view(raw)

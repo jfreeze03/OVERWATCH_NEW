@@ -73,6 +73,16 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   renders as `unavailable` — except absence-of-setup (the missing-migrations
   error), which stays a calm `needs_setup`. An empty state may carry its next best action (`action_label`
   + `on_action`, F56) so an empty panel is a doorway, not a dead end.
+- **Presentation mode (C19):** `components.present_mode()` returns `operator`
+  (default — the lean daily-triage surface) or `audit` (the full evidence
+  chain), stored per-viewer as `PRESENT_MODE` in `USER_PREFS` and hydrated into
+  `_ow_present_mode` exactly like the density pref. `result_caption()` always
+  shows the SOURCE (the app's "show the source" ethos is load-bearing) but
+  trims the per-panel fetched-at stamp and methodology note in operator mode;
+  `audit_mode()` gates methodology / how-computed / reconciliation / backtest
+  blocks (and `methodology_note(text)` renders in audit only). The pref-write
+  path (`prefs_sql.upsert_pref_sql`, an identity-scoped allowlist-gated MERGE)
+  returned with this — it had been retired with the density toggle in v4.157.
 - **Operator-write seam (C48):** `execute_statement` / `execute_action` /
   `execute_cancel_query` paint an in-flight spinner around the round-trip, and
   every write CLICK BLOCK pairs `components.write_gate_open(<key>)` (last

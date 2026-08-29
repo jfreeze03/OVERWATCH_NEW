@@ -259,7 +259,7 @@ cross-cutting risk.
 - [ ] **C46 · P1/M · Watch → visible monitoring tray.** Hoist the already-computed
   `watch_summary` (watched/attention counts + newest movement) into the sidebar/status
   strip on every page.
-- [ ] **C19 · P1/L · Operator vs Audit presentation modes** stored as a profile pref (the
+- [x] **C19 · P1/L · Operator vs Audit presentation modes** stored as a profile pref (the
   density-toggle precedent). Cost is the *breadth* of gating every `result_caption`/
   methodology/formula block, not the plumbing.
 - [ ] **C3 · P1/M · Finish the command palette** — fold the separate Investigate ID-lookup

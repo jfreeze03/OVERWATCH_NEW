@@ -70,7 +70,13 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    Never a raw `st.info`/`st.success` for an absence — this covers absence
    OUTCOMES of a read (zero rows / not configured / unavailable); action
    receipts, direct answers to a submitted question, and context notes
-   about data that structurally cannot exist stay raw.
+   about data that structurally cannot exist stay raw. **Presentation mode
+   (C19):** `components.present_mode()` = `operator` (default, lean) or `audit`
+   (full evidence chain), a per-viewer `PRESENT_MODE` pref hydrated like density.
+   `result_caption` always shows the SOURCE but trims fetched-at + note in
+   operator mode; gate methodology/how-computed/reconciliation blocks behind
+   `audit_mode()` / `methodology_note()`. The pref-write MERGE
+   (`prefs_sql.upsert_pref_sql`) is back for it.
 9. **Identity:** owner's-rights SiS — `CURRENT_USER()` = app owner. Viewer
    identity via `app/core/identity.py` (`st.user`, CURRENT_USER() fallback)
    for prefs/usage/audit. Executor allow-list: one statement, OVERWATCH

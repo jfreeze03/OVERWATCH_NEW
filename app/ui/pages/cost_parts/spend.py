@@ -49,6 +49,7 @@ from app.logic.formulas import (
 )
 from app.ui import charts
 from app.ui.components import (
+    audit_mode,
     empty_state,
     guard,
     kpi_row,
@@ -210,29 +211,30 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     kpi_row(_tiles)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
-    with st.expander("Why totals differ across pages (and vs Snowsight)"):
-        cat_usd = df.groupby("CATEGORY")["USD"].sum().to_dict()
-        wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
-        other_usd = float(sum(cat_usd.values())) - wh_usd
-        st.markdown(md_dollars(  # $-escape: three dollar amounts in one markdown body
-            f"- **This page — configured-rate credit spend ({days}d): {format_usd(billed_usd)}.** "
-            "Account-wide credit-billed services with the cloud-services rebate applied; it "
-            "excludes storage, transfer, marketplace, and org currency adjustments.\n"
-            f"- **Warehouse portion of that billed spend: {format_usd(wh_usd)}** — account-wide, "
-            "cloud-services rebate applied, reader metering included. Overview's company KPI "
-            "prices UNADJUSTED warehouse usage (no rebate, main-account metering only) — a "
-            "different basis, not a slice of this figure: a company scope usually reads below "
-            "it, but ALL (or a dominant company) can read slightly above it, by about the "
-            f"rebate. The remaining {format_usd(other_usd)} (serverless, AI, replication) has "
-            "no warehouse to scope by.\n"
-            "- **Snowsight → Cost Management reads higher than both:** it adds storage and data "
-            "transfer dollars and prices from USAGE_IN_CURRENCY (list/contract currency), and its "
-            "MTD window follows calendar-month boundaries in account time.\n"
-            "- **Rate axis:** AI/Cortex credits bill at the configured AI rate, not the compute "
-            "rate — this page and the Overview/Brief/Contract/Compare dollar figures all split "
-            "the two, as do the seeded budget alerts (pace, forecast) since V061.\n"
-            "- Same telemetry, different lenses — each number is exact for its own question."
-        ))
+    if audit_mode():   # C19: methodology detail — audit mode only
+        with st.expander("Why totals differ across pages (and vs Snowsight)"):
+            cat_usd = df.groupby("CATEGORY")["USD"].sum().to_dict()
+            wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
+            other_usd = float(sum(cat_usd.values())) - wh_usd
+            st.markdown(md_dollars(  # $-escape: three dollar amounts in one markdown body
+                f"- **This page — configured-rate credit spend ({days}d): {format_usd(billed_usd)}.** "
+                "Account-wide credit-billed services with the cloud-services rebate applied; it "
+                "excludes storage, transfer, marketplace, and org currency adjustments.\n"
+                f"- **Warehouse portion of that billed spend: {format_usd(wh_usd)}** — account-wide, "
+                "cloud-services rebate applied, reader metering included. Overview's company KPI "
+                "prices UNADJUSTED warehouse usage (no rebate, main-account metering only) — a "
+                "different basis, not a slice of this figure: a company scope usually reads below "
+                "it, but ALL (or a dominant company) can read slightly above it, by about the "
+                f"rebate. The remaining {format_usd(other_usd)} (serverless, AI, replication) has "
+                "no warehouse to scope by.\n"
+                "- **Snowsight → Cost Management reads higher than both:** it adds storage and data "
+                "transfer dollars and prices from USAGE_IN_CURRENCY (list/contract currency), and its "
+                "MTD window follows calendar-month boundaries in account time.\n"
+                "- **Rate axis:** AI/Cortex credits bill at the configured AI rate, not the compute "
+                "rate — this page and the Overview/Brief/Contract/Compare dollar figures all split "
+                "the two, as do the seeded budget alerts (pace, forecast) since V061.\n"
+                "- Same telemetry, different lenses — each number is exact for its own question."
+            ))
     result_caption(res)
 
     st.markdown("**Cost drill coverage**")
@@ -916,26 +918,27 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         # already exist scattered across surfaces; this consolidates the MAP (which
         # grain explains how much, and where each residual is proven) in one place,
         # anchored on the exact warehouse pool. No new marts/queries.
-        with st.expander("Cost coverage ladder — how much of the bill each grain explains"):
-            st.markdown(
-                f"- **Billed / metered pool (this window):** {format_usd(window_usd)} — the "
-                "warehouse-metering total above. **Exact at warehouse grain** (100% covered; "
-                "includes each warehouse's idle time + unadjusted cloud-services credits).\n"
-                "- **Allocated to user / database:** the elapsed-time (or credit-weighted) "
-                "share above — a **directional estimate**. The 'Named rows cover N%' caption on "
-                "each chart is its coverage; 'Other / not shown' is the residual.\n"
-                "- **Measured-query / object grain:** the **Object cost ledger** (Operations → "
-                "Optimize) splits query credits into read / write / **residual** (queries that "
-                "touched no base object) and proves *arms + residual = attribution credits* "
-                "(the additive-contract recon on Admin).\n"
-                "- **Billed-vs-model residual:** the **rate-card reconciliation** (Cost & "
-                "Contract → Contract) frames the gap to the invoice as storage / transfer / "
-                "serverless / discounts.\n\n"
-                "Non-additive tracks (idle, serverless, AI, storage, the cloud-services rebate) "
-                "are on the Spend service breakdown, **not** folded into this query-grain ladder."
-            )
-            st.caption("Each rung narrows scope and adds estimation error — the warehouse row is "
-                       "the only exact one. Nothing here re-bills; it maps where the residual lives.")
+        if audit_mode():   # C19: methodology detail — audit mode only
+            with st.expander("Cost coverage ladder — how much of the bill each grain explains"):
+                st.markdown(
+                    f"- **Billed / metered pool (this window):** {format_usd(window_usd)} — the "
+                    "warehouse-metering total above. **Exact at warehouse grain** (100% covered; "
+                    "includes each warehouse's idle time + unadjusted cloud-services credits).\n"
+                    "- **Allocated to user / database:** the elapsed-time (or credit-weighted) "
+                    "share above — a **directional estimate**. The 'Named rows cover N%' caption on "
+                    "each chart is its coverage; 'Other / not shown' is the residual.\n"
+                    "- **Measured-query / object grain:** the **Object cost ledger** (Operations → "
+                    "Optimize) splits query credits into read / write / **residual** (queries that "
+                    "touched no base object) and proves *arms + residual = attribution credits* "
+                    "(the additive-contract recon on Admin).\n"
+                    "- **Billed-vs-model residual:** the **rate-card reconciliation** (Cost & "
+                    "Contract → Contract) frames the gap to the invoice as storage / transfer / "
+                    "serverless / discounts.\n\n"
+                    "Non-additive tracks (idle, serverless, AI, storage, the cloud-services rebate) "
+                    "are on the Spend service breakdown, **not** folded into this query-grain ladder."
+                )
+                st.caption("Each rung narrows scope and adds estimation error — the warehouse row is "
+                           "the only exact one. Nothing here re-bills; it maps where the residual lives.")
 
         # V077: measured cost by CLIENT APPLICATION x user — which program (and who)
         # drove the credits, so a misconfigured tool is findable. Behind a toggle

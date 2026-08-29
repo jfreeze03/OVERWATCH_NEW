@@ -685,16 +685,48 @@ def status_bar(stats: list[dict]) -> None:
                         request_navigation(page, section)
 
 
+# C19: OPERATOR vs AUDIT presentation modes. Operator (the default) is the lean
+# daily-triage surface — panels lead with data, not provenance; Audit shows the
+# full evidence chain (fetched-at stamps, methodology notes, how-computed
+# expanders) for anyone defending or reproducing a number. Stored as a profile
+# pref (PRESENT_MODE in USER_PREFS), hydrated into _ow_present_mode at startup —
+# the exact density-toggle precedent. Unset = operator; only "audit" unlocks the
+# extra chrome, so a fresh viewer gets the clean surface.
+def present_mode() -> str:
+    return "audit" if st.session_state.get("_ow_present_mode") == "audit" else "operator"
+
+
+def audit_mode() -> bool:
+    """True in AUDIT presentation mode — gate methodology / how-computed /
+    formula-explanation blocks behind this so operator mode stays lean while
+    audit mode shows the full reproduction detail."""
+    return present_mode() == "audit"
+
+
+def methodology_note(text: str) -> None:
+    """A methodology / how-computed one-liner that shows in AUDIT mode only
+    (operator mode stays lean). Renders as a quiet caption; no-op in operator
+    mode and on empty text."""
+    if text and audit_mode():
+        st.caption(str(text))
+
+
 def result_caption(result: QueryResult, note: str = "") -> None:
     """Source + freshness line under any data panel. rec11: the ACCOUNT_USAGE lag
     note is NOT appended here — it printed verbatim under all ~76 panels; it now
-    shows once per page in page_header. Source/fetched legitimately vary per panel."""
+    shows once per page in page_header. Source/fetched legitimately vary per panel.
+
+    C19: the SOURCE always shows — 'show the source' is the app's whole ethos and
+    it's load-bearing evidence in a DBA tool. Operator mode trims the per-panel
+    fetched-at stamp and the methodology note (the page header already carries a
+    once-per-page freshness caption); audit mode shows the full chain."""
+    _audit = audit_mode()
     bits = []
     if result.source:
         bits.append(f"Source: {result.source}")
-    if result.fetched_at:
+    if result.fetched_at and _audit:
         bits.append(f"fetched {result.fetched_at.strftime('%H:%M:%S')}")
-    if note:
+    if note and _audit:
         bits.append(note)
     if bits:
         from app.logic.formulas import md_dollars

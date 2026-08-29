@@ -44,6 +44,7 @@ from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
     add_to_case_button,
+    audit_mode,
     contract_runway_bar,
     daily_spend_wide,
     download_text_button,
@@ -1027,17 +1028,18 @@ def render() -> None:
                        + " · ".join(f"{eng} ±{err:.1f}%" for eng, err in _mae.items())
                        + f" — '{_best}' most reliable; running '{engine}'. "
                        "Account-wide backtest — metering has no company grain.")
-        with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
-            if not _bt_hist.usable() or len(_bt_hist.df) < 50:
-                empty_state("no_data_yet", "Needs ~2 months of daily facts before a backtest says anything.")
-            elif _bt.empty:
-                empty_state("no_data_yet", "No complete months in the window yet.")
-            else:
-                styled_table(_bt, height=TABLE_H_MD, column_config={
-                    "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
-                })
-                st.caption("Mean absolute error per engine, per held-out month. Change "
-                           "engines via FORECAST_ENGINE on Admin → Settings.")
+        if audit_mode():   # C19: methodology detail — audit mode only
+            with st.expander("Forecast accuracy — how the projection performed, last 3 months"):
+                if not _bt_hist.usable() or len(_bt_hist.df) < 50:
+                    empty_state("no_data_yet", "Needs ~2 months of daily facts before a backtest says anything.")
+                elif _bt.empty:
+                    empty_state("no_data_yet", "No complete months in the window yet.")
+                else:
+                    styled_table(_bt, height=TABLE_H_MD, column_config={
+                        "ERROR_PCT": st.column_config.NumberColumn("Error %", format="%.1f%%"),
+                    })
+                    st.caption("Mean absolute error per engine, per held-out month. Change "
+                               "engines via FORECAST_ENGINE on Admin → Settings.")
 
     if score.drivers:
         with st.expander(f"Platform score deductions ({score.score}/100 · {score.state})"):

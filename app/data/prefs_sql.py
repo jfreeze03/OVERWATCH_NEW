@@ -11,11 +11,40 @@ import re
 
 from app.config import core_object
 from app.core.identity import identity_sql
+from app.core.sqlsafe import sql_literal
 
 # Offered display timezones; 'Account' means render as stored (account time).
 DISPLAY_TIMEZONES = ("Account (America/Chicago)", "America/New_York",
                      "America/Los_Angeles", "UTC", "Europe/London")
 VIEW_NAME_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,40}$")
+
+# C19: the pref-write path (upsert_pref_sql) returned with the operator/audit
+# presentation mode — it was retired with the Views popover in v4.157.0 (nobody
+# used the density toggle daily), but PRESENT_MODE reintroduces a live pref, so
+# the MERGE and its key allowlist come back verbatim, plus the new key.
+_KEY_RE = re.compile(r"^(DEFAULT_VIEW|DISPLAY_TZ|DENSITY|PRESENT_MODE|VIEW:[A-Za-z0-9 _\-]{1,40})$")
+
+
+def _valid_key(key: str) -> str:
+    key = str(key or "").strip()
+    if not _KEY_RE.match(key):
+        raise ValueError(f"Invalid pref key: {key!r}")
+    return key
+
+
+def upsert_pref_sql(key: str, value: str) -> str:
+    """MERGE one USER_PREFS row for the viewer (identity_sql scopes the row —
+    no user input selects whose pref is written). Key is allowlist-validated."""
+    key = _valid_key(key)
+    value = str(value or "")[:4000]
+    return (
+        f"MERGE INTO {core_object('USER_PREFS')} t "
+        f"USING (SELECT {identity_sql()} AS U, {sql_literal(key)} AS K) s "
+        "ON t.USER_NAME = s.U AND t.PREF_KEY = s.K "
+        f"WHEN MATCHED THEN UPDATE SET PREF_VALUE = {sql_literal(value)}, UPDATED_AT = CURRENT_TIMESTAMP() "
+        f"WHEN NOT MATCHED THEN INSERT (USER_NAME, PREF_KEY, PREF_VALUE) "
+        f"VALUES (s.U, s.K, {sql_literal(value)});"
+    )
 
 
 def user_prefs() -> str:

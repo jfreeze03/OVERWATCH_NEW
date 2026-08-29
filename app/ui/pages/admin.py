@@ -26,6 +26,7 @@ from app.core.state import filters
 from app.data import cost_sql, mart_sql
 from app.logic.formulas import humanize_duration, md_dollars, safe_float
 from app.ui.components import (
+    audit_mode,
     confirm_gate,
     empty_state,
     guard,
@@ -952,20 +953,21 @@ def _canary_tab() -> None:
     )
     from app.data.canary import CANARIES, EXPECTED_GAPS
 
-    with st.expander("Object-cost ledger reconciliation (additive contract)"):
-        st.caption(
-            "v4.52 (Codex #7): query arms + residual vs QUERY_ATTRIBUTION_HISTORY, "
-            "and each maintenance arm vs its source history, over a lag-safe window "
-            "ending 2 days ago. DELTA ~0 is the contract; drift is late-arriving "
-            "attribution (self-heals on the next daily load) or a loader defect."
-        )
-        if st.button("Run object-ledger recon", key="adm_objcost_recon"):
-            _oc_res = run(cost_sql.object_cost_recon(7), page=_PAGE, key="objcost_recon",
-                          tier="live", source="FACT_OBJECT_COST_DAILY vs QAH + serverless histories")
-            if guard(_oc_res, "Object-cost ledger has no rows yet (V048+ not deployed or first load pending)."):
-                styled_table(_oc_res.df, column_config={
-                    "DELTA_PCT": st.column_config.NumberColumn("Delta %", format="%.2f%%")})
-                result_caption(_oc_res)
+    if audit_mode():   # C19: methodology detail — audit mode only
+        with st.expander("Object-cost ledger reconciliation (additive contract)"):
+            st.caption(
+                "v4.52 (Codex #7): query arms + residual vs QUERY_ATTRIBUTION_HISTORY, "
+                "and each maintenance arm vs its source history, over a lag-safe window "
+                "ending 2 days ago. DELTA ~0 is the contract; drift is late-arriving "
+                "attribution (self-heals on the next daily load) or a loader defect."
+            )
+            if st.button("Run object-ledger recon", key="adm_objcost_recon"):
+                _oc_res = run(cost_sql.object_cost_recon(7), page=_PAGE, key="objcost_recon",
+                              tier="live", source="FACT_OBJECT_COST_DAILY vs QAH + serverless histories")
+                if guard(_oc_res, "Object-cost ledger has no rows yet (V048+ not deployed or first load pending)."):
+                    styled_table(_oc_res.df, column_config={
+                        "DELTA_PCT": st.column_config.NumberColumn("Delta %", format="%.2f%%")})
+                    result_caption(_oc_res)
 
     st.markdown(f"**{len(CANARIES)} registered statements**")
     compile_only = st.toggle(
