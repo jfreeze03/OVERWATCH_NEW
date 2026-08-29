@@ -1009,8 +1009,8 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
 
 def _task_health_view(company: str, days: int, database: str = "",
                       schema_contains: str = "") -> None:
-    res = run(mart_sql.fact_task_daily(days, company, database), page=_PAGE, key=f"t_fact_{company}_{days}",
-              tier="hourly", source="FACT_TASK_DAILY")
+    res = run(mart_sql.fact_task_daily(days, company, database, schema_contains), page=_PAGE,
+              key=f"t_fact_{company}_{days}", tier="hourly", source="FACT_TASK_DAILY")
     if not res.usable():
         res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")

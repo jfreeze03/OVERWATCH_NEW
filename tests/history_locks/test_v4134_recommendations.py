@@ -128,7 +128,9 @@ def test_ranked_bar_takeaway_is_opt_in(monkeypatch):
     charts.bar_usd(frame, "NAME", "USD")
     assert captions == []
     charts.bar_usd(frame, "NAME", "USD", takeaway=True)
-    assert captions == ["Top: A $75 (75% of $100)."]
+    # $ escaped via md_dollars() — two runtime '$' in one st.caption otherwise
+    # pair into a serif-italic LaTeX math span (the "creditspend" font bug).
+    assert captions == ["Top: A \\$75 (75% of \\$100)."]
 
 
 def test_boss_chart_takeaway_names_top_spender(monkeypatch):
@@ -141,7 +143,8 @@ def test_boss_chart_takeaway_names_top_spender(monkeypatch):
         "USD": [60.0, 20.0, 90.0, 30.0],
     })
     charts.monthly_stacked_usd(frame, "MONTH", "WH", "USD")     # WH_A = 150 of 200
-    assert captions == ["Top: WH_A $150 (75% of $200)."]
+    # $ escaped via md_dollars() (see test_ranked_bar_takeaway_is_opt_in)
+    assert captions == ["Top: WH_A \\$150 (75% of \\$200)."]
     captions.clear()
     charts.monthly_stacked_usd(frame, "MONTH", "WH", "USD", takeaway=False)
     assert captions == []

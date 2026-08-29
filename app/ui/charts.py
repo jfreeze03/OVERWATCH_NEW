@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app.logic.decision import LANE_ACTNOW_CONF, LANE_CONF_FLOOR
+from app.logic.formulas import md_dollars
 from app.logic.task_graph import TaskGraphShape, canonical_task_name
 from app.ui import palette
 from app.ui.sizing import CHART_H_MD, CHART_H_SM
@@ -842,7 +843,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
         _full_total = float(pd.to_numeric(df[usd_col], errors="coerce").fillna(0).sum())
         if _full_total > 0:
             top = data.loc[data["USD"].idxmax()]
-            st.caption(_share_note(str(top["Label"]), float(top["USD"]), _full_total))
+            st.caption(md_dollars(_share_note(str(top["Label"]), float(top["USD"]), _full_total)))
 
 
 def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: str,
@@ -995,7 +996,7 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     if takeaway:  # rec35: lead with the conclusion
         _g = data.assign(_v=pd.to_numeric(data["USD"], errors="coerce")).groupby("Category")["_v"].sum()
         if float(_g.sum()) > 0:
-            st.caption(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum())))
+            st.caption(md_dollars(_share_note(str(_g.idxmax()), float(_g.max()), float(_g.sum()))))
 
 
 def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
@@ -1384,6 +1385,12 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
     if data.empty:
         _empty_note()
         return
+    # A1: read the ONE shared severity palette, not a divergent copy (was a hardcoded
+    # red+orange a shade off from every other surface). INFO is a first-class alert
+    # severity (SEVERITY_RANK, COALESCE(...,'INFO')) — omitting it left an INFO day
+    # drawn as an unmapped black, legend-less segment; carry the full 5-level domain
+    # like operational_replay / incident_gantt do.
+    _sev_domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     chart = (
         _base(data)
         .mark_bar()
@@ -1393,11 +1400,8 @@ def events_by_day(df: pd.DataFrame, day_col: str = "DAY", severity_col: str = "S
             color=alt.Color(
                 "Severity:N",
                 scale=alt.Scale(
-                    # A1: read the ONE shared severity palette, not a divergent copy
-                    # (was a hardcoded red+orange a shade off from every other surface)
-                    domain=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
-                    range=[SEV_COLORS["CRITICAL"], SEV_COLORS["HIGH"],
-                           SEV_COLORS["MEDIUM"], SEV_COLORS["LOW"]],
+                    domain=_sev_domain,
+                    range=[SEV_COLORS[level] for level in _sev_domain],
                 ),
                 legend=_legend(wide=True),
             ),
@@ -1473,7 +1477,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
     st.altair_chart((bars + labels).properties(height=280), width="stretch")
     # rec35 / CoCo UI#14: lead the boss chart with its conclusion — the top spender.
     if takeaway and float(totals.sum()) > 0:
-        st.caption(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum())))
+        st.caption(md_dollars(_share_note(str(totals.index[0]), float(totals.iloc[0]), float(totals.sum()))))
 
 
 def paired_bars(df: pd.DataFrame, label_col: str, a_col: str, b_col: str,

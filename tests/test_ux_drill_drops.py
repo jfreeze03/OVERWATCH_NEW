@@ -22,6 +22,17 @@ def test_fact_task_daily_carries_schema_name():
     assert "SCHEMA_NAME" in mart_sql.fact_task_daily(7, "ALL")
 
 
+def test_fact_task_daily_honors_schema_filter():
+    # Task Health's section contract promises "Health and Runs honor this scope"
+    # (incl. schema_contains). The mart path must apply the schema predicate, or it
+    # over-counts across all schemas while the live fallback (ops_sql.task_runs)
+    # correctly scopes — two different failure counts for the same filter.
+    scoped = mart_sql.fact_task_daily(7, "ALL", "", "SALES")
+    assert "SCHEMA_NAME ILIKE" in scoped                 # schema filter applied
+    # blank schema leaves the SQL exactly as before (no stray predicate, same cache)
+    assert "SCHEMA_NAME ILIKE" not in mart_sql.fact_task_daily(7, "ALL", "", "")
+
+
 def test_overview_movers_and_alert_button():
     ov = _src("app/ui/pages/overview.py")
     assert 'entity_nav_table(_mv' in ov and 'entity_type="WAREHOUSE"' in ov     # #1

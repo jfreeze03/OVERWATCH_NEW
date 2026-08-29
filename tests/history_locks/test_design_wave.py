@@ -59,8 +59,12 @@ def test_a1_shell_has_one_global_health_pulse():
 
 def test_a1_charts_read_shared_severity_palette():
     ch = _src("app/ui/charts.py")
-    # the events-by-day scale + the budget line read SEV_COLORS, not divergent hexes
-    assert "SEV_COLORS[\"CRITICAL\"], SEV_COLORS[\"HIGH\"]" in ch
+    # the events-by-day scale + the budget line read SEV_COLORS, not divergent hexes.
+    # The scale range is built from the shared palette over the FULL 5-level domain
+    # (INFO included, matching operational_replay/incident_gantt — a missing INFO
+    # level otherwise draws an unmapped black, legend-less bar segment).
+    assert '_sev_domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]' in ch
+    assert "[SEV_COLORS[level] for level in _sev_domain]" in ch
     assert 'color=SEV_COLORS["CRITICAL"]' in ch
     assert "#ef4444" not in ch and "#f97316" not in ch and "#f87171" not in ch
 

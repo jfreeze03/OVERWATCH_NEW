@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.336.0 - UI-layer bug hunt: three presentation corrections (2026-08-29)
+
+Adversarial multi-agent hunt over `app/ui/*` (six diverse finder lenses, each
+finding independently verified — chart specs compiled, helpers executed, code
+paths traced) surfaced three confirmed bugs, each fixed and locked with a test:
+
+* **Chart takeaway captions rendered `$` amounts in serif-italic math font.** The
+  three USD "Top: X $Y (Z% of $total)" lead-with-the-conclusion captions
+  (`bar_usd`, `daily_stacked_usd`, `monthly_stacked_usd` — the boss chart)
+  emitted two runtime `$` into `st.caption` without escaping, pairing into an
+  inline LaTeX span (the "creditspend" font bug). Wrapped each in the house
+  `md_dollars()` escaper. The count (`dollars=False`) takeaways are unaffected.
+* **The Alerts events-by-day chart drew INFO events as an unmapped black bar.**
+  Its severity color scale listed only `[CRITICAL, HIGH, MEDIUM, LOW]`, so any
+  INFO-severity day (INFO is a first-class alert severity everywhere else)
+  rendered with no fill and no legend entry. Extended the domain/range to the
+  full 5 levels via the shared `SEV_COLORS`, matching `operational_replay` and
+  `incident_gantt`.
+* **Operations ▸ Tasks ▸ Health ignored the Schema filter it promised to honor.**
+  The default Health view's mart read (`mart_sql.fact_task_daily`) omitted the
+  `schema_contains` predicate, so its failure KPIs and task table over-counted
+  across all schemas while the live fallback (`ops_sql.task_runs`) correctly
+  scoped — the same filter yielded two different failure counts by path. Added
+  the `SCHEMA_NAME` predicate to the mart builder and threaded the filter
+  through, so the mart path now matches the contract and the live path.
+
 ## 4.335.0 - Logic-layer bug hunt: three scoring/measurement corrections (2026-08-29)
 
 Adversarial multi-agent hunt over the logic layer (`app/logic/*.py`) surfaced

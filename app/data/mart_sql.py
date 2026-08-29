@@ -14,7 +14,7 @@ from app.config import (
     core_object,
     mart_object,
 )
-from app.core.sqlsafe import sql_literal
+from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import (
     account_month_start_sql,
     ai_service_predicate,
@@ -297,13 +297,21 @@ ORDER BY DAY
 """
 
 
-def fact_task_daily(days: int, company: str = "ALL", database: str = "") -> str:
+def fact_task_daily(days: int, company: str = "ALL", database: str = "",
+                    schema_contains: str = "") -> str:
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
     where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     if str(database or "").strip():
         where.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
+    # Task Health must honor the Schema filter its section contract promises — the
+    # mart carries SCHEMA_NAME at task grain, so filter on it exactly as the live
+    # fallback (ops_sql.task_runs) does, or the two paths yield different failure
+    # counts for the same filter. contains_filter() returns '' when schema is off.
+    schema_clause = contains_filter("SCHEMA_NAME", schema_contains)
+    if schema_clause:
+        where.append(schema_clause)
     return f"""
 SELECT DAY, DATABASE_NAME, SCHEMA_NAME, TASK_NAME, COMPANY, RUNS, FAILED, AVG_SEC, LAST_STATE, LAST_ERROR
 FROM {mart_object("FACT_TASK_DAILY")}
