@@ -557,6 +557,19 @@ def test_product_retirement_no_reads_frame_all_insufficient():
     assert insights.product_retirement(pd.DataFrame(), pd.DataFrame(), 3.0).empty
 
 
+def test_product_retirement_product_absent_from_reads_is_insufficient_not_retire():
+    # The reads mart is non-empty but simply has no row for "Unmeasured".
+    # A left-merge miss must read as "we can't see its usage" (INSUFFICIENT_DATA),
+    # never as a measured zero that flags a costly product as RETIRE_CANDIDATE.
+    cost = _cost([("Unmeasured", 500.0), ("Measured", 500.0)])
+    reads = pd.DataFrame([{"DATA_PRODUCT": "Measured", "DISTINCT_CONSUMERS": 4,
+                           "RECENT_READS": 0, "PRIOR_READS": 80}])   # Measured: real zero -> RETIRE
+    out = insights.product_retirement(cost, reads, 3.0)
+    v = dict(zip(out["DATA_PRODUCT"], out["RETIREMENT_VERDICT"], strict=False))
+    assert v["Unmeasured"] == "INSUFFICIENT_DATA"   # merge-miss, not a measured zero
+    assert v["Measured"] == "RETIRE_CANDIDATE"      # present in reads, genuinely collapsed
+
+
 def test_product_retirement_cheap_declining_is_not_retire():
     # declining but BELOW the cost floor -> never a retire candidate (not worth it)
     cost = _cost([("Cheap", 1.0)])

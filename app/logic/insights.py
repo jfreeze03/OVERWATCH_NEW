@@ -353,11 +353,15 @@ def product_retirement(cost_df: pd.DataFrame, reads_df: pd.DataFrame,
     rate = max(safe_float(credit_rate_usd, 3.68), 0.0)
     reads = reads_df.copy() if (reads_df is not None and not reads_df.empty) else pd.DataFrame()
     reads_available = not reads.empty and "DATA_PRODUCT" in reads.columns
+    has_reads_row = pd.Series(False, index=out.index)
     if reads_available:
         keep_cols = ["DATA_PRODUCT", "DISTINCT_CONSUMERS", "TOTAL_READS", "RECENT_READS",
                      "PRIOR_READS", "LAST_READ"]
         out = out.merge(reads[[c for c in keep_cols if c in reads.columns]],
-                        on="DATA_PRODUCT", how="left")
+                        on="DATA_PRODUCT", how="left", indicator=True)
+        # capture join PRESENCE before safe_float zeroes the merge-miss NaNs: a
+        # product ABSENT from the reads mart has UNKNOWN usage, not a measured 0.
+        has_reads_row = out.pop("_merge") == "both"
     for col in ("MEASURED_OBJECT_CREDITS", "DISTINCT_CONSUMERS", "TOTAL_READS",
                 "RECENT_READS", "PRIOR_READS"):
         out[col] = out[col].map(safe_float) if col in out.columns else 0.0
@@ -382,11 +386,13 @@ def product_retirement(cost_df: pd.DataFrame, reads_df: pd.DataFrame,
     verdict = pd.Series("KEEP", index=out.index)
     verdict = verdict.mask(costly & declining, "REVIEW")
     verdict = verdict.mask(costly & (no_usage | collapsing), "RETIRE_CANDIDATE")
-    # INSUFFICIENT overrides: reads absent entirely, OR present-but-too-sparse to judge.
-    # A measured 0 (reads available, window_reads==0) is NOT insufficient — it is a real
-    # 'nobody touched it' signal and stays RETIRE_CANDIDATE.
+    # INSUFFICIENT overrides: the reads mart absent entirely, OR this product ABSENT
+    # from it (a merge miss — UNKNOWN usage, never retire on reads it never had; the
+    # 'missing measurement is not a measured 0' rule), OR present-but-too-sparse to
+    # judge. A measured 0 (product IS in the reads mart, window_reads==0) is NOT
+    # insufficient — it's a real 'nobody touched it' signal and stays RETIRE_CANDIDATE.
     if reads_available:
-        sparse = (window_reads > 0) & (window_reads < float(min_window_reads))
+        sparse = (~has_reads_row) | ((window_reads > 0) & (window_reads < float(min_window_reads)))
     else:
         sparse = pd.Series(True, index=out.index)
     verdict = verdict.mask(sparse, "INSUFFICIENT_DATA")

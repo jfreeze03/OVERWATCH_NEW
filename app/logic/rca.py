@@ -63,8 +63,8 @@ def _first(row, *cols: str) -> str:
 
 def _proximity(when: datetime | None, onset: datetime | None) -> float:
     """1.0 at onset, decaying the earlier the trigger; low for post-onset; 0 beyond the lead window."""
-    if when is None or onset is None:
-        return 0.3            # unknown timing — can't credit or discredit
+    if when is None or onset is None or when != when or onset != onset:
+        return 0.3            # unknown timing (None/NaT) — can't credit or discredit
     lead_h = (onset - when).total_seconds() / 3600.0
     if lead_h < 0:            # happened AFTER onset — a cause should precede the effect
         return _AFTER_ONSET_PROX
@@ -209,15 +209,19 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
         score = _W_PROX * prox + _W_MAG * mag + _W_MATCH * match
         band = "HIGH" if score >= _BAND_HIGH else ("MEDIUM" if score >= _BAND_MED else "LOW")
         when = c.get("when")
+        _timing_unknown = when is None or when != when   # None or NaN/NaT
         # Timing gates causation: a change outside the plausible trigger window (proximity 0),
-        # OR one that happened AFTER onset, cannot be a confident cause however big or
-        # on-entity it is — a cause must precede the effect. Cap those at LOW so a post-onset
-        # change can never headline as "most likely cause (high confidence)".
-        _after_onset = (when is not None and onset_dt is not None
+        # one that happened AFTER onset, OR one with NO timing at all cannot be a confident
+        # cause however big or on-entity it is — a cause must precede the effect, and an
+        # untimed candidate has no evidence it did. Cap those at LOW so neither a post-onset
+        # NOR an untimed change can headline as "most likely cause (high confidence)"
+        # (bug-hunt: an untimed candidate got proximity 0.3 and, with magnitude + entity
+        # match, crossed HIGH while its own reason read "timing unknown").
+        _after_onset = (not _timing_unknown and onset_dt is not None
                         and (onset_dt - when).total_seconds() < 0)
-        if prox <= 0.0 or _after_onset:
+        if prox <= 0.0 or _after_onset or _timing_unknown:
             band = "LOW"
-        if when is not None and onset_dt is not None:
+        if not _timing_unknown and onset_dt is not None:
             lead_h = (onset_dt - when).total_seconds() / 3600.0
             lead_text = (f"{lead_h:.1f}h before onset" if lead_h >= 0
                          else f"{-lead_h:.1f}h AFTER onset")

@@ -146,12 +146,16 @@ def escalation_flags(
     admin_bump: float = 25.0,
     self_escalate_bump: float = 40.0,
 ) -> pd.DataFrame:
-    """Sharpen the raw privilege RISK_SCORE into an escalation risk (Sec2).
+    """Sharpen object-privilege exposure into an escalation risk (Sec2).
 
-    ``RISK_SCORE`` counts *object* privileges (ownership, sensitive grants) but is
-    blind to admin-role membership, so a path that inherits ACCOUNTADMIN while
-    holding few listed object grants can score low despite being god-mode. Two
-    facts correct that:
+    The base is the OBJECT-privilege exposure (ownership + sensitive grants), which
+    is blind to admin-role membership and to the manage-grants surface — so a path
+    that inherits ACCOUNTADMIN, or holds MANAGE GRANTS, while holding few listed
+    object grants scores low on the base despite being god-mode. (The base is
+    recomputed here from the object components rather than reusing the RISK_SCORE
+    column, because RISK_SCORE ALSO weights MANAGE_GRANTS — reusing it would
+    double-count manage against the self-escalation bump below.) Two facts correct
+    the base:
       * ``REACHES_ADMIN`` — the path inherits an admin role, a standing exposure.
       * ``MANAGE_GRANTS`` — the effective role holds the MANAGE GRANTS privilege,
         which lets it grant *any* role (including admin) to anyone. That is the
@@ -173,7 +177,6 @@ def escalation_flags(
         df["SELF_ESCALATION"] = pd.Series(dtype=bool)
         df["ESCALATION_SCORE"] = pd.Series(dtype="int64")
         return df
-    risk = pd.to_numeric(df.get("RISK_SCORE"), errors="coerce").fillna(0.0)
     depth = pd.to_numeric(df.get("DEPTH"), errors="coerce").fillna(0.0).clip(lower=0.0)
     manage = pd.to_numeric(df.get("MANAGE_GRANTS"), errors="coerce").fillna(0.0)
     reaches_raw = df.get("REACHES_ADMIN")
@@ -183,8 +186,18 @@ def escalation_flags(
         else pd.Series(False, index=df.index)
     )
     self_escalation = manage > 0
+    # Object-privilege base EXCLUDING manage grants — the self-escalation bump below
+    # weights manage, and effective_access's RISK_SCORE column ALREADY weights it
+    # (MANAGE_GRANTS*25), so summing RISK_SCORE with the bump double-counted manage
+    # (bug-hunt 2026-08-29; the docstring's "RISK_SCORE is blind to MANAGE_GRANTS" was
+    # wrong). Recompute the base from the object components so manage counts once.
+    # NOTE: mirrors the ownership*10 + sensitive*20 weights in security_sql.effective_access.
+    _zero = pd.Series(0.0, index=df.index)   # absent-column safe (docstring contract)
+    ownership = pd.to_numeric(df.get("OWNERSHIP_GRANTS", _zero), errors="coerce").fillna(0.0)
+    sensitive = pd.to_numeric(df.get("SENSITIVE_PRIVILEGES", _zero), errors="coerce").fillna(0.0)
+    object_risk = (ownership * 10.0 + sensitive * 20.0).clip(upper=100.0)
     score = (
-        risk
+        object_risk
         + depth * float(depth_weight)
         + reaches.astype(float) * float(admin_bump)
         + self_escalation.astype(float) * float(self_escalate_bump)

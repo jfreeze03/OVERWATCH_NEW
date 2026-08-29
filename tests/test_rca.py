@@ -44,6 +44,19 @@ def test_a_change_after_onset_is_weak_evidence_of_cause():
     assert "AFTER onset" in next(h for h in ranked if h["title"] == "after")["lead_text"]
 
 
+def test_untimed_candidate_cannot_headline_high_confidence():
+    # A magnitude-1.0, on-entity candidate with no timestamp (when=None) has no
+    # timing evidence at all — it must be capped to LOW, never presented as a
+    # high-confidence lead whose own reason reads "timing unknown".
+    untimed = _cand(title="untimed", when=None, entity="WH_A", magnitude=1.0)
+    ranked = rank_root_causes([untimed], _ONSET, entity_name="WH_A")
+    assert ranked[0]["band"] == "LOW"
+    # pd.NaT (a real merge/parse miss) must behave identically and stay finite.
+    nat = _cand(title="nat", when=pd.NaT, entity="WH_A", magnitude=1.0)
+    r2 = rank_root_causes([nat], _ONSET, entity_name="WH_A")
+    assert r2[0]["band"] == "LOW" and r2[0]["score"] == r2[0]["score"]  # not NaN
+
+
 def test_beyond_the_lead_window_is_not_a_candidate_trigger():
     stale = _cand(when=_ONSET - timedelta(hours=60), magnitude=1.0, entity="WH_A")
     ranked = rank_root_causes([stale], _ONSET, entity_name="WH_A")

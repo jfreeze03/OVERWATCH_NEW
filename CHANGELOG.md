@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.335.0 - Logic-layer bug hunt: three scoring/measurement corrections (2026-08-29)
+
+Adversarial multi-agent hunt over the logic layer (`app/logic/*.py`) surfaced
+three confirmed correctness bugs, each now fixed and locked with a test:
+
+* **Privilege-escalation score double-counted MANAGE grants.** `escalation_flags`
+  seeded its base from `RISK_SCORE`, but that SQL score already weights
+  `MANAGE_GRANTS` (`OWNERSHIP*10 + MANAGE_GRANTS*25 + SENSITIVE*20`); adding the
+  self-escalation bump on top counted manage privilege twice, so a manage-only
+  principal scored 65 instead of 40. The base is now rebuilt from object-privilege
+  exposure (ownership + sensitive) alone, with depth/reach/self-escalation added
+  once. `RISK_SCORE` is unchanged where it's displayed standalone.
+* **Root-cause analysis could headline an *untimed* candidate as high-confidence.**
+  A candidate with no timestamp (`when=None`/`NaT`) was given a neutral proximity
+  of 0.3, which let it escape the LOW cap and present as the "most likely cause
+  (high confidence)" while its own reason read "timing unknown". Untimed
+  candidates are now capped to LOW.
+* **Product-retirement flagged products it couldn't actually see.** A left-merge
+  miss against the reads mart turned into `fillna(0)`, indistinguishable from a
+  measured zero, so a costly product simply *absent* from the reads data was
+  flagged `RETIRE_CANDIDATE`. Merge-misses now route to `INSUFFICIENT_DATA`;
+  only products present in the reads mart with genuinely collapsed usage retire.
+
 ## 4.334.0 - Nav order + reconciliation-footer font fix (2026-08-29)
 
 * **Ask OVERWATCH moved below Govern** in the sidebar nav order (was the top group).

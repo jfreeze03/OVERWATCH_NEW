@@ -159,11 +159,15 @@ def test_effective_access_exposes_admin_reach() -> None:
 
 
 def test_escalation_flags_scores_self_escalation_paths() -> None:
+    # The base is the OBJECT-privilege exposure (ownership*10 + sensitive*20), NOT the
+    # RISK_SCORE column — RISK_SCORE also weights manage grants, so reusing it would
+    # double-count manage against the self-escalation bump (bug-hunt 2026-08-29).
     frame = pd.DataFrame(
         {
             "USER_NAME": ["A", "A", "B", "C"],
-            "RISK_SCORE": [50, 30, 10, 0],
-            "DEPTH": [3, 1, 0, 2],
+            "OWNERSHIP_GRANTS": [3, 0, 1, 0],
+            "SENSITIVE_PRIVILEGES": [0, 1, 0, 0],
+            "DEPTH": [3, 1, 0, 0],
             "MANAGE_GRANTS": [2, 0, 0, 1],
             "REACHES_ADMIN": [True, True, False, False],
         }
@@ -178,10 +182,14 @@ def test_escalation_flags_scores_self_escalation_paths() -> None:
     # admin -> flagged. (The bug this replaces AND-ed the two facts row-wise and
     # would have missed this genuine escalation surface.)
     assert bool(scored.loc[3, "SELF_ESCALATION"]) is True
-    # Depth + admin + self-escalate bumps lift the score but stay clipped to 100.
-    assert 0 <= int(scored.loc[0, "ESCALATION_SCORE"]) <= 100
+    # Row 0: object 30 + depth 12 + admin 25 + self-escalate 40 = 107 -> clipped 100.
     assert int(scored.loc[0, "ESCALATION_SCORE"]) == 100
     assert int(scored.loc[0, "ESCALATION_SCORE"]) > int(scored.loc[1, "ESCALATION_SCORE"])
+    # Double-count guard (bug-hunt): row 3 is a pure MANAGE-GRANTS-only path (no
+    # object privileges, no depth, no admin reach) -> exactly the +40 self-escalation
+    # bump, NOT 40 + a second manage weight. Was 65 when RISK_SCORE (which weights
+    # MANAGE_GRANTS*25) was summed with the bump.
+    assert int(scored.loc[3, "ESCALATION_SCORE"]) == 40
     # A pathless frame returns the columns without raising.
     empty = escalation_flags(pd.DataFrame())
     for col in ("REACHES_ADMIN", "SELF_ESCALATION", "ESCALATION_SCORE"):
@@ -412,7 +420,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.334.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.335.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
