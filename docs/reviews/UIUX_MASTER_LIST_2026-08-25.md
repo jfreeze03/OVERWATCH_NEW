@@ -231,15 +231,22 @@ cross-cutting risk.
   "Browse the catalog"; Experiments empty → create one). `app/ui/pages/workbench.py:287`
 - [ ] **F5 · P2/M · Unify the selected/active visual grammar** across nav / section pills /
   status cards (three different "active" languages today). `app/theme.py:166-264`
-- [ ] **F17 · P2/S · Equalize KPI card heights in a row** (full-height flex so a row with
+- [x] **F17 · P2/S · Equalize KPI card heights in a row** (full-height flex so a row with
   one sparkline doesn't bottom-align raggedly). `app/ui/components.py:335`
+  — v4.320.0: min-height floor on `.ow-card`. Adversarial review proved the
+  full-height flex approach INERT (height:100% dies against Streamlit's
+  auto-height markdown wrappers); a min-height floor is robust + render-verifiable.
 - [ ] **F59 · P2/S · One optimistic star affordance for Watch everywhere** (button in
   Entity 360, raw boolean column on boards, Brief badge — three languages today).
   `app/ui/pages/workbench.py:610`
 - [ ] **F60 · P3/S · Unify the three confidence encodings** across the decision
   workbenches (chips+caption vs ProgressColumn vs absent). `app/ui/pages/workbench.py:114`
-- [ ] **F24 · P2/S · Explicit disabled treatment for gated actions** (a type-to-confirm
+- [x] **F24 · P2/S · Explicit disabled treatment for gated actions** (a type-to-confirm
   Execute doesn't visibly read as locked). `app/theme.py:230-244`
+  — v4.320.0: 0.55 opacity + dashed ink-mute edge + no hover lift + not-allowed
+  cursor (on the `.stButton` wrapper, since a disabled `<button>` isn't a pointer
+  target). Review caught a disabled-primary gradient-override bug (excluded
+  `:disabled` from primary) and the wrapper-cursor issue pre-ship.
 - [ ] **F19-icon (F20/F23) · P3/S · Icon-weight-by-size + one chip shape language**
   (rectangular trust-chips vs pill everything-else). `app/ui/icons.py:47`; `app/theme.py:80`
 
