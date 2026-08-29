@@ -141,14 +141,14 @@ cross-cutting risk.
   a `nonadditive=True` flag suppresses it on lens tables. `app/ui/components.py`
 - [ ] **F29 · P2/M · Magnitude-aware $ precision.** Cents only below ~$100, whole dollars
   to ~$10k, `k`/`M` above; CSV keeps raw, credits stay exact. `app/ui/components.py:1296`
-- [ ] **F32 · P2/S · Mute true-zero cells** so non-zero values carry the eye on sparse
+- [x] **F32 · P2/S · Mute true-zero cells** so non-zero values carry the eye on sparse
   operational tables (the table equivalent of the `—` NULL treatment). `app/ui/components.py:1473-1484`
-- [ ] **F33 · P2/M · Column-width intent by name convention** (id/status→small,
+- [x] **F33 · P2/M · Column-width intent by name convention** (id/status→small,
   preview→large, numerics→small) so wide tables stop laying out raggedly. `app/ui/components.py:1520-1547`
-- [ ] **F35 · P3/S · Keep the order/window provenance on small ranked tables** (the
+- [x] **F35 · P3/S · Keep the order/window provenance on small ranked tables** (the
   "by $ desc · last 30d" line is gated behind >10 rows; a 6-row movers table drops it).
   `app/ui/components.py:1634-1640`
-- [ ] **F36 · P3/S · State the CSV-is-raw contract** by the download button. `app/ui/components.py:1600-1628`
+- [x] **F36 · P3/S · State the CSV-is-raw contract** by the download button. `app/ui/components.py:1600-1628`
 
 ### Charts — one visual grammar
 - [ ] **C40 · P1/M · DAG minimap + fit-to-selection.** Corner viewport overview + a
@@ -262,7 +262,7 @@ cross-cutting risk.
 - [x] **C19 · P1/L · Operator vs Audit presentation modes** stored as a profile pref (the
   density-toggle precedent). Cost is the *breadth* of gating every `result_caption`/
   methodology/formula block, not the plumbing.
-- [ ] **C3 · P1/M · Finish the command palette** — fold the separate Investigate ID-lookup
+- [x] **C3 · P1/M · Finish the command palette** — fold the separate Investigate ID-lookup
   into the unified "Jump to" box as a mode, drop the extra Open button (enter-to-go), add a
   recents list. (The cross-page destination search already ships.) `app/main.py:272-372`
 - [ ] **C10 · P1/M · "Copy scoped link"** — reuse the existing page/section/filters

@@ -1680,6 +1680,47 @@ def _rank_bar_column(df, sort_label: str, skip: set) -> str | None:
     return None
 
 
+# F36: the CSV is the RAW source, not a copy of the on-screen display — state
+# it by the download button so nobody reconciles a rounded on-screen figure
+# against the exact CSV and reports a "mismatch".
+_CSV_RAW_HELP = ("Raw values — unformatted numbers, account-time timestamps, and any "
+                 "hidden columns; the CSV is the source, not the on-screen display.")
+
+
+def _mute_zero_css(v) -> str:
+    """F32: a true-zero numeric cell is present-but-quiet (muted grey) so the
+    non-zero values carry the eye on a sparse operational table — the table
+    equivalent of the em-dash NULL treatment, applied to 0.
+
+    Review fix: a LITERAL hex, not a CSS var — st.dataframe paints cells on a
+    canvas that can't resolve `var(--ow-ink-mute)` (only inline HTML does), so
+    every Styler color path uses palette.* hex the same way (status_css/delta_css)."""
+    try:
+        return f"color:{palette.INK_MUTE}" if float(v) == 0 else ""
+    except (TypeError, ValueError):  # non-numeric / NA / NaN -> no mute (NaN is already "—")
+        return ""
+
+
+def _width_for_column(col) -> str | None:
+    """F33: column-width intent by NAME convention so wide tables stop laying
+    out raggedly — identity / status / short-ratio columns stay small, free-text
+    columns (detail, title, note, sample) get room. None = Streamlit's default."""
+    c = str(col).upper()
+    # review fix: NOT *_ID -> small — Snowflake QUERY_ID/SESSION_ID are ~36-char
+    # UUIDs deliberately surfaced as the drill target; "small" would ellipsis-
+    # truncate the exact id the operator needs to read/copy. Short numeric ids
+    # auto-size fine with no hint.
+    if c in ("#", "AGE", "STATUS", "SEVERITY", "KIND", "STATE", "COMPANY") \
+            or c.endswith(("_PCT", "_SHARE", "STATUS")):
+        return "small"
+    if c in ("DETAIL", "TITLE", "NOTE", "SAMPLE", "HYPOTHESIS", "MESSAGE", "REASON",
+             "SUMMARY", "RESULT_NOTE") \
+            or c.endswith(("_DETAIL", "_NOTE", "_TITLE", "_REASON", "_MESSAGE")) \
+            or "DESCRIPTION" in c or "PREVIEW" in c:
+        return "large"
+    return None
+
+
 def _render_table(df, *, height: int | None, column_config: dict | None,
                   key: str | None = None, selectable: bool = False,
                   slug: str | None = None, days: int | None = None,
@@ -1769,6 +1810,18 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             for col in df.columns:
                 if is_delta_column(col):
                     styler = styler.map(lambda v: delta_css(v), subset=[col])
+            # F32: mute true-ZERO numeric cells so non-zero values carry the eye
+            # on a sparse table. Skip status/delta columns (they own their color)
+            # and the progress-bar column (its magnitude IS the signal).
+            from pandas.api import types as _ptypes
+            _mute_skip = set(status_columns_in(list(df.columns)))
+            _mute_skip |= {c for c in df.columns if is_delta_column(c)}
+            if _bar_col is not None:
+                _mute_skip.add(_bar_col)
+            for col in df.columns:
+                if col in _mute_skip or not _ptypes.is_numeric_dtype(df[col]):
+                    continue
+                styler = styler.map(_mute_zero_css, subset=[col])
             if fmts:
                 styler = styler.format(fmts, na_rep="—")  # rec27: one no-value glyph (em-dash)
             data = styler
@@ -1837,13 +1890,18 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         _pretty = _prettify_header(_col)
         _label = _pretty if _pretty != str(_col) else None
         _help = COLUMN_HELP.get(str(_col).upper())   # rec32: which-dollar-is-this on the header
-        if _label is None and _col != _pin_col and not _help:
+        _w = _width_for_column(_col)                 # F33: width intent by name convention
+        if _label is None and _col != _pin_col and not _help and not _w:
             continue
         try:
-            _cfg[_col] = st.column_config.Column(_label, pinned=True, help=_help) if _col == _pin_col \
-                else st.column_config.Column(_label, help=_help)
-        except TypeError:  # runtime predates pinned= : keep the relabel + help, drop the pin
-            _cfg[_col] = st.column_config.Column(_label, help=_help)
+            _cfg[_col] = st.column_config.Column(_label, pinned=True, help=_help, width=_w) \
+                if _col == _pin_col \
+                else st.column_config.Column(_label, help=_help, width=_w)
+        except TypeError:  # runtime predates pinned= / width= : keep the relabel + help
+            try:
+                _cfg[_col] = st.column_config.Column(_label, help=_help, width=_w)
+            except TypeError:
+                _cfg[_col] = st.column_config.Column(_label, help=_help)
         except Exception:  # noqa: BLE001 - relabel/pin/help is cosmetic, never break the table
             pass
     column_config = _cfg or None
@@ -1904,7 +1962,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                                    file_name=_export_filename(seq, slug), mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                    on_click="ignore",
-                                   help="Download this table as CSV (account time).")
+                                   help=_CSV_RAW_HELP)
             else:
                 # r13 #19 + r19 #19: big frames build their CSV ONCE at prep
                 # (bytes stored, not a boolean that reserialized every rerun)
@@ -1923,9 +1981,9 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     st.download_button("⬇ CSV ready", bytes(_slot["bytes"]),
                                        file_name=_export_filename(seq, slug), mime="text/csv",
                                        key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
-                                       on_click="ignore")
+                                       on_click="ignore", help=_CSV_RAW_HELP)
                 elif st.button("⬇ CSV", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
-                               help=f"Prepare {len(df):,} rows as CSV (account time)."):
+                               help=f"Prepare {len(df):,} rows as CSV. {_CSV_RAW_HELP}"):
                     st.session_state["_ow_dlprep"] = {
                         "fp": _fp, "bytes": df.to_csv(index=False).encode("utf-8")}
                     st.rerun()
@@ -1933,14 +1991,17 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         pass
     # rec31: declare size only on tables that SCROLL (>10 rows -> height-capped, so
     # the total is not visible on screen). Fully-visible small tables need no
-    # caption, and a caller that prints its own count passes size_note=False.
+    # count caption, and a caller that prints its own count passes size_note=False.
+    _prov = f"by {sort_label}" if sort_label else ""   # rec30: order provenance
+    if isinstance(days, int) and days > 0:
+        _prov += (" · " if _prov else "") + f"last {days}d"
     if size_note and len(df) > 10:
-        _cap = f"{len(df):,} rows"
-        if sort_label:                       # rec30: never make a reader guess if a list is ranked
-            _cap += f" · by {sort_label}"
-        if isinstance(days, int) and days > 0:
-            _cap += f" · last {days}d"
-        st.caption(_cap)
+        st.caption(f"{len(df):,} rows" + (f" · {_prov}" if _prov else ""))
+    elif size_note and _prov and len(df) >= 4:
+        # F35: a SMALL ranked/windowed table keeps its order/window provenance —
+        # the "N rows" part is redundant when the whole table is on screen, but
+        # "by $ desc · last 30d" is the context a 6-row movers list would drop.
+        st.caption(_prov)
     return selected
 
 
@@ -2103,6 +2164,10 @@ def decision_rows(
     selection = selectable_table(
         view, key=key, height=height, column_config=config,
         sort_label=sort_label,
+        # F35 review fix: decision boards always carry a sort_label and their
+        # callers already state the ordering basis in an adjacent caption, so
+        # suppress the auto provenance/size caption here to avoid saying it twice.
+        size_note=False,
     )
     if on_select is not None and selection is not None:
         seen_key = f"_ow_decision_{key}"

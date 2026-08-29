@@ -76,10 +76,11 @@ def test_rec13_prettify_header():
     assert _prettify_header("SPILL_REMOTE_GB") == "Spill Remote"
     assert _prettify_header("HIT_PCT") == "Hit (%)"
     comp = _src("app/ui/components.py")
-    assert "st.column_config.Column(_label, help=_help)" in comp          # relabel-only path (+ rec32 help)
+    # F33 (v4.317) added width=_w (name-convention width intent) to the same Column.
+    assert "st.column_config.Column(_label, help=_help, width=_w)" in comp   # relabel-only path
     # r5-bug: the pin and the pretty label go into the SAME Column so a wide table's
     # first column keeps both (the old code let the prettifier defeat _auto_pin).
-    assert "st.column_config.Column(_label, pinned=True, help=_help)" in comp
+    assert "st.column_config.Column(_label, pinned=True, help=_help, width=_w)" in comp
     assert "def _auto_pin" not in comp                                    # inlined away
 
 

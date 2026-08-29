@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.317.0 - UI/UX Wave 2: table-layer polish (F32/F33/F35/F36) (2026-08-28)
+
+Four low-risk refinements at the shared table layer (`_render_table`):
+
+* **F32** true-zero numeric cells are muted (present-but-quiet grey) so the
+  non-zero values carry the eye on a sparse operational table — the em-dash
+  NULL treatment, applied to 0. Skips status/delta columns (they own their
+  color) and the progress-bar column.
+* **F33** column width by name convention — status / severity / short-ratio
+  columns stay small, free-text columns (detail, title, note, sample) get
+  room — so wide tables stop laying out raggedly.
+* **F35** small (4-10 row) ranked tables keep their order/window provenance
+  ("by $ desc · last 30d") — the row count is dropped (redundant on screen),
+  the ordering context is not.
+* **F36** every download button states the CSV-is-raw contract, so nobody
+  reconciles a rounded on-screen figure against the exact CSV.
+
+Adversarial review confirmed 3 findings, all fixed pre-commit:
+
+* **MED** F32 was a SILENT no-op — st.dataframe paints cells on a canvas that
+  can't resolve `var(--ow-ink-mute)`; every Styler color path uses a literal
+  hex. Now returns `palette.INK_MUTE` (the same idiom as status/delta color).
+* **MED** F33 mapped `*_ID` to small, which ellipsis-truncated the 36-char
+  Snowflake QUERY_ID / SESSION_ID that are the deliberate drill targets (and
+  the pinned lead column on the heaviest-queries table). Dropped `_ID` from
+  the small rule — short numeric ids auto-size fine.
+* **LOW** F35 printed the ordering basis twice on decision boards (they carry
+  their own adjacent caption) — `decision_rows` now suppresses the auto caption.
+
 ## 4.316.0 - UI/UX Wave 2: desktop master-detail for Alerts (C42) (2026-08-28)
 
 The alert triage surface joins the master-detail layout: the open-events feed
