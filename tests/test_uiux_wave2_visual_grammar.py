@@ -65,6 +65,13 @@ def test_f24_primary_gradient_is_excluded_when_disabled():
     # the un-suffixed primary selector must no longer directly precede the
     # gradient declaration (that was the bug).
     assert '.stButton > button[kind="primary"],\n.stButton' not in _THEME
+    # bughunt r1: the primary TEXT-INK rule must ALSO exclude :disabled, else a
+    # disabled primary keeps dark ink after its accent gradient was removed above
+    # -> dark-ink-on-dark-disabled-surface, illegible. Both rules gate on :disabled.
+    assert '.stButton > button[kind="primary"]:not(:disabled) p' in _THEME
+    assert 'button[data-testid="stBaseButton-primary"]:not(:disabled) span' in _THEME
+    # the un-guarded primary p/span ink rule must be gone
+    assert '.stButton > button[kind="primary"] p,' not in _THEME
 
 
 def test_f17_kpi_cards_equalize_via_min_height_floor():

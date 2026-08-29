@@ -353,9 +353,13 @@ button[data-testid="baseButton-primary"]:not(:disabled) {
   color:#0f172a !important; border:none !important; }
 /* SiS builds vary the button markup; force dark ink on every descendant so
    an accent pill can never render pale-on-pale (live finding 2026-07-10:
-   the '2 open critical(s)' chip and Execute bulk RESOLVE were unreadable). */
-.stButton > button[kind="primary"] p, .stButton > button[kind="primary"] span,
-button[data-testid="stBaseButton-primary"] p, button[data-testid="stBaseButton-primary"] span {
+   the '2 open critical(s)' chip and Execute bulk RESOLVE were unreadable).
+   :not(:disabled) so a DISABLED primary's label doesn't keep dark ink after the
+   accent gradient it sat on was removed (F24) — that left dark-on-dark. It now
+   inherits the F24 locked treatment's faded light ink, like a disabled secondary. */
+.stButton > button[kind="primary"]:not(:disabled) p, .stButton > button[kind="primary"]:not(:disabled) span,
+button[data-testid="stBaseButton-primary"]:not(:disabled) p,
+button[data-testid="stBaseButton-primary"]:not(:disabled) span {
   color:#0f172a !important; }
 
 button[data-baseweb="tab"] { font-weight:640; }

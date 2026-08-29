@@ -244,13 +244,6 @@ def test_charts_at_density():
         days = pd.DataFrame({"DAY": pd.date_range("2025-07-07", periods=365, freq="D"),
                              "USD": [100.0 + i for i in range(365)]})
         charts.spend_trend(days, daily_budget_usd=250.0)
-        ev = pd.DataFrame({
-            "AT": pd.date_range("2026-07-01", periods=2000, freq="4min"),
-            "EVENT_TYPE": ["ALERT" if i % 2 else "DDL" for i in range(2000)],
-            "SEVERITY": ["HIGH" if i % 3 else "INFO" for i in range(2000)],
-            "LABEL": [f"e{i}" for i in range(2000)],
-        })
-        charts.event_timeline(ev)
         hm = pd.DataFrame({
             "ROW": [f"WH_{i % 45}" for i in range(45 * 24)],
             "HOUR": [i % 24 for i in range(45 * 24)],
@@ -261,7 +254,7 @@ def test_charts_at_density():
     started = time.perf_counter()
     at = AppTest.from_function(_app, default_timeout=120)
     at.run()
-    _clock("charts: 365d trend + 2k timeline + heatmap cap", started)
+    _clock("charts: 365d trend + heatmap cap", started)
     assert not at.exception
 
 

@@ -1,6 +1,16 @@
 # Changelog
 
-## 4.329.0 - Dead-code cleanup (2026-08-29)
+## 4.330.0 - Bug hunt round 1 fixes (2026-08-29)
+
+* **Disabled primary buttons were illegible.** The F24 change gated the primary
+  button's accent-gradient BACKGROUND on `:not(:disabled)` but left the companion
+  dark-ink (`#0f172a`) TEXT rule ungated — so a disabled primary kept near-black ink
+  after its bright background was removed, rendering dark-on-dark. The ink rule now
+  carries the same `:not(:disabled)` guard, so a disabled primary inherits the F24
+  locked treatment's faded light ink like a disabled secondary. Hit the common
+  default-state gated controls (Save-with-nothing-dirty, type-to-confirm Execute).
+* Removed a dangling `charts.event_timeline` call left in the (skipped-by-default)
+  `test_stress.py` after that function was deleted in the dead-code cleanup.
 
 * Removed eight functions with zero callers, verified individually by grep and by a
   green suite + clean lint after removal: `charts.waterfall_usd` (deliberately cut
