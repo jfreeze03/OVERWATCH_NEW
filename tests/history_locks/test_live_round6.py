@@ -187,5 +187,8 @@ def test_primary_buttons_force_dark_ink_across_markups():
     theme = (_ROOT / "app" / "theme.py").read_text(encoding="utf-8")
     assert 'button[data-testid="stBaseButton-primary"]' in theme
     assert "color:#0f172a !important" in theme
-    seg = theme.split('.stButton > button[kind="primary"],', 1)[1][:900]
+    # anchor on the primary selector root (the block now carries a :not(:disabled)
+    # guard so a disabled primary falls through to the F24 locked treatment — the
+    # descendant dark-ink rule still follows downstream).
+    seg = theme.split('[kind="primary"]', 1)[1][:900]
     assert "span" in seg and "p," in seg               # descendants forced too

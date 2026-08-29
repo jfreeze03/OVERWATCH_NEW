@@ -107,6 +107,19 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   retry re-executes). Keys scope by action/target wherever a fixed key would
   swallow a genuinely distinct action; fragment surfaces (where the run seq
   freezes) use scoped keys, and idempotent emergency actions short backstops.
+- **Interactive-control visual grammar (F14/F24/F17, `theme.py`):** one
+  keyboard-focus ring on every control (`:focus-visible` outline across buttons,
+  selects, radios, inputs — F14); one locked-action treatment (F24) so a disabled
+  control reads as locked, not unresponsive — 0.55 opacity, dashed ink-mute edge,
+  no hover lift, and a `not-allowed` cursor set on the `.stButton` *wrapper*
+  (a disabled `<button>` isn't a pointer target, so a cursor on it is ignored)
+  WITHOUT `pointer-events:none` (which would kill the `help=` "why it's locked"
+  tooltip); `:disabled` is excluded from the primary-button gradient so a disabled
+  primary falls through to the locked look instead of reading as bright-but-faded.
+  KPI cards (`.ow-card`) carry a min-height floor (F17) so a row stays even when
+  one card has a sparkline — a flex-through-the-column stretch was tried and
+  proven inert (`height:100%` dies against Streamlit's auto-height markdown
+  wrappers), so the robust floor was adopted instead.
 
 ## Cost formula contract
 

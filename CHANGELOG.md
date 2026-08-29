@@ -1,6 +1,26 @@
 # Changelog
 
-## 4.319.0 - UI/UX Wave 2: header orientation (F9 + F6) (2026-08-28)
+## 4.320.0 - UI/UX Wave 2: visual grammar — locked actions + even KPI rows (F24 + F17) (2026-08-28)
+
+* **F24** a gated action now READS as locked. A disabled control (a type-to-confirm
+  Execute whose text doesn't match yet, or a dirty-check Save with nothing to save)
+  dims to 0.55, takes a dashed ink-mute edge, drops its hover lift, and shows a
+  not-allowed cursor — instead of looking like a live button that just ignores the
+  click. Adversarial review caught two real bugs pre-ship: (1) a **disabled primary**
+  button kept its full-saturation accent gradient (the primary rule's `border:none`
+  + gradient beat F24 on source order at equal specificity), so it read as bright-
+  but-faded — fixed by excluding `:disabled` from the primary styling so it falls
+  through to the locked treatment; (2) `cursor:not-allowed` set on the disabled
+  `<button>` is ignored by browsers (a disabled control isn't a pointer target), so
+  it now also sits on the `.stButton` wrapper — deliberately WITHOUT
+  `pointer-events:none`, which would have suppressed the `help=` tooltip that
+  explains why the control is locked.
+* **F17** KPI cards in a row no longer read bottom-ragged when one card carries a
+  sparkline or extra delta line and its siblings don't — the card now has a
+  min-height floor. (The first attempt used a flex-through-the-column stretch;
+  adversarial review proved it INERT — `height:100%` resolves against Streamlit's
+  auto-height markdown wrappers and does nothing — and a min-height floor was
+  adopted as the robust, render-verifiable alternative.)
 
 * **F9** a "Group ▸ Page ▸ Section" breadcrumb kicker above the page title, so a
   deep-link landing (from the palette or a cross-page drill) says where it is

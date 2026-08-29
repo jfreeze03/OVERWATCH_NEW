@@ -79,9 +79,19 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 /* C22: no hover elevation on KPI/status cards — none of them is clickable, and
    hover motion falsely implies it. Interactive surfaces (buttons, rows, pills)
    keep their own hover states; a card that BECOMES a button earns hover back. */
+/* F17: a min-height FLOOR so a KPI row doesn't read bottom-ragged when one card
+   carries a sparkline/extra delta line and its siblings don't. Streamlit columns
+   already stretch to equal height, but the card sits top-aligned inside its
+   stretched column and height:100% can't reach it — the intermediate stMarkdown
+   wrappers are auto-height, so a percentage height resolves to auto (inert). A
+   flex-through-the-wrappers chain WOULD stretch it but is unverifiable headless
+   and silently no-ops if any SiS wrapper testid changes; a min-height floor is
+   robust and evens the common label+value+delta(+meta) rows. It only lifts short
+   cards — a genuinely tall card (sparkline + several meta lines) still exceeds it
+   and never clips (no overflow:hidden; the ::before stripe is top:0/bottom:0). */
 .ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
   border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
-  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); }
+  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); min-height:96px; box-sizing:border-box; }
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
@@ -263,6 +273,28 @@ div[role="radiogroup"][aria-label="Section"] label:has(input:checked) {
 .stButton > button { border-radius:var(--ow-r-sm); border:1px solid var(--ow-hairline2); font-weight:620;
   transition:transform var(--ow-ease),box-shadow var(--ow-ease),border-color var(--ow-ease); }
 .stButton > button:hover { border-color:var(--ow-accent); box-shadow:0 6px 18px -10px rgba(96,165,250,0.52); }
+/* F24: a gated action (a type-to-confirm Execute awaiting its match, or a
+   dirty-check Save with nothing to save) must READ as locked — muted, a dashed
+   edge, not-allowed cursor, no hover lift — so its inertness is obvious rather
+   than looking like a live button that just doesn't respond. */
+.stButton > button:disabled, .stButton > button[disabled],
+.stDownloadButton > button:disabled {
+  opacity:0.55 !important; border-style:dashed !important; border-color:var(--ow-ink-mute) !important;
+  box-shadow:none !important; cursor:not-allowed !important; }
+/* The not-allowed cursor must ALSO sit on the enabled wrapper: a disabled
+   <button> is not a pointer-event target, so a cursor set only on it is ignored
+   and the arrow shows instead. The wrapper receives the hover and the button
+   inherits its cursor. We deliberately do NOT set pointer-events:none on the
+   button — that would suppress the help= tooltip that explains WHY it's locked.
+   border-color is ink-mute (not the 0.28-alpha hairline) so the dashed edge is
+   still legible after the 0.55 element fade. :has() is used elsewhere here. */
+.stButton:has(> button:disabled), .stButton:has(> button[disabled]),
+.stDownloadButton:has(> button:disabled) { cursor:not-allowed; }
+.stButton > button:disabled:hover, .stButton > button[disabled]:hover {
+  border-color:var(--ow-ink-mute) !important; box-shadow:none !important; transform:none !important; }
+/* F17 lives on the base .ow-card rule below (min-height). See the note there for
+   why a min-height floor, not a flex-through-the-column stretch, equalizes the
+   KPI row. */
 /* F14 (a11y): ONE keyboard-focus grammar on every interactive control. Before
    this, only the section pill-group and the help badge had a focus rule — a Tab
    user lost the indicator on Execute buttons, nav radios, and every scope
@@ -278,10 +310,14 @@ div[role="radiogroup"] label:has(input:focus-visible),
 section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:focus-visible),
 .stCheckbox label:has(input:focus-visible), .stToggle label:has(input:focus-visible) {
   outline:2px solid var(--ow-accent); outline-offset:2px; }
-.stButton > button[kind="primary"],
-.stButton > button[data-testid="stBaseButton-primary"],
-button[data-testid="stBaseButton-primary"],
-button[data-testid="baseButton-primary"] {
+/* :not(:disabled) so a DISABLED primary button drops the bright accent
+   gradient + border:none and falls through to the F24 locked treatment below
+   (base 1px border flipped to dashed) — otherwise it reads as a live accent
+   button merely faded to 0.55, the exact thing F24 exists to prevent. */
+.stButton > button[kind="primary"]:not(:disabled),
+.stButton > button[data-testid="stBaseButton-primary"]:not(:disabled),
+button[data-testid="stBaseButton-primary"]:not(:disabled),
+button[data-testid="baseButton-primary"]:not(:disabled) {
   background:linear-gradient(180deg,var(--ow-accent2),var(--ow-accent)) !important;
   color:#0f172a !important; border:none !important; }
 /* SiS builds vary the button markup; force dark ink on every descendant so
