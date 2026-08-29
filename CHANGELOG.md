@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.342.0 - Round-5 UI-layer bug hunt: 2 help-text corrections (2026-08-29)
+
+Fifth hunt over `app/ui/*` with seven not-yet-run lenses (exhaustive per-builder
+charts, C25 empty-honesty, help-vs-computation, boundary/thresholds, column-config,
+account-time, cross-file drift). Five came back clean; the only two survivors were
+help strings that misdescribed a correct computation:
+
+* **[low] Incident "Reopen rate" help claimed a 14-day owner-set window the metric
+  never applies.** `incident_metrics(90).REOPEN_PCT` counts any resolved incident in
+  the 90-day window later reopened via `REOPENED_FROM`, with no 14-day bound
+  (`INCIDENT_REOPEN_DAYS` is dead config). The help now describes the actual basis.
+* **[low] Overview "Pace vs budget calendar" help formula was off by one day.** The
+  card correctly shows expected-to-date over *completed* days (today excluded, since
+  metering lags), but the help wrote the formula as `… x day_of_month`, one day
+  higher. The help now says `x completed days — today excluded`.
+
+Both are documentation-only (the displayed numbers were correct). After five rounds
+the UI layer's numeric/visual correctness is well-swept — this round found no wrong
+number, crash, or broken visual, only two captions.
+
 ## 4.341.0 - Round-4 UI-layer bug hunt: 3 fixes (regression audit clean) (2026-08-29)
 
 Fourth adversarial hunt over `app/ui/*`, including a regression self-audit of this

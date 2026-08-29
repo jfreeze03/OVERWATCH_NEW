@@ -680,7 +680,8 @@ def render() -> None:
             "method": "billed", "scope": "account-wide",
             "as_of": _ov_asof_meter,
             "help": "Signed variance of MTD billed spend vs the budget's own straight-line "
-                    "expected-to-date (MONTHLY_BUDGET_USD / days_in_month x day_of_month). "
+                    "expected-to-date (MONTHLY_BUDGET_USD / days_in_month x completed days — "
+                    "today excluded, since metering lags). "
                     "Positive = ahead of the flat daily budget target (burning fast); negative = "
                     "behind. Isolates calendar PACE from the structural 'will we end over' the "
                     "projected month-end KPI. Account-wide billed credits (AI at the AI rate).",

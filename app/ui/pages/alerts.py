@@ -1451,7 +1451,8 @@ def render() -> None:
                  "help": "Detected -> acknowledged / resolved at INCIDENT grain — "
                          "the alert-grain pair above counts individual events."},
                 {"label": "Reopen rate", "value": _optional_number(im.get("REOPEN_PCT"), "%"),
-                 "help": "Share of closed incidents reopened within 14 days (owner-set window)."},
+                 "help": "Of incidents resolved in the last 90 days, the share later reopened "
+                         "(a new incident links back via REOPENED_FROM)."},
                 {"label": "Alerts / incident", "value": _optional_number(im.get("COMPRESSION"), decimals=1),
                  "help": "How many alerts each incident absorbs — higher means storms "
                          "compress into one object instead of many pages."},
