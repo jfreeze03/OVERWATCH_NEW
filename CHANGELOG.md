@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.334.0 - Nav order + reconciliation-footer font fix (2026-08-29)
+
+* **Ask OVERWATCH moved below Govern** in the sidebar nav order (was the top group).
+* **The reconciliation footer's label rendered in a serif-italic math font.** The
+  `credit spend (Nd)` label (and the `Σ ...` totals caption) sat between two
+  `format_usd` dollar signs, which Streamlit markdown pairs into an inline LaTeX
+  math span — so the between-text rendered as serif italic with collapsed spaces
+  ("creditspend(7d)"). Both footers now wrap their string in the house
+  `formulas.md_dollars()` escaper, so the label matches the caption font.
+
 ## 4.333.0 - SQL bug hunt fixes (2026-08-29)
 
 * **Two repeat-query / release-health panels under-reported per-company activity.**

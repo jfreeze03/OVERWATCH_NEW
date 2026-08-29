@@ -1961,7 +1961,11 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     if isinstance(height, int) and height > 0:  # newer Streamlit rejects height=None
         kwargs["height"] = height
     if totals:
-        st.caption("Σ " + " · ".join(f"{label}: {value}" for label, value in totals))
+        # md_dollars: two $-formatted totals would pair into a LaTeX math span and
+        # render the between-text in serif-italic (see reconciliation_footer).
+        from app.logic.formulas import md_dollars
+        _tot = "Σ " + " · ".join(f"{label}: {value}" for label, value in totals)
+        st.caption(md_dollars(_tot))
     selected: int | list[int] | None = [] if multi else None
     if selectable and key:
         try:
@@ -2515,7 +2519,10 @@ def reconciliation_footer(visible_usd: object, expected_usd: object = None, *,
         parts.append(f"variance {'+' if diff >= 0 else '-'}{format_usd(abs(diff))} "
                      f"({diff / e * 100:+.1f}%)")
         parts.append(f"coverage {min(v / e * 100.0, 999.0):.0f}%")
-    st.caption(" · ".join(parts))
+    # md_dollars: the format_usd '$' signs would otherwise pair into a LaTeX math span
+    # and render the between-text (e.g. "credit spend (7d)") in serif-italic math.
+    from app.logic.formulas import md_dollars
+    st.caption(md_dollars(" · ".join(parts)))
 
 
 # C48: a click during a slow write QUEUES a second rerun, and on it the same

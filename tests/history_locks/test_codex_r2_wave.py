@@ -416,9 +416,10 @@ def test_rec19_alerts_renders_backlog_and_expired():
 # ---------------------------------------------------------------------------
 def test_rec14_nav_groups_partition_and_preserve_role_scope():
     from app.config import PAGES_BY_PROFILE, nav_groups_for
-    # DBA sees everything -> Ask leads the sidebar in its own group, then the three.
+    # DBA sees everything -> the three workflow groups, then Ask in its own group
+    # below Govern (owner ask 2026-08-29).
     dba = nav_groups_for(PAGES_BY_PROFILE["DBA"])
-    assert [g for g, _ in dba] == ["Ask OVERWATCH", "Watch", "Analyze", "Govern"]
+    assert [g for g, _ in dba] == ["Watch", "Analyze", "Govern", "Ask OVERWATCH"]
     assert dict(dba)["Ask OVERWATCH"] == ["Ask"]     # DBA-only grounded Q&A front door
     assert dict(dba)["Watch"] == ["Brief", "Overview", "Alerts"]
     assert dict(dba)["Govern"] == ["Security", "Admin"]

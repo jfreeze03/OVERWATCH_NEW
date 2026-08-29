@@ -35,7 +35,9 @@ def test_rec33_totals_caption_precedes_table(monkeypatch):
     )
 
     assert calls == [
-        ("caption", "Σ Current spend: $1.00 · Prior spend: $2.00"),
+        # the $ are md_dollars-escaped so the two amounts don't pair into a LaTeX
+        # math span (serif-italic font bug).
+        ("caption", "Σ Current spend: \\$1.00 · Prior spend: \\$2.00"),
         ("table", ""),
     ]
 

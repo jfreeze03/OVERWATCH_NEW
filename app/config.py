@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.333.0"
+APP_VERSION = "4.334.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -135,7 +135,7 @@ PAGES_BY_PROFILE = {
     "ANALYST": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
     "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
     # "Ask" (grounded Q&A, app/logic/ask + app/ui/pages/ask.py) is DBA-only for now
-    # and leads the sidebar in its own "Ask OVERWATCH" nav group (see NAV_GROUPS).
+    # and sits in its own "Ask OVERWATCH" nav group, ordered below Govern (see NAV_GROUPS).
     "DBA": ("Ask", "Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin"),
 }
 DEFAULT_PROFILE = "ANALYST"
@@ -146,11 +146,11 @@ DEFAULT_PROFILE = "ANALYST"
 # profile can see that is not listed here trails under "More" (so a new page is
 # never hidden by omission).
 NAV_GROUPS = {
-    # Ask leads the sidebar as the ask-first front door (its own single-item group).
-    "Ask OVERWATCH": ("Ask",),
     "Watch": ("Brief", "Overview", "Alerts"),
     "Analyze": ("Control Room", "Cost & Contract", "Operations", "Decision Studio"),
     "Govern": ("Security", "Admin"),
+    # Ask sits below Govern for now (its own single-item group).
+    "Ask OVERWATCH": ("Ask",),
 }
 
 
