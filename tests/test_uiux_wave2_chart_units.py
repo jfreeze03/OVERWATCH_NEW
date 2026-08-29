@@ -54,7 +54,10 @@ def test_f41_unit_formatter_spells_each_unit():
     assert f(float("nan"), "usd") == "—"
     assert f(float("inf"), "usd") == "—"
     assert f(float("-inf"), "count") == "—"
-    assert f(None, "pct") == "None"      # None isn't float()-able -> str(None)
+    # bug-hunt r2: None / pd.NA / NaT are ALSO missing -> em-dash, not "None"/"<NA>"/"NaT"
+    assert f(None, "pct") == "—"
+    assert f(pd.NA, "usd") == "—"
+    assert f(pd.NaT, "usd") == "—"
 
 
 def test_f41_usd_tooltip_and_axis_and_peak_carry_the_dollar(monkeypatch):

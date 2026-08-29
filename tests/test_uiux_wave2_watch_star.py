@@ -28,6 +28,10 @@ def test_f59_star_helpers():
     assert components.watch_star(1) == "★" and components.watch_star(0) == ""   # bool-coerced
     # a merge-miss NaN reads as NOT watched (bool(nan) is True — guarded)
     assert components.watch_star(float("nan")) == ""
+    # bug-hunt r2: pd.NA must NOT crash (bool(pd.NA) raises "ambiguous"); NA/None/NaT
+    # all read as NOT watched.
+    assert components.watch_star(pd.NA) == ""
+    assert components.watch_star(None) == "" and components.watch_star(pd.NaT) == ""
     assert components.watch_toggle_label(True) == "★ Watching"
     assert components.watch_toggle_label(False) == "☆ Watch"
 

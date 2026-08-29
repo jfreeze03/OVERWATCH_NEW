@@ -2166,10 +2166,19 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
 # noise — the point is to spot the few watched rows); the interactive toggle shows
 # both states so the off-state is discoverable.
 def _is_watched(on: object) -> bool:
-    # `on == on` is False for NaN, so a merge-miss NaN reads as NOT watched rather
-    # than as watched (bool(nan) is True — a footgun if a WATCHED column ever holds
-    # a NULL instead of a clean bool).
-    return bool(on) and on == on
+    # NA-safe: None / NaN / NaT / pd.NA in a WATCHED column all read as NOT watched,
+    # so a merge-miss NULL never shows a star. bool(NaN) and bool(NaT) are both True
+    # (footguns) and bool(pd.NA) RAISES "boolean value of NA is ambiguous", so the
+    # missing cases are caught before the plain bool() (bug-hunt r2). `on != on` is
+    # True for NaN/NaT; for pd.NA both `!=` and bool() are ambiguous -> except.
+    if on is None:
+        return False
+    try:
+        if on != on:        # NaN, NaT
+            return False
+        return bool(on)
+    except (TypeError, ValueError):   # pd.NA
+        return False
 
 
 def watch_star(on: object) -> str:

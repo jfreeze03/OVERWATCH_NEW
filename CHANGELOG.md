@@ -1,6 +1,20 @@
 # Changelog
 
-## 4.330.0 - Bug hunt round 1 fixes (2026-08-29)
+## 4.331.0 - Bug hunt round 2 fixes (2026-08-29)
+
+* **The boss chart's top total label could clip off the top.** F44 added a
+  stack-total label above each month's bar, but the bars' y-scale had no headroom —
+  so when the tallest month's total landed on/near a round axis tick, its label
+  rendered above the plot rectangle and got clipped (proven by compiling the actual
+  SVG). The bars' y-scale now pads to `1.12×` the max stacked total, mirroring
+  `bar_usd`, so the tallest month's headline number always has room.
+* **Robustness on NULL values** (found via edge-case fuzzing; not yet reachable but
+  the code's own comments claimed the safety): `_fmt_metric_value` now returns an
+  em-dash for `None`/`pd.NA`/`NaT` (previously only float `nan`, so a null metric
+  rendered the literal "None"/"&lt;NA&gt;"/"NaT"); and `_is_watched` (the watch-star
+  helper) is now truly NULL-safe — `bool(pd.NA)` raises "ambiguous" and `bool(NaN)`
+  / `bool(NaT)` are both `True`, so a NULL in a WATCHED column now correctly reads
+  as not-watched instead of crashing or showing a spurious star.
 
 * **Disabled primary buttons were illegible.** The F24 change gated the primary
   button's accent-gradient BACKGROUND on `:not(:disabled)` but left the companion

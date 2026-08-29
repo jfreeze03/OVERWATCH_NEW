@@ -70,6 +70,20 @@ def test_f44_labels_use_the_per_month_TOTAL_not_per_segment(monkeypatch):
     assert by_month == {"2026-07": 150_000.0, "2026-08": 500_000.0}
 
 
+def test_f44_bars_have_y_headroom_so_the_top_total_label_isnt_clipped(monkeypatch):
+    # bug-hunt r2: without domainMax headroom, the tallest month's total label
+    # (dy=-6 above the bar) clips off the top when that total lands on a round axis
+    # tick. The bars' y-scale is padded ~1.12x the max stacked total.
+    spec = _spec(monkeypatch, partial_month="2026-08")
+    def _mtype(layer):
+        m = layer.get("mark")
+        return m.get("type") if isinstance(m, dict) else m
+    bars = next(lyr for lyr in spec["layer"] if _mtype(lyr) == "bar")
+    dmax = bars["encoding"]["y"]["scale"]["domainMax"]
+    # max month total here is 500k (200k+300k); headroom must clear it
+    assert dmax > 500_000.0 and dmax == 500_000.0 * 1.12
+
+
 def test_f44_partial_month_label_dims_with_its_bar(monkeypatch):
     spec = _spec(monkeypatch, partial_month="2026-08")
     text = _text_layer(spec)

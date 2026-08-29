@@ -1297,11 +1297,13 @@ def _fmt_metric_value(v: object, unit: str) -> str:
     """Format one metric value with its unit (F41). Unknown unit falls back to
     the legacy adaptive precision (0 dp at >=100, else 1 dp) so callers that pass
     no unit are unchanged."""
+    if pd.isna(v):        # None / NaN / pd.NA / NaT all read as em-dash (bug-hunt r2:
+        return "—"        # None/NaT hit the except below and rendered "None"/"NaT")
     try:
         f = float(v)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return str(v)
-    if pd.isna(f) or abs(f) == float("inf"):   # missing/degenerate -> em-dash, never "nan"/"inf"
+    if abs(f) == float("inf"):   # degenerate -> em-dash, never "inf"
         return "—"
     spec = _METRIC_UNIT.get(unit)
     if spec is None:
@@ -1431,9 +1433,17 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
     # already do this. Stack order stays by total (biggest at the base) via an explicit
     # _RANK order, which the color sort used to carry.
     d["_RANK"] = d[category_col].map({c: i for i, c in enumerate(order)}).fillna(len(order))
+    # F44: per-month stacked totals drive BOTH the labels below AND the y-scale
+    # headroom. Without extra domain space the tallest month's total label (dy=-6
+    # above the bar) clips off the top of the plot whenever that total lands on a
+    # round axis tick (bug-hunt r2; mirrors bar_usd's scale padding).
+    _tot = d.groupby(month_col, as_index=False)[usd_col].sum()
+    _tot["_PARTIAL"] = _tot[month_col].astype(str) == str(partial_month)
+    _totmax = float(pd.to_numeric(_tot[usd_col], errors="coerce").max() or 0.0)
+    _yscale = alt.Scale(domainMax=_totmax * 1.12) if _totmax > 0 else alt.Undefined
     bars = (_base(d, 280).mark_bar().encode(
         x=alt.X(f"{month_col}:O", title=None, axis=alt.Axis(labelAngle=0)),
-        y=alt.Y(f"{usd_col}:Q", title="Spend (USD)", stack="zero"),  # A5: one dollar-axis spelling
+        y=alt.Y(f"{usd_col}:Q", title="Spend (USD)", stack="zero", scale=_yscale),  # A5
         color=_stable_color(category_col, d[category_col],
                             legend=alt.Legend(orient="bottom", title=None,
                                               columns=4, symbolLimit=top_n + 1,
@@ -1450,9 +1460,7 @@ def monthly_stacked_usd(df: pd.DataFrame, month_col: str, category_col: str,
     # ("$500m") away from any sub-dollar total. The partial month's total dims to
     # MATCH its bar (0.45) so a running total never reads brighter or more finished
     # than the bar it caps.
-    _tot = d.groupby(month_col, as_index=False)[usd_col].sum()
-    _tot["_PARTIAL"] = _tot[month_col].astype(str) == str(partial_month)
-    _lblfmt = _usd_fmt(float(pd.to_numeric(_tot[usd_col], errors="coerce").max() or 0.0))
+    _lblfmt = _usd_fmt(_totmax)
     labels = (
         alt.Chart(_tot).mark_text(dy=-6, baseline="bottom", fontSize=11, color=_TITLE)
         .encode(
