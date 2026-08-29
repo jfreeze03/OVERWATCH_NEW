@@ -1,6 +1,20 @@
 # Changelog
 
-## 4.320.0 - UI/UX Wave 2: visual grammar — locked actions + even KPI rows (F24 + F17) (2026-08-28)
+## 4.321.0 - UI/UX Wave 2: sparkline honesty — magnitude + trend polarity (F42 + F43) (2026-08-28)
+
+* **F42** the KPI-card sparkline no longer exaggerates tiny changes. It scaled to
+  the series' own min..max, so *every* series filled the full height — a 99.1→99.4
+  wiggle drew the same dramatic climb as a doubling. The domain now includes zero,
+  so amplitude is proportional to the real change: a small change relative to the
+  values reads as nearly flat, a genuine doubling still rises across the height.
+* **F43** the KPI-card sparkline is now colored by its delta's trend polarity
+  (matching the delta chip), not the card severity. Before, the spark took the
+  severity hue, so a cost card trending up (a red delta) could draw a calm blue
+  line *over* that red delta. One shared polarity source (`_delta_is_good`) now
+  feeds both the delta chip and the spark, so they can never disagree; a card with
+  no labeled delta keeps the severity tint (nothing to contradict). Adversarial
+  review (find→verify, 0 confirmed) proved the refactor behavior-preserving and
+  the chip/spark hues identical, including the `off`-delta neutral (`#94a3b8`).
 
 * **F24** a gated action now READS as locked. A disabled control (a type-to-confirm
   Execute whose text doesn't match yet, or a dirty-check Save with nothing to save)

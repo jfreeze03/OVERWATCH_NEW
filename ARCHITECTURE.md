@@ -119,7 +119,12 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   KPI cards (`.ow-card`) carry a min-height floor (F17) so a row stays even when
   one card has a sparkline — a flex-through-the-column stretch was tried and
   proven inert (`height:100%` dies against Streamlit's auto-height markdown
-  wrappers), so the robust floor was adopted instead.
+  wrappers), so the robust floor was adopted instead. The card sparkline itself
+  tells the truth: `spark_svg` anchors its domain to include zero (F42) so a tiny
+  wiggle doesn't fill the height like a doubling, and the card spark is colored by
+  the delta's trend polarity via the shared `_delta_is_good` (F43) so it can never
+  draw a calm line over a red delta — the delta chip and its spark read the same
+  good/bad hue by construction.
 
 ## Cost formula contract
 

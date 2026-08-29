@@ -168,11 +168,16 @@ cross-cutting risk.
   vertical with no text). `app/ui/charts.py:1255`
 - [ ] **F30 · P2/M · Inline sparkline columns** (`LineChartColumn`) for per-entity daily
   series on movers/top-spend/warehouse grids. `app/ui/components.py:1660-1671`
-- [ ] **F42 + F43 · P2/M · Fix sparkline magnitude scaling + polarity color.**
+- [x] **F42 + F43 · P2/M · Fix sparkline magnitude scaling + polarity color.**
   Auto-scaling makes 99.1→99.4% look as dramatic as a doubling; and the spark is tinted by
   card severity, not trend direction — a cost card trending *up* can draw a calm blue line
   over a red delta. Anchor the domain; color the spark by `delta_color` polarity.
   `app/ui/components.py:241,290`
+  — v4.321.0: `spark_svg` domain now includes zero (amplitude ∝ real change); card
+  spark colored by delta polarity via shared `_delta_is_good` so chip+spark can't
+  disagree (no-delta keeps severity tint). Adversarial review: 0 confirmed
+  (refactor behavior-preserving; a pre-existing, non-diverging sign-detection quirk
+  — Unicode-minus / "(5%)" / "0"→green — noted but out of scope, affects both fns equally).
 
 ### Orientation & metric ownership
 - [x] **C17 · P1/M · One data-derived verdict line per analytical page.** The mechanism

@@ -308,6 +308,14 @@ def spark_svg(values, width: int = 84, height: int = 24, color: str = palette.IN
     if len(nums) < 2:
         return ""
     lo, hi = min(nums), max(nums)
+    # F42: anchor the domain to include zero so the line's amplitude reflects the
+    # TRUE magnitude of change. min/max-only scaling stretched every series to
+    # full height, so a 99.1->99.4 wiggle looked as dramatic as a doubling. With
+    # zero in the domain a small change relative to the values reads as nearly
+    # flat, while a genuine doubling still rises across the height — proportional,
+    # not exaggerated. (Both callers pass card series; a series that dips negative
+    # keeps its true min, so a zero-crossing trend still renders sensibly.)
+    lo, hi = min(lo, 0.0), max(hi, 0.0)
     rng = (hi - lo) or 1.0
     n = len(nums)
     pts = [(round(i / (n - 1) * (width - 2) + 1, 1),
@@ -330,22 +338,46 @@ def spark_svg(values, width: int = 84, height: int = 24, color: str = palette.IN
             f'<circle cx="{last[0]}" cy="{last[1]}" r="1.9" fill="{color}"/></svg>')
 
 
+def _delta_is_good(delta, delta_color: str):
+    """Trend polarity of a delta: True = good/green, False = bad/red, None =
+    neutral (no delta, or delta_color 'off'). One source so the delta chip and
+    its card sparkline can never disagree — the F43 fix depends on both reading
+    polarity the same way. `inverse` flips it (a DOWN is good, e.g. cost/errors)."""
+    if not delta or delta_color == "off":
+        return None
+    down = str(delta).strip().startswith("-")
+    return down if delta_color == "inverse" else (not down)
+
+
 def _delta_html(delta, delta_color: str) -> str:
     if not delta:
         return ""
     text = html.escape(str(delta))
     down = str(delta).strip().startswith("-")
-    if delta_color == "off":
+    good = _delta_is_good(delta, delta_color)
+    if good is None:
         # route the neutral delta through the WCAG-AA muted token (rec15), not the
         # retired pre-a11y #6b7a90 (~3.9:1) — this is inline style=, so the var resolves
         col, arrow = "var(--ow-ink-mute)", "flat"
     else:
-        good = down if delta_color == "inverse" else (not down)
         col = palette.OK if good else palette.BAD   # rec50: single hue source
         arrow = "down" if down else "up"
     return (f'<div style="font-size:0.78rem;font-weight:640;color:{col};'
             f'display:flex;align-items:center;gap:4px;margin-top:3px">'
             f'{icon(arrow, 13)}{text}</div>')
+
+
+def _spark_color_for(item: dict, sev: str) -> str:
+    """F43: color a KPI-card sparkline by its delta's TREND polarity (matching the
+    delta chip), not the card severity — so a cost card trending up now draws a red
+    line instead of a calm blue one over a red delta. An explicit 'off' delta is
+    neutral (ink-mute); a card with NO labeled delta keeps the severity tint, since
+    there's no trend to contradict. Returns a literal hex — a spark stroke is an SVG
+    presentation attribute, where var(--...) does not resolve."""
+    good = _delta_is_good(item.get("delta"), str(item.get("delta_color", "normal")))
+    if good is None:
+        return palette.INK_MUTE if item.get("delta") else _SEV_HEX.get(sev, palette.INFO)
+    return palette.OK if good else palette.BAD
 
 
 def metric_card_html(item: dict) -> str:
@@ -360,7 +392,7 @@ def metric_card_html(item: dict) -> str:
     spark = ""
     if item.get("spark"):
         spark = ('<div class="ow-card__meta" style="margin-top:6px">'
-                 + spark_svg(item["spark"], color=_SEV_HEX.get(sev, palette.INFO)) + "</div>")
+                 + spark_svg(item["spark"], color=_spark_color_for(item, sev)) + "</div>")
     delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
     # rec 15 (a11y): a keyboard-focusable + touch-tappable '?' affordance carrying the
     # help text, replacing the hover-only card title= (invisible on touch, unreachable
