@@ -1352,6 +1352,9 @@ SELECT
     COALESCE(NULLIF(TRIM(SCHEMA_NAME), ''), '(none)') AS SCHEMA_NAME,
     IFF(UPPER(COALESCE(ROLE_NAME, '')) LIKE 'TF~_%' ESCAPE '~', 'TF_* service', 'other') AS ROLE_CLASS,
     COUNT(*) AS EVENTS,
+    -- Grand total across ALL groups, evaluated BEFORE the LIMIT 200, so the headline
+    -- KPI counts every destructive event even when the per-group table is capped.
+    SUM(COUNT(*)) OVER () AS TOTAL_EVENTS,
     COUNT(DISTINCT USER_NAME) AS USERS,
     MAX(EVENT_TS) AS LAST_SEEN
 FROM {core_object('FACT_SECURITY_CHANGE')}

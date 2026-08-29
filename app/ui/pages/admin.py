@@ -515,12 +515,14 @@ def _migrations_tab() -> None:
                        tier="live", source="APP_ERROR_LOG")
             try:
                 _hrs = pd.to_numeric(fresh.df["HOURS_SINCE_LOAD"], errors="coerce")
-                _rows = pd.to_numeric(fresh.df["ROW_COUNT"], errors="coerce")
-                # A never-loaded source reads HOURS_SINCE_LOAD NULL (NaN>26 is False,
-                # which would silently hide the worst case) and/or ROW_COUNT 0 —
-                # health_strip treats a NULL load ts as maximally urgent, so mirror
-                # that here and count never-loaded / empty sources as stale.
-                stale = fresh.df[(_hrs > 26) | _hrs.isna() | (_rows.fillna(0) <= 0)]
+                # Staleness keys on load AGE only. A never-loaded source reads
+                # HOURS_SINCE_LOAD NULL (NaN>26 is False, which would silently hide the
+                # worst case) — health_strip treats a NULL load ts as maximally urgent,
+                # so mirror that and count never-loaded sources as stale. A freshly-
+                # loaded but legitimately EMPTY mart (ROW_COUNT 0 in a quiet window, a
+                # recent LAST_LOAD_TS) is NOT stale — "missing measurement != measured
+                # 0" — so row count never enters the staleness test.
+                stale = fresh.df[(_hrs > 26) | _hrs.isna()]
             except (KeyError, TypeError, ValueError):
                 stale = fresh.df.iloc[0:0]
             if stale.empty:
@@ -528,7 +530,9 @@ def _migrations_tab() -> None:
             for _, s in stale.iterrows():
                 name = str(s["SOURCE_NAME"])
                 hint = ""
-                if float(s.get("ROW_COUNT", 0) or 0) == 0:
+                # "never filled" only when the source has genuinely never loaded (NULL
+                # load ts -> NaN age), not merely a zero-row window on a fresh load.
+                if pd.isna(s.get("HOURS_SINCE_LOAD")):
                     hint = ("never filled — run the backfill "
                             "(snowflake/backfill_365.sql: HOURLY 90, then DAILY 365).")
                 if errs.ok and not errs.empty:

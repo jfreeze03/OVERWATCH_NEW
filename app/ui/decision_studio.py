@@ -720,8 +720,8 @@ def _roi(company: str) -> None:
         {"label": "Verified this quarter", "value": format_usd(totals["verified_qtd_usd"])},
         {"label": "Realization rate",
          "value": (f"{_real:,.0f}%" if _real is not None else "—"),
-         "delta": (f"{format_usd(totals['verified_usd'])} of "
-                   f"{format_usd(totals['verified_estimated_usd'])} estimated"
+         "delta": (f"{format_usd(totals['realized_verified_usd'])} of "
+                   f"{format_usd(totals['realized_estimated_usd'])} estimated"
                    if _real is not None else "nothing verified yet"),
          "delta_color": "off",
          "help": "Verified $ as a share of what those items were estimated to save — the honest "

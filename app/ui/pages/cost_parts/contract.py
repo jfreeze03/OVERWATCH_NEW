@@ -167,7 +167,12 @@ def _org_truth_panel() -> bool:
                      "help": "Usage past the capacity commitment, billed on demand."})
     kpi_row(kpis)
     daily = bal.df.groupby("DAY", as_index=False)["TOTAL_REMAINING"].sum()
-    charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING", title="Remaining balance ($)", unit="usd")
+    # Currency-aware like the KPIs above (recon audit): keep the '$' ticks/tooltip only
+    # for USD; a non-USD org gets plain thousands-separated ticks with the real currency
+    # in the title, never a misleading '$' over EUR/GBP magnitudes.
+    _bal_unit = "usd" if _ccy == "USD" else "count"
+    charts.daily_metric_line(daily, "DAY", "TOTAL_REMAINING",
+                             title=f"Remaining balance ({_ccy})", unit=_bal_unit)
     if items.usable():
         styled_table(items.df, height=160)
     # E1: the caption contradicted the (already corrected) math — the burn stopped

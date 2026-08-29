@@ -73,15 +73,21 @@ def test_storage_calendar_divides_by_period_days_not_present_days():
     assert "AVG(COALESCE(DB_BYTES, 0))" not in sql
 
 
-def test_resize_down_recommendation_is_matchable():
-    """Audit #1: the resize-savings branch gated on startswith('DOWN') but the
-    recommendation is 'Size down candidate' -> 'SIZE DOWN ...', so it was dead."""
+def test_resize_saving_books_from_chosen_target_not_the_recommendation_string():
+    """Audit #1 + round-3 hunt: the resize-savings booking no longer keys on the
+    RECOMMENDATION string. That older gate booked 0.5*MONTHLY for ANY down-candidate
+    regardless of the operator's chosen target — a phantom saving on a same-size or
+    upsize pick. It now books from the ACTUAL target vs current size (credits ~halve
+    per size step down) and only on a confirmed downsize."""
     assert sizing.RECOMMEND_DOWN.upper().startswith("SIZE DOWN")
     assert not sizing.RECOMMEND_DOWN.upper().startswith("DOWN")   # the old gate never matched
     opt = (__import__("pathlib").Path(__file__).resolve().parents[2]
            / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text(encoding="utf-8")
-    # the est_sz gate matches the real recommendation prefix
-    assert 'startswith("SIZE DOWN")' in opt
+    # the saving now follows the chosen target vs the current size, not the recommendation text
+    assert 'startswith("SIZE DOWN")' not in opt
+    assert "CURRENT_SIZE" in opt                  # current size carried onto the frame
+    assert "_steps < 0" in opt                    # book only a genuine downsize
+    assert "2.0 ** _steps" in opt                 # credit-model saving, not a fixed half-rate
 
 
 def test_cortex_budget_breach_is_per_user_across_sources():

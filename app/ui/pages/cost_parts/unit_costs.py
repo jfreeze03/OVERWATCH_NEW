@@ -131,7 +131,16 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                               f"· {top_q.get('WAREHOUSE_NAME')}",
                      "delta_color": "off"})
     if p_res.usable():
-        top_p = p_res.df.iloc[0]
+        # procedure_costs_usd orders by TOTAL_CREDITS DESC, so iloc[0] is the highest-
+        # TOTAL procedure. This KPI is about $/CALL, so pick the row that is actually
+        # priciest per call (else a high-volume/cheap proc headlines a near-$0 value
+        # and the true per-call leader is never named). No pandas import here — coerce
+        # via safe_float and sort the frame directly.
+        _pp = p_res.df
+        if "CREDITS_PER_CALL" in _pp.columns:
+            _pp = _pp.assign(_pc=_pp["CREDITS_PER_CALL"].map(safe_float)).sort_values(
+                "_pc", ascending=False)
+        top_p = _pp.iloc[0]
         kpis.append({"label": "Priciest procedure (per call)",
                      "value": format_usd(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate, round_cents=False)),
                      "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})

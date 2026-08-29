@@ -444,9 +444,14 @@ def test_n15_brief_stalest_label():
     from app.ui.pages.brief import _stalest_label
     assert _stalest_label({"STALEST_SOURCE_H": "7.0", "STALEST_SOURCE_NAME": "FACT_QUERY_HOURLY"}) == \
         "FACT_QUERY_HOURLY 7h"
-    assert _stalest_label({"STALEST_SOURCE_H": "-1", "STALEST_SOURCE_NAME": "FACT_STORAGE_DAILY"}) == \
+    # round-3 hunt: the mart emits the -1 never-loaded sentinel as the scale-1 string
+    # "-1.0" (TO_VARCHAR of a NUMBER(.,1)); the label must read it NUMERICALLY, not
+    # string-match "-1". The old "-1" fixture passed on an input the SQL can't produce.
+    assert _stalest_label({"STALEST_SOURCE_H": "-1.0", "STALEST_SOURCE_NAME": "FACT_STORAGE_DAILY"}) == \
         "FACT_STORAGE_DAILY never loaded"
-    assert _stalest_label({"STALEST_SOURCE_H": "-1", "STALEST_SOURCE_NAME": "none"}) == "no data yet"
+    assert _stalest_label({"STALEST_SOURCE_H": "-1.0", "STALEST_SOURCE_NAME": "none"}) == "no data yet"
+    assert _stalest_label({"STALEST_SOURCE_H": "-1", "STALEST_SOURCE_NAME": "FACT_X"}) == \
+        "FACT_X never loaded"   # a bare "-1" still works too
 
 
 # ---------------------------------------------------------------------------

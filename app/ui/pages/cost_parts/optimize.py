@@ -51,7 +51,14 @@ from app.logic.savings_rollup import (
     rollup_savings,
 )
 from app.logic.serverless_roi import classify_qas_roi
-from app.logic.sizing import price_per_run_bounds, simulate_scenario, size_recommendations, sizing_summary
+from app.logic.sizing import (
+    SIZE_ORDER,
+    normalize_size,
+    price_per_run_bounds,
+    simulate_scenario,
+    size_recommendations,
+    sizing_summary,
+)
 from app.logic.workbench import experiment_state_by_key
 from app.ui import charts
 from app.ui.ai_panel import ai_evaluation_panel
@@ -410,6 +417,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _sizing_whs.df if _sizing_whs.ok and not _sizing_whs.empty else pd.DataFrame(),
             )
             sized = size_recommendations(_sizing_df, rate, sizing_days)
+            # Round-3 hunt: carry the current warehouse SIZE (SHOW WAREHOUSES, already
+            # loaded above) so a resize saving is computed from the operator's ACTUAL
+            # target vs the current size — not a fixed half-rate that ignores the pick.
+            if not sized.empty and _sizing_whs.ok and not _sizing_whs.empty:
+                _wcols = {str(c).lower(): c for c in _sizing_whs.df.columns}
+                if "name" in _wcols and "size" in _wcols:
+                    _size_map = {
+                        str(n).strip().upper(): str(s)
+                        for n, s in zip(_sizing_whs.df[_wcols["name"]],
+                                        _sizing_whs.df[_wcols["size"]], strict=False)
+                    }
+                    sized["CURRENT_SIZE"] = (sized["WAREHOUSE_NAME"].astype(str)
+                                             .str.strip().str.upper().map(_size_map))
             _sizing_profiles_tx = sized
             _savings_opps.extend(     # rec#16: right-sizing opportunities (overlaps idle per warehouse)
                 SavingsOpportunity("RESIZE", str(r["WAREHOUSE_NAME"]),
@@ -490,19 +510,33 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "This row is not an evidence-backed resize recommendation. The SQL remains "
                         "available for an intentional operator override, but no saving is booked."
                     )
+                # Round-3 hunt: scope the widget key to the warehouse — a fixed key let
+                # a size picked for one warehouse persist onto the next selected row.
                 target_size = st.selectbox("Resize to", ["XSMALL", "SMALL", "MEDIUM", "LARGE"],
-                                           key="sizing_to")
+                                           key=f"sizing_to_{srow['WAREHOUSE_NAME']}")
                 stmt_sz = remediation.resize_fix(str(srow["WAREHOUSE_NAME"]), target_size)
                 st.code(stmt_sz, language="sql")
+                # Round-3 hunt: the booked saving must follow the ACTUAL chosen target vs
+                # the current size (credits ~halve per size step down), NOT a fixed
+                # 0.5*MONTHLY tied only to the RECOMMENDATION string — which booked a
+                # phantom saving even for a same-size or larger pick. Book a positive
+                # ESTIMATED_USD only on a confirmed downsize.
                 est_sz = 0.0
-                # sizing.RECOMMEND_DOWN == "Size down candidate" -> "SIZE DOWN ...";
-                # the old startswith("DOWN") never matched, so the resize saving was
-                # dead code and every downsize booked $0.
-                if str(srow.get("RECOMMENDATION", "")).upper().startswith("SIZE DOWN"):
-                    est_sz = round(max(0.0, safe_float(srow.get("MONTHLY_USD_NOW"))
-                                        - safe_float(srow.get("SCENARIO_DOWN_USD"))), 2)
-                    st.caption(f"Half-rate scenario saving ~${est_sz:,.0f}/mo (ESTIMATED until you verify it "
-                               "on the Savings ledger below).")
+                _cur_size = normalize_size(srow.get("CURRENT_SIZE"))
+                _tgt_norm = normalize_size(target_size)
+                if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
+                    _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
+                    if _steps < 0:  # a genuine downsize
+                        _monthly = safe_float(srow.get("MONTHLY_USD_NOW"))
+                        est_sz = round(max(0.0, _monthly * (1.0 - 2.0 ** _steps)), 2)
+                        st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_size} → "
+                                   f"{_tgt_norm} (credits ~halve per size step; ESTIMATED until you "
+                                   "verify it on the Savings ledger below).")
+                    else:  # an upsize is a cost increase — never a booked saving
+                        st.caption(f"Resizing UP {_cur_size} → {_tgt_norm} raises cost — no saving booked.")
+                elif not _cur_size:
+                    st.caption("Current warehouse size unavailable (SHOW WAREHOUSES) — no saving "
+                               "booked automatically; verify any saving on the Savings ledger.")
                 blast_radius(str(srow["WAREHOUSE_NAME"]), _PAGE)
                 from app.logic import remediation as _remediation
                 st.caption(_remediation.reverse_hint("RESIZE", str(srow["WAREHOUSE_NAME"])))

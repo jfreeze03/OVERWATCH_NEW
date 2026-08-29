@@ -18,6 +18,7 @@ from app.core.query import run, run_batch
 from app.core.result import QueryResult
 from app.core.state import filters, request_navigation
 from app.data import cost_sql, mart27_sql, mart_sql
+from app.data.common import resolve_effective_window
 from app.logic import scoring
 from app.logic.actions import rank_actions
 from app.logic.forecast import MonthEndForecast, backtest_forecasts, month_end_projection
@@ -564,7 +565,13 @@ def render() -> None:
         _prior = float(_vp.df["CREDITS_PRIOR"].map(safe_float).sum())
         _pct = pct_delta(_cur, _prior)
         if _pct is not None:
-            _ov_spend_delta = f"{_pct:+,.0f}% vs prior {days}d"
+            # fact_warehouse_window_vs_prior clamps to the vs-prior half-window
+            # (resolve_effective_window, MAX_MART_WINDOW_DAYS//2 = 182d), so a 365d /
+            # current-year selection compares 182-vs-182 — label it with the REAL
+            # comparison window, not the unclamped `days`, or the delta reads as a
+            # year-over-prior-year move that is actually a half-year one.
+            _eff, _ = resolve_effective_window(days)
+            _ov_spend_delta = f"{_pct:+,.0f}% vs prior {_eff}d"
 
     company_kpis = [
         {

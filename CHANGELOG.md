@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.340.0 - Round-3 UI-layer bug hunt: 11 correctness/UX fixes (2026-08-29)
+
+Third adversarial multi-agent hunt over `app/ui/*` (per-file-cluster deep audits +
+write-path / cache-identity / nav lenses), each finding independently verified. 11
+confirmed, each fixed and locked:
+
+* **[med] Admin "Diagnose stale sources" flagged freshly-loaded empty marts as
+  "never filled."** Staleness now keys on load AGE only (never `ROW_COUNT`), and the
+  backfill hint fires only when a source has genuinely never loaded — "missing
+  measurement != measured 0".
+* **[med] Decision Studio "Realization rate" delta contradicted its own %.** It
+  rendered all-verified totals while the % is computed only over verified items that
+  carried a positive estimate; `ledger_totals` now exposes that restricted
+  numerator/denominator and the delta renders those.
+* **[med] Security effective-access graph could drop the self-escalation path it
+  flagged.** The per-user `head(80)` (RISK_SCORE order) could truncate a low-scoring
+  MANAGE-GRANTS-only path; escalation-critical paths are now floated in first (stable
+  sort) so the evidence for the flag is never cut.
+* **[med] "Priciest procedure (per call)" KPI read a row sorted by TOTAL credits.**
+  It now selects the genuinely priciest-per-call procedure.
+* **[med] Overview spend-tile vs-prior delta was mislabeled.** The builder clamps to
+  the 182-day half-window, but the label printed the unclamped day count; it now
+  labels the real comparison window, and Cost▸Contract's by-warehouse table discloses
+  the same clamp.
+* **[med] Brief/home "never loaded" badge never fired.** The `-1` sentinel arrives as
+  the string `"-1.0"`; both surfaces now compare numerically.
+* **[med] Ask bullets rendered raw SQL / error text through markdown.** Untrusted
+  `SAMPLE_TEXT` / `LAST_ERROR` are now wrapped as inline code, so `*`/`_`/`$$` render
+  literally instead of mangling or forming a LaTeX span.
+* **[low] Change-risk "Destructive events" count summed only the top-200 groups.** A
+  pre-LIMIT window total now backs the headline; shares stay of the shown groups, with
+  a disclosure when truncated.
+* **[low] Contract remaining-balance chart hardcoded "$".** It now follows the org
+  rate-card currency (title + ticks), USD only when the account bills USD.
+* **[low] Warehouse-resize booking used the RECOMMENDATION string, not the chosen
+  target.** It now books the credit-model saving from the actual target vs the current
+  size, and only on a confirmed downsize (no phantom saving on a same-size/upsize).
+* **[low] Resize "Resize to" widget used a fixed key** that leaked the target across
+  warehouses; the key is now warehouse-scoped.
+
 ## 4.339.0 - C38: projected storage-growth bars get a modeled mark (2026-08-29)
 
 The Cost▸Optimize "Storage growth movers" panel drew `GROWTH_USD_30D` — a

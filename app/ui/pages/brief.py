@@ -59,12 +59,17 @@ def _stalest_label(vals: dict) -> str:
 
     The strip's STALEST_SOURCE_H is -1 exactly when the worst source has no data
     at all (C3); STALEST_SOURCE_NAME says which one (N15)."""
-    hours = str(vals.get("STALEST_SOURCE_H", "?"))
     name = str(vals.get("STALEST_SOURCE_NAME", "") or "")
     src = f"{name} " if name and name != "none" else ""
-    if hours == "-1":
+    # The -1 sentinel arrives from the mart as the scale-1 string "-1.0"
+    # (TO_VARCHAR of a NUMBER(.,1)), so compare NUMERICALLY — a literal "-1" match
+    # never fired, leaving a never-loaded source rendering "…-1h" instead of "never
+    # loaded". A real age is always >= 0; anything below (or unparseable) is the
+    # never-loaded sentinel.
+    _h = safe_float(vals.get("STALEST_SOURCE_H"), default=float("nan"))
+    if not (_h >= 0):
         return f"{src}never loaded" if src else "no data yet"
-    return f"{src}{humanize_duration(hours, 'h')}"
+    return f"{src}{humanize_duration(_h, 'h')}"
 
 
 @safe_page(_PAGE)

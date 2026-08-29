@@ -796,6 +796,14 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             totals=(("Current spend", format_usd(window_usd)),
                     ("Prior spend", format_usd(prior_window_usd))),
         )
+        # fact_warehouse_window_vs_prior clamps to the vs-prior half-window so its
+        # current+prior pair fits in retention. Disclose it when the selection is wider,
+        # so "Current spend" is not read as the full (e.g. 365d) window it isn't.
+        _eff_wh, _ = resolve_effective_window(days)
+        if _eff_wh < int(days):
+            st.caption(f"Exact-usage window is the last {_eff_wh} days (today excluded) — the "
+                       f"vs-prior comparison caps there so the current and prior halves both "
+                       f"fit in retention, even though the page scope is {int(days)}d.")
         # C37: sum-only — this table IS the tab's parent pool (exact usage);
         # the billed KPI upstream is a different basis, so no expected= here.
         # r4: settle the allocated-share vs pool WINDOW mismatch. The live-share

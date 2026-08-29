@@ -98,13 +98,19 @@ def _render_change_risk_diagnostic() -> None:
             empty_state("clean", "No DESTRUCTIVE change-risk events over threshold in the last 7 days.")
             return
         df = res.df.copy()
-        total = int(df["EVENTS"].sum())
+        # `EVENTS` sums only the top-200 groups (the SQL's LIMIT bounds the table
+        # below). The headline count must be the TRUE population, so read the pre-LIMIT
+        # window total; the per-class SHARES stay relative to the shown groups (their
+        # denominator), disclosed when the two differ.
+        _shown = int(df["EVENTS"].sum())
+        total = (int(safe_float(df["TOTAL_EVENTS"].iloc[0])) if "TOTAL_EVENTS" in df.columns
+                 else _shown)
 
         def _events_where(mask: pd.Series) -> int:
-            return int(df.loc[mask, "EVENTS"].sum()) if total else 0
+            return int(df.loc[mask, "EVENTS"].sum()) if _shown else 0
 
         def _pct(n: int) -> str:
-            return f"{(100.0 * n / total):.0f}%" if total else "0%"
+            return f"{(100.0 * n / _shown):.0f}%" if _shown else "0%"
 
         tf = _events_where(df["ROLE_CLASS"] == "TF_* service")
         no_role = _events_where(df["ROLE_NAME"] == "(no role attributed)")
@@ -127,7 +133,10 @@ def _render_change_risk_diagnostic() -> None:
             "score: if a few named roles dominate, exclude those roles; if it's TF_*-dominated a "
             "pattern works; unattributed and human drops on real data should stay visible."
         )
-        styled_table(df, height=300)
+        if total > _shown:
+            st.caption(f"Showing the top 200 role/database/schema groups of {total:,} total "
+                       f"destructive events; the shares above are of the {_shown:,} shown.")
+        styled_table(df.drop(columns=["TOTAL_EVENTS"], errors="ignore"), height=300)
         result_caption(res)
 
 
@@ -412,7 +421,17 @@ def render_effective_access(company: str) -> None:
     if st.session_state.get("sec_effective_user_pick") not in users:
         st.session_state["sec_effective_user_pick"] = users[0]
     user = st.selectbox("Access path for", users, key="sec_effective_user_pick")
-    one = frame[frame["USER_NAME"].astype(str) == user].head(80)
+    _uslice = frame[frame["USER_NAME"].astype(str) == user]
+    # `frame` arrives RISK_SCORE-DESC. A MANAGE-GRANTS-only path (a self-escalation
+    # surface, but low RISK_SCORE ~25) would otherwise sort to the bottom and fall
+    # outside head(80) for a >80-path super-admin — the graph would then omit the red
+    # admin node and the caption while the summary flags the user as self-escalating.
+    # Float the escalation-critical paths in first (stable → RISK_SCORE order preserved
+    # within each group) so head(80) can never drop the evidence for the flag it shows.
+    _esc_cols = [c for c in ("SELF_ESCALATION", "REACHES_ADMIN") if c in _uslice.columns]
+    if _esc_cols:
+        _uslice = _uslice.sort_values(_esc_cols, ascending=False, kind="stable")
+    one = _uslice.head(80)
     dot = ["digraph access {", "rankdir=LR;", 'node [shape=box, style="rounded"];']
     dot.append(f'"{_dot_text(user)}" [shape=ellipse];')
     admin_nodes: set[str] = set()
@@ -445,7 +464,7 @@ def render_effective_access(company: str) -> None:
         request_navigation(
             "Control Room", "Entity 360", context={"entity_type": "USER", "entity_key": user}
         )
-    styled_table(one, height=300, sort_label="risk then path")
+    styled_table(one, height=300, sort_label="escalation, then risk")
     result_caption(result)
 
 

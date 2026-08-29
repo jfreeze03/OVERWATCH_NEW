@@ -542,7 +542,11 @@ def _persistent_status_bar(pages: tuple[str, ...], vals: object = _UNSET) -> Non
     undelivered, undelivered_state = vals.get("UNDELIVERED_CRITICAL", ("0", "OK"))
     stale, stale_state = vals.get("STALEST_SOURCE_H", ("-1", "MUTED"))
     stale_name = vals.get("STALEST_SOURCE_NAME", ("", ""))[0]
-    stale_age = humanize_duration(stale, "h") if stale != "-1" else ""
+    # The -1 never-loaded sentinel arrives as the scale-1 string "-1.0", so compare
+    # NUMERICALLY (a literal "-1" match never fired, showing "-1h"); a real age is
+    # >= 0, and a negative/unparseable value falls through to the "never loaded"
+    # (stale_state == "BAD") branch below.
+    stale_age = humanize_duration(stale, "h") if safe_float(stale, -1.0) >= 0 else ""
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
     stats = [

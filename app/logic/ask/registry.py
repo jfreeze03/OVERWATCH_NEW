@@ -49,6 +49,15 @@ def _sample(text: object, n: int) -> str:
     return _clip(text, n) or "(no sample text)"
 
 
+def _code(text: object) -> str:
+    """Wrap untrusted SQL / error text as an inline markdown code span, so its
+    markdown-special characters render literally in a bullet: no '*'/'_' emphasis and,
+    crucially, no '$$'/'$1' pair collapsing into a serif-italic LaTeX math span. Ask
+    bullets go straight to st.markdown, so raw SAMPLE_TEXT / LAST_ERROR would otherwise
+    mangle. A stray backtick in the text would break the span, so neutralize it."""
+    return "`" + str(text).replace("`", "'") + "`"
+
+
 def _num(series_val: object, default: float = 0.0) -> float:
     v = pd.to_numeric(series_val, errors="coerce")
     try:
@@ -299,7 +308,7 @@ def _analyze_cs_by_query(
     for i in range(min(3, len(s))):
         r = s.iloc[i]
         bullets.append(
-            f"{_sample(r.get('SAMPLE_TEXT'), 90)} — "
+            f"{_code(_sample(r.get('SAMPLE_TEXT'), 90))} — "
             f"{_fmt(float(r['CS_CREDITS']))} CS credits ({int(_num(r.get('RUNS', 0))):,} runs)"
         )
 
@@ -513,7 +522,7 @@ def _analyze_task_failures(
     if "LAST_ERROR" in top.index:
         err = _sample(top.get("LAST_ERROR"), 160)
         if err and err != "(no sample text)":
-            bullets.append(f"Latest error on {task}: {err}")
+            bullets.append(f"Latest error on {task}: {_code(err)}")
 
     ev = fails.head(15).copy()
     ev["FAIL_RATE_PCT"] = (ev["FAILED"] / ev["RUNS"].where(ev["RUNS"] > 0) * 100).round(0)

@@ -171,6 +171,12 @@ def ledger_totals(df: pd.DataFrame) -> dict:
         "estimated_count": len(est),
         "verified_count": len(ver),
         "verified_estimated_usd": round(float(ver_est_usd), 2),
+        # The numerator/denominator the realization_pct is ACTUALLY computed from —
+        # restricted to verified items that carried a positive estimate (_est_pos). The
+        # KPI delta must render THESE, not the all-verified totals, or the "$X of $Y
+        # estimated" line contradicts the % beside it.
+        "realized_verified_usd": round(float(ver_usd_col[_est_pos].sum()), 2),
+        "realized_estimated_usd": round(_real_den, 2),
         "realization_pct": realization,
         "verified_qtd_usd": round(qtd, 2),
         "avg_days_to_verify": avg_days,
