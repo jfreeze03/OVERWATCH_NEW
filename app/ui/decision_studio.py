@@ -55,6 +55,8 @@ from app.ui.components import (
     stamp_write,
     stash_section_count,
     styled_table,
+    watch_star,
+    watch_star_column,
     write_gate_open,
 )
 
@@ -845,7 +847,11 @@ def _scenarios(company: str) -> None:
         display = adf[[column for column in (
             "WATCHED", "STALE", "SEVERITY", "TITLE", "SOURCE_ENTITY_TYPE",
             "SOURCE_ENTITY_KEY", "CONFIDENCE", "ESTIMATED_USD", "PERIOD", "OWNER", "DUE_DATE",
-        ) if column in adf.columns]]
+        ) if column in adf.columns]].copy()
+        _scen_cfg = None
+        if "WATCHED" in display.columns:          # F59: one star, not raw True/False
+            display["WATCHED"] = display["WATCHED"].map(watch_star)
+            _scen_cfg = {"WATCHED": watch_star_column()}
 
         def open_scenario_entity(index: int) -> None:
             row = adf.iloc[int(index)]
@@ -856,7 +862,7 @@ def _scenarios(company: str) -> None:
 
         selectable_nav_table(
             display, key="ds_scenarios", on_select=open_scenario_entity,
-            height=320, sort_label="action priority order",
+            height=320, sort_label="action priority order", column_config=_scen_cfg,
         )
 
 

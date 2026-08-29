@@ -1,6 +1,19 @@
 # Changelog
 
-## 4.324.0 - UI/UX Wave 2: portfolio scatter lane gates (F46) (2026-08-29)
+## 4.325.0 - UI/UX Wave 2: one watch affordance — a star everywhere (F59) (2026-08-29)
+
+* **F59** "Watch" spoke three languages — a text button in Entity 360
+  (Watch/Unwatch), a raw True/False column on the decision boards, and an 👁 eye
+  badge on the Brief. It's now ONE filled-star affordance: **★ = watched,
+  everywhere**. A cell/badge shows ★ only when on (a column of hollow stars is
+  noise — the point is to spot the few watched rows); the interactive Entity 360
+  toggle shows both states (★ Watching / ☆ Watch). Shared helpers
+  (`watch_star` / `watch_toggle_label` / `watch_star_column`) drive the Decision
+  Studio portfolio + scenarios tables, the Entity 360 toggle, the Brief badge, and
+  the Watchlist board. The star conversion is display-only and happens after each
+  board's watched-first sort, so pinning and the watched counts are untouched;
+  the helper treats a NaN as not-watched (guarding `bool(nan) is True`). Adversarial
+  review: 0 confirmed (7 findings, all out-of-scope polish or non-issues).
 
 * **F46** the Decision-Studio portfolio scatter (impact × confidence, colored by
   lane) now draws the **confidence-axis lane gates** so a dot's vertical position

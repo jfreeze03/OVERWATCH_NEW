@@ -60,6 +60,7 @@ from app.ui.components import (
     stamp_write,
     status_chips,
     styled_table,
+    watch_toggle_label,
     write_gate_open,
 )
 
@@ -661,7 +662,7 @@ def render_entity_360(company: str) -> None:
         # widget's element identity (Streamlit drops a queued phantom click from a slow
         # write), and the per-direction/per-entity latch never swallows a legit undo.
         _dir = "rm" if is_watched else "add"
-        if (st.button("Unwatch" if is_watched else "Watch", key=f"entity_watch_toggle_{_dir}", type="tertiary")
+        if (st.button(watch_toggle_label(is_watched), key=f"entity_watch_toggle_{_dir}", type="tertiary")
                 and write_gate_open(f"entity_watch_{_dir}:{kind}:{key}")):
             try:
                 sql = watchlist_sql(viewer, kind, key, label, remove=is_watched)
@@ -881,7 +882,7 @@ def render_watch_badge(viewer: str, rate: float) -> None:
         return
     summary = watch_summary(status)
     if not summary["attention"]:
-        st.caption(f"👁 {summary['watched']} watched "
+        st.caption(f"★ {summary['watched']} watched "
                    + ("entity is" if summary["watched"] == 1 else "entities are") + " steady.")
         return
     # Preview the MOST SEVERE movers, not the first-added: rank warn > watch > other before
@@ -891,7 +892,7 @@ def render_watch_badge(viewer: str, rate: float) -> None:
            .assign(_o=lambda d: d["SEVERITY"].map(lambda s: _sev_rank.get(str(s), 2)))
            .sort_values("_o", kind="stable").head(4))
     lines = [f"**{r['LABEL']}** — {r['STATUS']}" for _, r in att.iterrows()]
-    st.warning("👁 " + str(summary["attention"]) + " of " + str(summary["watched"])
+    st.warning("★ " + str(summary["attention"]) + " of " + str(summary["watched"])
                + " watched " + ("entity has" if summary["attention"] == 1 else "entities have")
                + " moved:\n\n" + "\n\n".join(md_dollars(x) for x in lines))
     if st.button("Open Watchlist", key="brief_watch_jump", type="secondary"):
@@ -970,7 +971,7 @@ def render_watchlist() -> None:
             names = ", ".join(f"{r['LABEL']} ({r['STATUS']})" for _, r in moved.head(4).iterrows())
             more = "" if len(moved) <= 4 else f", +{len(moved) - 4} more"
             st.warning(md_dollars(
-                f"👁 {len(moved)} watched "
+                f"★ {len(moved)} watched "
                 + ("entity has" if len(moved) == 1 else "entities have")
                 + f" moved: {names}{more}."))
         frame = frame.drop(columns=["SEVERITY", "ATTENTION"])

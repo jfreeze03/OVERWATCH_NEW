@@ -259,9 +259,15 @@ cross-cutting risk.
   — v4.320.0: min-height floor on `.ow-card`. Adversarial review proved the
   full-height flex approach INERT (height:100% dies against Streamlit's
   auto-height markdown wrappers); a min-height floor is robust + render-verifiable.
-- [ ] **F59 · P2/S · One optimistic star affordance for Watch everywhere** (button in
+- [x] **F59 · P2/S · One optimistic star affordance for Watch everywhere** (button in
   Entity 360, raw boolean column on boards, Brief badge — three languages today).
-  `app/ui/pages/workbench.py:610`
+  `app/ui/workbench.py:664` (Entity 360), `decision_studio.py` (boards), Brief badge.
+  — v4.325.0: shared `watch_star`/`watch_toggle_label`/`watch_star_column` → ★ = watched
+  everywhere (Entity 360 toggle ★/☆, DS portfolio + scenarios WATCHED columns, Brief +
+  Watchlist badges — all eye emojis gone). Display-only after each board's watched-first
+  sort (counts/pinning untouched); NaN-guarded. Review 0 confirmed (7 findings, all
+  out-of-scope: STALE sibling col, Action-Center watch-blindness — both feature gaps, not
+  language conflicts).
 - [ ] **F60 · P3/S · Unify the three confidence encodings** across the decision
   workbenches (chips+caption vs ProgressColumn vs absent). `app/ui/pages/workbench.py:114`
 - [x] **F24 · P2/S · Explicit disabled treatment for gated actions** (a type-to-confirm

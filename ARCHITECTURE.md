@@ -125,6 +125,12 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
   the delta's trend polarity via the shared `_delta_is_good` (F43) so it can never
   draw a calm line over a red delta — the delta chip and its spark read the same
   good/bad hue by construction.
+- **One watch affordance (F59, `components.watch_*`):** "watched" reads as a filled
+  star ★ on every surface — the Entity 360 toggle (`watch_toggle_label` → ★ Watching
+  / ☆ Watch), the decision boards' WATCHED column (`watch_star` + `watch_star_column`
+  → ★ or blank, not raw True/False), the Brief badge and the Watchlist board. The
+  star is display-only and applied after each board's watched-first sort, so pinning
+  and the watched counts stay on the underlying bool; a NaN reads as not-watched.
 
 ## Cost formula contract
 

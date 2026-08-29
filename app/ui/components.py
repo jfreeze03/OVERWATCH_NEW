@@ -2190,6 +2190,36 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
                          size_note=size_note, sort_label=sort_label)
 
 
+# F59: ONE watch affordance across every surface. Before this, Watch spoke three
+# languages — a text button in Entity 360, a raw True/False column on the decision
+# boards, and an 👁 eye badge on the Brief. A filled star now means "watched"
+# everywhere. A cell/badge shows ★ only when on (a column of hollow stars is
+# noise — the point is to spot the few watched rows); the interactive toggle shows
+# both states so the off-state is discoverable.
+def _is_watched(on: object) -> bool:
+    # `on == on` is False for NaN, so a merge-miss NaN reads as NOT watched rather
+    # than as watched (bool(nan) is True — a footgun if a WATCHED column ever holds
+    # a NULL instead of a clean bool).
+    return bool(on) and on == on
+
+
+def watch_star(on: object) -> str:
+    """Star glyph for a watched-state CELL or badge: ★ when watched, else blank."""
+    return "★" if _is_watched(on) else ""
+
+
+def watch_toggle_label(on: object) -> str:
+    """Label for the Watch TOGGLE button — the current state read as a star."""
+    return "★ Watching" if _is_watched(on) else "☆ Watch"
+
+
+def watch_star_column(label: str = "Watch"):
+    """Shared column_config for a starred WATCHED column (compact, one star)."""
+    return st.column_config.TextColumn(
+        label, width="small",
+        help="★ = on your watchlist (starred from an Entity 360).")
+
+
 def decision_rows(
     df,
     *,
@@ -2235,6 +2265,9 @@ def decision_rows(
     view = source[[column for column, _ in selected]].copy()
     view.columns = [label for _, label in selected]
     config = {}
+    if "WATCHED" in view.columns:                 # F59: one star, not raw True/False
+        view["WATCHED"] = view["WATCHED"].map(watch_star)
+        config["WATCHED"] = watch_star_column()
     if "Impact" in view.columns:
         config["Impact"] = st.column_config.NumberColumn(
             "Impact", format="$%.2f", help=impact_help or None)
