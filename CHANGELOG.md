@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.350.0 - Default landing opens on Brief for DBAs (2026-08-30)
+
+The DBA profile's page tuple listed `Ask` first, so `pages[0]` — the default landing
+when there is no saved default view and no `?page=` deep link (app/main.py
+`current = _ow_page or pages[0]`) — resolved to **Ask OVERWATCH** for DBAs, even though
+the sidebar display had already moved Ask to its own group below Govern. Reordered
+`PAGES_BY_PROFILE["DBA"]` so **Brief** is first and Ask trails last, matching the nav
+display order — DBAs now open on Brief. Ask is unchanged in availability (still DBA-only,
+still its own nav group). Locked by `tests/history_locks/test_brief_landing.py` (every
+profile lands on Brief; DBA still sees Ask, last).
+
 ## 4.349.0 - V096/V097/V098: alert-scan dedupe/clear key hardening (2026-08-30)
 
 Alerting-layer hunt (3 owner-gated forward migrations). Each defect stems from a dedupe/clear

@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.349.0"
+APP_VERSION = "4.350.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -136,7 +136,9 @@ PAGES_BY_PROFILE = {
     "MANAGER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security"),
     # "Ask" (grounded Q&A, app/logic/ask + app/ui/pages/ask.py) is DBA-only for now
     # and sits in its own "Ask OVERWATCH" nav group, ordered below Govern (see NAV_GROUPS).
-    "DBA": ("Ask", "Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin"),
+    # Brief is FIRST so the default landing (pages[0], when no saved view / deep link)
+    # opens on Brief, not Ask — matching the nav display order (Ask trails last).
+    "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin", "Ask"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
