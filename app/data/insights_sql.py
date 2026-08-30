@@ -242,8 +242,14 @@ SELECT
     COUNT(*) AS QUERY_COUNT,
     SUM(IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0)) AS FAILED_COUNT,
     APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
-    SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
-    SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
+    -- PER-QUERY, not window totals: both scale with query VOLUME, and a deploy day
+    -- routinely changes traffic, so raw totals flagged a pure volume swing as a release
+    -- regression. Dividing by QUERY_COUNT makes the equal-width before/after windows
+    -- comparable on per-query health (bug-hunt 2026-08-30). FAIL_PCT/p95 already are.
+    SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0
+        / NULLIF(COUNT(*), 0) AS QUEUED_SEC,
+    SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3)
+        / NULLIF(COUNT(*), 0) AS SPILL_REMOTE_GB
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY 1

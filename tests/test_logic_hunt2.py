@@ -30,7 +30,7 @@ def test_release_compare_judges_from_zero_regressions():
                        "QUEUED_SEC": [0, 300], "SPILL_REMOTE_GB": [0, 10]})
     v = _verdicts(compare_release_periods(df))
     assert v["Failure %"] == "Worse"
-    assert v["Queued (s)"] == "Worse" and v["Remote spill (GB)"] == "Worse"
+    assert v["Queued (s/query)"] == "Worse" and v["Remote spill (GB/query)"] == "Worse"
 
 
 def test_release_compare_from_zero_no_change_is_flat_and_improvement_to_zero_is_better():
@@ -39,11 +39,11 @@ def test_release_compare_from_zero_no_change_is_flat_and_improvement_to_zero_is_
     flat = pd.DataFrame({"PERIOD": ["BEFORE", "AFTER"], "QUERY_COUNT": [10, 10],
                          "FAILED_COUNT": [0, 0], "P95_ELAPSED_SEC": [1, 1],
                          "QUEUED_SEC": [0, 0], "SPILL_REMOTE_GB": [0, 0]})
-    assert _verdicts(compare_release_periods(flat))["Remote spill (GB)"] == "Flat"
+    assert _verdicts(compare_release_periods(flat))["Remote spill (GB/query)"] == "Flat"
     better = pd.DataFrame({"PERIOD": ["BEFORE", "AFTER"], "QUERY_COUNT": [10, 10],
                           "FAILED_COUNT": [5, 0], "P95_ELAPSED_SEC": [1, 1],
                           "QUEUED_SEC": [300, 0], "SPILL_REMOTE_GB": [10, 0]})
-    assert _verdicts(compare_release_periods(better))["Queued (s)"] == "Better"
+    assert _verdicts(compare_release_periods(better))["Queued (s/query)"] == "Better"
 
 
 def test_rca_high_timed_cause_outranks_untimed_low_even_at_higher_raw_score():

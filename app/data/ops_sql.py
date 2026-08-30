@@ -658,10 +658,14 @@ def dynamic_table_health(days: int) -> str:
 SELECT
     DATABASE_NAME, SCHEMA_NAME, NAME,
     COUNT(*) AS REFRESHES,
-    COUNT_IF(STATE = 'FAILED') AS FAILURES,
+    -- UPSTREAM_FAILED (skipped because an upstream base/DT failed) and CANCELLED are
+    -- also non-success terminal states: the dynamic table did NOT refresh and is serving
+    -- stale data, exactly what this panel warns about — counting only 'FAILED' gave a
+    -- false all-clear for a table stale via an upstream break (bug-hunt 2026-08-30).
+    COUNT_IF(STATE IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED')) AS FAILURES,
     MAX_BY(STATE, REFRESH_END_TIME) AS LAST_STATE,
     MAX(REFRESH_END_TIME) AS LAST_REFRESH,
-    IFF(COUNT_IF(STATE = 'FAILED') > 0, 'FAILED', 'SUCCEEDED') AS STATUS
+    IFF(COUNT_IF(STATE IN ('FAILED', 'UPSTREAM_FAILED', 'CANCELLED')) > 0, 'FAILED', 'SUCCEEDED') AS STATUS
 FROM SNOWFLAKE.ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY
 WHERE REFRESH_END_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1, 2, 3
@@ -895,6 +899,13 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
 WHERE SCHEDULED_TIME >= DATEADD('day', -{horizon}, CURRENT_DATE())
   AND TO_VARCHAR(ROOT_TASK_ID) = {sql_literal(root, 80)}
   AND TO_VARCHAR(GRAPH_RUN_GROUP_ID) = {sql_literal(run, 100)}
+-- Auto-retries emit multiple rows sharing one SCHEDULED_TIME within a graph run;
+-- collapse each scheduled task to its terminal attempt so STATE reflects the final
+-- outcome, not a phantom FAILED attempt (mirrors task_graph_recent_runs / task_runs).
+-- GRAPH_RUN_GROUP_ID is already pinned by the WHERE, so the partition omits it.
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+    ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
 ORDER BY SCHEDULED_TIME, TASK_FQN
 LIMIT 2000
 """

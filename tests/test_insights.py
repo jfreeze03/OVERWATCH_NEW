@@ -377,7 +377,7 @@ def test_release_verdicts():
     rows = {r["Metric"]: r for r in insights.compare_release_periods(df)}
     assert rows["Failure %"]["Verdict"] == "Worse"        # 1% -> 3%
     assert rows["p95 runtime (s)"]["Verdict"] == "Better"  # halved
-    assert rows["Queued (s)"]["Verdict"] == "Flat"         # +5% within tolerance
+    assert rows["Queued (s/query)"]["Verdict"] == "Flat"   # +5% within tolerance
     assert insights.compare_release_periods(pd.DataFrame()) == []
 
 

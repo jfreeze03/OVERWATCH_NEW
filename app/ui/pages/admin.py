@@ -328,6 +328,20 @@ _EXPECTED_MIGRATIONS = {
          "earliest hours of the oldest day and near-emptied the CHANGE RISK exception-queue arm "
          "for events older than ~2 days. The d>3 full-backfill branch keeps the whole-window "
          "delete. Proc only, no schema change, no backfill",
+    101: "FACT_TASK_DAILY retry-collapse: SP_LOAD_DAILY_FACTS re-derived from V064 so the task "
+         "rollup aggregates over a terminal-attempt CTE (QUALIFY ROW_NUMBER() PARTITION BY "
+         "DATABASE_NAME/SCHEMA_NAME/NAME/SCHEDULED_TIME ORDER BY COMPLETED_TIME DESC), matching the "
+         "live ops_sql.task_runs — a task auto-retried to success no longer counts as a mart failure, "
+         "so the Task Health panel, day_task_failures drill and PIPE_TASK_FAILURES alert stop "
+         "over-reporting failures the live tab collapses. Other loader arms byte-identical. Proc only, "
+         "no schema change; self-heals on the next hourly run",
+    102: "Task-mart retry-collapse: SP_LOAD_MARTS_V27 re-derived from V095 so MART_TASK_GRAPH_DAILY "
+         "[6] and MART_TASK_NODE_DAILY [6b] aggregate over terminal-attempt derived tables (QUALIFY "
+         "ROW_NUMBER() PARTITION BY [GRAPH_RUN_GROUP_ID,] DATABASE_NAME/SCHEMA_NAME/NAME/SCHEDULED_TIME "
+         "ORDER BY COMPLETED_TIME DESC) — a task auto-retried to success no longer inflates "
+         "RUNS_WITH_FAILURES/FAILED, so the Pipeline Health graph board and per-node timing board match "
+         "the live drill. Sibling arms (incl. V095 COMPANY_FOR_ROLE) byte-identical. Proc only, no "
+         "schema change; owner re-runs SP_LOAD_MARTS_V27(HOURLY) to re-stamp",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

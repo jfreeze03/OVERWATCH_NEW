@@ -45,6 +45,7 @@ from app.logic.formulas import (
 )
 from app.logic.incident import route_incidents, summarize_incidents
 from app.logic.insights import (
+    DURATION_MIN_ACTIVE_DAYS,
     build_failure_timeline,
     cluster_failures_by_family,
     compare_release_periods,
@@ -567,7 +568,8 @@ def _query_insights_panel() -> None:
 
 
 def _failure_timeline_section(company: str, database: str = "", schema_contains: str = "",
-                              known_failures: float | None = None) -> None:
+                              known_failures: float | None = None,
+                              known_from_live: bool = False) -> None:
     """Root-cause vs cascade view of recent task failures (ported)."""
     # C23: a verified-clean section renders green, never a false alarm. The body scans
     # a FIXED 7 days, so the header alarm must reflect 7-DAY failures — NOT the caller's
@@ -578,7 +580,15 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     _TITLE = "Failure root-cause timeline (7d)"
     if known_failures is not None and known_failures <= 0:
         section_header(_TITLE, alarm_health(0), "alerts")
-        empty_state("clean", "No task failures in the last 7 days for this scope.")
+        if known_from_live:
+            empty_state("clean", "No task failures in the last 7 days for this scope.")
+        else:
+            # F10: the 0 came from the hourly FACT_TASK_DAILY mart, which lags the live
+            # TASK_HISTORY this body scans (mart rebuild ~1h + source ~45min), so a failure in
+            # the most recent hour may not be in it yet — disclose the basis instead of
+            # asserting a verified-fresh all-clear (bug-hunt 2026-08-30).
+            empty_state("clean", "No task failures in the last 7 days for this scope, per the "
+                        "hourly task mart — a failure in the most recent ~hour may not yet show.")
         return
     # P6: hourly, not recent. This is the page's most expensive read (~15s: a 7-day
     # TASK_HISTORY failure scan) and ACCOUNT_USAGE.TASK_HISTORY lags up to ~45 min
@@ -756,7 +766,7 @@ def _release_compare_tab(company: str) -> None:
             if worse:
                 st.warning("Regressed after release: " + ", ".join(worse))
             else:
-                empty_state("clean", "No query-health regression beyond the 10% flat tolerance.")
+                empty_state("clean", "No query-health regression beyond the flat tolerance.")
         else:
             empty_state("no_data_yet", "Need data on both sides of the release date to compare.")
         result_caption(q_res)
@@ -1025,7 +1035,8 @@ def _task_health_view(company: str, days: int, database: str = "",
                       schema_contains: str = "") -> None:
     res = run(mart_sql.fact_task_daily(days, company, database, schema_contains), page=_PAGE,
               key=f"t_fact_{company}_{days}", tier="hourly", source="FACT_TASK_DAILY")
-    if not res.usable():
+    _from_mart = res.usable()
+    if not _from_mart:
         res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
     known_failed = None
@@ -1061,11 +1072,19 @@ def _task_health_view(company: str, days: int, database: str = "",
         # otherwise invisible. Reuses the fact_task_daily frame already fetched (mart
         # path only — the live task_runs fallback carries no daily AVG_SEC series).
         if {"DAY", "AVG_SEC", "TASK_NAME"}.issubset(res.df.columns):
+            # F9: both detectors need >=7 active days (DURATION_MIN_ACTIVE_DAYS); when the
+            # served window is shorter (e.g. the Current-month preset in the first week of a
+            # month) no task can qualify, so an empty result is STRUCTURAL, not a clean bill.
+            # Render neutral + a "needs history" note, never a green all-clear (bug-hunt 2026-08-30).
+            _enough_hist = days >= DURATION_MIN_ACTIVE_DAYS
             _drift = task_duration_anomalies(res.df)
             section_header("Duration drift — tasks slower than their own baseline",
-                           alarm_health(len(_drift)), "clock")
+                           alarm_health(len(_drift)) if _enough_hist else alarm_health(None), "clock")
             if _drift.empty:
-                st.caption("No task is running materially slower than its own recent baseline.")
+                st.caption("No task is running materially slower than its own recent baseline."
+                           if _enough_hist else
+                           f"Needs >= {DURATION_MIN_ACTIVE_DAYS} days of history to assess drift — "
+                           "widen the window.")
             else:
                 kpi_row([
                     {"label": "Tasks drifting slower", "value": f"{len(_drift)}",
@@ -1079,9 +1098,12 @@ def _task_health_view(company: str, days: int, database: str = "",
             # already-loaded daily frame as the drift above; no extra scan.
             _fc = duration_sla_forecast(res.df)
             section_header("Predicted SLA miss — tasks trending slower",
-                           alarm_health(len(_fc)), "schedule")
+                           alarm_health(len(_fc)) if _enough_hist else alarm_health(None), "schedule")
             if _fc.empty:
-                st.caption("No task's recent runtime is climbing toward a miss.")
+                st.caption("No task's recent runtime is climbing toward a miss."
+                           if _enough_hist else
+                           f"Needs >= {DURATION_MIN_ACTIVE_DAYS} days of history to project a miss — "
+                           "widen the window.")
             else:
                 _miss = int((_fc["FORECAST"] == "Predicted miss").sum())
                 kpi_row([
@@ -1103,7 +1125,8 @@ def _task_health_view(company: str, days: int, database: str = "",
                     "not a live in-flight run.")
     st.divider()
     _failure_timeline_section(company, database, schema_contains,
-                              known_failures=known_failed if days >= 7 else None)
+                              known_failures=known_failed if days >= 7 else None,
+                              known_from_live=not _from_mart)
 
 
 def _task_sla_view(company: str, days: int, database: str = "",
@@ -1873,9 +1896,14 @@ def _monitor_coverage_panel() -> None:
     cov = monitor_coverage(_whs.df, _mons.df if _mons.ok else None)
     # C23: amber only when warehouses are genuinely uncapped — an ACCOUNT-level
     # monitor caps everything, so per-warehouse non-assignment stays calm.
+    # F6: a FAILED SHOW RESOURCE MONITORS read (probe=True; needs the MONITOR privilege a
+    # limited SiS role often lacks) means the monitor list is UNKNOWN, not "no account
+    # monitor" — so an account-level cap can't be ruled out. Render neutral and disclose,
+    # never assert warehouses are uncapped off an unread list (bug-hunt 2026-08-30).
     section_header("Resource-monitor coverage",
-                   alarm_health(0 if bool(cov.get("account_monitor"))
-                                else int(cov["uncovered"])), "cost")
+                   alarm_health(None) if not _mons.ok
+                   else alarm_health(0 if bool(cov.get("account_monitor"))
+                                     else int(cov["uncovered"])), "cost")
     # Review #4: a LEVEL=ACCOUNT monitor caps every warehouse — per-warehouse
     # non-assignment is then a detail, not an "uncapped" alarm.
     _acct = bool(cov.get("account_monitor"))
@@ -1884,7 +1912,7 @@ def _monitor_coverage_panel() -> None:
     kpi_row([
         {"label": "Warehouses with a monitor", "value": f"{cov['covered']:,}"},
         {"label": _unc_label, "value": f"{cov['uncovered']:,}",
-         "delta_color": "off" if _acct else ("inverse" if cov["uncovered"] else "off"),
+         "delta_color": "off" if (_acct or not _mons.ok) else ("inverse" if cov["uncovered"] else "off"),
          "help": ("An ACCOUNT-level monitor caps all warehouses; these just lack a "
                   "dedicated per-warehouse quota." if _acct else
                   "No resource monitor = no credit quota, no suspend threshold — a runaway "
@@ -1892,9 +1920,13 @@ def _monitor_coverage_panel() -> None:
                   "admin in Snowsight; this map is the coverage picture for monitors this "
                   "role can see.")},
     ])
-    if cov["uncovered_names"] and not _acct:
+    if cov["uncovered_names"] and not _acct and _mons.ok:
         st.warning("Uncapped warehouses: " + ", ".join(cov["uncovered_names"][:20])
                    + (" …" if len(cov["uncovered_names"]) > 20 else ""))
+    if not _mons.ok:
+        st.caption("Resource-monitor list unreadable this pass (SHOW RESOURCE MONITORS needs "
+                   "the MONITOR privilege) — cap coverage can't be confirmed, so warehouses "
+                   "are not branded uncapped here.")
     if not cov["monitors_df"].empty:
         st.markdown("**Existing monitors — quota consumed**")
         styled_table(cov["monitors_df"], height=200)

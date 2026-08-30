@@ -403,12 +403,16 @@ def product_retirement(cost_df: pd.DataFrame, reads_df: pd.DataFrame,
 # ---- 4. Release compare --------------------------------------------------------
 
 _RELEASE_METRICS = (
-    # column, label, lower_is_better
-    ("QUERY_COUNT", "Queries", None),
-    ("FAIL_PCT", "Failure %", True),
-    ("P95_ELAPSED_SEC", "p95 runtime (s)", True),
-    ("QUEUED_SEC", "Queued (s)", True),
-    ("SPILL_REMOTE_GB", "Remote spill (GB)", True),
+    # column, label, lower_is_better, min_abs_delta
+    # min_abs_delta: a >10% relative move still reads Flat unless the ABSOLUTE change also
+    # clears this floor — mirrors SP_WAREHOUSE_CHANGE_SCAN's per-axis floors (V024), so a
+    # trivially small move on a tiny baseline (p95 0.4->0.5s, fail 0.1%->0.2%) is not a false
+    # regression. Queued/spill are now PER-QUERY (insights_sql normalizes by QUERY_COUNT).
+    ("QUERY_COUNT", "Queries", None, 0.0),
+    ("FAIL_PCT", "Failure %", True, 0.5),                    # >= 0.5 percentage point
+    ("P95_ELAPSED_SEC", "p95 runtime (s)", True, 2.0),      # >= 2 s
+    ("QUEUED_SEC", "Queued (s/query)", True, 0.1),          # >= 0.1 s per query
+    ("SPILL_REMOTE_GB", "Remote spill (GB/query)", True, 0.001),  # >= ~1 MB per query
 )
 _FLAT_TOLERANCE_PCT = 10.0
 
@@ -430,19 +434,22 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
         # per-column number-formatting can't express them — format to a display
         # string here where the unit is still known per metric (durations
         # humanize to Hr/Min/Sec, matching the rest of the app).
-        if col in ("P95_ELAPSED_SEC", "QUEUED_SEC"):
+        if col == "P95_ELAPSED_SEC":
             return humanize_duration(v, "s")
-        if col == "SPILL_REMOTE_GB":
-            return f"{v:,.2f} GB"
+        if col == "QUEUED_SEC":               # per-query seconds — small, show 2 decimals
+            return f"{v:,.2f} s/q"
+        if col == "SPILL_REMOTE_GB":          # per-query GB — tiny, render as MB/query
+            return f"{v * 1024:,.1f} MB/q"
         if col == "FAIL_PCT":
             return f"{v:,.1f}%"
         return f"{v:,.0f}"
 
     rows = []
-    for col, label, lower_better in _RELEASE_METRICS:
+    for col, label, lower_better, min_abs_delta in _RELEASE_METRICS:
         b = _fail_pct(before) if col == "FAIL_PCT" else safe_float(before.get(col))
         a = _fail_pct(after) if col == "FAIL_PCT" else safe_float(after.get(col))
         delta_pct = None if b == 0 else round((a - b) / abs(b) * 100, 1)
+        _abs_delta = abs(a - b)
         if lower_better is None:
             verdict = "n/a"
         elif delta_pct is None:
@@ -457,7 +464,9 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
                 verdict = "Better"
             else:
                 verdict = "Worse"
-        elif abs(delta_pct) <= _FLAT_TOLERANCE_PCT:
+        elif abs(delta_pct) <= _FLAT_TOLERANCE_PCT or _abs_delta < min_abs_delta:
+            # Flat when either the relative move is within tolerance OR the absolute change
+            # is below the per-metric floor (small-baseline noise suppression).
             verdict = "Flat"
         elif (delta_pct < 0) == lower_better:
             verdict = "Better"
@@ -503,7 +512,7 @@ _ERROR_FAMILIES = (
     ("Session not set up", r"does not have a current (database|schema|warehouse|role)|call use (database|schema|warehouse|role)|no active warehouse"),
     ("Metadata not ready", r"not yet available"),
     ("Missing object", r"does not exist\b|invalid identifier|unknown (table|view|function)"),
-    ("Timeout / cancelled", r"timeout|timed out|statement reached its statement or warehouse timeout|cancelled"),
+    ("Timeout / cancelled", r"timeout|timed out|statement reached its statement or warehouse timeout|cancell?ed|aborted"),
     ("Resource / memory", r"out of memory|resource|exceeded|quota"),
     ("Data quality", r"numeric value|conversion|null result|duplicate|constraint|division by zero|is not recognized"),
     ("Syntax / SQL", r"syntax error|unexpected|compilation error"),

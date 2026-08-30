@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.354.0 - Operations-layer bug hunt: 8 app-side fixes + V101/V102 (2026-08-30)
+
+Adversarial hunt over the operations layer (task/warehouse/pipeline SQL builders, release-compare
+logic, Operations UI tabs, monitor coverage). Eight app-side fixes plus two owner-gated forward
+migrations, all keyed on one recurring family: **Snowflake task auto-retries emit multiple
+TASK_HISTORY rows for one scheduled run, and several read paths counted attempts instead of runs.**
+
+- **F1 (HIGH): graph-run node view collapses auto-retries** — `task_graph_run_nodes` listed every
+  attempt of a retried task, so the node grid double-showed a task that failed then succeeded on
+  retry. Added the terminal-attempt `QUALIFY` the sibling readers already use.
+- **F3 (MED): dynamic-table failure count includes terminal-failure states** — `dynamic_table_health`
+  counted only `STATE='FAILED'`, missing `UPSTREAM_FAILED` / `CANCELLED`, so a DT that never
+  refreshed because its upstream failed showed green. Widened the failure predicate.
+- **F6 (MED): monitor-coverage panel no longer paints a false green** — when the resource-monitor
+  probe failed or the account scope was active, the coverage KPI/warning rendered an affirmative
+  all-clear; now neutral with a "coverage unknown" caveat.
+- **F7 (MED): release-compare per-query normalization** — `release_query_compare` compared raw
+  summed queued-time and remote spill between releases of different query volume; both are now
+  per-query (`/ NULLIF(COUNT(*),0)`), and the metric labels/verdicts follow.
+- **F8 (LOW): task-error classifier catches "cancelled"/"aborted" spellings.**
+- **F9 (LOW): duration-drift / predicted-SLA-miss detectors disclose short windows** — both need
+  ≥7 active days; below that an empty result is structural, so the headers render neutral with a
+  "needs ≥7 days" caption instead of a green all-clear.
+- **F10 (LOW): failure-timeline all-clear discloses its mart basis** — the 7-day short-circuit reads
+  the hourly `FACT_TASK_DAILY` mart, which lags the live scan by ~1h; the clean message now says so.
+- **F11 (LOW): release verdicts gain a minimum-absolute-delta floor** so a metric that moved a
+  hair in relative terms but is materially flat no longer reads as a regression.
+- **V101 (owner-gated): `FACT_TASK_DAILY` retry-collapse** — `SP_LOAD_DAILY_FACTS` re-derived from
+  V064 so the task rollup aggregates over a terminal-attempt CTE, matching the live readers. The
+  mart-first Task Health panel, `day_task_failures` drill and `PIPE_TASK_FAILURES` alert stop
+  over-reporting failures a task recovered from on retry. Self-heals on the next hourly run.
+- **V102 (owner-gated): task-mart retry-collapse** — `SP_LOAD_MARTS_V27` re-derived from V095 so
+  `MART_TASK_GRAPH_DAILY` and `MART_TASK_NODE_DAILY` collapse retries too, so the Pipeline Health
+  graph board and per-node timing board match the live drill. Owner re-runs
+  `SP_LOAD_MARTS_V27('HOURLY', d)` to re-stamp trailing history.
+
 ## 4.353.0 - Cost-layer bug hunt: 3 app-side fixes (2026-08-30)
 
 Adversarial hunt over the cost layer (pricing core, ~45 SQL builders, 6 UI tabs, ROI logic).
