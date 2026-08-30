@@ -152,19 +152,26 @@ LIMIT 200
 """
 
 
-def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5) -> str:
-    """Account-takeover candidates: a burst of failed logins for a user FOLLOWED
-    BY a success — the brute-force breakthrough ``failed_logins``' count-only lens
-    can't express (it reads IS_SUCCESS='NO' only, never correlating a later success).
+# A brute-force "breakthrough" is a SUCCESS immediately preceded by a dense burst of failures;
+# this bounds how far back the burst can reach so scattered typos across days never qualify.
+_TAKEOVER_BURST_HOURS = 6
 
-    Per user over the window: failures, distinct failing IPs, first/last failure,
-    and the earliest SUCCESS landing AFTER the first failure. SUCCEEDED_AFTER (a
-    success followed the burst) is the dangerous signal — a burst with no later
-    success is a locked-out user, not a breach. Needs event-grain ordering, so it
-    reads live LOGIN_HISTORY (day-grain FACT_SECURITY_LOGIN_DAILY can't express
-    intra-window ordering). Scored by ``logic.insights.takeover_severity``.
-    Read-only review — no alert is raised; a legitimate user who fat-fingered a
-    password then logged in will also surface, so confirm before acting."""
+
+def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5) -> str:
+    """Account-takeover candidates: a BURST of failed logins for a user immediately
+    FOLLOWED BY a success — the brute-force breakthrough ``failed_logins``' count-only
+    lens can't express (it reads IS_SUCCESS='NO' only, never correlating a later success).
+
+    Per user over the window: failures, distinct failing IPs, first/last failure, and the
+    earliest SUCCESS that followed a dense burst (>= min_failures failures within
+    ``_TAKEOVER_BURST_HOURS``h before it). SUCCEEDED_AFTER (a success followed the BURST) is
+    the dangerous signal — a terminal lock-out burst with no later success is a locked-out
+    user, not a breach, and a routine login after an isolated typo is not a breakthrough.
+    Anchoring the success to a bounded pre-success burst (not merely the earliest failure
+    anywhere in the window) is what keeps those benign cases off the dangerous list
+    (bug-hunt 2026-08-30). Needs event-grain ordering, so it reads live LOGIN_HISTORY
+    (day-grain FACT_SECURITY_LOGIN_DAILY can't express intra-window ordering). Scored by
+    ``logic.insights.takeover_severity``. Read-only review — confirm before acting."""
     days = bounded_days(days, maximum=30)
     min_failures = max(2, min(int(min_failures), 100))
     ev_where = and_where(
@@ -190,14 +197,29 @@ fails AS (
     GROUP BY USER_NAME
     HAVING COUNT(*) >= {min_failures}
 ),
-succ_after AS (
-    SELECT f.USER_NAME, MIN(e.EVENT_TIMESTAMP) AS FIRST_SUCCESS_AFTER
-    FROM fails f
-    JOIN ev e
-      ON e.USER_NAME = f.USER_NAME
-     AND e.IS_SUCCESS = 'YES'
-     AND e.EVENT_TIMESTAMP > f.FIRST_FAILURE
-    GROUP BY f.USER_NAME
+breakthroughs AS (
+    -- a success is a breakthrough only if >= {min_failures} failures preceded it within
+    -- {_TAKEOVER_BURST_HOURS}h (a real concentrated attempt), so a login after a stray typo
+    -- and a terminal lock-out burst (no success after) are both correctly excluded.
+    SELECT s.USER_NAME, s.EVENT_TIMESTAMP AS SUCCESS_TS,
+           MIN(fl.EVENT_TIMESTAMP) AS BURST_FIRST_FAILURE
+    FROM ev s
+    JOIN fails cand ON cand.USER_NAME = s.USER_NAME
+    JOIN ev fl
+      ON fl.USER_NAME = s.USER_NAME
+     AND fl.IS_SUCCESS = 'NO'
+     AND fl.EVENT_TIMESTAMP < s.EVENT_TIMESTAMP
+     AND fl.EVENT_TIMESTAMP >= DATEADD('hour', -{_TAKEOVER_BURST_HOURS}, s.EVENT_TIMESTAMP)
+    WHERE s.IS_SUCCESS = 'YES'
+    GROUP BY s.USER_NAME, s.EVENT_TIMESTAMP
+    HAVING COUNT(*) >= {min_failures}
+),
+first_break AS (
+    SELECT USER_NAME,
+           MIN(SUCCESS_TS) AS FIRST_SUCCESS_AFTER,
+           MIN_BY(BURST_FIRST_FAILURE, SUCCESS_TS) AS BREAKTHROUGH_FROM
+    FROM breakthroughs
+    GROUP BY USER_NAME
 ),
 succ_total AS (
     SELECT USER_NAME, COUNT(*) AS SUCCESSES
@@ -211,12 +233,12 @@ SELECT f.USER_NAME,
        f.FAIL_IPS,
        f.FIRST_FAILURE,
        f.LAST_FAILURE,
-       sa.FIRST_SUCCESS_AFTER,
-       IFF(sa.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER,
-       DATEDIFF('minute', f.FIRST_FAILURE, sa.FIRST_SUCCESS_AFTER) AS MINS_TO_BREAKTHROUGH,
+       fb.FIRST_SUCCESS_AFTER,
+       IFF(fb.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER,
+       DATEDIFF('minute', fb.BREAKTHROUGH_FROM, fb.FIRST_SUCCESS_AFTER) AS MINS_TO_BREAKTHROUGH,
        f.LAST_ERROR
 FROM fails f
-LEFT JOIN succ_after sa ON sa.USER_NAME = f.USER_NAME
+LEFT JOIN first_break fb ON fb.USER_NAME = f.USER_NAME
 LEFT JOIN succ_total t ON t.USER_NAME = f.USER_NAME
 ORDER BY SUCCEEDED_AFTER DESC, f.FAILURES DESC
 LIMIT 100
@@ -1038,13 +1060,21 @@ def day_ddl(day: object, company: str = "ALL") -> str:
     from app.data.common import and_where, day_literal
 
     lit = day_literal(day)
+    # QUERY_TYPE list aligned with recent_ddl_changes so the day-replay covers the same
+    # security-relevant identity/role/policy DDL the main change-risk feed shows (a DROP_ROLE /
+    # ALTER_USER / masking-policy change was previously invisible in the replay). Warehouse
+    # suspend/resume (system auto-cycle noise) dropped, and the cap raised + ordered newest-first
+    # so a busy day no longer evicts late-day security DDL (bug-hunt 2026-08-30).
     where = and_where(
         f"DATE(START_TIME) = {lit}",
         "EXECUTION_STATUS = 'SUCCESS'",
-        """QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
-                     'ALTER_TABLE_MODIFY_COLUMN', 'DROP', 'RENAME', 'ALTER_SESSION',
-                     'CREATE_VIEW', 'ALTER_WAREHOUSE_SUSPEND', 'ALTER_WAREHOUSE_RESUME',
-                     'GRANT', 'REVOKE', 'TRUNCATE_TABLE')""",
+        ("(QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_VIEW', 'ALTER', "
+         "'ALTER_TABLE_MODIFY_COLUMN', 'ALTER_SESSION', 'ALTER_USER', 'CREATE_USER', 'DROP_USER', "
+         "'CREATE_ROLE', 'ALTER_ROLE', 'DROP_ROLE', 'DROP', 'GRANT', 'REVOKE', "
+         "'CREATE_TABLE_AS_SELECT', 'RENAME', 'RENAME_TABLE', 'TRUNCATE_TABLE') "
+         "OR QUERY_TYPE ILIKE '%POLICY%' OR QUERY_TYPE ILIKE '%USER%' "
+         "OR QUERY_TYPE ILIKE '%ROLE%' OR QUERY_TYPE ILIKE 'DROP%' "
+         "OR QUERY_TYPE ILIKE 'TRUNCATE%')"),
         _companies.role_clause(company),
     )
     return f"""
@@ -1052,8 +1082,8 @@ SELECT START_TIME, USER_NAME, ROLE_NAME, QUERY_TYPE, DATABASE_NAME, SCHEMA_NAME,
        LEFT(QUERY_TEXT, 140) AS DDL_PREVIEW
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
-ORDER BY START_TIME
-LIMIT 300
+ORDER BY START_TIME DESC
+LIMIT 500
 """
 
 
@@ -1451,10 +1481,16 @@ LIMIT 200
 
 
 def login_fact_coverage(days: int = 30) -> str:
+    # COVERAGE_DAYS is DENSITY (COUNT DISTINCT DAY), not the MIN..MAX span: the standing loader
+    # backfills only the last few days, so a past multi-day outage leaves a permanent interior
+    # gap. A span-based count reports that gap as covered, so fact_coverage_complete would promote
+    # a hole-ridden mart over the complete live LOGIN_HISTORY and undercount failed/new-network
+    # logins in the gap window (a real attack there goes invisible). Mirrors access_evidence_days
+    # (bug-hunt 2026-08-30).
     days = bounded_days(days, maximum=90)
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       DATEDIFF('day', MIN(DAY), MAX(DAY)) + 1 AS COVERAGE_DAYS,
+       COUNT(DISTINCT DAY) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_LOGIN_DAILY')}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -1463,10 +1499,12 @@ WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 
 def security_login_fact_coverage(days: int = 30) -> str:
     """Coverage contract for the V075 login evidence fact."""
+    # DENSITY, not span — see login_fact_coverage. An interior gap must deflate COVERAGE_DAYS so
+    # fact_coverage_complete keeps the page on the live path until the fact is genuinely dense.
     days = bounded_days(days, maximum=90)
     return f"""
 SELECT MIN(DAY) AS FIRST_DAY, MAX(DAY) AS LAST_DAY, COUNT(*) AS FACT_ROWS,
-       DATEDIFF('day', MIN(DAY), MAX(DAY)) + 1 AS COVERAGE_DAYS,
+       COUNT(DISTINCT DAY) AS COVERAGE_DAYS,
        MAX(LOAD_TS) AS LAST_LOAD
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}
 WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
@@ -1542,6 +1580,10 @@ SELECT f.USER_NAME, f.CLIENT_IP, f.FIRST_SEEN,
 FROM first_seen f
 JOIN {core_object('FACT_SECURITY_LOGIN_DAILY')} h
   ON h.USER_NAME = f.USER_NAME AND h.CLIENT_IP = f.CLIENT_IP
+ -- Bound the volume sums to the same 90-day window as the live new_network_logins path; the fact
+ -- retains 180 days, so an unbounded join inflated LOGINS/SUCCESSES vs the live sibling for a
+ -- (user, IP) with activity in the 90-180d band (bug-hunt 2026-08-30).
+ AND h.DAY >= DATEADD('day', -90, CURRENT_DATE())
 WHERE f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
 GROUP BY 1, 2, 3
 ORDER BY f.FIRST_SEEN DESC
@@ -1681,6 +1723,10 @@ WITH periods AS (
                          BYTES_TRANSFERRED, 0)) / POWER(1024, 3), 3) AS PRIOR_GB
     FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
     WHERE START_TIME >= DATEADD('day', -{span * 2}, CURRENT_TIMESTAMP())
+      -- TRUE egress only, matching egress_daily: a same-region internal transfer (both
+      -- TARGET_REGION and TARGET_CLOUD NULL) moves no data out of the account, so it must not
+      -- be scored as a new/spiking outbound destination on this exfiltration lens (bug-hunt 2026-08-30).
+      AND (TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)
     GROUP BY 1
 )
 SELECT TARGET_REGION, CURRENT_GB, PRIOR_GB, {span} AS BASELINE_DAYS,

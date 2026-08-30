@@ -822,7 +822,13 @@ def dormant_severity(df: pd.DataFrame) -> pd.DataFrame:
         else "Low",
         axis=1,
     )
-    return out
+    # Sort worst-first so a High-by-role-count row (moderate gap, many roles) leads instead of
+    # being buried under longer-gap Medium rows -- the table is read top-down as a triage list
+    # (mirrors takeover_severity, bug-hunt 2026-08-30).
+    _rank = {"High": 0, "Medium": 1, "Low": 2}
+    return (out.assign(_o=out["SEVERITY"].map(_rank))
+            .sort_values(["_o", "DAYS_DORMANT"], ascending=[True, False])
+            .drop(columns="_o").reset_index(drop=True))
 
 
 def reawakening_severity(df: pd.DataFrame) -> pd.DataFrame:
@@ -839,7 +845,11 @@ def reawakening_severity(df: pd.DataFrame) -> pd.DataFrame:
         else "Low",
         axis=1,
     )
-    return out
+    # Worst-first: a High-by-role-count reawakening must not sort below longer-gap Mediums.
+    _rank = {"High": 0, "Medium": 1, "Low": 2}
+    return (out.assign(_o=out["SEVERITY"].map(_rank))
+            .sort_values(["_o", "GAP_DAYS"], ascending=[True, False])
+            .drop(columns="_o").reset_index(drop=True))
 
 
 def task_failure_streaks(df: pd.DataFrame) -> pd.DataFrame:

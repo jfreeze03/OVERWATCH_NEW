@@ -495,7 +495,10 @@ def test_dormant_severity():
         {"USER_NAME": "C", "DAYS_DORMANT": 95, "ROLE_COUNT": 8},
     ])
     out = insights.dormant_severity(df)
-    assert list(out["SEVERITY"]) == ["High", "Medium", "High"]
+    # worst-first now (bug-hunt 2026-08-30): both High rows lead, ordered by DAYS_DORMANT desc
+    # (A=400, C=95), then the Medium (B). The High-by-role-count row is no longer buried.
+    assert list(out["SEVERITY"]) == ["High", "High", "Medium"]
+    assert list(out["USER_NAME"]) == ["A", "C", "B"]
 
 
 def test_reawakening_severity():
@@ -506,7 +509,10 @@ def test_reawakening_severity():
         {"USER_NAME": "C", "GAP_DAYS": 60, "ROLE_COUNT": 8},    # many roles -> High
         {"USER_NAME": "D", "GAP_DAYS": 50, "ROLE_COUNT": 1},    # short + few roles -> Low
     ])
-    assert list(insights.reawakening_severity(df)["SEVERITY"]) == ["High", "Medium", "High", "Low"]
+    # worst-first now: High rows lead (A gap=400, C gap=60), then Medium (B), then Low (D).
+    out = insights.reawakening_severity(df)
+    assert list(out["SEVERITY"]) == ["High", "High", "Medium", "Low"]
+    assert list(out["USER_NAME"]) == ["A", "C", "B", "D"]
     assert insights.reawakening_severity(pd.DataFrame()).empty
 
 

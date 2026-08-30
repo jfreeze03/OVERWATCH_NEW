@@ -195,9 +195,12 @@ def test_login_takeover_candidates_shape():
     sql = security_sql.login_takeover_candidates(7, "ALL", min_failures=5)
     assert "IS_SUCCESS = 'NO'" in sql and "IS_SUCCESS = 'YES'" in sql
     assert "HAVING COUNT(*) >= 5" in sql
-    # the breakthrough: earliest success AFTER the first failure
-    assert "e.EVENT_TIMESTAMP > f.FIRST_FAILURE" in sql
-    assert "IFF(sa.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER" in sql
+    # the breakthrough: a success preceded by a DENSE burst (>= min_failures failures within
+    # _TAKEOVER_BURST_HOURS), not merely any success after the first window failure (bug-hunt 2026-08-30)
+    assert "breakthroughs AS (" in sql
+    assert "DATEADD('hour', -6, s.EVENT_TIMESTAMP)" in sql
+    assert "e.EVENT_TIMESTAMP > f.FIRST_FAILURE" not in sql
+    assert "IFF(fb.FIRST_SUCCESS_AFTER IS NOT NULL, TRUE, FALSE) AS SUCCEEDED_AFTER" in sql
     # event-grain live read, anchored on CURRENT_TIMESTAMP (hours matter), 30d cap
     assert "EVENT_TIMESTAMP >= DATEADD('day', -7, CURRENT_TIMESTAMP())" in sql
     assert "ACCOUNT_USAGE.LOGIN_HISTORY" in sql

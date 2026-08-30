@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.357.0 - Security-layer bug hunt #2: 7 app fixes + V104 (2026-08-30)
+
+Second, deeper adversarial pass over the security layer (7 finders: login/MFA, credentials,
+grants/least-privilege, escalation/posture, change-risk/DDL, egress, tags/trust). Two candidates
+were correctly refuted (the egress-NEW-branch has no volume floor — an intentional
+security-conservative choice; a same-region egress duplicate was already covered). One confirmed
+finding (CREATE-OR-REPLACE change-risk classification) is deferred as a scoped follow-up because a
+safe fix needs live validation to avoid re-flooding the de-noised change-risk panel.
+
+- **Login fact-coverage now measures day density, not calendar span (HIGH)** — the login coverage
+  gate used `MIN..MAX` span, so a gappy `FACT_SECURITY_LOGIN_DAILY` (from a past loader outage the
+  standing task never backfills) passed as COMPLETE, silently switching the page onto a hole-ridden
+  mart that undercounts failed/new-network logins — an attack in the gap window went invisible. Now
+  `COUNT(DISTINCT DAY)`, matching `access_evidence_days`, so an interior gap keeps the page on the
+  complete live `LOGIN_HISTORY` path. (Also resolves the `fact_coverage_complete` density gap.)
+- **Account-takeover "breakthrough" now anchors to a real burst (MED)** — it flagged
+  `SUCCEEDED_AFTER` whenever any success followed the *first* failure in the window, so a routine
+  login after an isolated typo, and a locked-out terminal burst, both read as breaches. It now
+  requires a success preceded by a dense burst (≥ min_failures within 6h).
+- **Cross-week credential-expiry double-count fixed (MED, V104)** — the `SEC_CRED_EXPIRY` dedupe key
+  appended the ISO week, so a credential in the 10-day horizon raised a new OPEN alert each week and
+  V096's `EXPIRING→EXPIRED` supersede only matched a same-week sibling. The key drops the week token
+  (`SP_ALERT_SCAN` re-derived from V096); the supersede now matches regardless of raise week.
+- **Day-replay DDL covers identity/role/policy changes (MED)** — `day_ddl`'s type list had drifted
+  from `recent_ddl_changes`, so a `DROP_ROLE`/`ALTER_USER`/masking-policy change was invisible in
+  the day replay; aligned it, dropped warehouse suspend/resume noise, and hardened the row cap.
+- **Egress baseline scores only true egress (MED)** — `egress_baseline` counted same-region internal
+  transfers its sibling `egress_daily` excludes, false-flagging benign internal movement as a new
+  outbound destination; added the matching true-egress predicate.
+- **Dormant/reawakening tables sort worst-first (LOW)** — a High-by-role-count row no longer sorts
+  below longer-gap Medium rows.
+- **`new_network_logins_fact` volume bounded to 90d (LOW)** — matches the live sibling; the mart's
+  180-day retention no longer inflates the login/success counts on a source flip.
+
 ## 4.356.0 - Operations-layer bug hunt #2: 5 app fixes + V103 (2026-08-30)
 
 Second, deeper adversarial pass over the operations layer (7 finders: sizing, pipeline SLA,

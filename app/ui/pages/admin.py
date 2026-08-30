@@ -350,6 +350,14 @@ _EXPECTED_MIGRATIONS = {
          "SUSPEND on the mart-first right-sizing panel and inflated the idle-$ KPI. Matches the live "
          "warehouse_sizing_profile. Other mart arms byte-identical. Proc only, no schema change; owner "
          "re-runs SP_LOAD_MARTS_V27(HOURLY) to re-stamp trailing rows",
+    104: "SEC_CRED_EXPIRY dedupe key drops the ISO-week token: SP_ALERT_SCAN re-derived from V096 so "
+         "the credential-expiry event keys per RULE_ID|USER|NAME|EXPIRING/EXPIRED instead of appending "
+         "DATE_TRUNC(week). A credential in the 10-day horizon now raises ONE deduped OPEN EXPIRING "
+         "event (not one per ISO week the horizon spans), and V096's EXPIRING->EXPIRED supersede matches "
+         "regardless of raise week -- fixing the cross-week double-count that inflated open-alert/severity "
+         "tallies and stranded a phantom expiring alert after expiry. Other weekly-keyed rule "
+         "(SERVICE_TYPE) byte-identical. Proc only, no schema change; forward-healing on the next hourly "
+         "SP_ALERT_SCAN",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
