@@ -201,6 +201,10 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
     in the signals')."""
     onset_dt = _to_dt(onset)
     fams = set(families or [])
+    # Only advertise the entity-match factor when the caller actually supplies entity
+    # context; without it _entity_match is a constant 0.3 for every candidate (it cannot
+    # differentiate), so the "why" string must not claim it contributed to the ranking.
+    _has_entity_ctx = bool(str(entity_name).strip()) or bool(fams)
     scored: list[dict] = []
     for c in (candidates or []):
         prox = _proximity(c.get("when"), onset_dt)
@@ -232,8 +236,8 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
             "kind": c.get("kind"), "title": c.get("title"), "score": round(score, 3),
             "band": band, "when": when, "lead_text": lead_text,
             "magnitude_text": c.get("magnitude_text", ""), "changed_by": c.get("changed_by", ""),
-            "why": (f"timing {prox:.0%} ({lead_text}), magnitude {mag:.0%}, "
-                    f"entity match {match:.0%}"),
+            "why": (f"timing {prox:.0%} ({lead_text}), magnitude {mag:.0%}"
+                    + (f", entity match {match:.0%}" if _has_entity_ctx else "")),
             "evidence": c.get("evidence", {}),
         })
     # Rank by BAND strength first, then score. The LOW band-cap for untimed / after-

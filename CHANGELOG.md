@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.351.0 - Incident-management bug hunt: 9 app-side fixes + V099 (2026-08-30)
+
+Adversarial hunt over the incident-management layer (logic, SQL readers, triage UI,
+migrations) confirmed 10 distinct defects. Nine are fixed app-side here; the tenth is the
+owner-gated **V099** migration (apply in Snowsight after V098).
+
+**V099 — SP_INCIDENT_AUTODECLARE family-open guard scoped by company** [HIGH, owner-gated]:
+the proc groups per (FAMILY, COMPANY) but its family-already-open guard correlated only on
+the family, never `i.COMPANY = c.COMPANY`. Because ALFA and Trexis share rule families, a
+CRITICAL for one company was silently *not* auto-declared whenever the other company had an
+open incident of the same family — a cross-company coverage gap. Re-derived from V098 with
+the company correlation added. Byte-locked to `outputs/gen_v099.py`.
+
+**App-side (Control Room / Alerts / RCA / charts):**
+- **Manual declare no longer duplicates an already-open family** — `_incident_declare_sql`
+  gained the same family-already-open guard SP_INCIDENT_AUTODECLARE carries (per company),
+  and its members INSERT only fires if the incident row was actually created; it also now
+  returns a statement **list** so the declare is never string-split on `;` (a `;` in an
+  alert-derived title used to break the INSERT mid-literal).
+- **Dropped the "Change-correlated" incident KPI** — it counted `INCIDENT_MEMBERS` of kind
+  `WH_CHANGE`/`DEPLOY`, but no writer ever persists those kinds, so it was a permanent,
+  misleading `0%`. Change correlation lives in the Control Room RCA panel.
+- **RCA stops advertising the entity-match factor** — the production caller never passes
+  entity context, so the `0.20·entity-match` term was a constant that couldn't differentiate
+  candidates; the caption and the per-hypothesis "why" no longer claim it.
+- **`incident_timeline` 7d fallback brought to parity with the 48h mart** — it had dropped
+  the warehouse-change arm and half the DDL types, omitted COMPANY/REF_ID, and relabelled the
+  replay lanes, so toggling 48h→7d silently thinned the same window. Now identical KIND labels
+  (`ALERT`/`TASK_FAIL`/`DDL`/`WH_CHANGE`), full DDL set, COMPANY + REF_ID, and the WH_CHANGE arm.
+- **`incident_gantt` lanes by unique INCIDENT_ID, not the shared TITLE** — auto-declares all
+  titled `Auto: <family>` collapsed onto one row; plus a subtle 'now' reference line so an
+  open incident's projected right edge reads as reaching now, not a measured resolution (C38).
+- **Declare confirm/latch keys scoped per proposal** — a typed DECLARE no longer re-arms the
+  button after switching to a different proposal (mirrors the close flow's per-incident keys).
+- **Incidents exception-summary won't false-all-clear** — a failed incident-metrics /
+  critical-count / health read collapsed to 0 and read as "nothing wrong"; it now surfaces a
+  partial-telemetry signal so green never means "nothing loaded".
+
 ## 4.350.0 - Default landing opens on Brief for DBAs (2026-08-30)
 
 The DBA profile's page tuple listed `Ask` first, so `pages[0]` — the default landing

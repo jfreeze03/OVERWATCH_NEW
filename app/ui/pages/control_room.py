@@ -72,13 +72,25 @@ _PAGE = "Control Room"
 
 
 
-def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> str:
+def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> list[str]:
     """Generate-then-run declare: one incident + every open alert of the
     proposal's dedupe family as members (48h window). Two INSERTs sharing an
     APP-generated incident id (bug round 2 B3: the previous session-variable
     opener was outside the operator allow-list, so it was refused and the
     variable never existed — declare wrote zero rows. An inlined uuid keeps the
-    id shared across both INSERTs, and both are allow-listed OVERWATCH DML)."""
+    id shared across both INSERTs, and both are allow-listed OVERWATCH DML).
+
+    Returns the two statements as a LIST so the caller runs each verbatim — never
+    string-split on ';', which a ';' inside an alert-derived title would break
+    mid-literal (bug-hunt 2026-08-30).
+
+    Both INSERTs are guarded against duplicating a family that already has an open
+    incident (mirroring SP_INCIDENT_AUTODECLARE's family-already-open guard, which
+    the manual path used to bypass — declaring a second OPEN incident for a family
+    already covered fragments the lifecycle and double-counts OPEN_NOW): the INCIDENTS
+    insert is a no-op when an OPEN/MITIGATED incident for the same (family, company)
+    already holds a member alert, and the members insert only fires if its incident
+    row was actually created (else it would orphan members onto a non-existent id)."""
     import uuid
 
     from app.config import core_object
@@ -92,11 +104,25 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
             f"UPPER({sql_literal(proposal_parts[3])}) "
         )
     inc_id = sql_literal(str(uuid.uuid4()))
-    return (
+    # Family-already-open guard (family + company, matching SP_INCIDENT_AUTODECLARE):
+    # do not open a second incident for a (family, company) that already has an
+    # OPEN/MITIGATED incident holding a member alert of that family.
+    open_family_guard = (
+        f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
+        f"JOIN {core_object('INCIDENTS')} i ON i.INCIDENT_ID = m.INCIDENT_ID "
+        f"JOIN {core_object('ALERT_EVENTS')} a ON a.EVENT_ID = m.REF_ID "
+        "WHERE m.MEMBER_KIND = 'ALERT' AND i.STATUS IN ('OPEN', 'MITIGATED') "
+        f"AND (i.COMPANY = {sql_literal(str(company))} OR UPPER(i.COMPANY) = 'ALL') "
+        f"AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = {fam})"
+    )
+    incidents_insert = (
         f"INSERT INTO {core_object('INCIDENTS')} "
         "(INCIDENT_ID, TITLE, SEVERITY, STATUS, COMPANY, DETECTED_AT, ROOT_CAUSE_KIND) "
         f"SELECT {inc_id}, {sql_literal(str(title)[:300])}, {sql_literal(str(severity).upper())}, "
-        f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN';\n"
+        f"'OPEN', {sql_literal(str(company))}, CURRENT_TIMESTAMP(), 'UNKNOWN' "
+        f"{open_family_guard}"
+    )
+    members_insert = (
         f"INSERT INTO {core_object('INCIDENT_MEMBERS')} "
         "(INCIDENT_ID, MEMBER_KIND, REF_ID, EVIDENCE_TS, AUTO_LINKED) "
         f"SELECT {inc_id}, 'ALERT', e.EVENT_ID, e.RAISED_AT, FALSE "
@@ -109,8 +135,14 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
         f"AND SPLIT_PART(COALESCE(e.DEDUPE_KEY, e.EVENT_ID), '|', 1) = {fam} "
         f"{entity_filter}"
         f"AND NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
-        "WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID);"
+        "WHERE m.MEMBER_KIND = 'ALERT' AND m.REF_ID = e.EVENT_ID) "
+        # only link members if the incident row was actually created above — the
+        # family-already-open guard can make the INCIDENTS insert a no-op, which
+        # would otherwise orphan members onto a non-existent incident id.
+        f"AND EXISTS (SELECT 1 FROM {core_object('INCIDENTS')} i2 "
+        f"WHERE i2.INCIDENT_ID = {inc_id})"
     )
+    return [incidents_insert, members_insert]
 
 
 def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
@@ -205,7 +237,7 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
             "Magnitude": h["magnitude_text"], "By": h["changed_by"], "Why (scoring)": h["why"],
         } for h in hyps])
         styled_table(_rows, height=min(60 + 34 * len(hyps), 260))
-        st.caption("Ranked by 0.45·timing + 0.35·magnitude + 0.20·entity-match. A change outside "
+        st.caption("Ranked by timing (a trigger precedes onset) and magnitude. A change outside "
                    "the ~48h pre-onset window can't be a confident cause however large. Confirm the "
                    "lead, then close the incident with its root cause above.")
         # Grounded-AI narrative (button-gated, credit-warned): a plain-English read
@@ -661,6 +693,15 @@ def render() -> None:
             _exc.append({"label": "Stale sources", "value": f"{_stale:,}",
                          "detail": "Feeds past their freshness SLA — see Freshness & replay.",
                          "severity": "warn"})
+        # Never show a confident all-clear when a feeding read is UNKNOWN rather than zero:
+        # a failed incident_metrics / critical-count / health-strip read collapses to 0
+        # above, which would otherwise read as "nothing wrong" during an outage (green must
+        # never mean "nothing loaded"). Surface the gap so the clean message can't mislead.
+        if not (inc_met.usable() and _crit_known and _sv):
+            _exc.append({"label": "Telemetry", "value": "partial",
+                         "detail": "Some incident / critical / health feeds are unavailable — the "
+                                   "all-clear can't be trusted until they load.",
+                         "severity": "warn"})
         exception_summary(_exc, "No open criticals, open incidents, or stale sources.")
         # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
         # change-correlated) moved to Alerts > History — retrospective process
@@ -764,19 +805,24 @@ def render() -> None:
                 )
                 _dec = _incident_declare_sql(str(_prow["SUGGESTED_TITLE"]), str(_prow["SEVERITY"]),
                                              str(_prow["COMPANY"]), _pick)
-                st.code(_dec, language="sql")
-                if confirm_gate("DECLARE", "Declare incident + link alerts", key="inc_prop_exec",
+                st.code(";\n\n".join(_dec) + ";", language="sql")
+                # Scope the confirm/latch keys by the selected proposal so a typed DECLARE
+                # authorizes only THAT proposal — a fixed key let a confirmation typed for
+                # one proposal re-arm the button after switching to another (bug-hunt
+                # 2026-08-30), mirroring the close flow's per-incident inc_close_{id} keys.
+                _exec_key = f"inc_prop_exec_{_pick}"
+                if confirm_gate("DECLARE", "Declare incident + link alerts", key=_exec_key,
                                 prompt="Type DECLARE to confirm", type="primary"
-                                ) and write_gate_open("inc_prop_exec"):
+                                ) and write_gate_open(_exec_key):
                     _ok_all = True
-                    for _stmt in [s for s in _dec.split(";") if s.strip()]:
+                    for _stmt in _dec:
                         _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
                         _ok_all = _ok_all and _ok
                         if not _ok:
                             # Stop at the first failure — running INCIDENT_MEMBERS
                             # after a failed INCIDENTS insert half-applies the declare.
                             break
-                    stamp_write("inc_prop_exec", _ok_all)  # C48
+                    stamp_write(_exec_key, _ok_all)  # C48
                     notify(_ok_all, "Incident declared with members linked." if _ok_all
                            else "Declare failed — see the error log.")
                     if _ok_all:

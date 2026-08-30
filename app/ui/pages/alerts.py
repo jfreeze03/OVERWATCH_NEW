@@ -1466,9 +1466,9 @@ def render() -> None:
                 {"label": "Alerts / incident", "value": _optional_number(im.get("COMPRESSION"), decimals=1),
                  "help": "How many alerts each incident absorbs — higher means storms "
                          "compress into one object instead of many pages."},
-                {"label": "Change-correlated", "value": _optional_number(im.get("CHANGE_PCT"), "%"),
-                 "help": "Incidents with a warehouse-change or deploy member — how often "
-                         "a change explains the breakage."},
+                # "Change-correlated" removed v4.351: it counted INCIDENT_MEMBERS of kind
+                # WH_CHANGE/DEPLOY, but no writer ever persists those kinds, so it was a
+                # permanent misleading 0%. Change correlation lives in the Control Room RCA.
             ])
         else:
             st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")

@@ -1203,7 +1203,14 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
 
 def incident_gantt(df: pd.DataFrame) -> None:
     """CR5: per-incident detected->resolved bars, colored by severity — the
-    lifecycle shape (and what's still running, its bar reaching now) at a glance."""
+    lifecycle shape (and what's still running, its bar reaching now) at a glance.
+
+    Each incident is its OWN lane, keyed on the unique INCIDENT_ID rather than the
+    (possibly-shared) TITLE — SP_INCIDENT_AUTODECLARE titles every auto-declare
+    'Auto: <family>', so same-family incidents over the window would otherwise
+    collapse onto one row and occlude each other. A 'now' reference line marks where
+    an open incident's projected right edge sits (COALESCE(RESOLVED_AT, now)), so a
+    still-running bar reads as reaching now rather than as a measured resolution (C38)."""
     if df is None or df.empty:
         _empty_note("No incidents to chart in this window.")
         return
@@ -1214,15 +1221,20 @@ def incident_gantt(df: pd.DataFrame) -> None:
     if data.empty:
         _empty_note("No timestamped incidents to chart.")
         return
+    # One lane per incident: TITLE for the label, short INCIDENT_ID for uniqueness so
+    # distinct same-title incidents never share (and occlude on) a row.
+    _iid = (data["INCIDENT_ID"].astype(str) if "INCIDENT_ID" in data.columns
+            else data.index.astype(str))
+    data["LANE"] = data["TITLE"].astype(str) + "  ·  " + _iid.str.slice(0, 8)
     domain = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
     colors = [SEV_COLORS[level] for level in domain]
-    chart = (
+    bars = (
         alt.Chart(data)
         .mark_bar(cornerRadius=2, stroke=palette.BG, strokeWidth=0.5)
         .encode(
             x=alt.X("STARTED:T", title=None),
             x2="ENDED:T",
-            y=alt.Y("TITLE:N", title=None,
+            y=alt.Y("LANE:N", title=None,
                     sort=alt.EncodingSortField("STARTED", order="descending")),
             color=alt.Color("SEVERITY:N", scale=alt.Scale(domain=domain, range=colors),
                             legend=alt.Legend(orient="top", title=None)),
@@ -1233,8 +1245,17 @@ def incident_gantt(df: pd.DataFrame) -> None:
                      alt.Tooltip("ENDED:T", title="Resolved / now"),
                      alt.Tooltip("DURATION_MIN:Q", title="Duration (min)", format=",.0f")],
         )
-        .properties(height=max(_HEIGHT, 22 * len(data)))
     )
+    # C38: an open incident's end edge is a projected 'now' (COALESCE to now in the SQL),
+    # not a measured resolution — a subtle 'now' rule at the latest edge makes an open
+    # bar (reaching it) distinguishable from a resolved one (ending short of it).
+    now_df = pd.DataFrame({"NOW": [data["ENDED"].max()]})
+    now_rule = (
+        alt.Chart(now_df)
+        .mark_rule(strokeDash=[4, 4], color=palette.INK_MUTE, opacity=0.55)
+        .encode(x="NOW:T")
+    )
+    chart = (bars + now_rule).properties(height=max(_HEIGHT, 22 * len(data)))
     st.altair_chart(chart, width="stretch")
 
 

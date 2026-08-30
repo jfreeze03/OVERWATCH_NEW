@@ -161,11 +161,12 @@ def test_stamps_precede_reruns_everywhere():
 def test_declare_incident_loop_stops_at_first_failure():
     # site-audit fix: INCIDENT_MEMBERS must never run after a failed INCIDENTS
     # insert (half-applied declare)
+    # the declare exec keys are now scoped per proposal (_exec_key = inc_prop_exec_{_pick})
     src = _src("app/ui/pages/control_room.py")
-    idx = src.index('write_gate_open("inc_prop_exec")')
+    idx = src.index("write_gate_open(_exec_key)")
     block = src[idx:idx + 1400]
     assert "break" in block
-    assert block.index("break") < block.index('stamp_write("inc_prop_exec"')
+    assert block.index("break") < block.index("stamp_write(_exec_key")
 
 
 def test_ai_hypothesis_save_swallow_is_calm():

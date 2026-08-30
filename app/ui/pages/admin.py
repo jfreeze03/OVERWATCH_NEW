@@ -316,6 +316,11 @@ _EXPECTED_MIGRATIONS = {
         "the same NOT EXISTS INCIDENT_MEMBERS anti-membership guard the crit CTE already has, "
         "preventing an alert already a member of one incident from being re-attached to a second "
         "incident and double-counted. Proc only, no schema change",
+    99: "SP_INCIDENT_AUTODECLARE family-open guard scoped by company: re-derived from V098 with "
+        "AND i.COMPANY = c.COMPANY added to the family-already-open NOT EXISTS guard, so a CRITICAL "
+        "for one company is auto-declared even when the other company has an open incident of the "
+        "same (company-shared) rule family — fixing a cross-company incident coverage gap. The "
+        "manual-declare path already scoped by company. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

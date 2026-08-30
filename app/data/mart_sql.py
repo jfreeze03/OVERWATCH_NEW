@@ -923,8 +923,16 @@ ORDER BY r.INDEX
 
 
 def incident_timeline(days: int, company: str = "ALL") -> str:
-    """One time axis for everything that happened: alerts, task failures,
-    DDL. The 'what else happened around then?' view Datadog does well."""
+    """One time axis for everything that happened: alerts, task failures, DDL,
+    warehouse changes. The 'what else happened around then?' view Datadog does well.
+
+    This is the 7d / live-fallback twin of mart27_sql.incident_timeline (48h, reads
+    MART_INCIDENT_TIMELINE). It is kept at PARITY with that mart's V066 loader so the
+    replay chart is stable across the window toggle: identical KIND labels
+    ('ALERT' / 'TASK_FAIL' / 'DDL' / 'WH_CHANGE'), the same COMPANY + REF_ID columns,
+    the same full DDL QUERY_TYPE set, and the warehouse-change arm — before v4.351 this
+    path dropped WH_CHANGE + GRANT/REVOKE/RENAME/TRUNCATE DDL, omitted COMPANY/REF_ID,
+    and relabelled the lanes, so toggling 48h->7d silently thinned the same window."""
     days = bounded_days(days, 14)
     comp = str(company or "ALL")
     alert_filter = "" if comp.upper() == "ALL" else \
@@ -935,26 +943,40 @@ def incident_timeline(days: int, company: str = "ALL") -> str:
     # path (COMPANY_FOR_DATABASE, V027 arm [8]) instead of contradicting it.
     entity_filter = "" if comp.upper() == "ALL" else (
         "AND DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')) = " + sql_literal(comp))
+    # WAREHOUSE_CHANGE_REGISTRY carries its own COMPANY (like ALERT_EVENTS), so the
+    # WH_CHANGE arm scopes the same account-level-rides-along way, not via the DB UDF.
+    wh_filter = "" if comp.upper() == "ALL" else \
+        f"AND (COMPANY = {sql_literal(comp)} OR UPPER(COMPANY) = 'ALL')"
     return f"""
 SELECT 'ALERT' AS EVENT_TYPE, RAISED_AT::TIMESTAMP_NTZ AS AT, SEVERITY,
-       LEFT(TITLE, 120) AS LABEL
+       LEFT(TITLE, 120) AS LABEL, COMPANY, EVENT_ID AS REF_ID
 FROM {core_object("ALERT_EVENTS")}
 WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()) {alert_filter}
 UNION ALL
-SELECT 'TASK FAILURE', COMPLETED_TIME::TIMESTAMP_NTZ, 'HIGH',
+SELECT 'TASK_FAIL', COMPLETED_TIME::TIMESTAMP_NTZ, 'HIGH',
        LEFT(DATABASE_NAME || '.' || SCHEMA_NAME || '.' || NAME || ': ' ||
-            COALESCE(ERROR_MESSAGE, 'failed'), 120)
+            COALESCE(ERROR_MESSAGE, 'failed'), 120),
+       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')), NAME
 FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
 WHERE COMPLETED_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND STATE = 'FAILED' {entity_filter}
 UNION ALL
-SELECT 'DDL CHANGE', START_TIME::TIMESTAMP_NTZ, 'INFO',
-       LEFT(USER_NAME || ': ' || QUERY_TEXT, 120)
+SELECT 'DDL', START_TIME::TIMESTAMP_NTZ, 'INFO',
+       LEFT(USER_NAME || ': ' || QUERY_TEXT, 120),
+       DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_DATABASE(COALESCE(DATABASE_NAME, '')), QUERY_ID
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND EXECUTION_STATUS = 'SUCCESS'
-  AND (QUERY_TYPE ILIKE 'CREATE%' OR QUERY_TYPE ILIKE 'ALTER%' OR QUERY_TYPE ILIKE 'DROP%')
+  AND QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_TABLE_AS_SELECT', 'ALTER',
+                     'DROP', 'RENAME', 'CREATE_VIEW', 'GRANT', 'REVOKE', 'TRUNCATE_TABLE')
   {entity_filter}
+UNION ALL
+SELECT 'WH_CHANGE', CHANGE_SEEN_AT::TIMESTAMP_NTZ, 'INFO',
+       LEFT(WAREHOUSE_NAME || ' ' || SETTING || ' ' ||
+            COALESCE(OLD_VALUE, '?') || '->' || COALESCE(NEW_VALUE, '?'), 120),
+       COMPANY, CHANGE_ID
+FROM {core_object("WAREHOUSE_CHANGE_REGISTRY")}
+WHERE CHANGE_SEEN_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP()) {wh_filter}
 ORDER BY AT DESC
 LIMIT 400
 """
@@ -2196,16 +2218,22 @@ LIMIT 60
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate (share of
     resolved incidents in the same window that were reopened, bounded 0..100%),
-    storm compression, change-correlated %."""
+    and storm compression (alerts absorbed per incident).
+
+    No change-correlated % (removed v4.351): the numerator counted INCIDENT_MEMBERS of
+    kind WH_CHANGE/DEPLOY, but no writer ever persists a member kind other than 'ALERT'
+    (both SP_INCIDENT_AUTODECLARE and the manual declare insert only 'ALERT'), so it was
+    structurally always 0.0 — a misleading permanent zero. The RCA auto-investigation
+    (control_room) is the real change-correlation surface."""
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
-    # COMPRESSION and CHANGE_PCT previously nested (SELECT COUNT(*) FROM w) inside
-    # NULLIF inside a scalar subquery — Snowflake 002031 "Unsupported subquery type
-    # cannot be evaluated" (owner error log 2026-08-17). Hoist the incident count and
-    # both numerators into single-row CTEs and CROSS JOIN, so the ratios are plain
-    # column arithmetic with no nested subquery. The other single-scalar subqueries
-    # (OPEN_NOW, the MEDIAN/REOPEN aggregates over w) are uncorrelated and fine.
+    # COMPRESSION previously nested (SELECT COUNT(*) FROM w) inside NULLIF inside a scalar
+    # subquery — Snowflake 002031 "Unsupported subquery type cannot be evaluated" (owner
+    # error log 2026-08-17). Hoist the incident count and the numerator into single-row
+    # CTEs and CROSS JOIN, so the ratio is plain column arithmetic with no nested subquery.
+    # The other single-scalar subqueries (OPEN_NOW, the MEDIAN/REOPEN aggregates over w)
+    # are uncorrelated and fine.
     return f"""
 WITH w AS (
     SELECT * FROM {core_object("INCIDENTS")}
@@ -2217,12 +2245,6 @@ compression AS (
     FROM {core_object("INCIDENT_MEMBERS")} m
     JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
     WHERE m.MEMBER_KIND = 'ALERT'
-),
-change_inc AS (
-    SELECT COUNT(DISTINCT w.INCIDENT_ID) AS CHANGE_INCIDENTS
-    FROM w
-    JOIN {core_object("INCIDENT_MEMBERS")} m ON m.INCIDENT_ID = w.INCIDENT_ID
-    WHERE m.MEMBER_KIND IN ('WH_CHANGE', 'DEPLOY')
 ),
 -- REOPEN_PCT is a share-of-closed reading that must not exceed 100%. The old form
 -- counted reopen CHILDREN (REOPENED_FROM IS NOT NULL) in the numerator against
@@ -2253,9 +2275,8 @@ SELECT
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
     ROUND(100.0 * reopen.REOPENED_N / NULLIF(reopen.RESOLVED_N, 0), 1) AS REOPEN_PCT,
-    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION,
-    ROUND(100.0 * change_inc.CHANGE_INCIDENTS / NULLIF(wn.N, 0), 1) AS CHANGE_PCT
-FROM wn CROSS JOIN compression CROSS JOIN change_inc CROSS JOIN reopen
+    ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION
+FROM wn CROSS JOIN compression CROSS JOIN reopen
 """
 
 

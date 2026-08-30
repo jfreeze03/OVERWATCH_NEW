@@ -16,9 +16,15 @@ def test_anomaly_evidence_validates_date_and_scopes():
         insights_sql.anomaly_evidence("2026-07-06'; DROP--")
 
 
-def test_incident_timeline_unions_three_sources():
+def test_incident_timeline_unions_four_sources_at_mart_parity():
     sql = mart_sql.incident_timeline(7, "Trexis")
-    assert "'ALERT'" in sql and "'TASK FAILURE'" in sql and "'DDL CHANGE'" in sql
+    # v4.351: the 7d fallback is kept at parity with the 48h MART_INCIDENT_TIMELINE loader
+    # (V066) — identical KIND labels, COMPANY + REF_ID columns, and the WH_CHANGE arm.
+    assert "'ALERT'" in sql and "'TASK_FAIL'" in sql and "'DDL'" in sql and "'WH_CHANGE'" in sql
+    assert "'TASK FAILURE'" not in sql and "'DDL CHANGE'" not in sql   # old drifted labels gone
+    assert "WAREHOUSE_CHANGE_REGISTRY" in sql                          # the change arm is present
+    assert "AS REF_ID" in sql and "EVENT_ID AS REF_ID" in sql          # REF_ID carried for drills
+    assert "'GRANT', 'REVOKE'" in sql                                  # full DDL type set
     assert "::TIMESTAMP_NTZ" in sql                      # one dtype on the axis
     assert "COMPANY IN ('Trexis', 'ALL')" in sql
     assert "STATE = 'FAILED'" in sql and "LIMIT 400" in sql

@@ -90,9 +90,11 @@ def test_incident_readers_shapes():
     assert "''" in mart_sql.incident_members_detail("x'y")    # injection-safe
     met = mart_sql.incident_metrics(90)
     for col in ("OPEN_NOW", "TTD_MIN", "MTTA_MIN", "MTTR_MIN",
-                "REOPEN_PCT", "COMPRESSION", "CHANGE_PCT"):
+                "REOPEN_PCT", "COMPRESSION"):
         assert col in met, col
-    assert "('WH_CHANGE', 'DEPLOY')" in met                   # the IaC payoff metric
+    # CHANGE_PCT (and its ('WH_CHANGE', 'DEPLOY') member-kind numerator) removed v4.351:
+    # no writer ever persists those member kinds, so it was structurally always 0.0.
+    assert "CHANGE_PCT" not in met and "('WH_CHANGE', 'DEPLOY')" not in met
     gantt = mart_sql.incident_gantt(14, "ALFA")               # CR5 lifecycle-span reader
     for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE"):
         assert col in gantt, col
@@ -143,4 +145,6 @@ def test_close_sql_is_forward_only_and_events_log():
     assert "REOPENED_FROM" in body                            # doc'd in the docstring
     assert 'log_ui_event("incident_declare"' in _CR
     assert 'log_ui_event("incident_close"' in _CR
-    assert 'type="primary"' in _CR.split("inc_prop_exec", 1)[1][:120]
+    # the declare confirm_gate is the primary action (its key is now scoped per proposal —
+    # inc_prop_exec_{_pick} — so search a wider window past the key for type="primary").
+    assert 'type="primary"' in _CR.split("inc_prop_exec", 1)[1][:220]
