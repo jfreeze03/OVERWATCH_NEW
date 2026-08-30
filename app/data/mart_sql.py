@@ -1651,6 +1651,16 @@ LIMIT 60
 # All read OVERWATCH-owned tables — no ACCOUNT_USAGE.
 # ---------------------------------------------------------------------------
 
+# The sender (SP_NOTIFY_WEBHOOK, V064) keeps a CRITICAL event eligible to send for 7
+# days and everything else for 24h. The delivery-backlog / eligibility panels must
+# mirror that window (alias `e` = ALERT_EVENTS) or they undercount a CRITICAL that is
+# starved past 24h — mislabeling it "delivered/quiet/expired" while the drainer is
+# still retrying it. Keep this in lockstep with the SP_NOTIFY_WEBHOOK send predicate.
+_SEND_ELIGIBLE_SINCE = ("CASE WHEN e.SEVERITY = 'CRITICAL' "
+                        "THEN DATEADD('day', -7, CURRENT_TIMESTAMP()) "
+                        "ELSE DATEADD('hour', -24, CURRENT_TIMESTAMP()) END")
+
+
 def last_delivery_health() -> str:
     """ONE ROW PER ENABLED ROUTE answering the question the owner could NOT answer on
     2026-07-31: 'no alerts today — is it QUIET, or is delivery BROKEN?'
@@ -1736,9 +1746,9 @@ eligible AS (
     -- 'Quiet'). #14: OLDEST_ELIGIBLE = MIN(RAISED_AT) over ALL such events is the age the
     -- STUCK test keys on, so a young event is never stuck and an old backlog always is.
     SELECT r.ROUTE_ID,
-           COUNT(DISTINCT CASE WHEN e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+           COUNT(DISTINCT CASE WHEN e.RAISED_AT >= {_SEND_ELIGIBLE_SINCE}
                                THEN e.EVENT_ID END) AS ELIGIBLE_NOW,
-           COUNT(DISTINCT CASE WHEN e.RAISED_AT <  DATEADD('hour', -24, CURRENT_TIMESTAMP())
+           COUNT(DISTINCT CASE WHEN e.RAISED_AT <  {_SEND_ELIGIBLE_SINCE}
                                THEN e.EVENT_ID END) AS EXPIRED_UNDELIVERED,
            MIN(e.RAISED_AT) AS OLDEST_ELIGIBLE
     FROM {core_object("ALERT_ROUTES")} r
@@ -1776,7 +1786,7 @@ dist_eligible AS (
       ON c.RULE_ID = e.RULE_ID
      AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
     WHERE r.ENABLED
-      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND e.RAISED_AT >= {_SEND_ELIGIBLE_SINCE}
       AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
            OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
       AND CASE e.SEVERITY WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3
@@ -1874,9 +1884,10 @@ def route_backlog() -> str:
     """rec19 (V064): per enabled route, how many OPEN events are eligible-but-
     UNDELIVERED right now (the backlog SP_NOTIFY_WEBHOOK will drain next) and the
     age of the oldest one. Eligibility mirrors the proc's SEND predicate exactly
-    (open, within 24h, family+company+severity match, not yet delivered to THIS
-    route) so the panel and the drainer agree on 'what's pending'. A high
-    OLDEST_MIN with the drain running is the starvation signal rec8 fixes."""
+    (open, within the sender's severity-aware window — 7d for CRITICAL, 24h otherwise —
+    family+company+severity match, not yet delivered to THIS route) so the panel and
+    the drainer agree on 'what's pending'. A high OLDEST_MIN with the drain running is
+    the starvation signal rec8 fixes."""
     return f"""
 WITH ev AS (
     SELECT e.EVENT_ID, e.RAISED_AT, e.COMPANY, c.FAMILY,
@@ -1885,7 +1896,7 @@ WITH ev AS (
     FROM {core_object("ALERT_EVENTS")} e
     JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
     WHERE e.STATUS = 'OPEN'
-      AND e.RAISED_AT >= DATEADD('hour', -24, CURRENT_TIMESTAMP())
+      AND e.RAISED_AT >= {_SEND_ELIGIBLE_SINCE}
 )
 SELECT r.ROUTE_ID, r.INTEGRATION_NAME,
        COUNT(ev.EVENT_ID) AS BACKLOG,

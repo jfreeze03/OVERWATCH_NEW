@@ -12,6 +12,7 @@ from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 from app.config import core_object
@@ -1418,17 +1419,26 @@ def render() -> None:
                    tier="recent", source="ALERT_EVENTS lifecycle timestamps")
         if mttr.usable():
             df = mttr.df.copy()
-            latest = df.dropna(subset=["MTTA_MIN"]).tail(4)
+
+            def _weighted_minutes(val_col: str, weight_col: str) -> float | None:
+                # alert_mttr returns per-WEEK averages; a plain .mean() of those is a
+                # mean-of-means that weights a 1-event week the same as a 100-event one.
+                # Pool the last 4 active weeks by their event count for a true MTTA/MTTR.
+                sub = df.dropna(subset=[val_col]).tail(4)
+                w = pd.to_numeric(sub.get(weight_col), errors="coerce").fillna(0.0)
+                v = pd.to_numeric(sub[val_col], errors="coerce").fillna(0.0)
+                total = float(w.sum())
+                return float((v * w).sum() / total) if total > 0 else None
+
+            _mtta = _weighted_minutes("MTTA_MIN", "ACKED")
+            _mttr = _weighted_minutes("MTTR_MIN", "RESOLVED")
             kpi_row([
                 {"label": "MTTA (last 4 active weeks)",
-                 "value": humanize_duration(latest["MTTA_MIN"].mean(), "min")
-                 if not latest.empty else "No acks yet",
-                 "help": "Raised -> acknowledged. Improve by working the queue, not the inbox."},
+                 "value": humanize_duration(_mtta, "min") if _mtta is not None else "No acks yet",
+                 "help": "Raised -> acknowledged, event-weighted. Improve by working the queue, not the inbox."},
                 {"label": "MTTR (last 4 active weeks)",
-                 "value": (humanize_duration(
-                               df.dropna(subset=["MTTR_MIN"]).tail(4)["MTTR_MIN"].mean(), "min")
-                           if df["MTTR_MIN"].notna().any() else "No resolves yet"),
-                 "help": "Raised -> resolved, including remediation time."},
+                 "value": humanize_duration(_mttr, "min") if _mttr is not None else "No resolves yet",
+                 "help": "Raised -> resolved (event-weighted), including remediation time."},
                 {"label": "Events (90d)", "value": f"{int(df['EVENTS'].sum()):,}"},
             ])
             styled_table(df, height=240)

@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.347.0 - Alerting-layer bug hunt: 3 app-side fixes (2026-08-30)
+
+Adversarial alerting-layer hunt (7 lenses over the scan/delivery procs + app alert
+builders/logic) confirmed 8 defects. The 3 app-side ones are fixed here; the 5
+migration-bearing ones (scan/escalation/anomaly/incident procs) are tracked for
+owner-gated forward migrations.
+
+* **[med] Delivery-backlog panels undercounted starved CRITICAL alerts.**
+  `route_backlog` and `last_delivery_health` gated eligibility on a flat 24h window,
+  but the sender (`SP_NOTIFY_WEBHOOK`, V064) keeps a CRITICAL event eligible to send
+  for 7 days — so a CRITICAL stuck past 24h (integration outage) showed BACKLOG=0 /
+  "Eligible to send now: 0" / "expired" while the drainer was still retrying it. Both
+  builders now mirror the sender's severity-aware window (7d CRITICAL, 24h otherwise)
+  via a shared `_SEND_ELIGIBLE_SINCE`.
+* **[med] MTTA/MTTR headline was a mean-of-weekly-means.** The tiles averaged
+  `alert_mttr`'s already-per-week averages unweighted, so a 1-event week counted the
+  same as a 100-event week (a {1@100min, 100@10min} pair read 55 min vs the true ~11).
+  Now event-weighted by the per-week ACKED/RESOLVED counts.
+
+Also surfaced (tracked, not fixed — owner-gated forward migrations): V091 auto-clear
+never matches next-day-cleared conditions (events strand OPEN); PERF_SLO_BREACH and
+SEC_CRED_EXPIRY escalations swallowed / double-counted (dedupe key lacks the band);
+SP_ANOMALY_SWEEP misses spikes on majority-idle series (no mean-AD fallback); and
+SP_INCIDENT_AUTODECLARE can re-link an already-membered alert.
+
 ## 4.346.0 - V094: fix the FACT_QUERY_HOURLY boundary-hour duplicate (2026-08-29)
 
 Data-loader hunt over the migration `SP_LOAD_*` procs found a **HIGH** silent
