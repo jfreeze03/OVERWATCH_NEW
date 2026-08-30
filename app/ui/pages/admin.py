@@ -284,6 +284,11 @@ _EXPECTED_MIGRATIONS = {
         "un-assign an owner and un-defer (resume) a work item — the COALESCE-keep "
         "semantics could only keep, never clear (the v4.318 UI honesty gap). Both "
         "flags FALSE = the old behaviour byte-for-byte; old 8-arg overload dropped",
+    93: "Seed the 17 Admin-editable DEFAULT_SETTINGS keys no prior migration seeded "
+        "(9 SCORE_PTS_* platform-score weights, 5 GOV_PTS_* governance-drift weights, "
+        "FORECAST_ENGINE, EXPECTED_SPIKE_CALENDAR, DATA_TRANSFER_USD_PER_TB) with their "
+        "code defaults, so they appear in the Settings table; WHEN NOT MATCHED only "
+        "(never overwrites an edited value). Data-seed, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

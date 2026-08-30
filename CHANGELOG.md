@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.344.0 - V093: seed the 17 unseeded DEFAULT_SETTINGS keys (2026-08-29)
+
+Completes the v4.343.0 SETTINGS fix. The Admin ▸ Settings writer already upserts, so
+edits to unseeded keys persist — but 17 keys had no row until first edited, so the
+Settings table view was incomplete and the seed set had drifted from
+`DEFAULT_SETTINGS`.
+
+* **V093 (owner-gated migration)** MERGE-seeds the 17 keys (9 `SCORE_PTS_*`
+  platform-score weights, 5 `GOV_PTS_*` governance-drift weights, `FORECAST_ENGINE`,
+  `EXPECTED_SPIKE_CALENDAR`, `DATA_TRANSFER_USD_PER_TB`) with their code-default
+  values, `WHEN NOT MATCHED` only — it never overwrites an operator's edited value.
+  Data-seed only (no schema/proc/view/reload). **Owner applies in Snowsight after
+  V092.**
+* Lockstep bumped: `_EXPECTED_MIGRATIONS`, `validate.sql` (V001..V093), DEPLOYMENT/
+  README run lists, the regenerated rebuild bundle (`02_migrations_V001_V093.sql`),
+  and the migration tests that pin the validate tip.
+* New recurrence guard (`test_v093_seed_default_settings.py`): every editable
+  `DEFAULT_SETTINGS` key must be seeded by some migration, so a future key added to
+  config.py can't silently go unseeded again.
+
 ## 4.343.0 - SQL-layer bug hunt: 3 fixes (parity, upsert, NULL-safety) (2026-08-29)
 
 Adversarial SQL-layer hunt (7 lenses over `app/data/*_sql.py` + migrations:
