@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.343.0 - SQL-layer bug hunt: 3 fixes (parity, upsert, NULL-safety) (2026-08-29)
+
+Adversarial SQL-layer hunt (7 lenses over `app/data/*_sql.py` + migrations:
+injection/identifier, scoping, aggregation-grain, join/NULL/3VL, window/date/
+pruning, mart-vs-live, migration-integrity). Three confirmed:
+
+* **[med] Boss chart gained/lost a phantom CLOUD_SERVICES_ONLY segment by path.**
+  `monthly_spend_by_warehouse` (mart) excludes the CLOUD_SERVICES_ONLY pseudo-
+  warehouse but its live fallback `fact_monthly_spend_by_warehouse` did not, so on
+  the ALL view the segment and every month's total shifted depending on which path
+  served (the fallback fires until the efficiency mart accrues 12 months). The
+  fallback now applies the same exclusion.
+* **[med] Admin settings edits were silently lost for 17 unseeded keys.** 17
+  `DEFAULT_SETTINGS` keys (`SCORE_PTS_*`, `GOV_PTS_*`, `FORECAST_ENGINE`,
+  `EXPECTED_SPIKE_CALENDAR`, `DATA_TRANSFER_USD_PER_TB`) are never seeded, and the
+  Admin writer was UPDATE-only — a 0-row UPDATE that Snowflake does not error on, so
+  the UI reported success while nothing persisted. The writer is now a MERGE upsert
+  that inserts the row when absent.
+* **[low] `org_all_in_window_usd` OTHER_USD dropped NULL-RATING_TYPE rows.** The
+  residual used a bare `UPPER(RATING_TYPE) NOT IN (...)`; under three-valued logic a
+  NULL row yields NULL (not TRUE), so its dollars were counted in `TOTAL_USD` but
+  excluded from every bucket, breaking the buckets-sum-to-total invariant. Now
+  `COALESCE(UPPER(RATING_TYPE), '')`, matching the monthly builder.
+
 ## 4.342.0 - Round-5 UI-layer bug hunt: 2 help-text corrections (2026-08-29)
 
 Fifth hunt over `app/ui/*` with seven not-yet-run lenses (exhaustive per-builder

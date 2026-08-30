@@ -440,17 +440,26 @@ def _settings_tab(is_operator: bool) -> None:
     editable = [k for k in DEFAULT_SETTINGS if not k.startswith("_")]
     key = st.selectbox("Setting", editable, key="adm_setting_key")
     new_value = _setting_value_input(key, current)
-    update_sql = (
-        f"UPDATE {core_object('SETTINGS')} SET VALUE = {sql_literal(new_value)}, "
+    # UPSERT, not UPDATE: 17 of the DEFAULT_SETTINGS keys (SCORE_PTS_*/GOV_PTS_*/
+    # FORECAST_ENGINE/EXPECTED_SPIKE_CALENDAR/DATA_TRANSFER_USD_PER_TB) are never seeded
+    # by any migration, so a bare UPDATE matched 0 rows and the edit was silently lost
+    # (Snowflake does not error on a 0-row UPDATE, so the UI even reported success).
+    # A MERGE inserts the row when absent, mirroring V001's seed pattern.
+    upsert_sql = (
+        f"MERGE INTO {core_object('SETTINGS')} t "
+        f"USING (SELECT {sql_literal(key)} AS KEY, {sql_literal(new_value)} AS VALUE) s "
+        f"ON t.KEY = s.KEY "
+        f"WHEN MATCHED THEN UPDATE SET VALUE = s.VALUE, "
         f"UPDATED_AT = CURRENT_TIMESTAMP(), UPDATED_BY = {identity_sql()} "
-        f"WHERE KEY = {sql_literal(key)};"
+        f"WHEN NOT MATCHED THEN INSERT (KEY, VALUE, UPDATED_AT, UPDATED_BY) "
+        f"VALUES (s.KEY, s.VALUE, CURRENT_TIMESTAMP(), {identity_sql()});"
     )
-    st.code(update_sql, language="sql")
+    st.code(upsert_sql, language="sql")
     if is_operator:
         # rec42: one type-to-confirm gate (setting KEY, EXACT case) + action button.
         if confirm_gate(key, "Execute update", key="adm_setting",
                         prompt="Type the setting key to confirm") and write_gate_open("adm_setting"):
-            ok, msg = execute_statement(update_sql, page=_PAGE)
+            ok, msg = execute_statement(upsert_sql, page=_PAGE)
             stamp_write("adm_setting", ok)  # C48
             notify(ok, msg)
             if ok:

@@ -1011,6 +1011,7 @@ def fact_monthly_spend_by_warehouse(months: int = 12, company: str = "ALL") -> s
     SUM(CREDITS_TOTAL) AS CREDITS
 FROM DBA_MAINT_DB.OVERWATCH.FACT_WAREHOUSE_DAILY
 WHERE DAY >= DATEADD('month', -{m}, DATE_TRUNC('month', CURRENT_DATE()))
+  AND UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'
 {comp}GROUP BY 1, 2
 ORDER BY 1, 2"""
 # ---------------------------------------------------------------------------
