@@ -120,7 +120,10 @@ def test_optimize_adopts_eff_and_family_marts():
     assert "insights_sql.idle_warehouse_analysis" in _OPT          # live fallback kept
     assert "mart27_sql.eff_sizing_profile" in _OPT
     assert "insights_sql.warehouse_sizing_profile" in _OPT
-    assert "mart27_sql.family_repeat_fingerprints" in _OPT
+    # repeat-query panel is LIVE-ONLY (cost-hunt3 2026-08-30): the family mart diverged from the
+    # live twin on cache% and population and can't price the $ column, so this toggle-gated panel
+    # calls the live builder directly (not the mart) -- the mart reader stays for canary/other use.
+    assert "mart27_sql.family_repeat_fingerprints" not in _OPT
     assert "insights_sql.repeat_query_fingerprints" in _OPT
 
 

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import sqlglot
 
-from app.data import mart27_sql
+from app.data import insights_sql, mart27_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,3 +55,28 @@ def test_attributed_warehouse_help_excludes_reader():
     assert "Exact warehouse + reader metering, company-scopable." not in spend
     assert "Own-account warehouse metering only" in spend
     assert "unattributed gap" in spend
+
+
+# ---- MED x2 (deferred #A/#B): repeat-query panel resolved via the LIVE route --------
+def test_repeat_query_panel_is_live_only_not_mart():
+    # The family mart (family_repeat_fingerprints) diverged from the live twin two ways it cannot
+    # fix -- it averaged result-cache runs in at 0% cache (biasing well-cached families onto the
+    # <=25% materialization gate) and carried a broader population than the live SUCCESS/SELECT
+    # filter -- and only the live path prices the Avoidable $ column. The toggle-gated panel now
+    # calls the live builder directly instead of mart-first (cost-hunt3 -> live route, 2026-08-30).
+    opt = _src("app/ui/pages/cost_parts/optimize.py")
+    panel = opt.split("Repeat-query candidates", 1)[1].split("elif opt_section", 1)[0]
+    assert "run_mart_first(" not in panel
+    assert "insights_sql.repeat_query_fingerprints(" in panel
+    assert "mart27_sql.family_repeat_fingerprints" not in panel
+
+
+def test_live_repeat_query_builder_is_the_correct_basis():
+    # the live twin (now the sole source for the panel) filters SUCCESS/SELECT/non-OVERWATCH and
+    # bytes-weights the cache metric (excluding zero-scan result-cache runs) -- the reference basis.
+    sql = insights_sql.repeat_query_fingerprints(30, "ALFA", 10)
+    assert "EXECUTION_STATUS = 'SUCCESS'" in sql
+    assert "QUERY_TYPE = 'SELECT'" in sql
+    assert "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'" in sql
+    assert "IFF(COALESCE(BYTES_SCANNED, 0) > 0" in sql   # bytes-weighted, zero-scan excluded
+    assert "AS EST_CREDITS" in sql                        # the priced column the family mart lacks

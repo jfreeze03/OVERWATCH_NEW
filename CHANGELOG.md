@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.360.0 - Repeat-query panel routed to the live builder (2026-08-30)
+
+Resolves the two `family_repeat_fingerprints` mart-vs-live divergences deferred from cost hunt #3.
+Ground-truthing changed the fix: the repeat-query / materialization-candidate panel is a toggle-gated
+opt-in scan, the live builder (`insights_sql.repeat_query_fingerprints`) is definitionally correct
+(bytes-weighted cache excluding result-cache runs; `SUCCESS`/`SELECT`/non-OVERWATCH population) *and*
+uniquely carries the priced Avoidable-$ column (the family mart has no size grain), and the mart
+can't be filtered because its other reader (`family_compile_heavy`) needs the broad population. So
+the panel now calls the live builder directly instead of mart-first — a smaller, strictly-more-
+correct fix than the planned schema migration, with no owner-gated apply.
+
+- The default (mart) rendering had counted every result-cache run as 0% cache, dragging well-cached
+  families onto the ≤25% materialization gate as false candidates; and had included failed /
+  non-SELECT / OVERWATCH-tagged queries the live filter excludes, inflating the "Compute in repeats"
+  hours and the candidate count. Both are gone — the panel is now always the correct live scan, and
+  the Avoidable $/30d column always renders.
+- Window note: this panel's max scan is now the live builder's ~90-day cap (was 400 via the mart) —
+  appropriate for "is this a current materialization opportunity", and the mart's longer window was
+  serving wrong numbers anyway. The `family_repeat_fingerprints` mart reader is retained for the
+  canary and other potential use.
+
 ## 4.359.0 - Cost-layer bug hunt #3: 3 app-side fixes (2026-08-30)
 
 Third, deeper adversarial pass over the cost layer (6 finders: metering/attribution arithmetic,

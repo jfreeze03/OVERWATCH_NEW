@@ -907,25 +907,26 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            help="The heaviest scan on this page — runs only when you ask.")
         if _rq_on:
             with st.spinner("Fingerprinting the window's QUERY_HISTORY…"):
-                _rq_mart_min = repeat_min_runs(bounded_days(days, 400))
-                _rq_live_min = repeat_min_runs(bounded_days(days))
-                rq_res = run_mart_first(
-                    mart27_sql.family_repeat_fingerprints(
-                        days, company, _rq_mart_min,
-                        database=st.session_state.get("flt_database", ""),
-                        schema_contains=st.session_state.get("flt_schema_contains", "")),
+                # Live-only (NOT mart-first): the MART_QUERY_FAMILY_DAILY twin diverged from this
+                # builder two ways the mart cannot fix -- it averaged result-cache runs in at 0 %
+                # (biasing well-cached families onto the <=25 % materialization gate) and carried a
+                # broader population (failed / non-SELECT / OVERWATCH-tagged rows) than the live
+                # SUCCESS-SELECT filter -- and only the live path prices the Avoidable $ column (the
+                # family mart has no size grain). This is a toggle-gated opt-in scan, so always run
+                # the definitionally-correct live builder (cost-hunt3 -> live route, 2026-08-30).
+                _rq_days = bounded_days(days)
+                rq_res = run(
                     insights_sql.repeat_query_fingerprints(
-                        days, company, _rq_live_min,
+                        _rq_days, company, repeat_min_runs(_rq_days),
                         database=st.session_state.get("flt_database", ""),
                         schema_contains=st.session_state.get("flt_schema_contains", "")),
-                    page=_PAGE, key=f"repeatq_{company}_{days}", days=days,
-                    mart_source="MART_QUERY_FAMILY_DAILY (mart — wall-clock elapsed, day-level LAST_RUN)",
-                    live_source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live fallback)")
+                    page=_PAGE, key=f"repeatq_{company}_{days}", tier="historical",
+                    source="QUERY_HISTORY (QUERY_PARAMETERIZED_HASH, live)")
             if guard(rq_res, "No query fingerprints meet the normalized recurrence gate.",
                      setup_hint="Needs QUERY_PARAMETERIZED_HASH (standard in current Snowflake accounts)."):
                 # C1/D3: window-relative gate — the same fingerprint must not become
                 # a "candidate" merely because the picker moved from 7d to 365d.
-                rq_days = served_days(rq_res, days)
+                rq_days = served_days(rq_res, _rq_days)
                 candidates = flag_repeat_candidates(rq_res.df, rq_days)
                 hot = candidates[candidates["CANDIDATE"]]
                 kpi_row([
@@ -987,13 +988,12 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     styled_table(_rq_df[_rq_cols], column_config=_rq_cfg)
                 result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
                 st.caption(
-                    "Ranked by normalized 30-day estimated credits x cache-miss share, not wall-clock hours: an X-Small "
-                    "hour and a 4X-Large hour differ 128x in money, and an already-cached family has "
-                    "nothing left to reclaim. Avoidable $/30d is execution time x size rate x cache-miss share — an "
-                    "estimate, not the hour-share allocation the panels above use."
-                    if _rq_priced else
-                    "Served from the query-family mart, which carries no warehouse-size grain — the "
-                    "ordering here is by compute hours; the live scan adds the credit-weighted ranking."
+                    "Live scan of SUCCESS SELECTs (OVERWATCH's own queries excluded). Ranked by "
+                    "normalized 30-day estimated credits x cache-miss share, not wall-clock hours: an "
+                    "X-Small hour and a 4X-Large hour differ 128x in money, and an already-cached "
+                    "family has nothing left to reclaim. Cache % is scanned-bytes-weighted and ignores "
+                    "result-cache runs. Avoidable $/30d is execution time x size rate x cache-miss "
+                    "share — an estimate, not the hour-share allocation the panels above use."
                 )
 
     elif opt_section == "Storage & waste":

@@ -42,8 +42,12 @@ def test_remediation_fails_closed_when_current_timer_is_unknown_or_tuned():
 
 def test_repeat_scan_and_capacity_ui_adopt_normalized_and_stale_contracts():
     optimize = _source("app/ui/pages/cost_parts/optimize.py")
-    assert "repeat_min_runs(bounded_days(days, 400))" in optimize
-    assert "repeat_min_runs(bounded_days(days))" in optimize
+    # Repeat-query panel is LIVE-ONLY now (cost-hunt3 -> live route): the min-runs floor still
+    # normalizes recurrence by the served window, but that window is the live builder's bounded
+    # window (no separate 400d mart path). The AVOIDABLE $ column always renders on the live path.
+    assert "_rq_days = bounded_days(days)" in optimize
+    assert "repeat_min_runs(_rq_days)" in optimize
+    assert "repeat_min_runs(bounded_days(days, 400))" not in optimize   # the mart path is gone
     assert "AVOIDABLE_USD_PER_30D" in optimize
     assert 'statuses.get("STALE", 0)' in optimize
     assert "movers[\"PROJECTABLE\"]" in optimize
