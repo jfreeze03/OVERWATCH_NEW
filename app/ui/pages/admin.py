@@ -373,6 +373,14 @@ _EXPECTED_MIGRATIONS = {
          "identifier no longer fails the join and folds MTD_USD to 0, so the department-budget-pace "
          "alert stops silently missing an over-budget department the Chargeback screen shows. Everything "
          "else byte-identical. Proc only, no schema change; forward-healing on the next hourly SP_ALERT_SCAN",
+    107: "COST_DEPT_BUDGET_PACE department join + pace window: SP_ALERT_SCAN re-derived from V106 so the "
+         "[17] arm (1) joins DEPT_BUDGETS to DEPARTMENT_MAP via UPPER(m.DEPARTMENT) = UPPER(b.DEPARTMENT) "
+         "instead of the case-sensitive m.DEPARTMENT = b.DEPARTMENT -- a department case drift no longer "
+         "folds MTD_USD to 0 and silently suppresses an over-budget department; and (2) computes MTD_USD "
+         "over completed days only (f.DAY < CURRENT_DATE()) with TIME_SHARE = (DAY(CURRENT_DATE()) - 1) / "
+         "DAY(LAST_DAY(CURRENT_DATE())) so pace numerator and denominator cover the same elapsed window and "
+         "early-month OVER_PCT is no longer understated. Byte-identical otherwise. Proc only, no schema "
+         "change; forward-healing on the next hourly SP_ALERT_SCAN",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

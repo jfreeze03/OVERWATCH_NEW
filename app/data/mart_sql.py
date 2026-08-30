@@ -679,15 +679,21 @@ LIMIT {limit}
 """
 
 
-def savings_ledger() -> str:
+def savings_ledger(limit: int | None = 500) -> str:
+    """The savings ledger, newest first. `limit` caps rows for a browsable DETAIL table;
+    pass limit=None for the ECONOMICS reads (all-time verified $, realization, QTD, run-rate,
+    per-lever) so those totals sum the WHOLE ledger. A row cap silently truncates the oldest-
+    CREATED rows, which understates all-time verified savings (it shrinks as the ledger grows)
+    and makes the ledger's QTD disagree with the uncapped savings_summary_quarter mart that the
+    Brief/Scorecard cite for the same quarter (cost-hunt5 2026-08-30)."""
+    limit_clause = f"\nLIMIT {int(limit)}" if limit is not None else ""
     return f"""
 SELECT ITEM_ID, ACTION_ID, CREATED_AT, DESCRIPTION, STATE, ESTIMATED_USD, VERIFIED_USD,
        VERIFIED_AT, VERIFIED_BY, PROOF_SQL, NOTES,
        COALESCE(NULLIF(TRIM(FINDING_TYPE), ''), 'unclassified') AS FINDING_TYPE,
        IFF(SOURCE_CHANGE_ID IS NULL, 'manual', 'auto') AS SOURCE
 FROM {core_object("SAVINGS_LEDGER")}
-ORDER BY CREATED_AT DESC
-LIMIT 500
+ORDER BY CREATED_AT DESC{limit_clause}
 """
 
 

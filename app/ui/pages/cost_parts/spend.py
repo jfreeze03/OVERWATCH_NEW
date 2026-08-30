@@ -770,10 +770,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
         key=f"wh_vs_prior_fact_{company}_{days}", tier="hourly",
         source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
+    _wh_live = False
     if not wh.usable():  # mart not deployed/loaded yet -> bounded live scan
         wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
                  key=f"wh_vs_prior_{company}_{days}", tier="historical",
                  source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
+        _wh_live = True
     st.markdown("**By warehouse (exact usage)**")
     panel_help(
         "Warehouse spend is EXACT metering (credits x rate, company-scopable); the user/database "
@@ -801,7 +803,12 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         # fact_warehouse_window_vs_prior clamps to the vs-prior half-window so its
         # current+prior pair fits in retention. Disclose it when the selection is wider,
         # so "Current spend" is not read as the full (e.g. 365d) window it isn't.
-        _eff_wh, _ = resolve_effective_window(days)
+        # When the LIVE fallback served (mart not loaded), the live builder clamps to
+        # MAX_LIVE_WINDOW_DAYS (90), not the mart's wider half-window (182) — derive the
+        # disclosed window from the ACTUAL served cap, or a 90d live table is mislabeled 182d
+        # (cost-hunt5 2026-08-30; mirrors the alloc-pool re-derivation below).
+        _eff_wh, _ = (resolve_effective_window(days, max_days=MAX_LIVE_WINDOW_DAYS)
+                      if _wh_live else resolve_effective_window(days))
         if _eff_wh < int(days):
             st.caption(f"Exact-usage window is the last {_eff_wh} days (today excluded) — the "
                        f"vs-prior comparison caps there so the current and prior halves both "

@@ -522,11 +522,17 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share, non-success)")
         if guard(waste, "No failed/killed queries consumed warehouse compute in this window.", kind="clean"):
             wdf = waste.df.copy()
-            wdf["WASTED_USD"] = wdf["WASTED_CREDITS"].map(
-                lambda c: round(credits_to_usd(safe_float(c), rate, round_cents=False), 2))
-            monthly = float(wdf["WASTED_USD"].sum()) / max(days, 1) * 30.0
+            # Sum the UNROUNDED per-fingerprint USD and round once at the KPI edge: rounding each
+            # row to cents first zeroes fractional-cent allocations and understates the total
+            # (credits_to_usd's own docstring warns against round-then-sum). The displayed cell
+            # keeps per-row cents. (cost-hunt5 2026-08-30)
+            _wasted_raw = wdf["WASTED_CREDITS"].map(
+                lambda c: credits_to_usd(safe_float(c), rate, round_cents=False))
+            _wasted_total = float(_wasted_raw.sum())
+            wdf["WASTED_USD"] = _wasted_raw.round(2)
+            monthly = _wasted_total / max(days, 1) * 30.0
             kpi_row([
-                {"label": f"Wasted spend ({days}d)", "value": format_usd(float(wdf["WASTED_USD"].sum())),
+                {"label": f"Wasted spend ({days}d)", "value": format_usd(_wasted_total),
                  "help": "Allocated compute on non-success queries; monthly-ized at right."},
                 {"label": "Monthly-ized", "value": format_usd(monthly)},
                 {"label": "Repeat offenders",

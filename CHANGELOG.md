@@ -1,5 +1,54 @@
 # Changelog
 
+## 4.363.0 - Cost-layer bug hunt #5: 3 app-side fixes + V107 (2026-08-30)
+
+Fifth adversarial pass over the cost layer (6 finders: credit/USD math, chargeback/budget,
+warehouse/serverless/storage, savings/ROI ledger, cortex/AI cost, cost-UI consistency). Six
+findings confirmed, two refuted (the Overview vs-prior delta is a documented, per-window-labeled
+choice; the action-queue CPR de-overlap preserves its documented "queued set = scope total once"
+invariant). Three land app-side, two are one owner-gated migration (V107); one is deferred.
+
+- **Wasted-spend total rounds once, not per row (LOW)** — Operations ▸ wasted-spend scan built
+  `WASTED_USD` as `round(credits_to_usd(c, rate, round_cents=False), 2)` per fingerprint (defeating
+  the internal cent-rounding, then re-imposing it), and summed that already-rounded column for the
+  "Wasted spend" and "Monthly-ized" KPIs — the round-then-sum path `credits_to_usd`'s own docstring
+  warns against, which zeroes fractional-cent allocations. Now sums the unrounded per-row USD and
+  rounds once at the KPI edge; the table cell keeps per-row cents.
+- **Exact-usage window is disclosed at the served cap, not the mart cap (MED)** — Cost ▸ Spend &
+  Attribution ▸ "By warehouse (exact usage)" falls back to a 90-day live builder when the mart is
+  not loaded, but the disclosure caption computed the window from `resolve_effective_window(days)`
+  (the mart's 182-day cap) unconditionally, so a 90-day live table under a 365-day page scope was
+  labeled "last 182 days". The caption now derives its window from the actual served cap
+  (`MAX_LIVE_WINDOW_DAYS` when the live fallback served), mirroring the adjacent allocation-pool
+  re-derivation.
+- **ROI economics read the whole ledger, not the newest 500 rows (MED)** — `savings_ledger()` capped
+  at `LIMIT 500 ORDER BY CREATED_AT DESC`, and Decision Studio ▸ ROI and the Scorecard fed that
+  capped frame into `ledger_totals` / `savings_by_month` / `savings_by_lever`. So "Verified savings
+  (all time)", realization, the 12-month run-rate, and the page's own "Verified this quarter" were
+  computed over only the 500 newest-*created* rows — the total silently *shrank* as the ledger grew,
+  and the ROI page's QTD disagreed with the uncapped `savings_summary_quarter` mart the Brief and
+  Scorecard cite for the same quarter. `savings_ledger(limit=None)` now serves the full ledger to the
+  economics reads (the browsable detail table keeps its 500-row cap); the ledger's QTD is a full-table
+  `VERIFIED_AT >= quarter-start` sum, so it can no longer diverge from the mart.
+- **V107 (owner-gated): COST_DEPT_BUDGET_PACE department join + pace window (MED + LOW)** — two fixes
+  in the same `SP_ALERT_SCAN` [17] arm. (1) The department join `m.DEPARTMENT = b.DEPARTMENT` was
+  case-sensitive on a free-text string written verbatim on both sides, so a case drift ('Etl' vs
+  'ETL') made the join miss, folded `MTD_USD` to 0, and the rule silently never fired while Cost ▸
+  Chargeback showed the department over budget — the sibling of the warehouse-name case-fold V106
+  fixed, left on the other join key. (2) `MTD_USD` summed today's partial row while `TIME_SHARE`
+  counted today as fully elapsed, understating early-month `OVER_PCT` (a 2×-pace department read
+  on-pace on day 2). V107 re-derives `SP_ALERT_SCAN` from V106 with `UPPER(m.DEPARTMENT) =
+  UPPER(b.DEPARTMENT)` and completed-days-only pace math (`f.DAY < CURRENT_DATE()`, `TIME_SHARE =
+  (DAY(CURRENT_DATE()) - 1) / DAY(LAST_DAY(...))`); byte-identical otherwise. Proc only, no schema
+  change; owner applies after V106.
+- **Deferred (LOW, analyzed): cortex 30d-projection short-window over-projection.** The projection
+  divides credits spanning `days`+1 inclusive calendar dates (including today's partial row) by a
+  divisor capped at `days`, over-projecting the run-rate in the short calendar-month presets. Not
+  shipped: the "up to 1.5×" case assumes today is a *full* day of data, but cortex is ACCOUNT_USAGE-
+  sourced with hours of lag, so today's row is typically empty — and when today is empty the current
+  divisor is *exact*. A naive `days+1` fix would regress that common case; the only robust fix
+  (fractional-day divisor) adds wall-clock coupling disproportionate to a guarded, display-only KPI.
+
 ## 4.362.0 - Cost-layer bug hunt #4: 5 app-side fixes + V106 (2026-08-30)
 
 Fourth adversarial pass over the cost layer (finders: attribution/tagging, chargeback/budget,

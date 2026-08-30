@@ -603,8 +603,8 @@ def _scorecard(company: str, rate: float) -> None:
                "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
                "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
 
-    ledger = run(mart_sql.savings_ledger(), page=_PAGE, key="decision_roi_ledger",
-                 tier="recent", source="SAVINGS_LEDGER")
+    ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
+                 tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
     if not ledger.ok:
         empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
         return
@@ -706,8 +706,8 @@ def _roi(company: str) -> None:
     section_header("Return on OVERWATCH — verified savings", "info", "target")
     st.caption("Account-wide — SAVINGS_LEDGER has no company grain, so this track record does "
                "not narrow to the Company filter.")
-    ledger = run(mart_sql.savings_ledger(), page=_PAGE, key="decision_roi_ledger",
-                 tier="recent", source="SAVINGS_LEDGER")
+    ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
+                 tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
     if not ledger.ok:
         empty_state("needs_setup", "Apply the action layer (V051+) to book and verify savings.")
         return
