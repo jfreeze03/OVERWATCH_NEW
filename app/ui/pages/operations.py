@@ -2139,8 +2139,13 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
     elif guard(res, "", setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. The daily scan then populates this within a day."):
         df = res.df.copy()
         verdicts = df["VERDICT"].astype(str).str.upper()
+        # "Changes tracked" is a LEVEL count -- read the untruncated window total, not len(df),
+        # which the builder's LIMIT 200 caps (a CI-heavy account can register >200 changes/90d)
+        # (bug-hunt 2026-08-30).
+        _total_changes = (int(df["TOTAL_CHANGES"].iloc[0])
+                          if "TOTAL_CHANGES" in df.columns and len(df) else len(df))
         kpi_row([
-            {"label": "Changes tracked (90d)", "value": f"{len(df)}"},
+            {"label": "Changes tracked (90d)", "value": f"{_total_changes:,}"},
             {"label": "Regressed", "value": f"{int((verdicts == 'REGRESSED').sum())}",
              "delta_color": "inverse" if (verdicts == "REGRESSED").any() else "off",
              "help": "Worse credits/call, p95, or failure rate vs the frozen pre-change baseline."},
@@ -2148,6 +2153,9 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             {"label": "Still accumulating", "value": f"{int((verdicts == 'PENDING').sum())}",
              "help": "Fewer than 5 post-change runs so far — no verdict yet."},
         ])
+        if _total_changes > len(df):
+            st.caption(f"Table below shows the latest {len(df)} of {_total_changes:,} tracked "
+                       "changes; the Regressed/Improved tiles reflect that visible set.")
         _ci = with_user_names(df, _PAGE, user_col="CHANGED_BY", display_col="Changed by")
         # r4: a readable, laptop-fittable change table. with_user_names already added the
         # resolved "Changed by", so the raw CHANGED_BY was a duplicate identity column;

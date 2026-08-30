@@ -926,12 +926,21 @@ def task_freshness_status(df: pd.DataFrame) -> pd.DataFrame:
         return pd.Series([float("nan")] * len(out), index=out.index)  # absent -> all-NaN, never raises
 
     gap = _num("MEDIAN_GAP_MIN")
+    long_gap = _num("LONG_GAP_MIN")
     mins = _num("MINS_SINCE_SUCCESS")
     statuses: list[str] = []
     severities: list[str] = []
     overdue: list[float] = []
     for i in range(len(out)):
         g = safe_float(gap.iloc[i])
+        # Judge silence against the task's LONGEST NORMAL scheduled gap (p90), not 2x its median:
+        # a weekday-only cron's median gap is ~1 day but its real gaps include the ~3-day weekend,
+        # and a business-hours cron's median is ~1h but it idles overnight -- so a 2x-median rule
+        # flagged healthy tasks Stale/High every Monday / every night. LONG_GAP_MIN falls back to
+        # the median for a uniform cron (they coincide) and for old-shape frames without the
+        # column, so uniform-cadence tasks are unchanged (bug-hunt 2026-08-30).
+        _lg = long_gap.iloc[i]
+        yard = safe_float(_lg) if not pd.isna(_lg) and safe_float(_lg) > g else g
         m_raw = mins.iloc[i]
         if pd.isna(m_raw):
             statuses.append("Stale")
@@ -941,10 +950,10 @@ def task_freshness_status(df: pd.DataFrame) -> pd.DataFrame:
         m = safe_float(m_raw)
         over = m - g
         overdue.append(round(over, 1))
-        if g > 0 and m >= 2 * g and over >= _TASK_LAG_MIN:
+        if yard > 0 and m >= 2 * yard and (m - yard) >= _TASK_LAG_MIN:
             statuses.append("Stale")
             severities.append("High")
-        elif g > 0 and m >= g and over >= _TASK_LAG_MIN:
+        elif yard > 0 and m >= yard and (m - yard) >= _TASK_LAG_MIN:
             statuses.append("Late")
             severities.append("Medium")
         else:

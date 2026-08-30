@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.361.0 - Operations-layer bug hunt #3: 7 app-side fixes (2026-08-30)
+
+Third, deeper adversarial pass over the operations layer (6 finders: query-opt/pruning, lock
+contention, task freshness/SLA/streaks, warehouse concurrency/cache, volume/DQ/adaptive, change-
+impact/wiring). Two candidates refuted (the repeat-query cache-basis was already fixed by the
+v4.360.0 live-route; a triage mis-rank is unreachable since a >50GB scan implies >100 partitions on
+internal tables). Seven app-side fixes, no migration.
+
+- **Lock-wait "spike" no longer double-counts today (MED)** — `lock_wait_spikes` summed *yesterday +
+  today* into "last day" (`c.DAY >= today-1`) but compared it to a strictly per-single-day baseline,
+  inflating the ratio/count up to ~2× and firing false spikes on later-in-day views. Now `= today-1`
+  (the newest complete day), matching the baseline grain.
+- **Task freshness stops false-alarming on scheduled idle (MED)** — a weekday-only or business-hours
+  cron was flagged Stale/High every Monday / every night because silence was judged against 2× the
+  *median* gap while its real gaps include the weekend/overnight idle. It now judges against the p90
+  *longest normal gap*; uniform-cadence tasks are unchanged, and a task silent past even its longest
+  scheduled gap still fires.
+- **Result-cache hit % is account-wide (MED)** — a zero-scan answer has `WAREHOUSE_NAME = NULL`, so a
+  warehouse-company scope dropped the entire numerator and collapsed the hit % to ~0 under any
+  company filter. Computed account-wide, matching the metric's nature.
+- **Volume-drop stops false-FAILING weekday tables (MED)** — a Mon-Fri table read 100% FAILED every
+  Monday (yesterday = Sunday = 0 rows). It now suppresses the alarm when the same weekday last week
+  was also empty (the table doesn't load that day); a genuine stop on a normally-active weekday still
+  fires.
+- **proc-SLA rollup surfaces fully-broken procs (LOW)** — a 100%-failing proc had `P95 = NULL` so its
+  `CALLS × P95` rank collapsed to 0 and it was truncated out of the very panel meant to show it; it
+  now ranks first.
+- **DQ row-volume caps tables, not rows (LOW)** — a `LIMIT 8000` on the per-(table, day) series cut
+  alphabetically-late tables out entirely (a silent clean all-clear for them); it now caps distinct
+  tables so each keeps its complete series.
+- **Change-impact "Changes tracked" count is untruncated (LOW)** — the KPI read `len(df)` off a
+  `LIMIT 200` frame; it now reads a `COUNT(*) OVER ()` window total, with a "showing latest 200"
+  caption.
+
 ## 4.360.0 - Repeat-query panel routed to the live builder (2026-08-30)
 
 Resolves the two `family_repeat_fingerprints` mart-vs-live divergences deferred from cost hunt #3.

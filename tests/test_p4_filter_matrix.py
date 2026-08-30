@@ -224,10 +224,19 @@ def test_every_company_produces_parseable_snowflake_sql(name, fn):
         sqlglot.parse(sql, dialect="snowflake")
 
 
+# Builders that INTENTIONALLY accept a company arg but do not scope by it, because the metric has
+# no company-attributable key. ops_sql.result_cache_daily: a zero-scan / result-cache answer carries
+# WAREHOUSE_NAME=NULL and cannot be warehouse-attributed to a company, so a company scope would
+# collapse its numerator to ~0 -- it is account-wide by design (bug-hunt 2026-08-30).
+_ACCOUNT_WIDE = {"ops_sql.result_cache_daily"}
+
+
 @pytest.mark.parametrize(("name", "fn"), BUILDERS, ids=_IDS)
 def test_the_company_filter_is_live(name, fn):
     """A named company must change the SQL. Identical to 'ALL' means the scope
     is inert and the page shows every company's data to someone who picked one."""
+    if name in _ACCOUNT_WIDE:
+        pytest.skip("account-wide by design — the metric has no company-scopable key")
     unscoped = _build(fn, "ALL")
     for company in _NAMED:
         assert _build(fn, company) != unscoped, (
@@ -237,6 +246,8 @@ def test_the_company_filter_is_live(name, fn):
 
 @pytest.mark.parametrize(("name", "fn"), BUILDERS, ids=_IDS)
 def test_named_scopes_do_not_collapse_into_each_other(name, fn):
+    if name in _ACCOUNT_WIDE:
+        pytest.skip("account-wide by design — the metric has no company-scopable key")
     rendered = {c: _build(fn, c) for c in _NAMED}
     for a, b in ((x, y) for x in _NAMED for y in _NAMED if x < y):
         assert rendered[a] != rendered[b], (

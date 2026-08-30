@@ -691,10 +691,10 @@ def lock_wait_spikes(company: str = "ALL", database: str = "") -> str:
     return f"""SELECT * FROM (
     SELECT
         c.DATABASE_NAME, c.SCHEMA_NAME, c.OBJECT_NAME,
-        SUM(IFF(c.DAY >= DATEADD('day', -1, CURRENT_DATE()), c.WAIT_EVENTS, 0)) AS LAST_DAY_WAITS,
+        SUM(IFF(c.DAY = DATEADD('day', -1, CURRENT_DATE()), c.WAIT_EVENTS, 0)) AS LAST_DAY_WAITS,
         ROUND(SUM(IFF(c.DAY < DATEADD('day', -1, CURRENT_DATE()), c.WAIT_EVENTS, 0)) / 6.0, 1)
             AS PRIOR_DAILY_AVG,
-        SUM(IFF(c.DAY >= DATEADD('day', -1, CURRENT_DATE()), c.NEVER_ACQUIRED, 0))
+        SUM(IFF(c.DAY = DATEADD('day', -1, CURRENT_DATE()), c.NEVER_ACQUIRED, 0))
             AS LAST_DAY_NEVER_ACQ
     FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY c
     WHERE c.DAY >= DATEADD('day', -7, CURRENT_DATE())

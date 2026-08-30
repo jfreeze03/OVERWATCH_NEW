@@ -56,6 +56,11 @@ FROM dml m
 LEFT JOIN object_map om ON om.K = UPPER(m.FQN)
 LEFT JOIN database_map dm ON om.K IS NULL AND dm.K = UPPER(m.DATABASE_NAME)
 WHERE COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT) IS NOT NULL
+-- Cap the number of TABLES, not rows: a flat LIMIT on this per-(FQN, day) series cut
+-- alphabetically-late tables out entirely and sliced boundary tables mid-window (wrong
+-- LATEST_DAY, and a silent clean all-clear for the dropped tables). DENSE_RANK on FQN keeps
+-- each table's COMPLETE series and only ever drops whole tables past a generous cap (bug-hunt
+-- 2026-08-30). A DATABASE registration expanding to >600 tables is the only truncation case.
+QUALIFY DENSE_RANK() OVER (ORDER BY m.FQN) <= 600
 ORDER BY m.FQN, m.DAY
-LIMIT 8000
 """

@@ -232,6 +232,12 @@ WITH runs AS (
            -- retry-heavy task (GAP_MIN=0 for same-SCHEDULED_TIME retries) can't get
            -- a 0-minute median that would make it structurally unflaggable.
            MEDIAN(IFF(GAP_MIN > 0, GAP_MIN, NULL)) AS MEDIAN_GAP_MIN,
+           -- p90 of positive gaps = the LONGEST NORMAL scheduled gap (a weekend for a weekday-only
+           -- cron, an overnight for a business-hours cron). The classifier judges silence against
+           -- this, not 2x the median, so a scheduled idle window is not misread as 'silently
+           -- stopped'. p90 (not MAX) so a one-off maintenance pause does not inflate it (bug-hunt
+           -- 2026-08-30).
+           APPROX_PERCENTILE(IFF(GAP_MIN > 0, GAP_MIN, NULL), 0.9) AS LONG_GAP_MIN,
            COUNT_IF(GAP_MIN IS NOT NULL AND GAP_MIN > 0) AS INTERVALS
     FROM runs
     GROUP BY 1, 2, 3
@@ -246,6 +252,7 @@ WITH runs AS (
 )
 SELECT c.DATABASE_NAME, c.SCHEMA_NAME, c.TASK_NAME,
        ROUND(c.MEDIAN_GAP_MIN, 1) AS MEDIAN_GAP_MIN,
+       ROUND(c.LONG_GAP_MIN, 1) AS LONG_GAP_MIN,
        c.INTERVALS,
        l.LAST_SUCCESS, l.LAST_SCHEDULED, l.LAST_STATE,
        DATEDIFF('minute', l.LAST_SUCCESS, CURRENT_TIMESTAMP()) AS MINS_SINCE_SUCCESS
@@ -488,7 +495,11 @@ SELECT
 FROM calls
 WHERE PROC_NAME IS NOT NULL
 GROUP BY 1, 2, 3
-ORDER BY CALLS * COALESCE(P95_S, 0) DESC
+-- A 100%-failing proc has every OK_MS NULL, so P95_S is NULL and CALLS*P95 collapses to 0,
+-- sinking the fully-broken proc below the LIMIT -- exactly the row this panel's FAIL_PCT column
+-- exists to surface. Rank those first, then by P95 SLA-impact (bug-hunt 2026-08-30).
+ORDER BY CASE WHEN FAIL_PCT = 100 THEN 1 ELSE 0 END DESC,
+         CALLS * COALESCE(P95_S, 0) DESC
 LIMIT {limit}
 """
 
@@ -587,9 +598,16 @@ LIMIT 200
 
 def result_cache_daily(days: int, company: str = "ALL") -> str:
     """Share of successful queries answered without scanning (result cache /
-    metadata answers). A falling line means redundant recomputation."""
+    metadata answers). A falling line means redundant recomputation.
+
+    Account-wide by design: a zero-scan answer (result cache / metadata) carries
+    WAREHOUSE_NAME = NULL, so COMPANY_FOR_WAREHOUSE cannot attribute it to a company.
+    A warehouse-company scope would drop the ENTIRE numerator (every zero-scan hit) while
+    keeping the company's warehouse-run queries in the denominator, collapsing HIT_PCT to
+    ~0 under any company filter. ``company`` is accepted for call-site symmetry but is not
+    applied to this intrinsically un-scopable metric (bug-hunt 2026-08-30)."""
     days = bounded_days(days)
-    scope = _query_scope(days, company, "", "", "", "")
+    scope = _query_scope(days, "ALL", "", "", "", "")   # account-wide only -- see docstring
     return f"""
 SELECT
     DATE_TRUNC('day', START_TIME) AS DAY,
@@ -980,12 +998,18 @@ def volume_deltas() -> str:
 SELECT DB AS DATABASE_NAME, SCH AS SCHEMA_NAME, TBL AS TABLE_NAME,
        Y_ROWS, ROUND(AVG_ROWS, 0) AS AVG_ROWS_PRIOR_7D, DAYS_ACTIVE_7D,
        ROUND((1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100, 1) AS DROP_PCT,
-       CASE WHEN (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 > 50 THEN 'FAILED'
+       CASE WHEN Y_ROWS = 0 AND SAME_DOW_ROWS = 0 THEN 'NORMAL'
+            WHEN (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 > 50 THEN 'FAILED'
             WHEN (1 - Y_ROWS / NULLIF(AVG_ROWS, 0)) * 100 > 30 THEN 'WATCH'
             ELSE 'NORMAL' END AS STATUS
 FROM (
     SELECT d.DATABASE_NAME AS DB, d.SCHEMA_NAME AS SCH, d.TABLE_NAME AS TBL,
            SUM(IFF(DATE(d.START_TIME) = DATEADD('day', -1, CURRENT_DATE()), d.ROWS_ADDED, 0)) AS Y_ROWS,
+           -- Same weekday last week (7 days before yesterday). If it also added 0 rows, the table
+           -- does not load on this weekday (weekday-only / business-days pipeline), so yesterday's 0
+           -- is its normal pattern, not a drop -- suppress the false FAILED. A genuine stop on a
+           -- normally-active weekday leaves this non-zero and still fires (bug-hunt 2026-08-30).
+           SUM(IFF(DATE(d.START_TIME) = DATEADD('day', -8, CURRENT_DATE()), d.ROWS_ADDED, 0)) AS SAME_DOW_ROWS,
            SUM(IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE()), d.ROWS_ADDED, 0)) / 7 AS AVG_ROWS,
            COUNT(DISTINCT IFF(DATE(d.START_TIME) < DATEADD('day', -1, CURRENT_DATE())
                               AND d.ROWS_ADDED > 0, DATE(d.START_TIME), NULL)) AS DAYS_ACTIVE_7D

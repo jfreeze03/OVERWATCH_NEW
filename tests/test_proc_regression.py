@@ -31,8 +31,11 @@ def test_rollup_shape_and_success_only_latency():
     assert "APPROX_PERCENTILE(OK_MS, 0.95)" in sql              # p95, never PERCENTILE_CONT
     for col in ("CALLS", "FAIL_PCT", "AVG_S", "P95_S", "MAX_S", "TOTAL_MIN"):
         assert col in sql
-    # ranked by SLA impact = frequency x duration
-    assert "ORDER BY CALLS * COALESCE(P95_S, 0) DESC" in sql
+    # ranked by SLA impact = frequency x duration, but a 100%-failing proc (P95_S NULL -> rank 0)
+    # is surfaced FIRST so the LIMIT can't bury the fully-broken proc this panel exists to show
+    # (bug-hunt 2026-08-30).
+    assert "ORDER BY CASE WHEN FAIL_PCT = 100 THEN 1 ELSE 0 END DESC" in sql
+    assert "CALLS * COALESCE(P95_S, 0) DESC" in sql
 
 
 def test_rollup_scoping_clamp_and_injection():
