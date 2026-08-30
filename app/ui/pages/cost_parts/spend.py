@@ -1266,6 +1266,19 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         # every day, so a short row is a loader gap — average over the days
         # actually present, not the calendar length.
         first_this = today.replace(day=1)
+        # C4: MTD gets the SAME account-level loader-gap backfill as the prior month below.
+        # The builder divides each db's MTD bytes by the FULL elapsed period, so a mid-month
+        # day the loader hasn't delivered counts as ZERO — understating the daily average and
+        # skewing MoM negative early in the month (the prior baseline is watermark-corrected,
+        # so an uncorrected MTD reads a false drop). When the loader WATERMARK proves a uniform
+        # tail-day gap (covered < expected elapsed days), rescale the ACCOUNT total by
+        # elapsed/observed days; per-db bars keep their lifecycle zeros (a db created mid-month
+        # legitimately spans fewer days), exactly as the prior path does.
+        _mtd_latest = _loader_watermark(res)
+        expected_days = max(today.day - 1, 0)            # elapsed complete days (today excluded)
+        covered = ((_mtd_latest - first_this).days + 1) if _mtd_latest else 0
+        if expected_days > 0 and 0 < covered < expected_days:
+            mtd_tib *= expected_days / covered
         last_prior = first_this - timedelta(days=1)      # last day of the prior month
         period_days_prior = last_prior.day               # calendar length of the prior month
         pri = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
@@ -1324,17 +1337,16 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
         result_caption(res)
         # C4: expose coverage so a short month reads as short, not as low spend.
         # Expected complete days = day-of-month minus today's excluded partial day.
-        expected_days = max(today.day - 1, 0)
-        # #20: coverage from the loader WATERMARK (newest loaded day this month),
-        # not MIN(DAYS_AVERAGED) across all dbs — a short-lived or dropped database
-        # legitimately covers fewer days and must not read as "the loader is behind".
-        latest = _loader_watermark(res)
-        covered = ((latest - first_this).days + 1) if latest else 0
-        latest_txt = latest.isoformat() if latest else "n/a"
+        # #20: coverage from the loader WATERMARK (newest loaded day this month), not
+        # MIN(DAYS_AVERAGED) across all dbs — a short-lived or dropped database legitimately
+        # covers fewer days. expected_days/covered/_mtd_latest are computed above (they also
+        # drive the MTD backfill), so reuse them here.
+        latest_txt = _mtd_latest.isoformat() if _mtd_latest else "n/a"
         if expected_days > 0 and covered < expected_days - 2:
             st.warning(f"Storage MTD covers {covered} of {expected_days} elapsed days "
-                       f"(latest {latest_txt}) — the daily loader is behind, so this "
-                       "average understates. Backfill FACT_STORAGE_DAILY to correct it.")
+                       f"(latest {latest_txt}) — the daily loader is behind; the month-to-date "
+                       "average is watermark-corrected for the gap. Backfill FACT_STORAGE_DAILY "
+                       "for exact per-database figures.")
         else:
             st.caption(f"Coverage: averaged {covered} of {expected_days} month-to-date "
                        f"days; latest {latest_txt}.")

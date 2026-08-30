@@ -218,9 +218,15 @@ def savings_by_lever(df: pd.DataFrame) -> pd.DataFrame:
     ver["LEVER"] = ver.get("FINDING_TYPE", "unclassified").astype(str)
     ver["_V"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
     ver["_E"] = pd.to_numeric(ver.get("ESTIMATED_USD"), errors="coerce").fillna(0.0)
+    # Realization % compares like-for-like: only verified items that carried a positive
+    # estimate count toward the numerator too, else a zero/absent-estimate verified item
+    # adds its $ to the numerator with nothing in the denominator and inflates the ratio
+    # past 100% — the exact guard ledger_totals uses (_est_pos). VERIFIED_USD/ITEMS stay
+    # the full-lever totals for the $ column (bug-hunt 2026-08-30).
+    ver["_VPOS"] = ver["_V"].where(ver["_E"] > 0, 0.0)
     grp = ver.groupby("LEVER").agg(VERIFIED_USD=("_V", "sum"), ITEMS=("_V", "size"),
-                                   _EST=("_E", "sum")).reset_index()
-    grp["REALIZATION_PCT"] = (grp["VERIFIED_USD"] / grp["_EST"].where(grp["_EST"] > 0)
+                                   _VPOS=("_VPOS", "sum"), _EST=("_E", "sum")).reset_index()
+    grp["REALIZATION_PCT"] = (grp["_VPOS"] / grp["_EST"].where(grp["_EST"] > 0)
                               * 100).round(0)
     grp["VERIFIED_USD"] = grp["VERIFIED_USD"].round(2)
     return grp.sort_values("VERIFIED_USD", ascending=False).reset_index(drop=True)[cols]

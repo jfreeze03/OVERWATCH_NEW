@@ -236,19 +236,33 @@ def _year_projection_strip(settings: dict) -> None:
     proj_other = _year_end_credits(ytd_other, burn_other, frac_left, days_left)
     proj_ai = _year_end_credits(ytd_ai, burn_ai, frac_left, days_left)
     projected = proj_other + proj_ai
+    # A straight-line year total extrapolated from a handful of trailing days is noise —
+    # early January (or a fresh account / loader gap) can leave len(tail) at 1-2 days, so
+    # a single busy day would balloon the full-year figure. Flag thin history so the number
+    # reads as provisional, not a firm forecast (bug-hunt 2026-08-30).
+    _hist_days = len(tail)
+    _MIN_PROJECTION_DAYS = 7
+    _thin = _hist_days < _MIN_PROJECTION_DAYS
+    _thin_note = (f" ⚠ Low confidence: only {_hist_days} day(s) of trailing history — the "
+                  "projection extrapolates a full year from a small burn sample and will "
+                  "stabilize as the year fills in.") if _thin else ""
     kpi_row([
         {"label": f"{today.year} YTD (billed)", "value": f"{ytd:,.0f} cr",
          "delta": format_usd(blended_billed_usd(ytd_other, ytd_ai, rate_now, ai_rate)),
          "delta_color": "off"},
-        {"label": f"Projected {today.year} total", "value": f"{projected:,.0f} cr",
+        {"label": f"Projected {today.year} total", "value": (f"{projected:,.0f} cr" if not _thin
+                                                             else f"~{projected:,.0f} cr"),
          "delta": format_usd(blended_billed_usd(proj_other, proj_ai, rate_now, ai_rate)),
          "delta_color": "off",
          "help": "Straight-line: YTD billed credits + today's prorated remainder + "
                  f"trailing-30d daily burn x {days_left} days remaining (early in a "
                  "year the burn basis is YTD itself). AI/Cortex credits price at the "
                  "AI rate, the rest at the compute rate. Seasonality-aware month-end "
-                 "projections live on Overview; contract pacing below is term-aware."},
+                 "projections live on Overview; contract pacing below is term-aware."
+                 + _thin_note},
     ])
+    if _thin:
+        st.caption(_thin_note.strip())
 
 
 def _rate_card_reconciliation(settings: dict) -> None:

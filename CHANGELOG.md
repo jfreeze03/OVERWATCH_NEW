@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.353.0 - Cost-layer bug hunt: 3 app-side fixes (2026-08-30)
+
+Adversarial hunt over the cost layer (pricing core, ~45 SQL builders, 6 UI tabs, ROI logic).
+The layer swept clean — the pricing / allocation / compare / AI-egress lenses returned no
+defects — leaving 3 app-side fixes (no migration).
+
+- **MTD storage no longer skews MoM negative early in the month** — the month-to-date storage
+  KPI divided each database's bytes by the *full* elapsed period, so a mid-month day the daily
+  loader hadn't delivered yet counted as zero storage, understating the daily average. The
+  sibling "Prior full month" value is watermark-corrected, so the MoM delta read a false drop
+  (e.g. `-42% MoM` on flat storage in the first week). The MTD total now gets the same
+  account-level loader-gap backfill (rescale by elapsed/observed days when the watermark proves
+  an under-loaded tail), leaving per-database lifecycle zeros intact.
+- **`savings_by_lever` realization % matches `ledger_totals`** — it summed verified $ over every
+  verified item in a lever but only estimate-carrying items in the denominator, so a verified
+  item booked with no estimate inflated the ratio past 100% (e.g. 130% vs the correct 80%). The
+  numerator is now restricted to estimate-carrying items too; the `VERIFIED_USD`/`ITEMS` columns
+  keep the full-lever totals.
+- **The year-end projection flags thin trailing history** — it extrapolated a full-year total
+  from as little as one trailing day (early January, a fresh account, or a loader gap), so one
+  busy day ballooned the forecast. It now marks the figure provisional (`~`, low-confidence
+  caveat) when fewer than 7 trailing days back it.
+
 ## 4.352.0 - Security-layer bug hunt: 9 app-side fixes + V100 (2026-08-30)
 
 Adversarial hunt over the security layer (logic, ~45 SQL builders, 8 UI tabs, migrations)
