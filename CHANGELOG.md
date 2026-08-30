@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.356.0 - Operations-layer bug hunt #2: 5 app fixes + V103 (2026-08-30)
+
+Second, deeper adversarial pass over the operations layer (7 finders: sizing, pipeline SLA,
+warehouse pressure, contention/optimization, task graph, clustering/cache, page panels). Three
+candidates were correctly refuted (a pipeline-SLA cadence claim that misread `TABLE_DML_HISTORY`'s
+hourly granularity; a version-diff truncation unreachable under Snowflake's 1000-task DAG cap; a
+company-scoped cache-hit ratio that is the documented V044 UNKNOWN law). Five app fixes plus one
+owner-gated forward migration.
+
+- **V103 (owner-gated, HIGH): warehouse-efficiency idle % is now span-based** — the mart loader
+  counted only a query's *start* hour as active (`COUNT(DISTINCT DATE_TRUNC('hour', START_TIME))`),
+  so every later hour of a multi-hour query looked idle: a nightly 3-hour MERGE read `IDLE_PCT`
+  ≈ 66.7%. Because the right-sizing panel reads the mart first, that flipped busy batch/ELT
+  warehouses from KEEP to SUSPEND and inflated the idle-$ KPI. `SP_LOAD_MARTS_V27` re-derived from
+  V102 so the `wh_eff` arm expands each query across the hours it spans (matching the live
+  `_active_hours_cte` fixed back on 2026-07-31). Owner applies after V102, then re-runs
+  `SP_LOAD_MARTS_V27('HOURLY', d)` to re-stamp trailing rows.
+- **Blast-radius warning counts the full radius (MED)** — the suspend/resize confirmation warning
+  sourced its user and query totals from the `LIMIT 25` display frame, understating both on shared
+  warehouses and dropping exactly the light service/automation accounts an operator most needs to
+  know they'd interrupt. It now carries untruncated window totals (`COUNT(*) OVER ()` /
+  `SUM(COUNT(*)) OVER ()`) and notes when the table is a top-25 subset.
+- **Task-run "dispatch delay" no longer over-fires on wide graphs (MED)** — the signal and KPI
+  used the *summed* per-task queue, which grows with fan-out and isn't comparable to the single
+  wall-clock span (it could even print larger than wall time). Both now use the run-level *max*
+  per-task queue (`MAX_QUEUE_SEC`), the actual dispatch latency.
+- **Release "task regressions" stops greening on an empty AFTER window (MED)** — a task with
+  BEFORE runs but no AFTER runs yet was folded into a verified "no regression" all-clear; it's now
+  marked undecided, and the panel shows "no data yet" (mirroring its query-health sibling) rather
+  than a false green right after a deploy.
+- **proc-regression keeps "faster but failing" procs (LOW)** — the `LIMIT 200` ordered by signed
+  p95-delta truncated exactly the High-severity procs that now error out *fast* (negative delta,
+  big fail-jump); it now ranks by the stronger of slowdown and fail-jump.
+- **Clustering "recoverable" discloses its real span (LOW)** — the figure covers ≥30 days but was
+  labeled with the ambiguous "/window" while the page's picker can be 7 days; it now names the span.
+
 ## 4.355.0 - Cost-layer bug hunt #2: 3 app-side fixes (2026-08-30)
 
 Second, deeper adversarial pass over the cost layer (7 finders: pricing/unit-math, SQL builders,

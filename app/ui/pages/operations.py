@@ -778,8 +778,22 @@ def _release_compare_tab(company: str) -> None:
     if guard(t_res, "No task runs in the compare windows."):
         deltas = task_release_deltas(t_res.df)
         worse = deltas[deltas["GOT_WORSE"]]
+        # A task with no AFTER-window runs yet is UNDECIDED, not clean -- only claim an all-clear
+        # when at least one task actually has runs on the AFTER side; otherwise the AFTER window is
+        # still filling (or, for a nightly task right after a deploy, hasn't run yet). Mirrors the
+        # query-health sibling above, which shows 'no data yet' when a PERIOD is missing.
+        _decidable = bool(deltas["DECIDABLE"].any()) if "DECIDABLE" in deltas.columns else True
         if worse.empty:
-            empty_state("clean", "No task gained failures or slowed >25% after the release.")
+            if _decidable:
+                empty_state("clean", "No task gained failures or slowed >25% after the release.")
+                _undecided = int((~deltas["DECIDABLE"]).sum()) if "DECIDABLE" in deltas.columns else 0
+                if _undecided:
+                    st.caption(f"{_undecided} task(s) have no AFTER-window runs yet and are not "
+                               "included in this verdict.")
+            else:
+                empty_state("no_data_yet", "No task has run on the AFTER side of the release date "
+                            "yet — the window is still filling (or the post-deploy runs haven't "
+                            "happened). Widen the window or pick an earlier release date.")
         else:
             st.warning(f"{len(worse)} task(s) regressed after the release:")
         _delta_cols = [c for c in ["DATABASE_NAME", "SCHEMA_NAME", "TASK_NAME",
@@ -1291,7 +1305,9 @@ def _task_run_analyzer(root_id: str, topology, shape) -> None:
     failed = int(diagnostics["STATE"].astype(str).eq("FAILED").sum())
     critical = diagnostics[diagnostics["CRITICAL_PATH"]]
     critical_sec = safe_float(critical["PATH_SEC"].max()) if not critical.empty else 0.0
-    queue_sec = safe_float(run_row.get("QUEUE_SEC"))
+    # MAX_QUEUE_SEC (the worst single task's dispatch wait) is the run-level, wall-comparable
+    # dispatch metric; the summed QUEUE_SEC over-fires on wide fan-out graphs (bug-hunt 2026-08-30).
+    queue_sec = safe_float(run_row.get("MAX_QUEUE_SEC", run_row.get("QUEUE_SEC")))
     wall_sec = safe_float(run_row.get("WALL_SEC"))
     exceptions = []
     if failed:
@@ -1305,13 +1321,14 @@ def _task_run_analyzer(root_id: str, topology, shape) -> None:
         exceptions.append({
             "label": "Dispatch delay",
             "value": humanize_duration(queue_sec, "s"),
-            "detail": "Queue time is at least 60 seconds and 20% of run wall time.",
+            "detail": "The most-delayed task waited at least 60 seconds and 20% of run wall time.",
             "severity": "warn",
         })
     exception_summary(exceptions, "No failures or material dispatch delay in this run.")
     kpi_row([
         {"label": "Run wall time", "value": humanize_duration(run_row.get("WALL_SEC"), "s")},
-        {"label": "Dispatch queue", "value": humanize_duration(run_row.get("QUEUE_SEC"), "s")},
+        {"label": "Max task queue",
+         "value": humanize_duration(run_row.get("MAX_QUEUE_SEC", run_row.get("QUEUE_SEC")), "s")},
         {"label": "Failed tasks", "value": f"{failed:,}",
          "severity": "bad" if failed else "ok"},
         {"label": "Critical path", "value": humanize_duration(critical_sec, "s")},

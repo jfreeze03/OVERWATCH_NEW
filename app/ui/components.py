@@ -2375,12 +2375,24 @@ def blast_radius(warehouse: str, page: str) -> None:
     df = res.df
     tags = df["SAMPLE_TAG"].dropna().astype(str)
     tagged = tags[tags.str.len() > 0]
+    # The headline must reflect the FULL blast radius, not the LIMIT 25 display frame:
+    # sourcing it from len(df)/df['QUERIES'].sum() understated every warehouse with >25
+    # users and dropped exactly the light service/automation accounts an operator most
+    # needs to know they'd interrupt (bug-hunt 2026-08-30).
+    _total_users = int(df["TOTAL_USERS"].iloc[0]) if "TOTAL_USERS" in df.columns else len(df)
+    _total_queries = (int(df["TOTAL_QUERIES"].iloc[0]) if "TOTAL_QUERIES" in df.columns
+                      else int(df["QUERIES"].sum()))
     st.warning(
-        f"Blast radius (7d): {len(df)} user(s) ran {int(df['QUERIES'].sum()):,} queries here"
+        f"Blast radius (7d): {_total_users:,} user(s) ran {_total_queries:,} queries here"
         + (f"; scheduled/tooling tags present ({tagged.iloc[0][:40]}…)" if len(tagged) else "")
         + ". Review before executing."
     )
-    styled_table(with_user_names(df, page), height=TABLE_H_SM)   # show WHO you'd interrupt
+    _display = df.drop(columns=[c for c in ("TOTAL_USERS", "TOTAL_QUERIES") if c in df.columns])
+    styled_table(with_user_names(_display, page), height=TABLE_H_SM)   # show WHO you'd interrupt
+    if _total_users > len(_display):
+        st.caption(f"Table shows the top {len(_display)} users by elapsed time; "
+                   f"{_total_users - len(_display):,} lighter-usage account(s) not listed but "
+                   "counted in the total above.")
 
 
 # review fix: a badge may be at most one recent-cache-tier stale — after that

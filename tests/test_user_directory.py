@@ -95,4 +95,5 @@ def test_login_surfaces_wire_the_resolver():
         if any(c in src for c in login_cols):
             assert ("with_user_names" in src or "resolve_display" in src), f"{path.name} shows a login but never resolves it"
     # the shared blast-radius component (Alerts + Optimize, pre-cancel/suspend) resolves
-    assert "with_user_names(df, page)" in (root / "components.py").read_text(encoding="utf-8")
+    # (_display is df minus the window-total helper columns — bug-hunt 2026-08-30)
+    assert "with_user_names(_display, page)" in (root / "components.py").read_text(encoding="utf-8")

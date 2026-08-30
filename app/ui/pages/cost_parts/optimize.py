@@ -1361,8 +1361,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if not _churny.empty and "TABLE_FQN" in _churny.columns:
                     _recover = float(safe_float(_churny.get("RECOVERABLE_USD", pd.Series(dtype=float)).sum()))
                     st.markdown(
-                        f"**{len(_churny)} churny table(s) — est. {format_usd(_recover)}/window recoverable "
-                        "by suspending automatic clustering.**")
+                        f"**{len(_churny)} churny table(s) — est. {format_usd(_recover)} recoverable over "
+                        f"the last {max(days, 30)} days by suspending automatic clustering.**")
                     st.caption("Review-only candidates. SUSPEND RECLUSTER stops the reclustering spend; the "
                                "table stays queryable and can be RESUME'd. Confirm the key is genuinely a "
                                "poor fit (not a transient load pattern) before applying.")

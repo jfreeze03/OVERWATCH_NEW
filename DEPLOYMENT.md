@@ -118,6 +118,7 @@ snowflake/migrations/V099__incident_autodeclare_company_scope.sql
 snowflake/migrations/V100__security_change_fact_reload_gap.sql
 snowflake/migrations/V101__fact_task_daily_retry_collapse.sql
 snowflake/migrations/V102__task_marts_retry_collapse.sql
+snowflake/migrations/V103__wh_efficiency_active_hours_span.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

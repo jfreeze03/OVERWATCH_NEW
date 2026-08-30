@@ -342,6 +342,14 @@ _EXPECTED_MIGRATIONS = {
          "RUNS_WITH_FAILURES/FAILED, so the Pipeline Health graph board and per-node timing board match "
          "the live drill. Sibling arms (incl. V095 COMPANY_FOR_ROLE) byte-identical. Proc only, no "
          "schema change; owner re-runs SP_LOAD_MARTS_V27(HOURLY) to re-stamp",
+    103: "Warehouse-efficiency ACTIVE_HOURS span-based: SP_LOAD_MARTS_V27 re-derived from V102 so "
+         "the wh_eff arm counts every clock hour a query was RUNNING (span expansion bounded to 25, "
+         "matching insights_sql._active_hours_cte) instead of only its START hour. Fixes "
+         "MART_WAREHOUSE_EFFICIENCY_DAILY.IDLE_PCT overstating idle for multi-hour queries (a 3-hour "
+         "MERGE no longer reads 66.7% idle), which had flipped busy batch/ELT warehouses from KEEP to "
+         "SUSPEND on the mart-first right-sizing panel and inflated the idle-$ KPI. Matches the live "
+         "warehouse_sizing_profile. Other mart arms byte-identical. Proc only, no schema change; owner "
+         "re-runs SP_LOAD_MARTS_V27(HOURLY) to re-stamp trailing rows",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -533,7 +533,8 @@ def task_release_deltas(df: pd.DataFrame) -> pd.DataFrame:
     )
     pivot.columns = [f"{m}_{p}" for m, p in pivot.columns]
     pivot = pivot.reset_index().fillna(0)
-    for col in ("FAILED_BEFORE", "FAILED_AFTER", "AVG_SEC_BEFORE", "AVG_SEC_AFTER"):
+    for col in ("RUNS_BEFORE", "RUNS_AFTER", "FAILED_BEFORE", "FAILED_AFTER",
+                "AVG_SEC_BEFORE", "AVG_SEC_AFTER"):
         if col not in pivot.columns:
             pivot[col] = 0.0
     pivot["NEW_FAILURES"] = (pivot["FAILED_AFTER"] - pivot["FAILED_BEFORE"]).clip(lower=0)
@@ -543,7 +544,14 @@ def task_release_deltas(df: pd.DataFrame) -> pd.DataFrame:
         if safe_float(r["AVG_SEC_BEFORE"]) else 0.0,
         axis=1,
     )
-    pivot["GOT_WORSE"] = (pivot["NEW_FAILURES"] > 0) | (pivot["RUNTIME_DELTA_PCT"] > 25)
+    # DECIDABLE: a task with no AFTER-window runs can't be judged -- its FAILED_AFTER/AVG_SEC_AFTER
+    # fillna(0) yields NEW_FAILURES=0 and RUNTIME_DELTA_PCT=-100, which would otherwise read as a
+    # verified clean (GOT_WORSE=False). An empty AFTER window is UNKNOWN, not "no regression" -- the
+    # AFTER side may still be filling or (for a nightly task right after a deploy) not have run yet.
+    # The caller uses DECIDABLE to show 'no data yet' instead of a false green (bug-hunt 2026-08-30).
+    pivot["DECIDABLE"] = pivot["RUNS_AFTER"] > 0
+    pivot["GOT_WORSE"] = pivot["DECIDABLE"] & (
+        (pivot["NEW_FAILURES"] > 0) | (pivot["RUNTIME_DELTA_PCT"] > 25))
     return pivot.sort_values(["GOT_WORSE", "NEW_FAILURES", "RUNTIME_DELTA_PCT"],
                              ascending=[False, False, False]).reset_index(drop=True)
 

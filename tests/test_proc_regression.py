@@ -60,7 +60,11 @@ def test_regression_two_windows_and_delta_guard():
     assert "AS CUR_P95_MS" in sql and "AS PRIOR_P95_MS" in sql
     assert "(CUR_P95_MS - PRIOR_P95_MS) / NULLIF(PRIOR_P95_MS, 0)" in sql
     assert "AS P95_DELTA_PCT" in sql and "AS AVG_DELTA_PCT" in sql
-    assert "ORDER BY P95_DELTA_PCT DESC NULLS LAST" in sql
+    # ranked by the STRONGER of slowdown and fail-jump so the LIMIT keeps the High-severity
+    # 'faster but failing' class (negative p95 delta, big fail-jump) — signed p95-delta alone
+    # sorted them into the truncated tail and dropped them (bug-hunt 2026-08-30).
+    assert "ORDER BY GREATEST(COALESCE(P95_DELTA_PCT, 0)," in sql
+    assert "COALESCE(CUR_FAIL_PCT, 0) - COALESCE(PRIOR_FAIL_PCT, 0)) DESC NULLS LAST" in sql
     assert "CUR_FAIL_PCT" in sql and "PRIOR_FAIL_PCT" in sql
 
 

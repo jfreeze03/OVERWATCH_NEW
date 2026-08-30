@@ -574,7 +574,13 @@ SELECT
     CUR_FAIL_PCT,
     PRIOR_FAIL_PCT
 FROM agg
-ORDER BY P95_DELTA_PCT DESC NULLS LAST
+-- Rank by the STRONGER of the two regression signals, so the LIMIT keeps both the
+-- slower procs AND the High-severity 'faster but failing' class (a proc that now errors
+-- out fast has a NEGATIVE p95 delta but a big fail-jump). Ordering by signed P95_DELTA_PCT
+-- alone sorted the failing-but-faster procs into the truncated tail and dropped exactly
+-- the rows the panel exists to surface -> a false 'Faster but failing: 0' (bug-hunt 2026-08-30).
+ORDER BY GREATEST(COALESCE(P95_DELTA_PCT, 0),
+                  COALESCE(CUR_FAIL_PCT, 0) - COALESCE(PRIOR_FAIL_PCT, 0)) DESC NULLS LAST
 LIMIT 200
 """
 
@@ -866,6 +872,13 @@ SELECT COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID) AS RUN_KEY,
        COUNT_IF(STATE = 'FAILED') AS FAILED_TASKS,
        ROUND(SUM(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
                                    QUERY_START_TIME), 0)) / 1000, 2) AS QUEUE_SEC,
+       -- MAX per-task queue = the run's actual dispatch latency (the worst-delayed task).
+       -- QUEUE_SEC above SUMS every task's queue; in a fan-out graph independent branches
+       -- queue concurrently, so that sum grows with task count and is NOT comparable to the
+       -- single WALL_SEC span -- it over-fires a dispatch-delay warn on healthy wide graphs
+       -- and can exceed wall. The MAX is run-level and wall-comparable (bug-hunt 2026-08-30).
+       ROUND(MAX(GREATEST(DATEDIFF('millisecond', SCHEDULED_TIME,
+                                   QUERY_START_TIME), 0)) / 1000, 2) AS MAX_QUEUE_SEC,
        DATEDIFF('second', MIN(SCHEDULED_TIME), MAX(COMPLETED_TIME)) AS WALL_SEC
 FROM attempts
 GROUP BY COALESCE(TO_VARCHAR(GRAPH_RUN_GROUP_ID), QUERY_ID)
@@ -1015,7 +1028,14 @@ SELECT
     COUNT(*)                                        AS QUERIES,
     SUM(COALESCE(TOTAL_ELAPSED_TIME, 0)) / 1000.0   AS ELAPSED_SEC,
     MAX(START_TIME)                                 AS LAST_SEEN,
-    ANY_VALUE(NULLIF(QUERY_TAG, ''))                AS SAMPLE_TAG
+    ANY_VALUE(NULLIF(QUERY_TAG, ''))                AS SAMPLE_TAG,
+    -- Window totals over the FULL pre-LIMIT result (evaluated before ORDER BY..LIMIT):
+    -- the blast-radius headline must count EVERY affected user/query, not just the top 25
+    -- shown in the table. TOTAL_USERS = distinct users (one row per group here);
+    -- TOTAL_QUERIES = every user's queries, incl. the light service/automation accounts
+    -- that sort last by elapsed and would otherwise be dropped by LIMIT 25.
+    COUNT(*) OVER ()                                AS TOTAL_USERS,
+    SUM(COUNT(*)) OVER ()                           AS TOTAL_QUERIES
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
   AND UPPER(WAREHOUSE_NAME) = {sql_literal(wh.upper())}
