@@ -24,14 +24,14 @@ def test_metering_surfaces_moved_to_the_fact():
     """r14 #5: the 365d fact backfill makes the live WMH scans avoidable."""
     for sql in (chargeback_sql.department_window_credits(30, "ALFA"),
                 chargeback_sql.department_month_credits("2026-06", "ALFA"),
-                mart_sql.app_cost_quarter(),
+                mart_sql.app_cost_last_30d(),
                 mart27_sql.fact_monthly_spend_by_warehouse(12, "ALFA")):
         assert "FACT_WAREHOUSE_DAILY" in sql
         assert "ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY" not in sql
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
     assert "fact_monthly_spend_by_warehouse" in ov          # boss-chart fallback = fact
     br = (_ROOT / "app" / "ui" / "pages" / "brief.py").read_text(encoding="utf-8")
-    assert "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)" in br
+    assert "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN trailing 30d)" in br
 
 
 def test_cache_cardinality_is_bounded():

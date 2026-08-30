@@ -61,8 +61,11 @@ def test_roi_readers_never_mix_estimates_with_verified():
     assert "VERIFIED_QTD_USD" in s and "ESTIMATED_OPEN_USD" in s
     assert "STATE = 'VERIFIED'" in s and "STATE = 'ESTIMATED'" in s
     assert "DATE_TRUNC('quarter'" in s
-    c = _m.app_cost_quarter()
-    assert "WH_ALFA_ADMIN" in c and "DATE_TRUNC('quarter'" in c
+    c = _m.app_cost_last_30d()
+    # ROI denominator is a trailing-30-complete-day (monthly) window, not QTD, to match the
+    # monthly-magnitude verified-savings numerator (cost-hunt4 2026-08-30).
+    assert "WH_ALFA_ADMIN" in c
+    assert "DATEADD('day', -30, CURRENT_DATE())" in c and "DAY < CURRENT_DATE()" in c
     led = _m.ledger_for_event("ab12cd34")
     assert "'%event ab12cd34%'" in led and "LIMIT 5" in led
     with _pt.raises(ValueError):

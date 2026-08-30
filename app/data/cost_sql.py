@@ -583,7 +583,13 @@ def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25,
     _db = str(database or "").strip()
     db_pred = (f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {companies.sql_literal(_db.upper())}"
                if _db else "")
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred)
+    # Exclude the synthetic residual row (one per day: OBJECT_FQN='UNATTRIBUTED',
+    # COST_ARM='QUERY_COMPUTE_RESIDUAL') from the per-OBJECT top-N: it is a non-object whose
+    # query/maint split is $0/$0 yet CREDITS>0, so it can outrank a real table, take the #1 slot,
+    # and its entity drill lands on a non-existent Entity 360. The residual stays visible in
+    # object_cost_by_arm's arm breakdown (bug-hunt 2026-08-30).
+    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred,
+                      "OBJECT_FQN <> 'UNATTRIBUTED'")
     # COMPANY_FOR_DATABASE on the object's db: deterministic per OBJECT_FQN group
     # (the arg is a pure function of the grouped column), so MAX() just returns
     # that single value while keeping the column legal without a GROUP BY entry.
@@ -869,7 +875,12 @@ def tag_coverage(days: int, company: str = "ALL", database: str = "",
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        companies.warehouse_clause(company),
+        # Scope company by the USER (COMPANY_FOR_USER), NOT the warehouse: this is a USER-grain
+        # board and the mart sibling MART_TAG_COVERAGE_DAILY stamps COMPANY = COMPANY_FOR_USER (V095).
+        # Scoping the live fallback by warehouse-company returned a DIFFERENT user population than the
+        # mart (a user on another company's warehouse flips in/out), so the same company's board and
+        # "Tagged share" KPI changed with mart warmth (bug-hunt 2026-08-30).
+        companies.user_clause(company, "USER_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -907,7 +918,10 @@ def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL"
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        companies.warehouse_clause(company),
+        # user-company scope, matching the tag_coverage scoreboard this drills from (bug-hunt
+        # 2026-08-30): a warehouse-company scope would drop the drill's rows for a user who ran
+        # on another company's warehouse -- the exact user the scoreboard now includes.
+        companies.user_clause(company, "USER_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
         f"USER_NAME = {sql_literal(user_name)}",

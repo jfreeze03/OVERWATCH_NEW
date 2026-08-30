@@ -108,8 +108,8 @@ def render() -> None:
         {"key": "exh", "sql": mart_sql.contract_exhaustion(),
          "source": "SETTINGS + FACT_METERING_DAILY"},
         {"key": "roi", "sql": mart_sql.savings_summary_quarter(), "source": "SAVINGS_LEDGER"},
-        {"key": "appq", "sql": mart_sql.app_cost_quarter(),
-         "source": "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)"},
+        {"key": "appq", "sql": mart_sql.app_cost_last_30d(),
+         "source": "FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN trailing 30d)"},
         # PERF #46: the 14d spark moved OUT of this 'recent' batch to the shared hourly
         # daily_spend_wide() read below — batch members cache in a separate 'recent' store
         # that can't share with the solo hourly wide entry Overview/Contract also use.
@@ -204,24 +204,25 @@ def render() -> None:
             })
     roi = _b_rec.get("roi") or run(mart_sql.savings_summary_quarter(), page=_PAGE, key="brief_roi",
               tier="recent", source="SAVINGS_LEDGER")
-    cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_quarter(), page=_PAGE, key="brief_app_cost",
-                 tier="recent", source="FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN quarter)")
+    cost_q = _b_rec.get("appq") or run(mart_sql.app_cost_last_30d(), page=_PAGE, key="brief_app_cost",
+                 tier="recent", source="FACT_WAREHOUSE_DAILY (WH_ALFA_ADMIN trailing 30d)")
     if roi.usable():
         rrow = roi.df.iloc[0]
         verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
         pipeline = safe_float(rrow.get("ESTIMATED_OPEN_USD"))
-        app_usd = (safe_float(cost_q.df.iloc[0].get("APP_CREDITS_QTD")) * rate
+        app_usd = (safe_float(cost_q.df.iloc[0].get("APP_CREDITS_30D")) * rate
                    if cost_q.usable() else None)
         kpis.append({
             "label": "Verified savings (QTD)",
             "value": format_usd(verified),
-            "delta": (f"vs {format_usd(app_usd)} app run cost" if app_usd is not None
+            "delta": (f"vs {format_usd(app_usd)} monthly run cost" if app_usd is not None
                       else "app cost unavailable"),
             "delta_color": ("normal" if verified >= app_usd else "inverse")
                            if app_usd is not None else "off",
             "help": "VERIFIED ledger items only — proven by before/after actuals, never "
-                    "mixed with estimates. App cost = the shared app/loader warehouse's quarter "
-                    "spend. Green means OVERWATCH pays for itself.",
+                    "mixed with estimates. App cost = the shared app/loader warehouse's trailing 30-day "
+                    "(monthly) run cost -- same horizon as the monthly-magnitude savings. Green means "
+                    "OVERWATCH pays for itself.",
         })
         if pipeline > 0:
             kpis.append({

@@ -151,7 +151,11 @@ def test_table_tco_identifier_safety():
 
 def test_tag_coverage_shape():
     sql = cost_sql.tag_coverage(7, "Trexis")
-    assert "QUERY_TAG" in sql and "UNTAGGED_EXEC_SEC" in sql and "WH_TRXS_LOAD" in sql
+    assert "QUERY_TAG" in sql and "UNTAGGED_EXEC_SEC" in sql
+    # This is a USER-grain board (QUERY_HISTORY keyed on USER_NAME); company scopes by user, not
+    # warehouse, matching the mart sibling MART_TAG_COVERAGE_DAILY's COMPANY=COMPANY_FOR_USER stamp
+    # (cost-hunt4 2026-08-30). The old warehouse predicate (WH_TRXS_LOAD) is gone.
+    assert "COMPANY_FOR_USER(USER_NAME) = 'Trexis'" in sql
 
 
 def test_restatements_shape():

@@ -202,6 +202,13 @@ def savings_by_month(df: pd.DataFrame, months: int = 12) -> pd.DataFrame:
     ver["VERIFIED_USD"] = pd.to_numeric(ver.get("VERIFIED_USD"), errors="coerce").fillna(0.0)
     out = (ver.groupby("MONTH", as_index=False)["VERIFIED_USD"].sum()
            .sort_values("MONTH"))
+    # Drop the current calendar month: it is a month-to-date PARTIAL, and on a run-rate line a
+    # partial trailing bucket reads as a velocity collapse next to full months even when the true
+    # monthly rate is flat. Complete months only, matching the codebase's run-rate convention
+    # (bug-hunt 2026-08-30).
+    out = out[out["MONTH"] != account_now().strftime("%Y-%m")]
+    if out.empty:
+        return pd.DataFrame(columns=cols)
     return out.tail(max(1, int(months))).reset_index(drop=True)[cols]
 
 

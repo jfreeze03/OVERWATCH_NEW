@@ -1150,10 +1150,14 @@ FROM {core_object("SAVINGS_LEDGER")}
 """
 
 
-def app_cost_quarter() -> str:
-    """The ROI denominator: everything the app + its tasks burned this
-    quarter on their shared warehouse. From the fact since r14 #5 — the
-    Brief was the last always-on surface paying a live metering scan.
+def app_cost_last_30d() -> str:
+    """The ROI denominator: what the app + its tasks burned over the trailing 30
+    COMPLETE days on their shared warehouse. A trailing-30-day (monthly) window --
+    NOT quarter-to-date: the ROI numerator (SAVINGS_LEDGER.VERIFIED_USD) is a
+    30-day/monthly-magnitude value, so dividing it by a QTD cumulative cost (up to
+    ~90 days) was a time-basis mismatch that flipped the "pays for itself" verdict
+    (bug-hunt 2026-08-30). From the fact since r14 #5 -- the Brief was the last
+    always-on surface paying a live metering scan.
 
     WAREHOUSE_NAME comes from config (siblings app_self_cost/app_statement_stats
     do the same); a hardcoded literal would silently zero the ROI denominator if
@@ -1161,10 +1165,11 @@ def app_cost_quarter() -> str:
     from app.config import APP_WAREHOUSE
 
     return f"""
-SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_QTD
+SELECT ROUND(COALESCE(SUM(CREDITS_TOTAL), 0), 2) AS APP_CREDITS_30D
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
 WHERE WAREHOUSE_NAME = {sql_literal(APP_WAREHOUSE)}
-  AND DAY >= DATE_TRUNC('quarter', CURRENT_DATE())
+  AND DAY >= DATEADD('day', -30, CURRENT_DATE())
+  AND DAY < CURRENT_DATE()
 """
 
 

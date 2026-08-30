@@ -191,8 +191,16 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
         # the _MIN_OBSERVABLE_DAYS breach guard drift a day off the scope divisor.
         _elapsed = (_now - _first.dt.normalize()).dt.days + 1
         out["OBSERVABLE_DAYS"] = _elapsed.clip(lower=1, upper=cap).fillna(float(window))
+        # TENURE_DAYS is the user's TRUE days-since-first-usage, NOT clipped to the asked window.
+        # OBSERVABLE_DAYS above is the window-clamped PROJECTION divisor; TENURE_DAYS is the small-N
+        # TRUST guard -- so a veteran heavy spender viewed through a short window (the Current-month
+        # preset on the 3rd resolves to days=2) is still evaluated against the budget ladder instead
+        # of being mistaken for a first-day user and skipped, which blanked the whole scope into a
+        # false all-clear during a live breach (cost-hunt4 2026-08-30).
+        out["TENURE_DAYS"] = _elapsed.clip(lower=1).fillna(float(window))
     else:
         out["OBSERVABLE_DAYS"] = float(window)
+        out["TENURE_DAYS"] = float(window)
     out["PROJECTED_30D_CREDITS"] = out.get("TOTAL_CREDITS", 0.0) / out["OBSERVABLE_DAYS"] * 30.0
     rate = safe_float(ai_rate_usd, 2.20)
     out["SPEND_USD"] = (out.get("TOTAL_CREDITS", 0.0) * rate).round(2)
@@ -241,20 +249,26 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
         if "OBSERVABLE_DAYS" in src.columns:
             _obs = src.groupby("USER_NAME")["OBSERVABLE_DAYS"].max()
             agg["OBSERVABLE_DAYS"] = agg["USER_NAME"].map(_obs)
-            # rec #38: re-project the user's SUMMED credits over their most-reliable (MAX)
-            # observable window, rather than summing per-source projections that each divide
-            # by their OWN (possibly 1-day) window — else a brand-new second source's first-day
-            # burst is extrapolated 30x into the total and trips a false Critical breach. Mirrors
-            # enrich_user_rollup's projection over the same window the small-N guard trusts.
-            if "TOTAL_CREDITS" in agg.columns:
-                _obs_days = agg["OBSERVABLE_DAYS"].where(agg["OBSERVABLE_DAYS"] > 0, 1.0)
-                agg["PROJECTED_30D_CREDITS"] = agg["TOTAL_CREDITS"] / _obs_days * 30.0
-                agg["PROJECTED_30D_USD"] = (agg["PROJECTED_30D_CREDITS"] * rate).round(2)
+        if "TENURE_DAYS" in src.columns:
+            agg["TENURE_DAYS"] = agg["USER_NAME"].map(src.groupby("USER_NAME")["TENURE_DAYS"].max())
+        # rec #38: re-project the user's SUMMED credits over their most-reliable (MAX)
+        # observable window, rather than summing per-source projections that each divide
+        # by their OWN (possibly 1-day) window — else a brand-new second source's first-day
+        # burst is extrapolated 30x into the total and trips a false Critical breach. Mirrors
+        # enrich_user_rollup's projection over the same window the small-N guard trusts.
+        if "OBSERVABLE_DAYS" in src.columns and "TOTAL_CREDITS" in agg.columns:
+            _obs_days = agg["OBSERVABLE_DAYS"].where(agg["OBSERVABLE_DAYS"] > 0, 1.0)
+            agg["PROJECTED_30D_CREDITS"] = agg["TOTAL_CREDITS"] / _obs_days * 30.0
+            agg["PROJECTED_30D_USD"] = (agg["PROJECTED_30D_CREDITS"] * rate).round(2)
         for _, u in agg.iterrows():
-            # rec #38: skip users with too few observed days — projecting a brand-
-            # new user's first day/two at full intensity would be a false breach.
-            # Absent OBSERVABLE_DAYS (old shape) defaults inert, so nothing is lost.
-            if safe_float(u.get("OBSERVABLE_DAYS", _MIN_OBSERVABLE_DAYS)) < _MIN_OBSERVABLE_DAYS:
+            # rec #38: skip users with too few observed days — projecting a brand-new user's first
+            # day/two at full intensity would be a false breach. Gate on TENURE (true days-since-
+            # first-usage), NOT the window-clamped OBSERVABLE_DAYS divisor: a short window (the
+            # Current-month preset early in the month) would otherwise clamp every veteran's tenure
+            # to the window and skip the whole scope -- a false all-clear during a live breach
+            # (cost-hunt4). TENURE_DAYS falls back to OBSERVABLE_DAYS for old-shape frames.
+            _tenure = u.get("TENURE_DAYS", u.get("OBSERVABLE_DAYS", _MIN_OBSERVABLE_DAYS))
+            if safe_float(_tenure) < _MIN_OBSERVABLE_DAYS:
                 continue
             proj = safe_float(u.get("PROJECTED_30D_CREDITS"))
             sig: tuple[str, str] | None = None
@@ -334,12 +348,18 @@ def rollup_summary(enriched: pd.DataFrame, window_days: int) -> dict:
     projected_guarded = projected
     if {"USER_NAME", "TOTAL_CREDITS", "OBSERVABLE_DAYS"}.issubset(enriched.columns):
         _rate = (spend / total_credits) if total_credits > 0 else 0.0
+        # _TEN = true tenure (uncapped days-since-first-usage); _OBS = window-clamped projection
+        # divisor. Gate the small-N trust on _TEN so a short window doesn't drop every veteran and
+        # zero the guarded total (which blanked the AI budget breach into a false all-clear);
+        # still divide the projection by _OBS. _TEN falls back to _OBS for old-shape frames.
         _pu = pd.DataFrame({
             "USER_NAME": enriched["USER_NAME"],
             "_CR": pd.to_numeric(enriched["TOTAL_CREDITS"], errors="coerce").fillna(0.0),
             "_OBS": pd.to_numeric(enriched["OBSERVABLE_DAYS"], errors="coerce").fillna(0.0),
-        }).groupby("USER_NAME").agg(_CR=("_CR", "sum"), _OBS=("_OBS", "max"))
-        _pu = _pu[_pu["_OBS"] >= _MIN_OBSERVABLE_DAYS]
+            "_TEN": pd.to_numeric(enriched.get("TENURE_DAYS", enriched["OBSERVABLE_DAYS"]),
+                                  errors="coerce").fillna(0.0),
+        }).groupby("USER_NAME").agg(_CR=("_CR", "sum"), _OBS=("_OBS", "max"), _TEN=("_TEN", "max"))
+        _pu = _pu[_pu["_TEN"] >= _MIN_OBSERVABLE_DAYS]
         _proj_cr = _pu["_CR"] / _pu["_OBS"].where(_pu["_OBS"] > 0, 1.0) * 30.0
         projected_guarded = float((_proj_cr * _rate).sum())
     return {

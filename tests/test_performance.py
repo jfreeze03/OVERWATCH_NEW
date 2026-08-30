@@ -89,6 +89,6 @@ def test_app_cost_uses_one_warehouse_and_tag_based_workload_split():
     assert "IFF(QUERY_TAG LIKE 'OVERWATCH%', 'INTERACTIVE APP', 'LOADERS / TASKS')" in self_cost
     assert "WH_OVERWATCH_APP" not in self_cost
 
-    quarter = mart_sql.app_cost_quarter()
+    quarter = mart_sql.app_cost_last_30d()
     assert "WHERE WAREHOUSE_NAME = 'WH_ALFA_ADMIN'" in quarter
     assert "WH_OVERWATCH_APP" not in quarter

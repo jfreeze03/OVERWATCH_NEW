@@ -613,10 +613,10 @@ def _scorecard(company: str, rate: float) -> None:
 
     _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
              tier="recent", source="SAVINGS_LEDGER (QTD)")
-    _ac = run(mart_sql.app_cost_quarter(), page=_PAGE, key="sc_appcost",
-              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, QTD)")
+    _ac = run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
+              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
     verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
-    run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_QTD")) * rate if _ac.usable() else 0.0
+    run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
     roi = roi_multiple(verified_qtd, run_cost)
 
     _acc = run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
@@ -643,11 +643,12 @@ def _scorecard(company: str, rate: float) -> None:
         {"label": "Pays for itself",
          "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
          "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
-         "delta": (f"{format_usd(roi['VERIFIED_USD'])} verified vs {format_usd(roi['RUN_COST_USD'])} run cost (QTD)"
+         "delta": (f"{format_usd(roi['VERIFIED_USD'])} monthly verified vs {format_usd(roi['RUN_COST_USD'])} monthly run cost"
                    if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
          "delta_color": "off",
-         "help": "Verified savings this quarter as a multiple of OVERWATCH's own warehouse run cost "
-                 "(APP_WAREHOUSE credits × rate). ≥1× means it pays for itself."},
+         "help": "This quarter's verified savings (a 30-day/monthly-magnitude rate) as a multiple of "
+                 "OVERWATCH's own trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — "
+                 "same horizon on both sides. ≥1× means it pays for itself."},
         {"label": "Realization",
          "value": (f"{realization:,.0f}%" if realization is not None else "—"),
          "help": "Of what verified items were estimated to save, how much actually measured out. "

@@ -1,5 +1,53 @@
 # Changelog
 
+## 4.362.0 - Cost-layer bug hunt #4: 5 app-side fixes + V106 (2026-08-30)
+
+Fourth adversarial pass over the cost layer (finders: attribution/tagging, chargeback/budget,
+warehouse/credit math, ROI/verified-savings, self-cost/mart-vs-live, storage/egress/replication +
+serverless). Storage/egress/replication and the serverless dimension came back clean. Six findings
+confirmed (0 refuted); five land app-side now, one is an owner-gated migration (V106).
+
+- **Short-window Cortex breach no longer reads as a false all-clear (MED)** — `enrich_user_rollup`
+  clamps `OBSERVABLE_DAYS` to `[1, window_days]` to keep the per-day *rate* denominator honest, but
+  `classify_exceptions` / `rollup_summary` then reused that *clamped* number as the min-*tenure* trust
+  gate (`>= 4 observable days`). On a short window — the "Current month" preset early in a month
+  resolves to `window_days = 2` or `3` — `OBSERVABLE_DAYS` is clamped small for *everyone*, so the
+  gate tripped for genuinely long-tenured heavy spenders too and skipped them, blanking the whole
+  scope into a false all-clear during a live breach. Split the two concerns: a new uncapped
+  `TENURE_DAYS` (true days-since-first-usage, floor 1) drives the min-tenure gate; `OBSERVABLE_DAYS`
+  (still window-clamped) stays the rate denominator. A veteran heavy spender viewed through a short
+  window is now evaluated against the budget ladder instead of mistaken for a first-day user, and the
+  per-day projection is unchanged. `TENURE_DAYS` falls back to `OBSERVABLE_DAYS` for old-shape frames.
+- **Per-object top-N drops the synthetic residual row (MED)** — `object_cost_top` ranked objects by
+  attributed credits but included the `UNATTRIBUTED` residual bucket, which on an account with heavy
+  un-attributable spend could occupy a top-N slot and push a real object off the list. Excluded
+  `OBJECT_FQN <> 'UNATTRIBUTED'` from the ranked query (the residual is still surfaced separately as
+  coverage), so the "top objects by cost" list is all real objects.
+- **Tag-coverage + untagged-executions now scope by user, not warehouse (MED)** — `tag_coverage` and
+  `untagged_executions_for_user` filtered the query population with `warehouse_clause(company)`, but
+  these read `QUERY_HISTORY` keyed on `USER_NAME`; a company whose users run on shared/other-company
+  warehouses had its tag coverage computed over the wrong population. Switched both to
+  `user_clause(company, "USER_NAME")` (= `COMPANY_FOR_USER(USER_NAME) = 'X'`), matching how every
+  other user-keyed cost surface scopes.
+- **ROI "pays for itself" compares same horizons (MED)** — the verified-savings numerator is a
+  monthly-magnitude rate, but the denominator (`app_cost_quarter`) summed quarter-to-date app run
+  cost, so early in a quarter the multiple was inflated (tiny QTD denominator) and late in a quarter
+  deflated. Renamed the builder `app_cost_last_30d` (trailing 30 complete days, alias
+  `APP_CREDITS_30D`) so both sides of the ratio use a 30-day/monthly window. Brief + Decision Studio
+  labels and help updated to say so.
+- **Verified-savings-by-month drops the partial current month (MED)** — `savings_by_month` grouped
+  realized savings by calendar month including the in-progress current month, so the most recent bar
+  was always a partial-month undercount read as a month-over-month drop. Excluded the current
+  `YYYY-MM` before `.tail()`, so every plotted month is complete.
+- **V106 (owner-gated): COST_DEPT_BUDGET_PACE alert join is case-insensitive (LOW)** — the [17] arm
+  of `SP_ALERT_SCAN` joined `FACT_WAREHOUSE_DAILY` to `DEPARTMENT_MAP` with a one-sided fold
+  (`f.WAREHOUSE_NAME = UPPER(m.NAME)`). Because the fact preserves the raw case of a quoted mixed-case
+  warehouse identifier, such a warehouse failed the join, folded `MTD_USD` to 0 via `COALESCE`, and
+  the department never tripped the over-budget gates — while the Cost > Chargeback screen (which
+  uppercases both sides) showed it over budget. V106 re-derives `SP_ALERT_SCAN` from V104 with
+  `UPPER(f.WAREHOUSE_NAME) = UPPER(m.NAME)`; everything else byte-identical. Proc only, no schema
+  change; owner applies after V105 and the next hourly `SP_ALERT_SCAN` heals it.
+
 ## 4.361.0 - Operations-layer bug hunt #3: 7 app-side fixes (2026-08-30)
 
 Third, deeper adversarial pass over the operations layer (6 finders: query-opt/pruning, lock

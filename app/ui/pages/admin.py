@@ -367,6 +367,12 @@ _EXPECTED_MIGRATIONS = {
          "SNOW_ACCOUNTADMINS, so <=65) out of the queue so the V080/V088 de-noise is preserved. Live "
          "recent_ddl_changes given the matching base-55 bump app-side. Proc only, no schema change; owner "
          "re-runs SP_LOAD_SECURITY_FACTS(90) to re-stamp",
+    106: "COST_DEPT_BUDGET_PACE case-insensitive join: SP_ALERT_SCAN re-derived from V104 so the [17] "
+         "arm joins FACT_WAREHOUSE_DAILY to DEPARTMENT_MAP via UPPER(f.WAREHOUSE_NAME) = UPPER(m.NAME) "
+         "instead of the one-sided f.WAREHOUSE_NAME = UPPER(m.NAME). A quoted mixed-case warehouse "
+         "identifier no longer fails the join and folds MTD_USD to 0, so the department-budget-pace "
+         "alert stops silently missing an over-budget department the Chargeback screen shows. Everything "
+         "else byte-identical. Proc only, no schema change; forward-healing on the next hourly SP_ALERT_SCAN",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
