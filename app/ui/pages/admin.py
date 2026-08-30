@@ -358,6 +358,15 @@ _EXPECTED_MIGRATIONS = {
          "tallies and stranded a phantom expiring alert after expiry. Other weekly-keyed rule "
          "(SERVICE_TYPE) byte-identical. Proc only, no schema change; forward-healing on the next hourly "
          "SP_ALERT_SCAN",
+    105: "Change-risk CREATE OR REPLACE destructive: SP_LOAD_SECURITY_FACTS re-derived from V100 so both "
+         "reload arms mark a table create (CREATE_TABLE / CREATE_TABLE_AS_SELECT) whose text contains "
+         "OR REPLACE as CHANGE_KIND=DESTRUCTIVE with RISK_SCORE base 55 (ALTER band, not 90). A CREATE OR "
+         "REPLACE TABLE that wipes a live table now enters the destructive-events breakdown and the "
+         "RISK>=70 change-risk queue when done by an admin role on a PROD db (75), fixing a false "
+         "all-clear -- while base 55 keeps routine service-role replaces (never ACCOUNTADMIN/"
+         "SNOW_ACCOUNTADMINS, so <=65) out of the queue so the V080/V088 de-noise is preserved. Live "
+         "recent_ddl_changes given the matching base-55 bump app-side. Proc only, no schema change; owner "
+         "re-runs SP_LOAD_SECURITY_FACTS(90) to re-stamp",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -120,6 +120,7 @@ snowflake/migrations/V101__fact_task_daily_retry_collapse.sql
 snowflake/migrations/V102__task_marts_retry_collapse.sql
 snowflake/migrations/V103__wh_efficiency_active_hours_span.sql
 snowflake/migrations/V104__sec_cred_expiry_dedupe_key.sql
+snowflake/migrations/V105__change_risk_create_or_replace_destructive.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

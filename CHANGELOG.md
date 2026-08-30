@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.358.0 - Change-risk: CREATE OR REPLACE scored destructive (V105 + live) (2026-08-30)
+
+Completes the one finding deferred from the security-layer hunt #2 (v4.357.0). A
+`CREATE OR REPLACE TABLE` that drops and rebuilds a live table was classified as a benign CREATE
+(RISK ~40), so it entered neither the destructive-events breakdown nor the RISK≥70 change-risk
+queue — a false all-clear on a genuinely destructive change.
+
+- **Loader (V105, owner-gated)** — `SP_LOAD_SECURITY_FACTS` re-derived from V100 so both reload arms
+  mark a table create (`CREATE_TABLE` / `CREATE_TABLE_AS_SELECT`) whose text contains `OR REPLACE`
+  as `CHANGE_KIND='DESTRUCTIVE'` with `RISK_SCORE` base **55** (the ALTER band, not 90).
+- **Scoping that avoids re-flooding the de-noised panel** — base 55 plus the existing PROD/admin
+  bumps means only a PROD replace by an actual admin role reaches the ≥70 queue (55+10+10=75). The
+  ETL/service roles that drove the historical destructive flood (V080's TF_* / Glue / Informatica
+  roles) are never `ACCOUNTADMIN`/`SNOW_ACCOUNTADMINS`, so a service-role replace tops out at 65 and
+  stays out of the queue; the V080 exception-queue role exclusion remains a further backstop.
+  `CREATE OR REPLACE VIEW` is left alone (definition churn, no data loss).
+- **Live builder** — `recent_ddl_changes` gets the matching base-55 bump so the "Who changed what"
+  feed shows a `CREATE OR REPLACE TABLE` at the same elevated risk.
+
+Owner applies V105 in Snowsight after V104, then re-runs `SP_LOAD_SECURITY_FACTS(90)` to re-stamp
+trailing `FACT_SECURITY_CHANGE` rows.
+
 ## 4.357.0 - Security-layer bug hunt #2: 7 app fixes + V104 (2026-08-30)
 
 Second, deeper adversarial pass over the security layer (7 finders: login/MFA, credentials,
