@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.355.0 - Cost-layer bug hunt #2: 3 app-side fixes (2026-08-30)
+
+Second, deeper adversarial pass over the cost layer (7 finders: pricing/unit-math, SQL builders,
+spend/storage, ROI, contract/forecast, AI/allocation). The credit-arm, spend/storage and
+contract/forecast lenses swept clean; two candidates were correctly refuted (a CS-ratio anchor
+difference that is documented house convention, and a dedup-whitespace gap unreachable because
+`create_action_sql` strips on ingest). Three app-side fixes (no migration).
+
+- **Proc cost-trend total no longer contradicts the $/call leaderboard** — the "Trend one
+  procedure" drill summed per-day USD that had *already* been rounded to cents (round-then-sum),
+  so a cheap-but-frequent proc (~$0.004/day) read `$0.00` total while the leaderboard beside it
+  (which sums-then-rounds one window total) showed the true ~$0.11. The day-grain series now
+  dollarizes with `round_cents=False` before summing; KPIs round at display.
+- **AI budget: the "(all users)" aggregate no longer double-counts its constituents** — the
+  scope-aggregate exception row's `PROJECTED_30D_USD` *is* the sum of the per-user projections, so
+  queuing it beside the per-user rows double-counted those dollars in the action-acceptance rollup
+  (`DONE_USD` / `ESTIMATED_OPEN_USD` sum `ESTIMATED_USD` with no de-overlap). The aggregate is now
+  queued with the **incremental** exposure not already itemized (scope total − Σ other queued
+  projections, clamped ≥0), so the queued set sums to the scope total once; its detail still shows
+  the true scope total.
+- **Sub-cent unit-cost columns show real precision** — the measured-$, priced-CALL, and call-tree
+  `$%.4f` columns dollarized with the cents-rounding default, quantizing real sub-cent values to
+  `$0.0000`; they now use `round_cents=False`, matching the `$/call` sibling.
+
 ## 4.354.0 - Operations-layer bug hunt: 8 app-side fixes + V101/V102 (2026-08-30)
 
 Adversarial hunt over the operations layer (task/warehouse/pipeline SQL builders, release-compare

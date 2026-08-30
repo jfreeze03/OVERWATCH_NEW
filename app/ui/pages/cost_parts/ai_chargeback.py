@@ -277,11 +277,31 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         st.caption(md_dollars(_rules))
         with st.expander("Queue top exceptions to the Action Queue"):
             statements = []
-            for _, r in exceptions.head(10).iterrows():
+            _queued = exceptions.head(10)
+            # cost-hunt2: the '(all users)' aggregate row's PROJECTED_30D_USD IS the scope-wide
+            # total = the SUM of the per-user projections (aggregate_budget_row reads
+            # rollup_summary's projected_30d_usd_guarded). Queuing it at full value alongside the
+            # per-user rows double-counts those dollars in any additive rollup -- e.g.
+            # mart_sql.action_acceptance DONE_USD and ESTIMATED_OPEN_USD both SUM(ESTIMATED_USD)
+            # with no de-overlap, so once both are DONE the breaching users are counted twice.
+            # Stamp the aggregate's ESTIMATED_USD as the INCREMENTAL exposure not already itemized
+            # by the other queued rows (scope total - sum of other queued projections, clamped
+            # >=0) so the queued set sums to the scope total once. DETAIL still shows the true
+            # scope total; only the additive ESTIMATED_USD field is de-overlapped. (A user
+            # appearing as BOTH a budget breach and a CPR spike is a separate, smaller overlap.)
+            _other_proj = sum(safe_float(_r['PROJECTED_30D_USD'])
+                              for _, _r in _queued.iterrows()
+                              if str(_r['USER_NAME']) != "(all users)")
+            for _, r in _queued.iterrows():
                 user = str(r['USER_NAME'])
+                _is_agg = user == "(all users)"
                 title = f"Cortex {r['SIGNAL']}: {user} ({r['SOURCE']})"
+                _proj = safe_float(r['PROJECTED_30D_USD'])
+                _est = max(0.0, _proj - _other_proj) if _is_agg else _proj
                 detail = (f"{int(r['TOTAL_REQUESTS'])} requests, projected 30d "
-                          f"{format_usd(r['PROJECTED_30D_USD'])}, cr/request {r['CREDITS_PER_REQUEST']:.4f}.")
+                          f"{format_usd(_proj)}, cr/request {r['CREDITS_PER_REQUEST']:.4f}."
+                          + (" Queued $ is the incremental scope exposure beyond the per-user "
+                             "rows above (avoids double-count)." if _is_agg else ""))
                 # Attribute a PER-USER breach to the user's REAL company (COMPANY_FOR_USER), not the
                 # view's filter: in the ALL view `company` is 'ALL', which would both mis-file a
                 # Trexis user's action under 'ALL' AND -- because the dedup keys on COMPANY -- let
@@ -292,13 +312,13 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 # source) + this month + open status, so a double-click/retry is a no-op.
                 # DS #7: ESTIMATED_USD here is PROJECTED_30D_USD -- a 30-day (monthly-equivalent)
                 # figure -- so stamp PERIOD='MONTHLY' (else it summed beside one-time estimates).
-                company_expr = (sql_literal(company) if user == "(all users)"
+                company_expr = (sql_literal(company) if _is_agg
                                 else f"{companies.COMPANY_FOR_USER_FN}({sql_literal(user)})")
                 statements.append(
                     f"INSERT INTO {core_object('ACTION_QUEUE')} (COMPANY, SEVERITY, TITLE, DETAIL, OWNER, SOURCE, ESTIMATED_USD, PERIOD)\n"
                     f"SELECT {company_expr}, {sql_literal(str(r['SEVERITY']).upper())}, {sql_literal(title)}, "
                     f"{sql_literal(detail)}, 'DBA / AI Governance', 'Cost & Contract > Chargeback & AI > AI users', "
-                    f"{sql_number(r['PROJECTED_30D_USD'])}, 'MONTHLY'\n"
+                    f"{sql_number(_est)}, 'MONTHLY'\n"
                     f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('ACTION_QUEUE')} q "
                     f"WHERE q.COMPANY = {company_expr} AND q.TITLE = {sql_literal(title)} "
                     f"AND UPPER(q.STATUS) IN ('OPEN', 'IN_PROGRESS') "

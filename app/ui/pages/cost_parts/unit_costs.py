@@ -168,7 +168,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     st.markdown("**Most expensive queries — measured $ each**")
     if guard(q_res, "No attributed query credits in this scope/window (attribution lags ~8h)."):
         qdf = q_res.df.copy()
-        qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+        # round_cents=False: this column renders at $%.4f (sub-cent precision is the point
+        # of a per-query price), so cents-rounding here would quantize every real sub-cent
+        # query to $0.0000. Matches the $/call sibling below (cost-hunt2).
+        qdf["USD"] = qdf["CREDITS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
         qdf = with_user_names(qdf, _PAGE)
         qdf, _q_cfg = snowsight_profile_column(qdf, _PAGE)
         styled_table(qdf, height=280, column_config={
@@ -256,7 +259,14 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             if guard(tres, "No CALLs matched that name in this window/scope — "
                            "check spelling (bare names match any db.schema)."):
                 tdf = tres.df.copy()
-                tdf["USD"] = tdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                # round_cents=False BEFORE summing: tdf is day-grain, so cents-rounding each
+                # day would zero sub-cent daily spend and understate the window Total / Avg
+                # $/call (credits_to_usd's own docstring warns of this). The leaderboard above
+                # sums-then-rounds a single window total, so a round-then-sum here would make
+                # the drill contradict the leaderboard for a cheap-but-frequent proc. The KPIs
+                # round at display (format_usd) and the $%.4f table now shows real sub-cent days
+                # (cost-hunt2 F1/F3).
+                tdf["USD"] = tdf["CREDITS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
                 _tot = float(tdf["USD"].sum())
                 _calls = int(tdf["CALLS"].sum())
                 kpi_row([
@@ -288,7 +298,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             if guard(cres, "No CALLs matched in the last 7 days — check the id; "
                            "attribution lags ~8h, so very recent runs may not price yet."):
                 cdf = cres.df.copy()
-                cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                # round_cents=False: rendered at $%.4f (see qdf note) — a sub-cent CALL must
+                # not read $0.0000.
+                cdf["USD"] = cdf["CREDITS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
                 cdf, _c_cfg = snowsight_profile_column(cdf, _PAGE)
                 styled_table(cdf, height=170, column_config={
                     "USD": st.column_config.NumberColumn("$", format="$%.4f"),
@@ -302,7 +314,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                                source="attribution children of this CALL")
                     if kids.usable():
                         kdf = kids.df.copy()
-                        kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate))
+                        # round_cents=False: per-step call-tree $ at $%.4f — child steps are
+                        # routinely sub-cent, so cents-rounding would show them as $0.0000.
+                        kdf["USD"] = kdf["CREDITS"].map(lambda c: credits_to_usd(c, rate, round_cents=False))
                         kdf = build_call_tree(kdf, _cid)
                         kdf, _tree_cfg = snowsight_profile_column(kdf, _PAGE)
                         st.markdown("**Where the money went inside this CALL**")
