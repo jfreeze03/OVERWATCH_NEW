@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.349.0 - V096/V097/V098: alert-scan dedupe/clear key hardening (2026-08-30)
+
+Alerting-layer hunt (3 owner-gated forward migrations). Each defect stems from a dedupe/clear
+key not encoding the state or band it needs, or a proc missing a guard. Owner applies in
+Snowsight in order after V095; all forward-healing (no backfill — auto-clear/escalation start
+working on the next scan; pre-existing stranded/double-counted events may need a one-time manual
+resolve or age out).
+
+**V096 — alert-scan dedupe/clear keys** (re-derives two procs):
+- `SP_ALERT_SCAN` (from V091): (1) [MED] the auto-clear sweep matched
+  `DEDUPE_KEY LIKE '%|' || CURRENT_DATE()` (today only), but the three opted-in rules measure
+  over a trailing-24h window, so a condition that drops below CLEAR the *next* day never
+  auto-cleared and stranded OPEN. Now matches a `RAISED_AT >= 48h` recency window, keeping the
+  `>=1h` dwell and the below-CLEAR hysteresis NOT-IN; the ENABLED+AUTO_CLEAR_ENABLED rule scope
+  still excludes fact-day rules. (3) [LOW] the supersede sweep OR-list gains
+  `|EXPIRING|→|EXPIRED|` so a SEC_CRED_EXPIRY credential isn't counted as both an open HIGH and
+  an open CRITICAL. (2b) it also gains `|HIGH|→|CRIT|` for the SLO burn band below.
+- `SP_SLO_BREACH_SCAN` (from V085): (2) [MED] the dedupe key was `RULE_ID|SLO_ID|<date>` with no
+  burn band, so a same-day HIGH→CRITICAL escalation collided with the earlier HIGH on the
+  identical key and the NOT EXISTS guard suppressed the CRITICAL page. Now appends a burn band
+  token `IFF(COALESCE(BURN_MULTIPLE,0)>=2,'CRIT','HIGH')` (mirroring V066 PIPE/BUDGET), so HIGH
+  and CRIT get distinct keys and the supersede sweep resolves the superseded HIGH.
+
+**V097 — SP_ANOMALY_SWEEP mean-AD fallback** [MED]: the COST_ANOMALY_SWEEP arm hard-filtered
+`WHERE l.MAD > 0`, so a majority-idle/intermittent series whose median-absolute-deviation
+collapses to 0 silently dropped even a large material spike. Re-derived from V076 to port the
+app twin's estimator (`app/logic/anomaly.py` `robust_zscores`): a `meanad` CTE
+(`AVG(ABS(CREDITS-MED))`) and a MAD-first / mean-AD-second robust-z denominator
+(`0.6745/MAD` else `0.7979/MEAN_AD`, matching `_MAD_K`/`_MEANAD_K` and gate order), with the
+hard filter replaced by a `SIGNED_Z IS NOT NULL` guard. Collapse suppression and the
+materiality gates ($50 floor, ≥10 active days) are unchanged.
+
+**V098 — SP_INCIDENT_AUTODECLARE re-link guard** [LOW]: the member INSERT re-scanned
+ALERT_EVENTS with no anti-membership guard, so an alert already a member of one incident (e.g. a
+still-OPEN CRITICAL whose incident was resolved without resolving the alert) could be re-attached
+to a second incident and double-counted. Re-derived from V032 with the same
+`NOT EXISTS INCIDENT_MEMBERS` guard the `crit` CTE already carries added to the member INSERT.
+
+Each byte-locked to `outputs/gen_v0NN.py`; full migration lockstep (validate tip 95→98,
+`_EXPECTED_MIGRATIONS`, run-lists, rebuild bundle, tip tests).
+
 ## 4.348.0 - V095: evidence-based ROLE company classification (2026-08-30)
 
 Data-loader hunt (MED). `SP_LOAD_MARTS_V27`'s cost-allocation arm stamped the COMPANY

@@ -301,6 +301,21 @@ _EXPECTED_MIGRATIONS = {
         "inline CASE that defaulted every non-TRXS role to ALFA and never emitted UNKNOWN — "
         "fixing the V044 UNKNOWN-law bypass so shared roles stop inflating ALFA and the "
         "UNKNOWN pill populates ROLE like USER/DATABASE. New UDF + proc, no schema change",
+    96: "Alert-scan dedupe/clear keys: SP_ALERT_SCAN re-derived from V091 (auto-clear sweep "
+        "matches a RAISED_AT >= 48h recency window instead of DEDUPE_KEY LIKE today, so "
+        "trailing-24h conditions that clear the next day auto-resolve instead of stranding "
+        "OPEN; supersede sweep OR-list extended with |HIGH|→|CRIT| and |EXPIRING|→|EXPIRED|) "
+        "plus SP_SLO_BREACH_SCAN re-derived from V085 (dedupe key gains a burn band token so a "
+        "same-day HIGH→CRITICAL escalation is not swallowed by the NOT EXISTS guard). Two procs",
+    97: "SP_ANOMALY_SWEEP mean-AD fallback: COST_ANOMALY_SWEEP re-derived from V076 so a series "
+        "whose median-absolute-deviation collapses to 0 (intermittent/majority-idle serverless) "
+        "no longer silently drops its spike — adds a meanad CTE and picks the robust-z "
+        "denominator MAD-first (0.6745/MAD) else mean-AD (0.7979/MEAN_AD), mirroring "
+        "app.logic.anomaly; drops the hard WHERE MAD>0 for a SIGNED_Z IS NOT NULL guard. Proc only",
+    98: "SP_INCIDENT_AUTODECLARE re-link guard: re-derived from V032 so the member INSERT carries "
+        "the same NOT EXISTS INCIDENT_MEMBERS anti-membership guard the crit CTE already has, "
+        "preventing an alert already a member of one incident from being re-attached to a second "
+        "incident and double-counted. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
