@@ -31,7 +31,7 @@ def _latest_proc(name: str) -> str:
     migration that (re)defines it."""
     pat = re.compile(
         rf"CREATE OR REPLACE PROCEDURE DBA_MAINT_DB\.OVERWATCH\.{name}\(.*?\n\$\$;\n", re.S)
-    for mig in sorted(_MIG.glob("V0*.sql"), reverse=True):
+    for mig in sorted(_MIG.glob("V[0-9]*.sql"), reverse=True):
         found = pat.findall(mig.read_text(encoding="utf-8"))
         if found:
             return found[-1]

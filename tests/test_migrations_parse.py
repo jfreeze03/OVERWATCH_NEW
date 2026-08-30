@@ -16,7 +16,7 @@ import pytest
 sqlglot = pytest.importorskip("sqlglot")
 
 _SNOWFLAKE_DIR = Path(__file__).resolve().parents[1] / "snowflake"
-_FILES = [*sorted(_SNOWFLAKE_DIR.glob("migrations/V0*.sql")),
+_FILES = [*sorted(_SNOWFLAKE_DIR.glob("migrations/V[0-9]*.sql")),
      _SNOWFLAKE_DIR / "roles.sql",
     _SNOWFLAKE_DIR / "teardown.sql",
     _SNOWFLAKE_DIR / "alert_drill.sql",

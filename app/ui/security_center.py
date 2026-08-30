@@ -156,9 +156,17 @@ def render_security_overview(company: str) -> None:
         section_header("Security decision queue", "", "security")
         _setup_state("The security decision queue")
         return
+    if not queue.ok:
+        # The exception queue IS the per-domain evidence. If it did not resolve, scoring
+        # off an empty frame would read every COMPLETE-coverage domain as 100/Healthy —
+        # a false all-clear painted above this notice. Surface the unresolved state and
+        # stop, before any posture/verdict/KPI is rendered.
+        section_header("Security decision queue", "", "security")
+        empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")
+        return
 
     posture = domain_posture(
-        queue.df if queue.ok else pd.DataFrame(),
+        queue.df,
         coverage.df if coverage.ok else pd.DataFrame(),
     )
     # C17: one "should I worry?" line from the posture the queue already computed,
@@ -195,9 +203,8 @@ def render_security_overview(company: str) -> None:
     # DDL, surface WHO/WHAT actually drives it so any exclusion is precise, not a guess.
     _render_change_risk_diagnostic()
 
-    if not queue.ok:
-        empty_state("no_data_yet", "The domain contract loaded, but the exception queue did not resolve.")
-        return
+    # (queue.ok is guaranteed here — the unresolved-queue case is handled above, before any
+    # posture/verdict/KPI render, so a read failure can never paint a green all-clear.)
     # C16: park the open-exception count for the section bar's "Decision queue (n)"
     # badge — stashed only once the queue actually resolved, so 0 means clean, not unknown.
     # review fix: the queue SQL is company-filtered but window-independent —

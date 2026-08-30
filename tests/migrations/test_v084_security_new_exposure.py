@@ -123,8 +123,8 @@ def test_v084_in_migration_registry():
 
 def test_v084_validate_floor_and_deploy_docs_track_the_migration():
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V099 applied" in validate
-    assert "BETWEEN 1 AND 99) = 99" in validate
+    assert "V001..V100 applied" in validate
+    assert "BETWEEN 1 AND 100) = 100" in validate
     assert "BETWEEN 1 AND 88;" in validate and "n_versions < 88" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V084__security_new_exposure_alert.sql" in (_ROOT / rel).read_text(encoding="utf-8")

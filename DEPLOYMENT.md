@@ -115,6 +115,7 @@ snowflake/migrations/V096__alert_scan_dedupe_keys.sql
 snowflake/migrations/V097__anomaly_mean_ad_fallback.sql
 snowflake/migrations/V098__incident_autodeclare_relink_guard.sql
 snowflake/migrations/V099__incident_autodeclare_company_scope.sql
+snowflake/migrations/V100__security_change_fact_reload_gap.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

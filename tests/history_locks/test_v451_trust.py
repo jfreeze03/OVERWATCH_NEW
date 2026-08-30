@@ -240,7 +240,7 @@ def test_etl_formulas_are_run_grain_with_written_rows():
 # ---------------------------------------------------------------------------
 
 def test_deploy_docs_track_the_migration_floor():
-    latest = sorted((_ROOT / "snowflake" / "migrations").glob("V0*.sql"))[-1].name
+    latest = sorted((_ROOT / "snowflake" / "migrations").glob("V[0-9]*.sql"))[-1].name
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert latest in _read(rel), (
             f"{rel}: run-list trails the repo — add {latest} (the r27 #9 rewrite "
@@ -252,7 +252,7 @@ def test_validate_sql_floor_tracks_the_latest_migration():
     """validate.sql's 'V001..V0NN applied' floor and its count check must equal the
     latest migration number — generic so a new migration that forgets to bump it
     fails CI, without pinning the moving floor inside any per-migration test."""
-    migs = sorted((_ROOT / "snowflake" / "migrations").glob("V0*.sql"))
+    migs = sorted((_ROOT / "snowflake" / "migrations").glob("V[0-9]*.sql"))
     n = max(int(m.name[1:4]) for m in migs)
     v = _read("snowflake/validate.sql")
     assert f"V001..V{n:03d} applied" in v, f"validate.sql floor label != V{n:03d}"

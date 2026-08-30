@@ -11,7 +11,10 @@ _ROOT = Path(__file__).resolve().parents[2]
 def test_recommend_for_sheet_adds_action_column_to_actionable_sheets():
     out = recommend_for_sheet("unused_roles_90d", pd.DataFrame({"ROLE_NAME": ["OLD_ROLE"]}))
     assert next(iter(out.columns)) == "RECOMMEND"
-    assert out["RECOMMEND"].iloc[0].startswith("REVOKE")
+    # v4.352 (security hunt L2): REVIEW not REVOKE — a role exercised only via inheritance
+    # never appears as an executing role, so "unused by any query" over-claimed as a directive.
+    assert out["RECOMMEND"].iloc[0].startswith("REVIEW")
+    assert "inheritance" in out["RECOMMEND"].iloc[0]
     out2 = recommend_for_sheet("dormant_users", pd.DataFrame({"USER_NAME": ["JDOE"]}))
     assert out2["RECOMMEND"].iloc[0].startswith("REVIEW")
 

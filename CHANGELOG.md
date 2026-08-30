@@ -1,5 +1,54 @@
 # Changelog
 
+## 4.352.0 - Security-layer bug hunt: 9 app-side fixes + V100 (2026-08-30)
+
+Adversarial hunt over the security layer (logic, ~45 SQL builders, 8 UI tabs, migrations)
+confirmed 10 distinct defects. Nine are fixed app-side here; the tenth is the owner-gated
+**V100** migration (apply in Snowsight after V099). Also fixes a repo-wide `V0*.sql` glob
+boundary that would have excluded migration **V100** from the rebuild bundle and several
+migration guards (now `V[0-9]*.sql`).
+
+**V100 — security change-fact reload gap** [HIGH, owner-gated]: `SP_LOAD_SECURITY_FACTS(3)`
+(the standing task) reloaded `FACT_SECURITY_CHANGE` from the 3-day scratch extract
+`OW_QH_EXTRACT`, but deleted the full calendar window (`DAY >= -d days`) while the extract
+retains only a rolling ~72h — so `[midnight(D-3), now-72h)` was deleted but never re-inserted,
+and once that day left the delete window the loss was permanent. The CHANGE RISK exception-queue
+arm then read near-empty for change events older than ~2 days (a `GRANT ACCOUNTADMIN` / `DROP`
+on PROD / `CREATE_USER` disappeared). Re-derived from V075 so the `d<=3` branch deletes only the
+window the extract can refill (`EVENT_TS >= MIN(extract.START_TIME)`); the `d>3` full-backfill
+branch (reads `QUERY_HISTORY` directly) keeps the whole-window delete. Byte-locked to
+`outputs/gen_v100.py`.
+
+**App-side:**
+- **Break-glass activity panel now reads all statements live** — it selected the change-only
+  `FACT_SECURITY_CHANGE` twin when CHANGE RISK coverage was complete, but that fact can't see
+  SELECT/COPY/CALL, so an admin doing routine work under `ACCOUNTADMIN` read as a green "hugs
+  zero". Always reads live `QUERY_HISTORY` (all statement types) now.
+- **Domain posture no longer scored off a display-limited cross-domain frame** — a
+  Terraform-driven CHANGE RISK flood could evict every IDENTITY/PRIVILEGE finding past the
+  global top-100, scoring the starved domains 100/Healthy (a false all-clear). The exception
+  queue now caps **per domain** (`QUALIFY ROW_NUMBER() PARTITION BY DOMAIN`).
+- **Overview won't paint green on a read failure** — when the exception queue errored but the
+  coverage contract loaded, every COMPLETE domain scored 100/Healthy above the "did not resolve"
+  notice. The queue-fail guard now runs before any scoring/verdict/KPI.
+- **Auditor export MFA sheet proves an empty mart against live** — a deployed-but-empty
+  `FACT_LOGIN_DAILY` wrote an empty `mfa_gaps` CSV (a manufactured clean bill of health in a
+  compliance artifact); it now falls back to live `LOGIN_HISTORY` like the Access tab.
+- **Access-tab MFA panel is honest when the live fallback itself fails** — shows "unconfirmed",
+  not a green "no gaps".
+- **Admin-grant off-hours/weekend flag is account-local (Chicago)** — it computed `HOUR()` /
+  `DAYOFWEEKISO()` on the SiS session clock (UTC/LA), so a normal-hours deploy grant read as
+  off-hours and a real off-hours elevation read as within-hours. Now wraps
+  `CONVERT_TIMEZONE('America/Chicago', ...)`, matching the egress detector.
+- **`day_grants` scopes GRANTS_TO_USERS by the grantee, not the granted role name** — a shared
+  admin role (`SNOW_SYSADMINS`) granted to an in-company user was dropped from that company's
+  day-replay; now uses `COMPANY_FOR_USER(GRANTEE_NAME)`, matching the access-changes feed.
+- **`failed_login_reasons` uses the same coarse `ERROR_CATEGORY` buckets as its fact twin**, so
+  the panel is path-invariant across a window flip.
+- **Unused-roles export recommends REVIEW, not REVOKE** — a role exercised only via inheritance
+  never appears as an executing role, so "unused by any query" over-claimed; now flags the
+  inheritance caveat.
+
 ## 4.351.0 - Incident-management bug hunt: 9 app-side fixes + V099 (2026-08-30)
 
 Adversarial hunt over the incident-management layer (logic, SQL readers, triage UI,

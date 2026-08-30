@@ -25,7 +25,7 @@ _EXEMPT: set[str] = set()
 
 def _created_objects() -> set[str]:
     created: set[str] = set()
-    sources = sorted((SNOWFLAKE_DIR / "migrations").glob("V0*.sql"))
+    sources = sorted((SNOWFLAKE_DIR / "migrations").glob("V[0-9]*.sql"))
     sources.append(SNOWFLAKE_DIR / "native_alert_templates.sql")
     sources.append(SNOWFLAKE_DIR / "webhook_delivery.sql")
     sources.append(SNOWFLAKE_DIR / "ml_forecast_option.sql")

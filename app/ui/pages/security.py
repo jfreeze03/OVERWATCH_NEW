@@ -117,6 +117,7 @@ def _access_tab(company: str, days: int) -> None:
 
     mfa = stable_batch.get("mfa") or run(security_sql.users_without_mfa(company), page=_PAGE, key=f"mfa_{company}",
               tier="historical", source="USERS + FACT_LOGIN_DAILY (mart-first)")
+    _mfa_unproven = False
     if not mfa.ok or (mfa.empty and not fact_coverage_complete(legacy_coverage, 30)):
         # Fact empty/undeployed: an empty evidence set must never read as
         # "all clear" — prove it against live LOGIN_HISTORY before celebrating.
@@ -125,10 +126,18 @@ def _access_tab(company: str, days: int) -> None:
                        source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live fallback)")
         if live_mfa.ok:
             mfa = live_mfa
+        elif mfa.ok and mfa.empty:
+            # The mart was empty AND the live fallback itself failed — neither source
+            # proved MFA posture, so an empty result here is UNKNOWN, not clean. Do not
+            # let it fall through to the green "no gaps" state (bug-hunt 2026-08-30).
+            _mfa_unproven = True
     # C23: severity comes from the data — amber only when the gap list has rows.
     section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
                    "security", anchor="sec-mfa")
-    if mfa.ok and mfa.empty:
+    if _mfa_unproven:
+        empty_state("no_data_yet", "MFA evidence did not resolve — neither the login fact nor "
+                    "the live LOGIN_HISTORY fallback returned. MFA posture is unconfirmed, not clear.")
+    elif mfa.ok and mfa.empty:
         empty_state("clean", "No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
         kpi_row([{
@@ -373,7 +382,10 @@ def _access_tab(company: str, days: int) -> None:
                                sort_label="most-granted first")
         if sel is not None and sel != st.session_state.get("_sec_unused_role_sel"):
             st.session_state["_sec_unused_role_sel"] = sel
-        st.caption("Also in the Auditor export pack with the full grant matrix and 90d diff.")
+        st.caption("These roles were never *directly assumed* as the executing role in 90d — a role "
+                   "exercised only through inheritance (granted to a role users actually SET) won't "
+                   "appear here, so confirm holders + grants (click a row) before revoking. "
+                   "Also in the Auditor export pack with the full grant matrix and 90d diff.")
         result_caption(ur)
         role = str(frame.iloc[sel]["ROLE_NAME"]) if sel is not None and 0 <= sel < len(frame) else ""
         if role:
@@ -1019,6 +1031,16 @@ def _export_pack(company: str, days: int, window_label: str) -> None:
                     res = (_pack_batch or {}).get(name) or run(
                         sql, page=_PAGE, key=f"pack_{name}", tier="recent",
                         source=name, max_rows=10_000)
+                    # The MFA sheet is the top access-control finding in a compliance
+                    # artifact: an empty mart read must be PROVEN against live LOGIN_HISTORY,
+                    # never written as a 0-row "all clear" (mirrors the Access tab). A live
+                    # read that itself fails routes to the failures branch below rather than
+                    # a silent empty CSV (bug-hunt 2026-08-30).
+                    if name == "mfa_gaps_password_login" and res.ok and res.empty:
+                        res = run(security_sql.users_without_mfa_live(company), page=_PAGE,
+                                  key="pack_mfa_live", tier="recent",
+                                  source="ACCOUNT_USAGE.USERS + LOGIN_HISTORY (live proof)",
+                                  max_rows=10_000)
                     if res.ok:
                         frame = res.df
                         rows_written[name] = len(frame)
@@ -1364,18 +1386,16 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         result_caption(res)
 
     section_header("Break-glass role activity (should hug zero)", "warn", "admin")
-    if fact.ok and _domain_covered(coverage, "CHANGE RISK"):
-        bga = run(
-            security_sql.admin_role_activity_fact(days, company), page=_PAGE,
-            key=f"breakglass_fact_{days}", tier="hourly",
-            source="FACT_SECURITY_CHANGE (hourly)", probe=True,
-        )
-    else:
-        bga = run(
-            security_sql.admin_role_activity(days, company), page=_PAGE,
-            key=f"breakglass_{days}", tier="recent",
-            source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
-        )
+    # This panel asks "ALL statement volume under break-glass admin roles" — routine
+    # SELECT/COPY/CALL work is exactly the misuse it exists to catch. FACT_SECURITY_CHANGE
+    # holds only DDL/DCL change statements, so the fact twin structurally cannot see that
+    # work and would render a false "hugs zero" all-clear (bug-hunt 2026-08-30). Always
+    # read live QUERY_HISTORY here (all statement types), regardless of CHANGE RISK coverage.
+    bga = run(
+        security_sql.admin_role_activity(days, company), page=_PAGE,
+        key=f"breakglass_{days}_{company}", tier="recent",
+        source="ACCOUNT_USAGE.QUERY_HISTORY (all statements under admin roles)",
+    )
     if bga.ok and bga.empty:
         empty_state("clean", "No statements ran under ACCOUNTADMIN / SNOW_ACCOUNTADMINS in the window.")
     elif guard(bga, ""):

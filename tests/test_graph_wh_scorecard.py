@@ -66,7 +66,7 @@ def test_teardown_covers_v024_objects():
 def test_validate_expects_at_least_v024():
     import re
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    m = re.search(r"V001\.\.V0(\d+) applied", validate)
+    m = re.search(r"V001\.\.V(\d+) applied", validate)
     assert m and int(m.group(1)) >= 24                 # floor, not tip: V025+ must not break this
 
 

@@ -42,7 +42,7 @@ def test_v093_is_guarded_versioned_data_seed():
 def test_v093_seeds_each_unseeded_key_with_its_code_default():
     others = "".join(
         Path(p).read_text(encoding="utf-8")
-        for p in sorted(glob.glob(str(_MIG / "V0*.sql")))
+        for p in sorted(glob.glob(str(_MIG / "V[0-9]*.sql")))
         if "V093" not in p
     )
     unseeded = [k for k in _editable_keys() if f"'{k}'" not in others]
@@ -61,7 +61,7 @@ def test_every_editable_default_setting_is_seeded_by_some_migration():
     # future key added to config.py cannot silently go unseeded (the V093 defect).
     all_migrations = "".join(
         Path(p).read_text(encoding="utf-8")
-        for p in sorted(glob.glob(str(_MIG / "V0*.sql")))
+        for p in sorted(glob.glob(str(_MIG / "V[0-9]*.sql")))
     )
     missing = [k for k in _editable_keys() if f"'{k}'" not in all_migrations]
     assert not missing, (

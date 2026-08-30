@@ -25,7 +25,7 @@ def test_guards_declare_their_exceptions_everywhere():
     """Live failure 2026-07-10 (owner-diagnosed): RAISE only accepts a
     DECLAREd exception name — the inline RAISE EXCEPTION (code, msg) form
     is invalid scripting and the sqlglot gate cannot see $$ bodies."""
-    for p in sorted((_ROOT / "snowflake" / "migrations").glob("V0*.sql")):
+    for p in sorted((_ROOT / "snowflake" / "migrations").glob("V[0-9]*.sql")):
         assert "RAISE EXCEPTION (" not in p.read_text(encoding="utf-8"), p.name
     assert "IF (v < 34) THEN" in _MIG
     assert "SELECT 35 AS VERSION" in _MIG

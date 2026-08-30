@@ -385,9 +385,20 @@ def failed_login_reasons(days: int, company: str = "ALL") -> str:
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
                                       distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
     )
+    # REASON is the SAME coarse ERROR_CATEGORY bucketing the FACT loader (V075) writes,
+    # so this live/fallback path renders the identical rows as failed_login_reasons_fact
+    # instead of a per-raw-message breakdown that looks like a different panel on a window
+    # flip (bug-hunt 2026-08-30). Failures only (IS_SUCCESS='NO'), so no SUCCESS bucket.
     return f"""
 SELECT
-    COALESCE(ERROR_MESSAGE, 'UNKNOWN') AS REASON,
+    CASE
+      WHEN COALESCE(ERROR_MESSAGE, '') ILIKE '%network%' THEN 'NETWORK POLICY'
+      WHEN COALESCE(ERROR_MESSAGE, '') ILIKE '%disabled%' THEN 'DISABLED USER'
+      WHEN COALESCE(ERROR_MESSAGE, '') ILIKE '%mfa%' THEN 'MFA'
+      WHEN COALESCE(ERROR_MESSAGE, '') ILIKE ANY ('%password%', '%credential%', '%authentication%')
+        THEN 'CREDENTIAL'
+      ELSE 'OTHER'
+    END AS REASON,
     IFF(COALESCE(ERROR_MESSAGE, '') ILIKE '%network%', 'NETWORK POLICY', 'CREDENTIAL / OTHER') AS CATEGORY,
     COUNT(*) AS ATTEMPTS,
     COUNT(DISTINCT USER_NAME) AS USERS,
@@ -815,8 +826,11 @@ SELECT g.ROLE AS ADMIN_ROLE, g.GRANTEE_NAME AS USER_NAME,
        (SELECT COUNT(*) FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS p
          WHERE p.ROLE = g.ROLE AND p.GRANTEE_NAME = g.GRANTEE_NAME
            AND p.CREATED_ON < g.CREATED_ON) AS PRIOR_GRANTS,
-       DAYOFWEEKISO(g.CREATED_ON) AS DOW_ISO,
-       HOUR(g.CREATED_ON) AS HOUR_OF_DAY
+       -- Account-local (Chicago) so the off-hours/weekend flag grant_anomaly_flags
+       -- computes matches the operator's clock, not the SiS session tz (UTC/LA under
+       -- owner's-rights, where ALTER SESSION is a no-op). Mirrors unload_risk_events.
+       DAYOFWEEKISO(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS DOW_ISO,
+       HOUR(CONVERT_TIMEZONE('America/Chicago', g.CREATED_ON)) AS HOUR_OF_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS g
 WHERE {where}
 ORDER BY g.CREATED_ON DESC
@@ -1044,14 +1058,21 @@ LIMIT 300
 
 
 def day_grants(day: object, company: str = "ALL") -> str:
-    """Replay: role grants created or revoked on one day (role-scoped)."""
+    """Replay: role grants created or revoked on one day (grantee-scoped).
+
+    GRANTS_TO_USERS is a role->user table, so company must scope by the GRANTEE (the
+    receiving user, via COMPANY_FOR_USER) — NOT by the granted role's name. Keying off
+    ROLE dropped a grant of a shared admin role (SNOW_SYSADMINS) to an in-company user
+    from that company's replay, and dropped generically-named roles granted to ALFA
+    users; it also disagreed with the access-changes feed (recent_grant_changes), which
+    already scopes GRANTS_TO_USERS by GRANTEE_NAME. (bug-hunt 2026-08-30)"""
     from app import companies as _companies
     from app.data.common import and_where, day_literal
 
     lit = day_literal(day)
     where = and_where(
         f"(DATE(CREATED_ON) = {lit} OR DATE(DELETED_ON) = {lit})",
-        _companies.role_clause(company, "ROLE"),
+        _companies.user_clause(company, "GRANTEE_NAME"),
     )
     return f"""
 SELECT CREATED_ON AS GRANTED_AT, DELETED_ON, ROLE, GRANTED_TO, GRANTEE_NAME, GRANTED_BY
@@ -1314,7 +1335,15 @@ def _local_company_clause(company: str, column: str = "COMPANY") -> str:
 
 
 def security_exception_queue(company: str = "ALL", limit: int = 100) -> str:
-    """V075 local exception queue; no ACCOUNT_USAGE work on first paint."""
+    """V075 local exception queue; no ACCOUNT_USAGE work on first paint.
+
+    The cap is applied PER DOMAIN (QUALIFY ROW_NUMBER() partitioned by DOMAIN), not as a
+    single cross-domain LIMIT: this frame also feeds domain_posture scoring, and a global
+    top-N would let one noisy arm (e.g. a Terraform-driven CHANGE RISK flood, whose rows
+    carry precise recent EVENT_TS and outrank the day-midnight IDENTITY/PRIVILEGE rows
+    within a severity tier) evict another domain's findings entirely — scoring the starved
+    domain as 100/Healthy, a false all-clear. Per-domain ranking means no arm can crowd out
+    another, and the cap is far above where domain_posture's penalty saturates (~20/domain)."""
     limit = max(1, min(int(limit or 100), 300))
     value = str(company or "ALL").strip().upper()
     company_clause = "" if value == "ALL" else (
@@ -1323,16 +1352,16 @@ def security_exception_queue(company: str = "ALL", limit: int = 100) -> str:
         f"OR UPPER(COALESCE(OBJECT_COMPANY, '')) = {sql_literal(value)})"
     )
     where = and_where(company_clause)
+    _sev_order = ("CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 "
+                  "WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END")
     return f"""
 SELECT DOMAIN, COMPANY, ACTOR_COMPANY, OBJECT_COMPANY,
        ENTITY_TYPE, ENTITY_KEY, SEVERITY, TITLE, DETAIL,
        IMPACT_COUNT, DETECTED_AT, CONFIDENCE, OWNER, ACTION_ID, STATUS
 FROM {core_object('V_SECURITY_EXCEPTION_QUEUE')}
 WHERE {where}
-ORDER BY CASE UPPER(SEVERITY) WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-         WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 3 ELSE 4 END,
-         DETECTED_AT DESC
-LIMIT {limit}
+QUALIFY ROW_NUMBER() OVER (PARTITION BY DOMAIN ORDER BY {_sev_order}, DETECTED_AT DESC) <= {limit}
+ORDER BY {_sev_order}, DETECTED_AT DESC
 """
 
 
@@ -1573,6 +1602,13 @@ LIMIT 300
 
 
 def admin_role_activity_fact(days: int, company: str = "ALL") -> str:
+    """Daily CHANGE-statement volume under break-glass admin roles from FACT_SECURITY_CHANGE.
+
+    NOTE: FACT_SECURITY_CHANGE holds only DDL/DCL change statements, so this is the
+    change-statement count, NOT total statement volume — it does NOT see SELECT/COPY/CALL.
+    The "break-glass role activity (should hug zero)" panel therefore reads the LIVE
+    admin_role_activity (all statement types) instead; do not wire this change-only count
+    behind an all-statements panel (bug-hunt 2026-08-30)."""
     days = bounded_days(days, maximum=90)
     where = and_where(
         f"EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",

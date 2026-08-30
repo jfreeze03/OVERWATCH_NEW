@@ -128,7 +128,7 @@ def revoke_statements(frame: pd.DataFrame | None) -> list[str]:
 # actionable sheet gets one leading RECOMMEND column; evidence-only sheets (role
 # matrix, grant diff, failed logins, ...) stay raw evidence.
 _ACCESS_REVIEW_RECOMMEND = {
-    "unused_roles_90d": "REVOKE — role unused by any query in 90d",
+    "unused_roles_90d": "REVIEW — role never directly assumed in 90d (may still be used via inheritance)",
     "dormant_users": "REVIEW / disable — no activity in 90d",
     "mfa_gaps_password_login": "ENABLE MFA — password login without MFA",
     "expiring_credentials_10d": "ROTATE — credential expires within 10 days",

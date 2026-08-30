@@ -130,7 +130,7 @@ def test_v087_app_wires_the_generate_ui():
 
 def test_v087_validate_and_docs_track_the_migration():
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V099 applied" in validate
-    assert "BETWEEN 1 AND 99) = 99" in validate
+    assert "V001..V100 applied" in validate
+    assert "BETWEEN 1 AND 100) = 100" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V087__security_posture_rule.sql" in (_ROOT / rel).read_text(encoding="utf-8")

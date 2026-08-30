@@ -35,7 +35,7 @@ def test_v025_disables_the_rule_and_only_that():
 def test_validate_expects_at_least_v025():
     import re
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    m = re.search(r"V001\.\.V0(\d+) applied", validate)
+    m = re.search(r"V001\.\.V(\d+) applied", validate)
     assert m and int(m.group(1)) >= 25                 # floor, not tip
 
 
@@ -67,7 +67,11 @@ def test_day_replay_builders_take_company():
     ddl = security_sql.day_ddl("2026-07-07", "ALFA")
     assert "LIKE '%ALFA%'" in ddl                      # V044: evidence-based arm
     grants = security_sql.day_grants("2026-07-07", "ALFA")
-    assert "LIKE '%ALFA%'" in grants                   # V044: evidence-based arm
+    # v4.352: GRANTS_TO_USERS is a role->user table, so company scopes by the GRANTEE
+    # (COMPANY_FOR_USER), not the granted role's name — a shared admin role granted to an
+    # in-company user must not be dropped from that company's replay (bug-hunt 2026-08-30).
+    assert "COMPANY_FOR_USER(GRANTEE_NAME) = 'ALFA'" in grants
+    assert "role_clause" not in grants and "ROLE) LIKE" not in grants
     assert "ROLE" in grants
     # default stays account-wide (replay with company ALL)
     assert "TRXS" not in security_sql.day_ddl("2026-07-07")

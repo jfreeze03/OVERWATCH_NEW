@@ -321,6 +321,13 @@ _EXPECTED_MIGRATIONS = {
         "for one company is auto-declared even when the other company has an open incident of the "
         "same (company-shared) rule family — fixing a cross-company incident coverage gap. The "
         "manual-declare path already scoped by company. Proc only, no schema change",
+    100: "Security change-fact reload gap: SP_LOAD_SECURITY_FACTS re-derived from V075 so the "
+         "d<=3 FACT_SECURITY_CHANGE reload deletes only the window OW_QH_EXTRACT can refill "
+         "(EVENT_TS >= MIN(extract.START_TIME)) instead of the full calendar window it could not "
+         "refill from the rolling ~72h scratch table — which silently, permanently dropped the "
+         "earliest hours of the oldest day and near-emptied the CHANGE RISK exception-queue arm "
+         "for events older than ~2 days. The d>3 full-backfill branch keeps the whole-window "
+         "delete. Proc only, no schema change, no backfill",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

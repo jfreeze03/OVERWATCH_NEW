@@ -28,7 +28,7 @@ def _migration_header(previous: Path, maximum: int, count: int) -> str:
 
 
 def main() -> None:
-    migrations = sorted((SNOWFLAKE / "migrations").glob("V0*.sql"))
+    migrations = sorted((SNOWFLAKE / "migrations").glob("V[0-9]*.sql"))
     maximum = max(int(re.match(r"V(\d+)", path.name).group(1)) for path in migrations)
     candidates = sorted(REBUILD.glob("02_migrations_V001_V*.sql"))
     previous = candidates[-1]
