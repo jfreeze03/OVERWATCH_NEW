@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.345.0 - Logic-layer bug hunt #2: 3 fixes (verdict, ranking, dedup) (2026-08-29)
+
+Second adversarial logic-layer hunt (7 module-cluster lenses, each finding executed
+to confirm). Three confirmed:
+
+* **[med] Release-compare silenced from-zero regressions.** `compare_release_periods`
+  reported "n/a" when a lower-is-better metric's BEFORE value was 0 — so a fail rate
+  going 0%→8% (or queued 0→5m, spill 0→10GB) showed "n/a" and dropped off the
+  Operations release-compare, rendering a green "no regression" banner on the most
+  dangerous deploy (clean→broken). The percentage is undefined at a zero baseline but
+  the direction is not; the verdict now judges by the sign of the change. (Was B18 in
+  a 2026-07-29 review, never fixed.)
+* **[med] RCA could headline a LOW-capped untimed candidate over a HIGH cause.** The
+  ranking sorted by raw score with only a HIGH-vs-not tiebreak, but the LOW band-cap
+  for untimed/after-onset candidates lowers the band, not the score — so an untimed
+  candidate whose score edged a timed one took position 0 and `rca_summary` headlined
+  it as the lead. Ranking now keys on band strength first, then score.
+* **[low] ROI projection collapsed distinct blank-key actions.** `scenario_projection`
+  built its dedup id from `TYPE:KEY` and only fell back to the unique ACTION_ID when
+  the combined string was ≤1 char, so a blank key ("WAREHOUSE:" → "WAREHOUSE") merged
+  every blank-key action of that type into one entity, under-counting the candidate
+  and gross-estimate KPIs. It now falls back on ACTION_ID whenever the key is blank.
+
 ## 4.344.0 - V093: seed the 17 unseeded DEFAULT_SETTINGS keys (2026-08-29)
 
 Completes the v4.343.0 SETTINGS fix. The Admin ▸ Settings writer already upserts, so

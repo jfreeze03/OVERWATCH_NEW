@@ -236,8 +236,13 @@ def rank_root_causes(candidates: list[dict], onset, *, entity_name: str = "",
                     f"entity match {match:.0%}"),
             "evidence": c.get("evidence", {}),
         })
-    scored.sort(key=lambda h: (h["score"],
-                               1 if h["band"] == "HIGH" else 0), reverse=True)
+    # Rank by BAND strength first, then score. The LOW band-cap for untimed / after-
+    # onset candidates lowers the band but not the raw score, so a score-primary sort
+    # would let an untimed LOW candidate whose score edged a timed one HEADLINE as the
+    # lead (rca_summary reads [0]) above a genuine HIGH cause — defeating the cap. A
+    # HIGH cause must always outrank a MEDIUM/LOW one; score only breaks ties within a band.
+    _band_rank = {"HIGH": 2, "MEDIUM": 1, "LOW": 0}
+    scored.sort(key=lambda h: (_band_rank.get(h["band"], 0), h["score"]), reverse=True)
     return scored[:max(0, int(top))]
 
 

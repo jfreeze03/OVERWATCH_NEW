@@ -443,8 +443,20 @@ def compare_release_periods(df: pd.DataFrame) -> list[dict]:
         b = _fail_pct(before) if col == "FAIL_PCT" else safe_float(before.get(col))
         a = _fail_pct(after) if col == "FAIL_PCT" else safe_float(after.get(col))
         delta_pct = None if b == 0 else round((a - b) / abs(b) * 100, 1)
-        if lower_better is None or delta_pct is None:
+        if lower_better is None:
             verdict = "n/a"
+        elif delta_pct is None:
+            # b == 0: the PERCENTAGE is undefined, but the DIRECTION is not. An
+            # introduced-from-zero move is a real regression/improvement, not "n/a" —
+            # a 0%->8% fail rate must read "Worse" (else the Operations release-compare
+            # excludes it and shows a green "no regression" banner on a clean->broken
+            # deploy). Judge by the sign of (a - b); only 'n/a' when lower_better is None.
+            if a == b:
+                verdict = "Flat"
+            elif (a < b) == lower_better:
+                verdict = "Better"
+            else:
+                verdict = "Worse"
         elif abs(delta_pct) <= _FLAT_TOLERANCE_PCT:
             verdict = "Flat"
         elif (delta_pct < 0) == lower_better:

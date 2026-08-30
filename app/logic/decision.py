@@ -131,7 +131,13 @@ def scenario_projection(actions: pd.DataFrame | None, *, adoption_pct: float,
     ).fillna("").astype(str)
     action_id = view.get("ACTION_ID", pd.Series(view.index, index=view.index)).astype(str)
     entity_id = (entity_type.str.upper() + ":" + entity_key.str.upper()).str.strip(":")
-    view["_ENTITY"] = entity_id.where(entity_id.str.len().gt(1), action_id)
+    # A real entity needs a KEY, not just a TYPE: a blank key yields 'WAREHOUSE:' ->
+    # strip(':') -> 'WAREHOUSE' (len 9), which the old len<=1 guard let through, so every
+    # distinct blank-key action of that type collapsed into ONE entity and the ROI
+    # candidate count / gross estimate under-counted. Gate on the key being present and
+    # fall back to the (unique) ACTION_ID otherwise.
+    _has_key = entity_key.str.strip().str.len().gt(0)
+    view["_ENTITY"] = entity_id.where(_has_key, action_id)
     deduped = view.sort_values("_ESTIMATE", ascending=False).drop_duplicates("_ENTITY")
     gross = float(deduped["_ESTIMATE"].sum())
     adoption = max(0.0, min(safe_float(adoption_pct), 100.0)) / 100
