@@ -110,6 +110,7 @@ snowflake/migrations/V091__alert_auto_clear.sql
 snowflake/migrations/V092__action_lifecycle_clear_signals.sql
 snowflake/migrations/V093__seed_default_settings.sql
 snowflake/migrations/V094__fact_query_hourly_boundary_dedupe.sql
+snowflake/migrations/V095__cost_alloc_role_company.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

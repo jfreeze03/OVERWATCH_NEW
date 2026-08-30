@@ -138,7 +138,7 @@ def test_v086_snoozed_reader_is_scoped_and_status_filtered():
 
 def test_v086_validate_and_docs_track_the_migration():
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V094 applied" in validate
-    assert "BETWEEN 1 AND 94) = 94" in validate
+    assert "V001..V095 applied" in validate
+    assert "BETWEEN 1 AND 95) = 95" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V086__alert_snooze.sql" in (_ROOT / rel).read_text(encoding="utf-8")

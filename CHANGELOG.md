@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.348.0 - V095: evidence-based ROLE company classification (2026-08-30)
+
+Data-loader hunt (MED). `SP_LOAD_MARTS_V27`'s cost-allocation arm stamped the COMPANY
+of `MART_COST_ALLOCATION_DAILY`'s **ROLE** dimension with an inline
+`CASE WHEN UPPER(ROLE_NAME) LIKE '%TRXS%' THEN 'Trexis' ELSE 'ALFA' END` — defaulting
+every non-TRXS role to ALFA and **never emitting `UNKNOWN`**, bypassing the V044
+evidence-based classification law that its USER / DATABASE / SCHEMA siblings already
+honor via `COMPANY_FOR_USER` / `COMPANY_FOR_DATABASE`. Shared roles
+(PUBLIC / SYSADMIN / ACCOUNTADMIN) inflated the ALFA ROLE total, and the app's
+first-class UNKNOWN company pill returned zero ROLE-dim rows while USER/DATABASE
+populated it.
+
+**V095** (owner-gated; owner applies in Snowsight after V094, then re-runs the
+`SP_LOAD_MARTS_V27(HOURLY)` backfill to re-stamp trailing ROLE history):
+- New `COMPANY_FOR_ROLE(R)` scalar UDF — classifies a role NAME by the SAME evidence the
+  live V044 `COMPANY_FOR_USER` role predicates and `app.companies.role_clause` use:
+  `%TRXS%` → Trexis, `%ALFA%` or the two DBA roles (`SNOW_ACCOUNTADMINS` /
+  `SNOW_SYSADMINS`) → ALFA, else `UNKNOWN` (NULL-safe via COALESCE).
+- `SP_LOAD_MARTS_V27` re-derived from V082 so the ROLE arm calls
+  `COMPANY_FOR_ROLE(ROLE_NAME)` — making the ROLE dim structurally identical to its
+  siblings and centralizing the role-company law server-side (the buggy inline CASE was
+  copy-pasted across ~19 historical, now-superseded migrations).
+- Sibling arms byte-identical to V082; new UDF + proc, no schema change, no data reload.
+- `teardown.sql` drops the new UDF; byte-locked to `outputs/gen_v095.py`.
+
 ## 4.347.0 - Alerting-layer bug hunt: 3 app-side fixes (2026-08-30)
 
 Adversarial alerting-layer hunt (7 lenses over the scan/delivery procs + app alert

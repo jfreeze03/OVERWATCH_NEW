@@ -294,6 +294,13 @@ _EXPECTED_MIGRATIONS = {
         "SP_LOAD_OPS_DIAG) — the boundary hour is now deleted and fully rebuilt each run "
         "instead of leaving a permanent partial duplicate that ~2x'd multi-day query "
         "facts — plus a one-time INSERT OVERWRITE dedup keeping the complete hour per grain",
+    95: "Cost-allocation ROLE company classification: new COMPANY_FOR_ROLE(R) UDF "
+        "(%TRXS%→Trexis, %ALFA% or SNOW_ACCOUNTADMINS/SNOW_SYSADMINS→ALFA, else UNKNOWN — "
+        "same evidence as COMPANY_FOR_USER and app.companies.role_clause) + SP_LOAD_MARTS_V27 "
+        "re-derived from V082 so MART_COST_ALLOCATION_DAILY's ROLE dim calls it instead of an "
+        "inline CASE that defaulted every non-TRXS role to ALFA and never emitted UNKNOWN — "
+        "fixing the V044 UNKNOWN-law bypass so shared roles stop inflating ALFA and the "
+        "UNKNOWN pill populates ROLE like USER/DATABASE. New UDF + proc, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
