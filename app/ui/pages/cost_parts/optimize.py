@@ -527,11 +527,19 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if _cur_size and _tgt_norm and _tgt_norm != _cur_size:
                     _steps = SIZE_ORDER.index(_tgt_norm) - SIZE_ORDER.index(_cur_size)
                     if _steps < 0:  # a genuine downsize
-                        _monthly = safe_float(srow.get("MONTHLY_USD_NOW"))
-                        est_sz = round(max(0.0, _monthly * (1.0 - 2.0 ** _steps)), 2)
+                        # Book the CONSERVATIVE idle-scaled saving the rest of the tab uses, NOT the
+                        # whole bill rate-scaled: on a smaller warehouse a compute-bound query runs
+                        # ~2x longer (cost-neutral), so only the IDLE share reliably shrinks when the
+                        # per-hour rate halves (sizing.py rec#13). `_monthly * (1 - 2**steps)` booked
+                        # the optimistic everything-halves ceiling -- ~12x too high for a busy, low-idle
+                        # warehouse. Scale IDLE only, matching POTENTIAL_MONTHLY_SAVING_USD (bug-hunt
+                        # 2026-08-30).
+                        _idle = safe_float(srow.get("IDLE_MONTHLY_USD"))
+                        est_sz = round(max(0.0, _idle * (1.0 - 2.0 ** _steps)), 2)
                         st.caption(f"Projected saving ~${est_sz:,.0f}/mo resizing {_cur_size} → "
-                                   f"{_tgt_norm} (credits ~halve per size step; ESTIMATED until you "
-                                   "verify it on the Savings ledger below).")
+                                   f"{_tgt_norm} (only idle-hour credits reliably shrink; busy "
+                                   "compute-bound work runs ~2x longer on a smaller size. ESTIMATED "
+                                   "until you verify it on the Savings ledger below).")
                     else:  # an upsize is a cost increase — never a booked saving
                         st.caption(f"Resizing UP {_cur_size} → {_tgt_norm} raises cost — no saving booked.")
                 elif not _cur_size:

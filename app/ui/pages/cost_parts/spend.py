@@ -285,7 +285,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "billed but not chargeable to a company from metering alone."},
         {"label": "Attributed (warehouse)",
          "value": format_usd(_gap_summary["attributed_usd"]),
-         "help": "Exact warehouse + reader metering, company-scopable."},
+         "help": "Own-account warehouse metering only — the sole spend with a company key. "
+                 "Reader-account metering carries no company key and is part of the "
+                 "unattributed gap above, not this figure."},
     ])
     if not _gap_breakdown.empty:
         charts.bar_usd(_gap_breakdown, "CATEGORY", "GAP_USD",

@@ -842,6 +842,13 @@ cov AS (
         MAX(CASE WHEN {in_a} THEN DAY END) AS A_MAX_DAY,
         MIN(CASE WHEN {in_b} THEN DAY END) AS B_MIN_DAY,
         MAX(CASE WHEN {in_b} THEN DAY END) AS B_MAX_DAY,
+        -- Account/company-wide spend TOTALS across every warehouse (not window-ranked, not
+        -- LIMITed): the strip's "Warehouse spend" LEVEL KPI must sum ALL warehouses, but the
+        -- movers list is ORDER BY |A-B| DESC LIMIT 100, which drops the largest STEADY spender
+        -- first -- so summing the returned frame understated the headline. These totals ride the
+        -- single-row cov CROSS JOIN and survive the LIMIT (bug-hunt 2026-08-30).
+        SUM(IFF({in_a}, CREDITS_TOTAL, 0)) AS TOTAL_A_CREDITS,
+        SUM(IFF({in_b}, CREDITS_TOTAL, 0)) AS TOTAL_B_CREDITS,
         -- Loader's GLOBAL reach for this company scope (NOT window-bounded): idle
         -- calendar days inside a window don't lower it, so it separates "loader
         -- hasn't reached this window's end yet" (real partial backfill) from "no
@@ -860,6 +867,8 @@ SELECT
     cov.A_MAX_DAY,
     cov.B_MIN_DAY,
     cov.B_MAX_DAY,
+    cov.TOTAL_A_CREDITS,
+    cov.TOTAL_B_CREDITS,
     cov.LOADED_THROUGH
 FROM movers m
 CROSS JOIN cov

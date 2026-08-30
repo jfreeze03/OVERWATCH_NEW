@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.359.0 - Cost-layer bug hunt #3: 3 app-side fixes (2026-08-30)
+
+Third, deeper adversarial pass over the cost layer (6 finders: metering/attribution arithmetic,
+compare/trend, forecast/capacity, peers/coverage/allocation, mart-vs-live, optimize/unit-cost). One
+candidate refuted (the linear vs seasonal month-end projection — both engines drop a gap-day
+symmetrically). Two coordinated `family_repeat_fingerprints` mart-vs-live divergences (cache-basis
+and candidate-population) are deferred as a scoped loader+reader migration follow-up. Three
+app-side fixes:
+
+- **Resize-saving booking no longer overstates busy warehouses (MED)** — booking a downsize saving
+  scaled the *whole* monthly bill by the size step (`monthly * (1 − 2^steps)` = the optimistic
+  everything-halves ceiling), ~12× too high for a busy, low-idle warehouse. It now scales the idle
+  share only (`idle * (1 − 2^steps)`), matching the tab's own conservative model (rec#13: only idle
+  reliably shrinks when the per-hour rate halves) and the `POTENTIAL_MONTHLY_SAVING_USD` rollup.
+- **Compare-tab "Warehouse spend" KPI reflects all warehouses (MED)** — the LEVEL total summed the
+  delta-ranked, top-100-movers frame, so with >100 active warehouses (company=ALL) the largest
+  *steady* spender was truncated out of both period totals and the Δ%. It now reads account/company-
+  wide totals carried on the single-row `cov` CROSS JOIN, which survive the `LIMIT 100`; the movers
+  table/chart still show the top-100 by delta.
+- **"Attributed (warehouse)" help matches the number (LOW)** — the help claimed the figure includes
+  reader-account metering, but the computation excludes it (reader carries no company key and is in
+  the unattributed gap); reworded to match.
+
 ## 4.358.0 - Change-risk: CREATE OR REPLACE scored destructive (V105 + live) (2026-08-30)
 
 Completes the one finding deferred from the security-layer hunt #2 (v4.357.0). A

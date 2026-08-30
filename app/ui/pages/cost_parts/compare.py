@@ -156,8 +156,15 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
     # ---- paired KPI strip ---------------------------------------------------
     kpis: list[dict] = []
     if wh.usable():
-        a_usd = float(wh.df["A_CREDITS"].map(safe_float).sum()) * rate
-        b_usd = float(wh.df["B_CREDITS"].map(safe_float).sum()) * rate
+        # Use the account/company-wide TOTALS (constant across every row via the cov CROSS JOIN),
+        # NOT the sum of the returned frame: that frame is the top-100 movers by |A-B|, which drops
+        # the largest STEADY warehouse first and understated this LEVEL KPI (bug-hunt 2026-08-30).
+        if "TOTAL_A_CREDITS" in wh.df.columns and len(wh.df):
+            a_usd = safe_float(wh.df["TOTAL_A_CREDITS"].iloc[0]) * rate
+            b_usd = safe_float(wh.df["TOTAL_B_CREDITS"].iloc[0]) * rate
+        else:  # defensive fallback for an old-shape frame
+            a_usd = float(wh.df["A_CREDITS"].map(safe_float).sum()) * rate
+            b_usd = float(wh.df["B_CREDITS"].map(safe_float).sum()) * rate
         kpis.append({
             "label": f"Warehouse spend — {pair['label_a']}",
             "value": format_usd(a_usd),
