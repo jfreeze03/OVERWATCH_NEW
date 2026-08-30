@@ -289,6 +289,11 @@ _EXPECTED_MIGRATIONS = {
         "FORECAST_ENGINE, EXPECTED_SPIKE_CALENDAR, DATA_TRANSFER_USD_PER_TB) with their "
         "code defaults, so they appear in the Settings table; WHEN NOT MATCHED only "
         "(never overwrites an edited value). Data-seed, no schema change",
+    94: "FACT_QUERY_HOURLY boundary-hour dedupe: SP_LOAD_QH_EXTRACT re-derived from V062 "
+        "so the FACT_QUERY_HOURLY DELETE and INSERT bounds are both hour-truncated (like "
+        "SP_LOAD_OPS_DIAG) — the boundary hour is now deleted and fully rebuilt each run "
+        "instead of leaving a permanent partial duplicate that ~2x'd multi-day query "
+        "facts — plus a one-time INSERT OVERWRITE dedup keeping the complete hour per grain",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
