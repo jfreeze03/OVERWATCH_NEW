@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.389.0 - UI review Wave 2: standardized failure recovery (2026-08-31)
+
+- **[#46] One consistent recovery affordance on a page-render failure.** The `safe_page` error
+  boundary showed a prose "the failure was logged" note with no way to act on it. It now renders a
+  standard recovery block: a **copyable error reference**, a **Retry** (bumps the read salt and
+  re-runs the page), and an **Open error log →** jump that appears only for a viewer entitled to
+  Admin (so a non-admin isn't stranded — `request_navigation` clamps Admin→Overview otherwise).
+  `record_error` now mints that reference (timestamp + a short hash of the error), stamps it on the
+  in-session buffer entry, prepends it into the persisted `APP_ERROR_LOG.CONTEXT`, and returns it —
+  so the ref an operator copies matches its log row. The Admin error table shows the ref column.
+  Scoping caught the over-reach the first pass proposed (adding Retry to the panel-level
+  `empty_state('unavailable')`, which fires on *every* failed panel app-wide) and left it out; all
+  recovery-block imports stay lazy so the `query → errors` module cycle is preserved.
+
 ## 4.388.0 - UI review Wave 2: object-cost reconciliation coverage (2026-08-31)
 
 - **[#30] Reconciliation coverage on the top-objects cost table.** The `reconciliation_footer`

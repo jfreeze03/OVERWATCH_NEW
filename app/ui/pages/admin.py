@@ -805,7 +805,9 @@ def _observability_tab() -> None:
     if not buffer:
         empty_state("clean", "No errors recorded in this session.")
     else:
-        styled_table(pd.DataFrame(buffer)[["at", "page", "type", "message"]])
+        # #46: show the copyable error reference so an operator can match a ref they
+        # were shown to its row. reindex tolerates a pre-#46 buffer entry with no ref.
+        styled_table(pd.DataFrame(buffer).reindex(columns=["at", "ref", "page", "type", "message"]))
     sink = run(mart_sql.app_error_log(100), page=_PAGE, key="error_sink", tier="live",
                source="APP_ERROR_LOG")
     st.markdown("**Persisted error log (all sessions)**")

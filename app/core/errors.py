@@ -9,6 +9,7 @@ enforces that elsewhere).
 
 from __future__ import annotations
 
+import hashlib
 import re
 import traceback
 from datetime import datetime
@@ -43,14 +44,26 @@ def format_snowflake_error(error: object, max_len: int = 300) -> str:
     return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
 
-def record_error(page: str, error: BaseException, context: str = "") -> None:
-    """Ring-buffer the error and best-effort persist it to the Snowflake sink."""
+def record_error(page: str, error: BaseException, context: str = "") -> str:
+    """Ring-buffer the error and best-effort persist it to the Snowflake sink.
+
+    Returns a short error REFERENCE (also stored on the buffer entry and prepended
+    into the persisted CONTEXT) so the UI can show a copyable id the operator can
+    quote when reporting the failure (Wave 2 #46). The ref is a timestamp + a short
+    hash of the error, so the same operator-visible ref matches the APP_ERROR_LOG row.
+    """
+    at = datetime.now()
+    _digest = hashlib.sha1(
+        f"{type(error).__name__}|{error}|{traceback.format_exc(limit=3)}".encode("utf-8", "replace")
+    ).hexdigest()[:6].upper()
+    ref = f"OW-{at.strftime('%Y%m%d-%H%M%S')}-{_digest}"
     entry = {
-        "at": datetime.now().isoformat(timespec="seconds"),
+        "at": at.isoformat(timespec="seconds"),
+        "ref": ref,
         "page": str(page)[:80],
         "type": type(error).__name__[:200],
         "message": str(error)[:2000],
-        "context": str(context)[:2000],
+        "context": (f"ref={ref} · {context}" if context else f"ref={ref}")[:2000],
         "trace": traceback.format_exc(limit=6)[:4000],
     }
     try:
@@ -81,6 +94,7 @@ def record_error(page: str, error: BaseException, context: str = "") -> None:
                 statement.collect()
     except Exception:
         pass  # the ring buffer above still has it; Admin page shows it
+    return ref
 
 
 def error_buffer() -> list[dict]:
@@ -88,6 +102,35 @@ def error_buffer() -> list[dict]:
         return list(st.session_state.get(_BUFFER_KEY, []))
     except Exception:
         return []
+
+
+def _recovery_controls(ref: str, *, key: str) -> None:
+    """Wave 2 #46: one consistent recovery affordance under a page-render failure —
+    a copyable error reference (also written to APP_ERROR_LOG.CONTEXT), a Retry that
+    re-runs the page after bumping the read salt, and an Admin-gated jump to the error
+    log. Every import here is LAZY: query.py imports this module at load, so a
+    module-level import of state/session/config would be an import cycle.
+    """
+    st.caption("Quote this reference if you report it — it's in the error log too "
+               "(Admin ▸ Errors & telemetry). Other pages are unaffected.")
+    if ref:
+        st.code(ref, language=None)   # st.code carries a built-in one-click copy button
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button("↻ Retry", key=f"_ow_retry_{key}", width="stretch"):
+            from app.core.query import bump_refresh_salt  # lazy: query imports this module
+            bump_refresh_salt()
+            st.rerun()
+    with cols[1]:
+        from app.config import PAGES_BY_PROFILE
+        from app.core.session import active_profile
+        # Only offer the jump to a viewer who can actually open Admin —
+        # request_navigation clamps Admin -> Overview for everyone else, which
+        # would silently strand them somewhere they didn't ask to go.
+        if "Admin" in PAGES_BY_PROFILE.get(active_profile(), ()) and st.button(
+                "Open error log →", key=f"_ow_errnav_{key}", width="stretch"):
+            from app.core.state import request_navigation
+            request_navigation("Admin", "Errors & telemetry")   # self-reruns
 
 
 def safe_page(page_name: str):
@@ -103,7 +146,7 @@ def safe_page(page_name: str):
             try:
                 return render_fn(*args, **kwargs)
             except Exception as exc:
-                record_error(page_name, exc, context="page render")
+                ref = record_error(page_name, exc, context="page render")
                 st.error(f"{page_name} could not finish rendering.")
                 friendly = format_snowflake_error(exc)
                 if isinstance(exc, (KeyError, ValueError, TypeError, AttributeError, IndexError)):
@@ -112,10 +155,9 @@ def safe_page(page_name: str):
                     # KeyError('RULE_ID') class of crash).
                     friendly = f"{type(exc).__name__}: {friendly} — app bug, not a Snowflake failure."
                 st.caption(friendly)
-                st.info(
-                    "The failure was logged (Admin > Errors & telemetry). Other pages are unaffected; "
-                    "refresh after fixing the cause."
-                )
+                # #46: one standardized recovery block (copyable ref + Retry +
+                # Admin-gated Open-Errors) instead of the old prose st.info.
+                _recovery_controls(ref, key=page_name)
                 return None
 
         return wrapper
