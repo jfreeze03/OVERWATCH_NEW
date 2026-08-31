@@ -156,6 +156,12 @@ def candidates_from_anomalies(hits: list | pd.DataFrame | None) -> list[dict]:
     for h in (hits or []):
         z = safe_float(h.get("z"))
         label = str(h.get("label") or "")
+        # A spend COLLAPSE (z < 0) is a downstream EFFECT (a pipeline stopped, spend fell), not a
+        # candidate CAUSE of an incident -- and via abs(z) it could otherwise reach the HIGH band and
+        # headline as a high-confidence "cause". Only positive-z spikes are cause candidates
+        # (incident-hunt 2026-08-30).
+        if z <= 0:
+            continue
         # |z| -> 0..1 (z of 3.5 is the flag threshold; 8+ is extreme)
         mag = max(0.0, min(abs(z) / 8.0, 1.0))
         out.append({

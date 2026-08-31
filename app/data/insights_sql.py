@@ -353,7 +353,12 @@ LIMIT 200
 def task_failure_details(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
     from app.core.sqlsafe import contains_filter
 
-    days = bounded_days(days, maximum=14)
+    # Cap 30 (was 14) so the incident RCA auto-investigation feed, which asks for the incident's
+    # onset-covering window (up to 30 days), is not silently clamped shorter than the sibling RCA
+    # feeds (change/grant/warehouse registries, spend anomaly) and cannot omit an onset-time task
+    # failure from the ranked cause (incident-hunt 2026-08-30). SCHEDULED_TIME pruning keeps the scan
+    # bounded; the Operations 7d caller is unaffected.
+    days = bounded_days(days, maximum=30)
     # r23 #3: TASK_HISTORY prunes on SCHEDULED_TIME (the V031 builders bound
     # BOTH columns for exactly this reason); without it the RCA read scanned
     # the whole view — 33s on the fleet board. +1 day covers runs scheduled

@@ -817,11 +817,16 @@ def _object_blast_radius_panel(key: str) -> None:
         return
     # observed consumers for the object itself + its declared dependents
     fqns = (key, *deps["FQN"].tolist())
-    cons = run(graph_sql.object_blast_consumers(tuple(fqns), _BLAST_WINDOW_DAYS),
+    _BLAST_CONS_LIMIT = 500   # raised from the 200 default; blast radius wants the whole observed set
+    cons = run(graph_sql.object_blast_consumers(tuple(fqns), _BLAST_WINDOW_DAYS, limit=_BLAST_CONS_LIMIT),
                page=_PAGE, key=f"object_blast_cons_{key}", tier="recent",
                source="ACCOUNT_USAGE.ACCESS_HISTORY (Enterprise)", probe=True)
     measured_half = cons.ok   # False => could NOT measure (never conflate with "measured zero")
     consumers_df = cons.df if cons.usable() else pd.DataFrame()
+    # The consumer fetch is LIMIT-capped; at the cap the measured half is a lower bound, so the
+    # measured-vs-unmeasured split would over-state "unmeasured". Surface it like Declared dependents
+    # does for its truncation (incident-hunt 2026-08-30).
+    _cons_capped = measured_half and len(consumers_df) >= _BLAST_CONS_LIMIT
     summary = lineage.blast_summary(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
     radius = lineage.build_blast_radius(edges.df, consumers_df, key, window_days=_BLAST_WINDOW_DAYS)
     kpi_row([
@@ -830,7 +835,8 @@ def _object_blast_radius_panel(key: str) -> None:
          "help": "Objects that reference this one (transitively) per OBJECT_DEPENDENCIES "
                  "— declared view/matview/policy refs only, not procs/dynamic SQL."},
         {"label": "Observed in last 30d",
-         "value": (f"{summary['measured']}" if measured_half else "n/a"),
+         "value": ((f"{summary['measured']}" + (" (lower bound)" if _cons_capped else ""))
+                   if measured_half else "n/a"),
          "help": ("Dependents actually touched in ACCESS_HISTORY in the window. The rest "
                   "are recorded but unqueried here."
                   if measured_half else

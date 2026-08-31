@@ -104,16 +104,29 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
             f"UPPER({sql_literal(proposal_parts[3])}) "
         )
     inc_id = sql_literal(str(uuid.uuid4()))
-    # Family-already-open guard (family + company, matching SP_INCIDENT_AUTODECLARE):
-    # do not open a second incident for a (family, company) that already has an
-    # OPEN/MITIGATED incident holding a member alert of that family.
+    # V072 makes INCIDENT_PROPOSALS entity-aware (one proposal per FAMILY,COMPANY,ENTITY_KIND,
+    # ENTITY_NAME) and the members insert scopes to that entity via entity_filter. The
+    # family-already-open guard must match the SAME entity, or a family with an open incident for
+    # entity Y silently no-ops the INCIDENTS insert for a DISTINCT entity X (and the caller then
+    # falsely reports "declared") -- so a second warehouse/task's incident is never created
+    # (incident-hunt 2026-08-30). ACCOUNT-scoped proposals keep the family-only guard.
+    guard_entity_filter = ""
+    if len(proposal_parts) == 4 and proposal_parts[2].upper() != "ACCOUNT":
+        guard_entity_filter = (
+            "AND UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2)) = "
+            f"UPPER({sql_literal(proposal_parts[3])}) "
+        )
+    # Family-(+entity-)already-open guard (matching SP_INCIDENT_AUTODECLARE's family dedup, extended
+    # to the proposal's entity): do not open a second incident for a (family, company, entity) that
+    # already has an OPEN/MITIGATED incident holding a member alert of that family+entity.
     open_family_guard = (
         f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
         f"JOIN {core_object('INCIDENTS')} i ON i.INCIDENT_ID = m.INCIDENT_ID "
         f"JOIN {core_object('ALERT_EVENTS')} a ON a.EVENT_ID = m.REF_ID "
         "WHERE m.MEMBER_KIND = 'ALERT' AND i.STATUS IN ('OPEN', 'MITIGATED') "
         f"AND (i.COMPANY = {sql_literal(str(company))} OR UPPER(i.COMPANY) = 'ALL') "
-        f"AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = {fam})"
+        f"AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = {fam} "
+        f"{guard_entity_filter})"
     )
     incidents_insert = (
         f"INSERT INTO {core_object('INCIDENTS')} "
@@ -720,7 +733,7 @@ def render() -> None:
         if _ig.usable():
             st.caption("Recent incidents (14d) — bar = detected → resolved; an open incident's bar "
                        "reaches now. Account time.")
-            charts.incident_gantt(_ig.df)
+            charts.incident_gantt(_ig.df, now=account_now())
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")

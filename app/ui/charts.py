@@ -1201,7 +1201,7 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
     st.altair_chart(alt.vconcat(focus, overview, spacing=8), width="stretch")
 
 
-def incident_gantt(df: pd.DataFrame) -> None:
+def incident_gantt(df: pd.DataFrame, now: object = None) -> None:
     """CR5: per-incident detected->resolved bars, colored by severity — the
     lifecycle shape (and what's still running, its bar reaching now) at a glance.
 
@@ -1249,7 +1249,13 @@ def incident_gantt(df: pd.DataFrame) -> None:
     # C38: an open incident's end edge is a projected 'now' (COALESCE to now in the SQL),
     # not a measured resolution — a subtle 'now' rule at the latest edge makes an open
     # bar (reaching it) distinguishable from a resolved one (ending short of it).
-    now_df = pd.DataFrame({"NOW": [data["ENDED"].max()]})
+    # Anchor the "now" rule at the true account-now when the caller passes it: with no OPEN incident
+    # every ENDED is a past resolution, so data["ENDED"].max() would drop the rule into the past
+    # (incident-hunt 2026-08-30). An open incident's ENDED is already COALESCEd to now in the SQL, so
+    # max() keeps the rule at the latest bar edge in that case.
+    _end_max = data["ENDED"].max()
+    _now_anchor = max(_end_max, pd.Timestamp(now)) if now is not None else _end_max
+    now_df = pd.DataFrame({"NOW": [_now_anchor]})
     now_rule = (
         alt.Chart(now_df)
         .mark_rule(strokeDash=[4, 4], color=palette.INK_MUTE, opacity=0.55)

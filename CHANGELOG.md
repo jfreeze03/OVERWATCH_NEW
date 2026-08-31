@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.369.0 - Incident-layer bug hunt: 5 app-side fixes (2026-08-30)
+
+Adversarial pass over the incident-management layer (5 finders: auto-declare, membership/lineage, TTM/
+timeline, RCA/routing, narrative/UI). Nine surfaced, seven confirmed (six distinct), two refuted (the
+V099 auto-declare guard is company-scoped by design; the RCA 20% entity-match weight is not inert).
+Five land app-side here; the sixth (incident-timeline TASK_FAIL timestamp parity, a `MART_INCIDENT_
+TIMELINE` loader fix) is migration-bearing and ships in the migrations release.
+
+- **[MED] manual incident-declare guard is now entity-aware** — V072 makes `INCIDENT_PROPOSALS`
+  entity-aware (one proposal per family/company/entity) and the members-insert scopes to the chosen
+  entity, but the family-already-open guard correlated on family + company only. So once any incident
+  of a family was open, declaring a *distinct* entity's incident in that family made the INCIDENTS
+  insert a 0-row no-op — and `execute_statement` returns OK for a 0-row insert, so the UI reported
+  "Incident declared with members linked" while nothing was created and the second entity's alerts
+  stayed orphaned. The guard now carries the same entity predicate the members-insert uses.
+- **[MED] RCA auto-investigation task-failure feed covers the onset window** — the incident RCA
+  synthesis asks each feed for the incident's onset-covering window (up to 30 days), but
+  `task_failure_details` clamped to 14 days, so an onset-time task failure older than 14 days was
+  silently dropped from the ranked cause while the sibling change/grant/warehouse feeds covered it.
+  Cap raised to 30 (SCHEDULED_TIME pruning keeps the scan bounded; the Operations 7-day caller is
+  unaffected).
+- **[LOW] spend collapses are no longer candidate causes** — `candidates_from_anomalies` used `abs(z)`,
+  so a spend *collapse* (z < 0 — a downstream effect, e.g. a stopped pipeline) entered RCA as a
+  full-magnitude candidate and could headline as a high-confidence "cause". Non-positive-z anomalies
+  are now excluded (only spikes are cause candidates).
+- **[LOW] incident Gantt "now" line** — the projected-now reference line was derived from
+  `ENDED.max()`, which with no open incident is the latest *past* resolution, dropping the line into
+  the past. It now anchors to `account_now()` passed from the caller.
+- **[LOW] blast-radius observed-consumer half surfaces truncation** — the observed-consumer fetch was
+  silently LIMIT-capped (200), so the measured-vs-unmeasured split over-stated "unmeasured" at the cap.
+  Raised to 500 and the "Observed in last 30d" KPI now shows "(lower bound)" at the cap, mirroring the
+  Declared-dependents truncation note.
+
 ## 4.368.0 - Alerting-layer bug hunt: V110 + V111 + V112 (2026-08-30)
 
 Adversarial pass over the alerting layer (6 finders: rule thresholds, dedupe/refire/snooze, routing/
