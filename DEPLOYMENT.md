@@ -128,6 +128,8 @@ snowflake/migrations/V109__warehouse_change_scan_fail_token.sql
 snowflake/migrations/V110__alerting_hunt_sp_alert_scan_fixes.sql
 snowflake/migrations/V111__cost_budget_pace_completed_days.sql
 snowflake/migrations/V112__daily_digest_skips_paging_routes.sql
+snowflake/migrations/V113__incident_timeline_task_fail_completed_time.sql
+snowflake/migrations/V114__anomaly_sweep_after_daily_loader.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

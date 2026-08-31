@@ -1,5 +1,45 @@
 # Changelog
 
+## 4.371.0 - Data-loader/ETL bug hunt: 2 app-side fixes + V113 + V114 (2026-08-30)
+
+Adversarial pass over the data-loader/ETL layer (6 finders: incremental merge/dedup, window/watermark,
+mart-vs-reader derivation, metering arms, loader robustness, schedule/freshness). Eight surfaced, six
+confirmed, two refuted (FACT_AI_USAGE freshness staleness and TASK_INCIDENT_AUTODECLARE chaining are
+both working as designed). Four fixes ship here; three are deferred with a documented rationale.
+
+- **[MED] backfill_365 collapses task auto-retries** — the one-time year backfill's `FACT_TASK_DAILY`
+  arm aggregated raw `TASK_HISTORY` with no terminal-attempt dedup, while the standing loader
+  `SP_LOAD_DAILY_FACTS` was fixed to collapse retries in V101. So a task that failed then succeeded on
+  an auto-retry was backfilled as `RUNS=2 / FAILED=1` (phantom failure) on historical days while the
+  trailing V101-loaded days showed `RUNS=1 / FAILED=0` — a drift across the day boundary that inflated
+  YoY task-failure trends. The backfill now applies the same terminal-attempt `QUALIFY` CTE. (Repo
+  script; not a numbered migration.)
+- **[LOW] ops_diag mart readers are day-aligned** — `ops_diag_top_queries` / `ops_diag_failures`
+  windowed on the rolling `CURRENT_TIMESTAMP()` while their live twins use the day-aligned
+  `CURRENT_DATE()`, so the mart-first path covered a shorter window than the live fallback. Aligned to
+  `CURRENT_DATE()` (as `role_hourly` / `schema_window_summary` already are).
+- **V113 — [MED] incident-timeline TASK_FAIL uses COMPLETED_TIME** (deferred from the incident hunt):
+  the `MART_INCIDENT_TIMELINE` TASK_FAIL arm in `SP_LOAD_MARTS_V27` selected and bounded on
+  `QUERY_START_TIME`, but the live reader `incident_timeline` uses `COMPLETED_TIME`, so the same task
+  failure appeared at different instants on the 48h live vs 7d mart correlation-timeline paths (shifted
+  by the run duration), which can invert cause/effect ordering. Re-derived from V103 with the arm on
+  `COMPLETED_TIME` (the failure's instant, matching the reader).
+- **V114 — [LOW] anomaly sweep runs after the daily loader** — `TASK_ANOMALY_SWEEP` fired at 06:40,
+  five minutes *before* `TASK_LOAD_DAILY` (06:45), so `SP_ANOMALY_SWEEP`'s account/service arm scanned
+  yesterday's `FACT_METERING_DAILY` and detected a credit spike a day late. Cron moved to 07:00.
+
+**Deferred (documented, for a focused follow-up):**
+- **[MED] `SP_LOAD_APP_COST` / [LOW] `SP_LOAD_STORAGE_TRUTH` DELETE+INSERT transaction-wrapping** — a
+  mid-INSERT failure erases the reloaded window and leaves the fact empty until the next scheduled run
+  repopulates it. The correct fix (wrap in `BEGIN TRANSACTION … COMMIT` with `EXCEPTION … ROLLBACK`,
+  mirroring `SP_LOAD_OBJECT_COST`) introduces new control-flow SQL that CI cannot validate, so it
+  warrants a tested pass; the tables self-heal on the next load in the meantime.
+- **[MED] warehouse-efficiency `IDLE_PCT` hour-vs-credit weighting** — the mart stores an hour-count
+  idle fraction while the live sizing/idle twins compute a credit-weighted one, so a multi-cluster
+  warehouse's right-sizing verdict can flip mart-first vs live. The correct fix stores a
+  credit-weighted idle column in the mart (a coordinated schema + loader + reader change) and is
+  deferred to its own pass; both current values are bounded idle-share estimates.
+
 ## 4.370.0 - Cross-surface reconciliation audit: 3 app-side fixes (2026-08-30)
 
 Cross-surface reconciliation audit (6 finders pairing surfaces that should agree). Eight surfaced,

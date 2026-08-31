@@ -410,6 +410,15 @@ _EXPECTED_MIGRATIONS = {
          "also excludes CRITICAL-only routes (paging targets), so a CRITICAL -> PagerDuty route no longer "
          "receives the executive morning digest (DELIVER_DIGEST defaults TRUE and Snowflake cannot ALTER "
          "that default). Proc only, no schema change",
+    113: "Incident timeline TASK_FAIL uses COMPLETED_TIME: SP_LOAD_MARTS_V27 re-derived from V103 so the "
+         "MART_INCIDENT_TIMELINE TASK_FAIL arm selects and bounds on COMPLETED_TIME instead of "
+         "QUERY_START_TIME, matching the live reader mart_sql.incident_timeline, so the same task failure "
+         "no longer appears at different instants on the 48h live vs 7d mart correlation-timeline paths. "
+         "Everything else byte-identical. Proc only, no schema change",
+    114: "Anomaly sweep after the daily loader: TASK_ANOMALY_SWEEP cron moved from 06:40 to 07:00 so it "
+         "runs after TASK_LOAD_DAILY (06:45) refreshes FACT_METERING_DAILY -- SP_ANOMALY_SWEEP's account/"
+         "service arm no longer scans yesterday's metering and detects a credit spike a day late. "
+         "Schedule-only change (SUSPEND/SET SCHEDULE/RESUME); no proc, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

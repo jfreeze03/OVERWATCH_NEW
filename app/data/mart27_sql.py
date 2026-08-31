@@ -1115,7 +1115,7 @@ def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50) -> st
     limit = max(1, min(int(limit), 500))
     where = and_where(
         "d.KIND = 'TOP_ELAPSED'",
-        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
         _company_arm(company, "d.COMPANY"),
     )
     return f"""
@@ -1128,7 +1128,7 @@ SELECT
     d.SPILL_REMOTE_GB, d.QUERY_PREVIEW
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
-  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_TIMESTAMP())
+  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
 ORDER BY d.ELAPSED_SEC DESC
 LIMIT {limit}
 """
@@ -1143,7 +1143,7 @@ def ops_diag_failures(days: int, company: str = "ALL") -> str:
     days = bounded_days(days, 90)
     where = and_where(
         "d.KIND = 'FAIL_FAMILY'",
-        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
         _company_arm(company, "d.COMPANY"),
     )
     return f"""
@@ -1158,7 +1158,7 @@ SELECT
     MAX(d.LAST_SEEN) AS LAST_SEEN
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
-  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_TIMESTAMP())
+  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
 GROUP BY d.ERROR_CODE, d.ERROR_MESSAGE
 ORDER BY FAILURES DESC
 LIMIT 50
