@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import timedelta
 
 import streamlit as st
@@ -2482,13 +2483,18 @@ def render() -> None:
     # platform-score input mart (query/task failures, warehouse queueing, spill) + stale
     # sources; both are mart-backed / shell-shared (health_strip hits the same warm cache
     # entry main.py loaded), so this stays cheap under the lazy sections below.
-    _si = run_mart_first(
-        mart27_sql.platform_score_inputs(30), mart_sql.score_inputs_daily(30),
-        page=_PAGE, key="score_inputs", mart_tier="hourly", live_tier="hourly",
-        mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
-        live_source="facts (retro score inputs, live fallback)")
-    _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
-              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    # Wave 1 #48: name the cold-load so a slow first paint reads as progress, not a hang
+    # (the same hasattr-guarded st.status pattern Control Room / Spend / Security use).
+    _ops_load = (st.status("Reading Operations health…", expanded=False)
+                 if hasattr(st, "status") else contextlib.nullcontext())
+    with _ops_load:
+        _si = run_mart_first(
+            mart27_sql.platform_score_inputs(30), mart_sql.score_inputs_daily(30),
+            page=_PAGE, key="score_inputs", mart_tier="hourly", live_tier="hourly",
+            mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
+            live_source="facts (retro score inputs, live fallback)")
+        _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
+                  source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
     _stale = 0
     if _hs.ok and not _hs.empty:
         _sr = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]

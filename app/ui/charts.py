@@ -333,7 +333,14 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
         )
         aria = html.escape(details, quote=True)
         critical_path = str(row.get("CRITICAL_PATH") or "").lower() == "true"
-        node_class = "node critical-path" if critical_path else "node"
+        # F36: tag the two subsets the "Fit failures"/"Fit critical path" toolbar
+        # buttons frame. `failed` mirrors the red hue _task_node_style assigns to
+        # any failing state (selected-run or recent), so the class can't drift.
+        node_class = "node"
+        if critical_path:
+            node_class += " critical-path"
+        if color == palette.BAD:
+            node_class += " failed"
         search_text = html.escape(fqn.lower(), quote=True)
         node_markup.append(
             f'<g class="{node_class}" transform="translate({x:.1f} {y:.1f})" tabindex="0" '
@@ -406,7 +413,7 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
   border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.35);
 }
 .dag-toolbar input {
-  width: 190px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
+  width: 158px; height: 32px; padding: 0 9px; border: 1px solid rgba(148,163,184,.32);
   border-radius: 5px; background: #111827; color: #f8fafc; font: 500 12px Inter, sans-serif;
 }
 .dag-toolbar input:focus-visible { outline: 2px solid #60a5fa; outline-offset: 1px; }
@@ -417,6 +424,8 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
 }
 .dag-toolbar button:hover { border-color: #60a5fa; background: #243244; }
 .dag-toolbar button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+.dag-toolbar button:disabled { opacity: .38; cursor: not-allowed; border-color: rgba(148,163,184,.2); }
+.dag-toolbar button.frame { min-width: auto; }
 svg {
   width: 100%; height: __HEIGHT__px; display: block; cursor: grab;
   touch-action: none; user-select: none;
@@ -468,6 +477,10 @@ svg.dragging { cursor: grabbing; }
     <button id="zoomIn" title="Zoom in" aria-label="Zoom in">+</button>
     <button id="zoomOut" title="Zoom out" aria-label="Zoom out">-</button>
     <button id="fit" title="Fit graph" aria-label="Fit graph">Fit</button>
+    <button id="fitFail" class="frame" title="Frame the failed tasks"
+            aria-label="Frame the failed tasks">Failed</button>
+    <button id="fitCrit" class="frame" title="Frame the critical path"
+            aria-label="Frame the critical path">Critical</button>
     <button id="full" title="Full screen" aria-label="Full screen">Full</button>
     <button id="download" title="Download SVG" aria-label="Download SVG">SVG</button>
   </div>
@@ -526,6 +539,30 @@ svg.dragging { cursor: grabbing; }
     ty = (height - graphHeight * scale) / 2;
     apply();
   };
+  // F36: frame an arbitrary subset of nodes (failures, critical path) the same
+  // way Fit frames the whole graph — bbox of the subset, centered with margin.
+  const NODE_W = 238;
+  const NODE_H = 76;
+  const fitNodes = nodes => {
+    if (!nodes.length) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    nodes.forEach(node => {
+      const x = Number(node.dataset.x);
+      const y = Number(node.dataset.y);
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x + NODE_W);
+      maxY = Math.max(maxY, y + NODE_H);
+    });
+    const boxW = Math.max(maxX - minX, 1);
+    const boxH = Math.max(maxY - minY, 1);
+    const width = Math.max(svg.clientWidth, 1);
+    const height = Math.max(svg.clientHeight, 1);
+    scale = clamp(Math.min((width - 80) / boxW, (height - 80) / boxH));
+    tx = width / 2 - (minX + boxW / 2) * scale;
+    ty = height / 2 - (minY + boxH / 2) * scale;
+    apply();
+  };
   const zoomAt = (factor, x = svg.clientWidth / 2, y = svg.clientHeight / 2) => {
     const next = clamp(scale * factor);
     const ratio = next / scale;
@@ -571,6 +608,16 @@ svg.dragging { cursor: grabbing; }
   document.getElementById("zoomIn").addEventListener("click", () => zoomAt(1.25));
   document.getElementById("zoomOut").addEventListener("click", () => zoomAt(0.8));
   document.getElementById("fit").addEventListener("click", fit);
+  // F36: wire the subset-frame buttons; a graph with no failures (or no known
+  // critical path) disables its button rather than offering a dead click.
+  const failedNodes = graphNodes.filter(node => node.classList.contains("failed"));
+  const criticalNodes = graphNodes.filter(node => node.classList.contains("critical-path"));
+  const fitFail = document.getElementById("fitFail");
+  const fitCrit = document.getElementById("fitCrit");
+  fitFail.disabled = failedNodes.length === 0;
+  fitCrit.disabled = criticalNodes.length === 0;
+  fitFail.addEventListener("click", () => fitNodes(failedNodes));
+  fitCrit.addEventListener("click", () => fitNodes(criticalNodes));
   document.getElementById("full").addEventListener("click", async () => {
     if (!document.fullscreenElement && host.requestFullscreen) {
       await host.requestFullscreen();
@@ -1368,6 +1415,39 @@ def _fmt_metric_value(v: object, unit: str) -> str:
     # the sign leads the unit prefix: a negative balance reads "-$1,234", not "$-1,234".
     sign = "-" if f < 0 else ""
     return f"{sign}{pre}{abs(f):,.{dec}f}{suf}"
+
+
+def budget_burndown_chart(df: pd.DataFrame, *, day_col: str = "DAY",
+                          actual_col: str = "CUM_ACTUAL_USD",
+                          budget_col: str = "BUDGET_LINE_USD") -> None:
+    """Cumulative spend vs the straight-line budget in the house Altair grammar
+    (USD tooltips, a labelled dashed budget line, themed axes) — replaces the last
+    raw st.line_chart so this exec/CFO chart matches every other (Wave 1 #31). The
+    endpoint variance is stated in the caller's caption beneath it."""
+    data = df[[day_col, actual_col, budget_col]].copy().reset_index(drop=True)
+    data.columns = ["Day", "Actual", "Budget"]
+    data["Day"] = pd.to_datetime(data["Day"], errors="coerce")
+    long = data.melt("Day", ["Actual", "Budget"], var_name="Series", value_name="Value")
+    long["_Label"] = long["Value"].map(lambda v: _fmt_metric_value(v, "usd"))
+    lines = (
+        _base(long)
+        .mark_line()
+        .encode(
+            x=alt.X("Day:T", title=None, axis=_day_axis(long["Day"])),
+            y=alt.Y("Value:Q", title="Cumulative USD",
+                    axis=alt.Axis(format=_METRIC_AXIS_FMT["usd"])),
+            color=alt.Color("Series:N",
+                            scale=alt.Scale(domain=["Actual", "Budget"],
+                                            range=[palette.ACCENT, palette.INK_MUTE]),
+                            legend=alt.Legend(orient="top", title=None)),
+            strokeDash=alt.StrokeDash("Series:N",
+                                      scale=alt.Scale(domain=["Actual", "Budget"],
+                                                      range=[[1, 0], [6, 3]]),
+                                      legend=None),
+            tooltip=["Day:T", "Series:N", alt.Tooltip("_Label:N", title="USD")],
+        )
+    )
+    st.altair_chart(lines.properties(height=CHART_H_SM), width="stretch")
 
 
 def daily_metric_line(df: pd.DataFrame, day_col: str, value_col: str,

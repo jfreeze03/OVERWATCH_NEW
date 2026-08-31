@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import pandas as pd
 import streamlit as st
 
@@ -619,8 +621,13 @@ def _scorecard(company: str, rate: float) -> None:
                "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
                "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
 
-    ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
-                 tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
+    # Wave 1 #48: name the heaviest Decision Studio cold-load (the full proof ledger)
+    # so a slow first paint reads as progress, not a hang (hasattr-guarded st.status).
+    _sc_load = (st.status("Reading the proof ledger…", expanded=False)
+                if hasattr(st, "status") else contextlib.nullcontext())
+    with _sc_load:
+        ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
+                     tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
     if not ledger.ok:
         empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
         return

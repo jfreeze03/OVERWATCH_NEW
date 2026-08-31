@@ -121,6 +121,30 @@ def test_task_graph_workbench_has_dependency_free_pan_zoom_and_exports():
     assert "<script src" not in markup and "https://" not in markup
 
 
+def test_task_graph_can_frame_failures_and_critical_path():
+    # F36: two subset-fit controls jump the viewport to just the failures or just
+    # the critical path — an operator opening a large graph shouldn't hunt for them.
+    frame = pd.DataFrame(
+        [
+            {"TASK_FQN": "DB.OPS.ROOT", "PREDECESSORS": [], "STATE": "started",
+             "WAREHOUSE_NAME": "ETL_WH", "SCHEDULE": None, "RECENT_FAILURES": 0},
+            {"TASK_FQN": "DB.OPS.LOAD", "PREDECESSORS": '["DB.OPS.ROOT"]', "STATE": "failed",
+             "WAREHOUSE_NAME": "ETL_WH", "SCHEDULE": None, "RECENT_FAILURES": 3},
+        ]
+    )
+    shape = inspect_task_graph(frame["TASK_FQN"], frame["PREDECESSORS"])
+    markup = _task_dag_markup(frame, shape, height=640)
+    for control in ("fitFail", "fitCrit"):
+        assert f'id="{control}"' in markup
+    # the failing task carries the `failed` class the frame-failures button selects on
+    assert " failed\"" in markup
+    # subset framing reuses one bbox helper, and an empty subset disables its button
+    assert "const fitNodes" in markup
+    assert "fitFail.disabled = failedNodes.length === 0" in markup
+    assert "fitCrit.disabled = criticalNodes.length === 0" in markup
+    assert "button:disabled" in markup
+
+
 def test_operations_refuses_partial_or_invalid_graphs_before_rendering():
     source = _src("app/ui/pages/operations.py")
     sql = ops_sql.task_graph_nodes()

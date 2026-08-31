@@ -33,15 +33,11 @@ _LIGHT_EQUIV = {
 
 
 def _theme_is_light() -> bool:
-    try:
-        import streamlit as _st
-
-        ctx_theme = getattr(getattr(_st, "context", None), "theme", None)
-        if ctx_theme is not None and getattr(ctx_theme, "type", None):
-            return str(ctx_theme.type).lower() == "light"
-        return str(_st.get_option("theme.base") or "").lower() == "light"
-    except Exception:  # noqa: BLE001 - theming is cosmetic; default to dark pairs
-        return False
+    # Wave 1 #45: the app is committed to dark (theme.py forces the app surfaces dark
+    # regardless of the viewer's Streamlit base theme), so tables never adapt to light
+    # -- that half-done light path was the "light cells inside dark cards" contradiction.
+    # _LIGHT_EQUIV is kept parked for a future complete-light effort, not used today.
+    return False
 
 STATUS_COLOR_MAP = {
     # severities

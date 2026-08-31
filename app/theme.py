@@ -47,6 +47,13 @@ _TOKENS = """
 
 _CSS = """
 <style>
+/* Wave 1 #45: commit to dark. The design tokens are dark-only, so force the app
+   surfaces dark regardless of the viewer's Streamlit base theme — a light base
+   otherwise painted a light page behind the dark cards (and status_colors is
+   retired from adapting tables to light in lockstep). Degrades harmlessly if a
+   test-id shifts (the rule just stops matching). */
+[data-testid="stAppViewContainer"], [data-testid="stHeader"], .stApp { background:var(--ow-bg) !important; }
+[data-testid="stSidebar"], [data-testid="stSidebarContent"] { background:var(--ow-surface) !important; }
 .block-container { padding-top:1.1rem; padding-bottom:2.4rem; max-width:1360px; }
 .main .block-container > div { gap:0.55rem; }
 html, body, [class*="css"] { font-family:var(--ow-font); }

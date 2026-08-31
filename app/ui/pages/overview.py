@@ -767,7 +767,7 @@ def render() -> None:
         _burn = budget_burndown(_burn_src, budget, account_today())
         if len(_burn) >= 2:
             st.markdown("**Budget burndown — cumulative spend vs the straight-line budget**")
-            st.line_chart(_burn.set_index("DAY")[["CUM_ACTUAL_USD", "BUDGET_LINE_USD"]])
+            charts.budget_burndown_chart(_burn)   # Wave 1 #31: house Altair grammar, not raw st.line_chart
             _last = _burn.iloc[-1]
             _gap = float(_last["CUM_ACTUAL_USD"]) - float(_last["BUDGET_LINE_USD"])
             st.caption(md_dollars(

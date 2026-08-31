@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.385.0 - UI review Wave 1: chart, theme & cold-load (2026-08-31)
+
+The final Wave-1 batch — chart clarity, one committed theme, and named cold-loads.
+
+- **[#31] Budget burndown as a real chart.** The Overview budget-pace panel was a bare `st.line_chart` of
+  cumulative-actual vs the budget line — no currency formatting, no legend semantics. It now renders through
+  a dedicated `charts.budget_burndown_chart`: USD-formatted tooltips and axis, an accent actual line against
+  a muted dashed budget guide, so over/under-pace reads at a glance.
+- **[#36] Frame failures / critical path on the task graph.** The interactive DAG could pan and zoom but an
+  operator opening a large graph still had to hunt for the failures. Two toolbar buttons now jump the
+  viewport to just the failed tasks or just the critical path (a shared subset-bbox fit that reuses the
+  whole-graph fit math); each disables itself when its subset is empty. Failed nodes carry a `failed` class
+  derived from the same red hue they already paint, so the framing can't disagree with what's on screen.
+- **[#45] Commit to the dark surface.** A half-finished light path let some table cells adapt toward light
+  while their cards stayed dark — a "light inside dark" contradiction under a light Streamlit base theme.
+  The app now forces its own surfaces dark (`theme.py`) and tables no longer adapt (`_theme_is_light()` →
+  False); the light palette is parked, not deleted, for a future complete-light effort.
+- **[#48] Name the heaviest cold-loads.** Operations (verdict input reads) and Decision Studio (the full proof
+  ledger) wrap their heaviest first-paint reads in a `st.status` line, so a slow cold load reads as progress
+  rather than a hung page (both `hasattr`-guarded for older Streamlit).
+
 ## 4.384.0 - UI review Wave 1: shell & verdict (2026-08-31)
 
 Three shell/verdict Wave-1 items.
