@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.365.0 - Decision Studio bug hunt #1: 5 app-side fixes (2026-08-30)
+
+First adversarial pass over the Decision Studio layer (6 finders: action-queue economics, ROI/
+realization/proof, scenario projection, DS scoping/freshness, ranking/surfacing, narrative
+consistency). Six findings confirmed, zero refuted (two finders independently surfaced the same
+`slo_summary` stale-burn bug). All five distinct fixes are app-side — no migration.
+
+- **Proof verdict surfaces the "precision not trustworthy" caveat (MED)** — `proof_verdict` composes
+  its four low-signal checks (ROI, realization, precision, acceptance) by appending a reason *and*
+  setting `level='watch'`, but the high-unlabeled-share check appended its reason without the
+  `level='watch'`. Because the green "good" headline is built from `bits` (which cites the precision
+  number) and never renders `reasons`, a high unlabeled share alone left the flagship verdict
+  headlining the precision figure as proof while silently dropping the caveat that the precision
+  itself isn't trustworthy. It now downgrades to `watch` like every other signal, so the caveat
+  reaches the one-line go/no-go verdict.
+- **SLO worst-burn alarm respects the STALE verdict-withholding (MED)** — `slo_summary` computed
+  `worst_burn` and `has_burn` over *all* objectives, but the cockpit SQL still emits a stale
+  objective's last-known `BURN_MULTIPLE` even though its MET/BREACH verdict is deliberately withheld
+  (>2-day-old evidence). So a stalled loader whose last reading was below target fired a red "error-
+  budget breach" reliability alarm off evidence the same panel labels STALE and refuses to judge —
+  sending on-call to chase a phantom breach. `worst_burn`/`has_burn` are now scoped to MET/BREACH
+  rows only.
+- **"Consumer reach" is labeled honestly (MED)** — the DS ▸ Products KPI summed each product's
+  `DISTINCT_CONSUMERS` (a per-product `COUNT(DISTINCT USER_NAME)`) and labeled the result "Consumers
+  served — distinct accounts", but summing per-product distinct counts double-counts any account that
+  reads more than one product (3 products × the same 100 analysts → "300"). Relabeled to "Consumer
+  reach" with help stating it is the sum of each product's distinct readers (can exceed the count of
+  unique accounts); `$/consumer`, computed per-product, was already correct and is unaffected.
+- **Scenario projection distinguishes "unpriced" from "$0.00" (LOW)** — `_scenarios` gated its dollar
+  KPIs on `candidates > 0`, so a queue of eligible-but-unpriced actions (security decisions carry no
+  dollar estimate) rendered "Gross authored estimate: $0.00 / Expected capture: $0.00" — reading as
+  "worth nothing" when the dollars are unquantified. The KPIs now show "Unpriced" when candidates
+  exist but the gross estimate is zero.
+- **Scenario projection discloses the 500-action fetch cap (LOW)** — `_scenarios` projects from
+  `action_center(..., 500)` but showed no cap banner, so a >500-action queue's projection under-counted
+  silently (the sibling Portfolio board already discloses its cap). A caption now fires at the cap.
+
 ## 4.364.0 - Cost-layer bug hunt #6: V108 (contract-breach false all-clear) (2026-08-30)
 
 Sixth adversarial pass over the cost layer, this round aimed at the least-swept slices (storage

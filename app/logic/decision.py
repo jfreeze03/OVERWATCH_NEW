@@ -160,7 +160,13 @@ def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
     raw_burn = pd.to_numeric(
         frame.get("BURN_MULTIPLE", pd.Series(dtype="float64")), errors="coerce"
     )
-    burn = raw_burn.fillna(0.0)
+    # #11: an objective evaluated off STALE (or NO_DATA) mart evidence is neither MET nor BREACHED —
+    # its verdict is deliberately withheld. But the cockpit SQL still emits its last-known
+    # BURN_MULTIPLE, so the worst-burn KPI and the reliability alarm must be scoped to the same
+    # evaluated set, or a stalled loader fires a red "error-budget breach" off evidence the panel
+    # elsewhere refuses to judge (ds-hunt 2026-08-30). Only MET/BREACH rows drive the burn signals.
+    _evaluated = status.isin(("MET", "BREACH"))
+    burn_eval = raw_burn.where(_evaluated)
     return {
         "total": float(len(frame)),
         "met": float(status.eq("MET").sum()),
@@ -168,9 +174,9 @@ def slo_summary(frame: pd.DataFrame | None) -> dict[str, float]:
         "no_data": float(status.eq("NO_DATA").sum()),
         # #11: objectives evaluated off stale mart evidence are neither met nor breached.
         "stale": float(status.eq("STALE").sum()),
-        "worst_burn": round(float(burn.max()), 2),
+        "worst_burn": round(float(burn_eval.fillna(0.0).max()), 2),
         # #10: error-budget burn only applies to SUCCESS_PCT objectives (NULL for
-        # latency/P95). has_burn is False when no objective carries a burn, so the UI
-        # shows "n/a" instead of a misleading 0.00x.
-        "has_burn": float(raw_burn.notna().any()),
+        # latency/P95). has_burn is False when no EVALUATED objective carries a burn, so the UI
+        # shows "n/a" instead of a misleading 0.00x or a stale-only alarm.
+        "has_burn": float(burn_eval.notna().any()),
     }

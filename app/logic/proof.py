@@ -121,6 +121,11 @@ def proof_verdict(roi: dict, realization_pct: float | None, acceptance_pct: floa
         level = "watch"
     if precision.get("UNTAGGED_SHARE_PCT", 0) > _MAX_UNTAGGED_SHARE:
         reasons.append(f"{precision['UNTAGGED_SHARE_PCT']:.0f}% of alerts unlabeled — precision not yet trustworthy")
+        # Downgrade to watch like every other signal: the 'good' headline is composed from `bits`
+        # (which cites the precision number) and never renders `reasons`, so without this the caveat
+        # that precision itself isn't trustworthy would be silently dropped and the flagship verdict
+        # would headline that untrustworthy precision as proof (ds-hunt 2026-08-30).
+        level = "watch"
 
     if level == "good":
         bits = []

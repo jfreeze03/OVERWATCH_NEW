@@ -427,13 +427,19 @@ def _products(company: str, days: int, rate: float) -> None:
                        "(recent-read ingestion lag, or none were read) — verdicts show "
                        "INSUFFICIENT_DATA because usage couldn't be measured, not because it's zero.")
         _retire = int((verdicts["RETIREMENT_VERDICT"] == "RETIRE_CANDIDATE").sum())
-        _served = int(safe_float(verdicts.get("DISTINCT_CONSUMERS", pd.Series(dtype=float)).sum()))
+        # This is the SUM of each product's distinct readers (DISTINCT_CONSUMERS is a per-product
+        # COUNT(DISTINCT USER_NAME)), so an account that reads several of these products is counted
+        # once PER product -- it is a total reach figure, not a union-distinct account count. The KPI
+        # is labeled and helped as reach accordingly, not as "distinct accounts" (ds-hunt 2026-08-30).
+        _reach = int(safe_float(verdicts.get("DISTINCT_CONSUMERS", pd.Series(dtype=float)).sum()))
         _cpc = verdicts["COST_PER_CONSUMER_USD"].dropna()
         kpi_row([
-            {"label": "Consumers served", "value": f"{_served:,}" if _measured else "—",
-             "help": "Distinct accounts that read these products' objects in the cost window "
-                     "(any read, incl. service/pipeline; write-only ETL excluded). Blank when "
-                     "consumer reach can't be measured (no Enterprise ACCESS_HISTORY)."},
+            {"label": "Consumer reach", "value": f"{_reach:,}" if _measured else "—",
+             "help": "Total product-consumer reach in the cost window: the sum of each product's "
+                     "distinct readers, so an account reading several of these products counts once "
+                     "per product (this can exceed the number of unique accounts). Any read, incl. "
+                     "service/pipeline; write-only ETL excluded. Blank when reach can't be measured "
+                     "(no Enterprise ACCESS_HISTORY)."},
             {"label": "Median $/consumer",
              "value": format_usd(float(_cpc.median())) if not _cpc.empty else "—",
              "help": "Object-attributed cost per distinct consumer. Blank when no product has consumers."},
@@ -799,16 +805,35 @@ def _scenarios(company: str) -> None:
         confidence_floor=confidence,
     )
     has_candidates = projection["candidates"] > 0
+    # Distinguish "no eligible entities" from "eligible but UNPRICED": scenario_projection counts an
+    # action as a candidate on status + confidence alone, so a queue of eligible-but-unpriced actions
+    # (e.g. security decisions carry no dollar estimate) yields candidates > 0 with gross == 0.
+    # Rendering that as "$0.00" reads as "worth nothing" when the dollars are unquantified, not zero
+    # (ds-hunt 2026-08-30).
+    _priced = has_candidates and projection["gross_estimate"] > 0
+
+    def _capture(value: float) -> str:
+        if not has_candidates:
+            return "No evidence"
+        return format_usd(value) if _priced else "Unpriced"
+
     kpi_row([
         {"label": "Eligible entities", "value": f"{projection['candidates']:,.0f}"},
-        {"label": "Gross authored estimate",
-         "value": format_usd(projection["gross_estimate"]) if has_candidates else "No evidence"},
+        {"label": "Gross authored estimate", "value": _capture(projection["gross_estimate"])},
         {"label": "Expected capture",
-         "value": format_usd(projection["expected_capture"]) if has_candidates else "No evidence",
+         "value": _capture(projection["expected_capture"]),
          "delta": (f"{format_usd(projection['low_capture'])} to "
-                   f"{format_usd(projection['high_capture'])}") if has_candidates else None,
+                   f"{format_usd(projection['high_capture'])}") if _priced else None,
          "delta_color": "off"},
     ])
+    # Disclose the fetch cap so a >500-action queue's projection is not read as complete (the sibling
+    # _portfolio board discloses its own cap the same way). The lowest-severity/lowest-$ actions are
+    # the ones dropped by the ORDER BY (ds-hunt 2026-08-30).
+    if len(actions.df) >= 500:
+        st.caption(
+            "Projecting the top 500 open actions by severity, then overdue, then estimate — more "
+            "exist in this scope; narrow the Company to bring the rest into the projection."
+        )
     st.caption(
         "Open action estimates are de-duplicated by entity, then adoption and realization "
         "haircuts are applied. Estimates are summed at face value across time bases "

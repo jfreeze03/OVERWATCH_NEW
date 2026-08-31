@@ -44,7 +44,10 @@ def test_no_evidence_is_not_rendered_as_a_healthy_zero() -> None:
     # healthy $0 verified total), and realization reads "—" until something is verified.
     assert 'if not ledger.ok:\n        empty_state("needs_setup"' in studio
     assert '(f"{_real:,.0f}%" if _real is not None else "—")' in studio
-    assert 'if has_candidates else "No evidence"' in studio
+    # v4.365 (ds-hunt): the no-candidate state still reads "No evidence" (not a healthy $0), and an
+    # eligible-but-unpriced queue now reads "Unpriced" rather than a misleading $0.00.
+    assert 'return "No evidence"' in studio
+    assert 'return format_usd(value) if _priced else "Unpriced"' in studio
     assert _optional_number(None, "%") == "n/a"
     assert _optional_number(float("nan"), "%") == "n/a"
 
