@@ -2018,9 +2018,12 @@ SELECT
     (SELECT COUNT(*) FROM {core_object("REMEDIATION_LOG")}
       WHERE EXECUTED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
         AND STATUS = 'FAILED') AS FIXES_FAILED,
+    -- Funnel TOP = every item booked with an estimate in the window, regardless of its CURRENT state.
+    -- STATE is a snapshot, so counting only STATE='ESTIMATED' excluded items that have since been
+    -- verified/rejected and let the "N estimated -> M verified" funnel show verified > estimated. Every
+    -- ledger item enters as an estimate, so all CREATED_AT-in-window rows are the true entry (ds-hunt).
     (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
-      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
-        AND STATE = 'ESTIMATED') AS SAVINGS_ESTIMATED,
+      WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS SAVINGS_ESTIMATED,
     (SELECT COUNT(*) FROM {core_object("SAVINGS_LEDGER")}
       WHERE CREATED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
         AND STATE = 'VERIFIED') AS SAVINGS_VERIFIED,

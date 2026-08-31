@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.366.0 - Decision Studio bug hunt #2: 5 app-side fixes (2026-08-30)
+
+Second adversarial pass over the Decision Studio layer (6 finders: portfolio/prioritization,
+experiments, cost-truth, SLO editor/config, action-verify/triage, narrative round 2). Nine surfaced,
+five confirmed, four refuted (the experiment-detail notes render in the master table; the error-budget
+dual-signal is deliberate SRE practice; the triage severity path is unreachable given
+`ALERT_EVENTS.SEVERITY NOT NULL` plus canonical seeds; and the "Pays for itself" ratio is genuinely
+horizon-consistent). All five fixes are app-side — no migration.
+
+- **"Needs validation" KPI counts the VALIDATE lane, not a re-derived confidence threshold (MED)** —
+  the Portfolio exception panel derived its tally as `portfolio[CONFIDENCE < 0.5]`, but
+  `prioritize_workloads` also forces `LANE='VALIDATE'` for families with no behavioral evidence
+  (`~has_behavior`), whose run/day/cost `CONFIDENCE` is routinely ≥ 0.5. Those blind-but-costly
+  families — exactly what the KPI should size — were silently omitted, undercounting versus the table
+  and the per-lane cost subtotal. Now counts `LANE == 'VALIDATE'`.
+- **Experiments "Verified"/"Verified value" read an uncapped aggregate (MED)** — `_experiments`
+  computed the Verified count and dollar headline over the LIMIT-300 display frame, so once an account
+  held > 300 experiments the oldest settled VERIFIED rows (which sort past the active-first cap) fell
+  off both totals silently, contradicting the canonical ledger. A new uncapped
+  `experiment_verified_totals()` aggregate now backs those two headlines; the browsable table keeps its
+  300-row cap.
+- **Cost Truth MEASURED excludes the UNATTRIBUTED residual (MED)** — the MEASURED basis summed
+  `FACT_OBJECT_COST_DAILY` where `COST_ARM LIKE 'QUERY_COMPUTE%'`, which also matched the synthetic
+  `QUERY_COMPUTE_RESIDUAL` row (query compute that touched no base object, `COMPANY='UNKNOWN'`). That
+  overstated the "Object-attributed" coverage and, because the residual's company is UNKNOWN, made the
+  basis scope-variant (kept on ALL, dropped per-company) so per-company slices didn't reconcile to the
+  ALL total. Now excludes `OBJECT_FQN='UNATTRIBUTED'`, matching `object_cost_top`.
+- **SUCCESS_PCT SLO target is capped at 100 (LOW)** — the target `number_input` had no `max_value`
+  (unlike the sibling error-budget input), and `create_slo_objective_sql` wrote it unclamped. A
+  fat-fingered target > 100 on a percentage metric can never be met (`CURRENT_VALUE ≤ 100`), producing
+  a permanent, un-clearable false BREACH on a healthy warehouse. The UI now caps success targets at 100
+  and the builder clamps a `*_SUCCESS_PCT` target to `[0, 100]` defensively.
+- **Acceptance funnel top counts all booked-in-window (LOW)** — the funnel's top term
+  (`SAVINGS_ESTIMATED`) counted only rows in the current `STATE='ESTIMATED'` snapshot, disjoint from
+  verified/rejected, so a "N estimated → M verified" funnel could show verified exceeding estimated.
+  Every ledger item enters as an estimate, so the top now counts all items booked in the window.
+
 ## 4.365.0 - Decision Studio bug hunt #1: 5 app-side fixes (2026-08-30)
 
 First adversarial pass over the Decision Studio layer (6 finders: action-queue economics, ROI/

@@ -169,6 +169,19 @@ LIMIT {cap}
 """
 
 
+def experiment_verified_totals() -> str:
+    """Uncapped VERIFIED count + summed VERIFIED_USD over the whole experiments table. The browsable
+    experiments() list is capped (LIMIT 300, active-first) for the master/detail table, so computing
+    the 'Verified' count and 'Verified value' headlines from that capped frame silently dropped the
+    oldest settled VERIFIED experiments once the account holds > 300 -- this aggregate is not capped,
+    so the director-facing totals stay complete (ds-hunt 2026-08-30)."""
+    return f"""
+SELECT COUNT_IF(UPPER(STATUS) = 'VERIFIED') AS VERIFIED_COUNT,
+       ROUND(COALESCE(SUM(IFF(UPPER(STATUS) = 'VERIFIED', VERIFIED_USD, 0)), 0), 2) AS VERIFIED_USD
+FROM {core_object("OPTIMIZATION_EXPERIMENTS")}
+"""
+
+
 def slo_objectives(active_only: bool = True, entity_type: str = "",
                    entity_key: str = "") -> str:
     clauses = ["ACTIVE"] if active_only else []
@@ -689,6 +702,12 @@ WITH billed AS (
     FROM {core_object('FACT_OBJECT_COST_DAILY')}
     WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {fact_scope}
       AND COST_ARM LIKE 'QUERY_COMPUTE%'
+      -- Exclude the synthetic residual arm (OBJECT_FQN='UNATTRIBUTED', COST_ARM=
+      -- 'QUERY_COMPUTE_RESIDUAL', COMPANY='UNKNOWN'): it is query compute that touched no base object,
+      -- so it is NOT object-attributed. Folding it in overstated the 'Object-attributed' coverage and,
+      -- because its COMPANY is UNKNOWN, made MEASURED scope-variant (kept on ALL, dropped per-company)
+      -- so per-company slices did not reconcile to the ALL total. Matches object_cost_top (ds-hunt).
+      AND OBJECT_FQN <> 'UNATTRIBUTED'
 ), allocated AS (
     SELECT SUM(ALLOC_CREDITS) AS CREDITS
     FROM {core_object('MART_COST_ALLOCATION_DAILY')}

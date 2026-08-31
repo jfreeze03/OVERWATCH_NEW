@@ -498,13 +498,19 @@ def create_slo_objective_sql(
     if compare not in (">=", "<="):
         raise ValueError("SLO comparator must be >= or <=")
     horizon = max(1, min(int(window_days or 30), 400))
+    # A SUCCESS_PCT metric's CURRENT_VALUE is 100*(1 - fails/queries), capped at 100, so a target > 100
+    # can never be met -> permanent false BREACH. Clamp defensively even if the UI ceiling is bypassed
+    # (ds-hunt 2026-08-30). A latency (<=) target keeps its open range.
+    clean_target = float(target_value)
+    if str(metric or "").strip().upper().endswith("SUCCESS_PCT"):
+        clean_target = max(0.0, min(clean_target, 100.0))
     return f"""
 INSERT INTO {core_object('SLO_OBJECTIVES')}
     (NAME, ENTITY_TYPE, ENTITY_KEY, METRIC_KEY, COMPARATOR, TARGET_VALUE,
      ERROR_BUDGET_PCT, WINDOW_DAYS, OWNER_NAME, NOTES, UPDATED_BY)
 SELECT {sql_literal(clean_name, 300)}, {sql_literal(kind, 40)},
        {sql_literal(str(entity_key or '').strip(), 500)}, {sql_literal(metric, 160)},
-       {sql_literal(compare, 4)}, {sql_number(float(target_value))},
+       {sql_literal(compare, 4)}, {sql_number(clean_target)},
        {sql_number(max(0.01, min(float(error_budget_pct), 100.0)))}, {horizon},
        {sql_literal(str(owner or ''), 200)}, {sql_literal(str(notes or ''), 4000)},
        {sql_literal(str(actor or ''), 200)}

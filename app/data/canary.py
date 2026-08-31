@@ -230,6 +230,7 @@ CANARIES: tuple[tuple[str, Callable[[], str]], ...] = (
     ("workbench.related_savings", lambda: workbench_sql.related_savings("WH_CANARY", 1)),
     ("workbench.watchlist", lambda: workbench_sql.watchlist("CANARY_VIEWER")),
     ("workbench.experiments", lambda: workbench_sql.experiments(limit=1)),
+    ("workbench.experiment_verified_totals", lambda: workbench_sql.experiment_verified_totals()),
     ("workbench.slo_objectives", lambda: workbench_sql.slo_objectives()),
     ("workbench.entity_metric_snapshot", lambda: workbench_sql.entity_metric_snapshot()),
     ("workbench.workload_portfolio", lambda: workbench_sql.workload_portfolio()),

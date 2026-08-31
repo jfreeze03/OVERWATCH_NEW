@@ -117,7 +117,12 @@ def _portfolio(company: str, days: int, rate: float) -> None:
         )
     act_now = portfolio[portfolio["LANE"].eq("ACT NOW")]
     failure_risk = portfolio[portfolio["FAIL_PCT"].ge(2)]
-    validate = portfolio[portfolio["CONFIDENCE"].lt(0.5)]
+    # Count the VALIDATE LANE itself, not a re-derived confidence<0.5 threshold: prioritize_workloads
+    # also forces LANE=VALIDATE for no-behavioral-evidence families (~has_behavior) whose run/day/cost
+    # CONFIDENCE is routinely >= 0.5, so a confidence filter silently omits exactly the blind-but-costly
+    # families the KPI is meant to size -- and undercounts vs the table + per-lane cost subtotal
+    # (ds-hunt 2026-08-30).
+    validate = portfolio[portfolio["LANE"].eq("VALIDATE")]
     exceptions = []
     if not act_now.empty:
         exceptions.append({
@@ -228,7 +233,12 @@ def _slo_editor() -> None:
         success_metric = metric.endswith("SUCCESS_PCT")
         comparator = ">=" if success_metric else "<="
         target = st.number_input(
-            "Target", min_value=0.0, value=99.0 if success_metric else 60.0,
+            # A SUCCESS_PCT target is a percentage: cap it at 100 (mirroring the error-budget input),
+            # or a fat-fingered target > 100 makes CURRENT_VALUE (<=100) fail the >= test forever -- a
+            # permanent, un-clearable false BREACH on a healthy warehouse (ds-hunt 2026-08-30). A
+            # latency (<=) target has no such ceiling.
+            "Target", min_value=0.0, max_value=100.0 if success_metric else None,
+            value=99.0 if success_metric else 60.0,
             step=0.1, key="slo_new_target",
         )
         error_budget = st.number_input(
@@ -1018,6 +1028,19 @@ def _experiments() -> None:
     frame["AGE_DAYS"] = experiment_age_days(frame, account_now())
     _active = status.isin(("PLANNED", "RUNNING", "OBSERVING"))
     _oldest_active = int(frame.loc[_active, "AGE_DAYS"].max()) if bool(_active.any()) else 0
+    # Verified count + value are all-time totals, so read them from the UNCAPPED aggregate rather than
+    # the LIMIT-300 display frame — else the oldest settled VERIFIED experiments (which sort past the
+    # active-first cap) silently drop from these director-facing headlines (ds-hunt 2026-08-30).
+    _vtot = run(workbench_sql.experiment_verified_totals(), page=_PAGE,
+                key="decision_experiment_totals", tier="recent",
+                source="OPTIMIZATION_EXPERIMENTS (uncapped verified totals)", probe=True)
+    if _vtot.usable():
+        _vrow = _vtot.df.iloc[0]
+        _verified_ct = int(safe_float(_vrow.get("VERIFIED_COUNT")))
+        _verified_usd = safe_float(_vrow.get("VERIFIED_USD"))
+    else:   # fall back to the capped frame if the aggregate read is unavailable
+        _verified_ct = int(status.eq("VERIFIED").sum())
+        _verified_usd = float(frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())
     kpi_row([
         {"label": "Experiments", "value": f"{len(frame):,}"},
         {"label": "Running / observing", "value": f"{status.isin(('RUNNING', 'OBSERVING')).sum():,}"},
@@ -1025,10 +1048,8 @@ def _experiments() -> None:
          "severity": "warn" if _oldest_active >= 30 else "",
          "help": "Longest-running planned/running/observing experiment (days since it was "
                  "created). A long-lived active experiment may be stuck — verify or close it."},
-        {"label": "Verified", "value": f"{status.eq('VERIFIED').sum():,}", "severity": "ok"},
-        {"label": "Verified value",
-         "value": format_usd(
-             frame.loc[status.eq("VERIFIED"), "VERIFIED_USD"].map(safe_float).sum())},
+        {"label": "Verified", "value": f"{_verified_ct:,}", "severity": "ok"},
+        {"label": "Verified value", "value": format_usd(_verified_usd)},
     ])
     # C47: ranked experiments LEFT, the selected editor RIGHT (was stacked).
     # master_detail keys selection on EXPERIMENT_ID (an upgrade over the old
