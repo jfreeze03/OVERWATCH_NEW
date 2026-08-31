@@ -125,6 +125,9 @@ snowflake/migrations/V106__cost_dept_budget_pace_case_insensitive_join.sql
 snowflake/migrations/V107__cost_dept_budget_pace_dept_join_and_pace_window.sql
 snowflake/migrations/V108__cost_contract_breach_fires_when_exhausted.sql
 snowflake/migrations/V109__warehouse_change_scan_fail_token.sql
+snowflake/migrations/V110__alerting_hunt_sp_alert_scan_fixes.sql
+snowflake/migrations/V111__cost_budget_pace_completed_days.sql
+snowflake/migrations/V112__daily_digest_skips_paging_routes.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

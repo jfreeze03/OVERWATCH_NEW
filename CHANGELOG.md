@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.368.0 - Alerting-layer bug hunt: V110 + V111 + V112 (2026-08-30)
+
+Adversarial pass over the alerting layer (6 finders: rule thresholds, dedupe/refire/snooze, routing/
+delivery, severity/escalation/self-alert, alert readers/workflow, security arms). Thirteen surfaced,
+nine confirmed (deduping to six distinct bugs), four refuted (the route COMPANY_FILTER uses a
+controlled two-value vocabulary so there's no organic case divergence; the drawer history count is
+cosmetic; `SEC_BREAK_GLASS_USE` is a retired/deleted config row so its arm is unreachable; the egress
+14-day average is honestly labeled). All six are migration-bearing, shipped as three owner-gated procs.
+
+- **V110 — four `SP_ALERT_SCAN` fixes (re-derived from V107):**
+  - **[MED] `SEC_NEW_ADMIN_NETWORK` now watches the built-in `ACCOUNTADMIN`** — the arm built its
+    watched-admin population from `ROLE IN ('SNOW_ACCOUNTADMINS','SNOW_SYSADMINS')`, omitting the
+    built-in `ACCOUNTADMIN`, so a user granted `ACCOUNTADMIN` *directly* (a pattern the
+    `BREAKGLASS_GRANTS_30D` posture metric tracks) was absent from the join and their first login from
+    a new IP fired no alert — a false all-clear on the account's top-privilege credential. Added
+    `ACCOUNTADMIN` to the role set (the canonical set every sibling path uses).
+  - **[MED] cred-expiry EXPIRING→EXPIRED supersede is no longer a no-op** — V104 made the
+    `SEC_CRED_EXPIRY` dedupe band a *terminal* token (`…|NAME|EXPIRING`), but the escalation-supersede
+    sweep still matched `'|EXPIRING|'` (trailing pipe), which never occurs, so an expired credential
+    stranded a stale EXPIRING event beside the new EXPIRED one forever. Now matches the terminal token.
+  - **[LOW] contract-breach CRIT/WARN→EXHAUSTED supersede** — V108 added the EXHAUSTED band without a
+    matching supersede arm, so a contract escalating to exhausted left the stale CRIT event open. Added
+    `|CRIT|→|EXH|` and `|WARN|→|EXH|` arms.
+  - **[LOW] `PERF_QUERY_FAIL_PCT` DETAIL** interpolated the editable `WINDOW_HOURS` but the counts are
+    over a hardcoded 24h window; the DETAIL now hardcodes "in last 24h" to match the aggregation.
+- **V111 — [LOW] `COST_BUDGET_PACE` completed-days pace window (`SP_ALERT_SCAN_DAILY`, from V108):**
+  the [08] account budget-pace allowance counted today as a fully elapsed day while `MTD_USD` covers
+  only completed days, understating the pace ratio by ~1/D and letting a real early-month overspend
+  stay silent — the account-level sibling of the V107 department-pace fix. Allowance now uses
+  `(DAY_OF_MONTH − 1) / DAYS_IN_MONTH` with a day-1 guard; `MTD_USD` stays month-to-date for the
+  forecast arm.
+- **V112 — [LOW] daily digest skips paging routes (`SP_DAILY_DIGEST`, from V070):**
+  `DELIVER_DIGEST` defaults TRUE and the digest cursor had no severity filter, so a paging route added
+  via the documented CRITICAL → PagerDuty recipe would receive the executive morning digest (paging
+  on-call for a non-incident). Snowflake can't `ALTER` a column default to a literal, so the cursor now
+  also excludes CRITICAL-only routes.
+
 ## 4.367.0 - Operations-layer bug hunt #4: 2 app-side fixes + V109 (2026-08-30)
 
 Fourth adversarial pass over the operations layer (6 finders: query performance/pruning, task/pipeline

@@ -396,6 +396,20 @@ _EXPECTED_MIGRATIONS = {
          "a warehouse setting change that breaks queries no longer reads a false all-clear. Everything "
          "else byte-identical; no schema change, no task re-creation. Proc only; forward-healing on the "
          "next daily TASK_WAREHOUSE_CHANGE_SCAN",
+    110: "Alerting-hunt SP_ALERT_SCAN fixes (re-derived from V107): SEC_NEW_ADMIN_NETWORK adds the "
+         "built-in ACCOUNTADMIN to the watched-admin role set (false all-clear on a directly-granted-"
+         "ACCOUNTADMIN login from a new network); the escalation-supersede sweep matches the terminal "
+         "EXPIRING band token so an expired credential stops stranding a stale EXPIRING event; the sweep "
+         "gains CRIT->EXH and WARN->EXH arms for the V108 contract EXHAUSTED band; PERF_QUERY_FAIL_PCT "
+         "DETAIL hardcodes in-last-24h to match its 24h aggregation. Proc only, no schema change",
+    111: "COST_BUDGET_PACE completed-days pace window: SP_ALERT_SCAN_DAILY re-derived from V108 so the "
+         "[08] account budget-pace allowance uses (DAY_OF_MONTH - 1) / DAYS_IN_MONTH (completed days) "
+         "with a day-1 guard, no longer under-firing early in the month (account-level sibling of the "
+         "V107 dept-pace fix). MTD_USD stays month-to-date for the forecast arm. Proc only, no schema change",
+    112: "Daily digest skips paging routes: SP_DAILY_DIGEST re-derived from V070 so its route cursor "
+         "also excludes CRITICAL-only routes (paging targets), so a CRITICAL -> PagerDuty route no longer "
+         "receives the executive morning digest (DELIVER_DIGEST defaults TRUE and Snowflake cannot ALTER "
+         "that default). Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
