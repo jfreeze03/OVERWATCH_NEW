@@ -30,7 +30,7 @@ LATCHED_FILES = {
     "app/ui/workbench.py": 6,
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,
-    "app/ui/pages/control_room.py": 2,
+    "app/ui/pages/control_room.py": 3,   # +1 v4.375: bulk 'resolve open incidents' reset panel
     "app/ui/decision_studio.py": 2,
     "app/ui/pages/cost.py": 1,
     "app/ui/pages/admin.py": 1,

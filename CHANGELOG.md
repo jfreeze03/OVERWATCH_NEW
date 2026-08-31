@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.375.0 - Control Room: resolve open incidents in one step (2026-08-31)
+
+Adds an operator control on **Control Room ▸ Incidents & triage** to resolve every open
+(OPEN/MITIGATED) incident in the current company scope in one action — the incident-side companion to
+the Alerts "clear the open queue", for resetting the board after pre-production validation.
+
+- Fixes the reported issue where, after clearing the alert queue, Brief and Overview still read
+  **"Attention needed"**: that verdict is a composite, and its remaining driver was **open incidents**
+  (declared/auto-declared from the test alerts) — which clearing *alerts* does not resolve. The alert
+  counts themselves were updating correctly; the incident count wasn't being reset because there was no
+  bulk path for it.
+- The panel uses the uncapped `incident_metrics.OPEN_NOW`, so it covers the whole open set, not just the
+  50-row feed. Forward-only (a reopen is still a new incident with `REOPENED_FROM`); the chosen root
+  cause + note is stamped on each row exactly as a single close records it. Typed-confirm
+  (`CLEAR RESOLVE`), operator-gated, duplicate-click latched.
+- Because the `INCIDENTS` write bumps the `incidents` cache domain, Brief and Overview's open-incident
+  count — and their page verdict — refresh on the next read. App-only; no migration.
+
 ## 4.374.0 - Read-only tier for non-admins (ETL team) (2026-08-31)
 
 Adds a per-viewer **page-visibility** tier so non-admins can see the monitor without any write or

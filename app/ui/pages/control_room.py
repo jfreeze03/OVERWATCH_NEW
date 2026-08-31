@@ -174,6 +174,76 @@ def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     )
 
 
+def _clear_open_incidents_sql(company: str, kind: str, note: str) -> str:
+    """Bulk forward-only close: resolve EVERY open (OPEN/MITIGATED) incident in the
+    current company scope, matched by STATUS + company rather than enumerated ids —
+    so one action clears the whole open set (e.g. resetting after pre-production
+    validation, the incident-side mirror of the Alerts 'clear the open queue').
+
+    Same columns and the same forward-only STATUS guard as _incident_close_sql, so a
+    RESOLVED/reopened row is never rewritten; the resolution is stamped on each row
+    (ROOT_CAUSE_*/RESOLVED_AT) exactly as a single close records it. Company scope
+    keeps that company's rows PLUS account-level (COMPANY='ALL'), the open_incidents
+    convention."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    scope = ""
+    if str(company or "ALL").strip().upper() != "ALL":
+        scope = f"AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL') "
+    return (
+        f"UPDATE {core_object('INCIDENTS')} "
+        f"SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), "
+        f"ROOT_CAUSE_KIND = {sql_literal(str(kind).upper())}, "
+        f"ROOT_CAUSE_NOTE = {sql_literal(str(note)[:2000])}, "
+        "UPDATED_AT = CURRENT_TIMESTAMP() "
+        f"WHERE STATUS IN ('OPEN', 'MITIGATED') {scope}".rstrip() + ";"
+    )
+
+
+def _incident_reset_panel(company: str, open_now: int, is_op: bool) -> None:
+    """Operator control to resolve the open incident set in the current scope in one
+    step — the incident-side companion to the Alerts clear-queue, for resetting the
+    board after pre-production validation. Uses the uncapped OPEN_NOW count so it
+    covers the whole open set, not just the LIMIT-50 feed. The INCIDENTS write bumps
+    the 'incidents' cache domain, so Brief/Overview's open-incident count and their
+    page verdict refresh on the next read."""
+    if not (is_op and open_now > 0):
+        return
+    from app.core.query import execute_statement
+    from app.ui.components import (
+        confirm_gate,
+        log_ui_event,
+        notify,
+        stamp_write,
+        write_gate_open,
+    )
+
+    scope_lbl = ("all companies" if str(company).strip().upper() == "ALL"
+                 else f"{company} + account-level")
+    with st.expander(f"🧹 Resolve open incidents — {open_now:,} open in scope ({scope_lbl})"):
+        st.caption("Resolve the open (OPEN or MITIGATED) incidents in this scope in one step — for "
+                   "resetting the board after pre-production validation. Forward-only (a reopen is a "
+                   "new incident); the root cause below is stamped on each incident row.")
+        kind = st.selectbox("Root cause (applied to all)",
+                            ["UNKNOWN", "DEPLOY", "CONFIG_CHANGE", "DATA", "CAPACITY", "EXTERNAL"],
+                            key=f"inc_clear_kind_{company}")
+        note = st.text_input("Root-cause note (written to each incident)",
+                            value="Bulk cleared — pre-production validation",
+                            key=f"inc_clear_note_{company}", max_chars=500)
+        stmt = _clear_open_incidents_sql(company, kind, note)
+        st.code(stmt, language="sql")
+        key = f"inc_clear_exec_{company}"
+        if (confirm_gate("CLEAR RESOLVE", f"Resolve {open_now:,} open incident(s)", key=key,
+                         prompt=f"Type CLEAR RESOLVE to confirm ({open_now:,} incident(s) in scope)")
+                and write_gate_open(key)):
+            ok, msg = execute_statement(stmt, page=_PAGE)
+            stamp_write(key, ok)  # C48
+            notify(ok, msg if not ok else f"Resolved {open_now:,} open incident(s) in scope.")
+            if ok:
+                log_ui_event("incident_close", page=_PAGE)
+                st.rerun()
+
+
 def _auto_investigation(inc_row, company: str, rate: float) -> None:
     """Incidents that investigate themselves (read-only): for the selected incident,
     assemble the change / task-failure / spend-anomaly / grant signals around its onset
@@ -737,6 +807,7 @@ def render() -> None:
         oi = _live_pf.get("oi") or run(mart_sql.open_incidents(50, company), page=_PAGE,
                  key=f"open_incidents_{company}", tier="live",
                  source=f"INCIDENTS (open + mitigated, {company} + account-level)")
+        _incident_reset_panel(company, _open_now, _is_op)
         if oi.ok and oi.empty:
             empty_state("clean", "No open incidents.")
         elif guard(oi, "", setup_hint="Incident tables are not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness."):
