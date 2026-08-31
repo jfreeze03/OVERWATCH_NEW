@@ -419,6 +419,11 @@ _EXPECTED_MIGRATIONS = {
          "runs after TASK_LOAD_DAILY (06:45) refreshes FACT_METERING_DAILY -- SP_ANOMALY_SWEEP's account/"
          "service arm no longer scans yesterday's metering and detects a credit spike a day late. "
          "Schedule-only change (SUSPEND/SET SCHEDULE/RESUME); no proc, no schema change",
+    115: "Alert supersede includes ACK: SP_ALERT_SCAN re-derived from V110 so the escalation-supersede "
+         "sweep collapses the lower-band event when its higher-band sibling is OPEN or ACK, not OPEN-only "
+         "-- an acknowledged-then-escalated incident (a WARN ACKed then a CRIT raised) no longer "
+         "double-counts as two open alerts with a doubled score penalty. Auto-clear sweep stays "
+         "OPEN-only by design; everything else byte-identical. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.377.0 - V115: alert escalation-supersede includes ACK (2026-08-31)
+
+Migration-bearing fix for the alert-hunt's highest-impact confirmed finding (v4.376.0 shipped the
+app-only ones). `SP_ALERT_SCAN`'s escalation-supersede sweep (V067 #40) collapses a lower-band alert
+when its higher-band sibling exists — but it only fired when **both** sides were `STATUS='OPEN'`.
+
+The open-count convention is `STATUS IN ('OPEN','ACK')` — an acknowledged alert still counts as open.
+So an incident that was **acknowledged and then escalated** (e.g. a WARN gets ACKed, burn worsens, a
+CRIT raises as a new banded event) was never collapsed: the same incident double-counted as **two open
+alerts** and penalized the platform score twice — exactly what the sweep exists to prevent.
+
+- **V115** re-derives `SP_ALERT_SCAN` from V110 (byte-identical except the sweep) and broadens both
+  sides of the supersede match to `STATUS IN ('OPEN','ACK')`. Manual `RESOLVED` / active `SNOOZED` stay
+  excluded.
+- The sibling **auto-clear** sweep stays `OPEN`-only by design — there an ACK means a human is actively
+  working the alert, so a below-threshold condition must not auto-close it.
+- Proc only, no schema change. **Owner applies V115 in Snowsight after V114**; the next hourly
+  `SP_ALERT_SCAN` heals existing double-counts on its next run.
+
 ## 4.376.0 - Alert-layer bug hunt: app-side fixes (2026-08-31)
 
 Adversarial hunt across the alert layers (raise/scan, lifecycle, counts, precision/SLO, routing) —

@@ -130,6 +130,7 @@ snowflake/migrations/V111__cost_budget_pace_completed_days.sql
 snowflake/migrations/V112__daily_digest_skips_paging_routes.sql
 snowflake/migrations/V113__incident_timeline_task_fail_completed_time.sql
 snowflake/migrations/V114__anomaly_sweep_after_daily_loader.sql
+snowflake/migrations/V115__alert_supersede_includes_ack.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
