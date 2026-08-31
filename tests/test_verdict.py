@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.logic.verdict import Signal, oldest_open_hours, operations_signals, page_verdict
+from app.logic.verdict import (
+    Signal,
+    decision_studio_signals,
+    oldest_open_hours,
+    operations_signals,
+    page_verdict,
+)
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -79,6 +85,38 @@ def test_verdict_line_is_wired_across_the_do_first_surfaces():
         src = (_ROOT / "app" / "ui" / "pages" / rel).read_text(encoding="utf-8")
         assert "page_verdict(" in src and "page_verdict_line(" in src, rel
         assert "from app.logic.verdict import" in src, rel
+
+
+# Wave 2 #8 — the Decision Studio page verdict, derived from proof_verdict so it can
+# never disagree with the scorecard banner it sits above.
+def test_decision_studio_signals_map_proof_levels():
+    # good -> no concern -> Healthy
+    assert decision_studio_signals({"level": "good", "reasons": []}) == []
+    assert page_verdict(decision_studio_signals({"level": "good"}), healthy="earning its keep")["level"] == "ok"
+    # unproven -> a single warn (must NOT read as a green all-clear)
+    uns = decision_studio_signals({"level": "unproven", "reasons": []})
+    assert len(uns) == 1 and uns[0].level == "warn"
+    assert page_verdict(uns, healthy="x")["level"] == "warn"
+    # watch -> one warn per worst-first reason, composed worst-first
+    watch = decision_studio_signals(
+        {"level": "watch", "reasons": ["run cost not yet covered (0.4x)", "low realization (40%)"]})
+    assert [s.level for s in watch] == ["warn", "warn"]
+    v = page_verdict(watch, healthy="x")
+    assert v["level"] == "warn" and v["body"].startswith("run cost not yet covered")
+    # empty / None proof -> unproven-safe warn (never a false green)
+    assert decision_studio_signals(None)[0].level == "warn"
+    assert decision_studio_signals({})[0].level == "warn"
+
+
+def test_decision_studio_verdict_is_wired():
+    shell = (_ROOT / "app" / "ui" / "pages" / "decision_studio.py").read_text(encoding="utf-8")
+    body = (_ROOT / "app" / "ui" / "decision_studio.py").read_text(encoding="utf-8")
+    # the shell renders the hoisted verdict line above the section bar
+    assert "page_verdict_line(" in shell and "decision_verdict(" in shell
+    # the body composes it from the same proof_verdict the scorecard banner uses, and
+    # the scorecard + verdict read/compute through one shared helper
+    assert "decision_studio_signals(" in body and "page_verdict(" in body
+    assert "_proof_signals(" in body
 
 
 def test_oldest_open_hours_filters_severity_and_handles_empty():

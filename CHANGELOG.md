@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.386.0 - UI review Wave 2: Decision Studio verdict (2026-08-31)
+
+First Wave-2 item — the "should I worry?" line now leads Decision Studio too, closing the
+last major page without a page-open verdict (pairs with Wave-1 #7 on Operations).
+
+- **[#8] Decision Studio page verdict.** DS opened straight into its section bar with the
+  prove-it conclusion buried inside the Scorecard section. It now opens with a severity-striped
+  verdict line, **derived from the same `proof_verdict`** the Scorecard banner shows — so the
+  hoisted line can never disagree with the scorecard below it. New pure
+  `verdict.decision_studio_signals` maps the proof level to the page vocabulary and preserves
+  the honest **"unproven"** state (an account with no verified outcomes reads *Watch — not enough
+  verified outcomes yet*, never a false green). The verdict and the Scorecard now read/compute
+  through one shared `_proof_signals` helper (cache-keyed, so no extra I/O), wrapped in the same
+  `st.status` cold-load line as #48.
+
 ## 4.385.0 - UI review Wave 1: chart, theme & cold-load (2026-08-31)
 
 The final Wave-1 batch — chart clarity, one committed theme, and named cold-loads.

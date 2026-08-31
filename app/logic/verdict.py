@@ -137,3 +137,27 @@ def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> l
     elif ss >= 1:
         sigs.append(Signal("warn", f"{ss} stale source{'s' if ss > 1 else ''}"))
     return sigs
+
+
+def decision_studio_signals(proof: dict | None) -> list[Signal]:
+    """Wave 2 #8: page-verdict Signals for Decision Studio, DERIVED from the prove-it
+    verdict (app.logic.proof.proof_verdict) the Scorecard section already computes — so
+    the page-open 'should I worry?' line can never disagree with the scorecard banner
+    below it (same thresholds, same 'unproven' honesty), and no parallel model drifts.
+
+    Maps proof_verdict's level to the page vocabulary: 'good' -> no concern (Healthy);
+    'watch' -> one warn Signal per worst-first reason; 'unproven' (not enough labeled
+    evidence yet) -> a single warn, so an unproven account never reads as a green
+    all-clear. proof_verdict has no critical tier, so the DS verdict tops out at Watch.
+    Pure — the caller supplies the already-composed proof dict.
+    """
+    proof = proof or {}
+    level = str(proof.get("level") or "unproven")
+    if level == "good":
+        return []
+    if level == "unproven":
+        return [Signal("warn", "not enough verified outcomes yet to prove value")]
+    reasons = [str(r).strip() for r in (proof.get("reasons") or []) if str(r).strip()]
+    if reasons:
+        return [Signal("warn", r) for r in reasons]
+    return [Signal("warn", "providing value, but some proof signals need watching")]

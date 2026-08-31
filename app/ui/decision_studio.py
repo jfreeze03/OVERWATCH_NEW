@@ -29,6 +29,7 @@ from app.logic.proof import (
     proof_verdict,
     roi_multiple,
 )
+from app.logic.verdict import decision_studio_signals, page_verdict
 from app.logic.workbench import (
     EXPERIMENT_STATUSES,
     SLO_METRIC_KEYS,
@@ -610,6 +611,56 @@ def _cost_truth(company: str, days: int) -> None:
     )
 
 
+def _proof_signals(rate: float) -> dict | None:
+    """Wave 2 #8: the shared prove-it reads + compute behind BOTH the page-open verdict
+    and the Scorecard section, so the hoisted verdict and the scorecard banner are one
+    identical computation (and share the cache keys — no extra I/O). Returns None when
+    the savings ledger isn't set up yet. Keeps the `savings_ledger(limit=None)` /
+    `decision_roi_ledger_full` read to ONE site here (the other lives in _roi), which the
+    cost-hunt lock counts at exactly two."""
+    ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
+                 tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
+    if not ledger.ok:
+        return None
+    _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
+             tier="recent", source="SAVINGS_LEDGER (QTD)")
+    _ac = run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
+              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
+    _acc = run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
+               tier="recent", source="ACTION_QUEUE (decided in 90d)")
+    _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
+                tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
+    totals = ledger_totals(ledger.df)
+    verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
+    run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
+    return {
+        "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
+        "roi": roi_multiple(verified_qtd, run_cost),
+        "acc": acceptance_summary(_acc.df if _acc.usable() else None),
+        "prec": account_precision(_prec.df if _prec.usable() else None),
+    }
+
+
+def decision_verdict(rate: float) -> dict:
+    """Wave 2 #8: the page-open 'should I worry?' line for Decision Studio. Reuses the
+    Scorecard reads (via _proof_signals, cache-shared) and the same proof_verdict the
+    scorecard banner shows, so the hoisted line agrees with it exactly. Returns {} (the
+    shell renders nothing) until the ledger is set up. hasattr-guarded st.status so a
+    cold first paint reads as progress, matching the Operations verdict (#7)."""
+    _load = (st.status("Reading Decision Studio proof…", expanded=False)
+             if hasattr(st, "status") else contextlib.nullcontext())
+    with _load:
+        sig = _proof_signals(rate)
+    if sig is None:
+        return {}
+    proof = proof_verdict(sig["roi"], sig["realization"], sig["acc"]["ACCEPTANCE_PCT"], sig["prec"])
+    return page_verdict(
+        decision_studio_signals(proof),
+        healthy="OVERWATCH is earning its keep — savings realize, alerts stay precise, "
+                "and the team acts on the advice.",
+    )
+
+
 def _scorecard(company: str, rate: float) -> None:
     """Prove-it flagship: does OVERWATCH work, and does it pay for itself? Composes the
     five trust/value signals — ROI multiple, realization, acceptance, alert precision,
@@ -621,34 +672,21 @@ def _scorecard(company: str, rate: float) -> None:
                "verified out in dollars vs OVERWATCH's own run cost, and how much of the advice "
                "rests on labeled evidence. Resolve alerts with a kind and verify savings to grow it.")
 
-    # Wave 1 #48: name the heaviest Decision Studio cold-load (the full proof ledger)
-    # so a slow first paint reads as progress, not a hang (hasattr-guarded st.status).
+    # Wave 1 #48 + Wave 2 #8: name the heaviest cold-load, and read the prove-it signals
+    # through the SAME shared helper the page-open verdict uses so the scorecard banner
+    # and the hoisted verdict are one identical computation (hasattr-guarded st.status).
     _sc_load = (st.status("Reading the proof ledger…", expanded=False)
                 if hasattr(st, "status") else contextlib.nullcontext())
     with _sc_load:
-        ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
-                     tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
-    if not ledger.ok:
+        sig = _proof_signals(rate)
+    if sig is None:
         empty_state("needs_setup", "Apply the action + savings layer (V051+) to start the proof record.")
         return
-    totals = ledger_totals(ledger.df)
-    realization = totals["realization_pct"]
-
-    _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
-             tier="recent", source="SAVINGS_LEDGER (QTD)")
-    _ac = run(mart_sql.app_cost_last_30d(), page=_PAGE, key="sc_appcost",
-              tier="recent", source="FACT_WAREHOUSE_DAILY (app warehouse, trailing 30d)")
-    verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
-    run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
-    roi = roi_multiple(verified_qtd, run_cost)
-
-    _acc = run(mart_sql.action_acceptance(90), page=_PAGE, key="sc_accept",
-               tier="recent", source="ACTION_QUEUE (decided in 90d)")
-    acc = acceptance_summary(_acc.df if _acc.usable() else None)
-
-    _prec = run(mart_sql.rule_precision(90), page=_PAGE, key="sc_precision",
-                tier="recent", source="ALERT_EVENTS resolution kinds", probe=True)
-    prec = account_precision(_prec.df if _prec.usable() else None)
+    ledger = sig["ledger"]
+    realization = sig["realization"]
+    roi = sig["roi"]
+    acc = sig["acc"]
+    prec = sig["prec"]
 
     evcov = None
     _port = run(workbench_sql.workload_portfolio(30, "ALL", 200), page=_PAGE, key="sc_portfolio",

@@ -14,6 +14,7 @@ from app.ui.components import (
     lazy_sections,
     load_settings,
     page_header,
+    page_verdict_line,
     section_filter_contract,
     since_last_visit_opener,
     stashed_counts,
@@ -27,6 +28,7 @@ from app.ui.decision_studio import (
     _scenarios,
     _scorecard,
     _slos,
+    decision_verdict,
 )
 
 _PAGE = "Decision Studio"
@@ -42,6 +44,13 @@ def render() -> None:
         icon_name="target",
         scope_note=f"{f['company']} · {f['window_label']}",
     )
+    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    # Wave 2 #8: the page-open "should I worry?" line — the prove-it verdict hoisted
+    # above the section bar so it reads before any section is opened. Reuses the
+    # Scorecard reads (cache-shared) and renders nothing until the ledger is set up.
+    _verdict = decision_verdict(rate)
+    if _verdict:
+        page_verdict_line(_verdict)
     # C18: "since your last visit" opener — renders nothing mid-session or anonymous.
     since_last_visit_opener(_PAGE, f["company"])
     section = lazy_sections(
@@ -74,7 +83,6 @@ def render() -> None:
                         "note": "Experiment records are account-wide; the page Company/Window do not apply."},
     }
     section_filter_contract(f, **_contracts[section])
-    rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
     if section == "Scorecard":
         _scorecard(company, rate)
     elif section == "ROI":
