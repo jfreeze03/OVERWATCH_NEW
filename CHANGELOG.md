@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.384.0 - UI review Wave 1: shell & verdict (2026-08-31)
+
+Three shell/verdict Wave-1 items.
+
+- **[#7] Operations page verdict.** Operations was the largest page yet the only major one without the
+  "should I worry?" line. It now opens with the same `page_verdict` pattern, fed by the platform-score
+  input mart (query/task failures, warehouse queueing, spill) + stale sources — both mart-backed /
+  shell-shared, so it stays cheap under the lazy sections. New pure `verdict.operations_signals`
+  (test-locked; thresholds mirror the platform score's penalty onset).
+- **[#9] Persistent Case File tray.** Case additions used to vanish into a bottom-of-Brief expander;
+  the running count now rides every page in the sidebar (session-only, no query) with a one-click jump
+  to open it on Brief.
+- **[#16] Read-only badge.** A viewer with no operator entitlement (the READER tier, or any
+  non-operator) now sees an explicit "🔒 Read-only" badge in the sidebar instead of a silently trimmed
+  surface.
+
 ## 4.383.0 - UI review Wave 1: table & metric polish (2026-08-31)
 
 Three table primitives from the Wave-1 set (all in `components.py`, so every table benefits at once).

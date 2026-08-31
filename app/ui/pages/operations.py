@@ -24,7 +24,7 @@ from app.data import (
     security_sql,
     workbench_sql,
 )
-from app.logic import proc_regression, query_advisor, remediation, wh_change
+from app.logic import proc_regression, query_advisor, remediation, verdict, wh_change
 from app.logic.ai_prompts import release_compare_prompt, task_failure_prompt
 from app.logic.anomaly import (
     ANOMALY_MIN_ACTIVE_DAYS,
@@ -81,6 +81,7 @@ from app.ui.components import (
     nested_sections,
     notify,
     page_header,
+    page_verdict_line,
     panel_help,
     result_caption,
     run_mart_first,
@@ -2477,6 +2478,25 @@ def render() -> None:
     is_operator = _is_operator()
     page_header("Operations", "Queries, tasks, warehouses, contention, change impact, releases, pipeline SLAs, and emergency levers.", icon_name="operations",
                 scope_note=f"{f['company']} · {f['window_label']}")
+    # Wave 1 #7: the "should I worry?" verdict every other major page has. Fed by the
+    # platform-score input mart (query/task failures, warehouse queueing, spill) + stale
+    # sources; both are mart-backed / shell-shared (health_strip hits the same warm cache
+    # entry main.py loaded), so this stays cheap under the lazy sections below.
+    _si = run_mart_first(
+        mart27_sql.platform_score_inputs(30), mart_sql.score_inputs_daily(30),
+        page=_PAGE, key="score_inputs", mart_tier="hourly", live_tier="hourly",
+        mart_source="FACT_PLATFORM_SCORE_DAILY (daily snapshot)",
+        live_source="facts (retro score inputs, live fallback)")
+    _hs = run(mart_sql.health_strip(), page=_PAGE, key="health_strip", tier="recent",
+              source="ALERT_EVENTS + SOURCE_FRESHNESS_STATE + FACT_METERING_DAILY")
+    _stale = 0
+    if _hs.ok and not _hs.empty:
+        _sr = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]
+        if not _sr.empty:
+            _stale = int(safe_float(_sr.iloc[0]["VALUE"]))
+    page_verdict_line(verdict.page_verdict(
+        verdict.operations_signals(_si.df if _si.usable() else None, _stale),
+        healthy="no failing queries or tasks, warehouses aren't queueing or spilling, and sources are fresh"))
     # Contention folded under Warehouses (CoCo): warehouse health and the
     # contention it causes read together.
     section = lazy_sections(

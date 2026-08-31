@@ -84,3 +84,56 @@ def oldest_open_hours(
     if raised.empty:
         return None
     return max(0.0, (pd.Timestamp(now) - raised.min()).total_seconds() / 3600.0)
+
+
+def operations_signals(inputs: pd.DataFrame | None, stale_sources: int = 0) -> list[Signal]:
+    """Wave 1 #7: ops-health Signals for the Operations page verdict.
+
+    Reads the SAME per-day aggregates the platform score uses (QUERY_COUNT,
+    FAILED_COUNT, TASK_RUNS, TASK_FAILED, QUEUED_SEC, SPILL_GB summed over the
+    window) plus stale-source count (from the shell-shared health strip), so the
+    verdict agrees with the score rather than inventing a parallel model. Thresholds
+    mirror the score's penalty onset (query-fail 2%, task-fail 1%, queue 10 min,
+    spill 5 GB). Pure — the caller supplies the frames, so it is test-locked.
+    """
+    sigs: list[Signal] = []
+    if inputs is not None and not getattr(inputs, "empty", True):
+        cols = {str(c).upper(): c for c in inputs.columns}
+
+        def _sum(name: str) -> float:
+            col = cols.get(name)
+            if col is None:
+                return 0.0
+            return float(pd.to_numeric(inputs[col], errors="coerce").fillna(0).sum())
+
+        queries, q_fail = _sum("QUERY_COUNT"), _sum("FAILED_COUNT")
+        tasks, t_fail = _sum("TASK_RUNS"), _sum("TASK_FAILED")
+        queued_sec, spill_gb = _sum("QUEUED_SEC"), _sum("SPILL_GB")
+        ndays = max(1, len(inputs))
+        qf_pct = (q_fail / queries * 100) if queries else 0.0
+        tf_pct = (t_fail / tasks * 100) if tasks else 0.0
+        queue_min_day = (queued_sec / 60.0) / ndays
+
+        if qf_pct >= 5:
+            sigs.append(Signal("bad", f"query failures {qf_pct:.1f}%"))
+        elif qf_pct >= 2:
+            sigs.append(Signal("warn", f"query failures {qf_pct:.1f}%"))
+        if tf_pct >= 5:
+            sigs.append(Signal("bad", f"task failures {tf_pct:.1f}%"))
+        elif tf_pct >= 1:
+            sigs.append(Signal("warn", f"task failures {tf_pct:.1f}%"))
+        if queue_min_day >= 30:
+            sigs.append(Signal("bad", f"warehouse queueing {queue_min_day:.0f} min/day"))
+        elif queue_min_day >= 10:
+            sigs.append(Signal("warn", f"warehouse queueing {queue_min_day:.0f} min/day"))
+        if spill_gb >= 20:
+            sigs.append(Signal("bad", f"remote spill {spill_gb:,.0f} GB"))
+        elif spill_gb >= 5:
+            sigs.append(Signal("warn", f"remote spill {spill_gb:,.0f} GB"))
+
+    ss = int(stale_sources or 0)
+    if ss >= 3:
+        sigs.append(Signal("bad", f"{ss} stale sources"))
+    elif ss >= 1:
+        sigs.append(Signal("warn", f"{ss} stale source{'s' if ss > 1 else ''}"))
+    return sigs

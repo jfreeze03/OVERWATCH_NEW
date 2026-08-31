@@ -99,6 +99,16 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             '<div class="ow-brand-sub">Snowflake Command Center</div>',
             unsafe_allow_html=True,
         )
+        # Wave 1 #16: a viewer with no operator entitlement (the READER tier, or any
+        # non-operator) gets a trimmed surface with write controls hidden. Say so
+        # explicitly with a persistent badge, rather than leaving apparent feature gaps.
+        from app.core.session import is_operator as _is_op
+        if connected and not _is_op():
+            st.markdown(
+                '<div style="font-size:0.7rem;font-weight:600;letter-spacing:.04em;'
+                'margin-top:6px;display:inline-block;padding:1px 9px;border-radius:999px;'
+                'color:var(--ow-ink-mute);border:1px solid var(--ow-ink-mute)">'
+                '🔒 Read-only</div>', unsafe_allow_html=True)
         if connected:
             from app.ui.components import last_refreshed_note
             st.markdown(
@@ -172,6 +182,19 @@ def _sidebar(pages: tuple[str, ...], role: str, profile: str, connected: bool) -
             if hasattr(st, "toast"):
                 st.toast("Caches cleared — fetching fresh data.")
             st.rerun()
+        # Wave 1 #9: a persistent Case File presence in the shell. Additions used to
+        # vanish into a bottom-of-Brief expander; the running count now rides every
+        # page (session-only, so no query), with a one-click jump to open it on Brief.
+        from app.logic.case_file import CASE_STATE_KEY as _CASE_KEY
+        _case_items = st.session_state.get(_CASE_KEY) or []
+        if _case_items:
+            _latest = str((_case_items[-1] or {}).get("title") or "").strip()
+            if st.button(f"🗂️ Case File · {len(_case_items)}",
+                         width="stretch", key="_ow_case_shell",
+                         help=(f"Open the operator Case File on Brief. Latest: {_latest}"
+                               if _latest else "Open the operator Case File on Brief.")):
+                from app.core.state import request_navigation as _reqnav
+                _reqnav("Brief")
         # C19: operator vs audit presentation mode. Operator (default) keeps the
         # daily surface lean; audit shows the full evidence chain (per-panel
         # fetched-at, methodology notes, how-computed expanders). Persists to

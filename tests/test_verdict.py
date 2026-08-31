@@ -3,9 +3,39 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.logic.verdict import Signal, oldest_open_hours, page_verdict
+from app.logic.verdict import Signal, oldest_open_hours, operations_signals, page_verdict
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+
+# Wave 1 #7 — the Operations page verdict signals
+def test_operations_signals_from_score_inputs():
+    # two days of per-day aggregates: 10% query fails, 6% task fails, ~40 min/day
+    # queueing (48000s over 2 days), 30 GB spill -> all four bad; plus 2 stale sources
+    df = pd.DataFrame({
+        "QUERY_COUNT": [500, 500], "FAILED_COUNT": [50, 50],
+        "TASK_RUNS": [100, 100], "TASK_FAILED": [6, 6],
+        "QUEUED_SEC": [2400, 2400], "SPILL_GB": [15, 15],
+    })
+    sigs = operations_signals(df, stale_sources=2)
+    phrases = " | ".join(s.phrase for s in sigs)
+    assert any(s.level == "bad" and "query failures" in s.phrase for s in sigs)
+    assert any("task failures" in s.phrase for s in sigs)
+    assert any("warehouse queueing" in s.phrase for s in sigs)
+    assert any("remote spill" in s.phrase for s in sigs)
+    assert "2 stale sources" in phrases
+    # it composes into an Attention verdict
+    assert page_verdict(sigs, healthy="ok")["level"] == "bad"
+
+
+def test_operations_signals_healthy_and_empty_safe():
+    clean = pd.DataFrame({
+        "QUERY_COUNT": [1000], "FAILED_COUNT": [1], "TASK_RUNS": [200],
+        "TASK_FAILED": [0], "QUEUED_SEC": [60], "SPILL_GB": [0],
+    })
+    assert operations_signals(clean, stale_sources=0) == []      # nothing over threshold
+    assert operations_signals(None, stale_sources=0) == []       # missing frame is safe
+    assert operations_signals(pd.DataFrame(), stale_sources=0) == []
 
 
 def test_all_clear_is_healthy():
