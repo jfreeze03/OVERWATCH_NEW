@@ -54,6 +54,7 @@ from app.ui.components import (
     export_button,
     kpi_row,
     load_settings,
+    methodology_note,
     page_header,
     page_verdict_line,
     panel_help,
@@ -784,9 +785,10 @@ def render() -> None:
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
     # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
     # the whole bill. Not folded in: that would break the credits x rate contract.
-    st.caption("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
-               "and AI. Storage, transfer, and organization currency adjustments are separate — "
-               "Cost & Contract → org rate card is billing truth.")
+    # #1: pure how-computed provenance → audit-mode only (operator mode stays lean).
+    methodology_note("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
+                     "and AI. Storage, transfer, and organization currency adjustments are separate — "
+                     "Cost & Contract → org rate card is billing truth.")
 
     # ---- The work + the drivers (rec4: above the charts, not buried below) ----
     # An executive landing page leads with what needs an owner, not two charts.
@@ -910,9 +912,10 @@ def render() -> None:
             svc_view = (svc.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
                         .sort_values("VALUE_USD", ascending=False)
                         .rename(columns={"DIMENSION": "DRIVER", "VALUE_USD": "BILLED_USD"}))
-            st.caption("Serverless & AI billed spend — separate from the warehouse-compute "
-                       "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
-                       "compute rate).")
+            # #1: basis/reconciliation note → audit-mode only.
+            methodology_note("Serverless & AI billed spend — separate from the warehouse-compute "
+                             "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
+                             "compute rate).")
             styled_table(svc_view, height=TABLE_H_MD, slug="serverless-ai-drivers", column_config={
                 "BILLED_USD": st.column_config.NumberColumn("Billed $", format="$%.0f"),
             })
@@ -1070,17 +1073,19 @@ def render() -> None:
             # arithmetic is on screen — stops "−6 pts per critical" from reading as a
             # measured fact. Once SETTINGS overrides any weight, the line disappears.
             if scoring.resolve_weights(settings) == scoring.DEFAULT_WEIGHTS:
-                st.caption("Point values are the shipped defaults — uncalibrated starting "
-                           "points, not measured impact. Tune them per driver via the "
-                           "SCORE_PTS_* settings on Admin → Settings. '(capped)' means the "
-                           "driver is pinned at its maximum: more of it will not lower the "
-                           "score further.")
+                # #1: methodology caveat → audit-mode only (already inside a defaults check).
+                methodology_note("Point values are the shipped defaults — uncalibrated starting "
+                                 "points, not measured impact. Tune them per driver via the "
+                                 "SCORE_PTS_* settings on Admin → Settings. '(capped)' means the "
+                                 "driver is pinned at its maximum: more of it will not lower the "
+                                 "score further.")
 
     if not score_series.empty:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
             charts.daily_metric_line(score_series, "DAY", "SCORE",
                                      title="Platform score (retro, account-wide)", unit="count")
-            st.caption(
+            # #1: long how-computed caveat → audit-mode only.
+            methodology_note(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "
                 "high — judge the trend, not the level. Weights calibrate on "
@@ -1102,8 +1107,9 @@ def render() -> None:
         with st.expander(f"Morning AI digest — {row.get('DIGEST_DATE')} ({row.get('MODEL')})",
                          expanded=False):
             st.markdown(str(row.get("BODY") or ""))
-            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
-                       "only. Account-wide narrative — does not change with the company filter.")
+            # #1: provenance line → audit-mode only.
+            methodology_note("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
+                             "only. Account-wide narrative — does not change with the company filter.")
 
     # ---- Executive summary download -----------------------------------------
     # rec 5: export the SAME honest view-model the screen shows. An Incomplete score

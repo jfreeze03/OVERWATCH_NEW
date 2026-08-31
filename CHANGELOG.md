@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.387.0 - UI review Wave 2: drill + provenance adoption (2026-08-31)
+
+Two adoption sweeps that wire existing primitives onto surfaces that opted out.
+
+- **[#25] Entity-drilling on the Security user tables.** Four user-identity tables rendered as
+  inert `styled_table`s while ~15 other identity tables drill to Entity 360. The MFA-gaps,
+  single-factor-login, failed-login, and dormant-reawakening tables now use `entity_nav_table`
+  (a row click opens that user in Control Room → Entity 360), mirroring the dormant-users table
+  right beside them. `failed_logins` was included after ground-truthing its builder (`GROUP BY
+  USER_NAME`, one row per user) — the scoping skeptic caught it as a target the first pass wrongly
+  excluded.
+- **[#1] Operator/Audit caption sweep — Overview (first increment).** `methodology_note` (audit-mode
+  only) was built but used nowhere. Five pure how-computed / provenance captions on Overview (the
+  credit-spend-model note, the serverless/AI basis note, the score-defaults and score-trend caveats,
+  the AI-digest provenance) now render only in Audit mode, so operator mode leads with conclusions.
+  The account-wide **scope disclaimer** on the runway bar was deliberately left a plain caption —
+  hiding it would strand the bar with no cue that it isn't narrowed by the company filter (a
+  skeptic-caught over-reach). This is the standing sweep's first page; more follow one per session.
+
 ## 4.386.0 - UI review Wave 2: Decision Studio verdict (2026-08-31)
 
 First Wave-2 item — the "should I worry?" line now leads Decision Studio too, closing the

@@ -145,7 +145,9 @@ def _access_tab(company: str, days: int) -> None:
             "value": f"{len(mfa.df)}",
             "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
         }])
-        styled_table(with_user_names(mfa.df, _PAGE))
+        # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
+        entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
+                         key_col="USER_NAME", entity_type="USER")
         result_caption(mfa)
 
     # #16: the behavioral counterpart to the config-anchored MFA lens above — a
@@ -171,7 +173,9 @@ def _access_tab(company: str, days: int) -> None:
                      "MFA caching, or a temporary admin bypass also land here.",
              "delta_color": "inverse" if len(_bypass) else "off"},
         ])
-        styled_table(with_user_names(sf.df, _PAGE))
+        # #25: rows are users → drill to Entity 360.
+        entity_nav_table(with_user_names(sf.df, _PAGE), key=f"sec_single_factor_{company}_{days}",
+                         key_col="USER_NAME", entity_type="USER")
         st.caption("PASSWORD logins with an empty SECOND_AUTHENTICATION_FACTOR; currently-enrolled "
                    "users sort first. HAS_MFA is a point-in-time snapshot — a login before MFA "
                    "enrollment, MFA caching, or a temporary admin bypass can also appear here; verify "
@@ -188,7 +192,9 @@ def _access_tab(company: str, days: int) -> None:
         if res.ok and res.empty:
             empty_state("clean", "No failed logins in this window (reader capped at 30d).")
         elif guard(res, ""):
-            styled_table(with_user_names(res.df, _PAGE))
+            # #25: failed_logins aggregates one row per user (GROUP BY USER_NAME) → drill.
+            entity_nav_table(with_user_names(res.df, _PAGE), key=f"sec_faillog_{company}_{days}",
+                             key_col="USER_NAME", entity_type="USER")
     with right:
         section_header("Privileged role holders", "info", "admin", anchor="sec-privroles")
         res = stable_batch.get("admins") or run(
@@ -353,11 +359,13 @@ def _access_tab(company: str, days: int) -> None:
                  "help": "180+ day silence, or 5+ roles still held.",
                  "delta_color": "inverse" if len(whigh) else "off"},
             ])
-            styled_table(
+            # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
+            entity_nav_table(
                 with_user_names(wranked, _PAGE)[[
                     "SEVERITY", "USER", "USER_NAME", "EMAIL", "GAP_DAYS",
                     "LAST_ACTIVE_BEFORE", "WAKE_LOGIN", "CLIENT_IP", "AUTH_FACTOR",
                     "ROLE_COUNT", "ROLES"]],
+                key=f"sec_reawakening_{company}", key_col="USER_NAME", entity_type="USER",
             )
             st.caption("Review with the owner; service accounts may log in rarely by design, and a "
                        ">365-day silence shows a single login here (gap measured from account creation).")
