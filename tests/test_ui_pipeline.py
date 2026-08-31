@@ -59,7 +59,11 @@ def test_printf_equivalents_cover_auto_formats():
     # though, must still have a printf equivalent for that Arrow-native path.
     string_fmts = {f for f in fmts.values() if isinstance(f, str)}
     assert string_fmts <= set(_PRINTF_EQUIV), fmts
-    assert fmts["SPEND_USD"] == "${:,.2f}"
+    # Wave 1 #22: USD is now a magnitude-aware callable; the large-frame path falls back
+    # to a "$%.2f" printf via _callable_display_format so big USD tables keep the $.
+    assert callable(fmts["SPEND_USD"])
+    from app.ui.components import _callable_display_format
+    assert _callable_display_format("SPEND_USD") == "$%.2f"
     assert callable(fmts["LATENCY_MS"])
 
 

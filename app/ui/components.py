@@ -1526,7 +1526,11 @@ def _auto_formats(df, skip: set) -> dict:
         elif col in skip:
             continue
         elif c.endswith(("_USD", "_PRICE")) or c == "USD":
-            fmts[col] = "${:,.2f}"
+            # Wave 1 #22: magnitude-aware dollars (cents for small, whole for thousands,
+            # $x.xxM for millions) so a table figure matches the KPI card of the same
+            # metric instead of reading $1,234,567.89 beside a card's $1.23M. NaN stays
+            # blank, never "$0.00"; df.to_csv keeps the raw numeric.
+            fmts[col] = lambda v: format_usd(v) if v == v else ""
         elif "CREDITS" in c:
             fmts[col] = "{:,.2f}"
         elif _byte_unit_for_column(col):
@@ -1664,6 +1668,9 @@ def _callable_display_format(col: object) -> str:
     byte_unit = _byte_unit_for_column(col)
     if byte_unit:
         return f"%.2f {byte_unit[0]}"
+    c = str(col).upper()
+    if c.endswith(("_USD", "_PRICE")) or c == "USD":
+        return "$%.2f"   # Wave 1 #22: large-frame $ fallback for the magnitude-aware USD callable
     return _duration_display_format(col)
 
 
@@ -1926,7 +1933,17 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
     # F26/C34 review: gate on the DISPLAY width — the "#" insert makes a 7-raw-
     # column ranked table 8 columns wide, and freezing only the rank while the
     # identity column scrolls away defeats the pin's whole purpose.
-    _pin_col = df.columns[0] if len(data_columns) >= 8 and df.columns[0] not in caller_cfg else None
+    _pin_cols: set = set()
+    if len(data_columns) >= 8:
+        _c0 = df.columns[0]
+        if _c0 not in caller_cfg:
+            _pin_cols.add(_c0)
+        # Wave 1 #26: co-pin the first status/severity column so the act/watch signal
+        # stays on screen during a wide horizontal scroll, not just the identity.
+        for _sc in status_columns_in(list(df.columns)):
+            if _sc != _c0 and _sc not in caller_cfg:
+                _pin_cols.add(_sc)
+                break
     for _col in df.columns:
         if _col in caller_cfg:
             # F25: a caller-configured column (units, custom label) used to lose its
@@ -1943,11 +1960,11 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
         _label = _pretty if _pretty != str(_col) else None
         _help = COLUMN_HELP.get(str(_col).upper())   # rec32: which-dollar-is-this on the header
         _w = _width_for_column(_col)                 # F33: width intent by name convention
-        if _label is None and _col != _pin_col and not _help and not _w:
+        if _label is None and _col not in _pin_cols and not _help and not _w:
             continue
         try:
             _cfg[_col] = st.column_config.Column(_label, pinned=True, help=_help, width=_w) \
-                if _col == _pin_col \
+                if _col in _pin_cols \
                 else st.column_config.Column(_label, help=_help, width=_w)
         except TypeError:  # runtime predates pinned= / width= : keep the relabel + help
             try:
@@ -2106,17 +2123,27 @@ def selectable_table(df, key: str, *, height: int | None = None,
                          size_note=size_note, sort_label=sort_label, multi=multi)
 
 
+def row_select_hint(text: str) -> None:
+    """Wave 1 #24: one consistent 'rows are clickable' affordance so drillable
+    tables announce it the same way everywhere instead of each page hand-rolling
+    its own caption wording."""
+    if text:
+        st.caption(f"↳ {text}")
+
+
 def selectable_nav_table(df, key: str, on_select, *, height: int | None = None,
                          column_config: dict | None = None, slug: str | None = None,
                          days: int | None = None, size_note: bool = True,
-                         sort_label: str = "") -> None:
+                         sort_label: str = "", hint: str = "") -> None:
     """selectable_table with the sticky-selection guard built in (rec29).
 
     st.dataframe's selection is sticky and re-emits on EVERY rerun, so acting on
     a raw selection re-fires the action each pass. This calls ``on_select(row)``
     only when the selection CHANGES from the last one seen — the idiom Overview
     hand-rolled, extracted so no future page rediscovers the rerun loop.
+    ``hint`` renders the shared clickable-row affordance above the table.
     """
+    row_select_hint(hint)
     sel = selectable_table(df, key=key, height=height, column_config=column_config,
                            slug=slug, days=days, size_note=size_note, sort_label=sort_label)
     seen_key = f"_ow_navsel_{key}"
@@ -2129,7 +2156,7 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
                      type_col: str | None = None, height: int | None = None,
                      column_config: dict | None = None, slug: str | None = None,
                      days: int | None = None, size_note: bool = True,
-                     sort_label: str = "") -> None:
+                     sort_label: str = "", hint: str = "") -> None:
     """Universal entity drill (UI22): a table whose row click opens that entity
     in Control Room -> Entity 360.
 
@@ -2148,6 +2175,7 @@ def entity_nav_table(df, key: str, *, key_col: str, entity_type: str = "",
         styled_table(frame, height=height, column_config=column_config, slug=slug,
                      days=days, size_note=size_note, sort_label=sort_label)
         return
+    row_select_hint(hint)   # Wave 1 #24: consistent clickable-row affordance
 
     def _open(index: int) -> None:
         from app.core.state import request_navigation

@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.383.0 - UI review Wave 1: table & metric polish (2026-08-31)
+
+Three table primitives from the Wave-1 set (all in `components.py`, so every table benefits at once).
+
+- **[#22] Magnitude-aware table dollars.** `_USD` / `_PRICE` columns now humanize like the KPI cards
+  (cents for small, whole for thousands, `$x.xxM` for millions), so a table figure matches the card of
+  the same metric instead of reading `$1,234,567.89` beside a card's `$1.23M`. NaN stays blank; big
+  tables keep the `$` via a `$%.2f` large-frame fallback; `df.to_csv` keeps the raw numeric.
+- **[#26] Co-pin the status column.** Wide (≥8-col) tables pinned only the identity column, so severity
+  scrolled off on a horizontal scroll. The first status/severity column is now pinned alongside it.
+- **[#24] Consistent clickable-row hint.** Added a shared `row_select_hint` + an optional `hint=` on
+  `selectable_nav_table` / `entity_nav_table`, so drillable tables can announce it the same way instead
+  of each page hand-rolling its own wording.
+
 ## 4.382.0 - UI review Wave 1: colour-semantics correctness (2026-08-31)
 
 First of the Wave-1 items from the adjudicated UI review — the two that are correctness bugs, not

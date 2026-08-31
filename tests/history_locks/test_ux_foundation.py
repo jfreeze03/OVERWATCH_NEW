@@ -50,7 +50,12 @@ def test_auto_formats_by_convention():
         "RUNS": [1500.0], "P95_S": [12.34], "WAREHOUSE_NAME": ["WH_X"], "CONFIGURED": [7.0],
     })
     fmts = _auto_formats(df, skip=set())
-    assert fmts["SPEND_USD"] == "${:,.2f}"
+    # Wave 1 #22: USD columns humanize magnitude-aware via a Styler callable (cents for
+    # small, whole for thousands, $x.xxM for millions) — display-only, CSV keeps raw.
+    assert callable(fmts["SPEND_USD"])
+    assert fmts["SPEND_USD"](1_250_000) == "$1.25M"
+    assert fmts["SPEND_USD"](1234.5) == "$1,234.50"
+    assert fmts["SPEND_USD"](float("nan")) == ""
     assert fmts["CREDITS_BILLED"] == "{:,.2f}"
     assert fmts["RUNS"] == "{:,.0f}"
     # rec26: duration columns (_S/_SEC/_MS) humanize to H/M/S via a Styler callable —
