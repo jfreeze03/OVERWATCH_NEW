@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.367.0 - Operations-layer bug hunt #4: 2 app-side fixes + V109 (2026-08-30)
+
+Fourth adversarial pass over the operations layer (6 finders: query performance/pruning, task/pipeline
+health, warehouse concurrency, lock contention, data-quality/volume, change-impact). Four surfaced,
+three confirmed, one refuted (V027's dead `'FAILED'` mart token was already re-derived by V057). Two
+land app-side, one is an owner-gated migration (V109).
+
+- **RCA no longer pages for auto-retried tasks that ultimately SUCCEEDED (MED)** — `task_failure_details`
+  filtered `STATE = 'FAILED'` in the WHERE clause with no terminal-attempt dedup, while every sibling
+  task-outcome builder (`task_runs`, `task_recent_states`, `release_task_compare`, …) collapses retries
+  to the terminal attempt. So a task with `TASK_AUTO_RETRY_ATTEMPTS > 0` that flapped on attempt 1 then
+  succeeded surfaced its FAILED attempt as a standalone root-cause — inflating the "Failures (7d)" KPI,
+  painting the header alarm, and routing a phantom incident to the owner for a run whose final state
+  was SUCCEEDED. Now keeps only the terminal attempt (`QUALIFY ROW_NUMBER() … PARTITION BY db,schema,
+  name,scheduled_time ORDER BY completed_time DESC`) before filtering FAILED.
+- **Pipeline SLA forecast requires a trustworthy cadence (MED)** — `pipeline_sla_forecast` treated any
+  non-null median refresh gap as the table's "typical cadence", ignoring the `REFRESHES` interval count
+  the builder already carries, so a table with a single observed gap (e.g. a one-time backfill burst of
+  two DML events) got a High "Overdue" leading-indicator even when it was comfortably within SLA. Now
+  gated on `REFRESHES >= 3` (mirroring `task_freshness_sla`'s `INTERVALS >= 3`); sparse tables fall back
+  to the runway-proximity check.
+- **V109 (owner-gated): warehouse change-scan failure axis uses the real status domain (MED)** —
+  `SP_WAREHOUSE_CHANGE_SCAN` (defined only in V024, never re-derived) counted query failures with
+  `COUNT_IF(EXECUTION_STATUS = 'FAILED')`, but `QUERY_HISTORY.EXECUTION_STATUS` is
+  `SUCCESS`/`FAIL`/`INCIDENT` — never `FAILED` — so `BASELINE_FAIL_PCT` and `AFTER_FAIL_PCT` were a
+  constant 0 and the post-change regression fail axis (`AFTER >= BASELINE + 5`) could never fire: a
+  setting change that broke a warehouse's queries read a false all-clear (`fail 0->0%`). V109 re-derives
+  the proc from V024 with `COUNT_IF(EXECUTION_STATUS <> 'SUCCESS')` on both arms (the same dead token
+  V057 fixed in `SP_LOAD_MARTS_V27`); byte-identical otherwise, no schema change, no task re-creation.
+  Owner applies after V108.
+
 ## 4.366.0 - Decision Studio bug hunt #2: 5 app-side fixes (2026-08-30)
 
 Second adversarial pass over the Decision Studio layer (6 finders: portfolio/prioritization,

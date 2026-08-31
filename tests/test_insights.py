@@ -165,24 +165,26 @@ def test_pipeline_sla_forecast_joins_cadence_to_status():
 
 
 def test_pipeline_sla_forecast_tiers_by_cadence_and_runway():
+    # REFRESHES >= 3 makes each cadence trustworthy (a single-interval burst is now ignored — the
+    # ops-hunt min-interval guard mirrors task_freshness_sla's INTERVALS >= 3).
     df = pd.DataFrame([
         # already missed -> Breached
         {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "BREACHED",
          "MAX_AGE_HOURS": 24, "HOURS_SINCE": 30, "SLA_MET": False,
-         "MEDIAN_GAP_MIN": 60, "RUNWAY_HOURS": -6},
+         "MEDIAN_GAP_MIN": 60, "REFRESHES": 10, "RUNWAY_HOURS": -6},
         # meets SLA but refresh is 5h late vs a ~1h cadence -> Overdue
         {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "OVERDUE",
          "MAX_AGE_HOURS": 24, "HOURS_SINCE": 5, "SLA_MET": True,
-         "MEDIAN_GAP_MIN": 60, "RUNWAY_HOURS": 19},
+         "MEDIAN_GAP_MIN": 60, "REFRESHES": 10, "RUNWAY_HOURS": 19},
         # refreshes ~once/day (20h cadence): 23h stale is NOT overdue vs its own
         # cadence, but the deadline is within one refresh cycle -> At risk
         {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "ATRISK",
          "MAX_AGE_HOURS": 24, "HOURS_SINCE": 23, "SLA_MET": True,
-         "MEDIAN_GAP_MIN": 1200, "RUNWAY_HOURS": 1},
+         "MEDIAN_GAP_MIN": 1200, "REFRESHES": 10, "RUNWAY_HOURS": 1},
         # meets SLA, fresh, comfortably inside -> On track
         {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "OK",
          "MAX_AGE_HOURS": 24, "HOURS_SINCE": 2, "SLA_MET": True,
-         "MEDIAN_GAP_MIN": 120, "RUNWAY_HOURS": 22},
+         "MEDIAN_GAP_MIN": 120, "REFRESHES": 10, "RUNWAY_HOURS": 22},
     ])
     out = insights.pipeline_sla_forecast(df, overdue_k=1.5)
     by_table = dict(zip(out["TABLE_NAME"], out["FORECAST"], strict=True))
@@ -197,6 +199,14 @@ def test_pipeline_sla_forecast_tiers_by_cadence_and_runway():
          "MEDIAN_GAP_MIN": None, "RUNWAY_HOURS": 2},   # 2h <= 15% of 24h = 3.6h
     ])
     assert insights.pipeline_sla_forecast(no_cadence).iloc[0]["FORECAST"] == "At risk"
+    # A single-interval cadence (REFRESHES < 3) is NOT trusted: the same "5h late vs a 1h gap" table
+    # with only one observed interval falls back to runway proximity instead of firing Overdue.
+    one_interval = pd.DataFrame([
+        {"DATABASE_NAME": "D", "SCHEMA_NAME": "S", "TABLE_NAME": "SPARSE",
+         "MAX_AGE_HOURS": 24, "HOURS_SINCE": 5, "SLA_MET": True,
+         "MEDIAN_GAP_MIN": 60, "REFRESHES": 1, "RUNWAY_HOURS": 19},
+    ])
+    assert insights.pipeline_sla_forecast(one_interval).iloc[0]["FORECAST"] == "On track"
     assert insights.pipeline_sla_forecast(pd.DataFrame()).empty
 
 

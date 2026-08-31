@@ -389,6 +389,13 @@ _EXPECTED_MIGRATIONS = {
          "dedupe band so WARN -> CRIT -> EXHAUSTED crossings each re-fire. The p.TOTAL > 0 AND p.DAILY_BURN "
          "> 0 gates and every other arm are byte-identical. Proc only, no schema change; forward-healing on "
          "the next daily SP_ALERT_SCAN_DAILY",
+    109: "SP_WAREHOUSE_CHANGE_SCAN failure axis: proc re-derived from V024 so the baseline and after "
+         "query-failure counters use COUNT_IF(EXECUTION_STATUS <> 'SUCCESS') instead of the dead "
+         "= 'FAILED' token (QUERY_HISTORY domain is SUCCESS/FAIL/INCIDENT). BASELINE_FAIL_PCT and "
+         "AFTER_FAIL_PCT are no longer a constant 0, so the post-change regression fail axis can fire and "
+         "a warehouse setting change that breaks queries no longer reads a false all-clear. Everything "
+         "else byte-identical; no schema change, no task re-creation. Proc only; forward-healing on the "
+         "next daily TASK_WAREHOUSE_CHANGE_SCAN",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

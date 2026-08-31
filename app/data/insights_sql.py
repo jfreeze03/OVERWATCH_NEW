@@ -358,15 +358,30 @@ def task_failure_details(days: int, company: str = "ALL", database: str = "", sc
     # BOTH columns for exactly this reason); without it the RCA read scanned
     # the whole view — 33s on the fleet board. +1 day covers runs scheduled
     # before the window that started inside it.
+    # STATE = 'FAILED' moves to the OUTER select AFTER the retry dedup below, so a scheduled run whose
+    # FIRST attempt failed but a later auto-retry SUCCEEDED is not counted as a failure.
     where = and_where(
         f"SCHEDULED_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())",
         f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        "STATE = 'FAILED'",
         companies.database_clause(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
     return f"""
+WITH terminal AS (
+    SELECT
+        DATABASE_NAME, SCHEMA_NAME, NAME, ROOT_TASK_ID, GRAPH_RUN_GROUP_ID,
+        QUERY_START_TIME, COMPLETED_TIME, STATE, ERROR_CODE, ERROR_MESSAGE
+    FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
+    WHERE {where}
+    -- Retry dedup: keep only the TERMINAL attempt of each scheduled run (matches task_runs,
+    -- task_recent_states, release_task_compare). Without it a TASK_AUTO_RETRY_ATTEMPTS task that
+    -- flapped on attempt 1 then succeeded surfaces its FAILED attempt as a standalone root-cause,
+    -- inflating the Failures KPI and paging on-call for a run whose final state SUCCEEDED (ops-hunt).
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY DATABASE_NAME, SCHEMA_NAME, NAME, SCHEDULED_TIME
+        ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1
+)
 SELECT
     DATABASE_NAME,
     SCHEMA_NAME,
@@ -377,8 +392,8 @@ SELECT
     DATEDIFF('second', QUERY_START_TIME, COMPLETED_TIME) AS RUN_SEC,
     COALESCE(ERROR_CODE::VARCHAR, '') AS ERROR_CODE,
     LEFT(COALESCE(ERROR_MESSAGE, ''), 300) AS ERROR_MESSAGE
-FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-WHERE {where}
+FROM terminal
+WHERE STATE = 'FAILED'
 ORDER BY QUERY_START_TIME DESC
 LIMIT 500
 """

@@ -1165,6 +1165,10 @@ def _exfil_reason(r: pd.Series) -> str:
     return "; ".join(parts)
 
 
+_MIN_CADENCE_INTERVALS = 3   # a refresh rhythm needs >= 3 observed gaps to be trustworthy (mirrors
+#                              ops_sql.task_freshness_sla's INTERVALS >= 3 gate).
+
+
 def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.DataFrame:
     """Turn the reactive freshness SLA into a forward-looking tier (O10).
 
@@ -1197,6 +1201,7 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
     if runway.isna().all():
         runway = max_age - hours_since
     median_gap = pd.to_numeric(out.get("MEDIAN_GAP_MIN"), errors="coerce")
+    refreshes = pd.to_numeric(out.get("REFRESHES", pd.Series(pd.NA, index=out.index)), errors="coerce")
     k = float(overdue_k)
 
     forecasts: list[str] = []
@@ -1208,7 +1213,13 @@ def pipeline_sla_forecast(df: pd.DataFrame, *, overdue_k: float = 1.5) -> pd.Dat
         rw_raw = runway.iloc[i]
         rw = safe_float(rw_raw)
         gap_raw = median_gap.iloc[i]
-        has_cadence = bool(pd.notna(gap_raw)) and safe_float(gap_raw) > 0
+        # Min-interval guard: a cadence built from a single observed gap (e.g. a one-time backfill
+        # burst of two DML events) is not a "typical" refresh rhythm, so it must not drive the
+        # Overdue/High or At-risk forecast for a table otherwise within SLA -- that fired a false High
+        # leading-indicator on a sparse table (ops-hunt 2026-08-30). Sparse tables fall back to the
+        # runway-proximity check. Mirrors task_freshness_sla's INTERVALS >= 3.
+        has_cadence = (bool(pd.notna(gap_raw)) and safe_float(gap_raw) > 0
+                       and safe_float(refreshes.iloc[i]) >= _MIN_CADENCE_INTERVALS)
         cycle_hours = safe_float(gap_raw) / 60.0 if has_cadence else None
         if not is_met:
             forecasts.append("Breached")
