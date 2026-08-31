@@ -8,7 +8,12 @@ start-fresh clear does not skew per-rule precision.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.ui.pages.alerts import RESOLUTION_KINDS, _clear_open_queue_stmts
+
+_ALERTS_SRC = (Path(__file__).resolve().parents[1] / "app" / "ui" / "pages" / "alerts.py").read_text(
+    encoding="utf-8")
 
 
 def test_resolve_all_is_scope_based_audit_first_and_untagged_by_default() -> None:
@@ -52,3 +57,13 @@ def test_snoozed_events_are_never_touched() -> None:
     for action in ("ACK", "RESOLVE"):
         for s in _clear_open_queue_stmts("ALFA", action, "n"):
             assert "'SNOOZED'" not in s
+
+
+def test_clear_queue_receipt_is_honest_per_verb() -> None:
+    # alert-hunt #3: the receipt/toast used _open_total (OPEN+ACK) for BOTH verbs, which
+    # overstates ACK (ACK moves only the OPEN rows and keeps them counting as open) and
+    # wrongly calls an ACK 'cleared'. Now RESOLVE keeps the accurate count; ACK reports
+    # the action without a misleading number.
+    assert "event(s) {_c_verb}" not in _ALERTS_SRC        # old verb-agnostic overstatement gone
+    assert "event(s) resolved." in _ALERTS_SRC            # RESOLVE: true transitioned count
+    assert "open count until resolved" in _ALERTS_SRC     # ACK: honest, no count

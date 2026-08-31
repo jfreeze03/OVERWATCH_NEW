@@ -540,13 +540,21 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         if not _c_o:
                             break
                     stamp_write(f"alert_clear_exec_{company}", _c_ok)
-                    notify(_c_ok, (f"Cleared the open queue — {_open_total:,} event(s) {_c_verb}."
-                                   if _c_ok else "Clear failed — see the error log."))
+                    # Honest receipt: RESOLVE covers OPEN and ACK, so _open_total is the
+                    # true transitioned count and the queue really is cleared. ACK moves
+                    # ONLY the OPEN rows (already-ACK stay ACK) and keeps them counting as
+                    # open, so reusing _open_total (OPEN+ACK) would overstate the change and
+                    # 'cleared' would be wrong — report the action without a misleading count.
+                    if _c_resolve:
+                        _c_msg = f"Open queue cleared — {_open_total:,} event(s) resolved."
+                    else:
+                        _c_msg = ("Acknowledged the open events in scope — they stay in the "
+                                  "open count until resolved.")
+                    notify(_c_ok, _c_msg if _c_ok else "Clear failed — see the error log.")
                     if _c_ok:
                         from app.ui.components import log_ui_event
                         log_ui_event("alert_resolve" if _c_resolve else "alert_ack", page=_PAGE)
-                        st.session_state["_ow_alert_receipt"] = (
-                            f"Open queue cleared — {_open_total:,} event(s) {_c_verb}")
+                        st.session_state["_ow_alert_receipt"] = _c_msg
                         st.rerun()
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT, kind="clean"):
@@ -1594,7 +1602,9 @@ def render() -> None:
                  "delta_color": "inverse" if _und else "off"},
                 {"label": "Route failures (30d)",
                  "value": f"{safe_float(row0.get('ROUTE_FAILURES')):,.0f}",
-                 "help": "route_send_failed rows in APP_ERROR_LOG — RUNBOOK section 19 has the Teams debugging path."},
+                 "help": "distinct route-days with a send failure (route_send_failed in APP_ERROR_LOG, "
+                         "deduped so an hourly-retrying broken route counts once per day, not per run) — "
+                         "RUNBOOK section 19 has the Teams debugging path."},
                 # rec19: the webhook itself flags an OPEN event that aged past the
                 # 24h delivery window with no send — surfaced here, not just in logs.
                 {"label": "Expired-undelivered (30d)", "value": f"{_exp}",

@@ -1900,11 +1900,22 @@ SELECT
        FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS MEDIAN_MIN,
     (SELECT ROUND(APPROX_PERCENTILE(DATEDIFF('second', e.RAISED_AT, d.FIRST_SENT), 0.95) / 60.0, 1)
        FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS P95_MIN,
+    -- Same inner predicate as health_strip's UNDELIVERED_N, but this is a WINDOWED
+    -- SLO report: e is bounded to the last {days}d, so a critical still OPEN and
+    -- undelivered past the window drops out HERE while health_strip's always-on banner
+    -- (unbounded) still shows it red. That divergence is intended — the banner is the
+    -- authoritative "is anything broken right now" view; this card is the N-day report.
     (SELECT COUNT(*) FROM e LEFT JOIN d ON d.EVENT_ID = e.EVENT_ID
       WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
         AND d.EVENT_ID IS NULL
         AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())) AS UNDELIVERED_CRITICALS_30M,
-    (SELECT COUNT(*) FROM {core_object("APP_ERROR_LOG")}
+    -- Alert-hunt fix: a plain COUNT(*) counted every hourly retry row, so one route
+    -- broken for a month read as ~720 "failures". SP_NOTIFY_WEBHOOK logs one
+    -- route_send_failed row per failing route PER RUN, with the route id + integration
+    -- in CONTEXT; collapse to distinct (route, day) so a persistent outage counts as
+    -- route-days, not runs (mirrors the undelivered_expired once-per-24h grain).
+    (SELECT COUNT(DISTINCT CONTEXT || '|' || TO_VARCHAR(DATE_TRUNC('day', LOGGED_AT)))
+       FROM {core_object("APP_ERROR_LOG")}
       WHERE ERROR_TYPE = 'route_send_failed'
         AND LOGGED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())) AS ROUTE_FAILURES,
     -- rec19 (V064): the loud signal SP_NOTIFY_WEBHOOK itself raises when an OPEN

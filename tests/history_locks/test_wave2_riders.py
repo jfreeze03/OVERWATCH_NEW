@@ -30,6 +30,9 @@ def test_delivery_slo_reads_ledger_events_and_error_log():
                 "UNDELIVERED_CRITICALS_30M", "ROUTE_FAILURES"):
         assert col in sql, col
     assert "route_send_failed" in sql and "LOGGED_AT" in sql   # APP_ERROR_LOG's real ts col
+    # route failures dedup to distinct (route, day) so one hourly-retrying broken route
+    # counts once per day, not once per run (was COUNT(*) of raw retry rows)
+    assert "COUNT(DISTINCT CONTEXT" in sql
     assert "DATEADD('minute', -30" in sql                      # criticals get 30m grace
     assert "ROUTE_ID" in mart_sql.delivery_by_route(30)
 

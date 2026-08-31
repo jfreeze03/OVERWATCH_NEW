@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.376.0 - Alert-layer bug hunt: app-side fixes (2026-08-31)
+
+Adversarial hunt across the alert layers (raise/scan, lifecycle, counts, precision/SLO, routing) —
+5 finders, each finding adversarially verified. 7 confirmed, 4 refuted. The app-only fixes ship here;
+the migration-bearing and higher-risk items are tracked below.
+
+**Fixed (app-only):**
+- **[med] Route-failures KPI counted hourly retry rows, not distinct failures.** `SP_NOTIFY_WEBHOOK`
+  logs one `route_send_failed` row per failing route *per hourly run*, so one route broken for a month
+  read as ~720 "failures" on the History ▸ Delivery-health tile. `delivery_slo_summary` now counts
+  distinct `(route, day)` from `CONTEXT` (which carries the route id + integration), matching the
+  once-per-day grain of the sibling expired-undelivered metric. Tile help updated.
+- **[low] Clear-queue "Acknowledge" receipt overstated what changed.** The receipt/toast reported
+  `_open_total` (OPEN+ACK) for both verbs, but ACK moves only the OPEN rows (already-ACK stay ACK) and
+  keeps them counting as open — so it overstated the ACK count and wrongly said "cleared". RESOLVE keeps
+  the accurate count; ACK now reports the action honestly without a misleading number.
+- **[low] Clarified the undelivered-critical banner vs. SLO-card divergence.** health_strip's always-on
+  banner is unbounded (correctly still red for a 40d+ stuck critical); `delivery_slo_summary`'s
+  `UNDELIVERED_CRITICALS_30M` is a windowed report. They legitimately diverge only past the window — a
+  comment now records that so the two aren't mistakenly "reconciled".
+
+**Confirmed, handled separately (not in this release):**
+- **[med] `SP_ALERT_SCAN` escalation-supersede skips ACK'd events** → double-counts an
+  acked-then-escalated incident as two open alerts. Migration-bearing; shipping as V115.
+- **[med] Multi-day snooze defeated by date-banded dedupe** — a per-event snooze keeps the event's
+  date-banded `DEDUPE_KEY`, so the next day mints a fresh OPEN despite the snooze. Deferred: needs a
+  snooze-aware scan (invasive, all rule blocks) and can't be validated read-only.
+- **[med] Undelivered-critical uses event-level "any delivery"** — a CRITICAL delivered to a sibling
+  info route but failing its paging route reads green. Latent (no-op on a single-route account);
+  deferred pending a per-route anti-join mirroring `route_backlog`.
+- **[low] Clear-queue is non-atomic/non-idempotent** — split audit+update statements, no transaction or
+  idempotency key; a mid-op failure + retry can duplicate `ALERT_AUDIT` rows. Deferred: needs a
+  set-based atomic proc.
+
 ## 4.375.0 - Control Room: resolve open incidents in one step (2026-08-31)
 
 Adds an operator control on **Control Room ▸ Incidents & triage** to resolve every open
