@@ -79,6 +79,29 @@ def test_caption_sweep_cost_part1_four_files():
     assert "not per-run metered" in unit                   # $/run misread caveat
 
 
+def test_caption_sweep_cost_part2_optimize():
+    # #1 (Cost sweep, part 2): optimize.py, the largest Cost file. Exactly 7 pure
+    # basis/model/ranking/provenance captions convert; legends and misread caveats stay.
+    src = _src("app/ui/pages/cost_parts/optimize.py")
+    assert "    methodology_note,\n" in src
+    for conv in (
+        "Replays this window's observed credits",   # scenario replay model
+        "Complete days only, fixed 90-day evidence window",  # forecast gating
+        "Mechanical scenario model:",               # scenario model
+        "Measured, not allocated:",                 # measured basis
+        "Live scan of SUCCESS SELECTs",             # ranking methodology
+        "Books itself since V038",                  # self-booking provenance
+    ):
+        assert conv in src, conv
+    # exactly 7 conversions — guards against re-converting the kept legends/caveats
+    assert src.count("methodology_note(") == 7
+    # KEEP guards (ground-truth overrides of workflow CONVERTs)
+    assert "Actionable $ = idle minus one" in src         # column definition/legend
+    assert "not a dollarized saving" in src               # eligibility misread caveat
+    assert "the cost of building the object" in src       # cost-arm label legend
+    assert "No ETA is intentional" in src                 # blank-column legend
+
+
 def test_object_cost_table_reconciles_against_an_independent_parent():
     # #30: the top-objects cost table now discloses coverage against the object-attributed
     # total. The parent is the by-ARM aggregation minus the non-object residual arm — an

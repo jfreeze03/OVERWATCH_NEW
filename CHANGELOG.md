@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.393.0 - Operator/Audit caption sweep: Cost/Optimize (2026-08-31)
+
+- **[#1, Cost part 2] Caption sweep on `optimize.py` — the largest Cost file (58 captions).** Seven
+  pure basis/model/provenance captions moved to Audit mode via `methodology_note`: the scenario-replay
+  and mechanical-scenario model notes, the forecast-gating rule, the measured-basis note, the
+  recommendation-ranking methodology, and the self-booking-changes provenance. The other proposed
+  conversions were **kept visible** on review — they're things the operator needs at the table, not
+  audit detail: the `Actionable $` column definition, the `"eligibility is utilization, not a
+  dollarized saving"` misread caveat, the cost-arm label legend (`QUERY_COMPUTE_WRITE` = building the
+  object), and the "no ETA is intentional" blank-column explainer. This finishes the Cost caption sweep
+  (with `ai_chargeback.py` and `compare.py` having had no pure-methodology captions to convert). Across
+  all of Cost the workflow proposed 20 conversions; ground-truthing landed on 13, keeping the other 7
+  as legends and don't-misread-this caveats.
+
 ## 4.392.0 - Operator/Audit caption sweep: Cost, part 1 (2026-08-31)
 
 - **[#1, Cost part 1] Caption sweep across the smaller Cost files.** Four of the Cost page's files

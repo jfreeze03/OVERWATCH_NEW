@@ -70,6 +70,7 @@ from app.ui.components import (
     guard,
     kpi_row,
     lazy_sections,
+    methodology_note,
     notify,
     panel_help,
     reconciliation_footer,
@@ -101,7 +102,8 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
     was missing — every slider move re-rendered the whole grouped Cost page.
     The AST lock in test_codex_r21 makes 'Fragment:' docstrings binding."""
     with st.expander("Interactive what-if: size step + auto-suspend together"):
-        st.caption(
+        # #1: scenario-replay model methodology → audit-mode only.
+        methodology_note(
             "Replays this window's observed credits under a size step and a new "
             "auto-suspend, as a bounded range — not a promise. Busy credits land "
             "between rate-scaled (queries keep their wall time) and cost-neutral "
@@ -178,7 +180,8 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
 def _capacity_forecast_panel(company: str) -> None:
     """On-demand, mart-only forecast of recurring warehouse pressure."""
     st.markdown("**Capacity pressure forecast**")
-    st.caption(
+    # #1: forecast-gating methodology → audit-mode only.
+    methodology_note(
         "Complete days only, fixed 90-day evidence window. A forecast appears only when "
         "pressure recurs, workload growth agrees, recent settings are stable, and a 7-day "
         "holdout is accurate enough."
@@ -284,7 +287,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         _sizing_profiles_tx: pd.DataFrame | None = None
         # ---- Idle warehouse advisor ----------------------------------------------
         st.markdown("**Idle warehouse advisor**")
-        st.caption("Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
+        # #1: definition of the idle metric → audit-mode only (the section already frames it).
+        methodology_note(
+            "Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company),
             insights_sql.idle_warehouse_analysis(days, company),
@@ -389,7 +394,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         st.divider()
         # ---- Right-sizing simulator ------------------------------------------------
         st.markdown("**Warehouse right-sizing simulator**")
-        st.caption(
+        # #1: scenario-model methodology → audit-mode only.
+        methodology_note(
             "Mechanical scenario model: one Snowflake size step halves or doubles the credit rate. "
             "Runtime effects depend on the workload — the rationale says why; you decide."
         )
@@ -801,7 +807,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # ALONGSIDE the allocated one here on purpose — the value is the side-by-side
         # measured-vs-allocated contrast, not a duplicate of the Unit-costs price list.
         st.markdown("**Most expensive queries (measured $, exact attribution)**")
-        st.caption(
+        # #1: measured-basis provenance (measured vs allocated, lag, omissions) → audit-mode only.
+        methodology_note(
             "Measured, not allocated: exact QUERY_ATTRIBUTION_HISTORY credits for running "
             "each query, with warehouse idle time excluded (the allocated panel spreads the "
             "whole warehouse-hour bill, idle included). ~8h attribution lag; queries with no "
@@ -988,7 +995,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 else:
                     styled_table(_rq_df[_rq_cols], column_config=_rq_cfg)
                 result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
-                st.caption(
+                # #1: ranking + metric methodology → audit-mode only.
+                methodology_note(
                     "Live scan of SUCCESS SELECTs (OVERWATCH's own queries excluded). Ranked by "
                     "normalized 30-day estimated credits x cache-miss share, not wall-clock hours: an "
                     "X-Small hour and a 4X-Large hour differ 128x in money, and an already-cached "
@@ -1523,10 +1531,12 @@ def _savings_tab() -> None:
     if not res.ok:
         empty_state("needs_setup", "Savings ledger is not installed yet — an admin can apply the pending schema update on Admin → Migrations & freshness.")
         return
-    st.caption("Books itself since V038: the daily scan detects cost-lever changes "
-               "(auto-suspend, size, clusters, scaling policy) wherever they were "
-               "made — Snowsight included — and settles each against 14 days of "
-               "measured actuals. Manual items remain for one-offs.")
+    # #1: self-booking provenance (how the auto-detection works) → audit-mode only.
+    methodology_note(
+        "Books itself since V038: the daily scan detects cost-lever changes "
+        "(auto-suspend, size, clusters, scaling policy) wherever they were "
+        "made — Snowsight included — and settles each against 14 days of "
+        "measured actuals. Manual items remain for one-offs.")
     # The verified / estimated / realization ROI headline is owned by Decision Studio ▸ ROI
     # (same ledger_totals() source). This tab keeps the operational VERIFY workflow only.
     st.caption("Verified / estimated / realization totals live on **Decision Studio ▸ ROI**.")
