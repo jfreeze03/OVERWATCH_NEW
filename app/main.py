@@ -27,7 +27,6 @@ from app.config import (  # noqa: E402
     PAGES_BY_PROFILE,
     TRIAGE_WINDOW_OPTIONS,
     nav_groups_for,
-    resolve_role_profile,
 )
 from app.core.identity import identity_sql  # noqa: E402
 from app.core.query import (  # noqa: E402
@@ -37,7 +36,7 @@ from app.core.query import (  # noqa: E402
     flush_write_buffer,
     run,
 )
-from app.core.session import connection_available, current_role  # noqa: E402
+from app.core.session import active_profile, connection_available, current_role  # noqa: E402
 from app.core.sqlsafe import sql_literal  # noqa: E402
 from app.core.state import (  # noqa: E402
     consume_pending_navigation,
@@ -722,7 +721,11 @@ def main() -> None:
     # text is identical across users, one user's prefs frame could serve
     # another in-process. Identity first, THEN the first cached read.
     _apply_default_landing()
-    profile = resolve_role_profile(role)
+    # Page visibility keys on the VIEWER (st.user), NOT current_role() — under
+    # owner's-rights SiS the role is the app owner's for every viewer, so a
+    # role-based profile would show every viewer the owner's DBA pages. See
+    # session.active_profile(): admins -> DBA, ETL/unmapped -> read-only READER.
+    profile = active_profile(role)
     pages = PAGES_BY_PROFILE.get(profile, PAGES_BY_PROFILE["ANALYST"])
 
     page = _sidebar(pages, role, profile, connected)
@@ -753,6 +756,12 @@ def main() -> None:
     # surfaces only. Brief IS the compact status view (renders these signals as
     # its body), and Overview keeps the strip; every drill/govern page below
     # them is task-focused and does not repeat it (owner 2026-08-14).
+    # Explicit last-line authorization deny (belt-and-suspenders over _sidebar's
+    # clamp). Under owner's-rights SiS page visibility is the SOLE boundary — a
+    # page outside the viewer's set must NEVER reach _RENDERERS, whatever produced
+    # `page` (stale session_state, a saved deep-link, a future nav path).
+    if page not in pages:
+        page = pages[0]
     if page == "Overview":
         _persistent_status_bar(pages)
     _RENDERERS[page]()

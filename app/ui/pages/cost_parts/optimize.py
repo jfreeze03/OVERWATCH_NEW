@@ -962,11 +962,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if "LAST_RUN" in _rq_df.columns:
                     _rq_cols.append("LAST_RUN")
                 _rq_cols += ["CANDIDATE", "WHY", "QUERY_PREVIEW"]
-                from app.config import PAGES_BY_PROFILE, resolve_role_profile
-                from app.core.session import current_role
+                from app.config import PAGES_BY_PROFILE
+                from app.core.session import active_profile, current_role
 
                 _can_entity = "Control Room" in PAGES_BY_PROFILE.get(
-                    resolve_role_profile(current_role()), ()
+                    active_profile(current_role()), ()
                 )
                 if _can_entity:
                     def _open_fingerprint(index: int) -> None:

@@ -102,9 +102,9 @@ def request_navigation(page: str, section: str = "", filters: dict | None = None
     # clicking a Top-action row (whose Control Room jump clamps back to Overview) spun
     # forever — request_navigation -> rerun -> selection re-emits -> request_navigation.
     if page:
-        from app.config import PAGES_BY_PROFILE, resolve_role_profile
-        from app.core.session import current_role
-        allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+        from app.config import PAGES_BY_PROFILE
+        from app.core.session import active_profile, current_role
+        allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
         if allowed and page not in allowed:
             page = "Overview"  # offered by every profile
     if page == st.session_state.get("_ow_page") and not section and not filters and not context:
@@ -148,9 +148,9 @@ def consume_pending_navigation() -> None:
     # B8: never route a viewer to a page their profile does not offer — landing on
     # a dead page or forcing an off-profile selection. Clamp to the viewer's pages.
     if page:
-        from app.config import PAGES_BY_PROFILE, resolve_role_profile
-        from app.core.session import current_role
-        allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+        from app.config import PAGES_BY_PROFILE
+        from app.core.session import active_profile, current_role
+        allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
         if allowed and page not in allowed:
             page = "Overview"  # offered by every profile
     if page:

@@ -867,10 +867,10 @@ def render() -> None:
             # can't open Operations, so request_navigation would clamp the jump back to
             # Overview yet still apply warehouse_contains — a dead click that silently
             # leaks a cross-page scope filter. They get a plain (non-clickable) bar instead.
-            from app.config import PAGES_BY_PROFILE, resolve_role_profile
-            from app.core.session import current_role
+            from app.config import PAGES_BY_PROFILE
+            from app.core.session import active_profile, current_role
             _can_ops = "Operations" in PAGES_BY_PROFILE.get(
-                resolve_role_profile(current_role()), ())
+                active_profile(current_role()), ())
             if _can_ops:
                 _picked_wh = charts.clickable_bar_usd(
                     view, "DIMENSION", "VALUE_USD", key="ov_drivers_bar", title="Spend (USD)")

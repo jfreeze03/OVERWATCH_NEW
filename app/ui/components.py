@@ -2492,9 +2492,9 @@ def since_last_visit_opener(page: str, company: str) -> None:
     # Direct links to the changed items — never to the page we are already on,
     # and never to a page this viewer's profile cannot open (the C9/AGENTS rule).
     try:
-        from app.config import PAGES_BY_PROFILE, resolve_role_profile
-        from app.core.session import current_role
-        _allowed = PAGES_BY_PROFILE.get(resolve_role_profile(current_role()), ())
+        from app.config import PAGES_BY_PROFILE
+        from app.core.session import active_profile, current_role
+        _allowed = PAGES_BY_PROFILE.get(active_profile(current_role()), ())
     except Exception:  # noqa: BLE001 - the opener is chrome; jumps degrade to text
         _allowed = ()
     jumps = []

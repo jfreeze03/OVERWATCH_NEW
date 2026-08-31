@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.373.0"
+APP_VERSION = "4.374.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -139,6 +139,12 @@ PAGES_BY_PROFILE = {
     # Brief is FIRST so the default landing (pages[0], when no saved view / deep link)
     # opens on Brief, not Ask — matching the nav display order (Ask trails last).
     "DBA": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Alerts", "Security", "Admin", "Ask"),
+    # Read-only tier (owner ask 2026-08-31): the ETL team + any SiS viewer not
+    # explicitly mapped. Everything EXCEPT Admin, Alerts, and Ask. Operations is
+    # deliberately IN — ETL want its warehouse/task/pipeline health — but every
+    # write control there (emergency levers, scans) is is_operator-gated, so a
+    # READER sees it fully and can change nothing.
+    "READER": ("Brief", "Overview", "Control Room", "Cost & Contract", "Operations", "Decision Studio", "Security"),
 }
 DEFAULT_PROFILE = "ANALYST"
 
@@ -188,7 +194,7 @@ OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL i
 # Empty tuple = no viewer is an in-app operator (secure default); the owner adds
 # the specific usernames who may operate. Off-SiS (local dev/tests) there is no
 # viewer identity, so session.is_operator() falls back to the role->profile check.
-OPERATOR_USERS: tuple[str, ...] = ("H21427",)  # add more usernames as operators are onboarded
+OPERATOR_USERS: tuple[str, ...] = ("H21427", "E22292", "KEBARR1", "CLROY", "N22514")  # the DBA/admin team
 
 
 def is_operator_user(viewer: str) -> bool:
@@ -201,6 +207,42 @@ def is_operator_user(viewer: str) -> bool:
     if not name:
         return False
     return name in {str(u).strip().upper() for u in OPERATOR_USERS}
+
+
+# ---------------------------------------------------------------------------
+# Per-viewer navigation profile (page visibility) — the READ analog of
+# OPERATOR_USERS. Under owner's-rights SiS, CURRENT_ROLE() is the app OWNER's
+# role for EVERY viewer, so resolve_role_profile(current_role()) (the off-SiS
+# path) cannot scope who sees which pages. Key page visibility on the VIEWER
+# (st.user) instead: the DBA/admin team sees the full DBA surface; the ETL team
+# gets the read-only READER profile (no Admin/Alerts/Ask). Bare usernames,
+# matched case-insensitively (same grain as OPERATOR_USERS). This decides only
+# what the app OFFERS; writes remain independently gated by OPERATOR_USERS.
+# ---------------------------------------------------------------------------
+VIEWER_PROFILES: dict[str, str] = {
+    # DBA/admin team — full surface incl. Admin + Ask (also in OPERATOR_USERS for write)
+    "H21427": "DBA", "E22292": "DBA", "KEBARR1": "DBA", "CLROY": "DBA", "N22514": "DBA",
+    # ETL team (_DTI_ roles) — read-only, no Admin/Alerts/Ask
+    "GRTHOMP1": "READER", "SUDEVAX": "READER", "TV5073": "READER", "VS4229": "READER",
+}
+# Any identified SiS viewer NOT in VIEWER_PROFILES falls to this least-privilege
+# read tier — NEVER the owner's DBA. Owner policy 2026-08-31: an unmapped viewer
+# gets the same read-only surface as the ETL team.
+VIEWER_UNKNOWN_PROFILE = "READER"
+
+
+def resolve_viewer_profile(viewer: str) -> str | None:
+    """Navigation profile for a VIEWER username, or None when unmapped/blank.
+
+    Pure and case-insensitive (mirrors is_operator_user). The caller owns the
+    unmapped policy: on SiS an identified-but-unmapped viewer maps to
+    VIEWER_UNKNOWN_PROFILE (read-only); a blank viewer means off-SiS, where the
+    caller falls back to the role->profile map instead.
+    """
+    name = str(viewer or "").strip().upper()
+    if not name:
+        return None
+    return {str(k).strip().upper(): v for k, v in VIEWER_PROFILES.items()}.get(name)
 
 
 def resolve_role_profile(role: str) -> str:

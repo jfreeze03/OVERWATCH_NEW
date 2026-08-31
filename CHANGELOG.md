@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.374.0 - Read-only tier for non-admins (ETL team) (2026-08-31)
+
+Adds a per-viewer **page-visibility** tier so non-admins can see the monitor without any write or
+admin access. Same owner's-rights Streamlit-in-Snowflake blind spot as the operator fix: page
+visibility was resolved from `CURRENT_ROLE()`, which is the app **owner's** role for every viewer, so
+everyone got the owner's full DBA page set. Now `main.py` resolves the profile from the **viewer**
+(`st.user`) via the new `session.active_profile()`, mirroring `is_operator()`.
+
+- New **`READER`** profile — Brief, Overview, Control Room, Cost & Contract, Operations, Decision
+  Studio, Security. Everything **except Admin, Alerts, and Ask**. Read-only: the ETL team is *not* in
+  `OPERATOR_USERS`, so `is_operator()` is False for them and every write control (incl. the Operations
+  emergency levers — cancel query, warehouse resize/suspend, scans) stays hidden.
+- `VIEWER_PROFILES` maps the 5 admins (`H21427`, `E22292`, `KEBARR1`, `CLROY`, `N22514`) → `DBA` and
+  the 4 ETL users (`GRTHOMP1`, `SUDEVAX`, `TV5073`, `VS4229`) → `READER`. Any identified-but-unmapped
+  SiS viewer falls to `READER` (least-privilege), **never** the owner's DBA.
+- `OPERATOR_USERS` extended from just `H21427` to all 5 admins (write entitlement — a separate axis
+  from page visibility).
+- Defense-in-depth: the two `state.py` nav clamps (jump/saved-view/deep-link) now use `active_profile`
+  (they were inert on SiS), and `main.py` adds an explicit re-clamp right before render dispatch so a
+  page outside the viewer's set can never reach a renderer. `is_sis()` fails an unresolved-identity SiS
+  viewer *closed* to `READER` rather than inheriting the owner's DBA surface. Config-only; deploys with
+  an app code redeploy + restart (no Snowflake migration).
+
 ## 4.373.0 - Entitle the first operator (2026-08-31)
 
 Adds the account owner's Snowflake username (`H21427`) to `OPERATOR_USERS`. Under owner's-rights

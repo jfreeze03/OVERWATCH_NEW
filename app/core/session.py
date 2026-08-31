@@ -229,3 +229,43 @@ def is_operator() -> bool:
     # No viewer identity (off-SiS): the owner's-rights ambiguity does not apply,
     # so the role-based check is safe and preserves local-dev/test behavior.
     return resolve_role_profile(current_role()) in OPERATOR_PROFILES
+
+
+def is_sis() -> bool:
+    """True when running inside owner's-rights Streamlit-in-Snowflake.
+
+    Reads the marker _connect() stamps on the SiS session. Built on the
+    None-safe cached-session accessor so it never raises and never forces a NEW
+    connection — off-SiS (local dev, tests, older runtimes) it returns False.
+    """
+    session = get_cached_session()
+    return bool(getattr(session, _SIS_ATTR, False)) if session is not None else False
+
+
+def active_profile(role: str = "") -> str:
+    """Navigation profile (page visibility) for the current VIEWER — the read
+    analog of is_operator().
+
+    Under owner's-rights SiS, SQL CURRENT_ROLE() is the app OWNER's role for
+    EVERY viewer, so page visibility must key on the viewer identity (st.user),
+    not the role. An identified viewer maps through config.VIEWER_PROFILES (the
+    admin team -> DBA, the ETL team -> READER); an identified viewer NOT in the
+    map falls to the least-privilege VIEWER_UNKNOWN_PROFILE, NEVER the owner's
+    DBA. When no viewer identity is available, distinguish SiS (fail CLOSED to
+    VIEWER_UNKNOWN_PROFILE — an unresolved SiS viewer must never inherit the
+    owner's DBA surface) from off-SiS (local dev/tests: fall back to the
+    role->profile map, preserving today's behavior exactly).
+    """
+    from app.config import (
+        VIEWER_UNKNOWN_PROFILE,
+        resolve_role_profile,
+        resolve_viewer_profile,
+    )
+    from app.core.identity import viewer_name
+
+    viewer = viewer_name()
+    if viewer:
+        return resolve_viewer_profile(viewer) or VIEWER_UNKNOWN_PROFILE
+    if is_sis():
+        return VIEWER_UNKNOWN_PROFILE
+    return resolve_role_profile(role or current_role())

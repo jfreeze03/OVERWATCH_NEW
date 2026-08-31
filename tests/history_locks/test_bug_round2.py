@@ -44,7 +44,10 @@ def test_b7_db_validation_uses_live_classification():
 
 
 def test_b8_cross_page_nav_clamped_to_profile():
-    """B8: never route a viewer to a page their profile does not offer."""
+    """B8: never route a viewer to a page their profile does not offer.
+
+    v4.374.0: the clamp keys on active_profile (the VIEWER's profile under
+    owner's-rights SiS), not resolve_role_profile (the owner's role for everyone)."""
     body = _state_fn("consume_pending_navigation")
-    assert "PAGES_BY_PROFILE" in body and "resolve_role_profile" in body
+    assert "PAGES_BY_PROFILE" in body and "active_profile" in body
     assert 'page = "Overview"' in body                          # universal fallback
