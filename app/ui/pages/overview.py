@@ -585,10 +585,12 @@ def render() -> None:
             "spark": _spend_spark,
             "help": "Warehouse metering credits x "
                     f"${rate:.2f}/credit ({settings.get('_source')}) — the "
-                    "company-scopable lens, complete days only (today's partial excluded, "
-                    "so it reconciles with Cost & Contract -> By warehouse). Serverless/AI "
-                    "and the cloud-services rebate are on Cost & Contract -> Spend & "
-                    "Attribution; Snowsight adds storage and transfer, so it reads higher.",
+                    "company-scopable lens, complete days only (today's partial excluded). "
+                    "Reconciles with Cost & Contract -> By warehouse for windows up to 182 days; "
+                    "beyond that the exact-usage table clamps to its 182-day vs-prior half-window "
+                    "while this headline sums the full selected window, so at 365d/current-year the "
+                    "two differ. Serverless/AI and the cloud-services rebate are on Cost & Contract "
+                    "-> Spend & Attribution; Snowsight adds storage and transfer, so it reads higher.",
         },
     ]
     # rec36: divide by COMPLETE observed days (today's partial already dropped from

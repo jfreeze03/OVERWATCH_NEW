@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.370.0 - Cross-surface reconciliation audit: 3 app-side fixes (2026-08-30)
+
+Cross-surface reconciliation audit (6 finders pairing surfaces that should agree). Eight surfaced,
+six confirmed (three distinct), two refuted (the Decision Studio "two verified-savings" figures are
+the deliberate QTD-vs-all-time pair; the Operations lock-wait mart/live scope is a documented
+account-wide fallback). All three app-side.
+
+- **[MED] Brief "Open incidents" reads the true open count** — the Brief KPI was `len()` of the
+  `open_incidents(5)` feed (shared with the detail below it), so it saturated at 5 while Control Room
+  showed the true count for >5 open incidents. It now reads the uncapped `incident_metrics.OPEN_NOW`
+  (the same builder Control Room uses), added to the Brief's existing prefetch batch; the LIMIT-5 feed
+  is kept only for the row detail.
+- **[MED] Overview spend help no longer over-promises reconciliation** — the flagship "Spend, {window}
+  ({company})" tile sums the full selected window, but Cost ▸ By warehouse (exact usage) clamps to its
+  182-day vs-prior half-window, so at the 365-day / current-year selection the two legitimately differ
+  (~2×). The Overview help claimed unconditional reconciliation with that Cost table; it now states the
+  reconciliation holds up to 182 days and explains the clamp beyond that. (Each number is correct for
+  its stated window; only the claim was wrong.)
+- **[LOW] Brief vs Overview MTD credit spend blend from the same precision** — the Brief blends
+  `health_strip`'s MTD credit partitions, which were rounded to whole credits *before* the blend, while
+  Overview blends raw credit sums, so the two "MTD credit spend (account)" headlines could differ by up
+  to ~$3 on small/dev accounts (where cents render). `health_strip`'s `MTD_AI`/`MTD_OTHER` are now raw,
+  rounded only at the display edge; `MTD_ALL` stays whole for its credit-count display.
+
 ## 4.369.0 - Incident-layer bug hunt: 5 app-side fixes (2026-08-30)
 
 Adversarial pass over the incident-management layer (5 finders: auto-declare, membership/lineage, TTM/

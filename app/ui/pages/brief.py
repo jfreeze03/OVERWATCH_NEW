@@ -97,6 +97,8 @@ def render() -> None:
     _b_live = run_batch([
         {"key": "inc", "sql": mart_sql.open_incidents(5, company),
          "source": f"INCIDENTS (open, {company} + account-level)"},
+        {"key": "inc_met", "sql": mart_sql.incident_metrics(90, company),
+         "source": f"INCIDENTS (open-now count, {company} + account-level)"},
         {"key": f"brief_alert_counts_{company}",
          "sql": mart_sql.open_alert_severity_counts(company),
          "source": f"ALERT_EVENTS counts ({company} + account-level)"},
@@ -237,13 +239,22 @@ def render() -> None:
                key=f"brief_incidents_{_inc_company}", tier="live",
                source=f"INCIDENTS (open, {_inc_company} + account-level)")
     if _inc.ok:
-        _n_inc = len(_inc.df)
+        # Count from the UNCAPPED incident_metrics.OPEN_NOW (the same builder Control Room reads), not
+        # len() of the LIMIT-5 open_incidents feed used for the detail below -- otherwise the KPI
+        # saturates at 5 and disagrees with the Control Room queue for >5 open incidents (recon-audit
+        # 2026-08-30). Fall back to the capped len only if the metrics read is unavailable.
+        _inc_met = _b_live.get("inc_met")
+        if _inc_met is not None and _inc_met.usable():
+            _n_inc = int(safe_float(_inc_met.df.iloc[0].get("OPEN_NOW")))
+        else:
+            _n_inc = len(_inc.df)
         kpis.append({
             "label": "Open incidents",
             "value": f"{_n_inc}",
             "severity": "bad" if _n_inc else "ok",
-            "help": "Lifecycle objects — declared or auto-declared CRITICALs. "
-                    "The Control Room owns the queue; this is the executive glance.",
+            "help": "Lifecycle objects — declared or auto-declared CRITICALs (true open count, "
+                    "matching Control Room). The Control Room owns the queue; this is the "
+                    "executive glance.",
         })
     # CoCo do-first #1: a computed "should I worry?" opener, worst-first, above the
     # numbers — built from signals already on the page (no new query).

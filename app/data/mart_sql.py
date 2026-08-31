@@ -890,8 +890,12 @@ mtd AS (
     -- WHERE-filtered arms did).
     SELECT
         ROUND(COALESCE(SUM(CREDITS_BILLED), 0), 0) AS MTD_ALL,
-        ROUND(COALESCE(SUM(IFF({_AI_SERVICE_PRED}, CREDITS_BILLED, 0)), 0), 0) AS MTD_AI,
-        ROUND(COALESCE(SUM(IFF({_not_ai}, CREDITS_BILLED, 0)), 0), 0) AS MTD_OTHER
+        -- MTD_AI / MTD_OTHER are blended to dollars downstream (Brief), so keep them RAW and round at
+        -- the display edge -- rounding each partition to whole credits first made the Brief's blended
+        -- "MTD credit spend" disagree with Overview's raw-credit blend by up to ~$3 (recon-audit
+        -- 2026-08-30). MTD_ALL stays whole for the credit-count display.
+        COALESCE(SUM(IFF({_AI_SERVICE_PRED}, CREDITS_BILLED, 0)), 0) AS MTD_AI,
+        COALESCE(SUM(IFF({_not_ai}, CREDITS_BILLED, 0)), 0) AS MTD_OTHER
     FROM {mart_object("FACT_METERING_DAILY")}
     -- rec #2: anchor the MTD month boundary to the ACCOUNT timezone so this strip
     -- MTD selects the same days as the account_today()-anchored Overview MTD;
