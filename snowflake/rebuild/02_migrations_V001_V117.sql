@@ -59466,19 +59466,18 @@ WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERS
 -- ===========================================================================
 -- V117__alert_snooze_suppress_sweep.sql
 --
--- SP_ALERT_SCAN gains a snooze-suppress sweep (proc re-derived from V115):
+-- SP_ALERT_SCAN gains a snooze CARRY-FORWARD sweep (proc re-derived from V115):
 --   [MED] A per-event snooze keeps the event's date-banded DEDUPE_KEY, so when the day/week band
 --   rolls the raise arms mint a NEW OPEN event for the same rule+entity even though it is snoozed
---   -- a multi-day snooze silenced nothing past the first day. A new post-raise sweep resolves any
---   OPEN event whose band-independent identity (DEDUPE_KEY minus a trailing |YYYY-MM-DD token,
---   detected with TRY_TO_DATE, not regex) matches an ACTIVE snooze for the same rule. The re-raise
---   is minted then resolved within the scan (the webhook sender never sees it);
---   RESOLUTION_KIND='SNOOZE_SUPPRESSED' is excluded from precision. Entity-only keys (IP, grant
---   time) are never stripped -- their snooze already worked. The sibling supersede + auto-clear
---   sweeps and everything else are byte-identical to V115.
---
--- Residual (documented): on the WAKE scan the reopened stale original and a fresh re-raise can both
--- be OPEN for one scan until resolved; a clean fix needs a wake-step change and is deferred.
+--   -- a multi-day snooze silenced nothing past the first day. A new post-raise sweep carries the
+--   snooze forward: (1) snoozes the fresh same-identity re-raise inheriting the active snooze's
+--   wake time (so it holds the CURRENT band's data and wakes on schedule), (2) resolves the now-
+--   superseded older snoozed row (RESOLUTION_KIND='SNOOZE_SUPPRESSED', excluded from precision) so
+--   exactly ONE snoozed row survives and reopens once on wake with current numbers. Band-
+--   independent identity strips a trailing |YYYY-MM-DD via TRY_TO_DATE (not regex); entity-only
+--   keys are never stripped. ev.RAISED_AT > s.RAISED_AT restricts to genuine re-raises, leaving a
+--   pre-existing untriaged OPEN sibling for a human. Supersede + auto-clear sweeps byte-identical
+--   to V115.
 --
 -- No schema change; owner applies after V116 and the next hourly SP_ALERT_SCAN runs the sweep.
 
@@ -60377,41 +60376,60 @@ BEGIN
             SELECT 'AlertScan', 'autoclear_sweep_failed', :emsg, 'V091 auto-clear sweep - other rules unaffected', CURRENT_ROLE();
     END;
 
-    -- [snooze-suppress sweep] V117: a per-event snooze keeps the event's date-banded
-    -- DEDUPE_KEY, so when the day/week band rolls the raise arms above mint a NEW OPEN event
-    -- for the SAME rule+entity even though it is snoozed -- silently defeating a multi-day
-    -- snooze after the first day. Resolve any OPEN event whose band-independent identity (its
-    -- DEDUPE_KEY minus a trailing |YYYY-MM-DD date/week token) matches an ACTIVE snooze
-    -- (STATUS='SNOOZED', wake time still in the future) for the same rule. The re-raise is
-    -- minted then resolved WITHIN this scan, so the separate webhook sender never sees the
-    -- transient OPEN. RESOLUTION_KIND='SNOOZE_SUPPRESSED' is excluded from per-rule precision/
-    -- MTTR like SUPERSEDED/AUTO_CLEARED; the original SNOOZED row is untouched and wakes on
-    -- schedule. Entity-only keys (IP, grant timestamp) do not end in a bare ISO date, so their
-    -- identity is the full key -- their snooze already worked and is unchanged. TRY_TO_DATE
-    -- (not regex) strips the trailing date to avoid string-escape ambiguity. Wrapped so a sweep
-    -- failure never breaks alerting (does NOT touch :fails).
+    -- [snooze carry-forward sweep] V117: a per-event snooze keeps the event's date-banded
+    -- DEDUPE_KEY, so when the day/week band rolls the raise arms above mint a NEW OPEN event for
+    -- the SAME rule+entity even though it is snoozed -- silently defeating a multi-day snooze.
+    -- Carry the snooze FORWARD onto the re-raise (do NOT resolve it: a resolved row would occupy
+    -- the day's key and, after a mid-day wake, block the current band from re-minting so only a
+    -- STALE-numbers original showed). (1) snooze the fresh same-identity re-raise, inheriting the
+    -- active snooze's wake time, so it carries the CURRENT band's data and wakes on schedule;
+    -- (2) resolve the now-superseded older snoozed row so exactly ONE snoozed row (the latest
+    -- band, current data) survives and reopens once on wake. Band-independent identity strips a
+    -- trailing |YYYY-MM-DD via TRY_TO_DATE (no regex). ev.RAISED_AT > s.RAISED_AT restricts to
+    -- GENUINE future re-raises, leaving a pre-existing untriaged OPEN sibling for a human. Entity-
+    -- only keys (IP, grant time) never end in a bare date so they are never stripped -- untouched.
+    -- RESOLUTION_KIND='SNOOZE_SUPPRESSED' is a machine close excluded from precision. Wrapped so a
+    -- sweep failure never breaks alerting (does NOT touch :fails).
     BEGIN
         UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS ev
-           SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'
+           SET STATUS = 'SNOOZED',
+               SNOOZED_UNTIL = s.SNOOZED_UNTIL,
+               SNOOZE_BY = s.SNOOZE_BY,
+               SNOOZE_REASON = s.SNOOZE_REASON
+          FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s
          WHERE ev.STATUS = 'OPEN'
+           AND s.STATUS = 'SNOOZED'
+           AND s.SNOOZED_UNTIL > CURRENT_TIMESTAMP()
+           AND s.RULE_ID = ev.RULE_ID
+           AND s.EVENT_ID <> ev.EVENT_ID
+           AND ev.RAISED_AT > s.RAISED_AT
+           AND IFF(SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'
+                     AND TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10)) IS NOT NULL,
+                     LEFT(s.DEDUPE_KEY, LENGTH(s.DEDUPE_KEY) - 11), s.DEDUPE_KEY)
+               = IFF(SUBSTR(ev.DEDUPE_KEY, -11, 1) = '|'
+                     AND TRY_TO_DATE(RIGHT(ev.DEDUPE_KEY, 10)) IS NOT NULL,
+                     LEFT(ev.DEDUPE_KEY, LENGTH(ev.DEDUPE_KEY) - 11), ev.DEDUPE_KEY);
+        UPDATE DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s
+           SET STATUS = 'RESOLVED', RESOLVED_AT = CURRENT_TIMESTAMP(), RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'
+         WHERE s.STATUS = 'SNOOZED'
            AND EXISTS (
-               SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s
-               WHERE s.STATUS = 'SNOOZED'
-                 AND s.SNOOZED_UNTIL > CURRENT_TIMESTAMP()
-                 AND s.RULE_ID = ev.RULE_ID
-                 AND s.EVENT_ID <> ev.EVENT_ID
-                 AND IFF(SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'
-                         AND TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10)) IS NOT NULL,
-                         LEFT(s.DEDUPE_KEY, LENGTH(s.DEDUPE_KEY) - 11), s.DEDUPE_KEY)
-                     = IFF(SUBSTR(ev.DEDUPE_KEY, -11, 1) = '|'
-                           AND TRY_TO_DATE(RIGHT(ev.DEDUPE_KEY, 10)) IS NOT NULL,
-                           LEFT(ev.DEDUPE_KEY, LENGTH(ev.DEDUPE_KEY) - 11), ev.DEDUPE_KEY)
+               SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s2
+               WHERE s2.STATUS = 'SNOOZED'
+                 AND s2.EVENT_ID <> s.EVENT_ID
+                 AND s2.RULE_ID = s.RULE_ID
+                 AND s2.RAISED_AT > s.RAISED_AT
+                 AND IFF(SUBSTR(s2.DEDUPE_KEY, -11, 1) = '|'
+                     AND TRY_TO_DATE(RIGHT(s2.DEDUPE_KEY, 10)) IS NOT NULL,
+                     LEFT(s2.DEDUPE_KEY, LENGTH(s2.DEDUPE_KEY) - 11), s2.DEDUPE_KEY)
+                     = IFF(SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'
+                     AND TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10)) IS NOT NULL,
+                     LEFT(s.DEDUPE_KEY, LENGTH(s.DEDUPE_KEY) - 11), s.DEDUPE_KEY)
            );
     EXCEPTION
         WHEN OTHER THEN
             emsg := SQLERRM;
             INSERT INTO DBA_MAINT_DB.OVERWATCH.APP_ERROR_LOG (PAGE, ERROR_TYPE, ERROR_MESSAGE, CONTEXT, ROLE_NAME)
-            SELECT 'AlertScan', 'snooze_suppress_sweep_failed', :emsg, 'V117 snooze-suppress sweep - other rules unaffected', CURRENT_ROLE();
+            SELECT 'AlertScan', 'snooze_carry_forward_failed', :emsg, 'V117 snooze carry-forward sweep - other rules unaffected', CURRENT_ROLE();
     END;
 
     RETURN 'alert scan v11 (V091: + auto-clear sweep): ' || (16 - :fails) || '/16 rule blocks ok';
@@ -60420,5 +60438,5 @@ $$;
 
 INSERT INTO DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION (VERSION, DESCRIPTION)
 SELECT 117 AS VERSION,
-       'SP_ALERT_SCAN snooze-suppress sweep (re-derived from V115): a per-event snooze keeps the events date-banded DEDUPE_KEY, so when the day/week band rolled the raise arms minted a fresh OPEN for the same rule+entity and a multi-day snooze silenced nothing past the first day. A new post-raise sweep resolves any OPEN event whose band-independent identity (DEDUPE_KEY minus a trailing bare-date token, via TRY_TO_DATE) matches an active snooze for the same rule, with RESOLUTION_KIND=SNOOZE_SUPPRESSED (excluded from precision). Entity-only keys are never stripped. Supersede + auto-clear sweeps byte-identical. Proc only, no schema change; forward-healing on the next hourly SP_ALERT_SCAN.' AS DESCRIPTION
+       'SP_ALERT_SCAN snooze carry-forward sweep (re-derived from V115): a per-event snooze keeps the events date-banded DEDUPE_KEY, so when the day/week band rolled the raise arms minted a fresh OPEN for the same rule+entity and a multi-day snooze silenced nothing past the first day. A new post-raise sweep carries the snooze forward onto the fresh re-raise (inheriting the wake time) and resolves the superseded older snoozed row (RESOLUTION_KIND=SNOOZE_SUPPRESSED, excluded from precision), so one snoozed row with current-band data survives and reopens once on wake. Band-independent identity strips a trailing bare-date token via TRY_TO_DATE; entity-only keys are never stripped; ev.RAISED_AT > s.RAISED_AT leaves a pre-existing untriaged OPEN sibling for a human. Proc only, no schema change; forward-healing on the next hourly SP_ALERT_SCAN.' AS DESCRIPTION
 WHERE NOT EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SCHEMA_VERSION WHERE VERSION = 117);

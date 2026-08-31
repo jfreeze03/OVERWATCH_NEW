@@ -67,3 +67,7 @@ def test_clear_queue_receipt_is_honest_per_verb() -> None:
     assert "event(s) {_c_verb}" not in _ALERTS_SRC        # old verb-agnostic overstatement gone
     assert "event(s) resolved." in _ALERTS_SRC            # RESOLVE: true transitioned count
     assert "open count until resolved" in _ALERTS_SRC     # ACK: honest, no count
+    # self-review finding: a same-minute retry returns proc verdict DUPLICATE (0 rows) but
+    # execute_action reports success — the receipt must NOT then claim a cleared count.
+    assert 'startswith("DUPLICATE")' in _ALERTS_SRC
+    assert "already applied moments ago" in _ALERTS_SRC

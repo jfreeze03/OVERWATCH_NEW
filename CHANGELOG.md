@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.381.0 - Self-review fixes for the alert additions (2026-08-31)
+
+An adversarial review of the v4.376–v4.380 additions (4 finders + verify) found 3 confirmed issues;
+this fixes them. The V117 revision is in place (it was never applied), so the pending set stays
+V115–V117.
+
+- **[med] V117 revised from resolve → carry-forward.** The v4.380 sweep *resolved* each day's
+  snooze re-raise, leaving a `SNOOZE_SUPPRESSED` row occupying that day's `DEDUPE_KEY`. After a
+  **mid-day wake**, the current band couldn't re-mint (key occupied), so the operator saw only the
+  **stale-numbers original**. V117 now **carries the snooze forward**: it snoozes the fresh re-raise
+  (inheriting the wake time) and resolves the superseded older row, so exactly one snoozed row — the
+  latest band, with **current data** — survives and reopens once on wake. `ev.RAISED_AT > s.RAISED_AT`
+  also leaves a pre-existing *untriaged* OPEN sibling in the queue for a human (was over-broadly swept).
+- **[low] Clear-queue receipt no longer overstates a duplicate.** A same-minute retry hits the
+  idempotency key → the proc returns `DUPLICATE` (0 rows) which `execute_action` reports as success;
+  the receipt used to still say "cleared N". It now says "No change — already applied moments ago."
+- **[low] Comment clarity:** the undelivered-critical anti-join is *deliberately* unbounded in time
+  (unlike `route_backlog`'s 7-day send window) — noted so the "as in route_backlog" isn't over-read.
+- ⚠ The V117 carry-forward (`UPDATE…FROM` + `TRY_TO_DATE` identity strip) still **needs a live
+  smoke-check in SiS** — structurally byte-derived, all shape tests pass, but unverifiable read-only.
+
 ## 4.380.0 - V117: snooze-suppress sweep (multi-day snooze finally holds) (2026-08-31)
 
 Last deferred alert-hunt item (#2). A per-event snooze sets `STATUS='SNOOZED'` but keeps the event's

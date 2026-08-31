@@ -546,12 +546,14 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         _c_call, _clear_open_queue_stmts(company, _c_verb, _c_note, _c_kind),
                         page=_PAGE)
                     stamp_write(f"alert_clear_exec_{company}", _c_ok)
-                    # Honest receipt: RESOLVE covers OPEN and ACK, so _open_total is the
-                    # true transitioned count and the queue really is cleared. ACK moves
-                    # ONLY the OPEN rows (already-ACK stay ACK) and keeps them counting as
-                    # open, so reusing _open_total (OPEN+ACK) would overstate the change and
-                    # 'cleared' would be wrong — report the action without a misleading count.
-                    if _c_resolve:
+                    # Honest receipt. A same-minute retry hits the idempotency key and the proc
+                    # returns 'DUPLICATE' (0 rows moved) which execute_action reports as success —
+                    # so never claim a cleared count then (self-review finding). Otherwise RESOLVE
+                    # covers OPEN and ACK, so _open_total is the true transitioned count; ACK moves
+                    # only OPEN rows and keeps them counting as open, so report it without a count.
+                    if str(_c_m or "").strip().upper().startswith("DUPLICATE"):
+                        _c_msg = "No change — this clear was already applied moments ago."
+                    elif _c_resolve:
                         _c_msg = f"Open queue cleared — {_open_total:,} event(s) resolved."
                     else:
                         _c_msg = ("Acknowledged the open events in scope — they stay in the "

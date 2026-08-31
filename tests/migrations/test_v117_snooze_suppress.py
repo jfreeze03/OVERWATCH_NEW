@@ -19,16 +19,22 @@ def _read(rel: str) -> str:
     return (_ROOT / rel).read_text(encoding="utf-8")
 
 
-def test_v117_adds_snooze_suppress_sweep() -> None:
+def test_v117_adds_snooze_carry_forward_sweep() -> None:
     mig = _read("snowflake/migrations/V117__alert_snooze_suppress_sweep.sql")
     assert mig.count("CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_ALERT_SCAN") == 1
     assert "CREATE TABLE " not in mig and "ALTER TABLE " not in mig   # re-derived proc, no schema change
-    # the new sweep: resolve OPEN events covered by an ACTIVE snooze for the same rule
+    # (1) carry-forward: SNOOZE the fresh re-raise, inheriting the active snooze's wake time
+    #     (self-review fix: NOT resolve it, which left a stale-numbers original after wake)
+    assert "SET STATUS = 'SNOOZED'," in mig
+    assert "SNOOZED_UNTIL = s.SNOOZED_UNTIL" in mig
+    assert "FROM DBA_MAINT_DB.OVERWATCH.ALERT_EVENTS s" in mig       # UPDATE...FROM inherit
+    assert "s.SNOOZED_UNTIL > CURRENT_TIMESTAMP()" in mig            # only an ACTIVE snooze
+    assert "ev.RAISED_AT > s.RAISED_AT" in mig                       # only genuine re-raises (finding 5)
+    # (2) resolve the superseded older snoozed row so ONE snoozed row (latest band) survives
     assert "RESOLUTION_KIND = 'SNOOZE_SUPPRESSED'" in mig
-    assert "s.STATUS = 'SNOOZED'" in mig and "s.SNOOZED_UNTIL > CURRENT_TIMESTAMP()" in mig
-    assert "s.RULE_ID = ev.RULE_ID" in mig
+    assert "s2.RAISED_AT > s.RAISED_AT" in mig
     # band-independent identity via TRY_TO_DATE (no regex): strip a trailing |YYYY-MM-DD
-    assert "TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10))" in mig
+    assert mig.count("TRY_TO_DATE(RIGHT(s.DEDUPE_KEY, 10))") == 2    # stmt1 + stmt2
     assert "TRY_TO_DATE(RIGHT(ev.DEDUPE_KEY, 10))" in mig
     assert "SUBSTR(s.DEDUPE_KEY, -11, 1) = '|'" in mig
     # re-derived from V115: the supersede-ACK fix + the sibling sweeps survive untouched

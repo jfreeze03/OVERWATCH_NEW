@@ -837,11 +837,13 @@ def health_strip() -> str:
     return f"""
 WITH und_crit AS (
     -- Alert-hunt #6: a CRITICAL is UNDELIVERED when an ELIGIBLE enabled route (the
-    -- sender's family/company predicate, mirroring route_backlog) has no delivery for
-    -- it -- NOT merely when the event has no delivery row at all. The old event-level
-    -- "any delivery" check let a CRITICAL that reached a sibling info-route but FAILED
-    -- its paging route read as delivered (green banner while on-call was never paged).
-    -- JOIN-based anti-join per (event, eligible route) -- no nested correlated subquery.
+    -- sender's family/company/severity-floor predicate, as in route_backlog) has no
+    -- delivery for it -- NOT merely when the event has no delivery row at all. The old
+    -- event-level "any delivery" check let a CRITICAL that reached a sibling info-route
+    -- but FAILED its paging route read as delivered (green banner while on-call was never
+    -- paged). This is DELIBERATELY unbounded in time (unlike route_backlog's 7d send
+    -- window): the always-on banner must keep flagging any still-OPEN undelivered critical,
+    -- even one past the sender's send window. JOIN anti-join per (event, eligible route).
     SELECT DISTINCT e.EVENT_ID
     FROM {core_object("ALERT_EVENTS")} e
     LEFT JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
