@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.372.0 - Alerts: one-click "clear the open queue" (2026-08-30)
+
+Adds an operator-only bulk action on **Alerts ▸ Open events** to ack or resolve *every* open event in
+the current company scope in one step — for resetting the queue after validating that alerts flow
+correctly, rather than ticking hundreds of checkboxes (the existing bulk panel only acts on selected
+rows, which the ~500-row feed cap can't cover).
+
+- A collapsed **🧹 Clear the open queue** expander shows the true open count and severity mix in scope
+  (from the same `open_alert_severity_counts` the KPI tiles use, so it clears exactly what they show).
+- **Resolve** (zeroes the open counts) or **Acknowledge** (marks seen — an ACK event still counts as
+  open). Resolve defaults to an **untagged** resolution, which drops out of the per-rule precision
+  score — the honest choice for a setup/validation clear, so test alerts don't skew the proof metrics;
+  the three real kinds (ACTIONED/NOISE/EXPECTED) remain selectable.
+- Operator-gated, typed-confirm (`CLEAR RESOLVE` / `CLEAR ACK`) showing the affected count, and every
+  change is written to `ALERT_AUDIT`. Matched by `STATUS` + company (not enumerated event ids), so it
+  clears the whole queue past the feed cap; snoozed events are deliberately left alone.
+
 ## 4.371.0 - Data-loader/ETL bug hunt: 2 app-side fixes + V113 + V114 (2026-08-30)
 
 Adversarial pass over the data-loader/ETL layer (6 finders: incremental merge/dedup, window/watermark,

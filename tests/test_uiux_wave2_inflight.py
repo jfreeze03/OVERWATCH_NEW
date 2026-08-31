@@ -26,7 +26,7 @@ def _src(rel: str) -> str:
 LATCHED_FILES = {
     "app/ui/pages/cost_parts/optimize.py": 5,
     "app/ui/pages/operations.py": 5,
-    "app/ui/pages/alerts.py": 5,
+    "app/ui/pages/alerts.py": 6,
     "app/ui/workbench.py": 6,
     "app/ui/pages/cost_parts/ai_chargeback.py": 3,
     "app/ui/security_center.py": 2,

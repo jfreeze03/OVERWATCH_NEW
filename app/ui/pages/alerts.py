@@ -215,6 +215,43 @@ def _bulk_lifecycle_sql(event_ids: list[str], action: str, note: str, kind: str 
     return update, audit
 
 
+def _clear_open_queue_stmts(company: str, action: str, note: str, kind: str = "") -> list[str]:
+    """'Clear the open queue' — ack or resolve EVERY open/ack event in the current company scope,
+    matched by STATUS + company rather than enumerated EVENT_IDs, so one action clears the whole queue
+    past the feed's row cap (e.g. resetting after pre-production validation). Snoozed events are left
+    alone. Audit-first (mirrors _unsnooze_stmts): the ALERT_AUDIT insert SELECTs the to-be-transitioned
+    rows, then the state UPDATE runs. Same STATUS + company predicate as open_alert_severity_counts so
+    it clears exactly the population the KPI tiles show. Operator- and confirm-gated at the call site."""
+    action = "RESOLVE" if action == "RESOLVE" else "ACK"
+    kind = str(kind or "").upper()
+    kind = kind if kind in RESOLUTION_KINDS else ""
+    comp = str(company or "ALL").strip()
+    scope = "" if comp.upper() == "ALL" else (
+        f" AND (COMPANY = {sql_literal(comp)} OR UPPER(COMPANY) = 'ALL')")
+    transition = "STATUS = 'OPEN'" if action == "ACK" else "STATUS IN ('OPEN', 'ACK')"
+    audit_note = f"[{kind}] {note}" if kind else note
+    if viewer_name():
+        audit_note = f"{audit_note} — by {viewer_name()}"
+    audit = (
+        f"INSERT INTO {core_object('ALERT_AUDIT')} (EVENT_ID, ACTION, NOTE, ACTED_BY) "
+        f"SELECT EVENT_ID, {sql_literal(action)}, {sql_literal(audit_note)}, {identity_sql()} "
+        f"FROM {core_object('ALERT_EVENTS')} WHERE {transition}{scope};"
+    )
+    if action == "ACK":
+        update = (
+            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'ACK', ACK_BY = {identity_sql()}, "
+            f"ACK_AT = CURRENT_TIMESTAMP() WHERE STATUS = 'OPEN'{scope};"
+        )
+    else:
+        set_kind = f", RESOLUTION_KIND = {sql_literal(kind)}" if kind else ""
+        update = (
+            f"UPDATE {core_object('ALERT_EVENTS')} SET STATUS = 'RESOLVED', "
+            f"RESOLVED_AT = CURRENT_TIMESTAMP(){set_kind} "
+            f"WHERE STATUS IN ('OPEN', 'ACK'){scope};"
+        )
+    return [audit, update]
+
+
 def _last_delivery_card() -> None:
     """'No alerts today — quiet, or broken?' answered in one card, PER ROUTE.
 
@@ -448,6 +485,69 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     # keeps values by element id and re-sends them on the next interaction (sticky
     # dataframe highlights, typed confirm text) — a fresh key is the one reliable reset.
     _sel_nonce = int(st.session_state.get("_ow_alert_sel_nonce", 0))
+    # Operator-only "clear the whole open queue" — resolve/ack EVERY open event in scope in one action,
+    # past the feed's row cap. Deliberately collapsed + typed-confirm + audited; defaults to an UNTAGGED
+    # resolve so a start-fresh clear (e.g. after pre-production validation) does not skew per-rule
+    # precision. Renders before the feed guard so it works even when the queue exceeds the feed cap.
+    if is_operator:
+        _clr = run(mart_sql.open_alert_severity_counts(company), page=_PAGE,
+                   key=f"alert_clear_counts_{company}", tier="live",
+                   source="ALERT_EVENTS (open counts, scope)", probe=True)
+        _open_total = int(safe_float(_clr.df.iloc[0].get("TOTAL"))) if _clr.usable() else 0
+        if _open_total > 0:
+            _scope_lbl = ("all companies" if str(company).strip().upper() == "ALL"
+                          else f"{company} + account-level")
+            with st.expander(f"🧹 Clear the open queue — {_open_total:,} open in scope ({_scope_lbl})"):
+                st.caption("Bulk-transition EVERY open/acknowledged event in this scope in one action — "
+                           "past the feed's row cap. Snoozed events are left alone. Every change is "
+                           "written to ALERT_AUDIT.")
+                _cr = _clr.df.iloc[0]
+                _mix = " · ".join(
+                    f"{int(safe_float(_cr.get(_k))):,} {_lbl}"
+                    for _k, _lbl in (("CRIT", "CRITICAL"), ("HIGH", "HIGH"),
+                                     ("MED", "MEDIUM"), ("LOW", "LOW"))
+                    if int(safe_float(_cr.get(_k))) > 0)
+                if _mix:
+                    st.caption("In scope: " + _mix)
+                _c_choice = st.radio(
+                    "Action", ["Resolve (clear the queue)", "Acknowledge (mark seen, keeps the count)"],
+                    key=f"alert_clear_action_{company}",
+                    help="Resolve zeroes the open counts; Acknowledge only marks them seen — an ACK "
+                         "event still counts as open in the tiles.")
+                _c_resolve = _c_choice.startswith("Resolve")
+                _c_kind = ""
+                if _c_resolve:
+                    _c_pick = st.radio(
+                        "Resolution tag", ["Untagged — excluded from precision", *RESOLUTION_KINDS],
+                        key=f"alert_clear_kind_{company}",
+                        help="Untagged is right for a setup / validation clear: it drops out of the "
+                             "per-rule precision score, so test alerts don't skew it.")
+                    _c_kind = _c_pick if _c_pick in RESOLUTION_KINDS else ""
+                _c_note = st.text_input(
+                    "Note (written to every audit row)", value="Bulk cleared — pre-production validation",
+                    key=f"alert_clear_note_{company}", max_chars=500)
+                _c_verb = "RESOLVE" if _c_resolve else "ACK"
+                if (confirm_gate(
+                        f"CLEAR {_c_verb}", f"Clear the open queue ({_c_verb})",
+                        key=f"alert_clear_exec_{company}",
+                        prompt=f"Type CLEAR {_c_verb} to confirm ({_open_total:,} event(s) in scope)",
+                        type="primary")
+                        and write_gate_open(f"alert_clear_exec_{company}")):
+                    _c_ok = True
+                    for _c_stmt in _clear_open_queue_stmts(company, _c_verb, _c_note, _c_kind):
+                        _c_o, _c_m = execute_statement(_c_stmt, page=_PAGE)
+                        _c_ok = _c_ok and _c_o
+                        if not _c_o:
+                            break
+                    stamp_write(f"alert_clear_exec_{company}", _c_ok)
+                    notify(_c_ok, (f"Cleared the open queue — {_open_total:,} event(s) {_c_verb}."
+                                   if _c_ok else "Clear failed — see the error log."))
+                    if _c_ok:
+                        from app.ui.components import log_ui_event
+                        log_ui_event("alert_resolve" if _c_resolve else "alert_ack", page=_PAGE)
+                        st.session_state["_ow_alert_receipt"] = (
+                            f"Open queue cleared — {_open_total:,} event(s) {_c_verb}")
+                        st.rerun()
     if guard(events, "No open alert events — the scan ran and found nothing over threshold.",
              setup_hint=_SETUP_HINT, kind="clean"):
         edf = severity_sort(events.df)  # worst first, newest within — triage order
