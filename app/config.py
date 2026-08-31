@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.372.0"
+APP_VERSION = "4.373.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -188,7 +188,7 @@ OPERATOR_PROFILES = ("DBA",)  # profiles allowed to execute state-changing SQL i
 # Empty tuple = no viewer is an in-app operator (secure default); the owner adds
 # the specific usernames who may operate. Off-SiS (local dev/tests) there is no
 # viewer identity, so session.is_operator() falls back to the role->profile check.
-OPERATOR_USERS: tuple[str, ...] = ()  # e.g. ("JSMITH", "ADBA")
+OPERATOR_USERS: tuple[str, ...] = ("H21427",)  # add more usernames as operators are onboarded
 
 
 def is_operator_user(viewer: str) -> bool:

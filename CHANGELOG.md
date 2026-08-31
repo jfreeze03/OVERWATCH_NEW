@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.373.0 - Entitle the first operator (2026-08-31)
+
+Adds the account owner's Snowflake username (`H21427`) to `OPERATOR_USERS`. Under owner's-rights
+Streamlit-in-Snowflake every viewer executes as the app owner's role, so operator gating keys on the
+**viewer's username** (`st.user.user_name`), never `CURRENT_ROLE()` — the allowlist had shipped empty
+(secure default), which meant *no one* was entitled and every operator write control (ack/resolve, the
+new clear-the-queue panel, savings verification, incident declare, snooze, settings) was hidden for
+everyone. This is a config-only change; RBAC in Snowflake remains the real server-side boundary.
+
 ## 4.372.0 - Alerts: one-click "clear the open queue" (2026-08-30)
 
 Adds an operator-only bulk action on **Alerts ▸ Open events** to ack or resolve *every* open event in
