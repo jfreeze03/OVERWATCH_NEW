@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.390.0 - UI review Wave 2: DAG status & neighborhood filters (2026-08-31)
+
+Completes Wave 2. The interactive task graph offered name search only; it now supports the
+core "why did it break?" workflow directly on the graph.
+
+- **[#37] Status dimming + neighborhood isolation on the task DAG.** A new toolbar control
+  highlights one status (failed / suspended / critical path) and dims the rest, and clicking a
+  node isolates its **upstream + downstream lineage** (dimming everything off that node's blast
+  radius); clicking the root again, the Fit button, double-click, or the `0` key clears back to
+  the full graph. The data plumbing that makes it possible: nodes now carry a canonical
+  `data-node-id` and edges carry canonical `data-source` / `data-target`, so the client builds an
+  adjacency map and walks it with a cycle-guarded BFS. A `suspended` node class was added
+  (mutually exclusive with `failed`, so the positional `failed`-class lock is preserved). Every
+  highlight/dim class is toggled at **runtime via classList** — never emitted in the built markup —
+  so the `edge` / `edge edge-critical` class-count locks stay byte-stable. Still fully
+  self-contained (no external scripts); the dim/isolate interaction wants a live SiS eyeball.
+
 ## 4.389.0 - UI review Wave 2: standardized failure recovery (2026-08-31)
 
 - **[#46] One consistent recovery affordance on a page-render failure.** The `safe_page` error

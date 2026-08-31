@@ -145,6 +145,29 @@ def test_task_graph_can_frame_failures_and_critical_path():
     assert "button:disabled" in markup
 
 
+def test_task_graph_status_dim_and_neighborhood_isolation():
+    # F37: the DAG can dim to a status (failed/suspended/critical) and isolate a clicked
+    # node's upstream/downstream lineage. Edges carry canonical endpoint ids and nodes a
+    # canonical data-node-id so the client can build the adjacency map.
+    frame = _graph_frame()  # LOAD_STAGE has RECENT_FAILURES -> failed; PUBLISH -> suspended
+    shape = inspect_task_graph(frame["TASK_FQN"], frame["PREDECESSORS"])
+    markup = _task_dag_markup(frame, shape, height=640)
+    assert "data-node-id=" in markup
+    assert "data-source=" in markup and "data-target=" in markup
+    assert " suspended" in markup           # the suspended node carries the status class
+    assert 'id="statusDim"' in markup
+    for opt in ('value="failed"', 'value="suspended"', 'value="critical-path"'):
+        assert opt in markup
+    # isolation machinery, cycle-guarded via a visited Set
+    assert "isolateNeighborhood" in markup and "applyDim" in markup
+    assert "const upstream" in markup and "const downstream" in markup
+    # highlight classes are RUNTIME-only — never baked into the built markup, so the
+    # edge/node class-count locks stay stable
+    for runtime in ('class="node dimmed"', 'class="edge nbr"', 'class="node nbr"'):
+        assert runtime not in markup
+    assert "<script src" not in markup and "https://" not in markup
+
+
 def test_operations_refuses_partial_or_invalid_graphs_before_rendering():
     source = _src("app/ui/pages/operations.py")
     sql = ops_sql.task_graph_nodes()

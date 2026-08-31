@@ -303,8 +303,14 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
         bend = max(42.0, (end_x - start_x) * 0.48)
         _critical = predecessor in critical_nodes and child in critical_nodes
         edge_cls = "edge edge-critical" if _critical else "edge"
+        # F37: carry the canonical endpoint ids so the client can build an adjacency
+        # map for neighborhood isolation. Added as SEPARATE attributes (not into the
+        # class), so the class-count locks on 'edge'/'edge edge-critical' stay stable.
         edge_markup.append(
-            f'<path class="{edge_cls}" d="M {start_x:.1f} {start_y:.1f} '
+            f'<path class="{edge_cls}" '
+            f'data-source="{html.escape(predecessor, quote=True)}" '
+            f'data-target="{html.escape(child, quote=True)}" '
+            f'd="M {start_x:.1f} {start_y:.1f} '
             f'C {start_x + bend:.1f} {start_y:.1f}, '
             f'{end_x - bend:.1f} {end_y:.1f}, {end_x:.1f} {end_y:.1f}"/>'
         )
@@ -341,10 +347,18 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
             node_class += " critical-path"
         if color == palette.BAD:
             node_class += " failed"
+        elif "suspend" in status.lower():
+            # F37: status-dim/frame target (the MUTED hue). Mutually exclusive with
+            # `failed`, so `failed` stays the LAST class token on a failed node (the
+            # positional lock in test_wave1_task_graph_ux).
+            node_class += " suspended"
         search_text = html.escape(fqn.lower(), quote=True)
         node_markup.append(
             f'<g class="{node_class}" transform="translate({x:.1f} {y:.1f})" tabindex="0" '
-            f'data-name="{search_text}" data-x="{x:.1f}" data-y="{y:.1f}" '
+            # F37: data-node-id is the CANONICAL (upper) join key the edge endpoints use;
+            # data-name stays fqn.lower() for search. Distinct keys, do not conflate.
+            f'data-name="{search_text}" data-node-id="{html.escape(name, quote=True)}" '
+            f'data-x="{x:.1f}" data-y="{y:.1f}" '
             f'role="group" aria-label="{aria}">'
             f'<title>{html.escape(details)}</title>'
             f'<rect width="{node_w}" height="{node_h}" rx="6" '
@@ -426,6 +440,12 @@ body { font-family: Inter, "Segoe UI", Arial, sans-serif; }
 .dag-toolbar button:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 .dag-toolbar button:disabled { opacity: .38; cursor: not-allowed; border-color: rgba(148,163,184,.2); }
 .dag-toolbar button.frame { min-width: auto; }
+.dag-toolbar select {
+  height: 32px; padding: 0 6px; border: 1px solid rgba(148,163,184,.32);
+  border-radius: 5px; background: #1f2937; color: #f8fafc;
+  font: 600 12px Inter, "Segoe UI", sans-serif; cursor: pointer;
+}
+.dag-toolbar select:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
 svg {
   width: 100%; height: __HEIGHT__px; display: block; cursor: grab;
   touch-action: none; user-select: none;
@@ -462,6 +482,14 @@ svg.dragging { cursor: grabbing; }
 .node:focus rect { stroke-width: 4; }
 .node.search-hit rect { stroke: #f8fafc; stroke-width: 5; }
 .node.critical-path rect { stroke-dasharray: 7 3; }
+/* F37: status-dim + neighborhood isolation. Every class below is toggled at RUNTIME
+   via classList (never emitted in the built markup), so the node/edge class-count
+   locks stay byte-stable. */
+.dag-host.dimming .node.dimmed { opacity: .12; }
+.dag-host.dimming .edge { opacity: .12; }
+.dag-host.isolating .node:not(.nbr) { opacity: .12; }
+.dag-host.isolating .edge:not(.nbr) { opacity: .05; }
+.node.nbr-root rect { stroke: #f8fafc; stroke-width: 5; }
 .node-title { fill: #f8fafc; font-size: 13px; font-weight: 700; }
 .node-meta { fill: #cbd5e1; font-size: 10px; }
 .node-state { font-size: 9px; font-weight: 700; text-transform: uppercase; }
@@ -481,6 +509,13 @@ svg.dragging { cursor: grabbing; }
             aria-label="Frame the failed tasks">Failed</button>
     <button id="fitCrit" class="frame" title="Frame the critical path"
             aria-label="Frame the critical path">Critical</button>
+    <select id="statusDim" title="Highlight one status; dim the rest"
+            aria-label="Highlight one status and dim the rest">
+      <option value="">Highlight…</option>
+      <option value="failed">Failed</option>
+      <option value="suspended">Suspended</option>
+      <option value="critical-path">Critical path</option>
+    </select>
     <button id="full" title="Full screen" aria-label="Full screen">Full</button>
     <button id="download" title="Download SVG" aria-label="Download SVG">SVG</button>
   </div>
@@ -572,6 +607,76 @@ svg.dragging { cursor: grabbing; }
     apply();
   };
   const graphNodes = Array.from(scene.querySelectorAll(".node"));
+  // F37: status-dim + neighborhood isolation — the "why did it break" filters.
+  // Reuses the node classes (failed / suspended / critical-path) and the edge
+  // endpoints (data-source/target). Every highlight class is toggled at runtime,
+  // never emitted in the built markup, so the class-count locks stay stable.
+  const graphEdges = Array.from(scene.querySelectorAll(".edge"));
+  const upstream = new Map();
+  const downstream = new Map();
+  graphEdges.forEach(edge => {
+    const s = edge.dataset.source;
+    const t = edge.dataset.target;
+    if (!s || !t) return;
+    edge._s = s; edge._t = t;
+    (downstream.get(s) || downstream.set(s, new Set()).get(s)).add(t);
+    (upstream.get(t) || upstream.set(t, new Set()).get(t)).add(s);
+  });
+  const statusDim = document.getElementById("statusDim");
+  let dimStatus = "";
+  let isolateRoot = "";
+  const clearDim = () => {
+    dimStatus = "";
+    host.classList.remove("dimming");
+    graphNodes.forEach(node => node.classList.remove("dimmed"));
+  };
+  const clearIsolate = () => {
+    isolateRoot = "";
+    host.classList.remove("isolating");
+    graphNodes.forEach(node => node.classList.remove("nbr", "nbr-root"));
+    graphEdges.forEach(edge => edge.classList.remove("nbr"));
+  };
+  const resetFilters = () => {
+    clearDim();
+    clearIsolate();
+    if (statusDim) statusDim.value = "";
+  };
+  const applyDim = status => {
+    clearIsolate();
+    clearDim();
+    if (!status) return;
+    dimStatus = status;
+    graphNodes.forEach(node => {
+      if (!node.classList.contains(status)) node.classList.add("dimmed");
+    });
+    host.classList.add("dimming");
+  };
+  if (statusDim) statusDim.addEventListener("change", () => applyDim(statusDim.value));
+  const walk = (start, adjacency) => {
+    const seen = new Set();
+    const stack = [start];
+    while (stack.length) {
+      const cur = stack.pop();
+      (adjacency.get(cur) || []).forEach(next => {
+        if (!seen.has(next)) { seen.add(next); stack.push(next); }
+      });
+    }
+    return seen;   // Set of reachable ids (excludes start); the visited guard handles cycles
+  };
+  const isolateNeighborhood = node => {
+    const id = node.dataset.nodeId;
+    if (!id) return;
+    if (isolateRoot === id) { clearIsolate(); return; }   // click the root again to clear
+    resetFilters();
+    isolateRoot = id;
+    const keep = new Set([id]);
+    walk(id, upstream).forEach(n => keep.add(n));
+    walk(id, downstream).forEach(n => keep.add(n));
+    graphNodes.forEach(n => { if (keep.has(n.dataset.nodeId)) n.classList.add("nbr"); });
+    node.classList.add("nbr-root");
+    graphEdges.forEach(e => { if (keep.has(e._s) && keep.has(e._t)) e.classList.add("nbr"); });
+    host.classList.add("isolating");
+  };
   const focusNode = node => {
     const x = Number(node.dataset.x) + 119;
     const y = Number(node.dataset.y) + 38;
@@ -604,10 +709,12 @@ svg.dragging { cursor: grabbing; }
   graphNodes.forEach(node => node.addEventListener("click", event => {
     event.stopPropagation();
     focusNode(node);
+    isolateNeighborhood(node);   // F37: dim to this task's upstream/downstream lineage
   }));
   document.getElementById("zoomIn").addEventListener("click", () => zoomAt(1.25));
   document.getElementById("zoomOut").addEventListener("click", () => zoomAt(0.8));
-  document.getElementById("fit").addEventListener("click", fit);
+  // F37: Fit is also the "clear filters" reset (exits dim/isolate, resets the select).
+  document.getElementById("fit").addEventListener("click", () => { resetFilters(); fit(); });
   // F36: wire the subset-frame buttons; a graph with no failures (or no known
   // critical path) disables its button rather than offering a dead click.
   const failedNodes = graphNodes.filter(node => node.classList.contains("failed"));
@@ -673,11 +780,11 @@ svg.dragging { cursor: grabbing; }
   };
   svg.addEventListener("pointerup", stop);
   svg.addEventListener("pointercancel", stop);
-  svg.addEventListener("dblclick", fit);
+  svg.addEventListener("dblclick", () => { resetFilters(); fit(); });   // F37: dbl-click clears filters too
   svg.addEventListener("keydown", event => {
     if (event.key === "+" || event.key === "=") zoomAt(1.2);
     else if (event.key === "-") zoomAt(0.83);
-    else if (event.key === "0") fit();
+    else if (event.key === "0") { resetFilters(); fit(); }
     else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
       const step = 42;
