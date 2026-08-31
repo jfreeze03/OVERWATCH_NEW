@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.392.0 - Operator/Audit caption sweep: Cost, part 1 (2026-08-31)
+
+- **[#1, Cost part 1] Caption sweep across the smaller Cost files.** Four of the Cost page's files
+  (`cost.py`, and the Spend / Contract / Unit-costs parts) had their pure basis/provenance captions
+  moved to Audit mode via `methodology_note`: the chargeback allocated-vs-attributed caveat, the
+  notebook-runtime source label, the org-billing provenance/lag line (freshness stays on the
+  independent `result_caption`), and three measured-basis notes on Unit costs. Everything else stayed
+  visible — the sweep deliberately **kept** display legends (the task-tree indentation rule, the
+  `"n/a" = Cortex Code` column key), misread caveats (`$/run is allocated, not per-run metered`), scope
+  disclaimers, and every data-bearing line. A scope→verify workflow classified all 79 captions across
+  these files; ground-truthing then pulled several proposed conversions back to KEEP where the caption
+  was actually a legend or a don't-misread-this caveat the operator needs at the table. `optimize.py`
+  (the largest Cost file) is the next pass.
+
 ## 4.391.0 - Operator/Audit caption sweep: Brief & Security (2026-08-31)
 
 - **[#1, increment 2] Caption sweep continues to Brief and Security.** The standing operator/audit

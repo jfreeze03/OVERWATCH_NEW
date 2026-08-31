@@ -55,6 +55,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    methodology_note,
     panel_help,
     reconciliation_footer,
     result_caption,
@@ -486,8 +487,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                                      "a subset of the pool total when non-notebook services also run here."},
                         ])
                         styled_table(with_user_name_parts(_users, _PAGE), sort_label="credits desc")
-                        st.caption("Per-user notebook-runtime cost on this pool "
-                                   "(NOTEBOOKS_CONTAINER_RUNTIME_HISTORY).")
+                        # #1: pure source/basis label → audit-mode only (scope carried by the KPI help above).
+                        methodology_note("Per-user notebook-runtime cost on this pool "
+                                         "(NOTEBOOKS_CONTAINER_RUNTIME_HISTORY).")
             if notebooks is not None and notebooks.ok and notebooks.empty:
                 empty_state("no_data_yet", "No notebook container runtime was recorded in this window.")
             elif notebooks is not None and guard(notebooks, ""):

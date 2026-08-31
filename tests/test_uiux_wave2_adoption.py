@@ -58,6 +58,27 @@ def test_caption_sweep_second_increment_brief_and_security():
     assert "Scoped to {company}" in brief
 
 
+def test_caption_sweep_cost_part1_four_files():
+    # #1 (Cost sweep, part 1): pure basis/provenance captions on the smaller Cost files
+    # convert to the audit-only methodology_note; legends, misread caveats, scope cues,
+    # and data-bearing lines stay visible in operator mode.
+    cost = _src("app/ui/pages/cost.py")
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    contract = _src("app/ui/pages/cost_parts/contract.py")
+    unit = _src("app/ui/pages/cost_parts/unit_costs.py")
+    for src in (cost, spend, contract, unit):
+        assert "    methodology_note,\n" in src
+    assert 'methodology_note("Chargeback precision is capped by tag coverage' in cost
+    assert 'methodology_note("Per-user notebook-runtime cost on this pool' in spend
+    assert contract.count("methodology_note(") >= 1 and "Org-level billed spend in currency" in contract
+    # unit_costs converts exactly its 3 provenance captions; the 3 legends/caveats below
+    # stayed plain captions (ground-truth overrides of the workflow's CONVERT calls).
+    assert unit.count("methodology_note(") == 3
+    assert "Parent-before-child execution order" in unit   # tree indentation legend
+    assert "model = Cortex Code" in unit                   # "n/a" column legend
+    assert "not per-run metered" in unit                   # $/run misread caveat
+
+
 def test_object_cost_table_reconciles_against_an_independent_parent():
     # #30: the top-objects cost table now discloses coverage against the object-attributed
     # total. The parent is the by-ARM aggregation minus the non-object residual arm — an

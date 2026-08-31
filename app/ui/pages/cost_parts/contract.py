@@ -34,6 +34,7 @@ from app.ui.components import (
     empty_state,
     guard,
     kpi_row,
+    methodology_note,
     panel_help,
     result_caption,
     run_mart_first,
@@ -398,7 +399,9 @@ def _org_accounts_spend() -> None:
     the contract's billing truth, on the one Cost section that is already
     company-agnostic (org data has no company grain)."""
     st.markdown("**Org accounts spend (all accounts, billed currency)**")
-    st.caption(
+    # #1: pure source/provenance line (the markdown header above names the table;
+    # result_caption below carries freshness) → audit-mode only.
+    methodology_note(
         "Org-level billed spend in currency per account and usage type — the same source "
         "as Snowsight's Accounts Spend Summary (USAGE_IN_CURRENCY_DAILY, lags up to 24-72h)."
     )

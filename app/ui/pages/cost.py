@@ -25,6 +25,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    methodology_note,
     notify,
     page_header,
     page_verdict_line,
@@ -246,8 +247,9 @@ def render() -> None:
         _chargeback_tab(f["company"], f["days"], rate, is_operator)
         st.divider()
         section_header("Query-tag governance", "info", "chargeback", anchor="cost-tags")
-        st.caption("Chargeback precision is capped by tag coverage — untagged execution "
-                   "time can only be allocated, never attributed.")
+        # #1: pure allocated-vs-attributed methodology caveat → audit-mode only.
+        methodology_note("Chargeback precision is capped by tag coverage — untagged execution "
+                         "time can only be allocated, never attributed.")
         # #36: MART_TAG_COVERAGE_DAILY is user x day grain and carries no
         # DATABASE_NAME/SCHEMA_NAME column, so it cannot honor the active
         # Database/Schema filter — served mart-first, a scoped chargeback screen
