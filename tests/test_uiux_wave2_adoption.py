@@ -36,6 +36,28 @@ def test_overview_methodology_captions_are_audit_gated():
     assert 'st.caption("Whole-account contract commitment' in src
 
 
+def test_caption_sweep_second_increment_brief_and_security():
+    # #1 (increment 2): only PURE methodology/provenance captions convert to the
+    # audit-only methodology_note; conclusions, actions, scope cues, and interpretation
+    # caveats stay visible in operator mode.
+    brief = _src("app/ui/pages/brief.py")
+    sec = _src("app/ui/pages/security.py")
+    assert "    methodology_note,\n" in brief and "    methodology_note,\n" in sec
+    assert brief.count("methodology_note(") >= 1
+    assert sec.count("methodology_note(") >= 2
+    assert 'methodology_note("Spend covers credit-billed services' in brief
+    assert 'methodology_note("The hourly scan raises SEC_CRED_EXPIRY' in sec
+    assert 'methodology_note("Ranked largest deduction first.")' in sec
+    # KEEP guard (a ground-truth override of a workflow CONVERT): the "flags, not
+    # verdicts" interpretation caveat stays visible — hiding it risks an operator
+    # over-reacting to a behavioral flag (the same reason the sibling heuristic-score
+    # caveat is a plain caption).
+    assert 'st.caption("Flagged rows first' in sec
+    assert "Heuristic score, not a verdict" in sec
+    # Brief's company-scope disclaimer stays a plain caption (data-bearing + scope cue).
+    assert "Scoped to {company}" in brief
+
+
 def test_object_cost_table_reconciles_against_an_independent_parent():
     # #30: the top-objects cost table now discloses coverage against the object-attributed
     # total. The parent is the by-ARM aggregation minus the non-object residual arm — an

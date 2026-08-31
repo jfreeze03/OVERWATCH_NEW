@@ -42,6 +42,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    methodology_note,
     page_header,
     panel_help,
     result_caption,
@@ -303,7 +304,8 @@ def _access_tab(company: str, days: int) -> None:
              "help": "Still-active rows past EXPIRES_AT — jobs using these will start failing."},
         ])
         styled_table(with_user_names(cdf, _PAGE), height=280)
-        st.caption("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
+        # #1: pure alert-provenance (what the scan raises + cadence) → audit-mode only.
+        methodology_note("The hourly scan raises SEC_CRED_EXPIRY for these — re-raised weekly until rotated.")
         result_caption(creds)
 
     section_header("Dormant users still holding access (90d+)", "info", "security",
@@ -926,7 +928,8 @@ def _governance_score_panel():
         with st.expander(f"Governance deductions ({drift.score}/100 · {drift.state})"):
             for d in drift.drivers:
                 st.markdown(f"- **{d.driver}** −{d.penalty:.1f} pts — {d.evidence}")
-            st.caption("Ranked largest deduction first.")
+            # #1: pure sort-order note → audit-mode only.
+            methodology_note("Ranked largest deduction first.")
     st.divider()
     return post
 

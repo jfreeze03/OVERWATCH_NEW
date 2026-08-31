@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.391.0 - Operator/Audit caption sweep: Brief & Security (2026-08-31)
+
+- **[#1, increment 2] Caption sweep continues to Brief and Security.** The standing operator/audit
+  sweep (pure how-computed / provenance captions render only in Audit mode via `methodology_note`,
+  so operator mode leads with conclusions) reached two more pages. Every `st.caption` on Brief (6)
+  and Security (43) was classified; only the genuinely pure-methodology ones convert: Brief's
+  billing-basis note (the same disclosure Overview already hides), and Security's alert-provenance
+  note (`SEC_CRED_EXPIRY` cadence) and a sort-order note. Everything else stayed visible —
+  Security's captions are mostly conclusions, scan-cost warnings, scope disclaimers, and
+  interpretation caveats the operator needs. One caption the scoping pass proposed converting
+  (Security's "behavioral flags, not verdicts — the point is that someone looks") was **kept** on
+  review: hiding that in operator mode risks over-reacting to a flag, exactly like the sibling
+  heuristic-score caveat that's already a plain caption. Cost (~159 captions across 8 files) remains
+  its own future increment.
+
 ## 4.390.0 - UI review Wave 2: DAG status & neighborhood filters (2026-08-31)
 
 Completes Wave 2. The interactive task graph offered name search only; it now supports the

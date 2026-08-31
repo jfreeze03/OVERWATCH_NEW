@@ -41,6 +41,7 @@ from app.ui.components import (
     export_button,
     kpi_row,
     load_settings,
+    methodology_note,
     page_header,
     page_verdict_line,
     panel_help,
@@ -290,8 +291,9 @@ def render() -> None:
     kpi_row(kpis)
     # N7: same disclosure as Overview — the headline dollars are credit-billed
     # services; storage and data-transfer bill separately (Cost & Contract).
-    st.caption("Spend covers credit-billed services (compute, serverless, AI); "
-               "storage and data-transfer bill separately.")
+    # #1: pure billing-basis disclosure → audit-mode only (the note Overview also hides).
+    methodology_note("Spend covers credit-billed services (compute, serverless, AI); "
+                     "storage and data-transfer bill separately.")
 
     spend = daily_spend_wide(_PAGE)   # PERF #46: shared wide read; sliced to 14d for the spark
     brief_spend_series: list[float] = []
