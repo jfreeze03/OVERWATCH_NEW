@@ -127,19 +127,38 @@ def is_delta_column(name: object) -> bool:
     return bool(_DELTA_RE.search(str(name or "")))
 
 
-def delta_css(value: object) -> str:
-    """Sign color for a movement/delta cell — the cost-tool convention: an INCREASE
-    in cost/latency/failures is worse (red), a DECREASE is better (green). Text color
-    only (no fill) so a table of deltas stays scannable, not a wall of blocks. A ±0
-    or non-numeric value gets no color."""
+# Delta columns whose metric is GOOD when it rises — cache/hit rate, coverage,
+# verified savings, throughput, realization, precision, uptime. For these an
+# increase is green, inverting the default cost-tool polarity (cost/latency/
+# failures up = red). Matched as a substring of the column name; deliberately
+# narrow so an ambiguous name falls through to the safe bad-up default.
+_GOOD_UP_DELTA_TOKENS = (
+    "HIT", "CACHE", "COVERAGE", "VERIFIED", "THROUGHPUT", "REALIZATION",
+    "REALIZED", "PRECISION", "RECALL", "UPTIME", "AVAILABILITY", "ACCURACY",
+)
+
+
+def delta_up_is_good(column: object) -> bool:
+    """True when an INCREASE in this delta column is the healthy direction."""
+    up = str(column or "").upper()
+    return any(tok in up for tok in _GOOD_UP_DELTA_TOKENS)
+
+
+def delta_css(value: object, column: object = "") -> str:
+    """Sign color for a movement/delta cell. Default cost-tool convention: an
+    INCREASE in cost/latency/failures is worse (red), a DECREASE is better (green).
+    A good-up column (cache rate, coverage, verified savings, throughput ...) inverts
+    that so a positive delta reads green, not red — generic sign coloring miscodes
+    those. Text color only (no fill). A ±0 or non-numeric value gets no color."""
     try:
         v = float(value)
     except (TypeError, ValueError):
         return ""
-    if v > 0:
-        col = "#b91c1c" if _theme_is_light() else palette.BAD    # up = worse
-    elif v < 0:
-        col = "#15803d" if _theme_is_light() else palette.OK     # down = better
-    else:
+    if v == 0:
         return ""
+    is_good = (v > 0) == delta_up_is_good(column)
+    if is_good:
+        col = "#15803d" if _theme_is_light() else palette.OK     # healthy direction
+    else:
+        col = "#b91c1c" if _theme_is_light() else palette.BAD    # wrong direction
     return f"color: {col}; font-weight: 600;"

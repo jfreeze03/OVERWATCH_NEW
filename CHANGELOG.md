@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.382.0 - UI review Wave 1: colour-semantics correctness (2026-08-31)
+
+First of the Wave-1 items from the adjudicated UI review — the two that are correctness bugs, not
+polish (colour is supposed to carry meaning in this app).
+
+- **[#28] Metric-specific table delta colours.** Table delta cells were hard-coded up = red /
+  down = green, so a positive **cache-rate / coverage / verified-savings / throughput** delta was
+  wrongly reddened. `delta_css` now takes the column and inverts polarity for good-up metrics
+  (`delta_up_is_good`), so a positive good-up delta reads green like a negative cost delta. KPI cards
+  were already polarity-aware; only tables lied. CSV export unaffected.
+- **[#14] Neutral company scope chip.** The company chip was styled `"ok"` (green success), but
+  company is scope *context*, not health — it now renders neutral.
+
 ## 4.381.0 - Self-review fixes for the alert additions (2026-08-31)
 
 An adversarial review of the v4.376–v4.380 additions (4 finders + verify) found 3 confirmed issues;

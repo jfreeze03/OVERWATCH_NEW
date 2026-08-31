@@ -25,11 +25,19 @@ def test_a3_delta_detection_and_color():
     up, down = delta_css(40000), delta_css(-40000)
     assert "color:" in up and "color:" in down and up != down     # +$ and -$ differ by hue, not just a sign
     assert delta_css(0) == "" and delta_css("n/a") == ""
+    # Wave 1 #28: metric-specific polarity — a positive delta on a good-up column
+    # (cache/hit rate, coverage, verified savings, throughput) reads like a NEGATIVE
+    # cost delta (both green = healthy), not like a positive cost delta (red).
+    from app.ui.status_colors import delta_up_is_good
+    assert delta_up_is_good("DELTA_HIT_PCT") and delta_up_is_good("COVERAGE_DELTA")
+    assert not delta_up_is_good("DELTA_USD") and not delta_up_is_good("SPILL_DELTA")
+    assert delta_css(5, "DELTA_HIT_PCT") == down    # up on a good-up column == down on cost
+    assert delta_css(5, "DELTA_USD") == up          # up on a cost column stays red
 
 
 def test_a3_wired_into_table_renderer():
     c = _src("app/ui/components.py")
-    assert "if is_delta_column(col):" in c and "delta_css(v)" in c
+    assert "if is_delta_column(col):" in c and "delta_css(v, _c)" in c
 
 
 # rec11 — the lag note is once per page, not on every panel caption

@@ -34,7 +34,9 @@ def _scope_chip_html() -> str:
     # window, which was both lossy and wrong-looking. Plain rolling windows
     # keep the compact "30d" chip.
     _wl = str(f.get("window_label") or "")
-    chips = [chip(html.escape(f["company"]), "ok"),
+    # Company is CONTEXT, not health — render it neutral (the old "ok" gave it a
+    # green success chip, miscoding scope as a healthy state).
+    chips = [chip(html.escape(f["company"])),
              chip(html.escape(_wl) if "(" in _wl else f"{f['days']}d")]
     # Environment is a hidden compatibility field fixed to ALL, so it is not scope.
     for key, label in (("database", ""), ("schema_contains", "schema~"),
@@ -1859,7 +1861,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
             # A3: sign-color movement columns (Δ up = red/worse, down = green/better)
             for col in df.columns:
                 if is_delta_column(col):
-                    styler = styler.map(lambda v: delta_css(v), subset=[col])
+                    styler = styler.map(lambda v, _c=col: delta_css(v, _c), subset=[col])
             # F32: mute true-ZERO numeric cells so non-zero values carry the eye
             # on a sparse table. Skip status/delta columns (they own their color)
             # and the progress-bar column (its magnitude IS the signal).
