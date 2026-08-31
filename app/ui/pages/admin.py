@@ -381,6 +381,14 @@ _EXPECTED_MIGRATIONS = {
          "DAY(LAST_DAY(CURRENT_DATE())) so pace numerator and denominator cover the same elapsed window and "
          "early-month OVER_PCT is no longer understated. Byte-identical otherwise. Proc only, no schema "
          "change; forward-healing on the next hourly SP_ALERT_SCAN",
+    108: "COST_CONTRACT_BREACH fires when exhausted: SP_ALERT_SCAN_DAILY re-derived from V079 so the "
+         "[16] arm guard is DAYS_LEFT <= THRESHOLD_NUM instead of BETWEEN 0 AND THRESHOLD_NUM. Once "
+         "CONSUMED crossed CONTRACT_CREDITS the projected DAYS_LEFT went negative and the contract-breach "
+         "alert went permanently silent in the over-contract (on-demand overage) state; it now fires there "
+         "too with a distinct 'Contract EXHAUSTED: N credits over' CRITICAL title/metric and an EXHAUSTED "
+         "dedupe band so WARN -> CRIT -> EXHAUSTED crossings each re-fire. The p.TOTAL > 0 AND p.DAILY_BURN "
+         "> 0 gates and every other arm are byte-identical. Proc only, no schema change; forward-healing on "
+         "the next daily SP_ALERT_SCAN_DAILY",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

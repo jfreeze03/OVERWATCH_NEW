@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.364.0 - Cost-layer bug hunt #6: V108 (contract-breach false all-clear) (2026-08-30)
+
+Sixth adversarial pass over the cost layer, this round aimed at the least-swept slices (storage
+lifecycle, contract/commitment pacing, forecast math, cloud-services rebate, reader-scoping matrix,
+cost-alert rules). Five of six finders came back clean; one confirmed finding, zero refuted — the
+layer is well-hardened after five prior passes.
+
+- **V108 (owner-gated): COST_CONTRACT_BREACH fires once the contract is already exhausted (MED)** —
+  the [16] arm of `SP_ALERT_SCAN_DAILY` projected `DAYS_LEFT = CEIL((CONTRACT_CREDITS − CONSUMED) /
+  trailing-30-day burn)` and fired only when `DAYS_LEFT BETWEEN 0 AND THRESHOLD_NUM`. As soon as
+  `CONSUMED` crossed `CONTRACT_CREDITS`, `DAYS_LEFT` went negative and fell outside the band, so the
+  alert went **permanently silent in the over-contract state** — the most expensive one, billing
+  on-demand overage at premium rates — and no other scan proc covered the gap. (Not the deferred
+  ACCOUNT_USAGE-lag class; a pure logic guard.) V108 re-derives `SP_ALERT_SCAN_DAILY` from V079 with
+  the guard relaxed to `DAYS_LEFT <= THRESHOLD_NUM` so the over-contract state (`DAYS_LEFT <= 0`) also
+  fires, with a distinct `Contract EXHAUSTED: N credits over` CRITICAL title/metric and an `EXHAUSTED`
+  dedupe band so the WARN → CRIT → EXHAUSTED crossings each re-fire. A healthy account far from breach
+  (`DAYS_LEFT` large-positive `> THRESHOLD_NUM`) still does not fire; the `p.TOTAL > 0 AND
+  p.DAILY_BURN > 0` gates and every other arm are byte-identical. Proc only, no schema change; owner
+  applies after V107.
+
 ## 4.363.0 - Cost-layer bug hunt #5: 3 app-side fixes + V107 (2026-08-30)
 
 Fifth adversarial pass over the cost layer (6 finders: credit/USD math, chargeback/budget,
