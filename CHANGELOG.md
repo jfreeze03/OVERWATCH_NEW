@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.388.0 - UI review Wave 2: object-cost reconciliation coverage (2026-08-31)
+
+- **[#30] Reconciliation coverage on the top-objects cost table.** The `reconciliation_footer`
+  primitive (honest shown/canonical/coverage, never a fabricated ratio) was wired to only three
+  tables. The top-objects cost table (Cost → Optimize) now discloses what fraction of
+  object-attributed spend its top-N covers. The canonical parent is the by-**arm** aggregation
+  minus the non-object residual arm (`QUERY_COMPUTE_RESIDUAL`) — an *independent* read from the
+  by-object frame, and since the residual is exactly the `UNATTRIBUTED` rows the top-objects query
+  already excludes, the shown rows are a true subset of the parent. Scoping caught two traps: the
+  first-pass parent (`_adf` including the residual) mixed universes and would have understated
+  coverage; and the app×user measured table was **deliberately left footer-free** because its only
+  candidate parent is summed from the same frame — a tautological 100%, which the app's
+  reconciliation design law forbids.
+
 ## 4.387.0 - UI review Wave 2: drill + provenance adoption (2026-08-31)
 
 Two adoption sweeps that wire existing primitives onto surfaces that opted out.

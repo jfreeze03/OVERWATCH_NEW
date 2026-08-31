@@ -72,6 +72,7 @@ from app.ui.components import (
     lazy_sections,
     notify,
     panel_help,
+    reconciliation_footer,
     result_caption,
     run_mart_first,
     selectable_nav_table,
@@ -1038,6 +1039,14 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     _tdf[["OBJECT_FQN", "OBJECT_DOMAIN", "COMPANY", "QUERY_USD", "MAINT_USD", "USD"]],
                     key=f"objcost_top_sel_{company}_{days}_{_oc_db}",
                     key_col="OBJECT_FQN", entity_type="OBJECT", height=300)
+                # #30: how much of object-attributed spend the top-N covers. Parent is the
+                # by-ARM total minus the non-object residual arm — an INDEPENDENT aggregation
+                # (a different read/grain than _tdf), not a same-frame tautology. The residual
+                # is OBJECT_FQN='UNATTRIBUTED', which object_cost_top already excludes, so the
+                # shown top objects are a true subset of this parent (shown ⊆ canonical).
+                _attributed = float(_adf[_adf["COST_ARM"] != "QUERY_COMPUTE_RESIDUAL"]["USD"].sum())
+                reconciliation_footer(float(_tdf["USD"].sum()), _attributed,
+                                      label="top objects", expected_label="object-attributed spend")
             st.caption(
                 ("Scoped to the selected database. " if str(_oc_db).strip() else "")
                 + "Measured query compute is split equally across a query's base objects "

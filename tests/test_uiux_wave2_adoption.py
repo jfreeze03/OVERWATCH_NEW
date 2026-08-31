@@ -34,3 +34,24 @@ def test_overview_methodology_captions_are_audit_gated():
     # mode would strand the runway bar with no cue that it's account-wide (a
     # skeptic-caught over-reach, deliberately excluded from the sweep).
     assert 'st.caption("Whole-account contract commitment' in src
+
+
+def test_object_cost_table_reconciles_against_an_independent_parent():
+    # #30: the top-objects cost table now discloses coverage against the object-attributed
+    # total. The parent is the by-ARM aggregation minus the non-object residual arm — an
+    # INDEPENDENT read from _tdf (the by-object top-N), so this is a real coverage check,
+    # not a same-frame tautology (the law in test_footers_only_claim_independent_parents).
+    src = _src("app/ui/pages/cost_parts/optimize.py")
+    assert "    reconciliation_footer,\n" in src  # imported
+    assert 'reconciliation_footer(float(_tdf["USD"].sum())' in src
+    assert '_adf[_adf["COST_ARM"] != "QUERY_COMPUTE_RESIDUAL"]["USD"].sum()' in src
+
+
+def test_app_user_measured_table_stays_footer_free():
+    # #30 (skeptic + design law): the app×user measured table was a candidate, but its
+    # only available parent (the full _adf) is the SAME frame its shown head(300) comes
+    # from — a same-frame parent is a tautological ratio, so it deliberately gets NO
+    # footer. spend.py keeps exactly the one billed-KPI footer (an independent parent).
+    sp = _src("app/ui/pages/cost_parts/spend.py")
+    assert sp.count("reconciliation_footer(") == 1
+    assert 'reconciliation_footer(float(coverage["BILLED_USD"].sum()), billed_usd' in sp
