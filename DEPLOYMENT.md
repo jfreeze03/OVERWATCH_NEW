@@ -132,6 +132,7 @@ snowflake/migrations/V113__incident_timeline_task_fail_completed_time.sql
 snowflake/migrations/V114__anomaly_sweep_after_daily_loader.sql
 snowflake/migrations/V115__alert_supersede_includes_ack.sql
 snowflake/migrations/V116__alert_clear_scope_proc.sql
+snowflake/migrations/V117__alert_snooze_suppress_sweep.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

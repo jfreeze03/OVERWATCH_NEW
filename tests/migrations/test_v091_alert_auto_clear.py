@@ -82,6 +82,8 @@ def test_v091_is_byte_derived_from_v087():
 
 def test_read_path_excludes_auto_cleared_like_superseded():
     mart = (_ROOT / "app" / "data" / "mart_sql.py").read_text(encoding="utf-8")
-    # every machine-close exclusion now covers BOTH kinds (precision, MTTR, resolutions, fatigue)
-    assert mart.count("NOT IN ('SUPERSEDED', 'AUTO_CLEARED')") == 4
+    # every machine-close exclusion now covers all THREE kinds (precision, MTTR, resolutions,
+    # fatigue) — V117 added SNOOZE_SUPPRESSED alongside SUPERSEDED/AUTO_CLEARED.
+    assert mart.count("NOT IN ('SUPERSEDED', 'AUTO_CLEARED', 'SNOOZE_SUPPRESSED')") == 4
+    assert "NOT IN ('SUPERSEDED', 'AUTO_CLEARED')" not in mart          # no 2-element form left
     assert "COALESCE(RESOLUTION_KIND, '') <> 'SUPERSEDED'" not in mart  # no bare-superseded left

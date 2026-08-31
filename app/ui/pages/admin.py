@@ -429,6 +429,11 @@ _EXPECTED_MIGRATIONS = {
          "OW_ACTION_INTENTS idempotency key (mirrors SP_ALERT_LIFECYCLE/SNOOZE). Replaces the clear-queue "
          "two-autocommit path where a mid-op failure + retry could duplicate audit rows. New proc only, "
          "no schema change; the app calls it via execute_action() with the two-statement legacy fallback",
+    117: "Snooze-suppress sweep: SP_ALERT_SCAN re-derived from V115 with a post-raise sweep that resolves "
+         "any OPEN event whose band-independent identity (DEDUPE_KEY minus a trailing bare-date token, via "
+         "TRY_TO_DATE) matches an active snooze for the same rule. Fixes multi-day snooze being defeated by "
+         "date-banded dedupe (the band rolled and the raise arms minted a fresh OPEN despite the snooze). "
+         "RESOLUTION_KIND=SNOOZE_SUPPRESSED (a machine close, excluded from precision). Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

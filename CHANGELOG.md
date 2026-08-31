@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.380.0 - V117: snooze-suppress sweep (multi-day snooze finally holds) (2026-08-31)
+
+Last deferred alert-hunt item (#2). A per-event snooze sets `STATUS='SNOOZED'` but keeps the event's
+**date-banded** `DEDUPE_KEY` (`RULE|entity|<date>`). The re-raise guard matches the exact key, so when
+the day/week band rolled the next day the scan minted a **brand-new OPEN** event for the same
+rule+entity despite the snooze — a "1 week" snooze silenced nothing past the first day.
+
+- **V117** re-derives `SP_ALERT_SCAN` from V115 (byte-identical except one new post-raise sweep) that
+  resolves any OPEN event whose **band-independent identity** (its `DEDUPE_KEY` minus a trailing
+  `|YYYY-MM-DD` token) matches an **active** snooze (`SNOOZED`, wake time in the future) for the same
+  rule. The re-raise is minted then resolved *within the scan*, so the separate webhook sender never
+  sees the transient OPEN; `RESOLUTION_KIND='SNOOZE_SUPPRESSED'`.
+- The trailing-date strip uses `TRY_TO_DATE` (not a regex — avoids Snowflake string-escape ambiguity).
+  All date/week bands render as a bare ISO date; **entity-only keys** (IP, grant timestamp) don't, so
+  they're never stripped — their snooze already worked and is unchanged.
+- `SNOOZE_SUPPRESSED` joins `SUPERSEDED`/`AUTO_CLEARED` as a **machine close** excluded from the
+  read-path human-resolution metrics (precision, MTTR, RESOLVED counts) in `mart_sql.py`.
+- **Residual (documented):** on the wake scan the reopened stale original and a fresh re-raise can both
+  be OPEN for that one scan; a clean fix needs a wake-step change (weekly-band tradeoffs) and is deferred.
+- Proc only, no schema change. **Owner applies V117 in Snowsight after V116.**
+- ⚠ **Needs a live smoke-check in SiS** — the sweep SQL (correlated `EXISTS` + `TRY_TO_DATE` strip)
+  couldn't be validated read-only. It's structurally byte-derived and all shape tests pass.
+
 ## 4.379.0 - V116: atomic scope-based alert clear (2026-08-31)
 
 Second deferred alert-hunt item (#4). The drawer/bulk lifecycle already route through
