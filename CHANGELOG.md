@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.379.0 - V116: atomic scope-based alert clear (2026-08-31)
+
+Second deferred alert-hunt item (#4). The drawer/bulk lifecycle already route through
+`SP_ALERT_LIFECYCLE` (audit + status change in one transaction, idempotency-keyed). The clear-queue
+was the exception — it ran the audit `INSERT` and the status `UPDATE` as two separate auto-committed
+statements, so a mid-op failure (transient/lock error) + retry could leave events OPEN with duplicate
+`ALERT_AUDIT` rows.
+
+- **V116** adds `SP_ALERT_CLEAR_SCOPE`, which does the audit + status change atomically over a
+  `STATUS + company` scope (not enumerated ids, so it still clears past the feed cap) and records the
+  idempotency key in `OW_ACTION_INTENTS` so a double-click/retry is a `DUPLICATE` no-op. Mirrors
+  `SP_ALERT_SNOOZE` exactly (`BEGIN TRANSACTION … COMMIT`, `EXCEPTION → ROLLBACK`).
+- The app calls it via `execute_action()`, with the existing two-statement builder as the pre-V116
+  **legacy fallback** — so behaviour is unchanged until V116 is applied, then it becomes atomic.
+- New proc only, no schema change. **Owner applies V116 in Snowsight after V115.**
+
 ## 4.378.0 - Deferred #6: undelivered-critical is now route-level (2026-08-31)
 
 First of the three deferred alert-hunt items. The undelivered-critical banner (health_strip) and SLO

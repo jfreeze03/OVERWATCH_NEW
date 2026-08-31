@@ -74,8 +74,11 @@ def test_open_triage_routes_identity_section_and_scope():
 # --- rec14 / rec1: one-click ACK, typed RESOLVE, policy documented ----------------
 def test_ack_one_click_resolve_typed():
     body = _src("app/ui/pages/alerts.py")
-    seg = body.split('if is_operator:', 1)[1].split("execute_action", 1)[0]
-    assert 'if action in ("ACK", "SNOOZE"):' in seg           # ACK + SNOOZE = one click (V086)
+    # anchor on the drawer's lifecycle block directly: the clear-queue panel now also
+    # uses execute_action (V116 atomic proc), so the old first-execute_action split no
+    # longer lands on the drawer.
+    assert 'if action in ("ACK", "SNOOZE"):' in body          # ACK + SNOOZE = one click (V086)
+    seg = body.split('if action in ("ACK", "SNOOZE"):', 1)[1][:1500]
     assert 'st.button("Execute with audit row"' in seg       # ACK = one click
     assert "confirm_gate(action" in seg                        # RESOLVE keeps the gate
 

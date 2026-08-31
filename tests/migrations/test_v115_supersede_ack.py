@@ -40,11 +40,9 @@ def test_v115_supersede_includes_ack() -> None:
     assert "SELECT 115 AS VERSION" in mig and "WHERE VERSION = 115)" in mig
 
 
-def test_v115_registered_and_validate_tip_bumped() -> None:
+def test_v115_registered() -> None:
     from app.ui.pages.admin import _EXPECTED_MIGRATIONS
     assert 115 in _EXPECTED_MIGRATIONS
-    validate = _read("snowflake/validate.sql")
-    assert "V001..V115 applied" in validate
-    assert "BETWEEN 1 AND 115) = 115" in validate
-    # the procedural teeth-floor deliberately stays at 88 (not bumped every migration)
-    assert "BETWEEN 1 AND 88" in validate
+    # the MOVING validate tip (V001..Vtip applied / BETWEEN 1 AND tip) is asserted by the
+    # 7 designated tip tests, which bump every migration -- not here (this would break at V116).
+    assert "BETWEEN 1 AND 88" in _read("snowflake/validate.sql")   # teeth-floor is stable

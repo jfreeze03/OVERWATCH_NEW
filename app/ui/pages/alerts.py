@@ -533,12 +533,18 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         prompt=f"Type CLEAR {_c_verb} to confirm ({_open_total:,} event(s) in scope)",
                         type="primary")
                         and write_gate_open(f"alert_clear_exec_{company}")):
-                    _c_ok = True
-                    for _c_stmt in _clear_open_queue_stmts(company, _c_verb, _c_note, _c_kind):
-                        _c_o, _c_m = execute_statement(_c_stmt, page=_PAGE)
-                        _c_ok = _c_ok and _c_o
-                        if not _c_o:
-                            break
+                    # V116: one atomic, idempotent proc call (audit + status change commit or
+                    # roll back together; a double-click/retry is a DUPLICATE no-op). The
+                    # two-statement builder is the pre-V116 legacy fallback (execute_action
+                    # runs it if the proc is not deployed yet).
+                    _c_idem = idempotency_key(f"ALERT_CLEAR_{_c_verb}", f"{company}:{_c_kind}")
+                    _c_call = (f"CALL {core_object('SP_ALERT_CLEAR_SCOPE')}("
+                               f"{sql_literal(company)}, {sql_literal(_c_verb)}, "
+                               f"{sql_literal(_c_note)}, {sql_literal(_c_kind)}, "
+                               f"{identity_sql()}, {sql_literal(_c_idem)})")
+                    _c_ok, _c_m = execute_action(
+                        _c_call, _clear_open_queue_stmts(company, _c_verb, _c_note, _c_kind),
+                        page=_PAGE)
                     stamp_write(f"alert_clear_exec_{company}", _c_ok)
                     # Honest receipt: RESOLVE covers OPEN and ACK, so _open_total is the
                     # true transitioned count and the queue really is cleared. ACK moves

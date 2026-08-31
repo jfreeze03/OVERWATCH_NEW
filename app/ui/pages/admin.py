@@ -424,6 +424,11 @@ _EXPECTED_MIGRATIONS = {
          "-- an acknowledged-then-escalated incident (a WARN ACKed then a CRIT raised) no longer "
          "double-counts as two open alerts with a doubled score penalty. Auto-clear sweep stays "
          "OPEN-only by design; everything else byte-identical. Proc only, no schema change",
+    116: "Atomic scope-based alert clear: SP_ALERT_CLEAR_SCOPE does the ALERT_AUDIT insert and the "
+         "ALERT_EVENTS status change in one transaction over a STATUS + company scope, guarded by an "
+         "OW_ACTION_INTENTS idempotency key (mirrors SP_ALERT_LIFECYCLE/SNOOZE). Replaces the clear-queue "
+         "two-autocommit path where a mid-op failure + retry could duplicate audit rows. New proc only, "
+         "no schema change; the app calls it via execute_action() with the two-statement legacy fallback",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
