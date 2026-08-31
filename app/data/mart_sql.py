@@ -835,34 +835,59 @@ def health_strip() -> str:
     # OBJECT_CONSTRUCT drops NULL values, which would silently delete a metric —
     # every VALUE expression is COALESCEd to a non-NULL scalar for that reason.
     return f"""
-WITH crit AS (
+WITH und_crit AS (
+    -- Alert-hunt #6: a CRITICAL is UNDELIVERED when an ELIGIBLE enabled route (the
+    -- sender's family/company predicate, mirroring route_backlog) has no delivery for
+    -- it -- NOT merely when the event has no delivery row at all. The old event-level
+    -- "any delivery" check let a CRITICAL that reached a sibling info-route but FAILED
+    -- its paging route read as delivered (green banner while on-call was never paged).
+    -- JOIN-based anti-join per (event, eligible route) -- no nested correlated subquery.
+    SELECT DISTINCT e.EVENT_ID
+    FROM {core_object("ALERT_EVENTS")} e
+    LEFT JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
+    JOIN {core_object("ALERT_ROUTES")} r
+      ON r.ENABLED
+     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
+     AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+          OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
+    LEFT JOIN {core_object("ALERT_DELIVERIES")} d
+      ON d.EVENT_ID = e.EVENT_ID AND d.ROUTE_ID = r.ROUTE_ID
+    WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN' AND d.EVENT_ID IS NULL
+    UNION
+    -- config-gap safety: a CRITICAL matching NO route can never be delivered, so keep
+    -- flagging any critical with zero delivery rows (the pre-#6 event-level behavior).
+    SELECT e.EVENT_ID
+    FROM {core_object("ALERT_EVENTS")} e
+    WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
+      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d0
+                      WHERE d0.EVENT_ID = e.EVENT_ID)
+),
+crit AS (
     -- One pass over the open (OPEN or ACK) criticals. rec #3: OPEN_CRITICAL_N
     -- counts STATUS IN ('OPEN','ACK') to match open_alert_severity_counts (and
     -- the Brief/Overview/Control-Room tiles + the platform score), which all
     -- treat ACK as "still open, being worked". Counting OPEN-only made an
     -- acknowledged critical vanish from the sidebar while every page still
-    -- showed it. The delivery check is a LEFT JOIN to DISTINCT EVENT_IDs rather
-    -- than a correlated NOT EXISTS: the anti-join cannot be expressed inside
-    -- COUNT_IF, and DISTINCT keeps the join from multiplying rows.
+    -- showed it. Undelivered membership is the und_crit anti-join above (one row
+    -- per undelivered critical), LEFT-joined so it cannot multiply the open count.
     SELECT
         COUNT_IF(e.STATUS IN ('OPEN', 'ACK')) AS OPEN_CRITICAL_N,
-        -- N2: OPEN (not yet acknowledged) criticals 30+ min old with NO delivery
-        -- row — a page that reached nobody. Kept OPEN-only: an ACK'd critical was
-        -- seen in-app, so it is not a silent routing failure. Same predicate as
-        -- delivery_slo_summary's UNDELIVERED_CRITICALS_30M, always-on so the
-        -- morning surfaces cannot show green while a critical failed to route.
+        -- N2: OPEN (not yet acknowledged) criticals 30+ min old that are UNDELIVERED
+        -- (und_crit: missing delivery to an eligible route) — a page that reached
+        -- nobody. Kept OPEN-only: an ACK'd critical was seen in-app, so it is not a
+        -- silent routing failure. Always-on so the morning surfaces cannot show green
+        -- while a critical failed to route.
         COUNT_IF(e.STATUS = 'OPEN'
                  AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
-                 AND d.EVENT_ID IS NULL) AS UNDELIVERED_N,
+                 AND u.EVENT_ID IS NOT NULL) AS UNDELIVERED_N,
         -- CoCo CR#4: age (minutes) of the OLDEST undelivered critical, so the banner
         -- can show how long nobody has been paged — a count hides a 4h silent failure.
         MAX(IFF(e.STATUS = 'OPEN'
                 AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
-                AND d.EVENT_ID IS NULL,
+                AND u.EVENT_ID IS NOT NULL,
                 DATEDIFF('minute', e.RAISED_AT, CURRENT_TIMESTAMP()), NULL)) AS UNDELIVERED_OLDEST_MIN
     FROM {core_object("ALERT_EVENTS")} e
-    LEFT JOIN (SELECT DISTINCT EVENT_ID FROM {core_object("ALERT_DELIVERIES")}) d
-           ON d.EVENT_ID = e.EVENT_ID
+    LEFT JOIN und_crit u ON u.EVENT_ID = e.EVENT_ID
     WHERE e.STATUS IN ('OPEN', 'ACK') AND UPPER(e.SEVERITY) = 'CRITICAL'
 ),
 fresh AS (
@@ -1889,9 +1914,36 @@ WITH d AS (
     GROUP BY EVENT_ID
 ),
 e AS (
-    SELECT EVENT_ID, RAISED_AT, SEVERITY, STATUS
+    SELECT EVENT_ID, RAISED_AT, SEVERITY, STATUS, COMPANY, RULE_ID
     FROM {core_object("ALERT_EVENTS")}
     WHERE RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+),
+undc AS (
+    -- Alert-hunt #6: the windowed critical-undelivered set, ROUTE-level (an eligible
+    -- enabled route with no delivery), mirroring health_strip.und_crit but bounded to
+    -- this report window. Route-level so a CRIT delivered to a sibling info-route but
+    -- failing its paging route still counts as undelivered. JOIN anti-join (no nested
+    -- correlated subquery); the UNION arm keeps the config-gap (no-route) critical too.
+    SELECT DISTINCT e.EVENT_ID
+    FROM e
+    LEFT JOIN {core_object("ALERT_CONFIG")} c ON c.RULE_ID = e.RULE_ID
+    JOIN {core_object("ALERT_ROUTES")} r
+      ON r.ENABLED
+     AND (r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY)
+     AND (COALESCE(r.COMPANY_FILTER, 'ALL') = 'ALL'
+          OR e.COMPANY = r.COMPANY_FILTER OR UPPER(e.COMPANY) = 'ALL')
+    LEFT JOIN {core_object("ALERT_DELIVERIES")} dd
+      ON dd.EVENT_ID = e.EVENT_ID AND dd.ROUTE_ID = r.ROUTE_ID
+    WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
+      AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+      AND dd.EVENT_ID IS NULL
+    UNION
+    SELECT e.EVENT_ID
+    FROM e
+    WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
+      AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())
+      AND NOT EXISTS (SELECT 1 FROM {core_object("ALERT_DELIVERIES")} d0
+                      WHERE d0.EVENT_ID = e.EVENT_ID)
 )
 SELECT
     (SELECT COUNT(*) FROM e) AS EVENTS_RAISED,
@@ -1900,15 +1952,12 @@ SELECT
        FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS MEDIAN_MIN,
     (SELECT ROUND(APPROX_PERCENTILE(DATEDIFF('second', e.RAISED_AT, d.FIRST_SENT), 0.95) / 60.0, 1)
        FROM e JOIN d ON d.EVENT_ID = e.EVENT_ID) AS P95_MIN,
-    -- Same inner predicate as health_strip's UNDELIVERED_N, but this is a WINDOWED
-    -- SLO report: e is bounded to the last {days}d, so a critical still OPEN and
+    -- Same route-level membership as health_strip's UNDELIVERED_N (see undc), but this is
+    -- a WINDOWED SLO report: e is bounded to the last {days}d, so a critical still OPEN and
     -- undelivered past the window drops out HERE while health_strip's always-on banner
     -- (unbounded) still shows it red. That divergence is intended — the banner is the
     -- authoritative "is anything broken right now" view; this card is the N-day report.
-    (SELECT COUNT(*) FROM e LEFT JOIN d ON d.EVENT_ID = e.EVENT_ID
-      WHERE UPPER(e.SEVERITY) = 'CRITICAL' AND e.STATUS = 'OPEN'
-        AND d.EVENT_ID IS NULL
-        AND e.RAISED_AT <= DATEADD('minute', -30, CURRENT_TIMESTAMP())) AS UNDELIVERED_CRITICALS_30M,
+    (SELECT COUNT(*) FROM undc) AS UNDELIVERED_CRITICALS_30M,
     -- Alert-hunt fix: a plain COUNT(*) counted every hourly retry row, so one route
     -- broken for a month read as ~720 "failures". SP_NOTIFY_WEBHOOK logs one
     -- route_send_failed row per failing route PER RUN, with the route id + integration

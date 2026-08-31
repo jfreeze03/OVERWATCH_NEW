@@ -34,6 +34,11 @@ def test_delivery_slo_reads_ledger_events_and_error_log():
     # counts once per day, not once per run (was COUNT(*) of raw retry rows)
     assert "COUNT(DISTINCT CONTEXT" in sql
     assert "DATEADD('minute', -30" in sql                      # criticals get 30m grace
+    # alert-hunt #6: undelivered-criticals is ROUTE-level (an eligible enabled route with
+    # no delivery), not event-level "any delivery" — so a CRIT delivered to a sibling
+    # info-route but failing its paging route still counts as undelivered.
+    assert "undc AS" in sql and "(SELECT COUNT(*) FROM undc) AS UNDELIVERED_CRITICALS_30M" in sql
+    assert "ALERT_ROUTES" in sql and "r.FAMILY = 'ALL' OR c.FAMILY = r.FAMILY" in sql  # route-eligibility
     assert "ROUTE_ID" in mart_sql.delivery_by_route(30)
 
 

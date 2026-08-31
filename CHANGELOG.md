@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.378.0 - Deferred #6: undelivered-critical is now route-level (2026-08-31)
+
+First of the three deferred alert-hunt items. The undelivered-critical banner (health_strip) and SLO
+card (delivery_slo_summary) flagged a CRITICAL as undelivered only when it had **no delivery row at
+all** across any route. But `SP_NOTIFY_WEBHOOK` fans a CRITICAL out to every matching route — so a
+CRITICAL that reached a sibling info-route but **failed its paging route** had a delivery row and read
+**green**, while on-call was never paged.
+
+- Both surfaces now compute undelivered at the **route level**: a CRITICAL is undelivered if an
+  **eligible enabled route** (the sender's family/company predicate, mirroring `route_backlog`) has no
+  delivery for it. A config-gap safety `UNION` keeps flagging a CRITICAL that matches no route at all
+  (it can never be delivered), so the check never flags *fewer* criticals than before.
+- Implemented as a JOIN-based anti-join (`und_crit` / `undc` CTEs) — the codebase-safe pattern, not a
+  nested correlated subquery. Filtered to OPEN criticals, so it's a cheap subset scan, not a full
+  re-scan.
+- **Latent on a single-route account** (event-level == route-level with one catch-all route), so this
+  is a no-op today and takes effect once a second route with a distinct severity floor exists.
+- ⚠ **Needs a live smoke-check in SiS** — the route-level SQL couldn't be validated against Snowflake
+  read-only. It compiles and all shape tests pass; confirm the banner/SLO tiles still render once
+  deployed.
+
 ## 4.377.0 - V115: alert escalation-supersede includes ACK (2026-08-31)
 
 Migration-bearing fix for the alert-hunt's highest-impact confirmed finding (v4.376.0 shipped the

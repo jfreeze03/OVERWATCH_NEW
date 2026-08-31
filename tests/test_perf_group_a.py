@@ -107,10 +107,16 @@ def test_health_strip_is_single_pass_but_keeps_its_metric_contract():
                    "MTD_CREDITS_OTHER", "STALE_SOURCES"):
         assert f"'{metric}'" in sql          # main.py parses these BY NAME
     assert "METRIC" in sql and "VALUE" in sql and "STATE" in sql
-    # one scan per source table (the old build re-scanned 2/3/3 times)
-    assert sql.count("OVERWATCH.ALERT_EVENTS") == 1
+    # one scan per FRESHNESS/METERING source (the old build re-scanned 2/3/3 times)
     assert sql.count("OVERWATCH.SOURCE_FRESHNESS_STATE") == 1
     assert sql.count("OVERWATCH.FACT_METERING_DAILY") == 1
+    # alert-hunt #6: the undelivered-critical check is now ROUTE-level (flag a CRITICAL
+    # missing delivery to an ELIGIBLE enabled route, not merely with zero delivery rows),
+    # which needs a small critical-only anti-join over ALERT_EVENTS in und_crit besides
+    # the main crit aggregate. All arms filter to OPEN CRITICALs, so it's a cheap filtered
+    # subset, not a full re-scan; and it stays a dedup UNION, never UNION ALL.
+    assert "und_crit AS" in sql and "u.EVENT_ID IS NOT NULL" in sql
+    assert sql.count("OVERWATCH.ALERT_EVENTS") == 3      # crit aggregate + und_crit's 2 arms
     assert "UNION ALL" not in sql
 
 
