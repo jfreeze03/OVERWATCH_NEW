@@ -760,7 +760,8 @@ def main() -> None:
         _topbar_scope()
 
     if not connected:
-        st.title("OVERWATCH")
+        # #47: no duplicate wordmark here — _sidebar (above) already renders the OVERWATCH
+        # brand with its disconnected grey dot, so st.error leads as the single primary message.
         st.error("No Snowflake connection.")
         st.markdown(
             "- **Streamlit-in-Snowflake:** the session is injected automatically — if you see this "

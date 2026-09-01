@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.405.0 - Defer-tier triage: fix the one real defect (2026-09-01)
+
+- **[#3, defer tier] Re-triaged all 28 deferred Wave-2 items against current code; fixed the one that
+  was a real defect.** A 5-agent pass ground-truthed each deferred item. Result: **27 of 28 correctly
+  stay deferred** — they're cosmetic, low-ROI, would-regress, or already done — confirming the original
+  adjudication. Two premises turned out stale in a good way: Security **already** has a page verdict
+  (`security_center.py`, via `domain_posture()`), so the "missing Security verdict" was not missing; and
+  Decision Studio's verdict (#8) is done but its Prove/Decide/Track relabel is pure cosmetic regrouping.
+  The single genuine defect — **#47** — is fixed: the disconnected screen rendered the OVERWATCH wordmark
+  **twice** (the sidebar already brands it, plus a redundant `st.title`), so `main.py` now drops the
+  duplicate and lets the "No Snowflake connection" error lead. Everything else stays deferred by design.
+
 ## 4.404.0 - Ask Cortex answerer (CoCo rate) + contract-line wrap (2026-09-01)
 
 - **[#1] Ask OVERWATCH now answers Cortex/AI-spend questions — and the $2.20 rate fires.** A new
