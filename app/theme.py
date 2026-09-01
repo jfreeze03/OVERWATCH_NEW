@@ -52,9 +52,14 @@ _CSS = """
    otherwise painted a light page behind the dark cards (and status_colors is
    retired from adapting tables to light in lockstep). Degrades harmlessly if a
    test-id shifts (the rule just stops matching). */
-[data-testid="stAppViewContainer"], [data-testid="stHeader"], .stApp { background:var(--ow-bg) !important; }
+[data-testid="stAppViewContainer"], .stApp { background:var(--ow-bg) !important; }
 [data-testid="stSidebar"], [data-testid="stSidebarContent"] { background:var(--ow-surface) !important; }
-.block-container { padding-top:1.1rem; padding-bottom:2.4rem; max-width:1360px; }
+/* The fixed header is TRANSPARENT — an opaque header (the old rule painted it --ow-bg)
+   overlays the top of the scroll container and hid the top of the scope toolbar (the
+   "scrollbar space at the top" clip). Transparent lets that content show; the dark app
+   surface behind keeps the look dark. Extra top padding clears the header controls. */
+[data-testid="stHeader"] { background:transparent !important; }
+.block-container { padding-top:2.6rem; padding-bottom:2.4rem; max-width:1360px; }
 .main .block-container > div { gap:0.55rem; }
 html, body, [class*="css"] { font-family:var(--ow-font); }
 h1,h2,h3,h4 { letter-spacing:0; color:var(--ow-ink); }
@@ -237,12 +242,6 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
 .st-key-ow_triage_toolbar [data-testid="stHorizontalBlock"]{gap:0.42rem;}
 .st-key-ow_triage_toolbar div[data-baseweb="select"]>div{min-height:2.28rem;}
 .st-key-ow_triage_toolbar button{min-height:2.28rem;padding-left:0.65rem;padding-right:0.65rem;}
-/* The bordered toolbar must SIZE TO its row, never clip or scroll it — a constrained
-   height on the border wrapper (SiS default) is what sheared the top off the label and
-   showed a scrollbar. overflow:visible + auto height on the wrapper removes both. */
-.st-key-ow_triage_toolbar,
-.st-key-ow_triage_toolbar div[data-testid="stVerticalBlockBorderWrapper"]{
-  overflow:visible!important;max-height:none!important;height:auto!important;}
 /* Scope label is ONE line, exactly the height of the single-line selectboxes, and never
    wraps — a two-line stack overflowed the fixed-height toolbar row and its top got
    clipped by the bordered container. Kept to one line, the label can't exceed the row
@@ -456,7 +455,7 @@ _COMPACT_CSS = """
 <style>
 /* Compact density (Views popover toggle): more rows per screen, same order.
    Ops/DBA scanning mode — spacing shrinks, hierarchy and colors do not. */
-.block-container { padding-top:0.6rem; padding-bottom:1.4rem; }
+.block-container { padding-top:2.1rem; padding-bottom:1.4rem; }
 .main .block-container > div { gap:0.35rem; }
 div[data-testid="stMetric"] { padding:8px 10px 7px 12px; }
 [data-testid="stMetricValue"] { font-size:1.3rem !important; }

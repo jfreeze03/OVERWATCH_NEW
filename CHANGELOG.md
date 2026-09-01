@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.402.0 - Triage-bar clip: the real root cause (opaque header) (2026-09-01)
+
+- **Scope bar top clipped — actual root cause found (thanks to the "scroll bar" hint).** The scroll
+  container extends up under Streamlit's fixed header, and v4.385's dark-surface change had painted that
+  header **opaque** (`--ow-bg`), so it covered the top of the scope toolbar — the clipped "SCOPE" and
+  the empty space at the top of the scrollbar track. Fix: the header is now **transparent** again (the
+  dark app surface behind keeps the look dark, so #45's intent holds), and `.block-container`
+  `padding-top` is raised (1.1→2.6rem, compact 0.6→2.1rem) so the content clears the header controls.
+  The earlier label-level tweaks (single-line "Scope · Account view" label) stay — they're correct — but
+  the clip itself was the header, not the label. Reverted the speculative toolbar `overflow` override.
+
 ## 4.401.0 - Triage-bar clip: single line + toolbar overflow (2026-09-01)
 
 - **Scope/triage bar clip — the actual root cause.** CSS on the label alone (line-height, min-height)

@@ -66,5 +66,7 @@ def test_ask_page_wires_the_estimate_and_the_triage_line_height():
     # scope label is a single line (label + sub spans), not a clip-prone two-line stack
     assert ".ow-triage-label" in theme and ".ow-triage-sub" in theme
     assert 'class="ow-triage-label">Scope' in main
-    # the bordered toolbar must not clip/scroll its row (what sheared the top off "SCOPE")
-    assert 'stVerticalBlockBorderWrapper"]{\n  overflow:visible' in theme
+    # the fixed header is transparent (an opaque header hid the top of the scope bar), and
+    # the content clears the header with enough top padding — the real "cut-off" root cause
+    assert '[data-testid="stHeader"] { background:transparent' in theme
+    assert ".block-container { padding-top:2.6rem" in theme
