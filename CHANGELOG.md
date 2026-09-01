@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.403.0 - Note the scope-bar/header fix against regression (2026-09-01)
+
+- **Documented the scope-bar-clip fix so it can't silently come back.** The v4.402.0 fix (keep the fixed
+  header transparent + enough `.block-container` top padding) is confirmed working. Added a "DO NOT paint
+  the header opaque" warning in `theme.py` explaining why (the scroll container runs under the fixed
+  header, so an opaque header hides the top of the scope toolbar), and named the regression lock
+  accordingly (`test_ask_usd_wiring_and_scope_bar_not_clipped_by_header`) so re-opacifying the header or
+  shrinking the padding fails CI. No behavior change.
+
 ## 4.402.0 - Triage-bar clip: the real root cause (opaque header) (2026-09-01)
 
 - **Scope bar top clipped — actual root cause found (thanks to the "scroll bar" hint).** The scroll

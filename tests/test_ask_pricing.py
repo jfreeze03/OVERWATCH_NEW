@@ -56,7 +56,12 @@ def test_none_and_empty_are_safe():
     assert cols == [] and rates == set() and out.empty
 
 
-def test_ask_page_wires_the_estimate_and_the_triage_line_height():
+def test_ask_usd_wiring_and_scope_bar_not_clipped_by_header():
+    # Two things locked here: the Ask USD-estimate wiring, and the scope-bar clip
+    # regression guard. The scope toolbar's top was hidden because the fixed header had
+    # been painted OPAQUE (v4.385) and the scroll container runs under it — so this pins
+    # the header transparent + a top padding that clears it. If someone re-opacifies the
+    # header or shrinks the padding, the "cut-off SCOPE" bug is back and this fails.
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     ask = (root / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
@@ -66,7 +71,7 @@ def test_ask_page_wires_the_estimate_and_the_triage_line_height():
     # scope label is a single line (label + sub spans), not a clip-prone two-line stack
     assert ".ow-triage-label" in theme and ".ow-triage-sub" in theme
     assert 'class="ow-triage-label">Scope' in main
-    # the fixed header is transparent (an opaque header hid the top of the scope bar), and
-    # the content clears the header with enough top padding — the real "cut-off" root cause
+    # the fixed header MUST stay transparent (opaque hid the top of the scope bar) and the
+    # content MUST clear it with a top padding — the real root cause of the "cut-off" bug
     assert '[data-testid="stHeader"] { background:transparent' in theme
     assert ".block-container { padding-top:2.6rem" in theme

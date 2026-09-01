@@ -54,10 +54,13 @@ _CSS = """
    test-id shifts (the rule just stops matching). */
 [data-testid="stAppViewContainer"], .stApp { background:var(--ow-bg) !important; }
 [data-testid="stSidebar"], [data-testid="stSidebarContent"] { background:var(--ow-surface) !important; }
-/* The fixed header is TRANSPARENT — an opaque header (the old rule painted it --ow-bg)
-   overlays the top of the scroll container and hid the top of the scope toolbar (the
-   "scrollbar space at the top" clip). Transparent lets that content show; the dark app
-   surface behind keeps the look dark. Extra top padding clears the header controls. */
+/* DO NOT paint the fixed header opaque. It is position:fixed and the scroll container
+   runs up UNDERNEATH it, so an opaque background (v4.385 briefly set it to --ow-bg for the
+   dark-surface commitment) covers and HIDES the top of the scope toolbar — the "cut-off
+   SCOPE / empty space at the top of the scrollbar" bug (chased over v4.399–v4.402,
+   2026-09-01). Keep the header transparent: the dark app surface behind keeps the look
+   dark, and .block-container padding-top (below) must stay large enough to clear the
+   header controls. This invariant is locked by tests/test_ask_pricing.py. */
 [data-testid="stHeader"] { background:transparent !important; }
 .block-container { padding-top:2.6rem; padding-bottom:2.4rem; max-width:1360px; }
 .main .block-container > div { gap:0.55rem; }
