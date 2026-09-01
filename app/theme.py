@@ -237,16 +237,22 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
 .st-key-ow_triage_toolbar [data-testid="stHorizontalBlock"]{gap:0.42rem;}
 .st-key-ow_triage_toolbar div[data-baseweb="select"]>div{min-height:2.28rem;}
 .st-key-ow_triage_toolbar button{min-height:2.28rem;padding-left:0.65rem;padding-right:0.65rem;}
-/* The two-line "Scope / Account view" label must never clip. A FIXED height clips the
-   top line when the stacked lines render taller than it (font metrics + the bordered
-   toolbar's overflow) — the "cut-off triage bar". min-height lets the box grow to
-   contain the label, so nothing spills past it, while still matching the 2.28rem
-   selectboxes when the label is short. Compact line-heights keep it tidy. */
-.ow-triage-title{min-height:2.28rem;display:flex;flex-direction:column;justify-content:center;
-  line-height:1.15;padding:2px 0;
-  color:var(--ow-ink);font-size:0.73rem;font-weight:760;letter-spacing:0.06em;text-transform:uppercase;}
-.ow-triage-title small{display:block;line-height:1.2;color:var(--ow-ink-mute)!important;font-size:0.66rem;
-  font-weight:600;letter-spacing:0;text-transform:none;white-space:nowrap;}
+/* The bordered toolbar must SIZE TO its row, never clip or scroll it — a constrained
+   height on the border wrapper (SiS default) is what sheared the top off the label and
+   showed a scrollbar. overflow:visible + auto height on the wrapper removes both. */
+.st-key-ow_triage_toolbar,
+.st-key-ow_triage_toolbar div[data-testid="stVerticalBlockBorderWrapper"]{
+  overflow:visible!important;max-height:none!important;height:auto!important;}
+/* Scope label is ONE line, exactly the height of the single-line selectboxes, and never
+   wraps — a two-line stack overflowed the fixed-height toolbar row and its top got
+   clipped by the bordered container. Kept to one line, the label can't exceed the row
+   height, so nothing clips; if it's too wide it truncates horizontally instead. */
+.ow-triage-title{height:2.28rem;display:flex;align-items:center;gap:0.4rem;
+  overflow:hidden;white-space:nowrap;}
+.ow-triage-label{line-height:1;color:var(--ow-ink);font-size:0.73rem;font-weight:760;
+  letter-spacing:0.06em;text-transform:uppercase;flex:0 0 auto;}
+.ow-triage-sub{line-height:1;color:var(--ow-ink-mute);font-size:0.66rem;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
 .ow-kicker { font-size:0.75rem; letter-spacing:0; font-weight:750; color:var(--ow-ink-mute); text-transform:uppercase; margin-bottom:0.1rem; }
 .ow-brand { display:flex; align-items:center; gap:9px; }
 /* C4: the pulse now MEANS "connected to Snowflake" — _sidebar binds the class to

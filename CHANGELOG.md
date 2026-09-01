@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.401.0 - Triage-bar clip: single line + toolbar overflow (2026-09-01)
+
+- **Scope/triage bar clip — the actual root cause.** CSS on the label alone (line-height, min-height)
+  never fixed it because the clip came from the **bordered toolbar container**, not the label box: a
+  constrained height on the border wrapper sheared the top off the two-line "SCOPE" label and showed a
+  scrollbar. Two changes: (1) the scope label is now a single line ("Scope · Account view", two spans)
+  so it's exactly the height of the single-line selectboxes and can't overflow the row; (2) the
+  toolbar's border wrapper is forced to `overflow:visible; height:auto; max-height:none` so it sizes to
+  its row and can never clip or scroll it. (CSS is re-injected every run, not cached, so this takes
+  effect on redeploy.)
+
 ## 4.400.0 - Triage-bar clip: real fix (min-height) (2026-09-01)
 
 - **Scope/triage bar still clipped — fixed properly.** The v4.399.0 line-height tweak wasn't enough:

@@ -650,9 +650,13 @@ def _topbar_scope() -> None:
         with c_scope:
             marker = '<span class="ow-scope-active"></span>' if active else ""
             active_text = f"{active_n} active" if active_n else "Account view"
+            # Single-line label ("Scope · Account view") — a two-line stack clipped its
+            # top line inside the fixed-height toolbar row on SiS; one line matches the
+            # selectbox height and can't clip.
             st.markdown(
-                f'{marker}<div class="ow-triage-title">Scope'
-                f'<small>{active_text}</small></div>',
+                f'{marker}<div class="ow-triage-title">'
+                f'<span class="ow-triage-label">Scope</span>'
+                f'<span class="ow-triage-sub">{active_text}</span></div>',
                 unsafe_allow_html=True,
             )
         with c_company:

@@ -62,6 +62,9 @@ def test_ask_page_wires_the_estimate_and_the_triage_line_height():
     ask = (root / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
     assert "add_usd_estimates(" in ask and "AI_CREDIT_PRICE_USD" in ask
     theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
-    # the triage-title uses min-height (not a fixed height) so the two-line label can
-    # never spill past the box and get clipped by the bordered toolbar
-    assert ".ow-triage-title{min-height:2.28rem" in theme
+    main = (root / "app" / "main.py").read_text(encoding="utf-8")
+    # scope label is a single line (label + sub spans), not a clip-prone two-line stack
+    assert ".ow-triage-label" in theme and ".ow-triage-sub" in theme
+    assert 'class="ow-triage-label">Scope' in main
+    # the bordered toolbar must not clip/scroll its row (what sheared the top off "SCOPE")
+    assert 'stVerticalBlockBorderWrapper"]{\n  overflow:visible' in theme
