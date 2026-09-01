@@ -33,12 +33,25 @@ def test_backfill_365_task_daily_dedups_retries() -> None:
 
 
 def test_ops_diag_readers_are_day_aligned() -> None:
-    src = _read("app/data/mart27_sql.py")
-    # both ops_diag builders + their coverage gates use CURRENT_DATE (2 where + 2 gate)
-    assert src.count("d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())") == 2
-    assert src.count("FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())") == 2
-    # the ops_diag builders no longer use the rolling CURRENT_TIMESTAMP for HOUR_TS
-    assert "d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())" not in src
+    # Both ops_diag readers stay DAY-aligned (CURRENT_DATE, not the rolling
+    # CURRENT_TIMESTAMP) in their generated SQL — the scope predicate now flows
+    # through common.scope_window_where but the trailing form is unchanged, and
+    # the coverage gate keeps its -days+1 day offset. Checked on the generated SQL
+    # so the Last-month bounds branch cannot regress the trailing day-alignment.
+    from app.data import mart27_sql
+    for sql in (mart27_sql.ops_diag_top_queries(30), mart27_sql.ops_diag_failures(30)):
+        assert "d.HOUR_TS >= DATEADD('day', -30, CURRENT_DATE())" in sql
+        assert "d.HOUR_TS >= DATEADD('day', -30, CURRENT_TIMESTAMP())" not in sql
+        assert "FIRST_TS FROM cov) <= DATEADD('day', -30 + 1, CURRENT_DATE())" in sql
+    # and the Last-month bounds branch produces the bounded calendar range on both
+    from datetime import date
+
+    from app.logic.date_windows import window_bounds
+    _b = window_bounds("LAST_MONTH", date(2026, 9, 17))
+    for sql in (mart27_sql.ops_diag_top_queries(31, bounds=_b),
+                mart27_sql.ops_diag_failures(31, bounds=_b)):
+        assert "d.HOUR_TS >= '2026-08-01' AND d.HOUR_TS < '2026-09-01'" in sql
+        assert "FIRST_TS FROM cov) <= '2026-08-01'" in sql
 
 
 def test_v113_incident_timeline_uses_completed_time() -> None:

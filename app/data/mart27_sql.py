@@ -125,7 +125,7 @@ LIMIT 5000
 
 
 def task_nodes(days: int, company: str = "ALL", database: str = "",
-               schema_contains: str = "") -> str:
+               schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """C18: per-node loader timing from MART_TASK_NODE_DAILY (V058), which loads
     but had no reader. No COMPANY column -> scope via database_clause on
     DATABASE_NAME, same as task_graphs. Mart-ONLY (no live-parity builder: the
@@ -133,7 +133,7 @@ def task_nodes(days: int, company: str = "ALL", database: str = "",
     so a fallback leg would diverge numerically). p95 dispatch queue first surfaces
     the late-start / contention offenders the mart exists to quantify."""
     days = bounded_days(days, 400)
-    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    parts = [scope_window_where("DAY", days, bounds=bounds),
              companies.database_clause(company, "DATABASE_NAME"),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
@@ -409,12 +409,12 @@ LIMIT 100
 
 
 def schema_window_summary(days: int, company: str = "ALL", database: str = "",
-                          schema_contains: str = "") -> str:
+                          schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """ops_sql.query_window_summary contract from the schema-hour fact — the
     read that used to force a live QUERY_HISTORY scan whenever a schema
     filter was active. P95 is the peak hourly-group p95 (callers label it)."""
     days = bounded_days(days, 400)
-    parts = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",  # triage #12: match live CURRENT_DATE anchor
+    parts = [scope_window_where("HOUR_TS", days, bounds=bounds),  # triage #12: match live CURRENT_DATE anchor
              _company_arm(company),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
@@ -665,7 +665,7 @@ LIMIT 30
 """
 
 
-def lock_wait_daily(days: int, company: str = "ALL") -> str:
+def lock_wait_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Lock waits from MART_LOCK_WAIT_DAILY (V035) — the live scan read
     46-56 GB per view; the daily task pays that once. Same ranking as the
     live builder: never-acquired first (those are the aborted statements)."""
@@ -684,7 +684,7 @@ def lock_wait_daily(days: int, company: str = "ALL") -> str:
     SUM(c.NEVER_ACQUIRED) AS NEVER_ACQUIRED,
     MAX(c.LAST_SEEN) AS LAST_SEEN
 FROM DBA_MAINT_DB.OVERWATCH.MART_LOCK_WAIT_DAILY c
-WHERE c.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
+WHERE {scope_window_where("c.DAY", d, bounds=bounds)}
 {comp}GROUP BY 1, 2, 3, 4
 ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
 LIMIT 50"""
@@ -1119,7 +1119,8 @@ LIMIT 100
 """
 
 
-def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50) -> str:
+def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50, *,
+                         bounds: tuple | None = None) -> str:
     """ops_sql.top_queries_by_elapsed contract from MART_OPS_DIAG_HOURLY
     (V041 R7, corrected v4.36.1) — the UNFILTERED Operations first paint
     only: an entity or schema filter needs the true filtered top-N, which
@@ -1129,9 +1130,11 @@ def ops_diag_top_queries(days: int, company: str = "ALL", limit: int = 50) -> st
     mart accrues toward the asked window."""
     days = bounded_days(days, 90)
     limit = max(1, min(int(limit), 500))
+    cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
+                 else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
     where = and_where(
         "d.KIND = 'TOP_ELAPSED'",
-        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("d.HOUR_TS", days, bounds=bounds),
         _company_arm(company, "d.COMPANY"),
     )
     return f"""
@@ -1144,22 +1147,24 @@ SELECT
     d.SPILL_REMOTE_GB, d.QUERY_PREVIEW
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
-  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
+  AND (SELECT FIRST_TS FROM cov) <= {cov_bound}
 ORDER BY d.ELAPSED_SEC DESC
 LIMIT {limit}
 """
 
 
-def ops_diag_failures(days: int, company: str = "ALL") -> str:
+def ops_diag_failures(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """ops_sql.failures_by_error contract from MART_OPS_DIAG_HOURLY (V041 R7,
     corrected v4.36.1). USERS_AFFECTED combines the mart's hourly HLL states
     (V037 precedent) — an honest window approx-distinct, not a peak-hour
     stand-in. Unfiltered first paint only; coverage-gated like the
     top-queries reader."""
     days = bounded_days(days, 90)
+    cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
+                 else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
     where = and_where(
         "d.KIND = 'FAIL_FAMILY'",
-        f"d.HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("d.HOUR_TS", days, bounds=bounds),
         _company_arm(company, "d.COMPANY"),
     )
     return f"""
@@ -1174,7 +1179,7 @@ SELECT
     MAX(d.LAST_SEEN) AS LAST_SEEN
 FROM {mart_object("MART_OPS_DIAG_HOURLY")} d
 WHERE {where}
-  AND (SELECT FIRST_TS FROM cov) <= DATEADD('day', -{days} + 1, CURRENT_DATE())
+  AND (SELECT FIRST_TS FROM cov) <= {cov_bound}
 GROUP BY d.ERROR_CODE, d.ERROR_MESSAGE
 ORDER BY FAILURES DESC
 LIMIT 50

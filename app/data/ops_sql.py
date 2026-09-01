@@ -9,7 +9,8 @@ from app.data.common import and_where, bounded_days, scope_window_where
 
 
 def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
-                 database: str = "", schema_contains: str = "") -> str:
+                 database: str = "", schema_contains: str = "", *,
+                 bounds: tuple | None = None) -> str:
     # C10: scope QUERY_HISTORY by WAREHOUSE company only — COMPANY_FOR_WAREHOUSE, the
     # exact stamp the FACT_QUERY_HOURLY loader and the Cost pages use — NOT warehouse
     # AND user. The old intersection dropped all cross-company activity (a Trexis user
@@ -20,7 +21,7 @@ def _query_scope(days: int, company: str, warehouse_contains: str = "", user_con
     company_scope = ("" if comp.upper() == "ALL"
                      else f"{companies.company_case_sql('WAREHOUSE_NAME')} = {sql_literal(comp)}")
     return and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         company_scope,
         companies.database_equals_clause(database),
         contains_filter("WAREHOUSE_NAME", warehouse_contains),
@@ -30,7 +31,8 @@ def _query_scope(days: int, company: str, warehouse_contains: str = "", user_con
 
 
 def query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "", user_contains: str = "",
-                         database: str = "", schema_contains: str = "") -> str:
+                         database: str = "", schema_contains: str = "", *,
+                         bounds: tuple | None = None) -> str:
     """One-row query health summary for the window."""
     days = bounded_days(days)
     return f"""
@@ -41,13 +43,14 @@ SELECT
     SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains)}
+WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains, bounds=bounds)}
 """
 
 
 def top_queries_by_elapsed(days: int, company: str = "ALL", limit: int = 50,
                            warehouse_contains: str = "", user_contains: str = "",
-                           database: str = "", schema_contains: str = "") -> str:
+                           database: str = "", schema_contains: str = "", *,
+                           bounds: tuple | None = None) -> str:
     """Heaviest queries in the window (elapsed basis; cost labeled estimate)."""
     days = bounded_days(days)
     limit = max(1, min(int(limit), 500))
@@ -66,14 +69,15 @@ SELECT
     COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0) / POWER(1024, 3) AS SPILL_REMOTE_GB,
     LEFT(QUERY_TEXT, 180) AS QUERY_PREVIEW
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains)}
+WHERE {_query_scope(days, company, warehouse_contains, user_contains, database, schema_contains, bounds=bounds)}
 ORDER BY TOTAL_ELAPSED_TIME DESC
 LIMIT {limit}
 """
 
 
 def failures_by_error(days: int, company: str = "ALL", warehouse_contains: str = "",
-                      user_contains: str = "", database: str = "", schema_contains: str = "") -> str:
+                      user_contains: str = "", database: str = "", schema_contains: str = "", *,
+                      bounds: tuple | None = None) -> str:
     """Failed queries grouped by error code/message family.
 
     v4.157.0: honors the warehouse/user contains filters too — the Queries
@@ -84,7 +88,8 @@ def failures_by_error(days: int, company: str = "ALL", warehouse_contains: str =
     days = bounded_days(days)
     where = and_where(
         _query_scope(days, company, warehouse_contains=warehouse_contains,
-                     user_contains=user_contains, database=database, schema_contains=schema_contains),
+                     user_contains=user_contains, database=database, schema_contains=schema_contains,
+                     bounds=bounds),
         "EXECUTION_STATUS <> 'SUCCESS'",
     )
     return f"""
@@ -102,11 +107,12 @@ LIMIT 50
 """
 
 
-def task_runs(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
+def task_runs(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *,
+              bounds: tuple | None = None) -> str:
     """Task run outcomes grouped by task, newest failures surfaced."""
     days = bounded_days(days)
     where = and_where(
-        f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("QUERY_START_TIME", days, bounds=bounds),
         companies.database_clause(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
@@ -270,7 +276,7 @@ LIMIT 200
 """
 
 
-def warehouse_pressure(days: int, company: str = "ALL") -> str:
+def warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Queue and spill pressure per warehouse for the window."""
     days = bounded_days(days)
     return f"""
@@ -281,7 +287,7 @@ SELECT
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB,
     APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {and_where(f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())", "WAREHOUSE_NAME IS NOT NULL", companies.warehouse_clause(company))}
+WHERE {and_where(scope_window_where("START_TIME", days, bounds=bounds), "WAREHOUSE_NAME IS NOT NULL", companies.warehouse_clause(company))}
 GROUP BY 1
 HAVING SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) > 0
     OR SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) > 0
@@ -290,7 +296,7 @@ LIMIT 50
 """
 
 
-def lock_contention(days: int) -> str:
+def lock_contention(days: int, *, bounds: tuple | None = None) -> str:
     """Lock waits (account-wide; LOCK_WAIT_HISTORY has no warehouse grain).
     Window capped at 7d (was 14): the 14-day scan read ~56GB per run on this
     account (fleet board, 2026-07-10) and lock triage is a this-week
@@ -311,7 +317,7 @@ SELECT
     COUNT_IF(ACQUIRED_AT IS NULL) AS NEVER_ACQUIRED,
     MAX(REQUESTED_AT) AS LAST_SEEN
 FROM SNOWFLAKE.ACCOUNT_USAGE.LOCK_WAIT_HISTORY
-WHERE REQUESTED_AT >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {scope_window_where("REQUESTED_AT", days, bounds=bounds)}
 GROUP BY 1, 2, 3, 4
 ORDER BY NEVER_ACQUIRED DESC, ACQUIRED_WAIT_SEC DESC
 LIMIT 50
@@ -396,7 +402,8 @@ LIMIT 25
 
 def query_optimization_triage(days: int, company: str = "ALL", warehouse_contains: str = "",
                               user_contains: str = "", database: str = "",
-                              schema_contains: str = "", limit: int = 50) -> str:
+                              schema_contains: str = "", limit: int = 50, *,
+                              bounds: tuple | None = None) -> str:
     """The specific statements an optimizer should fix, ranked by inefficiency:
     remote spill first, then poor partition pruning, then huge cold-cache scans.
 
@@ -410,7 +417,8 @@ def query_optimization_triage(days: int, company: str = "ALL", warehouse_contain
     days = bounded_days(days)
     limit = max(1, min(int(limit), 200))
     where = and_where(
-        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains),
+        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains,
+                     bounds=bounds),
         "EXECUTION_STATUS = 'SUCCESS'",
         "QUERY_TYPE <> 'CALL'",
         "UPPER(COALESCE(QUERY_TEXT, '')) NOT LIKE 'EXECUTE STREAMLIT%'",
@@ -451,7 +459,8 @@ LIMIT {limit}
 
 def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "",
                     user_contains: str = "", database: str = "",
-                    schema_contains: str = "", limit: int = 50) -> str:
+                    schema_contains: str = "", limit: int = 50, *,
+                    bounds: tuple | None = None) -> str:
     """Per-stored-procedure runtime rollup, ranked by SLA impact (calls x p95).
 
     Rolls up QUERY_TYPE='CALL' rows into calls / avg / p95 / max / total-minutes
@@ -467,7 +476,8 @@ def proc_sla_rollup(days: int, company: str = "ALL", warehouse_contains: str = "
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
     where = and_where(
-        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains),
+        _query_scope(days, company, warehouse_contains, user_contains, database, schema_contains,
+                     bounds=bounds),
         "QUERY_TYPE = 'CALL'",
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
     )
@@ -506,7 +516,8 @@ LIMIT {limit}
 
 def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "",
                     user_contains: str = "", database: str = "",
-                    schema_contains: str = "", min_calls: int = 5) -> str:
+                    schema_contains: str = "", min_calls: int = 5, *,
+                    bounds: tuple | None = None) -> str:
     """Stored procedures whose runtime crept up vs the prior equal-length window.
 
     Emits, per proc, this window's vs the previous window's success-only p95/avg
@@ -526,8 +537,22 @@ def proc_regression(days: int, company: str = "ALL", warehouse_contains: str = "
     """
     days = bounded_days(days)
     min_calls = max(1, min(int(min_calls or 5), 10000))
+    # Vs-prior: for 'Last month' (bounds) CURRENT is that calendar month and PRIOR is
+    # the month before it — scan [prior_start, cur_end) and split the CUR/PRIOR IFF on
+    # cur_start. Trailing keeps the 2*days scan split on the -days CURRENT_DATE anchor.
+    if bounds is not None:
+        cur_start, cur_end = bounds
+        prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
+                       if cur_start.month == 1
+                       else cur_start.replace(month=cur_start.month - 1))
+        outer_bounds = (prior_start, cur_end)
+        cur_from = f"START_TIME >= '{cur_start.isoformat()}'"
+    else:
+        outer_bounds = None
+        cur_from = f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())"
     where = and_where(
-        _query_scope(2 * days, company, warehouse_contains, user_contains, database, schema_contains),
+        _query_scope(2 * days, company, warehouse_contains, user_contains, database,
+                     schema_contains, bounds=outer_bounds),
         "QUERY_TYPE = 'CALL'",
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
     )
@@ -538,7 +563,7 @@ WITH calls AS (
         DATABASE_NAME,
         SCHEMA_NAME,
         EXECUTION_STATUS,
-        IFF(START_TIME >= DATEADD('day', -{days}, CURRENT_DATE()), 'CUR', 'PRIOR') AS WIN,
+        IFF({cur_from}, 'CUR', 'PRIOR') AS WIN,
         IFF(EXECUTION_STATUS = 'SUCCESS', TOTAL_ELAPSED_TIME, NULL) AS OK_MS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE {where}

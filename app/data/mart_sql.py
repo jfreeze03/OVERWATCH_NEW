@@ -86,7 +86,8 @@ ORDER BY DAY, SERVICE_TYPE
 
 
 def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contains: str = "",
-                              user_contains: str = "", database: str = "") -> str:
+                              user_contains: str = "", database: str = "", *,
+                              bounds: tuple | None = None) -> str:
     """Ops Queries-tab hot path from FACT_QUERY_HOURLY.
 
     Counts, failures, queued time and spill are exact sums of the hourly
@@ -101,7 +102,7 @@ def fact_query_window_summary(days: int, company: str = "ALL", warehouse_contain
     # triage #12: midnight-aligned window (CURRENT_DATE) to match the live twin
     # ops_sql.query_window_summary and fact_warehouse_pressure, so the same
     # "24h"/"Nd" tile covers the same span whichever source serves it.
-    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())"]
+    where = [scope_window_where("HOUR_TS", days, bounds=bounds)]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     where.append(contains_filter("WAREHOUSE_NAME", warehouse_contains))
@@ -224,7 +225,7 @@ def _billed_split_cols(credits_col: str = "CREDITS_BILLED") -> str:
     )
 
 
-def billed_split(days: int = 30) -> str:
+def billed_split(days: int = 30, *, bounds: tuple | None = None) -> str:
     """rec29: windowed billed credits split into AI vs OTHER partitions (account-
     wide — billing carries no company grain) so the Cost Truth BILLED basis
     dollarizes with the house rate mix (AI/Cortex at ai_rate, compute at the
@@ -233,7 +234,7 @@ def billed_split(days: int = 30) -> str:
     return f"""
 SELECT {_billed_split_cols()}
 FROM {core_object('FACT_METERING_DAILY')}
-WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+WHERE {scope_window_where('DAY', horizon, bounds=bounds)}
 """
 
 
@@ -306,9 +307,9 @@ ORDER BY DAY
 
 
 def fact_task_daily(days: int, company: str = "ALL", database: str = "",
-                    schema_contains: str = "") -> str:
+                    schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"]
+    where = [scope_window_where("DAY", days, bounds=bounds)]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     if str(database or "").strip():
@@ -1469,14 +1470,14 @@ LIMIT 5000
 """
 
 
-def fact_warehouse_pressure(days: int, company: str = "ALL") -> str:
+def fact_warehouse_pressure(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """ops_sql.warehouse_pressure contract from FACT_QUERY_HOURLY (r23 #1:
     the live scan was a top fleet pain key at 17.8s p50). Queued seconds,
     spill and counts are exact sums of the hourly fact; P95_ELAPSED_SEC is
     the PEAK hourly-group p95 — the caller labels it. Live stays as the
     labeled fallback for pre-fact windows."""
     days = max(1, min(int(days or 7), 90))
-    where = [f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = [scope_window_where("HOUR_TS", days, bounds=bounds),
              "WAREHOUSE_NAME IS NOT NULL"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")

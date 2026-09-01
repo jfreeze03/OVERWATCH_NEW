@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.414.0 - "Last month" rollout batch 6: Operations/Security/DS builders honor bounds (2026-09-01)
+
+Extends the bounded **Last month** branch to the scope-window builders behind the last four pages
+(Operations, Security, Control Room, Decision Studio) — 108 builder edits across `mart_sql`, `mart27_sql`,
+`ops_sql`, `security_sql`, `insights_sql`, `workbench_sql`.
+
+- Operations Queries/Tasks/Warehouses/Contention readers (`fact_query_window_summary`,
+  `query_window_summary`, `schema_window_summary`, `fact_task_daily`, `fact_warehouse_pressure`,
+  `ops_diag_*`, `task_nodes`, `lock_wait_daily`, `proc_regression` [vs-prior → month-before], warehouse
+  sizing/quiet-hours/adaptive), Security change-risk/login/egress/client readers, and Decision Studio's
+  Portfolio/Products/Cost-Truth readers (`workload_portfolio`, `data_product_economics`, `cost_truth`,
+  `billed_split`, …) all gain a `bounds` param and the bounded calendar predicate.
+- Trailing branch byte-identical (the `ops_diag` day-alignment lock is now a generated-SQL check). Real-
+  time surfaces (task SLA streaks, live query feeds, incident/alert feeds), fixed-window drills (task
+  graph, change-impact, MFA/expiry/dormant), and period-anchored DS reads (ROI proof — monthly-magnitude,
+  SLO per-objective windows, action-queue PERIOD) are correctly left trailing/untouched.
+- Builder layer only — inert until the pages thread `f["bounds"]` (next batch). Backward compatible.
+
 ## 4.413.0 - "Last month" rollout batch 5: Overview economics (2026-09-01)
 
 Brings **Last month** to the Overview economics — Cost & Overview are now both exact.

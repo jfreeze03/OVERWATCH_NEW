@@ -5,7 +5,12 @@ from __future__ import annotations
 from app import companies
 from app.config import core_object, mart_object
 from app.core.sqlsafe import contains_filter, sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import (
+    and_where,
+    bounded_days,
+    resolve_effective_window,
+    scope_window_where,
+)
 
 
 def users_without_mfa(company: str = "ALL") -> str:
@@ -85,13 +90,16 @@ LIMIT 200
 """
 
 
-def failed_logins(days: int, company: str = "ALL") -> str:
+def failed_logins(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=30)
+    _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
+              if bounds is not None
+              else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "IS_SUCCESS = 'NO'",
         companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
-                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
     )
     return f"""
 SELECT
@@ -108,7 +116,7 @@ LIMIT 100
 """
 
 
-def single_factor_logins(days: int = 30, company: str = "ALL") -> str:
+def single_factor_logins(days: int = 30, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """#16: successful PASSWORD logins that landed with NO second factor — behavioral
     MFA-bypass proof, independent of the HAS_MFA config flag.
 
@@ -118,13 +126,19 @@ def single_factor_logins(days: int = 30, company: str = "ALL") -> str:
     no-second-factor, successful logins; the USERS join exposes HAS_MFA so the render
     separates the genuine bypass (enrolled) from the not-yet-enrolled. Read-only."""
     days = bounded_days(days, maximum=30)
+    _scope = (resolve_effective_window(days, "L.EVENT_TIMESTAMP", bounds=bounds)[1]
+              if bounds is not None
+              else f"L.EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
+    _scope_sub = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
+                  if bounds is not None
+                  else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"L.EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "L.FIRST_AUTHENTICATION_FACTOR = 'PASSWORD'",
         "COALESCE(TO_VARCHAR(L.SECOND_AUTHENTICATION_FACTOR), '') = ''",
         "L.IS_SUCCESS = 'YES'",
         companies.user_scope_subquery(company, "L.USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
-                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope_sub),
     )
     return f"""
 WITH single_factor AS (
@@ -157,7 +171,7 @@ LIMIT 200
 _TAKEOVER_BURST_HOURS = 6
 
 
-def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5) -> str:
+def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures: int = 5, *, bounds: tuple | None = None) -> str:
     """Account-takeover candidates: a BURST of failed logins for a user immediately
     FOLLOWED BY a success — the brute-force breakthrough ``failed_logins``' count-only
     lens can't express (it reads IS_SUCCESS='NO' only, never correlating a later success).
@@ -174,10 +188,13 @@ def login_takeover_candidates(days: int = 7, company: str = "ALL", min_failures:
     ``logic.insights.takeover_severity``. Read-only review — confirm before acting."""
     days = bounded_days(days, maximum=30)
     min_failures = max(2, min(int(min_failures), 100))
+    _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
+              if bounds is not None
+              else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     ev_where = and_where(
-        f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
-                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
     )
     return f"""
 WITH ev AS (
@@ -278,9 +295,12 @@ LIMIT 300
 """
 
 
-def recent_role_grants(days: int) -> str:
+def recent_role_grants(days: int, *, bounds: tuple | None = None) -> str:
     """Recently granted roles to users (account-wide governance view)."""
     days = bounded_days(days, maximum=90)
+    _scope = (resolve_effective_window(days, "CREATED_ON", bounds=bounds)[1]
+              if bounds is not None
+              else f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
     GRANTEE_NAME AS USER_NAME,
@@ -288,7 +308,7 @@ SELECT
     GRANTED_BY,
     CREATED_ON AS GRANTED_ON
 FROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS
-WHERE CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {_scope}
   AND DELETED_ON IS NULL
 ORDER BY CREATED_ON DESC
 LIMIT 200
@@ -315,7 +335,7 @@ ORDER BY ROLE, USER_NAME
 """
 
 
-def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", schema_contains: str = "") -> str:
+def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Who changed what: DDL/DCL statements grouped by user and object type."""
     days = bounded_days(days, maximum=30)
     # C11: scope change evidence by ACTOR *or* OBJECT, not actor AND object. GRANT /
@@ -330,7 +350,7 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
     where = and_where(
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         "EXECUTION_STATUS = 'SUCCESS'",
         ("(QUERY_TYPE IN ('CREATE', 'CREATE_TABLE', 'CREATE_VIEW', 'ALTER', 'ALTER_TABLE_MODIFY_COLUMN', "
          "'ALTER_SESSION', 'ALTER_USER', 'CREATE_USER', 'DROP_USER', 'CREATE_ROLE', 'ALTER_ROLE', "
@@ -396,18 +416,21 @@ LIMIT 300
 """
 
 
-def failed_login_reasons(days: int, company: str = "ALL") -> str:
+def failed_login_reasons(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Failed logins grouped by reason — network-policy blocks surface
     separately from bad credentials."""
     # r6-bug13: match failed_logins()' 30d cap. This breakdown is presented as the
     # decomposition of the failed-logins table directly above it; a wider (90d) window
     # here made the two panels disagree under one "90 days" scope and never reconcile.
     days = bounded_days(days, maximum=30)
+    _scope = (resolve_effective_window(days, "EVENT_TIMESTAMP", bounds=bounds)[1]
+              if bounds is not None
+              else f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "IS_SUCCESS = 'NO'",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY",
-                                      distinct_where=f"EVENT_TIMESTAMP >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
     )
     # REASON is the SAME coarse ERROR_CATEGORY bucketing the FACT loader (V075) writes,
     # so this live/fallback path renders the identical rows as failed_login_reasons_fact
@@ -436,15 +459,18 @@ LIMIT 50
 """
 
 
-def admin_role_activity(days: int, company: str = "ALL") -> str:
+def admin_role_activity(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Daily statement volume under break-glass admin roles. Routine work
     belongs on SNOW_SYSADMINS; this line should hug zero."""
     days = bounded_days(days)
+    _scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+              if bounds is not None
+              else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "ROLE_NAME IN ('ACCOUNTADMIN', 'SNOW_ACCOUNTADMINS')",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
-                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
     )
     return f"""
 SELECT
@@ -995,7 +1021,7 @@ LIMIT {limit}
 """
 
 
-def client_drivers(days: int = 30, company: str = "ALL") -> str:
+def client_drivers(days: int = 30, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Driver/version inventory from ACCOUNT_USAGE.SESSIONS: which driver,
     which version, reported by which program, used by whom — the "when do
     we need to upgrade" sheet.
@@ -1010,11 +1036,14 @@ def client_drivers(days: int = 30, company: str = "ALL") -> str:
     the string layers — V022 lesson).
     """
     days = bounded_days(days, maximum=90)
+    _scope = (resolve_effective_window(days, "CREATED_ON", bounds=bounds)[1]
+              if bounds is not None
+              else f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "CLIENT_APPLICATION_ID IS NOT NULL",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.SESSIONS",
-                                      distinct_where=f"CREATED_ON >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
     )
     return f"""
 WITH s AS (
@@ -1115,7 +1144,7 @@ LIMIT 200
 """
 
 
-def new_network_logins(days: int = 7, company: str = "ALL") -> str:
+def new_network_logins(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """r25 #6 (owner pick): privileged logins from never-before-seen networks.
 
     Baseline = 90 days of LOGIN_HISTORY for break-glass users (same role list
@@ -1124,6 +1153,9 @@ def new_network_logins(days: int = 7, company: str = "ALL") -> str:
     purpose — better a stale re-flag than a silent novel network.
     """
     days = bounded_days(days)
+    _first_seen_scope = (resolve_effective_window(days, "F.FIRST_SEEN", bounds=bounds)[1]
+                         if bounds is not None
+                         else f"F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     admin_where = and_where(
         "DELETED_ON IS NULL",
         "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')",
@@ -1157,7 +1189,7 @@ SELECT F.USER_NAME,
        MAX_BY(H.FIRST_AUTHENTICATION_FACTOR, H.EVENT_TIMESTAMP) AS AUTH_FACTOR
 FROM first_seen F
 JOIN hist H ON H.USER_NAME = F.USER_NAME AND H.CLIENT_IP = F.CLIENT_IP
-WHERE F.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {_first_seen_scope}
 GROUP BY F.USER_NAME, F.CLIENT_IP, F.FIRST_SEEN
 ORDER BY F.FIRST_SEEN DESC
 LIMIT 200
@@ -1251,7 +1283,7 @@ ORDER BY DAY, GB DESC
 
 
 def unload_activity(days: int = 30, company: str = "ALL", database: str = "",
-                    schema_contains: str = "") -> str:
+                    schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """r25 #7b (owner pick): who runs COPY INTO <location> (QUERY_TYPE
     'UNLOAD'), per user/day. GB_OUT sums both QUERY_HISTORY byte counters —
     for an unload exactly one of them carries the payload, so the sum is the
@@ -1263,12 +1295,15 @@ def unload_activity(days: int = 30, company: str = "ALL", database: str = "",
     SCHEMA_NAME — the context the unload's source table resolves in — so a
     scoped screen no longer silently widens to company-wide."""
     days = bounded_days(days)
+    _scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+              if bounds is not None
+              else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "QUERY_TYPE = 'UNLOAD'",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
-                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -1296,7 +1331,7 @@ LIMIT 300
 
 
 def unload_risk_events(days: int = 30, company: str = "ALL", database: str = "",
-                       schema_contains: str = "") -> str:
+                       schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """#18: per-EVENT unload egress for the behavioral exfiltration score.
 
     Sibling to ``unload_activity``, which GROUPs BY day and so discards the three
@@ -1313,12 +1348,15 @@ def unload_risk_events(days: int = 30, company: str = "ALL", database: str = "",
     exfil-like events the score exists to rank. The per-user MEDIAN/COUNT baselines
     are computed over the full window before the cap, so they stay accurate."""
     days = bounded_days(days)
+    _scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+              if bounds is not None
+              else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         "QUERY_TYPE = 'UNLOAD'",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.user_scope_subquery(company, "USER_NAME", source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
-                                      distinct_where=f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+                                      distinct_where=_scope),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -1513,10 +1551,10 @@ WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 
-def failed_logins_fact(days: int, company: str = "ALL") -> str:
+def failed_logins_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=30)
     where = and_where(
-        f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("DAY", days, bounds=bounds),
         "FAILURES > 0",
         _local_company_clause(company),
     )
@@ -1534,10 +1572,10 @@ LIMIT 100
 """
 
 
-def failed_login_reasons_fact(days: int, company: str = "ALL") -> str:
+def failed_login_reasons_fact(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=30)
     where = and_where(
-        f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("DAY", days, bounds=bounds),
         "FAILURES > 0",
         _local_company_clause(company),
     )
@@ -1556,8 +1594,11 @@ LIMIT 50
 """
 
 
-def new_network_logins_fact(days: int = 7, company: str = "ALL") -> str:
+def new_network_logins_fact(days: int = 7, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=90)
+    _first_seen_scope = (resolve_effective_window(days, "f.FIRST_SEEN", bounds=bounds)[1]
+                         if bounds is not None
+                         else f"f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     admin_where = and_where(
         "DELETED_ON IS NULL",
         "ROLE IN ('SNOW_ACCOUNTADMINS', 'SNOW_SYSADMINS')",
@@ -1586,7 +1627,7 @@ JOIN {core_object('FACT_SECURITY_LOGIN_DAILY')} h
  -- retains 180 days, so an unbounded join inflated LOGINS/SUCCESSES vs the live sibling for a
  -- (user, IP) with activity in the 90-180d band (bug-hunt 2026-08-30).
  AND h.DAY >= DATEADD('day', -90, CURRENT_DATE())
-WHERE f.FIRST_SEEN >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {_first_seen_scope}
 GROUP BY 1, 2, 3
 ORDER BY f.FIRST_SEEN DESC
 LIMIT 200
@@ -1594,7 +1635,7 @@ LIMIT 200
 
 
 def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
-                            schema_contains: str = "") -> str:
+                            schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=90)
     actor_company = companies.user_clause(company, "g.USER_NAME")
     object_company = companies.database_clause(company, "g.DATABASE_NAME")
@@ -1602,8 +1643,11 @@ def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
         f"({actor_company} OR {object_company})"
         if actor_company and object_company else (actor_company or object_company)
     )
+    _scope = (resolve_effective_window(days, "f.EVENT_TS", bounds=bounds)[1]
+              if bounds is not None
+              else f"f.EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        f"f.EVENT_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _scope,
         companies.database_equals_clause(database, "f.DATABASE_NAME"),
         contains_filter("f.SCHEMA_NAME", schema_contains),
     )
@@ -1714,24 +1758,43 @@ LIMIT 3000
 """
 
 
-def egress_baseline(days: int = 30) -> str:
+def egress_baseline(days: int = 30, *, bounds: tuple | None = None) -> str:
     span = max(1, min(int(days or 30), 45))
+    if bounds is not None:
+        # vs-prior on the calendar window: CURRENT = the given month [start, end),
+        # PRIOR = the whole month before it [prior_start, start). BASELINE_DAYS is the
+        # current month's span so the label matches the compared window.
+        from datetime import timedelta
+        start, end = bounds
+        prior_start = (start - timedelta(days=1)).replace(day=1)
+        _current_pred = (f"START_TIME >= '{start.isoformat()}' "
+                         f"AND START_TIME < '{end.isoformat()}'")
+        _prior_pred = (f"START_TIME >= '{prior_start.isoformat()}' "
+                       f"AND START_TIME < '{start.isoformat()}'")
+        _outer_pred = (f"START_TIME >= '{prior_start.isoformat()}' "
+                       f"AND START_TIME < '{end.isoformat()}'")
+        _baseline = (end - start).days
+    else:
+        _current_pred = f"START_TIME >= DATEADD('day', -{span}, CURRENT_TIMESTAMP())"
+        _prior_pred = f"START_TIME < DATEADD('day', -{span}, CURRENT_TIMESTAMP())"
+        _outer_pred = f"START_TIME >= DATEADD('day', -{span * 2}, CURRENT_TIMESTAMP())"
+        _baseline = span
     return f"""
 WITH periods AS (
     SELECT COALESCE(TARGET_REGION, '(same region)') AS TARGET_REGION,
-           ROUND(SUM(IFF(START_TIME >= DATEADD('day', -{span}, CURRENT_TIMESTAMP()),
+           ROUND(SUM(IFF({_current_pred},
                          BYTES_TRANSFERRED, 0)) / POWER(1024, 3), 3) AS CURRENT_GB,
-           ROUND(SUM(IFF(START_TIME < DATEADD('day', -{span}, CURRENT_TIMESTAMP()),
+           ROUND(SUM(IFF({_prior_pred},
                          BYTES_TRANSFERRED, 0)) / POWER(1024, 3), 3) AS PRIOR_GB
     FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{span * 2}, CURRENT_TIMESTAMP())
+    WHERE {_outer_pred}
       -- TRUE egress only, matching egress_daily: a same-region internal transfer (both
       -- TARGET_REGION and TARGET_CLOUD NULL) moves no data out of the account, so it must not
       -- be scored as a new/spiking outbound destination on this exfiltration lens (bug-hunt 2026-08-30).
       AND (TARGET_REGION IS NOT NULL OR TARGET_CLOUD IS NOT NULL)
     GROUP BY 1
 )
-SELECT TARGET_REGION, CURRENT_GB, PRIOR_GB, {span} AS BASELINE_DAYS,
+SELECT TARGET_REGION, CURRENT_GB, PRIOR_GB, {_baseline} AS BASELINE_DAYS,
        IFF(PRIOR_GB = 0 AND CURRENT_GB > 0, 'NEW',
            IFF(CURRENT_GB > PRIOR_GB * 2 AND CURRENT_GB >= 1, 'SPIKE', 'NORMAL')) AS BEHAVIOR
 FROM periods

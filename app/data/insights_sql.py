@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from app import companies
 from app.config import core_object
-from app.data.common import and_where, bounded_days, resolve_effective_window
+from app.data.common import and_where, bounded_days, resolve_effective_window, scope_window_where
 
 
 def _iso_date(value: str, name: str) -> str:
@@ -38,7 +38,7 @@ def _iso_date(value: str, name: str) -> str:
 _ACTIVE_HOUR_SPAN = 25
 
 
-def _active_hours_cte(days: int, company: str) -> str:
+def _active_hours_cte(days: int, company: str, *, bounds: tuple | None = None) -> str:
     """CTE pair (`q_spans`, `query_hours`) yielding one row per active
     warehouse-hour. Callers LEFT JOIN metering to `query_hours`."""
     return f"""q_spans AS (
@@ -46,7 +46,7 @@ def _active_hours_cte(days: int, company: str) -> str:
            DATE_TRUNC('hour', START_TIME) AS H0,
            DATE_TRUNC('hour', COALESCE(END_TIME, START_TIME)) AS H1
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
       AND WAREHOUSE_NAME IS NOT NULL
       AND {companies.warehouse_clause(company) or "1 = 1"}
 ),
@@ -58,7 +58,7 @@ query_hours AS (
 )"""
 
 
-def idle_warehouse_analysis(days: int, company: str = "ALL") -> str:
+def idle_warehouse_analysis(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Per warehouse: total vs idle credits (hour slices with no queries).
 
     WAREHOUSE_METERING_HISTORY bills by hour slice; joining each slice to
@@ -68,11 +68,11 @@ def idle_warehouse_analysis(days: int, company: str = "ALL") -> str:
     """
     days = bounded_days(days)
     where = and_where(
-        f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("M.START_TIME", days, bounds=bounds),
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
     return f"""
-WITH {_active_hours_cte(days, company)}
+WITH {_active_hours_cte(days, company, bounds=bounds)}
 SELECT
     M.WAREHOUSE_NAME,
     {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
@@ -408,10 +408,10 @@ LIMIT 500
 # Warehouse sizing profile (credits + load stats + idle share per warehouse)
 # ---------------------------------------------------------------------------
 
-def warehouse_sizing_profile(days: int, company: str = "ALL") -> str:
+def warehouse_sizing_profile(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days)
     where_m = and_where(
-        f"M.START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("M.START_TIME", days, bounds=bounds),
         "M.WAREHOUSE_ID > 0",
         companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
     )
@@ -426,12 +426,12 @@ WITH query_stats AS (
         SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_PROVISIONING_SEC,
         SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+    WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
       AND WAREHOUSE_NAME IS NOT NULL
       AND {companies.warehouse_clause(company) or "1 = 1"}
     GROUP BY WAREHOUSE_NAME
 ),
-{_active_hours_cte(days, company)}
+{_active_hours_cte(days, company, bounds=bounds)}
 SELECT
     M.WAREHOUSE_NAME,
     {companies.company_case_sql("M.WAREHOUSE_NAME")} AS COMPANY,
@@ -710,7 +710,7 @@ LIMIT {limit}
 """
 
 
-def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
+def warehouse_hourly_activity(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Hour-of-day credits vs query activity per warehouse — the input to
     the off-hours schedule advisor (credits with no queries = waste).
 
@@ -733,8 +733,18 @@ def warehouse_hourly_activity(days: int, company: str = "ALL") -> str:
     DAYS_METERED stays in the output so a reader can see how sparse the hour is.
     """
     days = bounded_days(days, 30)
+    # CURRENT_TIMESTAMP-anchored + a per-day divisor: for 'Last month' (bounds) use the
+    # bounded [start, end) range and divide by that calendar span; trailing stays byte-identical.
+    if bounds is not None:
+        _span, _m_win = resolve_effective_window(days, "START_TIME", bounds=bounds)
+        _q_win = resolve_effective_window(days, "HOUR_TS", bounds=bounds)[1]
+        _divisor = _span
+    else:
+        _m_win = f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        _q_win = f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        _divisor = days
     where_m = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _m_win,
         companies.warehouse_clause(company),
     )
     return f"""
@@ -751,13 +761,13 @@ WITH m AS (
 q AS (
     SELECT WAREHOUSE_NAME, HOUR(HOUR_TS) AS HR, SUM(QUERY_COUNT) AS QC
     FROM {core_object("FACT_QUERY_HOURLY")}
-    WHERE HOUR_TS >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    WHERE {_q_win}
       AND {companies.warehouse_clause(company) or "1 = 1"}
     GROUP BY 1, 2
 )
 SELECT m.WAREHOUSE_NAME, m.HR AS HOUR_OF_DAY,
-       ROUND(m.CR / {days}, 3) AS AVG_CREDITS,
-       ROUND(COALESCE(q.QC, 0) / {days}, 1) AS AVG_QUERIES,
+       ROUND(m.CR / {_divisor}, 3) AS AVG_CREDITS,
+       ROUND(COALESCE(q.QC, 0) / {_divisor}, 1) AS AVG_QUERIES,
        m.DAYS_SEEN AS DAYS_METERED
 FROM m
 LEFT JOIN q ON q.WAREHOUSE_NAME = m.WAREHOUSE_NAME AND q.HR = m.HR
@@ -973,7 +983,7 @@ LIMIT {limit}
 
 def wasted_query_spend_usd(days: int, company: str = "ALL", warehouse_contains: str = "",
                            user_contains: str = "", database: str = "", schema_contains: str = "",
-                           limit: int = 50) -> str:
+                           limit: int = 50, *, bounds: tuple | None = None) -> str:
     """rec#17: allocated compute burned on non-success queries — money spent on runs
     that produced nothing.
 
@@ -989,14 +999,19 @@ def wasted_query_spend_usd(days: int, company: str = "ALL", warehouse_contains: 
 
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
+    # Both scans share ONE window; CURRENT_TIMESTAMP-anchored, so 'Last month' (bounds)
+    # uses the bounded [start, end) range. Trailing stays byte-identical.
+    _win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+            if bounds is not None
+            else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where_q = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         companies.warehouse_clause(company),
     )
     where_m = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         companies.warehouse_clause(company),
     )
     vis = and_where(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.config import core_object
 from app.core.sqlsafe import clean_filter_text, contains_filter, sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, scope_window_where
 
 
 def _entity_type(value: str) -> str:
@@ -319,7 +319,7 @@ LIMIT 50
 
 
 def workload_portfolio(days: int = 30, company: str = "ALL",
-                       limit: int = 200) -> str:
+                       limit: int = 200, *, bounds: tuple | None = None) -> str:
     """Measured recurring-query portfolio with cost and behavior evidence."""
     horizon = bounded_days(days, 400)
     cap = max(10, min(int(limit or 200), 500))
@@ -337,7 +337,7 @@ WITH costs AS (
            HLL_ESTIMATE(HLL_COMBINE(p.USERS_HLL)) AS USERS,
            MAX(p.DAY) AS LAST_SEEN
     FROM {core_object('MART_PATTERN_COST_DAILY')} p
-    WHERE p.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('p.DAY', horizon, bounds=bounds)}
       {company_clause}
     GROUP BY p.QUERY_HASH
 ), scoped_families AS (
@@ -346,7 +346,7 @@ WITH costs AS (
     -- dropped a family whose representative database wasn't in the company's set.
     SELECT DISTINCT p.QUERY_HASH, p.COMPANY
     FROM {core_object('MART_PATTERN_COST_DAILY')} p
-    WHERE p.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('p.DAY', horizon, bounds=bounds)}
       {company_clause}
 ), families AS (
     SELECT f.QUERY_HASH,
@@ -359,7 +359,7 @@ WITH costs AS (
     FROM {core_object('MART_QUERY_FAMILY_DAILY')} f
     JOIN scoped_families s
       ON s.QUERY_HASH = f.QUERY_HASH AND s.COMPANY = f.COMPANY
-    WHERE f.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('f.DAY', horizon, bounds=bounds)}
     GROUP BY f.QUERY_HASH
 )
 -- FAILS stays RAW (NULL on a family-mart join miss), like AVG_CACHE_PCT/P95_SEC below:
@@ -468,7 +468,8 @@ ORDER BY CASE STATUS WHEN 'BREACH' THEN 0 WHEN 'STALE' THEN 1 WHEN 'NO_DATA' THE
 """
 
 
-def data_product_economics(days: int = 30, company: str = "ALL") -> str:
+def data_product_economics(days: int = 30, company: str = "ALL",
+                           *, bounds: tuple | None = None) -> str:
     """Separate measured-object and metered-warehouse economics by product."""
     horizon = bounded_days(days, 400)
     company_value = str(company or "ALL").upper()
@@ -524,7 +525,7 @@ WITH catalog AS (
     LEFT JOIN database_map dm
       ON om.DATA_PRODUCT IS NULL
      AND UPPER(dm.ENTITY_KEY) = UPPER(SPLIT_PART(l.OBJECT_FQN, '.', 1))
-    WHERE l.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('l.DAY', horizon, bounds=bounds)}
       {object_company}
       AND COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT) IS NOT NULL
     GROUP BY COALESCE(om.DATA_PRODUCT, dm.DATA_PRODUCT)
@@ -534,7 +535,7 @@ WITH catalog AS (
     FROM {core_object('MART_WAREHOUSE_EFFICIENCY_DAILY')} w
     JOIN catalog c ON c.ENTITY_TYPE = 'WAREHOUSE'
                   AND UPPER(c.ENTITY_KEY) = UPPER(w.WAREHOUSE_NAME)
-    WHERE w.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('w.DAY', horizon, bounds=bounds)}
       {warehouse_company}
     GROUP BY c.DATA_PRODUCT
 ), task_health AS (
@@ -543,7 +544,7 @@ WITH catalog AS (
     JOIN catalog c ON c.ENTITY_TYPE = 'TASK'
                   AND UPPER(c.ENTITY_KEY) =
                       UPPER(t.DATABASE_NAME || '.' || t.SCHEMA_NAME || '.' || t.TASK_NAME)
-    WHERE t.DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('t.DAY', horizon, bounds=bounds)}
     GROUP BY c.DATA_PRODUCT
 )
 SELECT p.DATA_PRODUCT, p.TEAM, p.OWNER_NAME, p.OWNER_CONFLICT, p.CRITICALITY, p.CATALOG_ENTITIES,
@@ -563,7 +564,8 @@ ORDER BY MEASURED_OBJECT_CREDITS DESC, METERED_WAREHOUSE_CREDITS DESC
 """
 
 
-def product_mapping_totals(days: int = 30, company: str = "ALL") -> str:
+def product_mapping_totals(days: int = 30, company: str = "ALL",
+                           *, bounds: tuple | None = None) -> str:
     """Coverage denominators for the product-economics view (Codex #20): the WHOLE
     account's object cost and catalog-entity counts, so the mapped share and the
     unmapped residual are explicit — an operator can tell whether product economics
@@ -577,7 +579,7 @@ def product_mapping_totals(days: int = 30, company: str = "ALL") -> str:
 SELECT
     (SELECT ROUND(COALESCE(SUM(CREDITS), 0), 4)
        FROM {core_object('FACT_OBJECT_COST_DAILY')}
-      WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {obj_co}) AS TOTAL_OBJECT_CREDITS,
+      WHERE {scope_window_where('DAY', horizon, bounds=bounds)} {obj_co}) AS TOTAL_OBJECT_CREDITS,
     (SELECT COUNT(*) FROM {core_object('ENTITY_CATALOG')} WHERE 1 = 1 {cat_co}) AS TOTAL_ENTITIES,
     (SELECT COUNT(*) FROM {core_object('ENTITY_CATALOG')}
       WHERE NULLIF(TRIM(DATA_PRODUCT), '') IS NOT NULL {cat_co}) AS MAPPED_ENTITIES
@@ -605,7 +607,8 @@ LIMIT 500
 """
 
 
-def product_consumer_reads(days: int = 30, company: str = "ALL") -> str:
+def product_consumer_reads(days: int = 30, company: str = "ALL",
+                           *, bounds: tuple | None = None) -> str:
     """#28: per data-product consumer reach + reads trend from ACCESS_HISTORY.
 
     For each catalogued DATA_PRODUCT: how many DISTINCT users read its objects, and how
@@ -628,6 +631,21 @@ def product_consumer_reads(days: int = 30, company: str = "ALL") -> str:
     the per-row blowup companies.py warns against). ACCESS_HISTORY has no COMPANY."""
     recent = bounded_days(days, 200)
     horizon = bounded_days(2 * recent, 400)
+    if bounds is not None:
+        from datetime import timedelta
+        _start, _end = bounds
+        # vs-prior: CURRENT = the bounded month, PRIOR = the calendar month before it.
+        _prior_start = (_start - timedelta(days=1)).replace(day=1)
+        _reads_where = (f"a.QUERY_START_TIME >= '{_prior_start.isoformat()}' "
+                        f"AND a.QUERY_START_TIME < '{_end.isoformat()}'")
+        _recent_pred = (f"QUERY_START_TIME >= '{_start.isoformat()}' "
+                        f"AND QUERY_START_TIME < '{_end.isoformat()}'")
+        _prior_pred = (f"QUERY_START_TIME >= '{_prior_start.isoformat()}' "
+                       f"AND QUERY_START_TIME < '{_start.isoformat()}'")
+    else:
+        _reads_where = f"a.QUERY_START_TIME >= DATEADD('day', -{horizon}, CURRENT_TIMESTAMP())"
+        _recent_pred = f"QUERY_START_TIME >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP())"
+        _prior_pred = f"QUERY_START_TIME <  DATEADD('day', -{recent}, CURRENT_TIMESTAMP())"
     cv = str(company or "ALL").upper()
     catalog_company = "" if cv == "ALL" else f"AND UPPER(COMPANY) = {sql_literal(cv, 40)}"
     return f"""
@@ -645,7 +663,7 @@ WITH catalog AS (
            a.USER_NAME, a.QUERY_ID, a.QUERY_START_TIME
     FROM SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY a,
          LATERAL FLATTEN(input => a.BASE_OBJECTS_ACCESSED) f
-    WHERE a.QUERY_START_TIME >= DATEADD('day', -{horizon}, CURRENT_TIMESTAMP())
+    WHERE {_reads_where}
       -- match the domains the cost ETL (V048) attributes credits to, or an
       -- actively-queried materialized view would show cost with zero reads and be
       -- falsely flagged for retirement.
@@ -665,12 +683,12 @@ SELECT DATA_PRODUCT,
        -- `days`-window object cost it is divided by (data_product_economics scans
        -- `days`, not 2*days); a 2*days reach figure over a `days` cost understates
        -- $/consumer. RECENT/PRIOR reads keep the full horizon for the trend.
-       COUNT(DISTINCT IFF(QUERY_START_TIME >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+       COUNT(DISTINCT IFF({_recent_pred},
                           USER_NAME, NULL)) AS DISTINCT_CONSUMERS,
        COUNT(DISTINCT QUERY_ID)  AS TOTAL_READS,
-       COUNT(DISTINCT IFF(QUERY_START_TIME >= DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+       COUNT(DISTINCT IFF({_recent_pred},
                           QUERY_ID, NULL)) AS RECENT_READS,
-       COUNT(DISTINCT IFF(QUERY_START_TIME <  DATEADD('day', -{recent}, CURRENT_TIMESTAMP()),
+       COUNT(DISTINCT IFF({_prior_pred},
                           QUERY_ID, NULL)) AS PRIOR_READS,
        MAX(QUERY_START_TIME) AS LAST_READ
 FROM product_reads
@@ -680,7 +698,8 @@ LIMIT 500
 """
 
 
-def cost_truth(days: int = 30, company: str = "ALL") -> str:
+def cost_truth(days: int = 30, company: str = "ALL",
+               *, bounds: tuple | None = None) -> str:
     """One non-additive inventory of billed, metered, measured and allocated credits."""
     horizon = bounded_days(days, 400)
     company_value = str(company or "ALL").upper()
@@ -692,15 +711,15 @@ def cost_truth(days: int = 30, company: str = "ALL") -> str:
 WITH billed AS (
     SELECT SUM(CREDITS_BILLED) AS CREDITS
     FROM {core_object('FACT_METERING_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE())
+    WHERE {scope_window_where('DAY', horizon, bounds=bounds)}
 ), metered AS (
     SELECT SUM(CREDITS_TOTAL) AS CREDITS
     FROM {core_object('FACT_WAREHOUSE_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {fact_scope}
+    WHERE {scope_window_where('DAY', horizon, bounds=bounds)} {fact_scope}
 ), measured AS (
     SELECT SUM(CREDITS) AS CREDITS
     FROM {core_object('FACT_OBJECT_COST_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {fact_scope}
+    WHERE {scope_window_where('DAY', horizon, bounds=bounds)} {fact_scope}
       AND COST_ARM LIKE 'QUERY_COMPUTE%'
       -- Exclude the synthetic residual arm (OBJECT_FQN='UNATTRIBUTED', COST_ARM=
       -- 'QUERY_COMPUTE_RESIDUAL', COMPANY='UNKNOWN'): it is query compute that touched no base object,
@@ -711,7 +730,7 @@ WITH billed AS (
 ), allocated AS (
     SELECT SUM(ALLOC_CREDITS) AS CREDITS
     FROM {core_object('MART_COST_ALLOCATION_DAILY')}
-    WHERE DAY >= DATEADD('day', -{horizon}, CURRENT_DATE()) {fact_scope}
+    WHERE {scope_window_where('DAY', horizon, bounds=bounds)} {fact_scope}
       AND DIMENSION = 'USER'
 )
 SELECT 'BILLED' AS BASIS, 'Account billed credits' AS METRIC, CREDITS,
