@@ -127,7 +127,10 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
             match = wdf_wi[wdf_wi.get("name", "").astype(str) == wi_pick] if "name" in wdf_wi.columns else wdf_wi.iloc[0:0]
             if not match.empty:
                 live_size = str(match.iloc[0].get("size", "") or "")
-                live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600) or 600)
+                # No trailing `or 600`: safe_float already defaults 600 only on None/NaN/parse
+                # error, so a REAL auto_suspend=0 (a never-suspend warehouse) is preserved
+                # instead of being silently modeled as a 600s suspend (round-3 bug hunt).
+                live_suspend = int(safe_float(match.iloc[0].get("auto_suspend"), 600))
         c_sz, c_sus = st.columns(2)
         with c_sz:
             delta_wi = st.select_slider("Size step", options=[-2, -1, 0, 1, 2], value=0,

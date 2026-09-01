@@ -16,7 +16,7 @@ from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart27_sql, mart_sql
 from app.logic.directory import resolve_display
-from app.logic.formulas import format_usd, humanize_duration, safe_float
+from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.verdict import Signal, page_verdict
 from app.ui.components import (
     alarm_health,
@@ -317,8 +317,9 @@ def render() -> None:
                          page=_PAGE,
                          key=f"untagged_user_{f['company']}_{f['days']}_{_sel_user}_{_u_db}_{_u_sc}{_tag_lm}",
                          tier="historical", source="QUERY_HISTORY (untagged executions, per user)")
-                st.markdown(f"**Untagged executions — "
-                            f"{resolve_display(_sel_user, user_display_map(_PAGE))}**")
+                st.markdown(md_dollars(
+                    f"**Untagged executions — "
+                    f"{resolve_display(_sel_user, user_display_map(_PAGE))}**"))
                 if guard(ut, "No untagged executions for this user in the window/scope."):
                     styled_table(ut.df, height=240)
                     result_caption(ut)

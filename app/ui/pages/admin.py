@@ -546,6 +546,13 @@ def _setting_value_input(key: str, current: dict[str, str]) -> str:
         value = float(cur) if cur not in ("", None) else float(spec.get("min_value", 0.0))
     except (TypeError, ValueError):
         value = float(spec.get("min_value", 0.0))
+    # Clamp the stored value into the widget's own bounds before rendering: a value below
+    # min_value (or above max_value) makes st.number_input raise, crashing the settings row
+    # for a stored setting that predates a tightened spec (round-3 bug hunt).
+    if spec.get("min_value") is not None:
+        value = max(float(spec["min_value"]), value)
+    if spec.get("max_value") is not None:
+        value = min(float(spec["max_value"]), value)
     return _num_to_str(st.number_input("New value", value=value, key=wkey, **spec))
 
 
@@ -706,9 +713,15 @@ def _migrations_tab() -> None:
                 _hval = s["HOURS_SINCE_LOAD"]
                 _age = ("never loaded" if pd.isna(_hval)
                         else f"{humanize_duration(_hval, 'h')} since load")
-                st.markdown(f"- **{name}** — {_age}. "
-                            + (hint or "no matching error logged — check SHOW TASKS "
-                                       "(tasks suspend if a migration half-applied)."))
+                # md_dollars: the loader ERROR_MESSAGE is raw Snowflake exception text and
+                # commonly carries '$' (staged column refs $1/$2, $-quoted names) which
+                # st.markdown would pair into a LaTeX math span, corrupting the exact string
+                # a DBA is reading to diagnose the failure (round-3 bug hunt; matches the
+                # brief.py:379 / alerts DETAIL guarding pattern for the same data class).
+                st.markdown(md_dollars(
+                    f"- **{name}** — {_age}. "
+                    + (hint or "no matching error logged — check SHOW TASKS "
+                               "(tasks suspend if a migration half-applied).")))
 
 
 _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold "

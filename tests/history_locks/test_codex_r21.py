@@ -41,9 +41,13 @@ def test_recon_waits_for_the_toggle():
 def test_settings_cache_key_carries_the_refresh_salt():
     cmp_src = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     # The refresh salt still joins the settings cache key: load_settings passes the salt-keyed
-    # scope to the memoized merge (_merged_settings_cached, added to skip the iterrows merge at
-    # ~23 call sites/rerun), which forwards it verbatim to the frame cache.
-    assert '_merged_settings_cached(\n            f"global:{st.session_state.get(\'_ow_refresh_salt\', \'\')}")' in cmp_src
+    # scope to the memoized merge (_merged_settings_cached), which forwards it verbatim to the
+    # frame cache. Round-3 fix: the 'settings' DOMAIN salt also joins the key, so an Admin
+    # SETTINGS edit (which bumps only the domain salt) invalidates load_settings instead of
+    # serving the old pricing dict for its 300s TTL.
+    assert '_gsalt = st.session_state.get("_ow_refresh_salt", "")' in cmp_src
+    assert '.get("settings", "")' in cmp_src
+    assert '_merged_settings_cached(f"global:{_gsalt}|settings:{_ssalt}")' in cmp_src
     assert "_settings_frame_cached(scope)" in cmp_src
 
 

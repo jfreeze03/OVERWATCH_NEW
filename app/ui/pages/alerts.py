@@ -756,7 +756,9 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     event_id = str(row["EVENT_ID"])
                     # C42: no leading divider — the column edge separates the feed
                     # from the drawer now (the old rule was a stacked-flow separator).
-                    st.markdown(f"**[{row['SEVERITY']}] {row['TITLE']}**")
+                    # md_dollars: TITLE can carry entity names with '$' — escape so it
+                    # doesn't render as a LaTeX span (matches the brief.py TITLE guard).
+                    st.markdown(md_dollars(f"**[{row['SEVERITY']}] {row['TITLE']}**"))
                     st.caption(f"{row['RAISED_AT']} · {row['COMPANY']} · rule {row['RULE_ID']} · "
                                f"event {event_id[:8]} · status {row['STATUS']}")
                     detail_text = str(row.get("DETAIL") or "").strip()

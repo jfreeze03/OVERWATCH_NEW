@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.418.0 - Bug hunt round 3: cache invalidation, text-escaping, truthiness, widget bounds (2026-09-01)
+
+A third 12-dimension adversarial sweep (empty-data render, schema contract, text-escaping, boolean/
+precedence, sort/rank, widget-state, alerts, nav, formula-unit, v4.417 regression, lifecycle, concurrency)
+— refute-verified, then ground-truthed by hand. 7 confirmed fixed, 2 refuted.
+
+- **Settings edit served a stale app-wide pricing dict (cache invalidation).** An Admin SETTINGS edit
+  bumps only the `settings` domain salt, but `load_settings` keyed its 300s cache on the *global* refresh
+  salt — so all ~23 dollar surfaces kept the OLD rate for up to 5 minutes while SQL-side SETTINGS reads
+  (which fold in domain salts) refreshed immediately, disagreeing on the just-edited rate within one
+  render. `load_settings` now keys on the settings domain salt too.
+- **Loader ERROR_MESSAGE mis-rendered** — raw Snowflake exception text (with `$` staged-column refs) went
+  into `st.markdown` unescaped, so `$…$` became a LaTeX math span, corrupting the exact string a DBA reads
+  to diagnose a broken loader. Now `md_dollars`-escaped (matches the brief/alerts guarding pattern);
+  the alert TITLE, an untagged-user name, and a timeline label backtick-break-out were escaped the same way.
+- **`auto_suspend = 0` (never-suspend) was silently modeled as 600s** in the what-if simulator — a
+  `safe_float(x, 600) or 600` treated a legitimate 0 as missing. Dropped the `or 600`.
+- **Settings number_input crashed** when a stored value sat below a later-tightened `min_value` spec; the
+  value is now clamped into the widget's own bounds before rendering.
+
+Refuted (2): a landing-nav ordering concern and a saved-view restore (empirically reproduced as correct).
+9 new regression tests, incl. a behavioral cache-key lock and the never-suspend truthiness case.
+
 ## 4.417.0 - Bug hunt round 2: consistency, format, date-time, RCA, idempotency (2026-09-01)
 
 A second 12-dimension adversarial sweep (aggregation/join, pure-logic edges, cross-surface consistency,

@@ -1450,8 +1450,15 @@ def _merged_settings_cached(scope: str) -> dict:
 def load_settings(page: str) -> dict:
     """Settings from SETTINGS with code defaults as offline fallback."""
     try:
-        return _merged_settings_cached(
-            f"global:{st.session_state.get('_ow_refresh_salt', '')}")
+        # Key on BOTH the global refresh salt AND the 'settings' DOMAIN salt: an Admin
+        # SETTINGS edit bumps only the domain salt (query._bump_refresh domain-scopes a
+        # write to OVERWATCH.SETTINGS), so a global-salt-only key served the old pricing
+        # dict for the full 300s TTL while SQL-side SETTINGS reads (via run()->_cache_scope,
+        # which folds in domain salts) refreshed immediately — the two disagreed on the
+        # just-edited rate within one render (round-3 bug hunt).
+        _gsalt = st.session_state.get("_ow_refresh_salt", "")
+        _ssalt = (st.session_state.get("_ow_domain_salts", {}) or {}).get("settings", "")
+        return _merged_settings_cached(f"global:{_gsalt}|settings:{_ssalt}")
     except Exception:  # noqa: BLE001 — settings fallback must never break a page
         merged = dict(DEFAULT_SETTINGS)
         merged["_source"] = "code defaults (SETTINGS not reachable)"

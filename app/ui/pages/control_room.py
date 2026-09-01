@@ -1116,7 +1116,10 @@ def render() -> None:
                     at = pd.to_datetime(anchor["AT"])
                     lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
                     nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
-                    st.markdown(f"**±30 minutes around** `{anchor['LABEL']}` — {len(nearby)} event(s)")
+                    # strip backticks from the data-derived LABEL so it can't break out of
+                    # the markdown code-span and inject formatting (round-3 bug hunt).
+                    _lbl = str(anchor["LABEL"]).replace("`", "")
+                    st.markdown(f"**±30 minutes around** `{_lbl}` — {len(nearby)} event(s)")
                     styled_table(nearby)
                 except (KeyError, ValueError, TypeError) as exc:
                     st.caption(f"±30 min window unavailable for this row — {type(exc).__name__}: "
