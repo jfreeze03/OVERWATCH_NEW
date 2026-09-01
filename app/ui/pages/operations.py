@@ -106,7 +106,9 @@ _PAGE = "Operations"
 
 
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
-                 database: str = "", schema_contains: str = "") -> None:
+                 database: str = "", schema_contains: str = "", *,
+                 bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     nav_query = str(navigation_context().get("query_id") or "").strip()
     nav_signature = f"query:{nav_query}"
     if nav_query and st.session_state.get("_ow_ops_context_applied") != nav_signature:
@@ -131,13 +133,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     _summary_source = ""
     if not schema_contains:
         _summary_sql = mart_sql.fact_query_window_summary(
-            days, company, wh_filter, user_filter, database)
-        _summary_key = f"q_fact_summary_{company}_{days}"
+            days, company, wh_filter, user_filter, database, bounds=bounds)
+        _summary_key = f"q_fact_summary_{company}_{days}{_lm}"
         _summary_source = "FACT_QUERY_HOURLY (mart, loaded hourly)"
     elif not wh_filter and not user_filter:
         _summary_sql = mart27_sql.schema_window_summary(
-            days, company, database, schema_contains)
-        _summary_key = f"q_schema_fact_{company}_{days}"
+            days, company, database, schema_contains, bounds=bounds)
+        _summary_key = f"q_schema_fact_{company}_{days}{_lm}"
         _summary_source = "FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)"
     _activity_sql = mart_sql.fact_daily_activity(14, company, database)
     _mart_jobs = [
@@ -149,10 +151,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             {"key": "summary", "sql": _summary_sql, "source": _summary_source})
     if _use_diag:
         _mart_jobs.extend([
-            {"key": "top", "sql": mart27_sql.ops_diag_top_queries(days, company, 50),
+            {"key": "top", "sql": mart27_sql.ops_diag_top_queries(days, company, 50, bounds=bounds),
              "source": "MART_OPS_DIAG_HOURLY (mart — union of hourly top-50s)",
              "max_rows": 50},
-            {"key": "fails", "sql": mart27_sql.ops_diag_failures(days, company),
+            {"key": "fails", "sql": mart27_sql.ops_diag_failures(days, company, bounds=bounds),
              "source": "MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)"},
         ])
     _mart_pf = run_batch(_mart_jobs, page=_PAGE, tier="hourly") if len(_mart_jobs) > 1 else {}
@@ -167,8 +169,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
             summary, used_mart = m, True
     if summary is None:
-        summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains),
-                      page=_PAGE, key=f"q_summary_{company}_{days}", tier="recent",
+        summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+                      page=_PAGE, key=f"q_summary_{company}_{days}{_lm}", tier="recent",
                       source="ACCOUNT_USAGE.QUERY_HISTORY")
     if summary.usable():
         row = summary.df.iloc[0]
@@ -217,18 +219,18 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     if _use_diag:
         _qb = {
             "top": run_mart_first(
-                mart27_sql.ops_diag_top_queries(days, company, 50),
+                mart27_sql.ops_diag_top_queries(days, company, 50, bounds=bounds),
                 ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
-                                               user_filter, database, schema_contains),
-                page=_PAGE, key=f"q_top_{company}_{days}",
+                                               user_filter, database, schema_contains, bounds=bounds),
+                page=_PAGE, key=f"q_top_{company}_{days}{_lm}",
                 mart_source="MART_OPS_DIAG_HOURLY (mart — union of hourly top-50s)",
                 live_source="QUERY_HISTORY (live fallback)",
                 mart_tier="hourly", live_tier="recent", max_rows=50,
                 preloaded=_mart_pf.get("top") if isinstance(_mart_pf, dict) else None),
             "fails": run_mart_first(
-                mart27_sql.ops_diag_failures(days, company),
-                ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
-                page=_PAGE, key=f"q_fails_{company}_{days}",
+                mart27_sql.ops_diag_failures(days, company, bounds=bounds),
+                ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+                page=_PAGE, key=f"q_fails_{company}_{days}{_lm}",
                 mart_source="MART_OPS_DIAG_HOURLY (mart — users = HLL approx-distinct)",
                 live_source="QUERY_HISTORY (live fallback)",
                 mart_tier="hourly", live_tier="recent",
@@ -239,9 +241,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # in one shot; any failure falls back to the serial per-query calls.
         _qb = run_batch([
             {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
-                                                                 user_filter, database, schema_contains),
+                                                                 user_filter, database, schema_contains, bounds=bounds),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
-            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
+            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
         ], page=_PAGE, tier="recent")
 
@@ -250,8 +252,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     if top is None or not top.ok:
         top = run(
             ops_sql.top_queries_by_elapsed(
-                days, company, 50, wh_filter, user_filter, database, schema_contains),
-            page=_PAGE, key=f"q_top_{company}_{days}", tier="recent",
+                days, company, 50, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"q_top_{company}_{days}{_lm}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY", max_rows=50)
     if guard(top, "No queries in this window/scope."):
         # r24: every QUERY_ID row links straight to its Snowsight profile
@@ -290,8 +292,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     if _triage_on:
         _triage = run(
             ops_sql.query_optimization_triage(
-                days, company, wh_filter, user_filter, database, schema_contains),
-            page=_PAGE, key=f"q_triage_{company}_{days}", tier="recent",
+                days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"q_triage_{company}_{days}{_lm}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY (spill / pruning / scan)", max_rows=50)
         if _triage.ok and _triage.empty:
             empty_state("clean", "No spill-heavy or poorly-pruned statements in this window — nothing to optimize first.")
@@ -332,11 +334,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     if _proc_reg_on:
         _pb = run_batch([
             {"key": "roll", "sql": ops_sql.proc_sla_rollup(
-                days, company, wh_filter, user_filter, database, schema_contains),
+                days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY (proc SLA-impact rollup)", "max_rows": 200},
             {"key": "reg", "sql": ops_sql.proc_regression(
                 days, company, wh_filter, user_filter, database, schema_contains,
-                min_calls=proc_regression.MIN_CALLS),
+                min_calls=proc_regression.MIN_CALLS, bounds=bounds),
              "source": "ACCOUNT_USAGE.QUERY_HISTORY (proc p95 vs prior window)", "max_rows": 200},
         ], page=_PAGE, tier="recent")
 
@@ -502,8 +504,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
     fails = _qb.get("fails")
     if fails is None or not fails.ok:
         fails = run(
-            ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains),
-            page=_PAGE, key=f"q_fails_{company}_{days}", tier="recent",
+            ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"q_fails_{company}_{days}{_lm}", tier="recent",
             source="ACCOUNT_USAGE.QUERY_HISTORY")
     # C23: amber only when failures exist; a clean window reads verified-green.
     section_header("Failures by error", alarm_health(fails), "alerts")
@@ -525,8 +527,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
         waste = run(
             insights_sql.wasted_query_spend_usd(days, company, wh_filter, user_filter,
-                                                database, schema_contains),
-            page=_PAGE, key=f"q_waste_{company}_{days}", tier="historical",
+                                                database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"q_waste_{company}_{days}{_lm}", tier="historical",
             source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share, non-success)")
         if guard(waste, "No failed/killed queries consumed warehouse compute in this window.", kind="clean"):
             wdf = waste.df.copy()
@@ -1060,12 +1062,13 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
 
 
 def _task_health_view(company: str, days: int, database: str = "",
-                      schema_contains: str = "") -> None:
-    res = run(mart_sql.fact_task_daily(days, company, database, schema_contains), page=_PAGE,
-              key=f"t_fact_{company}_{days}", tier="hourly", source="FACT_TASK_DAILY")
+                      schema_contains: str = "", *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
+    res = run(mart_sql.fact_task_daily(days, company, database, schema_contains, bounds=bounds), page=_PAGE,
+              key=f"t_fact_{company}_{days}{_lm}", tier="hourly", source="FACT_TASK_DAILY")
     _from_mart = res.usable()
     if not _from_mart:
-        res = run(ops_sql.task_runs(days, company, database, schema_contains), page=_PAGE, key=f"t_live_{company}_{days}",
+        res = run(ops_sql.task_runs(days, company, database, schema_contains, bounds=bounds), page=_PAGE, key=f"t_live_{company}_{days}{_lm}",
                   tier="recent", source="ACCOUNT_USAGE.TASK_HISTORY (live fallback)")
     known_failed = None
     if guard(res, "No task runs recorded for this scope/window."):
@@ -1252,12 +1255,13 @@ def _task_sla_view(company: str, days: int, database: str = "",
 
 
 def _task_runs_view(company: str, days: int, database: str = "",
-                    schema_contains: str = "") -> None:
+                    schema_contains: str = "", *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     section_header("Node run timing", "info", "clock")
     nres = run(
-        mart27_sql.task_nodes(days, company, database, schema_contains),
+        mart27_sql.task_nodes(days, company, database, schema_contains, bounds=bounds),
         page=_PAGE,
-        key=f"t_node_{company}_{days}",
+        key=f"t_node_{company}_{days}{_lm}",
         tier="hourly",
         source="MART_TASK_NODE_DAILY",
     )
@@ -1640,22 +1644,25 @@ def _task_graph_view() -> None:
     result_caption(graph, note=f"root {root_id} · graph version {graph_version}")
 
 
-def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str = "", *,
+               bounds: tuple | None = None) -> None:
     view = nested_sections(
         ["Health", "SLA", "Graph", "Runs"],
         key="ops_tasks_view",
     )
     if view == "Health":
-        _task_health_view(company, days, database, schema_contains)
+        _task_health_view(company, days, database, schema_contains, bounds=bounds)
     elif view == "SLA":
         _task_sla_view(company, days, database, schema_contains)
     elif view == "Graph":
         _task_graph_view()
     else:
-        _task_runs_view(company, days, database, schema_contains)
+        _task_runs_view(company, days, database, schema_contains, bounds=bounds)
 
 
-def _warehouses_tab(company: str, rate: float, days: int) -> None:
+def _warehouses_tab(company: str, rate: float, days: int, *,
+                    bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     section_header("Warehouse spend & anomalies", "info", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
@@ -1742,9 +1749,9 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
                      help="Per-warehouse idle %, queue/spill, p95 and a size verdict over the window."):
         st.caption("Toggle to profile every warehouse's idle share and right-size verdict on demand.")
     elif guard((_prof := run_mart_first(
-                    mart27_sql.eff_sizing_profile(days, company),
-                    insights_sql.warehouse_sizing_profile(days, company),
-                    page=_PAGE, key=f"ops_sizing_{company}_{days}", days=days,
+                    mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
+                    insights_sql.warehouse_sizing_profile(days, company, bounds=bounds),
+                    page=_PAGE, key=f"ops_sizing_{company}_{days}{_lm}", days=days,
                     mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                     live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                "No warehouse activity to profile in this window."):
@@ -1823,8 +1830,8 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
                      help="Reads hour-of-day credits vs query activity per warehouse."):
         st.caption("Toggle to find warehouses burning credits in hours with ~no queries.")
     elif guard((_hh := run(
-                    insights_sql.warehouse_hourly_activity(days, company), page=_PAGE,
-                    key=f"ops_wh_hourly_{company}_{days}", tier="historical",
+                    insights_sql.warehouse_hourly_activity(days, company, bounds=bounds), page=_PAGE,
+                    key=f"ops_wh_hourly_{company}_{days}{_lm}", tier="historical",
                     source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day activity)")),
                "No hour-of-day warehouse activity in this window."):
         import pandas as pd
@@ -1852,10 +1859,10 @@ def _warehouses_tab(company: str, rate: float, days: int) -> None:
         result_caption(_hh)
 
     _monitor_coverage_panel()
-    _adaptive_candidacy_panel(company, days)
+    _adaptive_candidacy_panel(company, days, bounds=bounds)
 
 
-def _adaptive_candidacy_panel(company: str, days: int) -> None:
+def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None = None) -> None:
     """Adaptive-compute candidacy (repo review wave 3): which warehouses would
     benefit from auto-scaling compute — bursty, material-volume load — vs those a
     fixed size or auto-suspend serves better. Scored from the hour-of-day profile
@@ -1867,19 +1874,20 @@ def _adaptive_candidacy_panel(company: str, days: int) -> None:
     # so cap idle to match — else the idle discount would cover a longer span than the
     # burst profile it modifies.
     _win = min(int(days), 30)
+    _lm = "_lm" if bounds is not None else ""
     # Perf: the two independent 'hourly' reads (idle_warehouse_analysis is a heavy
     # QUERY_HISTORY+METERING join) prefetch in one parallel batch; each keeps its run() fallback.
     _acb = run_batch([
-        {"key": "hourly", "sql": insights_sql.warehouse_hourly_activity(_win, company),
+        {"key": "hourly", "sql": insights_sql.warehouse_hourly_activity(_win, company, bounds=bounds),
          "source": "WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day)"},
-        {"key": "idle", "sql": insights_sql.idle_warehouse_analysis(_win, company),
+        {"key": "idle", "sql": insights_sql.idle_warehouse_analysis(_win, company, bounds=bounds),
          "source": "WAREHOUSE_METERING_HISTORY (idle credits)"},
     ], page=_PAGE, tier="hourly")
-    hourly = _acb.get("hourly") or run(insights_sql.warehouse_hourly_activity(_win, company), page=_PAGE,
-                 key=f"ops_wh_hourly_{company}_{_win}", tier="hourly",
+    hourly = _acb.get("hourly") or run(insights_sql.warehouse_hourly_activity(_win, company, bounds=bounds), page=_PAGE,
+                 key=f"ops_wh_hourly_{company}_{_win}{_lm}", tier="hourly",
                  source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day)")
-    idle = _acb.get("idle") or run(insights_sql.idle_warehouse_analysis(_win, company), page=_PAGE,
-               key=f"ops_wh_idle_{company}_{_win}", tier="hourly",
+    idle = _acb.get("idle") or run(insights_sql.idle_warehouse_analysis(_win, company, bounds=bounds), page=_PAGE,
+               key=f"ops_wh_idle_{company}_{_win}{_lm}", tier="hourly",
                source="WAREHOUSE_METERING_HISTORY (idle credits)")
     if not guard(hourly, "Needs hour-of-day warehouse metering to score candidacy."):
         return
@@ -1967,7 +1975,8 @@ def _monitor_coverage_panel() -> None:
     result_caption(_whs)
 
 
-def _contention_tab(company: str, days: int) -> None:
+def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     left, right = st.columns(2)
     with left:
         section_header("Warehouse queue & spill pressure", "info", "warehouse")
@@ -1975,9 +1984,9 @@ def _contention_tab(company: str, days: int) -> None:
         # (the live read sat at 17.8s on the fleet board). r19 #18 still
         # holds — no one-member batch; mart-first with the labeled fallback.
         res = run_mart_first(
-            mart_sql.fact_warehouse_pressure(days, company),
-            ops_sql.warehouse_pressure(days, company),
-            page=_PAGE, key=f"c_pressure_{company}_{days}",
+            mart_sql.fact_warehouse_pressure(days, company, bounds=bounds),
+            ops_sql.warehouse_pressure(days, company, bounds=bounds),
+            page=_PAGE, key=f"c_pressure_{company}_{days}{_lm}",
             mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)",
             live_source="QUERY_HISTORY (live fallback)",
             mart_tier="hourly", live_tier="recent")
@@ -2006,9 +2015,9 @@ def _contention_tab(company: str, days: int) -> None:
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
         res = run_mart_first(
-            mart27_sql.lock_wait_daily(min(days, 14), company),
-            ops_sql.lock_contention(min(days, 14)),
-            page=_PAGE, key=f"c_locks_{company}_{days}_{_lock_db}",  # #34: scope in the cache key
+            mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds),
+            ops_sql.lock_contention(min(days, 14), bounds=bounds),
+            page=_PAGE, key=f"c_locks_{company}_{days}_{_lock_db}{_lm}",  # #34: scope in the cache key
             mart_source=f"MART_LOCK_WAIT_DAILY ({company} + account-level)",
             live_source="ACCOUNT_USAGE.LOCK_WAIT_HISTORY (account-wide, pre-V035)",
             empty_is_answer=True)
@@ -2558,11 +2567,11 @@ def render() -> None:
     section_filter_contract(f, **_contracts[section])
     if section == "Queries":
         _queries_tab(f["company"], f["days"], f["warehouse_contains"], f["user_contains"],
-                     f["database"], f["schema_contains"])
+                     f["database"], f["schema_contains"], bounds=f["bounds"])
     elif section == "Tasks":
-        _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+        _tasks_tab(f["company"], f["days"], f["database"], f["schema_contains"], bounds=f["bounds"])
     elif section == "Warehouses":
-        _warehouses_tab(f["company"], rate, f["days"])
+        _warehouses_tab(f["company"], rate, f["days"], bounds=f["bounds"])
         st.divider()
         section_header(
             "Contention (queue, spill & lock waits)",
@@ -2570,7 +2579,7 @@ def render() -> None:
             "warehouse",
             anchor="ops-wh-contention",
         )
-        _contention_tab(f["company"], f["days"])
+        _contention_tab(f["company"], f["days"], bounds=f["bounds"])
     elif section == "Change impact":
         _change_impact_tab(f["company"], f["database"], f["schema_contains"], is_operator)
     elif section == "Pipeline SLA":

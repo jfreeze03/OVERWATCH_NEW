@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.415.0 - "Last month" rollout complete: every page threaded (2026-09-01)
+
+Threads `f["bounds"]` through Operations, Security, Control Room and Decision Studio, activating the
+v4.414 builders — **Last month is now exact across the entire app.**
+
+- **Operations**: Queries, Tasks (Health + Runs), Warehouses (sizing/quiet-hours/adaptive) and Contention
+  tabs. **Security**: change-risk, login and egress reads across its tabs + export pack. **Control Room**:
+  the one scope read (spend movers vs prior). **Decision Studio**: Portfolio, Products and Cost-Truth.
+  Every scope-window cache key gains the `{_lm}` Last-month discriminator.
+- Real-time surfaces (task SLA streaks, live query/incident/alert feeds, correlation timelines), fixed-
+  window drills (task graph, change impact, MFA/expiry/dormant, day-replay) and period-anchored Decision
+  Studio reads (the ROI proof — savings are monthly-magnitude by design — SLO per-objective windows,
+  action-queue PERIOD) are deliberately left as-is: they don't respond to *any* scope window, so they are
+  not "approximating" Last month.
+- The scope-bar caveat is gone: the caption now simply confirms "the complete previous calendar month,
+  today excluded." Backward compatible; new page-threading + bounded-builder tests.
+
 ## 4.414.0 - "Last month" rollout batch 6: Operations/Security/DS builders honor bounds (2026-09-01)
 
 Extends the bounded **Last month** branch to the scope-window builders behind the last four pages

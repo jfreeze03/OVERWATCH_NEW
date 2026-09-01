@@ -62,7 +62,7 @@ def test_failed_login_reasons_uses_coarse_error_categories():
 # --- H1: break-glass panel reads all statements live; the fact twin is documented ------
 def test_breakglass_panel_reads_live_all_statements():
     tab = _SEC.split("Break-glass role activity", 1)[1].split("section_header", 1)[0]
-    assert "security_sql.admin_role_activity(days, company)" in tab
+    assert "security_sql.admin_role_activity(days, company, bounds=bounds)" in tab
     assert "admin_role_activity_fact" not in tab
     # the change-only fact builder now warns against reuse behind an all-statements panel
     assert "does NOT see SELECT/COPY/CALL" in (

@@ -64,11 +64,44 @@ def test_cost_spend_tab_threads_bounds_to_the_headline_metering():
     assert "metering_daily_by_service(days, bounds=bounds)" in spend
 
 
-def test_scope_bar_discloses_last_month_coverage_honestly():
+def test_scope_bar_confirms_last_month_is_a_bounded_month():
     main = _src("app/main.py")
     assert "_window == LAST_MONTH_WINDOW" in main
-    # names exactly where it is exact (now Cost & Overview), and that others approximate it
-    assert "applied exactly across Cost & Overview" in main and "approximate" in main
+    # Last month is now exact everywhere, so the caption just confirms the bounded span
+    # (no "other panels approximate" caveat remains).
+    assert "complete previous calendar month" in main
+    assert "approximate" not in main.split("_window == LAST_MONTH_WINDOW", 1)[1][:400]
+
+
+def test_remaining_pages_thread_bounds_into_their_scope_reads():
+    ops = _src("app/ui/pages/operations.py")
+    sec = _src("app/ui/pages/security.py")
+    cr = _src("app/ui/pages/control_room.py")
+    ds = _src("app/ui/decision_studio.py")
+    # Operations threads bounds into its four scope tabs + representative reads
+    assert "fact_query_window_summary(" in ops and "bounds=bounds" in ops
+    assert "mart27_sql.task_nodes(days, company, database, schema_contains, bounds=bounds)" in ops
+    assert "lock_contention(min(days, 14), bounds=bounds)" in ops
+    # Security threads bounds into its change/login/egress reads
+    assert "new_network_logins_fact(days, company, bounds=bounds)" in sec
+    assert "admin_role_activity(days, company, bounds=bounds)" in sec
+    # Control Room's only scope read (spend movers vs prior) carries bounds
+    assert "fact_warehouse_window_vs_prior(" in cr and 'f["bounds"]' in cr
+    # Decision Studio threads bounds into Portfolio/Products/Cost-Truth
+    assert "workload_portfolio(" in ds and "bounds=bounds" in ds
+    assert "cost_truth(" in ds
+
+
+def test_ops_and_security_builders_honor_last_month_bounds():
+    from app.data import security_sql
+    for sql in (
+        mart_sql.fact_query_window_summary(31, "ALL", bounds=_AUG),
+        mart_sql.fact_task_daily(31, "ALL", bounds=_AUG),
+        security_sql.new_network_logins_fact(31, "ALL", bounds=_AUG),
+        security_sql.admin_role_activity(31, "ALL", bounds=_AUG),
+    ):
+        assert "'2026-08-01'" in sql and "'2026-09-01'" in sql, sql[:120]
+        assert "-31, CURRENT_" not in sql, sql[:120]
 
 
 def test_overview_economics_route_last_month_to_the_bounded_live_path():

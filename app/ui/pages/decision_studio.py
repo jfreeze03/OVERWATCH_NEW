@@ -38,6 +38,7 @@ _PAGE = "Decision Studio"
 def render() -> None:
     f = filters()
     company, days = f["company"], f["days"]
+    bounds = f["bounds"]
     page_header(
         "Decision Studio",
         "Plan the work: portfolio, objectives, product economics, cost truth, scenarios, experiments.",
@@ -88,13 +89,13 @@ def render() -> None:
     elif section == "ROI":
         _roi(company)
     elif section == "Portfolio":
-        _portfolio(company, days, rate)
+        _portfolio(company, days, rate, bounds=bounds)
     elif section == "SLOs":
         _slos()
     elif section == "Products":
-        _products(company, days, rate)
+        _products(company, days, rate, bounds=bounds)
     elif section == "Cost Truth":
-        _cost_truth(company, days)
+        _cost_truth(company, days, bounds=bounds)
     elif section == "Scenarios":
         _scenarios(company)
     else:

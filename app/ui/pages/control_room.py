@@ -1147,12 +1147,14 @@ def render() -> None:
         section_header("Spend movers (window vs prior)")
         if f["database"]:
             st.caption("Warehouse grain — the database filter doesn't narrow this.")
-        movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-                     key=f"cr_movers_fact_{company}_{days}", tier="recent",
+        _bounds = f["bounds"]
+        _lm = "_lm" if _bounds is not None else ""
+        movers = run(mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=_bounds), page=_PAGE,
+                     key=f"cr_movers_fact_{company}_{days}{_lm}", tier="recent",
                      source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
         if not movers.usable():  # mart not deployed/loaded yet -> bounded live scan
-            movers = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
-                         key=f"cr_movers_{company}_{days}", tier="historical",
+            movers = run(cost_sql.warehouse_window_vs_prior(days, company, bounds=_bounds), page=_PAGE,
+                         key=f"cr_movers_{company}_{days}{_lm}", tier="historical",
                          source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
         if guard(movers, "No warehouse spend to compare in this window."):
             view = movers.df.copy()

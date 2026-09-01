@@ -66,7 +66,8 @@ from app.ui.security_center import (
 _PAGE = "Security"
 
 
-def _access_tab(company: str, days: int) -> None:
+def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     # Stable policy/identity evidence gets a long-lived batch. Recent activity
     # is a separate batch so a window change no longer cold-starts every sibling.
     stable_batch = run_batch([
@@ -89,16 +90,16 @@ def _access_tab(company: str, days: int) -> None:
     use_security_fact = fact_coverage_complete(security_coverage, min(days, 30))
     use_security_network_fact = fact_coverage_complete(security_coverage, 90)
     _logins_sql = (
-        security_sql.failed_logins_fact(days, company)
-        if use_security_fact else security_sql.failed_logins(days, company)
+        security_sql.failed_logins_fact(days, company, bounds=bounds)
+        if use_security_fact else security_sql.failed_logins(days, company, bounds=bounds)
     )
     _reasons_sql = (
-        security_sql.failed_login_reasons_fact(days, company)
-        if use_security_fact else security_sql.failed_login_reasons(days, company)
+        security_sql.failed_login_reasons_fact(days, company, bounds=bounds)
+        if use_security_fact else security_sql.failed_login_reasons(days, company, bounds=bounds)
     )
     _newnet_sql = (
-        security_sql.new_network_logins_fact(days, company)
-        if use_security_network_fact else security_sql.new_network_logins(days, company)
+        security_sql.new_network_logins_fact(days, company, bounds=bounds)
+        if use_security_network_fact else security_sql.new_network_logins(days, company, bounds=bounds)
     )
     _activity_source = (
         "FACT_SECURITY_LOGIN_DAILY (hourly)"
@@ -155,8 +156,8 @@ def _access_tab(company: str, days: int) -> None:
     # successful PASSWORD login with NO second factor. Unlike HAS_MFA=FALSE, this
     # surfaces an ENROLLED user (HAS_MFA=TRUE) who still landed single-factor (a real
     # bypass/misconfig). Live LOGIN_HISTORY, companion to MFA gaps.
-    sf = run(security_sql.single_factor_logins(min(days, 30), company), page=_PAGE,
-             key=f"single_factor_{company}_{days}", tier="recent",
+    sf = run(security_sql.single_factor_logins(min(days, 30), company, bounds=bounds), page=_PAGE,
+             key=f"single_factor_{company}_{days}{_lm}", tier="recent",
              source="ACCOUNT_USAGE.LOGIN_HISTORY (PASSWORD, no second factor, success)")
     # C23: the (cached) read moves above the header so severity is data-derived.
     section_header("Single-factor logins (MFA-bypassed, 30d)", alarm_health(sf),
@@ -187,7 +188,7 @@ def _access_tab(company: str, days: int) -> None:
     with left:
         section_header("Failed logins", "info", "alerts", anchor="sec-faillog")
         res = batch.get("logins") or run(
-            _logins_sql, page=_PAGE, key=f"faillog_{company}_{days}",
+            _logins_sql, page=_PAGE, key=f"faillog_{company}_{days}{_lm}",
             tier="hourly" if use_security_fact else "recent", source=_activity_source,
         )
         if res.ok and res.empty:
@@ -222,8 +223,8 @@ def _access_tab(company: str, days: int) -> None:
         help="Flags a user with a burst of failed logins followed by a successful one — the "
              "brute-force breakthrough a failure count alone can't show.")
     if _ato_on:
-        ato = run(security_sql.login_takeover_candidates(days=min(days, 30), company=company),
-                  page=_PAGE, key=f"takeover_{company}_{days}", tier="recent",
+        ato = run(security_sql.login_takeover_candidates(days=min(days, 30), company=company, bounds=bounds),
+                  page=_PAGE, key=f"takeover_{company}_{days}{_lm}", tier="recent",
                   source="ACCOUNT_USAGE.LOGIN_HISTORY (fail-burst → success correlation)")
         if ato.ok and ato.empty:
             empty_state("clean", "No user shows a failed-login burst in this window (reader capped at 30d).")
@@ -260,7 +261,7 @@ def _access_tab(company: str, days: int) -> None:
     section_header("Failed-login reasons (network policy vs credentials)", "info", "alerts",
                    anchor="sec-failreasons")
     reasons = batch.get("login_reasons") or run(
-        _reasons_sql, page=_PAGE, key=f"login_reasons_{company}_{days}",
+        _reasons_sql, page=_PAGE, key=f"login_reasons_{company}_{days}{_lm}",
         tier="hourly" if use_security_fact else "recent", source=_activity_source,
     )
     if reasons.ok and reasons.empty:
@@ -272,7 +273,7 @@ def _access_tab(company: str, days: int) -> None:
     section_header("New networks for privileged users (90-day baseline)", "warn", "alerts",
                    anchor="sec-newnet")
     nn = batch.get("newnet") or run(_newnet_sql, page=_PAGE,
-              key=f"newnet_{days}", tier="recent",
+              key=f"newnet_{days}{_lm}", tier="recent",
               source=_network_source)
     if nn.ok and nn.empty:
         empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
@@ -435,11 +436,12 @@ def _access_tab(company: str, days: int) -> None:
     render_admin_grant_anomalies(company)
 
 
-def _egress_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+def _egress_tab(company: str, days: int, database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> None:
     """r25 #7 (owner pick): data leaving the account. Two lenses — the
     outbound transfer bill (DATA_TRANSFER_HISTORY) and who unloads to stages
     (QUERY_TYPE='UNLOAD') — because exfiltration and a surprise egress bill
     both start as 'bytes moved that nobody was watching'."""
+    _lm = "_lm" if bounds is not None else ""
     st.caption("Data leaving the account: outbound transfer by destination, and who unloads to stages.")
     section_header("Outbound transfer (account-wide)", "info", "security")
     st.caption("The dollar egress story — outbound transfer by destination region — lives on "
@@ -450,8 +452,8 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
 
     if st.toggle("Compare destinations with the prior period", key="sec_egress_baseline_on"):
         baseline = run(
-            security_sql.egress_baseline(days), page=_PAGE,
-            key=f"sec_egress_baseline_{days}", tier="historical",
+            security_sql.egress_baseline(days, bounds=bounds), page=_PAGE,
+            key=f"sec_egress_baseline_{days}{_lm}", tier="historical",
             source="DATA_TRANSFER_HISTORY current vs prior (on demand)",
         )
         if baseline.ok and baseline.empty:
@@ -476,8 +478,8 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
     )
     # #35: honor the active Database/Schema filter (QUERY_HISTORY carries both) so the
     # unload panel doesn't silently revert to company-wide under a scoped view.
-    unl = run(security_sql.unload_activity(days, company, database, schema_contains), page=_PAGE,
-              key=f"unload_{company}_{days}_{database}_{schema_contains}", tier="recent",
+    unl = run(security_sql.unload_activity(days, company, database, schema_contains, bounds=bounds), page=_PAGE,
+              key=f"unload_{company}_{days}_{database}_{schema_contains}{_lm}", tier="recent",
               source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD only)")
     if unl.ok and unl.empty:
         empty_state("clean", "No unloads to stages in this window for this scope.")
@@ -508,8 +510,8 @@ def _egress_tab(company: str, days: int, database: str = "", schema_contains: st
                  help="Ranks each unload event by a transparent 0-100 behavioral score "
                       "(volume vs the user's baseline, off-hours, personal destination, "
                       "human vs service role). Service/ETL roles are capped at Low."):
-        ev = run(security_sql.unload_risk_events(days, company, database, schema_contains),
-                 page=_PAGE, key=f"exfil_{company}_{days}_{database}_{schema_contains}",
+        ev = run(security_sql.unload_risk_events(days, company, database, schema_contains, bounds=bounds),
+                 page=_PAGE, key=f"exfil_{company}_{days}_{database}_{schema_contains}{_lm}",
                  tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (UNLOAD, per event)")
         if ev.ok and ev.empty:
             empty_state("clean", "No unload events to score in this window for this scope.")
@@ -993,14 +995,15 @@ def _tag_governance_panel(company: str) -> None:
     st.divider()
 
 
-def _export_pack(company: str, days: int, window_label: str) -> None:
+def _export_pack(company: str, days: int, window_label: str, *, bounds: tuple | None = None) -> None:
     """One-click access-review bundle: CSVs zipped in memory, stdlib only."""
+    _lm = "_lm" if bounds is not None else ""
     section_header("Auditor export pack", "info", "security")
     st.caption("Ten CSVs — dormant users, MFA gaps, privileged holders, window grants, plus the "
                "audit sheets (failed logins, credentials, role matrix, unused roles, 90d grant diff). "
                "The manifest labels company-scoped and account-wide sheets separately; actionable "
                "sheets carry a leading RECOMMEND column (revoke / review / enable MFA / rotate).")
-    pack_key = f"{company}|{days}|{window_label}|{cache_scope()}"
+    pack_key = f"{company}|{days}|{window_label}|{cache_scope()}{_lm}"
     cached_value = st.session_state.get("_ow_security_pack")
     cached = cached_value if isinstance(cached_value, dict) else {}
     build = st.button("Build access-review pack", key="sec_pack_build")
@@ -1016,8 +1019,8 @@ def _export_pack(company: str, days: int, window_label: str) -> None:
         "dormant_users": insights_sql.dormant_users(90, company),
         "mfa_gaps_password_login": security_sql.users_without_mfa(company),
         "break_glass_holders": security_sql.admin_role_holders(company),
-        "role_grants_window": security_sql.recent_role_grants(days),
-        "failed_logins_window": security_sql.failed_logins(days, company),
+        "role_grants_window": security_sql.recent_role_grants(days, bounds=bounds),
+        "failed_logins_window": security_sql.failed_logins(days, company, bounds=bounds),
         "expiring_credentials_10d": security_sql.expiring_credentials(10, company),
         "role_privilege_matrix": security_sql.role_privilege_matrix(),
         "unused_roles_90d": security_sql.unused_roles(90),
@@ -1162,8 +1165,9 @@ def _posture_trend_panel(trend) -> None:
                "Loaded daily at 06:30.")
 
 
-def _clients_tab(company: str, days: int) -> None:
+def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:
     """Driver/version inventory — the 'when do we need to upgrade' sheet."""
+    _lm = "_lm" if bounds is not None else ""
     section_header("Client drivers & versions — who connects with what", "info", "operations")
     panel_help(
         "Source: ACCOUNT_USAGE.SESSIONS (lags up to ~3h, 365d retention). DRIVER and "
@@ -1173,8 +1177,8 @@ def _clients_tab(company: str, days: int) -> None:
         "The observed-newest comparison is the upgrade signal; this is a read-only "
         "inventory, not a support-policy verdict."
     )
-    res = run(security_sql.client_drivers(days, company), page=_PAGE,
-              key=f"clients_{company}_{days}", tier="historical",
+    res = run(security_sql.client_drivers(days, company, bounds=bounds), page=_PAGE,
+              key=f"clients_{company}_{days}{_lm}", tier="historical",
               source="ACCOUNT_USAGE.SESSIONS")
     if res.ok and res.empty:
         empty_state("no_data_yet", "No sessions recorded in this window for this scope.")
@@ -1278,7 +1282,8 @@ def _ai_guardrails_tab(company: str) -> None:
         result_caption(gr)
 
 
-def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "") -> None:
+def _changes_tab(company: str, days: int, database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     # Recent grant changes feed (owner ask 2026-08-17): the granular "who granted
     # what to whom, and when" access-change log, newest first — one row per grant or
     # revoke across role->user and privilege->object, from GRANTS_TO_USERS/ROLES.
@@ -1340,16 +1345,16 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
         source="Security domain coverage contract", probe=True,
     )
     fact = run(
-        security_sql.recent_ddl_changes_fact(days, company, database, schema_contains),
-        page=_PAGE, key=f"ddl_fact_{company}_{days}_{database}_{schema_contains}",
+        security_sql.recent_ddl_changes_fact(days, company, database, schema_contains, bounds=bounds),
+        page=_PAGE, key=f"ddl_fact_{company}_{days}_{database}_{schema_contains}{_lm}",
         tier="hourly", source="FACT_SECURITY_CHANGE (hourly)", probe=True,
     )
     if fact.ok and _domain_covered(coverage, "CHANGE RISK"):
         res = fact
     else:
         res = run(
-            security_sql.recent_ddl_changes(days, company, database, schema_contains),
-            page=_PAGE, key=f"ddl_{company}_{days}_{database}_{schema_contains}",
+            security_sql.recent_ddl_changes(days, company, database, schema_contains, bounds=bounds),
+            page=_PAGE, key=f"ddl_{company}_{days}_{database}_{schema_contains}{_lm}",
             tier="recent", source="ACCOUNT_USAGE.QUERY_HISTORY (coverage fallback)",
         )
     # No early return on an empty window (v4.49): the bare `return` here used
@@ -1403,8 +1408,8 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
     # work and would render a false "hugs zero" all-clear (bug-hunt 2026-08-30). Always
     # read live QUERY_HISTORY here (all statement types), regardless of CHANGE RISK coverage.
     bga = run(
-        security_sql.admin_role_activity(days, company), page=_PAGE,
-        key=f"breakglass_{days}_{company}", tier="recent",
+        security_sql.admin_role_activity(days, company, bounds=bounds), page=_PAGE,
+        key=f"breakglass_{days}_{company}{_lm}", tier="recent",
         source="ACCOUNT_USAGE.QUERY_HISTORY (all statements under admin roles)",
     )
     if bga.ok and bga.empty:
@@ -1489,17 +1494,17 @@ def render() -> None:
         _posture_trend_panel(_post90)
         _tag_governance_panel(f["company"])
     elif section == "Access":
-        _access_tab(f["company"], f["days"])
+        _access_tab(f["company"], f["days"], bounds=f["bounds"])
         st.divider()
-        _export_pack(f["company"], f["days"], f["window_label"])
+        _export_pack(f["company"], f["days"], f["window_label"], bounds=f["bounds"])
     elif section == "AI guardrails":
         _ai_guardrails_tab(f["company"])
     elif section == "Changes":
-        _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+        _changes_tab(f["company"], f["days"], f["database"], f["schema_contains"], bounds=f["bounds"])
     elif section == "Clients":
-        _clients_tab(f["company"], f["days"])
+        _clients_tab(f["company"], f["days"], bounds=f["bounds"])
     elif section == "Egress":
-        _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"])
+        _egress_tab(f["company"], f["days"], f["database"], f["schema_contains"], bounds=f["bounds"])
     elif section == "Exposure":
         _exposure_tab()
     elif section == "Least privilege":

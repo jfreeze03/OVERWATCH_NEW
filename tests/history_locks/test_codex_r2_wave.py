@@ -66,7 +66,7 @@ def test_rec10_score_reads_on_hourly_tier():
 
 def test_rec10_task_node_panel_on_hourly_tier():
     ops = _src("app/ui/pages/operations.py")
-    node = ops.split('key=f"t_node_{company}_{days}"', 1)[1].split(")", 1)[0]
+    node = ops.split('key=f"t_node_{company}_{days}{_lm}"', 1)[1].split(")", 1)[0]
     assert 'tier="hourly"' in node   # MART_TASK_NODE_DAILY loads hourly, not every 5 min
 
 

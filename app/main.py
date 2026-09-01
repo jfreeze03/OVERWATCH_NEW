@@ -720,13 +720,11 @@ def _topbar_scope() -> None:
         _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
         _days = resolve_window_days(_window)
         if _window == LAST_MONTH_WINDOW:
-            # Honest coverage: Last month is a bounded calendar range, applied exactly
-            # across Cost & Overview; the remaining pages still read it as the trailing
-            # month-span until their builders are migrated.
+            # Last month is a bounded calendar window, now honored exactly across every
+            # scope-driven surface — confirm the exact span (the page scope_note shows it too).
             st.caption(
-                f"{window_scope_label(_window)} — applied exactly across Cost & Overview. "
-                "Operations, Security, Control Room and Decision Studio currently "
-                f"approximate it as the trailing {int(_days)} days."
+                f"{window_scope_label(_window)} — the complete previous calendar month, "
+                "today excluded."
             )
         elif _days > MAX_LIVE_WINDOW_DAYS:
             st.caption(

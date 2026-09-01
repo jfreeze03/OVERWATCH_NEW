@@ -85,10 +85,11 @@ def _open_action_center() -> None:
 _PORTFOLIO_CAP = 200
 
 
-def _portfolio(company: str, days: int, rate: float) -> None:
+def _portfolio(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     result = run(
-        workbench_sql.workload_portfolio(days, company, _PORTFOLIO_CAP), page=_PAGE,
-        key=f"decision_portfolio_{company}_{days}", tier="historical",
+        workbench_sql.workload_portfolio(days, company, _PORTFOLIO_CAP, bounds=bounds), page=_PAGE,
+        key=f"decision_portfolio_{company}_{days}{_lm}", tier="historical",
         source="MART_PATTERN_COST_DAILY + MART_QUERY_FAMILY_DAILY",
     )
     if not guard(result, "No measured recurring-query cost exists in this scope."):
@@ -352,10 +353,11 @@ def _slos() -> None:
     _slo_editor()
 
 
-def _products(company: str, days: int, rate: float) -> None:
+def _products(company: str, days: int, rate: float, *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     result = run(
-        workbench_sql.data_product_economics(days, company), page=_PAGE,
-        key=f"decision_products_{company}_{days}", tier="historical",
+        workbench_sql.data_product_economics(days, company, bounds=bounds), page=_PAGE,
+        key=f"decision_products_{company}_{days}{_lm}", tier="historical",
         source="ENTITY_CATALOG + object, warehouse and task marts",
     )
     if not result.ok:
@@ -387,8 +389,8 @@ def _products(company: str, days: int, rate: float) -> None:
 
     # Codex #20: coverage is the trust anchor for the whole board — mapped vs total
     # account object cost and mapped vs total catalog entities, with the unmapped residual.
-    _cov = run(workbench_sql.product_mapping_totals(days, company), page=_PAGE,
-               key=f"product_coverage_{company}_{days}", tier="recent",
+    _cov = run(workbench_sql.product_mapping_totals(days, company, bounds=bounds), page=_PAGE,
+               key=f"product_coverage_{company}_{days}{_lm}", tier="recent",
                source="FACT_OBJECT_COST_DAILY + ENTITY_CATALOG", probe=True)
     if _cov.usable():
         _cr = _cov.df.iloc[0]
@@ -420,8 +422,8 @@ def _products(company: str, days: int, rate: float) -> None:
     # #28: cost-per-consumer + retirement candidates. Which products cost real money but
     # have lost their readers? Consumer reach + reads trend from ACCESS_HISTORY
     # (Enterprise-only, degrade-safe) joined to the object cost above.
-    reads = run(workbench_sql.product_consumer_reads(days, company), page=_PAGE,
-                key=f"decision_product_consumers_{company}_{days}", tier="recent",
+    reads = run(workbench_sql.product_consumer_reads(days, company, bounds=bounds), page=_PAGE,
+                key=f"decision_product_consumers_{company}_{days}{_lm}", tier="recent",
                 source="ENTITY_CATALOG + ACCESS_HISTORY reads", probe=True)
     verdicts = insights.product_retirement(
         result.df, reads.df if reads.usable() else pd.DataFrame(), rate)
@@ -526,10 +528,11 @@ def _products(company: str, days: int, rate: float) -> None:
     )
 
 
-def _cost_truth(company: str, days: int) -> None:
+def _cost_truth(company: str, days: int, *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     result = run(
-        workbench_sql.cost_truth(days, company), page=_PAGE,
-        key=f"decision_cost_truth_{company}_{days}", tier="historical",
+        workbench_sql.cost_truth(days, company, bounds=bounds), page=_PAGE,
+        key=f"decision_cost_truth_{company}_{days}{_lm}", tier="historical",
         source="existing billed, metered, measured and allocated facts",
     )
     if not guard(result, "No cost facts exist in this window."):
@@ -559,8 +562,8 @@ def _cost_truth(company: str, days: int) -> None:
     settings = load_settings(_PAGE)
     rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-    split = run(mart_sql.billed_split(days), page=_PAGE,
-                key=f"decision_billed_split_{days}", tier="historical",
+    split = run(mart_sql.billed_split(days, bounds=bounds), page=_PAGE,
+                key=f"decision_billed_split_{days}{_lm}", tier="historical",
                 source="FACT_METERING_DAILY (billed AI/OTHER split)")
     if split.usable():
         _s = split.df.iloc[0]

@@ -63,7 +63,7 @@ def test_reader_is_qualified_scoped_and_adopted():
     assert "NEVER_ACQUIRED DESC" in sql                                   # ranking preserved
     assert "''" in mart27_sql.lock_wait_daily(7, "x'y")                   # injection-safe
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
-    assert "mart27_sql.lock_wait_daily(min(days, 14), company)" in ops
-    assert "ops_sql.lock_contention(min(days, 14))" in ops                # live fallback kept
+    assert "mart27_sql.lock_wait_daily(min(days, 14), company, bounds=bounds)" in ops
+    assert "ops_sql.lock_contention(min(days, 14), bounds=bounds)" in ops                # live fallback kept
     canary = (_ROOT / "app" / "data" / "canary.py").read_text(encoding="utf-8")
     assert "mart27_sql.lock_wait_daily" in canary

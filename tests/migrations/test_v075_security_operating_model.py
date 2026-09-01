@@ -400,7 +400,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
     assert "fact_coverage_complete(security_coverage, 90)" in page
     assert "security_login_fact_coverage(90)" in page
     assert "admin_role_holders(company)" in page
-    assert "new_network_logins_fact(days, company)" in page
+    assert "new_network_logins_fact(days, company, bounds=bounds)" in page
     assert "_domain_covered(coverage, \"TRUST CENTER\")" in page
     assert 'active = pd.to_numeric(fdf["CURRENT_COUNT"]' in page
     assert "stable_batch = run_batch" in page and "batch = run_batch" in page
@@ -420,7 +420,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.414.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.415.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
