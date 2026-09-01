@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.413.0 - "Last month" rollout batch 5: Overview economics (2026-09-01)
+
+Brings **Last month** to the Overview economics — Cost & Overview are now both exact.
+
+- The exec board is a pre-aggregate keyed by trailing `WINDOW_DAYS` and has no row for a bounded calendar
+  month, so Overview now **skips the board for Last month** (detected by `f["bounds"]`) and reads the
+  bounded live daily aggregate (`warehouse_daily_credits` with the range) — the spend headline, per-day
+  trend, reconciliation and 'as of' watermark all reflect the exact previous month, today-excluded by the
+  month end. No owner migration was needed (the daily-fact re-route the earlier note anticipated).
+- **Top cost drivers** for Last month are derived from that same bounded warehouse frame (top warehouses
+  by billed $), with no extra query. The **vs-prior spend delta** honors the bounded window too (August
+  vs July). The always-current-month MTD / projected-month-end KPIs are unchanged by design.
+- Scope-bar caption updated: Last month is "applied exactly across Cost & Overview"; Operations, Security,
+  Control Room and Decision Studio still approximate it as the trailing month-span (their rollout follows).
+
 ## 4.412.0 - "Last month" rollout batch 4: whole Cost page threaded (2026-09-01)
 
 Threads `f["bounds"]` from the page into every remaining Cost tab, activating the bounded builders from

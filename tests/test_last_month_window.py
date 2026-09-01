@@ -67,8 +67,21 @@ def test_cost_spend_tab_threads_bounds_to_the_headline_metering():
 def test_scope_bar_discloses_last_month_coverage_honestly():
     main = _src("app/main.py")
     assert "_window == LAST_MONTH_WINDOW" in main
-    # names exactly where it is exact, and that other panels approximate it
-    assert "applied exactly on Cost" in main and "approximate" in main
+    # names exactly where it is exact (now Cost & Overview), and that others approximate it
+    assert "applied exactly across Cost & Overview" in main and "approximate" in main
+
+
+def test_overview_economics_route_last_month_to_the_bounded_live_path():
+    ov = _src("app/ui/pages/overview.py")
+    # the exec board is WINDOW_DAYS-keyed and cannot express a bounded month, so Last
+    # month (f["bounds"] set) skips it and reads the bounded live daily aggregate
+    assert '_load_board(company, days, f["window"]) if _ov_bounds is None else None' in ov
+    assert "_live_fallback_daily(company, days, rate, bounds=_ov_bounds)" in ov
+    assert "warehouse_daily_credits(days, company, bounds=bounds)" in ov
+    # top drivers for Last month are derived from that same bounded warehouse frame
+    assert '_ov_bounds is not None and trend_source.usable()' in ov
+    # the vs-prior spend delta honors the bounded window too
+    assert "fact_warehouse_window_vs_prior(days, company, bounds=_ov_bounds)" in ov
 
 
 # ---------------------------------------------------------------------------

@@ -720,12 +720,12 @@ def _topbar_scope() -> None:
         _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
         _days = resolve_window_days(_window)
         if _window == LAST_MONTH_WINDOW:
-            # Honest coverage: Last month is a bounded calendar range and is applied
-            # exactly on the headline spend; the rest of the app still reads it as the
-            # trailing month-span until those builders are migrated.
+            # Honest coverage: Last month is a bounded calendar range, applied exactly
+            # across Cost & Overview; the remaining pages still read it as the trailing
+            # month-span until their builders are migrated.
             st.caption(
-                f"{window_scope_label(_window)} — applied exactly on Cost ▸ Spend "
-                "(total credits, spend by service, daily trend). Other panels currently "
+                f"{window_scope_label(_window)} — applied exactly across Cost & Overview. "
+                "Operations, Security, Control Room and Decision Studio currently "
                 f"approximate it as the trailing {int(_days)} days."
             )
         elif _days > MAX_LIVE_WINDOW_DAYS:

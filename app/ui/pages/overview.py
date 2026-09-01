@@ -102,12 +102,16 @@ def _load_board(company: str, days: int, window: object = None) -> QueryResult:
     )
 
 
-def _live_fallback_daily(company: str, days: int, rate: float) -> tuple[pd.DataFrame, QueryResult]:
+def _live_fallback_daily(company: str, days: int, rate: float,
+                         bounds: tuple | None = None) -> tuple[pd.DataFrame, QueryResult]:
     """Bounded live aggregate when the mart is not deployed — real data,
-    clearly labeled, never fabricated."""
+    clearly labeled, never fabricated. Also the 'Last month' path: the exec board is
+    keyed by trailing WINDOW_DAYS and cannot express a bounded calendar month, so
+    Overview routes Last month here with the explicit (start, end) range."""
+    _lm = "_lm" if bounds is not None else ""
     res = run(
-        cost_sql.warehouse_daily_credits(days, company),
-        page=_PAGE, key=f"live_wh_daily_{company}_{days}", tier="historical",
+        cost_sql.warehouse_daily_credits(days, company, bounds=bounds),
+        page=_PAGE, key=f"live_wh_daily_{company}_{days}{_lm}", tier="historical",
         source="Live ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (bounded)",
     )
     if not res.usable():
@@ -259,11 +263,15 @@ def render() -> None:
     # while the 45d MTD fact is fixed — coupling them in one batch cache meant
     # every company/days change cold-started the fixed read. Serial keeps each
     # on its own cache key, so filter changes only refetch the board.
-    board_res = _load_board(company, days, f["window"])
-    board = board_res.df if board_res.usable() else pd.DataFrame(
+    # 'Last month' is a BOUNDED calendar window (f["bounds"] is set only then); the exec
+    # board is keyed by trailing WINDOW_DAYS and has no row for it, so skip the mart and
+    # read the bounded live daily aggregate (real data, today-excluded by the month end).
+    _ov_bounds = f["bounds"]
+    board_res = _load_board(company, days, f["window"]) if _ov_bounds is None else None
+    board = board_res.df if (board_res is not None and board_res.usable()) else pd.DataFrame(
         columns=["PANEL", "METRIC", "DIMENSION", "PERIOD_START", "VALUE", "VALUE_USD"]
     )
-    using_mart = board_res.usable()
+    using_mart = board_res is not None and board_res.usable()
 
     if using_mart:
         daily_panel = _board_panel(board, "DAILY_SPEND")
@@ -272,7 +280,7 @@ def render() -> None:
         daily = daily.groupby("DAY", as_index=False)["USD"].sum().sort_values("DAY")
         trend_source = board_res
     else:
-        daily, trend_source = _live_fallback_daily(company, days, rate)
+        daily, trend_source = _live_fallback_daily(company, days, rate, bounds=_ov_bounds)
 
     # rec1/rec36: drop today's still-filling partial row from the headline total and
     # the per-day average, so "Spend, last N days" uses the today-EXCLUDED convention
@@ -541,6 +549,16 @@ def render() -> None:
         if not drivers.empty
         else pd.DataFrame(columns=["DIMENSION", "VALUE_USD"])
     )
+    # Last month has no board COST_DRIVER row (the board is mart-keyed by trailing days);
+    # derive top warehouse drivers from the SAME bounded warehouse frame the trend used,
+    # so the drivers reflect the exact previous month with no extra query.
+    if driver_view.empty and _ov_bounds is not None and trend_source.usable() \
+            and "WAREHOUSE_NAME" in trend_source.df.columns:
+        _wd = trend_source.df.copy()
+        _wd["VALUE_USD"] = pd.to_numeric(_wd.get("CREDITS_TOTAL"), errors="coerce").fillna(0.0) * rate
+        driver_view = (_wd.groupby("WAREHOUSE_NAME", as_index=False)["VALUE_USD"].sum()
+                       .rename(columns={"WAREHOUSE_NAME": "DIMENSION"})
+                       .sort_values("VALUE_USD", ascending=False))
     # Ov15: 'as of <date>' watermarks for the $ KPIs, from frames already in
     # memory (no query). The last COMPLETE day behind window spend, and the last
     # metering day behind MTD/projected — the honest data-through, not today.
@@ -557,8 +575,9 @@ def render() -> None:
     # overview's live-scan budget at 1); hidden when the mart is absent or the
     # prior window is zero (pct_delta returns None — never a fabricated 0%).
     _ov_spend_delta = None
-    _vp = run(mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-              key=f"ov_spend_vs_prior_{company}_{days}", tier="recent",
+    _vp = run(mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=_ov_bounds), page=_PAGE,
+              key=f"ov_spend_vs_prior_{company}_{days}{'_lm' if _ov_bounds is not None else ''}",
+              tier="recent",
               source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
     if _vp.usable():
         _cur = float(_vp.df["CREDITS_CURRENT"].map(safe_float).sum())
