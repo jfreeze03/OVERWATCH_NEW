@@ -23,6 +23,7 @@ st.set_page_config(
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
     DEFAULT_DAY_WINDOW,
+    LAST_MONTH_WINDOW,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
     TRIAGE_WINDOW_OPTIONS,
@@ -718,7 +719,16 @@ def _topbar_scope() -> None:
                 )
         _window = st.session_state.get("flt_days", DEFAULT_DAY_WINDOW)
         _days = resolve_window_days(_window)
-        if _days > MAX_LIVE_WINDOW_DAYS:
+        if _window == LAST_MONTH_WINDOW:
+            # Honest coverage: Last month is a bounded calendar range and is applied
+            # exactly on the headline spend; the rest of the app still reads it as the
+            # trailing month-span until those builders are migrated.
+            st.caption(
+                f"{window_scope_label(_window)} — applied exactly on Cost ▸ Spend "
+                "(total credits, spend by service, daily trend). Other panels currently "
+                f"approximate it as the trailing {int(_days)} days."
+            )
+        elif _days > MAX_LIVE_WINDOW_DAYS:
             st.caption(
                 f"{window_scope_label(_window)} applies to mart history; live Operations "
                 f"and Security scans cap at {MAX_LIVE_WINDOW_DAYS}d."

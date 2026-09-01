@@ -65,14 +65,21 @@ def source_freshness() -> str:
     return f"SELECT SOURCE_NAME, LAST_LOAD_TS, ROW_COUNT, HOURS_SINCE_LOAD FROM {mart_object('MART_SOURCE_FRESHNESS')} ORDER BY SOURCE_NAME"
 
 
-def fact_metering_by_service(days: int) -> str:
+def fact_metering_by_service(days: int, *, bounds: tuple | None = None) -> str:
     """Spend-tab hot path: same output shape as the live metering reader,
-    served from the hourly-loaded fact instead of ACCOUNT_USAGE."""
+    served from the hourly-loaded fact instead of ACCOUNT_USAGE.
+
+    'Last month' passes an explicit (start, end_exclusive) calendar range via ``bounds``;
+    every other window keeps the trailing day-offset. This is THE headline spend number
+    (total credits, spend-by-service, daily trend), so it honors the bounded range."""
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    where = (resolve_effective_window(days, "DAY", max_days=MAX_MART_WINDOW_DAYS, bounds=bounds)[1]
+             if bounds is not None
+             else f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())")
     return f"""
 SELECT DAY, SERVICE_TYPE, CREDITS_USED, CREDITS_BILLED, CREDITS_ADJUSTMENT
 FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 ORDER BY DAY, SERVICE_TYPE
 """
 

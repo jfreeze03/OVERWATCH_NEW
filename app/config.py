@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.407.0"
+APP_VERSION = "4.408.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -96,11 +96,21 @@ DEFAULT_SETTINGS = {
 DAY_WINDOW_OPTIONS = (7, 14, 30, 60, 90, 180, 365)
 DEFAULT_DAY_WINDOW = 7
 CURRENT_MONTH_WINDOW = "CURRENT_MONTH"
+LAST_MONTH_WINDOW = "LAST_MONTH"
 CURRENT_YEAR_WINDOW = "CURRENT_YEAR"
 # The fixed tuple remains the exec-board/retention contract. Calendar presets
 # resolve to an account-time day offset at render time and V073 materializes
 # those dynamic offsets in MART_EXEC_BOARD.
-TRIAGE_WINDOW_OPTIONS = (*DAY_WINDOW_OPTIONS, CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
+#
+# LAST_MONTH is a BOUNDED calendar window (previous complete month) — unlike the
+# trailing/period presets it ends BEFORE today, so it cannot be expressed as a
+# single day-offset. Builders that support it read its explicit (start, end) from
+# date_windows.window_bounds(); the day-offset it resolves to is the last-month SPAN
+# (for /day normalization and as a graceful trailing fallback on surfaces that do not
+# yet honor the bounds — currently everything outside Cost & Overview economics).
+TRIAGE_WINDOW_OPTIONS = (
+    *DAY_WINDOW_OPTIONS, CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW, CURRENT_YEAR_WINDOW,
+)
 MAX_LIVE_WINDOW_DAYS = 90          # hard clamp for live ACCOUNT_USAGE scans
 MAX_MART_WINDOW_DAYS = 365         # mart-backed facts (400-800d retention) honor the long window
 # The 90d live cap bounds expensive QUERY_HISTORY-scale scans. The window

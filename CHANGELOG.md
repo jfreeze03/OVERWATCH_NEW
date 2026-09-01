@@ -1,5 +1,34 @@
 # Changelog
 
+## 4.408.0 - "Last month" scope window (bounded) — headline spend (2026-09-01)
+
+Adds **Last month** to the global scope filter: the *previous complete calendar month*
+(e.g. all of August when it's September), distinct from the existing "Current month" (month-to-date).
+
+The whole app models a window as a trailing day-offset from today (`DAY >= DATEADD('day', -N,
+CURRENT_DATE())`, ~337 predicates); Last month is the one *bounded* window — it ends before today — so
+it needs an explicit `[start, end)` range. This lands the mechanism plus correct coverage of the headline
+spend number, and is honest in the UI about the rest.
+
+- **Window primitives.** `LAST_MONTH_WINDOW` config option (grouped next to Current month in the scope
+  bar). `date_windows.window_bounds()` returns the exact `(first-of-last-month, first-of-this-month)` with
+  year-rollover and leap-February handled; `resolve_window_days` returns the month's span (for /day
+  normalization and as a trailing fallback); labels read "Last month (Aug 1 – Aug 31)". `filters()` now
+  carries `f["bounds"]`.
+- **Bounded predicate.** `common.resolve_effective_window(..., bounds=)` — the shared spend-pool window
+  helper — emits `col >= 'start' AND col < 'end'` when given bounds, else the unchanged trailing form.
+- **Headline spend is exact.** `fact_metering_by_service` (mart) and `metering_daily_by_service` (live
+  fallback) honor the bounds; the Cost ▸ Spend tab threads `f["bounds"]` into them. So **total credits,
+  spend-by-service, and the daily trend are the true previous month** when Last month is selected.
+- **Honest coverage.** The scope bar states plainly that Last month is applied exactly on Cost ▸ Spend and
+  that other panels currently approximate it as the trailing month-span — a mapping pass found **79**
+  scope-window builders across Cost & Overview, and the rest (plus Overview's pre-aggregated headline
+  board, which needs an owner migration or a daily-fact re-route) are a follow-up. Nothing silently
+  mislabels a number: where it isn't exact yet, the UI says so.
+
+New tests: bounded window math (mid-month, year/leap boundaries), the bounded predicate, both metering
+builders honoring bounds, the Spend-tab threading, and the coverage caption. Version 4.407.0 → 4.408.0.
+
 ## 4.407.0 - Full-app adversarial hardening sweep (2026-09-01)
 
 An 11-dimension adversarial sweep of the entire app (SQL-injection, entitlement, money/metric,

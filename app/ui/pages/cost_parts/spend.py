@@ -82,14 +82,17 @@ def _categorize(service: str) -> str:
     return service_category(service)
 
 
-def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
+def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None) -> list[dict]:
     """perf #15: the four INDEPENDENT tier='recent' mart reads that gate the
     eager Spend + Attribution first paint, so cost.py can submit them as one
     parallel run_batch instead of four serial round-trips. Each panel keeps its
     own live/historical fallback for a cold or missing mart (the batch carries
-    only the mart leg). `daily` is fixed at 30d exactly as the panel reads it."""
+    only the mart leg). `daily` is fixed at 30d exactly as the panel reads it.
+
+    `bounds` (the 'Last month' calendar range) is threaded into the headline metering
+    read so the total/by-service/trend reflect the exact previous month."""
     return [
-        {"key": "metering", "sql": mart_sql.fact_metering_by_service(days),
+        {"key": "metering", "sql": mart_sql.fact_metering_by_service(days, bounds=bounds),
          "source": "FACT_METERING_DAILY (mart, loaded hourly)"},
         {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company),
          "source": "FACT_WAREHOUSE_DAILY (cloud-services share)"},
@@ -107,7 +110,8 @@ def _spend_attr_recent_jobs(company: str, days: int) -> list[dict]:
 
 
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
-               *, metering_res=None, csr_res=None, coco_res=None) -> None:
+               *, bounds: tuple | None = None,
+               metering_res=None, csr_res=None, coco_res=None) -> None:
     # Hot path: the daily metering fact carries the same columns; fall back
     # to live ACCOUNT_USAGE only when the fact has no rows yet. metering_res is
     # the prefetched batch result (perf #15); None -> read it serially here.
@@ -126,11 +130,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         st.status("Loading Spend & Attribution…", expanded=False)
         if (_fallback and hasattr(st, "status")) else contextlib.nullcontext())
     with _load_status:
+        _lm = "_lm" if bounds is not None else ""
         res = metering_res if metering_res is not None else run(
-            mart_sql.fact_metering_by_service(days), page=_PAGE, key=f"metering_fact_{days}",
+            mart_sql.fact_metering_by_service(days, bounds=bounds), page=_PAGE,
+            key=f"metering_fact_{days}{_lm}",
             tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
         if not res.ok or res.empty:
-            res = run(cost_sql.metering_daily_by_service(days), page=_PAGE, key=f"metering_{days}",
+            res = run(cost_sql.metering_daily_by_service(days, bounds=bounds), page=_PAGE,
+                      key=f"metering_{days}{_lm}",
                       tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return

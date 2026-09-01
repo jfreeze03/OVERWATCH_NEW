@@ -17,7 +17,8 @@ def bounded_days(days: object, maximum: int = 90) -> int:
 
 
 def resolve_effective_window(days: object, column: str = "DAY",
-                             max_days: int | None = None) -> tuple[int, str]:
+                             max_days: int | None = None,
+                             *, bounds: tuple | None = None) -> tuple[int, str]:
     """rec 4 / added rec #3: the ONE half-open effective window the warehouse dollar
     POOL and every allocation DENOMINATOR must share, so per-entity allocation shares
     reconcile to the dollar pool instead of applying a 365-day share to a 182-day pool
@@ -26,7 +27,18 @@ def resolve_effective_window(days: object, column: str = "DAY",
     Clamps ``days`` to ``max_days`` (default ``MAX_MART_WINDOW_DAYS // 2`` — the
     vs-prior half-window cap the pool uses so its current+prior pair fits in retention)
     and EXCLUDES today (partial metering). Returns ``(eff_days, where_fragment)`` where
-    the fragment bounds ``column`` to the half-open ``[today - eff_days, today)``."""
+    the fragment bounds ``column`` to the half-open ``[today - eff_days, today)``.
+
+    ``bounds`` (start, end_exclusive dates — from date_windows.window_bounds for the
+    'Last month' calendar window) overrides the trailing form with an explicit half-open
+    ``[start, end)`` calendar range and returns the span as ``eff_days``. The bounded
+    range is naturally today-excluded (it ends at the first of this month), so it keeps
+    the same today-excluded, half-open contract the pool and shares rely on."""
+    if bounds is not None:
+        start, end = bounds
+        eff = (end - start).days
+        frag = f"{column} >= '{start.isoformat()}' AND {column} < '{end.isoformat()}'"
+        return eff, frag
     from app.config import MAX_MART_WINDOW_DAYS
     cap = (MAX_MART_WINDOW_DAYS // 2) if max_days is None else max_days
     eff = bounded_days(days, cap)

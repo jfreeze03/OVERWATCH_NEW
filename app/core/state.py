@@ -44,7 +44,11 @@ def init_filters() -> None:
 
 def filters() -> dict:
     init_filters()
-    from app.logic.date_windows import resolve_window_days, window_scope_label
+    from app.logic.date_windows import (
+        resolve_window_days,
+        window_bounds,
+        window_scope_label,
+    )
 
     window = st.session_state["flt_days"]
     return {
@@ -52,6 +56,10 @@ def filters() -> dict:
         "environment": str(st.session_state["flt_environment"]),
         "days": resolve_window_days(window),
         "window": window,
+        # (start, end_exclusive) dates for the bounded 'Last month' window, else None.
+        # Builders that support it pass this to resolve_effective_window(..., bounds=...)
+        # to emit an explicit calendar range instead of the trailing today-anchored one.
+        "bounds": window_bounds(window),
         "window_label": window_scope_label(window),
         "warehouse_contains": str(st.session_state["flt_warehouse_contains"]),
         "user_contains": str(st.session_state["flt_user_contains"]),

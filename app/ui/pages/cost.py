@@ -182,10 +182,11 @@ def render() -> None:
         # serial round-trips. Each panel still falls back to its own mart/live
         # read if the batch is unavailable (run_batch -> None) or a member misses
         # (a None/empty prefetch triggers that panel's existing fallback).
-        _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),
+        _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"], f["bounds"]),
                         page=_PAGE, tier="hourly") or {}
         section_header("Spend", "info", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
+                   bounds=f["bounds"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
                    coco_res=_pf.get("coco"))
         st.divider()

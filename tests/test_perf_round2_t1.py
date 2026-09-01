@@ -47,7 +47,8 @@ def test_t1_1_spend_facts_on_hourly_tier():
 
 def test_t1_1_cost_batch_and_unmapped_on_hourly_tier():
     cost = _read("app/ui/pages/cost.py")
-    assert 'run_batch(_spend_attr_recent_jobs(f["company"], f["days"]),' in cost
+    # f["bounds"] threads the 'Last month' calendar range into the headline metering read
+    assert 'run_batch(_spend_attr_recent_jobs(f["company"], f["days"], f["bounds"]),' in cost
     assert 'page=_PAGE, tier="hourly") or {}' in cost
     assert 'key=f"unmapped_{f[\'days\']}", tier="hourly"' in cost
 

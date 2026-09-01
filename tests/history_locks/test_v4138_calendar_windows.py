@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from app.config import (
     CURRENT_MONTH_WINDOW,
     CURRENT_YEAR_WINDOW,
+    LAST_MONTH_WINDOW,
     TRIAGE_WINDOW_OPTIONS,
     clamp_days,
 )
@@ -16,6 +17,7 @@ from app.logic.date_windows import (
     CalendarDayOffset,
     normalize_window,
     resolve_window_days,
+    window_bounds,
     window_option_label,
     window_scope_label,
 )
@@ -42,12 +44,41 @@ def test_calendar_day_one_stays_today_only_and_leap_ytd_reaches_january_first():
 
 
 def test_options_and_legacy_integer_views_normalize_without_losing_calendar_mode():
-    assert TRIAGE_WINDOW_OPTIONS[-2:] == (CURRENT_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
+    # the three calendar presets sit at the tail, month options grouped together
+    assert TRIAGE_WINDOW_OPTIONS[-3:] == (
+        CURRENT_MONTH_WINDOW, LAST_MONTH_WINDOW, CURRENT_YEAR_WINDOW)
     assert normalize_window("CURRENT_MONTH") == CURRENT_MONTH_WINDOW
+    assert normalize_window("LAST_MONTH") == LAST_MONTH_WINDOW
     assert normalize_window(61) == 60
     assert normalize_window("bad") == 7
     assert window_option_label(30) == "30d"
     assert window_option_label(CURRENT_YEAR_WINDOW) == "Current year"
+    assert window_option_label(LAST_MONTH_WINDOW) == "Last month"
+
+
+def test_last_month_is_a_bounded_previous_calendar_month():
+    # mid-month: Last month is the WHOLE previous month, ending BEFORE today
+    today = date(2026, 9, 17)
+    assert window_bounds(LAST_MONTH_WINDOW, today) == (date(2026, 8, 1), date(2026, 9, 1))
+    assert window_scope_label(LAST_MONTH_WINDOW, today) == "Last month (Aug 1 - Aug 31)"
+    # the resolved day-offset is the SPAN of last month (August = 31d), not a today-anchored
+    # rolling window — used for /day math and as a trailing fallback only
+    assert resolve_window_days(LAST_MONTH_WINDOW, today) == 31
+    # trailing/period windows are NOT bounded (they end today) -> None
+    assert window_bounds(30, today) is None
+    assert window_bounds(CURRENT_MONTH_WINDOW, today) is None
+    assert window_bounds(CURRENT_YEAR_WINDOW, today) is None
+
+
+def test_last_month_handles_year_and_feb_boundaries():
+    # January -> last month is the previous December (year rolls back)
+    assert window_bounds(LAST_MONTH_WINDOW, date(2026, 1, 9)) == (date(2025, 12, 1), date(2026, 1, 1))
+    assert resolve_window_days(LAST_MONTH_WINDOW, date(2026, 1, 9)) == 31
+    # March in a leap year -> last month is February with 29 days
+    assert window_bounds(LAST_MONTH_WINDOW, date(2024, 3, 5)) == (date(2024, 2, 1), date(2024, 3, 1))
+    assert resolve_window_days(LAST_MONTH_WINDOW, date(2024, 3, 5)) == 29
+    # on the 1st, last month is still the whole previous month (bounded, ends yesterday)
+    assert window_bounds(LAST_MONTH_WINDOW, date(2026, 9, 1)) == (date(2026, 8, 1), date(2026, 9, 1))
 
 
 def test_saved_view_window_takes_precedence_over_legacy_resolved_days(monkeypatch):

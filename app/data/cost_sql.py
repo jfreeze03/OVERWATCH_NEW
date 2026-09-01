@@ -25,9 +25,16 @@ _BILLED = (
 )
 
 
-def metering_daily_by_service(days: int) -> str:
-    """Account-wide billed credits by day and service type (adjustment applied)."""
+def metering_daily_by_service(days: int, *, bounds: tuple | None = None) -> str:
+    """Account-wide billed credits by day and service type (adjustment applied).
+
+    Live ACCOUNT_USAGE fallback for the headline metering fact; honors the same
+    'Last month' bounded (start, end_exclusive) range as its mart twin when ``bounds``
+    is set, else keeps the trailing day-offset."""
     days = bounded_days(days)
+    where = (resolve_effective_window(days, "USAGE_DATE", bounds=bounds)[1]
+             if bounds is not None
+             else f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())")
     return f"""
 SELECT
     USAGE_DATE AS DAY,
@@ -38,7 +45,7 @@ SELECT
     SUM(COALESCE(CREDITS_USED, 0)) AS CREDITS_USED,
     SUM({_BILLED}) AS CREDITS_BILLED
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
-WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 GROUP BY USAGE_DATE, UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN'))
 ORDER BY DAY
 """
