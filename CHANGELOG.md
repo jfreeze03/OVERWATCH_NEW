@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.399.0 - Ask USD estimates + triage-bar clip fix (2026-09-01)
+
+- **Ask OVERWATCH — estimated $ next to credits.** Every Ask evidence table now inserts a `<col>_USD`
+  column beside each credit-quantity column (ALLOC_CREDITS, CS_CREDITS, …), formatted as dollars, with
+  a caption naming the rate used. The rate is chosen **per column**: a column whose name carries an
+  AI/Cortex segment (CORTEX_CREDITS, TOKEN_CREDITS, …) prices at the CoCo rate ($2.20), everything else
+  at the compute rate ($3.68) — so a warehouse/cloud-services credit column is never mispriced, and a
+  ratio (CREDIT_SHARE) or rate (CS_PER_1K_RUNS) is never dollarized. Rates come from Admin → Settings
+  (`CREDIT_PRICE_USD` / `AI_CREDIT_PRICE_USD`). Today all four Ask answerers report compute credits, so
+  you'll see $3.68; the $2.20 path is wired for a future Cortex answerer (register its intent in
+  `_AI_INTENTS`) or any AI-named credit column. New pure `app/logic/ask/pricing.py`, unit-tested.
+- **Triage/scope bar clip fix.** The scope strip's two-line "Scope / Account view" label spilled past
+  its fixed 2.28rem row at the browser-default line-height, and the bordered toolbar clipped the
+  overflow — the "cut-off triage bar" seen on every page. A compact `line-height` on the label makes
+  the two lines fit inside the row.
+
 ## 4.398.0 - Caption sweep: second re-audit of the remaining sections (2026-08-31)
 
 - **[#1, remaining-sections re-audit #2] Reverted Overview's last conversions; it now hides nothing.**

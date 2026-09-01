@@ -19,10 +19,18 @@ from app.core.query import run
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.logic.ask import REGISTRY, route
+from app.logic.ask.pricing import add_usd_estimates
 from app.logic.ask.types import AnswerResult, AskParams
+from app.logic.formulas import safe_float
 from app.ui.components import load_settings, page_header
 
 _PAGE = "Ask"
+
+# Intents whose credits are AI/Cortex-metered (priced at AI_CREDIT_PRICE_USD, not the
+# compute rate). Empty today — every registered answerer reports compute/cloud-services
+# credits — but a future Cortex answerer registers its intent here (per-column AI naming
+# also forces the AI rate, so a mixed table still prices each column correctly).
+_AI_INTENTS: frozenset[str] = frozenset()
 
 
 def _capabilities(heading: str) -> None:
@@ -70,7 +78,7 @@ def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
 
 
 def _render_result(result: AnswerResult, company: str, params: AskParams,
-                   use_ai: bool, model: str) -> None:
+                   use_ai: bool, model: str, settings: dict) -> None:
     if result.confidence == "no_data":
         # review fix: Ask's no_data headline IS the answer to a question the
         # user just typed — conditional feedback, not a panel absence, so the
@@ -89,8 +97,33 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
             st.markdown(f"> {phrased}")
 
     if result.evidence is not None and not result.evidence.empty:
+        # Dollarize any credit-quantity column at the current compute rate ($3.68) or the
+        # AI/Cortex "CoCo" rate ($2.20) — per column, so a warehouse-credit column is never
+        # priced at the AI rate. No credit column -> the frame renders unchanged.
+        compute_rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
+        ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
+        ev, usd_cols, rates = add_usd_estimates(
+            result.evidence, compute_rate=compute_rate, ai_rate=ai_rate,
+            intent_is_ai=result.intent in _AI_INTENTS,
+        )
         with st.expander("Evidence — the rows this answer is built from", expanded=True):
-            st.dataframe(result.evidence, width="stretch", hide_index=True)
+            colcfg = {
+                c: st.column_config.NumberColumn(
+                    c[:-4].replace("_", " ").title() + " ($)", format="$%.2f")
+                for c in usd_cols
+            }
+            st.dataframe(ev, width="stretch", hide_index=True,
+                         column_config=colcfg or None)
+            if usd_cols:
+                if len(rates) > 1:
+                    _note = (f"AI/Cortex credits at ${ai_rate:.2f}, "
+                             f"compute credits at ${compute_rate:.2f}")
+                elif rates == {round(ai_rate, 2)} and ai_rate != compute_rate:
+                    _note = f"at ${ai_rate:.2f}/credit (AI/Cortex rate)"
+                else:
+                    _note = f"at ${compute_rate:.2f}/credit (compute rate)"
+                st.caption(f"$ columns are estimates = credits × rate, {_note}. "
+                           "Edit the rates on Admin → Settings.")
 
     # Use the answer's OWN effective window (an answerer may clamp it, e.g. the
     # spend mart's 182-day horizon), never the raw request, so the caption can't
@@ -175,4 +208,4 @@ def render() -> None:
         frames[spec.key] = res.df
 
     result = ans.analyze(params, frames)
-    _render_result(result, company, params, use_ai, model)
+    _render_result(result, company, params, use_ai, model, settings)
