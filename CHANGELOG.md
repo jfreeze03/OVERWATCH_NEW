@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.411.0 - "Last month" rollout batch 3: all remaining cost builders honor bounds (2026-09-01)
+
+Adds the bounded **Last month** branch to the remaining ~40 scope-driven cost/AI/optimization SQL builders
+across `cost_sql`, `mart_sql`, `mart27_sql`, `cortex_sql`, `chargeback_sql`, `insights_sql`, `etl_sql`,
+`graph_sql`, `ops_sql` — storage, query-tags, chargeback, Cortex/AI spend, AI-code, idle/sizing/pattern
+optimization, QAS, egress/replication/marketplace/pools, result-cache, ETL and graph costs.
+
+- Each builder gains a keyword-only `bounds` param and emits the explicit `[start, end)` calendar range
+  (via `scope_window_where` for `CURRENT_DATE` predicates or `resolve_effective_window(..., bounds=)` for
+  `CURRENT_TIMESTAMP` ones). The **trailing branch is byte-identical** — the full suite's SQL locks and
+  reconciliation tests confirm no existing window changed.
+- Multi-predicate builders bind ALL their scope predicates to one range (e.g. `qas_roi`'s eligible+used
+  CTEs, `expensive_queries_usd`'s query+metering CTEs), so both sides of a ratio stay on one window.
+- `cortex_model_costs` is shared with Ask; the Ask path passes `days` positionally so `bounds` defaults
+  None and Ask is unchanged, while the Cost unit-costs fallback can now bound it. `cortex_code_user_daily`
+  (days-independent by design) is intentionally left for a dedicated pass.
+- This batch is the **builder layer** — the params are inert until the page tabs thread `f["bounds"]`
+  (next batches: chargeback/tags, Cortex/AI, storage, optimization, then Overview). Backward compatible.
+
 ## 4.410.0 - "Last month" rollout batch 2: Cost ▸ Attribution (2026-09-01)
 
 Extends **Last month** to the Cost ▸ Attribution tab — the reconciliation-critical surface where per-entity

@@ -148,3 +148,43 @@ def test_attribution_tab_threads_bounds_to_pool_and_shares():
     assert "fact_warehouse_window_vs_prior(days, company, bounds=bounds)" in spend
     assert "allocated_attribution(days, dim, company, database, schema_contains,\n" in spend
     assert 'alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database,\n' in spend
+
+
+# ---------------------------------------------------------------------------
+# Batch 3: the remaining Cost data builders all accept and honor the bounds
+# (storage, tags, chargeback, cortex/AI, optimization, unit-costs). One sample
+# per file locks that the bounded predicate fires and no trailing scope leaks.
+# ---------------------------------------------------------------------------
+def test_remaining_cost_builders_honor_last_month_bounds():
+    from app.data import (
+        chargeback_sql,
+        cortex_sql,
+        etl_sql,
+        graph_sql,
+        insights_sql,
+        mart27_sql,
+        ops_sql,
+    )
+    samples = [
+        cost_sql.warehouse_daily_credits(31, "ALL", bounds=_AUG),
+        cost_sql.storage_account_truth(31, bounds=_AUG),
+        cost_sql.tag_coverage(31, "ALL", bounds=_AUG),
+        cost_sql.qas_roi(31, "ALL", bounds=_AUG),                 # two predicates, both bound
+        cost_sql.transfer_egress_priced(31, bounds=_AUG),          # CURRENT_TIMESTAMP anchor
+        mart_sql.fact_cortex_daily_spend(31, bounds=_AUG),
+        mart27_sql.pattern_cost(31, "ALL", bounds=_AUG),
+        cortex_sql.cortex_ai_functions_daily(31, bounds=_AUG),
+        chargeback_sql.department_window_credits(31, "ALL", bounds=_AUG),
+        insights_sql.expensive_queries_usd(31, "ALL", bounds=_AUG),  # where_q AND where_m
+        etl_sql.etl_cost_by_pipeline(31, "ALL", bounds=_AUG),
+        graph_sql.graph_daily_costs(31, "ALL", bounds=_AUG),
+        ops_sql.result_cache_daily(31, "ALL", bounds=_AUG),
+    ]
+    for sql in samples:
+        assert "'2026-08-01'" in sql and "'2026-09-01'" in sql, sql[:120]
+        assert "-31, CURRENT_" not in sql, sql[:120]              # no leftover trailing scope
+    # qas_roi and expensive_queries_usd bind BOTH of their scope predicates
+    assert cost_sql.qas_roi(31, "ALL", bounds=_AUG).count("'2026-08-01'") >= 2
+    assert insights_sql.expensive_queries_usd(31, "ALL", bounds=_AUG).count("'2026-08-01'") >= 2
+    # Ask's cortex_model_costs is unchanged when called without bounds (positional Ask path)
+    assert "DATEADD('day', -30, CURRENT_TIMESTAMP())" in cortex_sql.cortex_model_costs(30)

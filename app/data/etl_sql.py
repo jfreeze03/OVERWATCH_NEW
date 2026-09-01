@@ -12,14 +12,14 @@ dollarizes.
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 # The recommended structured QUERY_TAG keys (JSON object).
 TAG_KEYS = ("pipeline", "run_id", "target_object", "environment", "cost_center")
 
 
 def etl_cost_by_pipeline(days: int, company: str = "ALL", database: str = "",
-                         schema_contains: str = "") -> str:
+                         schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Measured attribution credits per tagged pipeline: runs, credits, per-run,
     per-million-rows-written, per-TiB-scanned, and failed-run waste.
 
@@ -35,12 +35,19 @@ def etl_cost_by_pipeline(days: int, company: str = "ALL", database: str = "",
     from app.core.sqlsafe import contains_filter
 
     where = and_where(
-        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
+         if bounds is not None
+         else f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "q.QUERY_TAG IS NOT NULL",
         "GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'pipeline') IS NOT NULL",
         companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "q.DATABASE_NAME"),
         contains_filter("q.SCHEMA_NAME", schema_contains),
+    )
+    cred_where = (
+        resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
     )
     return f"""
 WITH tagged AS (
@@ -59,7 +66,7 @@ cred AS (
     SELECT QUERY_ID,
            SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {cred_where}
     GROUP BY QUERY_ID
 ),
 runs AS (

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from app import companies
 from app.config import core_object
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, scope_window_where
 
 _DEPT = (
     "COALESCE(D.DEPARTMENT, 'Unmapped')"
@@ -30,7 +30,7 @@ _MAP_JOIN = (
 )
 
 
-def department_window_credits(days: int, company: str = "ALL") -> str:
+def department_window_credits(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Exact credits per department and warehouse for the window.
     Mart-backed (FACT_WAREHOUSE_DAILY), so it honors the long window (v4.54)."""
     days = bounded_days(days, 365)
@@ -40,7 +40,7 @@ def department_window_credits(days: int, company: str = "ALL") -> str:
     # from the total and never surfaced as UNKNOWN (V044 evidence-based scope).
     company_filter = "" if str(company).upper() in ("ALL", "") else f"M.COMPANY = {companies.sql_literal(company)}"
     where = and_where(
-        f"M.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("M.DAY", days, bounds=bounds),
         company_filter,
     )
     return f"""
@@ -58,7 +58,7 @@ ORDER BY DEPARTMENT, CREDITS_TOTAL DESC
 """
 
 
-def role_share_within_warehouse(days: int, company: str = "ALL") -> str:
+def role_share_within_warehouse(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Elapsed-time share per (warehouse, role) — multiply by that warehouse's
     exact credits for the allocated role slice.
 
@@ -69,7 +69,7 @@ def role_share_within_warehouse(days: int, company: str = "ALL") -> str:
     renormalized to 1 over this company's roles and over-billed them."""
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         "WAREHOUSE_NAME IS NOT NULL",
         "EXECUTION_STATUS = 'SUCCESS'",
         companies.warehouse_clause(company),

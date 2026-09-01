@@ -5,7 +5,7 @@ from __future__ import annotations
 from app import companies
 from app.config import core_object
 from app.core.sqlsafe import contains_filter, sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, scope_window_where
 
 
 def _query_scope(days: int, company: str, warehouse_contains: str = "", user_contains: str = "",
@@ -596,7 +596,7 @@ LIMIT 200
 """
 
 
-def result_cache_daily(days: int, company: str = "ALL") -> str:
+def result_cache_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Share of successful queries answered without scanning (result cache /
     metadata answers). A falling line means redundant recomputation.
 
@@ -607,7 +607,8 @@ def result_cache_daily(days: int, company: str = "ALL") -> str:
     ~0 under any company filter. ``company`` is accepted for call-site symmetry but is not
     applied to this intrinsically un-scopable metric (bug-hunt 2026-08-30)."""
     days = bounded_days(days)
-    scope = _query_scope(days, "ALL", "", "", "", "")   # account-wide only -- see docstring
+    scope = (scope_window_where("START_TIME", days, bounds=bounds) if bounds is not None
+             else _query_scope(days, "ALL", "", "", "", ""))   # account-wide only -- see docstring
     return f"""
 SELECT
     DATE_TRUNC('day', START_TIME) AS DAY,

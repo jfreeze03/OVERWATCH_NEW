@@ -16,15 +16,15 @@ from __future__ import annotations
 
 from app import companies
 from app.core.sqlsafe import contains_filter
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, scope_window_where
 
 
 def graph_daily_costs(days: int, company: str = "ALL", database: str = "",
-                      schema_contains: str = "") -> str:
+                      schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Per DAY x pipeline: graph runs, failures, wall time, measured credits."""
     days = bounded_days(days)
     where = and_where(
-        f"h.QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("h.QUERY_START_TIME", days, bounds=bounds),
         "h.STATE IN ('SUCCEEDED', 'FAILED')",
         companies.database_clause(company, "h.DATABASE_NAME"),
         companies.database_equals_clause(database, "h.DATABASE_NAME"),
@@ -59,12 +59,12 @@ WITH attempts AS (
         SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS ROOT_ID,
                SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
         FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-        WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())
+        WHERE {scope_window_where('START_TIME', days + 1, bounds=bounds)}
           -- Prune before the GROUP BY: only task-run queries matter here.
           -- Aggregating the whole view was the 139s family (perf pass #9).
           AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (
               SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.TASK_HISTORY
-              WHERE QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+              WHERE {scope_window_where('QUERY_START_TIME', days, bounds=bounds)}
                 AND STATE IN ('SUCCEEDED', 'FAILED')
           )
         GROUP BY COALESCE(ROOT_QUERY_ID, QUERY_ID)

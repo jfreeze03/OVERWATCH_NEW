@@ -418,8 +418,10 @@ LIMIT 500
 """
 
 
-def _cloud_svc_where(days: int, company: str, warehouse: str) -> str:
-    where = [f"DAY >= DATEADD('day', -{bounded_days(days, MAX_MART_WINDOW_DAYS)}, CURRENT_DATE())"]
+def _cloud_svc_where(days: int, company: str, warehouse: str, *, bounds: tuple | None = None) -> str:
+    where = [resolve_effective_window(days, "DAY", max_days=MAX_MART_WINDOW_DAYS, bounds=bounds)[1]
+             if bounds is not None
+             else f"DAY >= DATEADD('day', -{bounded_days(days, MAX_MART_WINDOW_DAYS)}, CURRENT_DATE())"]
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     if str(warehouse or "").strip():
@@ -427,7 +429,7 @@ def _cloud_svc_where(days: int, company: str, warehouse: str) -> str:
     return and_where(*where)
 
 
-def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "") -> str:
+def cloud_svc_top_shapes(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:
     """Top query shapes by cloud-services credits (V055, MART_CLOUD_SVC_DAILY).
 
     The shape-grain lens the compile-heavy view misses: a metadata storm of tiny
@@ -445,14 +447,14 @@ SELECT
     ROUND(SUM(EXEC_SEC_SUM) / NULLIF(SUM(RUNS), 0), 3) AS AVG_EXEC_S,
     ROUND(SUM(CACHE_PCT_SUM) / NULLIF(SUM(RUNS), 0) * 100, 0) AS AVG_CACHE_PCT
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, warehouse)}
+WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
 GROUP BY QUERY_PARAMETERIZED_HASH
 ORDER BY CS_CREDITS DESC
 LIMIT 30
 """
 
 
-def cloud_svc_by_user(days: int, company: str = "ALL", warehouse: str = "") -> str:
+def cloud_svc_by_user(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:
     """Cloud-services credits by user/role (V055) — who (or which tool) drives
     the ratio. A service account topping this list points at the fix (throttle
     its polling / batch its DML / consolidate its metadata calls)."""
@@ -464,14 +466,14 @@ SELECT
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
     ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_PER_1K_RUNS
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, warehouse)}
+WHERE {_cloud_svc_where(days, company, warehouse, bounds=bounds)}
 GROUP BY USER_NAME
 ORDER BY CS_CREDITS DESC
 LIMIT 25
 """
 
 
-def cs_by_query_type_mart(days: int, company: str = "ALL") -> str:
+def cs_by_query_type_mart(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """K2: cost_sql.cs_by_query_type served from MART_CLOUD_SVC_DAILY.
 
     Byte-identical output contract to the live builder — QUERY_TYPE, QUERIES,
@@ -494,7 +496,7 @@ SELECT
     ROUND(SUM(CS_CREDITS), 4) AS CS_CREDITS,
     ROUND(SUM(CS_CREDITS) / NULLIF(SUM(RUNS), 0) * 1000, 4) AS CS_CREDITS_PER_1K
 FROM {mart_object("MART_CLOUD_SVC_DAILY")}
-WHERE {_cloud_svc_where(days, company, "")}
+WHERE {_cloud_svc_where(days, company, "", bounds=bounds)}
 GROUP BY QUERY_TYPE
 ORDER BY CS_CREDITS DESC
 LIMIT 12
@@ -2432,18 +2434,19 @@ FROM {mart_object("FACT_METERING_DAILY")}
 """
 
 
-def fact_cortex_daily_spend(days: int) -> str:
+def fact_cortex_daily_spend(days: int, *, bounds: tuple | None = None) -> str:
     """AI/Cortex service credits by day from the daily fact (Codex r16 #7) —
     same SERVICE_TYPE predicate and billed basis as the live builder it
     replaces; the fact carries DAY, SERVICE_TYPE, and CREDITS_BILLED."""
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    scope = scope_window_where("DAY", days, bounds=bounds)
     return f"""
 SELECT
     DAY,
     UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
     SUM(CREDITS_BILLED) AS CREDITS_BILLED
 FROM {mart_object("FACT_METERING_DAILY")}
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {scope}
   AND {_AI_SERVICE_PRED}
 GROUP BY 1, 2
 ORDER BY DAY

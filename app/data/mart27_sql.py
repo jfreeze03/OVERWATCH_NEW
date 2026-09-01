@@ -195,12 +195,12 @@ LIMIT 5000
 # (e.g. p95 here is the PEAK DAILY p95 of the mart, not a raw-row p95).
 # ---------------------------------------------------------------------------
 
-def eff_idle_analysis(days: int, company: str = "ALL") -> str:
+def eff_idle_analysis(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """insights_sql.idle_warehouse_analysis contract from the efficiency mart.
     IDLE_CREDITS uses each day's IDLE_PCT x credits (loader-computed from
     billed-vs-active hours), so no metering/query-history join at read time."""
     days = bounded_days(days, 400)
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = and_where(scope_window_where("DAY", days, bounds=bounds),
                       _company_arm(company))
     return f"""
 SELECT
@@ -220,13 +220,13 @@ LIMIT 100
 """
 
 
-def eff_sizing_profile(days: int, company: str = "ALL") -> str:
+def eff_sizing_profile(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """insights_sql.warehouse_sizing_profile contract from the efficiency
     mart. P95_ELAPSED_SEC is the peak daily p95 (callers label it).
     Qualified (e.) — the CREDITS_TOTAL output alias shadowed the column in
     later aggregates (same class as the compile-heavy live failure)."""
     days = bounded_days(days, 400)
-    where = and_where(f"e.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = and_where(scope_window_where("e.DAY", days, bounds=bounds),
                       _company_arm(company, "e.COMPANY"))
     return f"""
 SELECT
@@ -249,7 +249,7 @@ ORDER BY CREDITS_TOTAL DESC
 LIMIT 100
 """
 
-def family_compile_heavy(days: int, company: str = "ALL") -> str:
+def family_compile_heavy(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """cost_sql.compile_heavy_families contract from the family mart.
     Company scoping is EXACT via the mart's COMPANY column (V082 regrain) —
     was a lossy ANY_VALUE(DATABASE_NAME) heuristic before. Averages are
@@ -258,7 +258,7 @@ def family_compile_heavy(days: int, company: str = "ALL") -> str:
     alias and raised 'aggregate functions cannot be nested' (live, 2026-07-10).
     Qualified references cannot be shadowed."""
     days = bounded_days(days, 400)
-    where = and_where(f"f.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = and_where(scope_window_where("f.DAY", days, bounds=bounds),
                       _company_arm(company, "f.COMPANY"))
     return f"""
 SELECT
@@ -319,14 +319,17 @@ ORDER BY TOTAL_ELAPSED_HOURS DESC
 LIMIT 50
 """
 
-def role_share(days: int, company: str = "ALL") -> str:
+def role_share(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """chargeback_sql.role_share_within_warehouse contract from the role-hour
     fact. Attribution law (v4.34.1): the fact's COMPANY column scopes
     warehouses in the denominator; the TRXS role heuristic (live-round-3
     lesson) only picks display rows AFTER the share is computed, so an
     excluded role keeps its slice and this company's roles never absorb it."""
     days = bounded_days(days, 400)
-    where = and_where(f"HOUR_TS >= DATEADD('day', -{days}, CURRENT_DATE())",  # verify round: match live twin's anchor
+    # bounds -> the 'Last month' calendar window; the coverage-gate start follows it
+    cov_start = (f"'{bounds[0].isoformat()}'" if bounds is not None
+                 else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
+    where = and_where(scope_window_where("HOUR_TS", days, bounds=bounds),  # verify round: match live twin's anchor
                       _company_arm(company),
                       # Coverage gate — abstain (zero rows -> live fallback + pool-rematch) ONLY when
                       # the role-hour fact is MATERIALLY SHORTER than the credit POOL fact AND the
@@ -339,7 +342,7 @@ def role_share(days: int, company: str = "ALL") -> str:
                       # warehouse fact at the first metered (incl. idle) day, so pool commonly leads
                       # by a day or two — while any real retention purge (tens+ of days) still abstains.
                       f"NOT ((SELECT MIN(HOUR_TS)::DATE FROM {mart_object('FACT_QUERY_ROLE_HOURLY')}) "
-                      f"> DATEADD('day', -{days} + 1, CURRENT_DATE()) "
+                      f"> {cov_start} "
                       f"AND (SELECT MIN(DAY) FROM {mart_object('FACT_WAREHOUSE_DAILY')}) "
                       f"< DATEADD('day', -7, (SELECT MIN(HOUR_TS)::DATE FROM {mart_object('FACT_QUERY_ROLE_HOURLY')})))")
     vis = and_where(companies.role_clause(company, "ROLE_NAME"))
@@ -428,12 +431,15 @@ WHERE {and_where(*parts)}
 """
 
 
-def ai_costs_by_model(days: int) -> str:
+def ai_costs_by_model(days: int, *, bounds: tuple | None = None) -> str:
     """cortex_sql model/source cost contract from FACT_AI_USAGE_DAILY —
     Code + Functions in one read, loaded daily. Qualified (a.) — TOKENS and
     CREDITS output aliases shadowed the columns in the per-1M expression
     (same class as the compile-heavy live failure)."""
     days = bounded_days(days, 400)
+    win = scope_window_where("a.DAY", days, bounds=bounds)
+    cov_bound = (f"'{bounds[0].isoformat()}'" if bounds is not None
+                 else f"DATEADD('day', -{days} + 1, CURRENT_DATE())")
     return f"""
 SELECT
     a.SOURCE AS FUNCTION_NAME,
@@ -444,14 +450,14 @@ SELECT
     ROUND(SUM(COALESCE(a.CREDITS, 0)) * 1000000
           / NULLIF(SUM(COALESCE(a.TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
 FROM {mart_object("FACT_AI_USAGE_DAILY")} a
-WHERE a.DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {win}
   -- Coverage gate (same guard as ai_code_user_rollup/_daily, ALL sources here since this
   -- serves Code + Functions): emit ZERO rows unless the fact's earliest day covers the asked
   -- window, so a young/backfilling fact falls back to the live Functions reader (honestly
   -- labeled ' - Functions only' + the 90d cap) instead of answering a 365d question with three
   -- weeks of credits and silently UNDER-REPORTING account AI spend under a full-window label.
   AND (SELECT MIN(a2.DAY) FROM {mart_object("FACT_AI_USAGE_DAILY")} a2)
-      <= DATEADD('day', -{days} + 1, CURRENT_DATE())
+      <= {cov_bound}
 GROUP BY a.SOURCE, a.MODEL_NAME
 ORDER BY CREDITS DESC
 LIMIT 200
@@ -504,7 +510,7 @@ def _ai_code_window(days: int, bounds: tuple | None = None) -> str:
             f"<= DATEADD('day', -{days} + 1, CURRENT_DATE())")
 
 
-def ai_code_user_rollup(days: int, company: str = "ALL") -> str:
+def ai_code_user_rollup(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """cortex_sql.cortex_code_user_rollup contract from FACT_AI_USAGE_DAILY.
 
     Company scope is applied ONCE per grouped user (a ~50-row set), not per
@@ -534,7 +540,7 @@ by_user AS (
         MIN(FIRST_TS) AS FIRST_USAGE,
         MAX(LAST_TS) AS LAST_USAGE
     FROM {mart_object("FACT_AI_USAGE_DAILY")}
-    WHERE {_ai_code_window(days)}
+    WHERE {_ai_code_window(days, bounds)}
     GROUP BY USER_NAME, SOURCE
 ),
 named AS (
@@ -636,12 +642,12 @@ LIMIT 500
 """
 
 
-def tag_coverage_daily(days: int, company: str = "ALL") -> str:
+def tag_coverage_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """cost_sql.tag_coverage contract from MART_TAG_COVERAGE_DAILY (V031) —
     the user-grain column the family mart could not carry. Qualified (c.)
     per the alias-shadow rule; same 60s exec floor as live."""
     days = bounded_days(days, 400)
-    where = and_where(f"c.DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = and_where(scope_window_where("c.DAY", days, bounds=bounds),
                       _company_arm(company, "c.COMPANY"))
     return f"""
 SELECT
@@ -758,12 +764,14 @@ FROM (
 {comp}ORDER BY w.MONTH, w.WAREHOUSE_NAME"""
 
 
-def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25) -> str:
+def pattern_cost(days: int = 30, company: str = "ALL", limit: int = 25, *, bounds: tuple | None = None) -> str:
     """Measured $ per repeated statement pattern (V036) — the silent-spend
     table. Attribution credits are MEASURED compute; the sample text rides
     in from the family mart by hash."""
     d = bounded_days(days, 90)
-    min_runs = max(2, (5 * d + 29) // 30)
+    # bounds -> scale the run-rate floor to the calendar-month span, not the trailing d
+    span = (bounds[1] - bounds[0]).days if bounds is not None else d
+    min_runs = max(2, (5 * span + 29) // 30)
     lim = max(5, min(int(limit), 100))
     comp = ""
     if company and company != "ALL":
@@ -780,10 +788,10 @@ FROM DBA_MAINT_DB.OVERWATCH.MART_PATTERN_COST_DAILY p
 LEFT JOIN (
     SELECT QUERY_HASH, ANY_VALUE(SAMPLE_TEXT) AS SAMPLE_TEXT
     FROM DBA_MAINT_DB.OVERWATCH.MART_QUERY_FAMILY_DAILY
-    WHERE DAY >= DATEADD('day', -{d}, CURRENT_DATE())
+    WHERE {scope_window_where("DAY", d, bounds=bounds)}
     GROUP BY QUERY_HASH
 ) f ON f.QUERY_HASH = p.QUERY_HASH
-WHERE p.DAY >= DATEADD('day', -{d}, CURRENT_DATE())
+WHERE {scope_window_where("p.DAY", d, bounds=bounds)}
 {comp}GROUP BY p.QUERY_HASH
 HAVING SUM(p.CREDITS_ATTRIBUTED) > 0.01 AND SUM(p.RUNS) >= {min_runs}
 ORDER BY CREDITS DESC

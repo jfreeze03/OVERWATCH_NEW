@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from app import companies
 from app.config import core_object
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 
 def _iso_date(value: str, name: str) -> str:
@@ -890,7 +890,8 @@ LIMIT 24
 
 
 def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
-                          database: str = "", schema_contains: str = "") -> str:
+                          database: str = "", schema_contains: str = "", *,
+                          bounds: tuple | None = None) -> str:
     """Top queries by ALLOCATED credits — warehouse-hour credits split across
     that hour's queries by execution-time share.
 
@@ -909,8 +910,13 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
 
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
+    # bound BOTH the query CTE (display + denominator) and the metering CTE (credit pool)
+    # to the SAME window, so 'Last month' keeps the two sides over one identical range.
+    _win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+            if bounds is not None
+            else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where_q = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         companies.warehouse_clause(company),
@@ -920,7 +926,7 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
         contains_filter("q.SCHEMA_NAME", schema_contains),
     )
     where_m = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        _win,
         companies.warehouse_clause(company),
     )
     return f"""
@@ -1208,7 +1214,8 @@ GROUP BY KIND
 
 def measured_query_costs(days: int, company: str = "ALL", database: str = "",
                          schema_contains: str = "", warehouse_contains: str = "",
-                         user_contains: str = "", limit: int = 50) -> str:
+                         user_contains: str = "", limit: int = 50, *,
+                         bounds: tuple | None = None) -> str:
     """Top queries by MEASURED compute credits (QUERY_ATTRIBUTION_HISTORY).
 
     Attribution excludes warehouse idle time: this answers "what did running
@@ -1221,12 +1228,19 @@ def measured_query_costs(days: int, company: str = "ALL", database: str = "",
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
     where = and_where(
-        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
+         if bounds is not None
+         else f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "q.DATABASE_NAME"),
         contains_filter("q.SCHEMA_NAME", schema_contains),
         contains_filter("q.WAREHOUSE_NAME", warehouse_contains),
         contains_filter("q.USER_NAME", user_contains),
+    )
+    att_guard = (
+        resolve_effective_window(days, "a.START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"a.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
     )
     return f"""
 WITH q AS (
@@ -1249,7 +1263,7 @@ SELECT
 FROM q
 JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY a
   ON a.QUERY_ID = q.QUERY_ID
- AND a.START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+ AND {att_guard}
 GROUP BY q.QUERY_ID, q.USER_NAME, q.WAREHOUSE_NAME, q.DATABASE_NAME, q.SCHEMA_NAME,
          q.QUERY_TYPE, q.EXECUTION_STATUS, q.START_TIME, q.ELAPSED_MS, q.QUERY_SNIPPET
 HAVING SUM(a.CREDITS_ATTRIBUTED_COMPUTE + COALESCE(a.CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
@@ -1259,7 +1273,8 @@ LIMIT {limit}
 
 
 def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
-                        schema_contains: str = "", limit: int = 50) -> str:
+                        schema_contains: str = "", limit: int = 50, *,
+                        bounds: tuple | None = None) -> str:
     """$/call leaderboard for EVERY stored procedure (measured credits).
 
     Child statements roll up to the CALL via ROOT_QUERY_ID, so a procedure's
@@ -1272,23 +1287,35 @@ def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
     days = bounded_days(days)
     limit = max(5, min(int(limit or 50), 200))
     where = and_where(
-        f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "c.START_TIME", bounds=bounds)[1]
+         if bounds is not None
+         else f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "c.QUERY_TYPE = 'CALL'",
         companies.warehouse_clause(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
         contains_filter("c.SCHEMA_NAME", schema_contains),
+    )
+    att_guard = (
+        resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
+    )
+    call_scope = (
+        resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
     )
     return f"""
 WITH att AS (
     SELECT COALESCE(ROOT_QUERY_ID, QUERY_ID) AS RID,
            SUM(CREDITS_ATTRIBUTED_COMPUTE + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {att_guard}
       -- Prune before the GROUP BY: only rows rolling up to a CALL matter
       -- (children carry the CALL's id as ROOT_QUERY_ID). Perf pass #9.
       AND COALESCE(ROOT_QUERY_ID, QUERY_ID) IN (
           SELECT QUERY_ID FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-          WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+          WHERE {call_scope}
             AND QUERY_TYPE = 'CALL'
       )
     GROUP BY 1

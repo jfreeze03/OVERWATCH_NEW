@@ -15,7 +15,7 @@ Sources:
 from __future__ import annotations
 
 from app import companies
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, resolve_effective_window
 
 _COMBINED_CODE_USAGE = """
     SELECT USER_ID, USAGE_TIME, TOKEN_CREDITS, TOKENS, 'Snowsight' AS SOURCE
@@ -164,10 +164,13 @@ ORDER BY DAY, SOURCE
 """
 
 
-def cortex_ai_functions_daily(days: int) -> str:
+def cortex_ai_functions_daily(days: int, *, bounds: tuple | None = None) -> str:
     """Optional AI Functions daily credits (view absent in some accounts;
     the runtime error path is the compatibility guard)."""
     days = bounded_days(days)
+    scope = (resolve_effective_window(days, "F.START_TIME", bounds=bounds)[1]
+             if bounds is not None
+             else f"F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
     F.START_TIME::DATE AS DAY,
@@ -175,13 +178,13 @@ SELECT
     COUNT(DISTINCT F.QUERY_ID) AS TOTAL_REQUESTS,
     SUM(COALESCE(F.CREDITS, 0)) AS TOTAL_CREDITS
 FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY F
-WHERE F.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {scope}
 GROUP BY 1
 ORDER BY DAY
 """
 
 
-def cortex_model_costs(days: int) -> str:
+def cortex_model_costs(days: int, *, bounds: tuple | None = None) -> str:
     """AI credits by function and model, with a credits/1M-token unit rate.
 
     CORTEX_FUNCTIONS_USAGE_HISTORY carries no database dimension — this is
@@ -190,6 +193,9 @@ def cortex_model_costs(days: int) -> str:
     the compatibility guard (same pattern as cortex_ai_functions_daily).
     """
     days = bounded_days(days)
+    scope = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+             if bounds is not None
+             else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
     FUNCTION_NAME,
@@ -199,7 +205,7 @@ SELECT
     ROUND(SUM(COALESCE(TOKEN_CREDITS, 0)) * 1000000
           / NULLIF(SUM(COALESCE(TOKENS, 0)), 0), 4) AS CREDITS_PER_1M_TOKENS
 FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY
-WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {scope}
 GROUP BY 1, 2
 ORDER BY CREDITS DESC
 LIMIT 200
@@ -247,7 +253,7 @@ ORDER BY DAY
 """
 
 
-def cortex_code_token_types(days: int = 30) -> str:
+def cortex_code_token_types(days: int = 30, *, bounds: tuple | None = None) -> str:
     """Per-user token-TYPE decomposition (repo review wave 2: TOKENS_GRANULAR)
     — input / output / cache_read / cache_write — the prompt-cache-efficiency
     lens raw token totals can't show.
@@ -259,15 +265,18 @@ def cortex_code_token_types(days: int = 30) -> str:
     sibling cortex_code_* scans, so it tracks the page window up to 365d rather than the
     90d ACCOUNT_USAGE cap — the panel ties to the page's Window filter."""
     days = bounded_days(days, 365)
+    scope = (resolve_effective_window(days, "USAGE_TIME", bounds=bounds)[1]
+             if bounds is not None
+             else f"USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 WITH combined AS (
     SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_SNOWSIGHT_USAGE_HISTORY
-    WHERE USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    WHERE {scope}
     UNION ALL
     SELECT USER_ID, USAGE_TIME, TOKENS_GRANULAR
     FROM SNOWFLAKE.ACCOUNT_USAGE.CORTEX_CODE_CLI_USAGE_HISTORY
-    WHERE USAGE_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+    WHERE {scope}
 ),
 flat AS (
     -- TOKENS_GRANULAR on this account is nested BY MODEL: each model name maps to an

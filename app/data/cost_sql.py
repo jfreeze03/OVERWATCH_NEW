@@ -17,6 +17,7 @@ from app.data.common import (
     and_where,
     bounded_days,
     resolve_effective_window,
+    scope_window_where,
 )
 
 _BILLED = (
@@ -51,11 +52,11 @@ ORDER BY DAY
 """
 
 
-def warehouse_daily_credits(days: int, company: str = "ALL") -> str:
+def warehouse_daily_credits(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Per-warehouse daily compute credits (exact usage, not billed), company-scoped."""
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         companies.warehouse_clause(company),
     )
     return f"""
@@ -214,27 +215,28 @@ LIMIT 100
 """
 
 
-def cortex_daily_spend(days: int) -> str:
+def cortex_daily_spend(days: int, *, bounds: tuple | None = None) -> str:
     """AI/Cortex service credits by day (account-wide, billed basis)."""
     days = bounded_days(days)
+    where = scope_window_where("USAGE_DATE", days, bounds=bounds)
     return f"""
 SELECT
     USAGE_DATE AS DAY,
     UPPER(COALESCE(SERVICE_TYPE, 'UNKNOWN')) AS SERVICE_TYPE,
     SUM({_BILLED}) AS CREDITS_BILLED
 FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
-WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
   AND {ai_service_predicate()}
 GROUP BY 1, 2
 ORDER BY DAY
 """
 
 
-def replication_by_database(days: int, company: str = "ALL", database: str = "") -> str:
+def replication_by_database(days: int, company: str = "ALL", database: str = "", *, bounds: tuple | None = None) -> str:
     """Native replication credits and transferred bytes by secondary database."""
     days = bounded_days(days, 365)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("START_TIME", days, bounds=bounds),
         companies.database_clause(company, "DATABASE_NAME"),
         companies.database_equals_clause(database, "DATABASE_NAME"),
     )
@@ -255,7 +257,7 @@ ORDER BY CREDITS DESC, BYTES_TRANSFERRED DESC
 """
 
 
-def transfer_egress_priced(days: int) -> str:
+def transfer_egress_priced(days: int, *, bounds: tuple | None = None) -> str:
     """rec#11: outbound data-transfer (egress) bytes grouped by source/target
     cloud+region and transfer type, with a BILLABLE flag.
 
@@ -267,6 +269,9 @@ def transfer_egress_priced(days: int) -> str:
     TB), falling back to the DATA_TRANSFER_USD_PER_TB setting when org currency is
     not visible — never an inlined rate (house rule d)."""
     days = bounded_days(days, 365)
+    where = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+             if bounds is not None
+             else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 SELECT
     COALESCE(SOURCE_CLOUD, '(unknown)')      AS SOURCE_CLOUD,
@@ -281,14 +286,14 @@ SELECT
     ROUND(SUM(BYTES_TRANSFERRED) / POWER(1024, 4), 6) AS TB,
     SUM(BYTES_TRANSFERRED)                   AS BYTES
 FROM SNOWFLAKE.ACCOUNT_USAGE.DATA_TRANSFER_HISTORY
-WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())
+WHERE {where}
 GROUP BY 1, 2, 3, 4, 5, 6
 HAVING SUM(BYTES_TRANSFERRED) > 0
 ORDER BY BILLABLE DESC, TB DESC
 """
 
 
-def qas_roi(days: int, company: str = "ALL") -> str:
+def qas_roi(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """rec#6: Query Acceleration Service ROI per warehouse — QAS credits SPENT
     (QUERY_ACCELERATION_HISTORY) beside the eligible acceleration workload
     (QUERY_ACCELERATION_ELIGIBLE, the benefit side the app never read).
@@ -301,6 +306,9 @@ def qas_roi(days: int, company: str = "ALL") -> str:
     """
     days = bounded_days(days, 365)
     wc = companies.warehouse_clause(company)
+    win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+           if bounds is not None
+           else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     return f"""
 WITH elig AS (
     SELECT WAREHOUSE_NAME,
@@ -308,13 +316,13 @@ WITH elig AS (
            ROUND(SUM(COALESCE(ELIGIBLE_QUERY_ACCELERATION_TIME, 0)), 1) AS ELIGIBLE_SEC,
            MAX(UPPER_LIMIT_SCALE_FACTOR) AS MAX_SCALE_FACTOR
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_ELIGIBLE
-    WHERE {and_where(f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())", wc)}
+    WHERE {and_where(win, wc)}
     GROUP BY 1
 ),
 used AS (
     SELECT WAREHOUSE_NAME, SUM(COALESCE(CREDITS_USED, 0)) AS QAS_CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ACCELERATION_HISTORY
-    WHERE {and_where(f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())", wc)}
+    WHERE {and_where(win, wc)}
     GROUP BY 1
 )
 SELECT
@@ -331,9 +339,10 @@ LIMIT 200
 """
 
 
-def compute_pool_usage(days: int) -> str:
+def compute_pool_usage(days: int, *, bounds: tuple | None = None) -> str:
     """SPCS credits by compute pool and owning application (account-wide)."""
     days = bounded_days(days, 365)
+    where = scope_window_where("START_TIME", days, bounds=bounds)
     return f"""
 SELECT
     COMPUTE_POOL_NAME,
@@ -343,16 +352,17 @@ SELECT
     MIN(START_TIME) AS FIRST_USE,
     MAX(END_TIME) AS LAST_USE
 FROM SNOWFLAKE.ACCOUNT_USAGE.SNOWPARK_CONTAINER_SERVICES_HISTORY
-WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 GROUP BY COMPUTE_POOL_NAME, COALESCE(APPLICATION_NAME, 'Unassigned'), IS_EXCLUSIVE
 HAVING SUM(COALESCE(CREDITS_USED, 0)) > 0
 ORDER BY CREDITS DESC
 """
 
 
-def notebook_container_usage(days: int) -> str:
+def notebook_container_usage(days: int, *, bounds: tuple | None = None) -> str:
     """Notebook runtime and credits, a non-additive subset of SPCS usage."""
     days = bounded_days(days, 365)
+    where = scope_window_where("START_TIME", days, bounds=bounds)
     return f"""
 SELECT
     NOTEBOOK_NAME,
@@ -364,7 +374,7 @@ SELECT
     MIN(START_TIME) AS FIRST_USE,
     MAX(END_TIME) AS LAST_USE
 FROM SNOWFLAKE.ACCOUNT_USAGE.NOTEBOOKS_CONTAINER_RUNTIME_HISTORY
-WHERE START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 GROUP BY NOTEBOOK_NAME, USER_NAME, COMPUTE_POOL_NAME, SERVICE_NAME
 HAVING SUM(COALESCE(CREDITS, 0)) > 0
     OR SUM(COALESCE(NOTEBOOK_EXECUTION_TIME_SECS, 0)) > 0
@@ -372,9 +382,10 @@ ORDER BY CREDITS DESC, EXECUTION_TIME_SEC DESC
 """
 
 
-def marketplace_paid_usage(days: int) -> str:
+def marketplace_paid_usage(days: int, *, bounds: tuple | None = None) -> str:
     """Paid Marketplace charges for this account in their native currency."""
     days = bounded_days(days, 365)
+    where = scope_window_where("USAGE_DATE", days, bounds=bounds)
     return f"""
 SELECT
     PROVIDER_NAME,
@@ -387,7 +398,7 @@ SELECT
     MIN(USAGE_DATE) AS FIRST_USE,
     MAX(USAGE_DATE) AS LAST_USE
 FROM SNOWFLAKE.ORGANIZATION_USAGE.MARKETPLACE_PAID_USAGE_DAILY
-WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
   AND CONSUMER_ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
 GROUP BY PROVIDER_NAME, LISTING_DISPLAY_NAME, DATABASE_NAME, CHARGE_TYPE, CURRENCY
 HAVING SUM(COALESCE(CHARGE, 0)) <> 0
@@ -511,13 +522,14 @@ ORDER BY DB_BYTES DESC
 """
 
 
-def storage_account_truth(days: int) -> str:
+def storage_account_truth(days: int, *, bounds: tuple | None = None) -> str:
     """Account-wide storage by tier on the billing basis (F1b/R3, V046):
     average of daily bytes for table, stage, fail-safe, hybrid, and archive
     cool/cold. Account grain only — STORAGE_USAGE (and this fact) carry no
     per-database split for stage/hybrid/archive. Reads FACT_STORAGE_ACCOUNT_
     DAILY; page falls back to the _live variant while the fact is empty."""
     days = bounded_days(days, maximum=400)
+    where = scope_window_where("DAY", days, bounds=bounds)
     return f"""
 SELECT
     AVG(COALESCE(TABLE_BYTES, 0))        AS TABLE_BYTES,
@@ -529,7 +541,7 @@ SELECT
     COUNT(DISTINCT DAY)                  AS DAYS_AVERAGED,
     MAX(DAY)                             AS LATEST_DAY
 FROM DBA_MAINT_DB.OVERWATCH.FACT_STORAGE_ACCOUNT_DAILY
-WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 """
 
 
@@ -554,7 +566,7 @@ WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
 """
 
 
-def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "") -> str:
+def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "", *, bounds: tuple | None = None) -> str:
     """Object-cost breakdown by cost arm from FACT_OBJECT_COST_DAILY (V048,
     additive; V050 splits query compute by role). QUERY_COMPUTE_WRITE is the
     production share (building the object), QUERY_COMPUTE_READ the consumption
@@ -572,7 +584,7 @@ def object_cost_by_arm(days: int = 30, company: str = "ALL", database: str = "")
     _db = str(database or "").strip()
     db_pred = (f"UPPER(SPLIT_PART(OBJECT_FQN, '.', 1)) = {companies.sql_literal(_db.upper())}"
                if _db else "")
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred)
+    where = and_where(scope_window_where("DAY", days, bounds=bounds), comp, db_pred)
     return f"""
 SELECT COST_ARM,
        COUNT(DISTINCT OBJECT_FQN) AS OBJECTS,
@@ -585,7 +597,7 @@ ORDER BY CREDITS DESC
 
 
 def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25,
-                    database: str = "") -> str:
+                    database: str = "", *, bounds: tuple | None = None) -> str:
     """Top objects by total measured + maintenance credits (V048), with the
     query-compute vs maintenance split per object.
 
@@ -610,7 +622,7 @@ def object_cost_top(days: int = 30, company: str = "ALL", limit: int = 25,
     # query/maint split is $0/$0 yet CREDITS>0, so it can outrank a real table, take the #1 slot,
     # and its entity drill lands on a non-existent Entity 360. The residual stays visible in
     # object_cost_by_arm's arm breakdown (bug-hunt 2026-08-30).
-    where = and_where(f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())", comp, db_pred,
+    where = and_where(scope_window_where("DAY", days, bounds=bounds), comp, db_pred,
                       "OBJECT_FQN <> 'UNATTRIBUTED'")
     # COMPANY_FOR_DATABASE on the object's db: deterministic per OBJECT_FQN group
     # (the arg is a pure function of the grouped column), so MAX() just returns
@@ -756,7 +768,7 @@ LIMIT 100
 
 
 def compile_heavy_families(days: int, company: str = "ALL", warehouse: str = "",
-                           min_runs: int = 20) -> str:
+                           min_runs: int = 20, *, bounds: tuple | None = None) -> str:
     """Query families whose compile time dominates — the usual driver of a
     high cloud-services ratio.
 
@@ -767,7 +779,8 @@ def compile_heavy_families(days: int, company: str = "ALL", warehouse: str = "",
     days = bounded_days(days)
     min_runs = max(1, min(int(min_runs), 100))
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "QUERY_PARAMETERIZED_HASH IS NOT NULL",
         # an exact warehouse is already a complete scope; the company predicate
         # (hardcoded tuple/prefix) would only subtract and can zero a warehouse
@@ -834,7 +847,7 @@ GROUP BY 1
 ORDER BY 1 DESC
 """
 
-def org_all_in_window_usd(days: int) -> str:
+def org_all_in_window_usd(days: int, *, bounds: tuple | None = None) -> str:
     """rec #8: this account's ALL-IN billed cost (org rate card) over the last N
     days — the invoice total the metering credit-spend headline omits (storage,
     data transfer, marketplace, org adjustments). Same trailing window as the
@@ -843,6 +856,7 @@ def org_all_in_window_usd(days: int) -> str:
     credit tile near the trailing edge.
     """
     days = bounded_days(days)
+    where = scope_window_where("USAGE_DATE", days, bounds=bounds)
     return f"""
 SELECT
     SUM(USAGE_IN_CURRENCY)                                                              AS TOTAL_USD,
@@ -855,7 +869,7 @@ SELECT
     MAX(CURRENCY)                                                                       AS CURRENCY
 FROM SNOWFLAKE.ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY
 WHERE ACCOUNT_NAME = CURRENT_ACCOUNT_NAME()
-  AND USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+  AND {where}
 """
 
 
@@ -884,7 +898,7 @@ ORDER BY 1
 
 
 def tag_coverage(days: int, company: str = "ALL", database: str = "",
-                 schema_contains: str = "") -> str:
+                 schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Query-tag governance: execution-time-weighted coverage + the top
     untagged workloads by user. Chargeback precision is capped by this.
 
@@ -896,7 +910,8 @@ def tag_coverage(days: int, company: str = "ALL", database: str = "",
     from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         # Scope company by the USER (COMPANY_FOR_USER), NOT the warehouse: this is a USER-grain
@@ -925,7 +940,7 @@ LIMIT 30
 
 
 def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL",
-                                 database: str = "", schema_contains: str = "") -> str:
+                                 database: str = "", schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Per-user drill for tag_coverage: the top untagged statement TYPES for ONE
     user, so a chargeback owner can see WHAT is running without a QUERY_TAG.
 
@@ -939,7 +954,8 @@ def untagged_executions_for_user(user_name: str, days: int, company: str = "ALL"
     from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         # user-company scope, matching the tag_coverage scoreboard this drills from (bug-hunt
@@ -964,14 +980,15 @@ LIMIT 20
 """
 
 
-def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "") -> str:
+def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "", *, bounds: tuple | None = None) -> str:
     """Cloud-services credits by statement type (COST_DB recon R6) — makes
     metadata storms (SHOW/DESCRIBE floods) visible beside the compile-heavy
     families when the CS ratio is ELEVATED. ``warehouse`` scopes to one warehouse
     for the per-warehouse elevation drill."""
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "CREDITS_USED_CLOUD_SERVICES > 0",
         # exact warehouse is a complete scope (see compile_heavy_families) — the
         # company predicate would only subtract and can zero a runtime-mapped warehouse.
