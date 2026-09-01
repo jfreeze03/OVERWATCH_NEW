@@ -237,11 +237,13 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
 .st-key-ow_triage_toolbar [data-testid="stHorizontalBlock"]{gap:0.42rem;}
 .st-key-ow_triage_toolbar div[data-baseweb="select"]>div{min-height:2.28rem;}
 .st-key-ow_triage_toolbar button{min-height:2.28rem;padding-left:0.65rem;padding-right:0.65rem;}
-/* Compact line-heights so the two-line "Scope / Account view" label fits inside the
-   fixed 2.28rem row — at the browser-default line-height the stacked lines spill past
-   it and the bordered toolbar clips them (the "cut-off triage bar"). */
-.ow-triage-title{height:2.28rem;display:flex;flex-direction:column;justify-content:center;
-  line-height:1.15;
+/* The two-line "Scope / Account view" label must never clip. A FIXED height clips the
+   top line when the stacked lines render taller than it (font metrics + the bordered
+   toolbar's overflow) — the "cut-off triage bar". min-height lets the box grow to
+   contain the label, so nothing spills past it, while still matching the 2.28rem
+   selectboxes when the label is short. Compact line-heights keep it tidy. */
+.ow-triage-title{min-height:2.28rem;display:flex;flex-direction:column;justify-content:center;
+  line-height:1.15;padding:2px 0;
   color:var(--ow-ink);font-size:0.73rem;font-weight:760;letter-spacing:0.06em;text-transform:uppercase;}
 .ow-triage-title small{display:block;line-height:1.2;color:var(--ow-ink-mute)!important;font-size:0.66rem;
   font-weight:600;letter-spacing:0;text-transform:none;white-space:nowrap;}

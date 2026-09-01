@@ -62,5 +62,6 @@ def test_ask_page_wires_the_estimate_and_the_triage_line_height():
     ask = (root / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
     assert "add_usd_estimates(" in ask and "AI_CREDIT_PRICE_USD" in ask
     theme = (root / "app" / "theme.py").read_text(encoding="utf-8")
-    # the triage-title two-line label gets a compact line-height so it can't clip
-    assert ".ow-triage-title{" in theme and "line-height:1.15" in theme
+    # the triage-title uses min-height (not a fixed height) so the two-line label can
+    # never spill past the box and get clipped by the bordered toolbar
+    assert ".ow-triage-title{min-height:2.28rem" in theme

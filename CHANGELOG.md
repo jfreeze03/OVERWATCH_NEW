@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.400.0 - Triage-bar clip: real fix (min-height) (2026-09-01)
+
+- **Scope/triage bar still clipped — fixed properly.** The v4.399.0 line-height tweak wasn't enough:
+  the two-line "Scope / Account view" label still rendered taller than the fixed `height:2.28rem`,
+  spilled above the box, and the bordered toolbar clipped the top of "SCOPE". Switched the label from a
+  fixed `height` to `min-height:2.28rem` (plus a little vertical padding) so the box grows to contain
+  the label — nothing can spill past it, so nothing clips — while still matching the 2.28rem
+  selectboxes when the label is short.
+
 ## 4.399.0 - Ask USD estimates + triage-bar clip fix (2026-09-01)
 
 - **Ask OVERWATCH — estimated $ next to credits.** Every Ask evidence table now inserts a `<col>_USD`
