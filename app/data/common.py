@@ -81,6 +81,15 @@ def account_month_start_sql() -> str:
     )
 
 
+def account_today_sql() -> str:
+    """SQL DATE for 'today' in the ACCOUNT timezone (America/Chicago) — the same clock
+    as logic.formulas.account_today(). Session-tz CURRENT_DATE() drifts from it near
+    midnight and month/quarter boundaries; use this wherever a SQL date bound must agree
+    with the app's Python 'today' (calendar-month/quarter windows especially)."""
+    from app.logic.formulas import ACCOUNT_TIMEZONE
+    return f"CONVERT_TIMEZONE('{ACCOUNT_TIMEZONE}', CURRENT_TIMESTAMP())::DATE"
+
+
 def lag_offset_start(days: int, lag_hours: int = 24) -> str:
     """Window start that ends before the ACCOUNT_USAGE completeness horizon.
 

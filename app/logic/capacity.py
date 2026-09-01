@@ -301,6 +301,12 @@ def capacity_forecasts(
             if 0 < eta <= 180 and high <= 365:
                 base.update({
                     "STATUS": "FORECAST",
+                    # Report the DRIVER channel's current index here, not the cross-channel
+                    # max: the ETA below is derived from driver_current, so a row that showed
+                    # a near-1.0 max from a FLAT channel next to a far ETA from a different
+                    # rising channel read as self-contradictory (round-2 bug hunt). Now the
+                    # shown current, the ETA, and the BASIS all describe the same channel.
+                    "CURRENT_PRESSURE_INDEX": round(driver_current, 3),
                     "DAYS_TO_PRESSURE": round(eta),
                     "ETA_LOW_DAYS": round(low),
                     "ETA_HIGH_DAYS": round(high),

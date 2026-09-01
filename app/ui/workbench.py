@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
 
-from app.core.identity import viewer_name
+from app.core.identity import idempotency_key, viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
@@ -207,7 +206,14 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             defer_until=defer,
             note=note,
             actor=viewer_name(),
-            request_key=f"ui:{action_id}:{uuid4()}",
+            # STABLE request_key (content signature), not a fresh uuid: the proc dedups on
+            # it, so an at-least-once retry (transient error after the server already wrote)
+            # is idempotent instead of writing a duplicate audit/comment row. Any real edit
+            # (incl. the comment text) changes the signature and writes a new row (round-2
+            # bug hunt).
+            request_key=idempotency_key(
+                "ui_action",
+                f"{action_id}|{status}|{owner}|{_due_arg}|{defer}|{note}|{_clear_owner}|{_clear_defer}"),
             clear_owner=_clear_owner,
             clear_defer=_clear_defer,
         )

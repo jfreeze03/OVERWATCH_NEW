@@ -169,7 +169,11 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             "label": f"Warehouse spend — {pair['label_a']}",
             "value": format_usd(a_usd),
             "delta": _delta_chip(a_usd, b_usd),
-            "delta_color": "inverse" if a_usd > b_usd else "normal",
+            # Higher-is-worse: color by the metric's fixed polarity, not the A-vs-B
+            # outcome. 'inverse' -> a negative delta (A cheaper than B) reads GREEN and a
+            # positive delta reads RED. The old `else "normal"` painted a favorable
+            # (negative) delta RED — every comparison read as bad (round-2 bug hunt).
+            "delta_color": "inverse",
             "help": "Exact warehouse metering x rate, company-scopable. "
                     f"B = {format_usd(b_usd)}.",
         })
@@ -184,11 +188,11 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
         b_rate = (bf / bq * 100) if bq else 0.0
         kpis.append({"label": "Fail rate", "value": f"{a_rate:.2f}%",
                      "delta": f"{a_rate - b_rate:+.2f} pts vs B",
-                     "delta_color": "inverse" if a_rate > b_rate else "normal",
+                     "delta_color": "inverse",   # higher-is-worse: A better than B -> green
                      "help": f"B = {b_rate:.2f}% ({bf:,.0f} of {bq:,.0f})."})
         kpis.append({"label": "Queued", "value": humanize_duration(aqu, "s"),
                      "delta": _delta_chip(aqu, bqu),
-                     "delta_color": "inverse" if aqu > bqu else "normal",
+                     "delta_color": "inverse",   # higher-is-worse
                      "help": f"B = {humanize_duration(bqu, 's')}."})
     if bill.usable():
         # C1: price AI/Cortex credits at the AI rate. compare_billed carries the
@@ -205,7 +209,7 @@ def _compare_tab(company: str, rate: float, ai_rate: float) -> None:
             "label": "Account billed",
             "value": format_usd(ab),
             "delta": _delta_chip(ab, bb),
-            "delta_color": "inverse" if ab > bb else "normal",
+            "delta_color": "inverse",   # higher-is-worse: A billed less than B -> green
             "help": "Every service, account-wide — metering-daily has no "
                     "company grain, so this ignores the company filter. AI/Cortex "
                     f"credits price at the AI rate. B = {format_usd(bb)}.",

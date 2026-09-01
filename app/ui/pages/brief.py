@@ -268,8 +268,11 @@ def render() -> None:
         _age = (f", oldest {humanize_duration(_oldest_crit_h, 'h')}"
                 if _oldest_crit_h is not None else "")
         _vsig.append(Signal("bad", f"{scoped_crit} open critical alert(s){_age}"))
-    if _inc.ok and len(_inc.df) > 0:
-        _vsig.append(Signal("bad", f"{len(_inc.df)} open incident(s)"))
+    if _inc.ok and _n_inc > 0:
+        # Use the UNCAPPED count (_n_inc, from incident_metrics.OPEN_NOW) the KPI above uses,
+        # not len() of the LIMIT-5 feed — else the verdict says "5" while the KPI says the true
+        # count for >5 open incidents (round-2 bug hunt; the KPI was hardened, this sibling wasn't).
+        _vsig.append(Signal("bad", f"{_n_inc} open incident(s)"))
     if exh.usable():
         _erow = exh.df.iloc[0]
         if safe_float(_erow.get("TOTAL")) > 0:

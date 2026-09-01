@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.417.0 - Bug hunt round 2: consistency, format, date-time, RCA, idempotency (2026-09-01)
+
+A second 12-dimension adversarial sweep (aggregation/join, pure-logic edges, cross-surface consistency,
+display/format, date-time, a v4.416 regression check, incident/RCA, security, ask, state/writes) — refute-
+verified, then ground-truthed by hand. 12 confirmed fixed, 3 refuted.
+
+- **alloc_xdim_attribution coverage gate ignored Last-month bounds** (a v4.408 regression the round-1
+  sweep missed): the data scope was bounded but the `cov` interior-day count + `FIRST_DAY` gate still
+  measured the trailing window — so it could pass on a covered trailing window while the served month was
+  gappy and silently under-report per-entity attribution. Gate now follows the bounded calendar range.
+- **Delta-color inversions** — Compare-mode KPIs (warehouse spend, fail rate, queued, billed) and the
+  warehouse-change "better/worse" chips painted *favorable* differences RED. Both now color by the
+  metric's fixed polarity (`inverse`), so cheaper/improved reads green.
+- **Brief "should I worry?" verdict** undercounted open incidents (LIMIT-5 feed) while the KPI beside it
+  used the uncapped count — now both use the uncapped `incident_metrics.OPEN_NOW`.
+- **Account-clock date anchors** — storage calendar-month (`storage_by_database_calendar[_live]`) and the
+  savings **quarter** boundary (`savings_summary_quarter`) used session-tz `CURRENT_DATE()`; they now use
+  account-tz (America/Chicago), so they don't blank/mislabel at month/quarter boundaries or disagree with
+  account-anchored siblings. New `common.account_today_sql()`.
+- **RCA** stamped a day-grain spend anomaly at midnight, so a same-day incident onset read it as a
+  *preceding cause*; day-grain anomalies are now stamped end-of-day (a same-day spike reads as symptom,
+  LOW-capped; a prior-day spike still precedes).
+- **Capacity forecast** showed a cross-channel *max* CURRENT_PRESSURE_INDEX next to an ETA from a different
+  (driver) channel — self-contradictory. A FORECAST row now reports the driver channel's current, so the
+  current, the ETA, and the BASIS describe one channel.
+- **Write idempotency** — the work-item save and experiment-settle CALLs embedded a fresh `uuid4()`
+  request_key, defeating the procs' dedup so an at-least-once retry double-wrote (audit/comment row;
+  savings-ledger booking). Both now use a stable content-signature `idempotency_key`.
+
+Refuted (3): a repeat-fingerprint MAX aggregate (per-day maxes, correct), a RISK_SCORE object-grant count
+(no admin-member gap), and a boss-chart company-filter (already carries the `OR ='ALL'` arm). 15 new tests.
+
 ## 4.416.0 - Comprehensive bug hunt: Last-month threading gaps + Cortex projection (2026-09-01)
 
 A 12-dimension adversarial sweep (each finding refute-verified, then ground-truthed by hand) plus an

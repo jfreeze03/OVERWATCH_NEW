@@ -13,6 +13,8 @@ from __future__ import annotations
 from app import companies
 from app.core.sqlsafe import sql_literal
 from app.data.common import (
+    account_month_start_sql,
+    account_today_sql,
     ai_service_predicate,
     and_where,
     bounded_days,
@@ -464,12 +466,16 @@ def storage_by_database_calendar(company: str = "ALL", database: str = "", prior
     2026-07-14): average of daily bytes over the current month-to-date
     (excluding today's partial day) or the prior completed calendar month.
     Snowflake bills storage on the monthly average of daily on-disk bytes."""
+    # Account-tz month anchors (America/Chicago), matching account_today() and the app's
+    # other calendar-month surfaces. Session-tz CURRENT_DATE() drifts a day at the month
+    # boundary — blanking the current-month panel and mislabeling the prior month, and
+    # disagreeing with account-anchored siblings (round-2 bug hunt).
     if prior:
-        lo = "DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE()))"
-        hi = "DATE_TRUNC('month', CURRENT_DATE())"
+        lo = f"DATE_TRUNC('month', DATEADD('month', -1, {account_today_sql()}))"
+        hi = account_month_start_sql()
     else:
-        lo = "DATE_TRUNC('month', CURRENT_DATE())"
-        hi = "CURRENT_DATE()"
+        lo = account_month_start_sql()
+        hi = account_today_sql()
     where = and_where(f"DAY >= {lo}", f"DAY < {hi}",
                       companies.database_clause(company),
                       companies.database_equals_clause(database))
@@ -495,12 +501,16 @@ ORDER BY DB_BYTES DESC
 def storage_by_database_calendar_live(company: str = "ALL", database: str = "", prior: bool = False) -> str:
     """Live fallback for storage_by_database_calendar (fact empty): same
     calendar-month billing basis from DATABASE_STORAGE_USAGE_HISTORY."""
+    # Account-tz month anchors (America/Chicago), matching account_today() and the app's
+    # other calendar-month surfaces. Session-tz CURRENT_DATE() drifts a day at the month
+    # boundary — blanking the current-month panel and mislabeling the prior month, and
+    # disagreeing with account-anchored siblings (round-2 bug hunt).
     if prior:
-        lo = "DATE_TRUNC('month', DATEADD('month', -1, CURRENT_DATE()))"
-        hi = "DATE_TRUNC('month', CURRENT_DATE())"
+        lo = f"DATE_TRUNC('month', DATEADD('month', -1, {account_today_sql()}))"
+        hi = account_month_start_sql()
     else:
-        lo = "DATE_TRUNC('month', CURRENT_DATE())"
-        hi = "CURRENT_DATE()"
+        lo = account_month_start_sql()
+        hi = account_today_sql()
     where = and_where(f"USAGE_DATE >= {lo}", f"USAGE_DATE < {hi}",
                       companies.database_clause(company),
                       companies.database_equals_clause(database))

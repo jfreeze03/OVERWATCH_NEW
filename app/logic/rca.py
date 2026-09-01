@@ -164,10 +164,17 @@ def candidates_from_anomalies(hits: list | pd.DataFrame | None) -> list[dict]:
             continue
         # |z| -> 0..1 (z of 3.5 is the flag threshold; 8+ is extreme)
         mag = max(0.0, min(abs(z) / 8.0, 1.0))
+        # A DAY-grain spike has no intra-day order, so stamp it at END-of-day: a spike on the
+        # SAME calendar day as onset then reads as after-onset (weak, LOW-capped) rather than
+        # "14h before" — a same-day spend spike is usually the incident's SYMPTOM, not its
+        # cause, and must not headline as a confident cause. A prior-day spike still precedes.
+        _when = _to_dt(h.get("day"))
+        if _when is not None:
+            _when = _when.replace(hour=23, minute=59, second=59)
         out.append({
             "kind": "spend_anomaly",
             "title": f"Spend {'spike' if z > 0 else 'drop'} on {label} (robust-z {z:+.1f})",
-            "when": _to_dt(h.get("day")), "entity": label, "magnitude": mag,
+            "when": _when, "entity": label, "magnitude": mag,
             "magnitude_text": f"z {z:+.1f}, ${safe_float(h.get('value')):,.0f} that day",
             "changed_by": "",
             "evidence": {"warehouse": label, "z": round(z, 1), "value_usd": round(safe_float(h.get("value")), 0)},

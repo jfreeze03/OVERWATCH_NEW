@@ -7,7 +7,7 @@ import contextlib
 import pandas as pd
 import streamlit as st
 
-from app.core.identity import viewer_name
+from app.core.identity import idempotency_key, viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
@@ -999,6 +999,13 @@ def _render_experiment_detail(row) -> None:
             experiment_id, status=update_status, result=result_note,
             verified_usd=verified_value if update_status == "VERIFIED" else None,
             actor=viewer_name(),
+            # STABLE content-signature request_key (not a fresh uuid) so the settle proc
+            # dedups an at-least-once retry into an idempotent no-op instead of double-booking
+            # the savings ledger / writing a duplicate activity row (round-2 bug hunt).
+            request_key=idempotency_key(
+                "ui_experiment",
+                f"{experiment_id}|{update_status}|{result_note}|"
+                f"{verified_value if update_status == 'VERIFIED' else ''}"),
         )
         # F58: a plain-English effect line above the SQL — name the status move
         # and the ledger consequence a VERIFIED save carries ("book $X to the

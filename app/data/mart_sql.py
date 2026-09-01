@@ -17,6 +17,7 @@ from app.config import (
 from app.core.sqlsafe import contains_filter, sql_literal
 from app.data.common import (
     account_month_start_sql,
+    account_today_sql,
     ai_service_predicate,
     and_where,
     bounded_days,
@@ -1202,14 +1203,19 @@ FROM (
 
 def savings_summary_quarter() -> str:
     """The ROI numerator: VERIFIED savings this quarter (never mixed with
-    estimates) plus the open estimated pipeline, labeled separately."""
+    estimates) plus the open estimated pipeline, labeled separately.
+
+    Quarter start is anchored on the ACCOUNT clock (account_today_sql), matching Decision
+    Studio's account-time quarter — session-tz DATE_TRUNC('quarter', CURRENT_DATE()) drifted
+    a day at a quarter change and disagreed with the DS surface (round-2 bug hunt)."""
+    _q0 = f"DATE_TRUNC('quarter', {account_today_sql()})"
     return f"""
 SELECT
     ROUND(SUM(IFF(STATE = 'VERIFIED'
-                  AND VERIFIED_AT >= DATE_TRUNC('quarter', CURRENT_DATE()),
+                  AND VERIFIED_AT >= {_q0},
                   COALESCE(VERIFIED_USD, 0), 0)), 2) AS VERIFIED_QTD_USD,
     COUNT_IF(STATE = 'VERIFIED'
-             AND VERIFIED_AT >= DATE_TRUNC('quarter', CURRENT_DATE())) AS VERIFIED_ITEMS,
+             AND VERIFIED_AT >= {_q0}) AS VERIFIED_ITEMS,
     ROUND(SUM(IFF(STATE = 'ESTIMATED', COALESCE(ESTIMATED_USD, 0), 0)), 2) AS ESTIMATED_OPEN_USD
 FROM {core_object("SAVINGS_LEDGER")}
 """

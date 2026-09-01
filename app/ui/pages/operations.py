@@ -2108,8 +2108,12 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
                     "value": _wc_val(d),
                     "delta": (f"{d['delta_pct']:+.1f}%"
                               if d["delta_pct"] is not None else "new load"),
-                    "delta_color": ("inverse" if d["direction"] == "worse"
-                                    else "normal" if d["direction"] == "better" else "off"),
+                    # All five metrics are lower-is-better, so color by that fixed polarity:
+                    # 'inverse' -> a negative delta (improvement) reads GREEN, a positive
+                    # (regression) reads RED. The old 'better'->"normal" arm painted an
+                    # improvement RED (round-2 bug hunt).
+                    "delta_color": ("inverse" if d["direction"] in ("worse", "better")
+                                    else "off"),
                 } for d in deltas[:5]])
             else:
                 st.caption("Before/after stats still accumulating for this change.")

@@ -17,7 +17,12 @@ def test_calendar_storage_readers():
             assert "DATE_TRUNC('month'" in sql
             assert "FAILSAFE_BYTES" in sql and "DAYS_AVERAGED" in sql
             sqlglot.parse(sql, dialect="snowflake")
-    assert "< CURRENT_DATE()" in cost_sql.storage_by_database_calendar("ALFA", prior=False)
+    # current-month upper bound is the ACCOUNT-tz today (exclusive; excludes today's
+    # partial), not session CURRENT_DATE() — fixes the month-boundary drift + the disagreement
+    # with account-anchored siblings (round-2 bug hunt).
+    _cur = cost_sql.storage_by_database_calendar("ALFA", prior=False)
+    assert "< CONVERT_TIMEZONE('America/Chicago', CURRENT_TIMESTAMP())::DATE" in _cur
+    assert "CURRENT_DATE()" not in _cur                       # no session-tz anchor remains
     assert "DATEADD('month', -1" in cost_sql.storage_by_database_calendar("ALFA", prior=True)
 
 

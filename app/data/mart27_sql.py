@@ -1084,6 +1084,19 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
         companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "x.DATABASE_NAME"),
     )
+    # The coverage probe must measure the SAME window the panel serves. For 'Last month'
+    # (bounds) that is the bounded calendar range, NOT a trailing today-anchored window —
+    # else the gate could pass on a well-covered trailing window while the served month is
+    # gappy and silently under-report (round-2 bug hunt: this gate was missed when the data
+    # scope was bounded). The interior-day count and FIRST_DAY gate both follow the window.
+    if bounds is not None:
+        _cs, _ce = f"'{bounds[0].isoformat()}'", f"'{bounds[1].isoformat()}'"
+        cov_window = f"DAY >= {_cs} AND DAY < {_ce}"
+        first_day_gate = f"(SELECT FIRST_DAY FROM cov) <= {_cs}"
+    else:
+        cov_window = (f"DAY >= DATEADD('day', -{days}, CURRENT_DATE()) "
+                      f"AND DAY < CURRENT_DATE()")
+        first_day_gate = f"(SELECT FIRST_DAY FROM cov) <= DATEADD('day', -{days}, CURRENT_DATE())"
     # #18: the old gate ``FIRST_DAY <= today - days + 1`` permitted ONE missing
     # day, so a 7d answer could be ~14% incomplete (the window's first day absent)
     # and still pass, silently under-reporting. Require BOTH the exact lower bound
@@ -1093,9 +1106,7 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     return f"""
 WITH cov AS (
     SELECT MIN(DAY) AS FIRST_DAY,
-           COUNT(DISTINCT CASE
-                   WHEN DAY >= DATEADD('day', -{days}, CURRENT_DATE())
-                    AND DAY < CURRENT_DATE() THEN DAY END) AS WINDOW_DAYS
+           COUNT(DISTINCT CASE WHEN {cov_window} THEN DAY END) AS WINDOW_DAYS
     FROM {mart_object("FACT_COST_ALLOC_XDIM_DAILY")} x
     WHERE {cov_scope}
 ),
@@ -1111,7 +1122,7 @@ SELECT
     ROUND(SUM(ALLOC_CREDITS), 6) AS ALLOC_CREDITS
 FROM scoped
 WHERE {display}
-  AND (SELECT FIRST_DAY FROM cov) <= DATEADD('day', -{days}, CURRENT_DATE())
+  AND {first_day_gate}
   AND (SELECT WINDOW_DAYS FROM cov) >= {days}
 GROUP BY KEY_NAME
 ORDER BY ALLOC_CREDITS DESC
