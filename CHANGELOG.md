@@ -3,8 +3,9 @@
 ## 4.406.0 - Hardening pass on this session's new features (2026-09-01)
 
 An adversarial hardening + smoke-test sweep of everything shipped this session (Ask USD/Cortex,
-the scope-bar fix, the recovery boundary, entitlement). 18 findings triaged; the safe fixes land here,
-and the one metric-definition finding is FLAGGED to the owner rather than silently changed (below).
+the scope-bar fix, the recovery boundary, entitlement). 18 findings triaged; the safe fixes land here.
+The one "HIGH" (a Decision Studio ROI horizon mismatch) was ground-truthed and cleared as a false
+positive — the code is dimensionally correct and already documented as a deliberate design (below).
 
 - **[Ask hardening] The Cortex answerer's gate now needs an AI word AND a spend word.** It routed on a
   lone AI token, so "why is my llm task failing" could hijack it away from task-failures. The
@@ -30,12 +31,17 @@ and the one metric-definition finding is FLAGGED to the owner rather than silent
 - **[UI — task graph] A Highlight status with zero nodes no longer greys the whole graph.** Selecting
   e.g. "Suspended" when nothing is suspended dimmed every node (nothing left to highlight), reading as a
   blank/broken chart. Those options are now disabled at render, mirroring the fit-button guards.
-- **[FLAGGED to owner — not changed] Decision Studio's "pays for itself" ratio mixes horizons.**
-  `_proof_signals` divides QTD cumulative verified savings (numerator) by trailing-30-day app run-cost
-  (denominator) — a horizon mismatch that inflates the flagship ROI multiple. This is pre-existing (in
-  `_scorecard`/`proof_verdict`), and correcting it changes a tracked proof number, so it needs an owner
-  decision on the fix (normalize QTD→30d, match the denominator to QTD, or add a `savings_summary_30d`
-  builder) rather than a silent redefinition.
+- **[Investigated — NOT a bug] Decision Studio's "pays for itself" ratio was checked for a horizon
+  mismatch and cleared.** A finder flagged `_proof_signals` dividing a QTD numerator (`VERIFIED_QTD_USD`)
+  by a trailing-30-day denominator (`APP_CREDITS_30D`) as inflating the flagship ROI multiple. Ground-
+  truthing overturned it: every savings item is a **monthly-magnitude** value (booked as `monthly_usd` in
+  `savings_rollup.py`; Decision Studio impact is "normalized to 30 days"), so the QTD sum is the
+  *accumulated monthly savings rate*, and dividing a monthly rate by the monthly run cost is dimensionally
+  consistent — monthly ÷ monthly, exactly the "same horizon on both sides" the scorecard tooltip claims.
+  This was already the deliberate 2026-08-30 fix, documented at `mart_sql.py:1190-1197`. Residual worth an
+  owner's awareness (not a code defect): the QTD numerator accumulates the monthly rate across the quarter,
+  so a verified saving that later lapses would overstate the current rate until the quarter rolls — a
+  savings-durability modeling question, not a horizon error.
 
 ## 4.405.0 - Defer-tier triage: fix the one real defect (2026-09-01)
 
