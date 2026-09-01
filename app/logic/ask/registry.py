@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from app.data import insights_sql, mart27_sql, mart_sql
+from app.data import cortex_sql, insights_sql, mart27_sql, mart_sql
 from app.data.common import bounded_days, resolve_effective_window
 from app.logic.anomaly import robust_zscores
 from app.logic.ask.types import (
@@ -539,6 +539,111 @@ def _analyze_task_failures(
 # --------------------------------------------------------------------------- #
 # the registry
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Answerer 5 — "which model is driving AI / Cortex spend?"
+# --------------------------------------------------------------------------- #
+_CORTEX_INTENT = "cortex_spend_by_model"
+
+
+def _needs_cortex_by_model(params: AskParams) -> list[QuerySpec]:
+    # CORTEX_FUNCTIONS_USAGE_HISTORY has no company/db grain, so the page company
+    # filter does not apply — the answer is honestly account-wide.
+    return [
+        QuerySpec(
+            key="cortex",
+            sql=cortex_sql.cortex_model_costs(params.days),
+            tier="recent",
+        )
+    ]
+
+
+def _analyze_cortex_by_model(
+    params: AskParams, frames: dict[str, pd.DataFrame]
+) -> AnswerResult:
+    src = (f"cortex_sql.cortex_model_costs({params.days}d) — "
+           "ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY (account-wide)")
+    meta: dict[str, object] = {"days": params.days, "company": params.company}
+    no_data = (
+        f"No Cortex/AI function spend in the last {params.days}d — "
+        "CORTEX_FUNCTIONS_USAGE_HISTORY is empty or unavailable on this account "
+        "(Cortex Code via Snowsight/CLI bills through a separate usage view)."
+    )
+    df = frames.get("cortex")
+    if (df is None or df.empty or "CREDITS" not in df.columns
+            or "MODEL_NAME" not in df.columns):
+        return AnswerResult(intent=_CORTEX_INTENT, headline=no_data,
+                            source=src, confidence="no_data", params=meta)
+
+    d = df.copy()
+    d["CREDITS"] = pd.to_numeric(d["CREDITS"], errors="coerce").fillna(0.0)
+    # A model can appear across several functions; roll up to the model so "which
+    # model" ranks the model, not each (function, model) pair.
+    agg = (
+        d.groupby("MODEL_NAME", as_index=False)
+        .agg(AI_CREDITS=("CREDITS", "sum"))
+        .sort_values("AI_CREDITS", ascending=False)
+        .reset_index(drop=True)
+    )
+    total = float(agg["AI_CREDITS"].sum())
+    if agg.empty or total <= 0:
+        return AnswerResult(intent=_CORTEX_INTENT, headline=no_data,
+                            source=src, confidence="no_data", params=meta)
+
+    z = robust_zscores(agg["AI_CREDITS"])
+    top = agg.iloc[0]
+    top_model = str(top["MODEL_NAME"])
+    # 'n/a' is real spend the usage view could not tag to a model — keep it in the
+    # ranking (it is not fabricated) but name it honestly in prose.
+    top_disp = "unattributed AI functions (no model tag)" if top_model == "n/a" else top_model
+    top_credits = float(top["AI_CREDITS"])
+    top_share = top_credits / total
+    top_z = _num(z.iloc[0]) if len(z) else 0.0
+    outlier = top_z >= OUTLIER_Z
+    meta["top_z"] = round(top_z, 2)
+
+    tail = f" — a clear outlier vs the other models (z={top_z:.1f})" if outlier else ""
+    headline = (
+        f"Over the last {params.days}d, {top_disp} is the top AI/Cortex spender: "
+        f"{_fmt(top_credits)} credits ({top_share * 100:.0f}% of AI-function spend){tail}."
+    )
+
+    bullets: list[str] = ["Account-wide — Cortex function usage carries no company grain."]
+    for i in range(min(5, len(agg))):
+        r = agg.iloc[i]
+        cr = float(r["AI_CREDITS"])
+        name = "n/a (no model tag)" if str(r["MODEL_NAME"]) == "n/a" else str(r["MODEL_NAME"])
+        bullets.append(f"{name}: {_fmt(cr)} credits ({cr / total * 100:.0f}%)")
+    n = len(agg)
+    if not outlier:
+        if n < 5:
+            bullets.append(
+                f"Only {n} model{'s' if n != 1 else ''} had AI spend this window — "
+                "too few for the peer-outlier test; read the ranking directly."
+            )
+        elif top_share >= 0.5:
+            bullets.append(
+                f"{top_disp} carries the majority ({top_share * 100:.0f}%) of "
+                "AI-function spend, though not a statistical outlier vs the others."
+            )
+        else:
+            bullets.append(
+                "No single model is a statistical outlier this window — AI spend is "
+                "spread across models, not one runaway."
+            )
+
+    ev = agg.head(15)[["MODEL_NAME", "AI_CREDITS"]].copy()
+    ev["CREDIT_SHARE"] = ev["AI_CREDITS"] / total
+    return AnswerResult(
+        intent=_CORTEX_INTENT,
+        headline=headline,
+        bullets=bullets,
+        evidence=ev,
+        source=src,
+        confidence="grounded",
+        params=meta,
+    )
+
+
 REGISTRY: tuple[Answerer, ...] = (
     Answerer(
         intent=_SPEND_INTENT,
@@ -631,5 +736,29 @@ REGISTRY: tuple[Answerer, ...] = (
         ),
         needs=_needs_task_failures,
         analyze=_analyze_task_failures,
+    ),
+    Answerer(
+        intent=_CORTEX_INTENT,
+        title="Which model is driving AI / Cortex spend",
+        examples=(
+            "which model is driving AI spend",
+            "what is driving cortex credits",
+            "top cortex models in the last 30 days",
+        ),
+        keywords=(
+            "cortex", "ai", "model", "models", "llm", "token", "tokens",
+            "genai", "embedding", "spend", "credits", "driving", "coco",
+        ),
+        require_all=(
+            # SINGLE gate: any AI/Cortex-domain phrase routes here. A plain spend
+            # question carries no AI phrase, so this never steals it; priority breaks
+            # a tie with the generic spender for "who is driving AI spend".
+            ("cortex", "genai", "gen ai", "llm", "token", "tokens",
+             "ai spend", "ai cost", "ai credit", "ai credits", "ai model",
+             "ai models", "coco", "embedding", "embeddings"),
+        ),
+        needs=_needs_cortex_by_model,
+        analyze=_analyze_cortex_by_model,
+        priority=1,
     ),
 )

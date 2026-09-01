@@ -27,10 +27,10 @@ from app.ui.components import load_settings, page_header
 _PAGE = "Ask"
 
 # Intents whose credits are AI/Cortex-metered (priced at AI_CREDIT_PRICE_USD, not the
-# compute rate). Empty today — every registered answerer reports compute/cloud-services
-# credits — but a future Cortex answerer registers its intent here (per-column AI naming
-# also forces the AI rate, so a mixed table still prices each column correctly).
-_AI_INTENTS: frozenset[str] = frozenset()
+# compute rate). The Cortex answerer already names its column AI_CREDITS, which the pricing
+# helper prices at the AI rate on its own; declaring the intent here is belt-and-suspenders
+# and the extension point for any future AI answerer with a generically-named credit column.
+_AI_INTENTS: frozenset[str] = frozenset({"cortex_spend_by_model"})
 
 
 def _capabilities(heading: str) -> None:

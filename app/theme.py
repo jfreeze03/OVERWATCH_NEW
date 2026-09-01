@@ -175,7 +175,10 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-section--info .ow-section__badge { color:var(--ow-info); border-color:rgba(96,165,250,0.42); }
 
 .ow-filter-contract { margin:-2px 0 10px 0; padding:5px 10px; border-left:2px solid var(--ow-info);
-  color:var(--ow-ink-mute); background:rgba(96,165,250,0.07); font-size:0.72rem; line-height:1.45; }
+  color:var(--ow-ink-mute); background:rgba(96,165,250,0.07); font-size:0.72rem; line-height:1.45;
+  /* Cap the measure so the long scope-contract sentence wraps into a tidy block instead
+     of running the full 1360px content width out to the right edge on wide monitors. */
+  max-width:80ch; }
 
 .ow-exceptions { margin:4px 0 10px; border-top:1px solid var(--ow-hairline);
   border-bottom:1px solid var(--ow-hairline); }

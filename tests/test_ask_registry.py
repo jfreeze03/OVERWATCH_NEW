@@ -452,6 +452,53 @@ def test_task_failures_spec_is_uncapped_so_rate_is_not_truncated():
 
 # ================================================= wiring lock ==============
 
+# ================================================= answerer 5: cortex/AI ====
+
+def test_cortex_question_routes_to_model_answerer():
+    for q in ("which model is driving AI spend", "what is driving cortex credits",
+              "top cortex models in the last 30 days"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == "cortex_spend_by_model", q
+    # a plain compute-spend question still goes to the generic spender, not cortex
+    assert route("which user is causing spend spikes", default_days=30,
+                 company="ALL").answerer.intent == "spend_spike_by_user"
+    # and a cloud-services question is not stolen by cortex
+    assert route("top cloud services queries in the last 30 days", default_days=30,
+                 company="ALL").answerer.intent == "cloud_services_spike_by_query"
+
+
+def test_cortex_answer_rolls_up_by_model_and_emits_ai_credits_evidence():
+    from app.logic.ask.registry import _analyze_cortex_by_model
+    df = pd.DataFrame({
+        "FUNCTION_NAME": ["COMPLETE", "COMPLETE", "EMBED_TEXT_768"],
+        "MODEL_NAME": ["llama3.1-70b", "llama3.1-70b", "e5-base-v2"],
+        "TOKENS": [1_000_000, 500_000, 200_000],
+        "CREDITS": [80.0, 40.0, 5.0],
+        "CREDITS_PER_1M_TOKENS": [0.08, 0.08, 0.025],
+    })
+    res = _analyze_cortex_by_model(AskParams(30, "ALL"), {"cortex": df})
+    assert res.confidence == "grounded"
+    assert "llama3.1-70b" in res.headline
+    assert "120" in res.headline                      # 80+40 rolled up to the model
+    assert res.evidence is not None and "AI_CREDITS" in res.evidence.columns
+    assert any("Account-wide" in b for b in res.bullets)
+
+
+def test_cortex_answer_no_data_on_empty_view():
+    from app.logic.ask.registry import _analyze_cortex_by_model
+    r = _analyze_cortex_by_model(AskParams(30, "ALL"), {"cortex": pd.DataFrame()})
+    assert r.confidence == "no_data"
+
+
+def test_cortex_evidence_ai_credits_column_triggers_the_coco_rate():
+    # the whole point: the AI_CREDITS column name makes the Ask USD helper price at
+    # the $2.20 AI/Cortex rate, not the $3.68 compute rate.
+    from app.logic.ask.pricing import add_usd_estimates
+    ev = pd.DataFrame({"MODEL_NAME": ["m"], "AI_CREDITS": [10.0]})
+    out, cols, rates = add_usd_estimates(ev, compute_rate=3.68, ai_rate=2.20)
+    assert cols == ["AI_CREDITS_USD"] and rates == {2.20}
+    assert out["AI_CREDITS_USD"].iloc[0] == 22.0
+
+
 def test_ask_page_is_wired_and_isolated():
     # the ONE nav wiring point (main.py) + owner-only visibility (config.py).
     main = (_ROOT / "app" / "main.py").read_text(encoding="utf-8")

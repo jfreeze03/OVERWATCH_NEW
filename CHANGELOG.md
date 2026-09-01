@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.404.0 - Ask Cortex answerer (CoCo rate) + contract-line wrap (2026-09-01)
+
+- **[#1] Ask OVERWATCH now answers Cortex/AI-spend questions — and the $2.20 rate fires.** A new
+  answerer ("which model is driving AI spend", "what is driving cortex credits") ranks Cortex models
+  by token credits from `ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY`, with the same outlier / honest
+  no-data / account-wide-scope discipline as the other answerers. Its evidence column is named
+  `AI_CREDITS`, so the USD helper prices it at the **CoCo/AI rate ($2.20)** automatically (the intent is
+  also registered in `_AI_INTENTS`) — completing the per-question rate logic we built earlier: compute
+  questions show $3.68, this one shows $2.20. Routes on a single AI/Cortex gate at priority 1, so it
+  never steals plain-spend or cloud-services questions. New tests in `test_ask_registry.py`.
+- **[#4] Scope-contract line no longer runs to the edge.** The long "Applies: …" sentence had no
+  measure cap, so it stretched the full 1360px content width on wide monitors. Capped `.ow-filter-
+  contract` to `max-width:80ch` so it wraps into a tidy readable block.
+
 ## 4.403.0 - Note the scope-bar/header fix against regression (2026-09-01)
 
 - **Documented the scope-bar-clip fix so it can't silently come back.** The v4.402.0 fix (keep the fixed
