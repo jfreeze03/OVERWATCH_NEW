@@ -59,43 +59,51 @@ def test_caption_sweep_second_increment_brief_and_security():
 
 
 def test_caption_sweep_cost_part1_four_files():
-    # #1 (Cost sweep, part 1): pure basis/provenance captions on the smaller Cost files
-    # convert to the audit-only methodology_note; legends, misread caveats, scope cues,
-    # and data-bearing lines stay visible in operator mode.
+    # #1 (Cost sweep, part 1 — post re-audit): only truly pure basis/provenance captions
+    # stay converted; misread caveats, wayfinding, and display legends were reverted to
+    # plain captions on the re-audit (they must stay visible in operator mode).
     cost = _src("app/ui/pages/cost.py")
     spend = _src("app/ui/pages/cost_parts/spend.py")
     contract = _src("app/ui/pages/cost_parts/contract.py")
     unit = _src("app/ui/pages/cost_parts/unit_costs.py")
-    for src in (cost, spend, contract, unit):
+    for src in (spend, contract, unit):
         assert "    methodology_note,\n" in src
-    assert 'methodology_note("Chargeback precision is capped by tag coverage' in cost
+    # cost.py's only conversion (the chargeback caveat) was reverted — it's a
+    # misread-prevention line, so the file no longer imports or uses methodology_note.
+    assert "methodology_note" not in cost
+    assert 'st.caption("Chargeback precision is capped by tag coverage' in cost
     assert 'methodology_note("Per-user notebook-runtime cost on this pool' in spend
     assert contract.count("methodology_note(") >= 1 and "Org-level billed spend in currency" in contract
-    # unit_costs converts exactly its 3 provenance captions; the 3 legends/caveats below
-    # stayed plain captions (ground-truth overrides of the workflow's CONVERT calls).
-    assert unit.count("methodology_note(") == 3
-    assert "Parent-before-child execution order" in unit   # tree indentation legend
-    assert "model = Cortex Code" in unit                   # "n/a" column legend
-    assert "not per-run metered" in unit                   # $/run misread caveat
+    # unit_costs keeps exactly ONE conversion (the grouping-basis note); the measured-basis
+    # wayfinding line and the $0-day display legend were reverted, and three legends/caveats
+    # were never converted.
+    assert unit.count("methodology_note(") == 1
+    assert 'st.caption(\n        "Measured price tags:' in unit   # wayfinding, reverted
+    assert '"$0 days with calls' in unit                          # $0.0000 legend, reverted
+    assert "Parent-before-child execution order" in unit          # tree indentation legend
+    assert "model = Cortex Code" in unit                          # "n/a" column legend
+    assert "not per-run metered" in unit                          # $/run misread caveat
 
 
 def test_caption_sweep_cost_part2_optimize():
-    # #1 (Cost sweep, part 2): optimize.py, the largest Cost file. Exactly 7 pure
-    # basis/model/ranking/provenance captions convert; legends and misread caveats stay.
+    # #1 (Cost sweep, part 2 — post re-audit): optimize.py keeps 5 pure basis/model/
+    # ranking/provenance conversions; the re-audit reverted two ("not a promise" and
+    # "Measured, not allocated" + reconciliation) back to plain captions.
     src = _src("app/ui/pages/cost_parts/optimize.py")
     assert "    methodology_note,\n" in src
     for conv in (
-        "Replays this window's observed credits",   # scenario replay model
         "Complete days only, fixed 90-day evidence window",  # forecast gating
         "Mechanical scenario model:",               # scenario model
-        "Measured, not allocated:",                 # measured basis
         "Live scan of SUCCESS SELECTs",             # ranking methodology
         "Books itself since V038",                  # self-booking provenance
     ):
         assert conv in src, conv
-    # exactly 7 conversions — guards against re-converting the kept legends/caveats
-    assert src.count("methodology_note(") == 7
-    # KEEP guards (ground-truth overrides of workflow CONVERTs)
+    # exactly 5 conversions — guards against re-converting the kept legends/caveats
+    assert src.count("methodology_note(") == 5
+    # reverted on re-audit (misread caveats — must stay visible)
+    assert 'st.caption(\n            "Replays this window' in src   # "not a promise"
+    assert 'st.caption(\n            "Measured, not allocated:' in src
+    # KEEP guards (never converted)
     assert "Actionable $ = idle minus one" in src         # column definition/legend
     assert "not a dollarized saving" in src               # eligibility misread caveat
     assert "the cost of building the object" in src       # cost-arm label legend

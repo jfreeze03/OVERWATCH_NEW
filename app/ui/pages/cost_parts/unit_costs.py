@@ -52,8 +52,9 @@ _UNIT_COST_MAX_DAYS = 30
 def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     company, days = f["company"], f["days"]
     database, schema_contains = f["database"], f["schema_contains"]
-    # #1: measured-basis provenance (source + lag + rate) → audit-mode only.
-    methodology_note(
+    # KEPT: the second sentence is where-to-go wayfinding (allocated view / task-graph
+    # panel) plus the measured-vs-allocated framing — read-correctly cues, kept visible.
+    st.caption(
         "Measured price tags: QUERY_ATTRIBUTION_HISTORY credits (~8h lag, idle time "
         "excluded) at your contract rate. For 'who owns the bill' including idle, "
         "use Optimization's allocated view; for pipelines, the task-graph panel below."
@@ -283,9 +284,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                     "USD": st.column_config.NumberColumn("$", format="$%.4f"),
                     "CREDITS_PER_CALL": st.column_config.NumberColumn("cr/call", format="%.6f"),
                 })
-                # #1: explains the $0-day data-lag artifact (methodology) → audit-mode only.
-                methodology_note("$0 days with calls = attribution not caught up (~8h) or "
-                                 "children ran without a warehouse — same caveats as the leaderboard.")
+                # KEPT: decodes the literal $0.0000 the trend table shows for lag/sub-cent
+                # days (a display legend), and the same caveat is kept visible on the leaderboard.
+                st.caption("$0 days with calls = attribution not caught up (~8h) or "
+                           "children ran without a warehouse — same caveats as the leaderboard.")
 
     with st.expander("Price a specific CALL or session (measured)"):
         st.caption(

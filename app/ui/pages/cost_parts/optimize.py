@@ -102,8 +102,8 @@ def _whatif_panel(sized, days: int, rate: float) -> None:
     was missing — every slider move re-rendered the whole grouped Cost page.
     The AST lock in test_codex_r21 makes 'Fragment:' docstrings binding."""
     with st.expander("Interactive what-if: size step + auto-suspend together"):
-        # #1: scenario-replay model methodology → audit-mode only.
-        methodology_note(
+        # KEPT: "as a bounded range — not a promise" is a misread-prevention caveat.
+        st.caption(
             "Replays this window's observed credits under a size step and a new "
             "auto-suspend, as a bounded range — not a promise. Busy credits land "
             "between rate-scaled (queries keep their wall time) and cost-neutral "
@@ -807,8 +807,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # ALONGSIDE the allocated one here on purpose — the value is the side-by-side
         # measured-vs-allocated contrast, not a duplicate of the Unit-costs price list.
         st.markdown("**Most expensive queries (measured $, exact attribution)**")
-        # #1: measured-basis provenance (measured vs allocated, lag, omissions) → audit-mode only.
-        methodology_note(
+        # KEPT: "Measured, not allocated" is a misread caveat, and the closing line
+        # reconciles why the measured total reads below the allocated one — both are
+        # read-correctly cues the operator needs, not audit-only methodology.
+        st.caption(
             "Measured, not allocated: exact QUERY_ATTRIBUTION_HISTORY credits for running "
             "each query, with warehouse idle time excluded (the allocated panel spreads the "
             "whole warehouse-hour bill, idle included). ~8h attribution lag; queries with no "

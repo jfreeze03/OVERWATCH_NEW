@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.395.0 - Caption sweep: Cost correctness re-audit (2026-08-31)
+
+- **[#1, Cost re-audit] Reverted five over-conversions caught on a thorough second pass.** A dedicated
+  re-audit of all seven Cost files (both directions: wrongly-converted and missed) found that the
+  first Cost pass was too aggressive on "X, not Y" misread caveats and where-to-go wayfinding. Five
+  captions that had been hidden in Audit mode are now plain `st.caption` again because the operator
+  needs them: the chargeback `"allocated, never attributed"` caveat (cost.py), the size-scenario
+  `"bounded range — not a promise"` and the `"Measured, not allocated … reads below the allocated one"`
+  reconciliation notes (optimize.py), the measured-price-tags line whose second sentence is wayfinding
+  to the allocated/pipeline views, and the `$0-days` note that decodes the literal `$0.0000` the trend
+  table shows (unit_costs.py). No missed conversions were found. Net: Cost conversions drop from 13 to
+  8, and `cost.py` no longer imports `methodology_note`. Locks updated to the new exact counts.
+
 ## 4.394.0 - Operator/Audit caption sweep: remaining pages (2026-08-31)
 
 - **[#1, remaining pages] Caption sweep across Operations, Control Room, Alerts, Decision Studio,

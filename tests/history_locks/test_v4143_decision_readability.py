@@ -199,7 +199,7 @@ def test_exception_first_and_decision_rows_are_wired_at_real_render_shapes() -> 
 
 
 def test_v4143_release_metadata_is_current() -> None:
-    assert 'APP_VERSION = "4.394.0"' in _source("app/config.py")
+    assert 'APP_VERSION = "4.395.0"' in _source("app/config.py")
     changelog = _source("CHANGELOG.md")
     assert "## 4.143.1 - Snowflake button compatibility hotfix (2026-08-03)" in changelog
     assert "## 4.143.0 - Decision-readable operating surfaces (2026-08-03)" in changelog
