@@ -589,8 +589,13 @@ def render() -> None:
             # current-year selection compares 182-vs-182 — label it with the REAL
             # comparison window, not the unclamped `days`, or the delta reads as a
             # year-over-prior-year move that is actually a half-year one.
-            _eff, _ = resolve_effective_window(days)
-            _ov_spend_delta = f"{_pct:+,.0f}% vs prior {_eff}d"
+            if _ov_bounds is not None:
+                # Last month compares whole calendar months (August vs July), not a
+                # trailing day-count — label it as such.
+                _ov_spend_delta = f"{_pct:+,.0f}% vs prior month"
+            else:
+                _eff, _ = resolve_effective_window(days)
+                _ov_spend_delta = f"{_pct:+,.0f}% vs prior {_eff}d"
 
     company_kpis = [
         {

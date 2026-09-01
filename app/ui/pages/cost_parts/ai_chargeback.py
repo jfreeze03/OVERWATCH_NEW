@@ -157,7 +157,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             return
         # Keep the live result's source/freshness/error for the caption and the
         # guard; swap in the window-sliced rollup the panel actually renders.
-        rollup_res = replace(live_res, df=rollup_from_user_daily(live_res.df, days))
+        rollup_res = replace(live_res, df=rollup_from_user_daily(live_res.df, days, bounds=bounds))
     if not guard(rollup_res,
                  "No Cortex Code usage (Snowsight or CLI) recorded in this window for this scope.",
                  setup_hint="If these views are not enabled in this account, this tab stays honest and empty."):
@@ -165,9 +165,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
 
     # P8/C7: one divisor for the whole tab — days the scope has actually been
     # observable, never the asked window when the data is younger than it.
-    eff_days = effective_window_days(rollup_res.df, days)
-    enriched = enrich_user_rollup(rollup_res.df, ai_rate, eff_days)
-    summary = rollup_summary(enriched, eff_days)
+    eff_days = effective_window_days(rollup_res.df, days, bounds=bounds)
+    enriched = enrich_user_rollup(rollup_res.df, ai_rate, eff_days, bounds=bounds)
+    summary = rollup_summary(enriched, eff_days, bounds=bounds)
     budget_kpi_item = (
         {"label": "AI monthly budget", "value": format_usd(ai_budget),
          "help": "AI_MONTHLY_BUDGET_USD from SETTINGS; drives the severity flags below."}
@@ -209,7 +209,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             # The 365d fetch that served the rollup already holds every day —
             # folding it costs nothing, where the old live cortex_code_daily
             # was a second 15s secure-view scan of the same two views.
-            daily_res = replace(live_res, df=daily_from_user_daily(live_res.df, days))
+            daily_res = replace(live_res, df=daily_from_user_daily(live_res.df, days, bounds=bounds))
         else:
             # The rollup came off the fact, so the fact covers this window: an
             # empty daily read here is the ANSWER, not a cold mart. Reviving the

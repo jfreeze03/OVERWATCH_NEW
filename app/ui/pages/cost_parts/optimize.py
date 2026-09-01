@@ -256,7 +256,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     # sizing below; the identical SQL shares one cached scan). GROSS idle, never "savings".
     _idle_head = run_mart_first(
         mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
-        insights_sql.idle_warehouse_analysis(days, company),
+        insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
         page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
@@ -296,7 +296,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             "Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
-            insights_sql.idle_warehouse_analysis(days, company),
+            insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
             page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
@@ -413,7 +413,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
             st.caption("Toggle to run the per-warehouse sizing profile on demand.")
         elif guard((prof_res := run_mart_first(
                         mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
-                        insights_sql.warehouse_sizing_profile(days, company),
+                        insights_sql.warehouse_sizing_profile(days, company, bounds=bounds),
                         page=_PAGE, key=f"sizing_{company}_{days}{_lm}", days=days,
                         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
@@ -693,7 +693,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         )
         if st.toggle("Run consolidation scan (hour-of-day activity)", key="opt_consolidation_toggle",
                      help="Reads WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY hour-of-day activity."):
-            act = run(insights_sql.warehouse_hourly_activity(days, company), page=_PAGE,
+            act = run(insights_sql.warehouse_hourly_activity(days, company, bounds=bounds), page=_PAGE,
                       key=f"wh_hourly_consol_{company}_{days}", tier="historical",
                       source="WAREHOUSE_METERING_HISTORY x FACT_QUERY_HOURLY (hour-of-day activity)")
             if guard(act, "No hour-of-day warehouse activity in this window."):
@@ -1419,7 +1419,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # no longer pays its own live metering x history join when the mart is up.
         idle_res = run_mart_first(
             mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
-            insights_sql.idle_warehouse_analysis(days, company),
+            insights_sql.idle_warehouse_analysis(days, company, bounds=bounds),
             page=_PAGE, key=f"remed_idle_{company}_{days}{_lm}", days=days,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")

@@ -175,7 +175,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # storage / transfer / marketplace / adjustments the metering credit-spend tile
     # structurally omits, so the headline reconciles to the invoice. Degrades quietly
     # (org visibility required); org data is UTC and lags ~72h so it trails near today.
-    allin_res = run(cost_sql.org_all_in_window_usd(days), page=_PAGE, key=f"org_allin_{days}",
+    allin_res = run(cost_sql.org_all_in_window_usd(days, bounds=bounds), page=_PAGE, key=f"org_allin_{days}",
                     tier="historical",
                     source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)")
     _tiles = [
@@ -324,7 +324,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         )
         if detail == "Replication":
             rep = run(
-                cost_sql.replication_by_database(days, company, database),
+                cost_sql.replication_by_database(days, company, database, bounds=bounds),
                 page=_PAGE,
                 key=f"replication_db_{company}_{database}_{days}",
                 tier="historical",
@@ -416,12 +416,12 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 [
                     {
                         "key": "pools",
-                        "sql": cost_sql.compute_pool_usage(days),
+                        "sql": cost_sql.compute_pool_usage(days, bounds=bounds),
                         "source": "SNOWPARK_CONTAINER_SERVICES_HISTORY (native pool detail)",
                     },
                     {
                         "key": "notebooks",
-                        "sql": cost_sql.notebook_container_usage(days),
+                        "sql": cost_sql.notebook_container_usage(days, bounds=bounds),
                         "source": "NOTEBOOKS_CONTAINER_RUNTIME_HISTORY (native notebook detail)",
                     },
                 ],
@@ -519,7 +519,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             # org rate card's implied $/TB, reconciled to billed TRANSFER_USD; same-
             # region transfer is free and priced at $0.
             eg = run(
-                cost_sql.transfer_egress_priced(days),
+                cost_sql.transfer_egress_priced(days, bounds=bounds),
                 page=_PAGE, key=f"egress_priced_{days}", tier="historical",
                 source="DATA_TRANSFER_HISTORY (egress bytes by source/target, billable flag)",
             )
@@ -531,7 +531,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 # skew by 30/days), and via the VERIFIED RATING_TYPE='DATA_TRANSFER' path
                 # (org_all_in_window_usd), not a SERVICE_TYPE string match.
                 org = run(
-                    cost_sql.org_all_in_window_usd(days), page=_PAGE,
+                    cost_sql.org_all_in_window_usd(days, bounds=bounds), page=_PAGE,
                     key=f"org_transfer_truth_{days}", tier="historical",
                     source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (data transfer, verified rating type)",
                     probe=True,
@@ -617,7 +617,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 result_caption(eg)
         else:
             market = run(
-                cost_sql.marketplace_paid_usage(days),
+                cost_sql.marketplace_paid_usage(days, bounds=bounds),
                 page=_PAGE,
                 key=f"marketplace_paid_{days}",
                 tier="historical",
@@ -687,13 +687,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             st.markdown(f"**{_fam_title}**")
             if _sel_wh:
                 comp = run(
-                    cost_sql.compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5),
+                    cost_sql.compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5, bounds=bounds),
                     page=_PAGE, key=f"compile_fams_{company}_{days}_{_sel_wh}", tier="recent",
                     source="ACCOUNT_USAGE.QUERY_HISTORY (compile-heavy families, per warehouse)")
             else:
                 comp = run_mart_first(
-                    mart27_sql.family_compile_heavy(days, company),
-                    cost_sql.compile_heavy_families(days, company),
+                    mart27_sql.family_compile_heavy(days, company, bounds=bounds),
+                    cost_sql.compile_heavy_families(days, company, bounds=bounds),
                     page=_PAGE, key=f"compile_fams_{company}_{days}",
                     mart_source="MART_QUERY_FAMILY_DAILY (mart, run-weighted averages)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (COMPILATION_TIME, live fallback)")
@@ -711,13 +711,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             # a warehouse selection uses the live per-warehouse read instead.
             if _sel_wh:
                 cs_types = run(
-                    cost_sql.cs_by_query_type(days, company, warehouse=_sel_wh),
+                    cost_sql.cs_by_query_type(days, company, warehouse=_sel_wh, bounds=bounds),
                     page=_PAGE, key=f"cs_types_{company}_{days}_{_sel_wh}", tier="recent",
                     source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, per warehouse)")
             else:
                 cs_types = run_mart_first(
-                    mart_sql.cs_by_query_type_mart(days, company),
-                    cost_sql.cs_by_query_type(days, company),
+                    mart_sql.cs_by_query_type_mart(days, company, bounds=bounds),
+                    cost_sql.cs_by_query_type(days, company, bounds=bounds),
                     page=_PAGE, key=f"cs_types_{company}_{days}",
                     mart_source="MART_CLOUD_SVC_DAILY (CS credits by QUERY_TYPE, loaded hourly)",
                     live_source="ACCOUNT_USAGE.QUERY_HISTORY (CS credits by QUERY_TYPE, live fallback)")
@@ -750,7 +750,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                                  "not only ELEVATED. '(all warehouses)' includes the no-warehouse "
                                  "metadata bucket (WAREHOUSE_NAME resolves to NONE).")
         wh_arg = "" if pick == _ALL else pick
-        shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg), page=_PAGE,
+        shapes = run(mart_sql.cloud_svc_top_shapes(days, company, wh_arg, bounds=bounds), page=_PAGE,
                      key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly",
                      source="MART_CLOUD_SVC_DAILY (per-query CS credits, loaded hourly)")
         if guard(shapes, "No cloud-services credits recorded for this warehouse yet "
@@ -763,7 +763,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 "CS_CREDITS": st.column_config.NumberColumn("CS credits", format="%.4f"),
                 "AVG_CACHE_PCT": st.column_config.NumberColumn("Cache %", format="%d%%")})
             result_caption(shapes)
-            users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg), page=_PAGE,
+            users = run(mart_sql.cloud_svc_by_user(days, company, wh_arg, bounds=bounds), page=_PAGE,
                         key=f"cs_users_{company}_{days}_{pick}", tier="hourly",
                         source="MART_CLOUD_SVC_DAILY (CS credits by user/role)")
             if guard(users, "No per-user cloud-services credits for this warehouse yet."):
@@ -982,9 +982,9 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
                           "(Tableau, dbt, a driver, a named tool) and the user. Runs a heavy "
                           "live join until the FACT_APP_COST_DAILY fact (V077) is loaded."):
             _app = run_mart_first(
-                app_cost_sql.app_cost_mart(days, company),
-                app_cost_sql.app_cost_live(days, company),
-                page=_PAGE, key=f"app_cost_{company}_{days}",
+                app_cost_sql.app_cost_mart(days, company, bounds=bounds),
+                app_cost_sql.app_cost_live(days, company, bounds=bounds),
+                page=_PAGE, key=f"app_cost_{company}_{days}{_lm}",
                 mart_source="FACT_APP_COST_DAILY (V077)",
                 live_source="SESSIONS x QUERY_HISTORY x QUERY_ATTRIBUTION_HISTORY (live)")
             if guard(_app, "No measured application cost in this window.",

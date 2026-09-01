@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.416.0 - Comprehensive bug hunt: Last-month threading gaps + Cortex projection (2026-09-01)
+
+A 12-dimension adversarial sweep (each finding refute-verified, then ground-truthed by hand) plus an
+independent cache/threading audit. All confirmed defects fixed; one finding (a money mismatch on a stale
+quote) was refuted.
+
+- **Cost ▸ Spend lower panels + optimize were threaded incompletely.** The v4.409 "whole Spend tab" only
+  threaded the top tiles; `_spend_tab`'s lower panels (all-in reconciliation, replication, compute pools,
+  notebooks, transfer/egress, marketplace, compile-heavy, cs-by-type, cloud-svc drill, app-cost) and the
+  optimize idle/sizing **live-fallback** args + `warehouse_hourly_activity` were still trailing under a
+  Last-month label. ~20 builder calls now thread `bounds` (and `app_cost_mart`/`app_cost_live` gained the
+  bounds param, live-side padding its join scans by the same 1d/7d offsets).
+- **Cortex AI-users live fallback + projection (money/budget-critical).** The pandas-fold live path
+  (`_window_slice`/`rollup_from_user_daily`/`daily_from_user_daily`) sliced a trailing span under Last
+  month while the mart leg was bounded, and the per-user 30-day projection divisor
+  (`effective_window_days`/`enrich_user_rollup`) anchored on *today* — so a last-month view taken
+  mid-current-month divided the month's credits by days-to-today, understating burn and suppressing budget
+  breaches. Both now honor the bounded window (fold slices `[start, end)`; divisor anchors on the month end).
+- **Ask AI-phrasing now enforces its promise.** The "grounded numbers unchanged" caption was unverified;
+  `_ai_phrasing` now discards any rephrase that introduces a numeric token absent from the grounded finding.
+- **`cortex_complete` NULL result** no longer renders as the literal answer "None" — it routes to the
+  honest empty-answer path (`str(rows[0]["ANSWER"] or "")`).
+- **Overview vs-prior delta** labels "vs prior month" under Last month (was "vs prior 31d" while the data
+  compared calendar months).
+
+~13 new regression tests (bounded fold, projection divisor anchor, numeric guard, threading locks).
+
 ## 4.415.0 - "Last month" rollout complete: every page threaded (2026-09-01)
 
 Threads `f["bounds"]` through Operations, Security, Control Room and Decision Studio, activating the

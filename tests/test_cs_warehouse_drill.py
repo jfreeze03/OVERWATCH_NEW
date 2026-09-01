@@ -55,8 +55,8 @@ def test_drill_wired_into_spend_page():
     src = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     # ratio table is selectable and drives a per-warehouse scoped read
     assert 'selectable_table(\n            csr.df, key=f"csr_sel_' in src
-    assert "compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5)" in src
-    assert "cs_by_query_type(days, company, warehouse=_sel_wh)" in src
+    assert "compile_heavy_families(days, company, warehouse=_sel_wh, min_runs=5, bounds=bounds)" in src
+    assert "cs_by_query_type(days, company, warehouse=_sel_wh, bounds=bounds)" in src
     # bounds guard on the sticky selection + the account-wide fallback both survive
     assert "0 <= int(_wh_sel) < len(csr.df)" in src
-    assert "family_compile_heavy(days, company)" in src
+    assert "family_compile_heavy(days, company, bounds=bounds)" in src

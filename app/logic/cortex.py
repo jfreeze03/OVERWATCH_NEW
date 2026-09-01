@@ -50,7 +50,8 @@ BUDGET_LADDER = ((1.00, "Critical", "Budget breach"),
 _SEVERITY_ORDER = {"Critical": 0, "High": 1, "Medium": 2}
 
 
-def effective_window_days(rollup: pd.DataFrame, window_days: int) -> int:
+def effective_window_days(rollup: pd.DataFrame, window_days: int,
+                          *, bounds: tuple | None = None) -> int:
     """The projection divisor: days this SCOPE has actually been observable.
 
     C7: dividing by the ASKED window is wrong whenever the data is younger
@@ -74,8 +75,13 @@ def effective_window_days(rollup: pd.DataFrame, window_days: int) -> int:
         return asked
     if pd.isna(first):
         return asked
-    # +1: a first-usage timestamp of today means one observed day, not zero.
-    elapsed = (account_today() - first.date()).days + 1
+    # The divisor is days-since-first-usage up to the window END, not up to today: for a
+    # bounded 'Last month' the observable window ends on the last day of that month, so
+    # anchoring on today would divide the month's credits by the (larger) days-since-first
+    # -to-today span and under-project the monthly burn (missing budget breaches).
+    _last = (bounds[1] - timedelta(days=1)) if bounds is not None else account_today()
+    # +1: a first-usage timestamp on the anchor day means one observed day, not zero.
+    elapsed = (_last - first.date()).days + 1
     return max(1, min(asked, elapsed))
 
 
@@ -90,23 +96,33 @@ def effective_window_days(rollup: pd.DataFrame, window_days: int) -> int:
 # column-for-column — those builders remain the contract of record.
 # ---------------------------------------------------------------------------
 
-def _window_slice(user_daily: pd.DataFrame, days: int) -> pd.DataFrame:
+def _window_slice(user_daily: pd.DataFrame, days: int,
+                  *, bounds: tuple | None = None) -> pd.DataFrame:
     """Rows of the 365d fetch inside the asked window.
 
     Day-grain anchor (see app/data/common.py): "N days" is N complete days
     plus today — the SAME bound mart27_sql.ai_code_* apply, so the mart leg
     and the live leg of the same panel can never disagree by a day.
+
+    'Last month' passes ``bounds`` = (start, end_exclusive); the slice is then the
+    bounded calendar range ``USAGE_DATE >= start AND < end`` (exclusive end, matching
+    the mart's ``DAY >= start AND DAY < end``), NOT a trailing today-anchored cutoff —
+    so the live fallback leg covers the same month the bounded mart leg does.
     """
     if user_daily is None or user_daily.empty or "USAGE_DATE" not in user_daily.columns:
         return pd.DataFrame()
     dates = pd.to_datetime(user_daily["USAGE_DATE"], errors="coerce")
+    if bounds is not None:
+        start, end = bounds
+        return user_daily[(dates >= pd.Timestamp(start)) & (dates < pd.Timestamp(end))]
     cutoff = pd.Timestamp(account_today() - timedelta(days=max(int(days or 1), 1)))
     return user_daily[dates >= cutoff]      # NaT compares False — unparseable rows drop
 
 
-def rollup_from_user_daily(user_daily: pd.DataFrame, days: int) -> pd.DataFrame:
+def rollup_from_user_daily(user_daily: pd.DataFrame, days: int,
+                           *, bounds: tuple | None = None) -> pd.DataFrame:
     """cortex_sql.cortex_code_user_rollup's output, folded in pandas."""
-    win = _window_slice(user_daily, days)
+    win = _window_slice(user_daily, days, bounds=bounds)
     if win.empty:
         return pd.DataFrame()
     keys = [c for c in ("USER_NAME", "EMAIL", "FIRST_NAME", "LAST_NAME", "SOURCE")
@@ -132,9 +148,10 @@ def rollup_from_user_daily(user_daily: pd.DataFrame, days: int) -> pd.DataFrame:
                .reset_index(drop=True))
 
 
-def daily_from_user_daily(user_daily: pd.DataFrame, days: int) -> pd.DataFrame:
+def daily_from_user_daily(user_daily: pd.DataFrame, days: int,
+                          *, bounds: tuple | None = None) -> pd.DataFrame:
     """cortex_sql.cortex_code_daily's output, folded in pandas."""
-    win = _window_slice(user_daily, days)
+    win = _window_slice(user_daily, days, bounds=bounds)
     if win.empty:
         return pd.DataFrame()
     out = (win.groupby(["USAGE_DATE", "SOURCE"], dropna=False)
@@ -154,7 +171,7 @@ _MIN_OBSERVABLE_DAYS = 4
 
 
 def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
-                       window_days: int = 30) -> pd.DataFrame:
+                       window_days: int = 30, *, bounds: tuple | None = None) -> pd.DataFrame:
     """Add projected-30d credits/cost columns to the SQL rollup.
 
     Projection basis (rec #38) is each user's OWN observable window —
@@ -173,7 +190,7 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
     for col in ("TOTAL_CREDITS", "AVG_DAILY_CREDITS", "CREDITS_PER_REQUEST", "TOTAL_REQUESTS"):
         if col in out.columns:
             out[col] = out[col].map(safe_float)
-    window = effective_window_days(out, window_days)
+    window = effective_window_days(out, window_days, bounds=bounds)
     # rec #38: project each user against their OWN observable window (days since
     # THAT user's first Cortex request), not the scope minimum. A heavy user new to
     # a mature 30-day scope was divided by the full scope window (2 days of credits
@@ -183,7 +200,11 @@ def enrich_user_rollup(df: pd.DataFrame, ai_rate_usd: float,
     cap = max(int(window_days or 30), 1)
     if "FIRST_USAGE" in out.columns:
         _first = pd.to_datetime(out["FIRST_USAGE"], errors="coerce", utc=True)
-        _now = pd.Timestamp(account_today()).tz_localize("UTC")
+        # Anchor the per-user elapsed span at the WINDOW END (last day of the bounded
+        # month), not today — else a 'Last month' view taken mid-current-month divides the
+        # month's credits by days-to-today and under-projects the burn (see effective_window_days).
+        _anchor = (bounds[1] - timedelta(days=1)) if bounds is not None else account_today()
+        _now = pd.Timestamp(_anchor).tz_localize("UTC")
         # .normalize() to date-grain FIRST: a first-usage timestamp carries a time-of-day, and
         # a bare (_now - _first).dt.days would FLOOR the intraday fraction, landing one day short
         # for every real (non-midnight) request — so this must match effective_window_days'
@@ -321,7 +342,8 @@ def classify_exceptions(enriched: pd.DataFrame, ai_budget_usd: float, ai_rate_us
     return out.reset_index(drop=True)
 
 
-def rollup_summary(enriched: pd.DataFrame, window_days: int) -> dict:
+def rollup_summary(enriched: pd.DataFrame, window_days: int,
+                   *, bounds: tuple | None = None) -> dict:
     """Window totals + 30d projection for the KPI row.
 
     The 30d projection is the SUM of the per-user PROJECTED_30D_USD column (rec #38:
@@ -332,7 +354,7 @@ def rollup_summary(enriched: pd.DataFrame, window_days: int) -> dict:
     if enriched is None or enriched.empty:
         return {"active_users": 0, "total_requests": 0, "total_credits": 0.0,
                 "spend_usd": 0.0, "projected_30d_usd": 0.0, "window_days": 1}
-    days = effective_window_days(enriched, window_days)
+    days = effective_window_days(enriched, window_days, bounds=bounds)
     total_credits = float(enriched["TOTAL_CREDITS"].sum())
     spend = float(enriched["SPEND_USD"].sum())
     projected = (float(enriched["PROJECTED_30D_USD"].sum())

@@ -47,7 +47,10 @@ def cortex_complete(prompt: str, model: object = _DEFAULT_MODEL, *, page: str = 
         apply_query_tag(session, build_query_tag(page=page, tier="cortex"))
         apply_statement_timeout(session, CORTEX_TIMEOUT_SECONDS)
         rows = session.sql(sql).collect()
-        answer = str(rows[0]["ANSWER"]) if rows else ""
+        # Coalesce a SQL NULL result BEFORE stringifying: str(None) -> the literal "None",
+        # which is truthy and would render a non-answer as a confident answer. `or ""`
+        # routes NULL/blank to the honest empty-answer path (mirrors session.py's convention).
+        answer = str(rows[0]["ANSWER"] or "") if rows else ""
         return (True, answer) if answer.strip() else (False, "Cortex returned an empty answer.")
     except Exception as exc:
         record_error(page, exc, context=f"cortex_complete model={model_name}")

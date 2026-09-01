@@ -133,7 +133,7 @@ def test_spend_adopts_family_and_allocation_marts():
     assert "mart27_sql.alloc_attribution(" not in _SPEND   # P0-1: owner-scoped mart retired from spend
     assert "cost_sql.allocated_attribution" in _SPEND
     assert "if schema_contains:" in _SPEND                         # no mart carries schema grain
-    assert "company, database)" in _SPEND                           # P0-1: unfiltered + db-filtered both -> xdim (warehouse-scoped)
+    assert "company, database, bounds=bounds)" in _SPEND            # P0-1: unfiltered + db-filtered both -> xdim (warehouse-scoped), Last-month aware
     assert "mart27_sql.alloc_xdim_attribution" in _SPEND
     # v4.33.1: ONE dollarization formula on every path — global share x the pool
     # total the caption states. The mart credits x rate branch used a different

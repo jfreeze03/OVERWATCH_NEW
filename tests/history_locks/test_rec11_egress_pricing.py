@@ -76,6 +76,6 @@ def test_panel_reconciles_over_the_same_window_via_verified_path():
     # (not a hardcoded 30d) via the verified RATING_TYPE builder, and reconciliation
     # only engages when the org bill is USD.
     block = _SPEND.split('elif detail == "Egress / data transfer":', 1)[1].split("\n        else:", 1)[0]
-    assert "org_all_in_window_usd(days)" in block   # same window + verified RATING_TYPE
+    assert "org_all_in_window_usd(days, bounds=bounds)" in block   # same window + verified RATING_TYPE
     assert "org_usage_in_currency(30)" not in block  # the old fixed-30d path is gone
     assert 'ccy == "USD"' in block                   # USD guard on the reconciliation

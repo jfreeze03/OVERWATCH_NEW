@@ -17,7 +17,7 @@ from __future__ import annotations
 from app import companies
 from app.config import core_object
 from app.core.sqlsafe import sql_literal
-from app.data.common import and_where, bounded_days
+from app.data.common import and_where, bounded_days, scope_window_where
 
 # The application identifier, matching V077's SP_LOAD_APP_COST: the self-reported
 # program, else the driver family (version stripped), else '(unknown)'.
@@ -37,11 +37,12 @@ def _company_col_clause(company: str) -> str:
     return f"UPPER(COMPANY) = {sql_literal(c.upper(), 40)}"
 
 
-def app_cost_mart(days: int = 30, company: str = "ALL") -> str:
+def app_cost_mart(days: int = 30, company: str = "ALL", *,
+                  bounds: tuple | None = None) -> str:
     """Measured cost by application x user from FACT_APP_COST_DAILY (V077)."""
     days = bounded_days(days, 365)
     where = and_where(
-        f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+        scope_window_where("DAY", days, bounds=bounds),
         _company_col_clause(company),
     )
     return f"""
@@ -56,13 +57,28 @@ LIMIT 1000
 """
 
 
-def app_cost_live(days: int = 30, company: str = "ALL") -> str:
+def app_cost_live(days: int = 30, company: str = "ALL", *,
+                  bounds: tuple | None = None) -> str:
     """Live fallback: SESSIONS x QUERY_HISTORY (SESSION_ID) x
     QUERY_ATTRIBUTION_HISTORY (QUERY_ID). Heavier than the mart (a 3-way join over
-    ACCOUNT_USAGE, capped to 90d); serves until FACT_APP_COST_DAILY loads."""
+    ACCOUNT_USAGE, capped to 90d); serves until FACT_APP_COST_DAILY loads.
+
+    The RESULT window is defined by the q (QUERY_HISTORY) scan; the cred/sess scans are
+    join sources scanned a little WIDER (attribution +1d, sessions +7d) so an in-window
+    query never loses its credit/app for lack of a match. 'Last month' (bounds) applies
+    the bounded [start, end) to q and the same padded lower bounds to cred/sess."""
     days = bounded_days(days, 90)
+    if bounds is not None:
+        _si, _ei = f"'{bounds[0].isoformat()}'", f"'{bounds[1].isoformat()}'"
+        q_scope = f"q.START_TIME >= {_si} AND q.START_TIME < {_ei}"
+        cred_scope = f"START_TIME >= DATEADD('day', -1, {_si}) AND START_TIME < {_ei}"
+        sess_scope = f"CREATED_ON >= DATEADD('day', -7, {_si}) AND CREATED_ON < {_ei}"
+    else:
+        q_scope = f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"
+        cred_scope = f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
+        sess_scope = f"CREATED_ON >= DATEADD('day', -{days + 7}, CURRENT_TIMESTAMP())"
     q_where = and_where(
-        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        q_scope,
         companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
     )
     return f"""
@@ -70,7 +86,7 @@ WITH cred AS (
     SELECT QUERY_ID,
            SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {cred_scope}
     GROUP BY QUERY_ID
     HAVING SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) > 0
 ),
@@ -82,7 +98,7 @@ q AS (
 sess AS (
     SELECT SESSION_ID, {_APP_EXPR} AS APPLICATION
     FROM SNOWFLAKE.ACCOUNT_USAGE.SESSIONS
-    WHERE CREATED_ON >= DATEADD('day', -{days + 7}, CURRENT_TIMESTAMP())
+    WHERE {sess_scope}
     QUALIFY ROW_NUMBER() OVER (PARTITION BY SESSION_ID ORDER BY CREATED_ON DESC) = 1
 )
 SELECT COALESCE(s.APPLICATION, '(unknown)') AS APPLICATION,

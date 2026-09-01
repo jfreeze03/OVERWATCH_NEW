@@ -94,9 +94,9 @@ def test_native_cost_builders_pin_grain_scope_window_and_currency_contracts():
 def test_cost_service_detail_is_lazy_and_notebook_spend_is_declared_non_additive():
     source = _source("app/ui/pages/cost_parts/spend.py")
     assert 'st.toggle(\n        "Load detailed service attribution"' in source
-    assert "cost_sql.replication_by_database(days, company, database)" in source
-    assert "cost_sql.compute_pool_usage(days)" in source
-    assert "cost_sql.notebook_container_usage(days)" in source
+    assert "cost_sql.replication_by_database(days, company, database, bounds=bounds)" in source
+    assert "cost_sql.compute_pool_usage(days, bounds=bounds)" in source
+    assert "cost_sql.notebook_container_usage(days, bounds=bounds)" in source
     assert "Notebook credits are a subset" in source
     assert "native currency and are not converted" in source
 

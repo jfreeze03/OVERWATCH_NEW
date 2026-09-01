@@ -12,6 +12,8 @@ Revert: see the authoritative REVERT PATH in app/logic/ask/__init__.py (delete
 
 from __future__ import annotations
 
+import re
+
 import streamlit as st
 
 from app.core.errors import safe_page
@@ -52,9 +54,23 @@ def _test_cases() -> list[str]:
     return cases
 
 
+_NUM_RE = re.compile(r"\d[\d,]*\.?\d*")
+
+
+def _numbers_preserved(grounded: str, phrased: str) -> bool:
+    """Enforce the 'grounded numbers unchanged' promise: every numeric token in the AI
+    phrasing must already appear in the grounded finding. The prompt TELLS the model not to
+    change numbers, but nothing made it true — a drifted figure would render under a caption
+    claiming the numbers are unchanged. Thousands-commas are normalized so '1,234' == '1234'."""
+    def toks(s: str) -> set[str]:
+        return {m.group().replace(",", "").rstrip(".") for m in _NUM_RE.finditer(s)}
+    return toks(phrased) <= toks(grounded)
+
+
 def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
     """Reword the grounded result via Cortex. Given ONLY the deterministic
-    finding and told to change no number/name. Degrades silently to None."""
+    finding and told to change no number/name. Degrades silently to None —
+    including when the phrasing introduces a number not in the grounded finding."""
     grounded = result.headline + "\n" + "\n".join(f"- {b}" for b in result.bullets)
     prompt = (
         "Reword the following grounded analytics finding in 1-2 short, plain "
@@ -71,7 +87,9 @@ def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
                   source="Ask:cortex_narrate")
         if res.df is not None and not res.df.empty:
             txt = str(res.df.iloc[0]["TXT"]).strip()
-            return txt or None
+            # Discard a rephrase that invented or changed a number — the caption promises
+            # the grounded numbers are unchanged, so honor it rather than trust the model.
+            return txt if (txt and _numbers_preserved(grounded, txt)) else None
     except Exception:  # noqa: BLE001 — narration is a nicety; never break the answer
         return None
     return None
