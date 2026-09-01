@@ -22,6 +22,7 @@ from app.data.common import (
     bounded_days,
     not_ai_service_predicate,
     resolve_effective_window,
+    scope_window_where,
 )
 
 
@@ -327,13 +328,18 @@ ORDER BY FAILED DESC, DAY DESC
 """
 
 
-def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
+def fact_warehouse_window_vs_prior(days: int, company: str = "ALL", *,
+                                   bounds: tuple | None = None) -> str:
     """Window-vs-prior warehouse credits from FACT_WAREHOUSE_DAILY.
 
     Same output contract as cost_sql.warehouse_window_vs_prior but reads the
     hourly-loaded fact instead of scanning WAREHOUSE_METERING_HISTORY live
     (perf pass: Control Room movers). Inherits up-to-an-hour loader lag —
     callers keep the live builder as fallback and label the source.
+
+    For 'Last month' (``bounds``), CURRENT is the previous calendar month and PRIOR
+    is the month before it (an equal *calendar* period, not an equal day-count), so
+    the mover reads as 'August vs July' rather than 'last 31 days vs the 31 before'.
     """
     # This builder scans 2*days (current + prior equal windows). Cap at HALF the
     # mart max so the pair stays within retention and the prior window has data —
@@ -341,17 +347,28 @@ def fact_warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     # half as a false 100% swing (audit Batch A verify). rec 4: the CURRENT window
     # [today-days, today) IS the shared effective window (resolve_effective_window)
     # the allocation shares must span, so pool dollars and share denominators reconcile.
-    days, _ = resolve_effective_window(days)   # clamped MAX_MART_WINDOW_DAYS // 2, today-excluded
-    where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())",
-             "DAY < CURRENT_DATE()"]   # equal-length windows, exclude today (Codex P0-3)
+    if bounds is not None:
+        cur_start, cur_end = bounds
+        prior_start = (cur_start.replace(year=cur_start.year - 1, month=12)
+                       if cur_start.month == 1
+                       else cur_start.replace(month=cur_start.month - 1))
+        where = [f"DAY >= '{prior_start.isoformat()}'", f"DAY < '{cur_end.isoformat()}'"]
+        cur_from = f"DAY >= '{cur_start.isoformat()}'"
+        prior_to = f"DAY < '{cur_start.isoformat()}'"
+    else:
+        days, _ = resolve_effective_window(days)   # clamped MAX_MART_WINDOW_DAYS // 2, today-excluded
+        where = [f"DAY >= DATEADD('day', -{2 * days}, CURRENT_DATE())",
+                 "DAY < CURRENT_DATE()"]   # equal-length windows, exclude today (Codex P0-3)
+        cur_from = f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())"
+        prior_to = f"DAY < DATEADD('day', -{days}, CURRENT_DATE())"
     if str(company).upper() != "ALL":
         where.append(f"COMPANY = {sql_literal(company)}")
     return f"""
 SELECT
     WAREHOUSE_NAME,
     COMPANY,
-    ROUND(SUM(IFF(DAY >= DATEADD('day', -{days}, CURRENT_DATE()), CREDITS_TOTAL, 0)), 4) AS CREDITS_CURRENT,
-    ROUND(SUM(IFF(DAY < DATEADD('day', -{days}, CURRENT_DATE()), CREDITS_TOTAL, 0)), 4) AS CREDITS_PRIOR
+    ROUND(SUM(IFF({cur_from}, CREDITS_TOTAL, 0)), 4) AS CREDITS_CURRENT,
+    ROUND(SUM(IFF({prior_to}, CREDITS_TOTAL, 0)), 4) AS CREDITS_PRIOR
 FROM {mart_object("FACT_WAREHOUSE_DAILY")}
 WHERE {and_where(*where)}
 GROUP BY 1, 2
@@ -361,7 +378,8 @@ LIMIT 500
 """
 
 
-def fact_cloud_services_ratio(days: int, company: str = "ALL") -> str:
+def fact_cloud_services_ratio(days: int, company: str = "ALL", *,
+                              bounds: tuple | None = None) -> str:
     """Cloud-services share per warehouse from FACT_WAREHOUSE_DAILY.
 
     The fact already stores CREDITS_TOTAL and CREDITS_COMPUTE, so cloud
@@ -371,7 +389,7 @@ def fact_cloud_services_ratio(days: int, company: str = "ALL") -> str:
     windowed ratio this panel shows.
     """
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
-    where = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    where = [scope_window_where("DAY", days, bounds=bounds),
              # triage #8: match the live builder — drop the CLOUD_SERVICES_ONLY
              # pseudo-warehouse (a 100%-CS metadata bucket that sorts first and
              # spuriously triggers the compile-heavy drill); the >= 0.5 HAVING

@@ -69,3 +69,59 @@ def test_scope_bar_discloses_last_month_coverage_honestly():
     assert "_window == LAST_MONTH_WINDOW" in main
     # names exactly where it is exact, and that other panels approximate it
     assert "applied exactly on Cost" in main and "approximate" in main
+
+
+# ---------------------------------------------------------------------------
+# Batch 1: the rest of the Cost > Spend tab tiles (cloud-services, CoCo, vs-prior)
+# ---------------------------------------------------------------------------
+def test_scope_window_where_helper_trailing_and_bounded():
+    from app.data.common import scope_window_where
+    assert scope_window_where("DAY", 30) == "DAY >= DATEADD('day', -30, CURRENT_DATE())"
+    assert scope_window_where("DAY", 30, exclude_today=True) == (
+        "DAY >= DATEADD('day', -30, CURRENT_DATE()) AND DAY < CURRENT_DATE()")
+    assert scope_window_where("DAY", 31, bounds=_AUG) == "DAY >= '2026-08-01' AND DAY < '2026-09-01'"
+
+
+def test_cloud_services_ratio_builders_honor_last_month():
+    mart = mart_sql.fact_cloud_services_ratio(31, "ALL", bounds=_AUG)
+    assert "DAY >= '2026-08-01' AND DAY < '2026-09-01'" in mart
+    assert "DATEADD" not in mart
+    # live fallback keeps its CURRENT_TIMESTAMP trailing form when unbounded
+    live_plain = cost_sql.cloud_services_ratio_by_warehouse(30)
+    assert "START_TIME >= DATEADD('day', -30, CURRENT_TIMESTAMP())" in live_plain
+    live_lm = cost_sql.cloud_services_ratio_by_warehouse(31, bounds=_AUG)
+    assert "START_TIME >= '2026-08-01' AND START_TIME < '2026-09-01'" in live_lm
+
+
+def test_ai_code_daily_coco_honors_last_month():
+    from app.data import mart27_sql
+    lm = mart27_sql.ai_code_daily(31, "ALL", bounds=_AUG)
+    assert "DAY >= '2026-08-01' AND DAY < '2026-09-01'" in lm
+    # the coverage guard now requires the fact to reach the window START
+    assert "(SELECT FIRST_DAY FROM cov) <= '2026-08-01'" in lm
+    plain = mart27_sql.ai_code_daily(30, "ALL")
+    assert "DAY >= DATEADD('day', -30, CURRENT_DATE())" in plain
+
+
+def test_warehouse_vs_prior_uses_prior_calendar_month_for_last_month():
+    # CURRENT = August, PRIOR = July (the month before), not "the 31 days before August"
+    lm = mart_sql.fact_warehouse_window_vs_prior(31, "ALL", bounds=_AUG)
+    assert "DAY >= '2026-07-01' AND DAY < '2026-09-01'" in lm          # scan spans both months
+    assert "IFF(DAY >= '2026-08-01'" in lm                             # current = August
+    assert "IFF(DAY < '2026-08-01'" in lm                              # prior = July split
+    # live fallback: same prior-month semantics, START_TIME column
+    live = cost_sql.warehouse_window_vs_prior(31, bounds=_AUG)
+    assert "START_TIME >= '2026-07-01'" in live and "START_TIME < '2026-09-01'" in live
+    assert "START_TIME >= '2026-08-01'" in live                        # current split
+    # unbounded keeps the trailing equal-window form
+    plain = mart_sql.fact_warehouse_window_vs_prior(30)
+    assert "DATEADD('day', -" in plain and "2026-07" not in plain
+
+
+def test_spend_tab_threads_bounds_to_cloud_services_and_coco_not_vs_prior():
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    assert "fact_cloud_services_ratio(days, company, bounds=bounds)" in spend
+    assert 'ai_code_daily(days, "ALL", bounds=bounds)' in spend
+    assert "cloud_services_ratio_by_warehouse(days, company, bounds=bounds)" in spend
+    # the vs-prior 'wh' job stays trailing until the Attribution-tab batch
+    assert "fact_warehouse_window_vs_prior(days, company),\n" in spend

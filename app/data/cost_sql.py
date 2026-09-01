@@ -73,9 +73,13 @@ ORDER BY DAY, CREDITS_TOTAL DESC
 """
 
 
-def warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
+def warehouse_window_vs_prior(days: int, company: str = "ALL", *,
+                              bounds: tuple | None = None) -> str:
     """Current vs prior window credits per warehouse on ONE explicit half-open
     CALENDAR window — the same [start, end) the allocation SHARES use.
+
+    For 'Last month' (``bounds``) CURRENT is the previous calendar month and PRIOR is
+    the month before it (an equal calendar period, not an equal day-count).
 
     #17: the dollar POOL this builds (CREDITS_CURRENT) is multiplied by the live
     allocation shares (allocated_attribution), which resolve their window through
@@ -86,12 +90,22 @@ def warehouse_window_vs_prior(days: int, company: str = "ALL") -> str:
     mis-attributed at the window edges. Both now anchor CURRENT_DATE() through the
     ONE truth and keep the 90-day live cap. Prior = the immediately preceding
     equal-length calendar window."""
-    eff, _win = resolve_effective_window(days, "START_TIME", max_days=90)
-    current_start = f"DATEADD('day', -{eff}, CURRENT_DATE())"
-    prior_start = f"DATEADD('day', -{2 * eff}, CURRENT_DATE())"
+    if bounds is not None:
+        cur_start, cur_end = bounds
+        _prior_start_d = (cur_start.replace(year=cur_start.year - 1, month=12)
+                          if cur_start.month == 1
+                          else cur_start.replace(month=cur_start.month - 1))
+        current_start = f"'{cur_start.isoformat()}'"
+        prior_start = f"'{_prior_start_d.isoformat()}'"
+        window_end = f"'{cur_end.isoformat()}'"
+    else:
+        eff, _win = resolve_effective_window(days, "START_TIME", max_days=90)
+        current_start = f"DATEADD('day', -{eff}, CURRENT_DATE())"
+        prior_start = f"DATEADD('day', -{2 * eff}, CURRENT_DATE())"
+        window_end = "CURRENT_DATE()"
     where = and_where(
         f"START_TIME >= {prior_start}",
-        "START_TIME < CURRENT_DATE()",
+        f"START_TIME < {window_end}",
         companies.warehouse_clause(company),
     )
     return f"""
@@ -705,7 +719,8 @@ FROM SNOWFLAKE.ACCOUNT_USAGE.METERING_DAILY_HISTORY
 """
 
 
-def cloud_services_ratio_by_warehouse(days: int, company: str = "ALL") -> str:
+def cloud_services_ratio_by_warehouse(days: int, company: str = "ALL", *,
+                                      bounds: tuple | None = None) -> str:
     """Cloud-services share of each warehouse's credits (CoCo's top finding).
 
     >10% deserves a look, >20% (the alert threshold) usually means many tiny
@@ -713,7 +728,8 @@ def cloud_services_ratio_by_warehouse(days: int, company: str = "ALL") -> str:
     """
     days = bounded_days(days)
     where = and_where(
-        f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         companies.warehouse_clause(company),
     )
     return f"""

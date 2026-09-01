@@ -94,8 +94,10 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
     return [
         {"key": "metering", "sql": mart_sql.fact_metering_by_service(days, bounds=bounds),
          "source": "FACT_METERING_DAILY (mart, loaded hourly)"},
-        {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company),
+        {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company, bounds=bounds),
          "source": "FACT_WAREHOUSE_DAILY (cloud-services share)"},
+        # 'wh' feeds the Attribution tab (not yet Last-month-aware), so it stays trailing
+        # here to keep that tab internally consistent until its own migration batch.
         {"key": "wh", "sql": mart_sql.fact_warehouse_window_vs_prior(days, company),
          "source": "FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)"},
         {"key": "daily", "sql": mart_sql.fact_warehouse_daily(30, company),
@@ -104,7 +106,7 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
         # (ALL) to match the '(account)' basis of the other tiles; a small day×source
         # aggregate off FACT_AI_USAGE_DAILY, so it rides the same batch, not a serial
         # round-trip.
-        {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL"),
+        {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL", bounds=bounds),
          "source": "FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)"},
     ]
 
@@ -166,7 +168,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # differ" expander below and on Admin.
     coco_usd = None
     if coco_res is None:
-        coco_res = run(mart27_sql.ai_code_daily(days, "ALL"), page=_PAGE,
+        coco_res = run(mart27_sql.ai_code_daily(days, "ALL", bounds=bounds), page=_PAGE,
                        key=f"coco_spend_{days}", tier="hourly",
                        source="FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)")
     if coco_res is not None and coco_res.usable() and "TOTAL_CREDITS" in coco_res.df.columns:
@@ -652,13 +654,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         "metadata-heavy patterns, or compile-heavy SQL. ELEVATED starts past 20%, "
         "where the COST_CLOUD_SVC_RATIO alert fires (editable on Alerts)."
     )
+    _lm = "_lm" if bounds is not None else ""
     csr = csr_res if csr_res is not None else run(
-        mart_sql.fact_cloud_services_ratio(days, company), page=_PAGE,
-        key=f"csr_fact_{company}_{days}", tier="hourly",
+        mart_sql.fact_cloud_services_ratio(days, company, bounds=bounds), page=_PAGE,
+        key=f"csr_fact_{company}_{days}{_lm}", tier="hourly",
         source="FACT_WAREHOUSE_DAILY (cloud-services share)")
     if not csr.usable():  # mart not deployed/loaded yet -> bounded live scan
-        csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company), page=_PAGE,
-              key=f"cs_ratio_{company}_{days}", tier="recent",
+        csr = run(cost_sql.cloud_services_ratio_by_warehouse(days, company, bounds=bounds), page=_PAGE,
+              key=f"cs_ratio_{company}_{days}{_lm}", tier="recent",
               source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY")
     _sel_wh = ""
     if guard(csr, "No warehouse metering in this window."):

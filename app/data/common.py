@@ -47,6 +47,23 @@ def resolve_effective_window(days: object, column: str = "DAY",
     return eff, frag
 
 
+def scope_window_where(column: str, days: int, *, bounds: tuple | None = None,
+                       exclude_today: bool = False) -> str:
+    """The scope-filter date predicate for a day-grain ``column`` — trailing OR bounded.
+
+    Default (bounds=None) reproduces the app's trailing convention EXACTLY:
+    ``{column} >= DATEADD('day', -{days}, CURRENT_DATE())`` (plus ``AND {column} <
+    CURRENT_DATE()`` when ``exclude_today``). Given ``bounds`` (the 'Last month' calendar
+    range, start inclusive / end exclusive) it emits ``{column} >= 'start' AND {column} <
+    'end'`` — a bounded previous-calendar-month instead of a today-anchored window. This
+    is the one edit almost every scope-driven cost builder needs to honor Last month; the
+    trailing branch stays byte-identical so no existing window changes."""
+    if bounds is not None:
+        return resolve_effective_window(days, column, bounds=bounds)[1]
+    frag = f"{column} >= DATEADD('day', -{days}, CURRENT_DATE())"
+    return f"{frag} AND {column} < CURRENT_DATE()" if exclude_today else frag
+
+
 def account_month_start_sql() -> str:
     """SQL DATE for the first of THIS month in the ACCOUNT timezone.
 

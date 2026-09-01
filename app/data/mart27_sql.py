@@ -17,6 +17,7 @@ from app.data.common import (
     and_where,
     bounded_days,
     resolve_effective_window,
+    scope_window_where,
 )
 
 
@@ -489,7 +490,14 @@ def _ai_code_coverage_cte() -> str:
 )"""
 
 
-def _ai_code_window(days: int) -> str:
+def _ai_code_window(days: int, bounds: tuple | None = None) -> str:
+    if bounds is not None:
+        start, end = bounds
+        # bounded 'Last month': the coverage guard requires the fact to cover from the
+        # window START (else the panel understates the month).
+        return (f"DAY >= '{start.isoformat()}' AND DAY < '{end.isoformat()}'\n"
+                f"      AND {_AI_CODE_SOURCE_ARM}\n"
+                f"      AND (SELECT FIRST_DAY FROM cov) <= '{start.isoformat()}'")
     return (f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())\n"
             f"      AND {_AI_CODE_SOURCE_ARM}\n"
             f"      AND (SELECT FIRST_DAY FROM cov) "
@@ -557,7 +565,7 @@ LIMIT 500
 """
 
 
-def ai_code_daily(days: int, company: str = "ALL") -> str:
+def ai_code_daily(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """cortex_sql.cortex_code_daily contract from FACT_AI_USAGE_DAILY.
 
     ACTIVE_USERS counts distinct USER_NAME where the live builder counts
@@ -577,7 +585,7 @@ def ai_code_daily(days: int, company: str = "ALL") -> str:
           SELECT USER_NAME FROM (
               SELECT DISTINCT USER_NAME
               FROM {mart_object("FACT_AI_USAGE_DAILY")}
-              WHERE DAY >= DATEADD('day', -{days}, CURRENT_DATE())
+              WHERE {scope_window_where("DAY", days, bounds=bounds)}
                 AND {_AI_CODE_SOURCE_ARM}
           )
           WHERE {companies.COMPANY_FOR_USER_FN}(USER_NAME) = {sql_literal(company)}
@@ -592,7 +600,7 @@ SELECT
     SUM(COALESCE(CREDITS, 0)) AS TOTAL_CREDITS,
     SUM(COALESCE(TOKENS, 0)) AS TOTAL_TOKENS
 FROM {mart_object("FACT_AI_USAGE_DAILY")}
-WHERE {_ai_code_window(days)}{scope}
+WHERE {_ai_code_window(days, bounds)}{scope}
 GROUP BY DAY, SOURCE
 ORDER BY DAY, SOURCE
 LIMIT 5000

@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.409.0 - "Last month" rollout batch 1: rest of Cost ▸ Spend (2026-09-01)
+
+Extends the bounded **Last month** window (v4.408) to the rest of the Cost ▸ Spend section, so the whole
+tab — not just the headline metering — reflects the exact previous calendar month.
+
+- **Shared helper** `common.scope_window_where(column, days, *, bounds)` — trailing by default (byte-
+  identical to the old predicate), bounded `col >= 'start' AND col < 'end'` when given the Last-month
+  range. The single edit almost every scope-driven cost builder needs.
+- **Cloud-services health** (`fact_cloud_services_ratio` + live `cloud_services_ratio_by_warehouse`) and
+  the **CoCo / Cortex-Code tile** (`ai_code_daily`, incl. its coverage guard) now honor the bounds.
+- **Warehouse window-vs-prior** (`fact_warehouse_window_vs_prior` + live twin): for Last month, CURRENT =
+  the previous calendar month and PRIOR = the month **before** it (an equal *calendar* period, so it reads
+  "August vs July", not "last 31 days vs the 31 before"). Threaded on the Spend tab; the same builder's
+  Attribution-tab use stays trailing until that tab's batch, so no tab is internally inconsistent.
+- Backward compatible (`bounds=None` default everywhere). New builder tests cover each, plus the helper.
+
 ## 4.408.0 - "Last month" scope window (bounded) — headline spend (2026-09-01)
 
 Adds **Last month** to the global scope filter: the *previous complete calendar month*

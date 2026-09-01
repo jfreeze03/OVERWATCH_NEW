@@ -34,15 +34,15 @@ def test_t1_1_overview_facts_on_hourly_tier():
 
 def test_t1_1_spend_facts_on_hourly_tier():
     sp = _read("app/ui/pages/cost_parts/spend.py")
-    for key in ('key=f"csr_fact_{company}_{days}", tier="hourly"',
+    for key in ('key=f"csr_fact_{company}_{days}{_lm}", tier="hourly"',
                 'key=f"cs_shapes_{company}_{days}_{pick}", tier="hourly"',
                 'key=f"cs_users_{company}_{days}_{pick}", tier="hourly"',
                 'key=f"wh_vs_prior_fact_{company}_{days}", tier="hourly"',
                 'key=f"fact_wh_daily_{company}", tier="hourly"',
                 'key=f"stor_acct_{days}", tier="hourly"'):
         assert key in sp, key
-    # the live WMH fallback stays off the hourly tier
-    assert 'key=f"cs_ratio_{company}_{days}", tier="recent"' in sp
+    # the live WMH fallback stays off the hourly tier ({_lm} discriminates Last month)
+    assert 'key=f"cs_ratio_{company}_{days}{_lm}", tier="recent"' in sp
 
 
 def test_t1_1_cost_batch_and_unmapped_on_hourly_tier():
