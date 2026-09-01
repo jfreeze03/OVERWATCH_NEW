@@ -151,7 +151,8 @@ ORDER BY 1
 
 
 def allocated_attribution(days: int, dimension: str, company: str = "ALL",
-                          database: str = "", schema_contains: str = "") -> str:
+                          database: str = "", schema_contains: str = "", *,
+                          bounds: tuple | None = None) -> str:
     """Elapsed-time-share attribution by USER_NAME or DATABASE_NAME.
 
     Produces shares, not dollars: the caller multiplies by scoped warehouse
@@ -175,7 +176,7 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
     # mart share + the dollar pool (resolve_effective_window), so the live fallback's
     # denominator lines up too. Keep the 90-day cap here — this is a live QUERY_HISTORY
     # scan, and the mart path (182d, credit-weighted) is the normal, preferred estimate.
-    days, _win = resolve_effective_window(days, "START_TIME", max_days=90)
+    days, _win = resolve_effective_window(days, "START_TIME", max_days=90, bounds=bounds)
     dim = "USER_NAME" if str(dimension).upper() == "USER_NAME" else "DATABASE_NAME"
     vis = (companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY", distinct_where=_win)
            if dim == "USER_NAME"

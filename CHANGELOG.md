@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.410.0 - "Last month" rollout batch 2: Cost ▸ Attribution (2026-09-01)
+
+Extends **Last month** to the Cost ▸ Attribution tab — the reconciliation-critical surface where per-entity
+dollars = warehouse-spend POOL × elapsed-time SHARE. Both sides must span the identical window or the
+per-user/-database dollars stop reconciling to the exact-usage pool.
+
+- The exact-usage **pool** (`fact_warehouse_window_vs_prior` + live twin) and both **allocation shares**
+  (`alloc_xdim_attribution` mart + `allocated_attribution` live) now read the bounded calendar range —
+  they already funnel through `resolve_effective_window`, so threading `bounds` keeps pool and shares on
+  one window by construction. For Last month the span (≤31d) sits under the 90-day live cap, so the
+  wider-window pool/live re-derivation stays inert and the bounded pool is used directly.
+- Threaded through `_attribution_tab` and the prefetch batch; new tests pin both share builders and the
+  pool/share threading. Backward compatible.
+
 ## 4.409.0 - "Last month" rollout batch 1: rest of Cost ▸ Spend (2026-09-01)
 
 Extends the bounded **Last month** window (v4.408) to the rest of the Cost ▸ Spend section, so the whole

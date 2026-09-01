@@ -192,7 +192,7 @@ def render() -> None:
         st.divider()
         section_header("Attribution", "info", "chargeback", anchor="cost-attribution")
         _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
-                         wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
+                         bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
         st.divider()
         # perf #15: Storage (3 reads) + Unmapped (1 read) are below-fold detail;
         # gate both behind ONE toggle so the default first paint pays only the

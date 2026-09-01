@@ -1040,7 +1040,7 @@ ORDER BY 1, 2"""
 # ---------------------------------------------------------------------------
 
 def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
-                           database: str = "") -> str:
+                           database: str = "", *, bounds: tuple | None = None) -> str:
     """cost_sql.allocated_attribution contract from FACT_COST_ALLOC_XDIM_DAILY
     (V041 R2) — the database/user-filtered attribution that used to pay two
     live QUERY_HISTORY scans per filter value; user-within-database is now
@@ -1053,7 +1053,7 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     # warehouse dollar POOL it will be multiplied by (spend.py), else a 365-day share
     # (including today's partial) applied to the pool's clamped 182-day, today-excluded
     # dollars mis-attributes per-entity cost. resolve_effective_window is the one truth.
-    days, _win = resolve_effective_window(days, "x.DAY")
+    days, _win = resolve_effective_window(days, "x.DAY", bounds=bounds)
     dim = str(dimension or "USER").upper()
     if dim not in ("USER", "DATABASE"):
         raise ValueError(f"dimension must be USER/DATABASE, got {dimension!r}")

@@ -118,10 +118,33 @@ def test_warehouse_vs_prior_uses_prior_calendar_month_for_last_month():
     assert "DATEADD('day', -" in plain and "2026-07" not in plain
 
 
-def test_spend_tab_threads_bounds_to_cloud_services_and_coco_not_vs_prior():
+def test_spend_tab_threads_bounds_to_cloud_services_and_coco():
     spend = _src("app/ui/pages/cost_parts/spend.py")
     assert "fact_cloud_services_ratio(days, company, bounds=bounds)" in spend
     assert 'ai_code_daily(days, "ALL", bounds=bounds)' in spend
     assert "cloud_services_ratio_by_warehouse(days, company, bounds=bounds)" in spend
-    # the vs-prior 'wh' job stays trailing until the Attribution-tab batch
-    assert "fact_warehouse_window_vs_prior(days, company),\n" in spend
+
+
+# ---------------------------------------------------------------------------
+# Batch 2: Cost > Attribution tab — pool AND allocation shares share the window
+# ---------------------------------------------------------------------------
+def test_allocation_share_builders_honor_last_month():
+    lm_live = cost_sql.allocated_attribution(31, "USER_NAME", "ALL", bounds=_AUG)
+    assert "START_TIME >= '2026-08-01' AND START_TIME < '2026-09-01'" in lm_live
+    from app.data import mart27_sql
+    lm_mart = mart27_sql.alloc_xdim_attribution(31, "USER", "ALL", bounds=_AUG)
+    assert "x.DAY >= '2026-08-01' AND x.DAY < '2026-09-01'" in lm_mart
+    # unbounded keeps the trailing today-excluded effective window
+    plain = mart27_sql.alloc_xdim_attribution(30, "USER", "ALL")
+    assert "DATEADD('day', -" in plain and "CURRENT_DATE()" in plain and "2026-08" not in plain
+
+
+def test_attribution_tab_threads_bounds_to_pool_and_shares():
+    cost = _src("app/ui/pages/cost.py")
+    spend = _src("app/ui/pages/cost_parts/spend.py")
+    assert 'bounds=f["bounds"], wh_res=_pf.get("wh")' in cost
+    # the prefetched vs-prior pool and both allocation share reads all carry bounds,
+    # so per-entity dollars still reconcile to the exact-usage pool
+    assert "fact_warehouse_window_vs_prior(days, company, bounds=bounds)" in spend
+    assert "allocated_attribution(days, dim, company, database, schema_contains,\n" in spend
+    assert 'alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database,\n' in spend

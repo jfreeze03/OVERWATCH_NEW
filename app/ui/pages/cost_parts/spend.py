@@ -96,9 +96,7 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
          "source": "FACT_METERING_DAILY (mart, loaded hourly)"},
         {"key": "csr", "sql": mart_sql.fact_cloud_services_ratio(days, company, bounds=bounds),
          "source": "FACT_WAREHOUSE_DAILY (cloud-services share)"},
-        # 'wh' feeds the Attribution tab (not yet Last-month-aware), so it stays trailing
-        # here to keep that tab internally consistent until its own migration batch.
-        {"key": "wh", "sql": mart_sql.fact_warehouse_window_vs_prior(days, company),
+        {"key": "wh", "sql": mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=bounds),
          "source": "FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)"},
         {"key": "daily", "sql": mart_sql.fact_warehouse_daily(30, company),
          "source": "FACT_WAREHOUSE_DAILY"},
@@ -775,17 +773,20 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 result_caption(users)
 
 def _attribution_tab(company: str, days: int, rate: float, database: str = "", schema_contains: str = "",
-                     *, wh_res=None, daily_res=None) -> None:
+                     *, bounds: tuple | None = None, wh_res=None, daily_res=None) -> None:
     # wh_res / daily_res are the prefetched batch results (perf #15); None ->
     # read serially here. The live/historical fallbacks below are unchanged.
+    # For 'Last month' (bounds) the pool AND the allocation shares both read the bounded
+    # calendar range, so per-entity dollars still reconcile to the exact-usage pool.
+    _lm = "_lm" if bounds is not None else ""
     wh = wh_res if wh_res is not None else run(
-        mart_sql.fact_warehouse_window_vs_prior(days, company), page=_PAGE,
-        key=f"wh_vs_prior_fact_{company}_{days}", tier="hourly",
+        mart_sql.fact_warehouse_window_vs_prior(days, company, bounds=bounds), page=_PAGE,
+        key=f"wh_vs_prior_fact_{company}_{days}{_lm}", tier="hourly",
         source="FACT_WAREHOUSE_DAILY (window vs prior, loaded hourly)")
     _wh_live = False
     if not wh.usable():  # mart not deployed/loaded yet -> bounded live scan
-        wh = run(cost_sql.warehouse_window_vs_prior(days, company), page=_PAGE,
-                 key=f"wh_vs_prior_{company}_{days}", tier="historical",
+        wh = run(cost_sql.warehouse_window_vs_prior(days, company, bounds=bounds), page=_PAGE,
+                 key=f"wh_vs_prior_{company}_{days}{_lm}", tier="historical",
                  source="ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY (live fallback)")
         _wh_live = True
     st.markdown("**By warehouse (exact usage)**")
@@ -864,18 +865,20 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
         # caption used to guess the full-window pool. Resolve the served pool from the actual
         # path. Keys match the render pass below, so these reads are cached, not doubled.
         def _fetch_alloc(dim: str):
-            _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains)
+            _alloc_live = cost_sql.allocated_attribution(days, dim, company, database, schema_contains,
+                                                         bounds=bounds)
             if schema_contains:
                 # no allocation mart carries a schema grain — live only
-                return run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                return run(_alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}{_lm}",
                            tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (elapsed share)")
             # P0-1/P0-2 (Codex 2026-07-14): BOTH unfiltered and database-filtered attribution
             # read FACT_COST_ALLOC_XDIM_DAILY so company scope is warehouse-based on every
             # path. The owner-scoped MART_COST_ALLOCATION_DAILY made the same user/DB total
             # shift when a database filter was toggled. `database` is "" unfiltered.
             return run_mart_first(
-                mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database),
-                _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}",
+                mart27_sql.alloc_xdim_attribution(days, dim.replace("_NAME", ""), company, database,
+                                                  bounds=bounds),
+                _alloc_live, page=_PAGE, key=f"alloc_{dim}_{company}_{days}{_lm}",
                 mart_source="FACT_COST_ALLOC_XDIM_DAILY (mart — warehouse-hour credit share)",
                 live_source="QUERY_HISTORY (elapsed share, live fallback)")
 
