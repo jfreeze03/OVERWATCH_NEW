@@ -16,10 +16,10 @@ _OPT = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "optimize.py").read_text
 def test_remediation_reuses_the_advisors_mart_first_pair():
     remed = _OPT.split('key=f"remed_idle_', 1)[0].rsplit("idle_res = ", 1)[1]
     assert "run_mart_first" in remed
-    assert "eff_idle_analysis(days, company)" in remed
+    assert "eff_idle_analysis(days, company, bounds=bounds)" in remed
     # identical builder pair as the advisor -> identical SQL identity -> cache
     # (3 sites since v4.254: advisor, remediation, and the wave-3 idle-waste headline)
-    assert _OPT.count("mart27_sql.eff_idle_analysis(days, company)") == 3
+    assert _OPT.count("mart27_sql.eff_idle_analysis(days, company, bounds=bounds)") == 3
 
 
 def test_quarantine_keys_are_namespaced_by_page_and_sql():

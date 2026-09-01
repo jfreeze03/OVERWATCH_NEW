@@ -91,7 +91,7 @@ def test_storage_tab_wires_account_tiers():
     # on the page whose subject it is.
     sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     assert "def _account_storage_tiers" in sp
-    assert "_account_storage_tiers(company, days, settings)" in sp
+    assert "_account_storage_tiers(company, days, settings, bounds=bounds)" in sp
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
     assert "_account_storage_tiers" not in cb
 

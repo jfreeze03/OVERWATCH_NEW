@@ -231,7 +231,7 @@ def test_etl_formulas_are_run_grain_with_written_rows():
     # scope threading reaches the SQL (Codex #10: the panel ignored database/schema)
     assert "ALFA_EDW_PRD" in sql and "STG" in sql
     uc = _read("app/ui/pages/cost_parts/unit_costs.py")
-    assert 'etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"])' in uc
+    assert 'etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"], bounds=bounds)' in uc
     assert 'etl_sql.etl_tag_coverage(days, company, f["database"], f["schema_contains"])' in uc
 
 

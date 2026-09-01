@@ -57,7 +57,7 @@ _PAGE = "Cost & Contract"
 # navigation/dispatch stays in cost.py. Import preamble mirrored from
 # cost.py; ruff --fix prunes what this section does not use.
 
-def _cortex_spend_tab(days: int, ai_rate: float) -> None:
+def _cortex_spend_tab(days: int, ai_rate: float, *, bounds: tuple | None = None) -> None:
     # v4.50: the storage panels moved to Spend & Attribution — storage is
     # neither chargeback nor AI, and the section label was hiding it.
     st.markdown("**Cortex / AI spend (account-wide)**")
@@ -66,9 +66,10 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
     # dense-series reach-back/interior-gap rules would reject a perfectly good mart on the common
     # case and degrade to the 90d-clamped live fallback — undercounting long windows. served_days
     # already labels the live-fallback path honestly; the mart is trusted for its available history.
+    _lm = "_lm" if bounds is not None else ""
     res = run_mart_first(
-        mart_sql.fact_cortex_daily_spend(days), cost_sql.cortex_daily_spend(days),
-        page=_PAGE, key=f"cortex_{days}",
+        mart_sql.fact_cortex_daily_spend(days, bounds=bounds), cost_sql.cortex_daily_spend(days, bounds=bounds),
+        page=_PAGE, key=f"cortex_{days}{_lm}",
         mart_source="FACT_METERING_DAILY (AI services, billed)",
         live_source="ACCOUNT_USAGE.METERING_DAILY_HISTORY (AI services, live fallback)")
     if guard(res, "No AI/Cortex service credits in this window."):
@@ -97,8 +98,8 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
             # P8: metadata tier (4h). The source view lags hours and the numbers
             # are exact token metering, so an hourly re-scan re-pays the
             # secure-view expansion for an answer that cannot have changed.
-            fn_res = run(cortex_sql.cortex_ai_functions_daily(days), page=_PAGE,
-                         key=f"cortex_fn_{days}", tier="metadata",
+            fn_res = run(cortex_sql.cortex_ai_functions_daily(days, bounds=bounds), page=_PAGE,
+                         key=f"cortex_fn_{days}{_lm}", tier="metadata",
                          source="ACCOUNT_USAGE.CORTEX_AI_FUNCTIONS_USAGE_HISTORY")
             if fn_res.ok and not fn_res.empty:
                 fn = fn_res.df.copy()
@@ -111,7 +112,7 @@ def _cortex_spend_tab(days: int, ai_rate: float) -> None:
                 st.caption(f"View not available in this account/role: {fn_res.error}")
 
 
-def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool) -> None:
+def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Cortex Code user attribution — ported from the original AI & Cortex
     Monitor. Token credits are exact per user; projections and severities are
     computed in tested logic, and budget severities only exist when an AI
@@ -132,8 +133,9 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     #     user-day-source fetch under a days-independent cache key, from which
     #     BOTH this rollup and the daily-by-source chart are folded in pandas.
     #     One 22s payment per TTL instead of two per window.
-    rollup_res = run(mart27_sql.ai_code_user_rollup(days, company), page=_PAGE,
-                     key=f"cortex_users_{company}_{days}", tier="hourly",
+    _lm = "_lm" if bounds is not None else ""
+    rollup_res = run(mart27_sql.ai_code_user_rollup(days, company, bounds=bounds), page=_PAGE,
+                     key=f"cortex_users_{company}_{days}{_lm}", tier="hourly",
                      source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
     live_res = None
     if not rollup_res.usable():
@@ -212,8 +214,8 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
             # The rollup came off the fact, so the fact covers this window: an
             # empty daily read here is the ANSWER, not a cold mart. Reviving the
             # live scan would pay 15s to confirm what we already know.
-            daily_res = run(mart27_sql.ai_code_daily(days, company), page=_PAGE,
-                            key=f"cortex_daily_{company}_{days}", tier="hourly",
+            daily_res = run(mart27_sql.ai_code_daily(days, company, bounds=bounds), page=_PAGE,
+                            key=f"cortex_daily_{company}_{days}{_lm}", tier="hourly",
                             source="FACT_AI_USAGE_DAILY (Cortex Code, daily loader)")
         if guard(daily_res, "No daily Cortex Code usage rows."):
             daily = daily_res.df.copy()
@@ -338,10 +340,10 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
     _coco_cap = safe_float(settings.get("COCO_DAILY_CAP_CREDITS"), 15.0)
-    _token_economics_panel(company, days, _coco_cap if _coco_cap > 0 else 15.0)
+    _token_economics_panel(company, days, _coco_cap if _coco_cap > 0 else 15.0, bounds=bounds)
 
 
-def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
+def _token_economics_panel(company: str, days: int, cap_credits: float, *, bounds: tuple | None = None) -> None:
     """CoCo efficiency review (repo review wave 2: TOKENS_GRANULAR). Cache-hit alone can't separate
     a heavy-but-targeted user from a high-intensity one, so this merges the token grain with
     per-user daily credits into peer-relative signals + a 🚩 Review flag. Tracks the page's Window
@@ -358,7 +360,8 @@ def _token_economics_panel(company: str, days: int, cap_credits: float) -> None:
                           "per user and merges daily credits into peer-relative efficiency "
                           "signals — on demand; needs the newer view shape."):
         return
-    te_res = run(cortex_sql.cortex_code_token_types(days), page=_PAGE, key=f"cortex_token_types_{days}",
+    _lm = "_lm" if bounds is not None else ""
+    te_res = run(cortex_sql.cortex_code_token_types(days, bounds=bounds), page=_PAGE, key=f"cortex_token_types_{days}{_lm}",
                  tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
                  probe=True)
     if not te_res.ok:
@@ -542,10 +545,11 @@ def _statement_export(company: str, rate: float) -> None:
             )
             st.success(f"{frame['DEPARTMENT'].nunique()} department statements for {month}.")
 
-def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> None:
+def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens."""
-    dept_res = run(chargeback_sql.department_window_credits(days, company), page=_PAGE,
-                   key=f"cb_dept_{company}_{days}", tier="historical",
+    _lm = "_lm" if bounds is not None else ""
+    dept_res = run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
+                   key=f"cb_dept_{company}_{days}{_lm}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
     if not guard(dept_res, "No warehouse credits in this window.",
                  setup_hint="Not installed yet — an admin can verify on Admin → Migrations & freshness. Seed department names in DEPARTMENT_MAP."):
@@ -587,9 +591,9 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool) -> 
         "roles outside this scope keep their slice, so a warehouse's rows can sum below 1."
     )
     share_res = run_mart_first(
-        mart27_sql.role_share(days, company),
-        chargeback_sql.role_share_within_warehouse(days, company),
-        page=_PAGE, key=f"cb_share_{company}_{days}",
+        mart27_sql.role_share(days, company, bounds=bounds),
+        chargeback_sql.role_share_within_warehouse(days, company, bounds=bounds),
+        page=_PAGE, key=f"cb_share_{company}_{days}{_lm}",
         mart_source="FACT_QUERY_ROLE_HOURLY (mart — exec-sec share)",
         live_source="QUERY_HISTORY (elapsed share per warehouse, live fallback)")
     if share_res.usable():

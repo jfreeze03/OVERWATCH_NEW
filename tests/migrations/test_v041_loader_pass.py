@@ -598,7 +598,7 @@ def test_ai_users_tab_is_fact_first_now_that_the_fact_carries_the_columns():
     the revert was about."""
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
     body = cb.split("def _ai_users_tab", 1)[1].split("\ndef ", 1)[0]
-    assert "mart27_sql.ai_code_user_rollup(days, company)" in body
+    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in body
     assert "probe=True" in body                             # 002139 probe semantics kept
     assert 'error_kind == "unknown_function"' in body       # 002139 note survives
     # the live fallback still exists, and is now ONE 365d days-independent read

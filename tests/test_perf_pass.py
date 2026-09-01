@@ -23,7 +23,7 @@ def test_idle_scan_runs_once_per_hour_not_twice():
     # idle-waste headline above the sub-tabs) use run_mart_first with the IDENTICAL
     # builder pair — mart and live reads each share one cache identity, so the whole
     # tab pays for ONE idle scan per hour no matter how many sites read it.
-    assert src.count("mart27_sql.eff_idle_analysis(days, company)") == 3
+    assert src.count("mart27_sql.eff_idle_analysis(days, company, bounds=bounds)") == 3
     assert src.count("insights_sql.idle_warehouse_analysis(days, company)") == 3
     assert src.count("idle_warehouse_analysis(") == 3
 

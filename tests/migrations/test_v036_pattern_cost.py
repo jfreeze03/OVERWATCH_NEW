@@ -37,7 +37,7 @@ def test_pattern_reader_is_measured_scoped_and_floored():
     assert "''" in mart27_sql.pattern_cost(30, "x'y")
     uc = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "unit_costs.py").read_text(encoding="utf-8")
     assert "Repeated patterns — the silent spend (measured $)" in uc
-    assert 'key=f"patterns_{company}_{days}"' in uc              # triage filter honored
+    assert 'key=f"patterns_{company}_{days}{_lm}"' in uc              # triage filter honored
     assert "probe=True" in uc.split("patterns_", 1)[1][:300]     # quiet pre-V036
 
 

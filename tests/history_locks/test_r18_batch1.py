@@ -46,7 +46,7 @@ def test_role_shares_follow_the_attribution_law():
 def test_unit_costs_reads_ai_fact_before_paying_the_live_scan():
     assert _UC.find("ai_costs_by_model") < _UC.find("run_batch(")
     assert 'if not _ai_m.usable():' in _UC              # live member is conditional
-    assert _UC.count("cortex_model_costs(days)") == 2   # batch member + serial fallback only
+    assert _UC.count("cortex_model_costs(days, bounds=bounds)") == 2   # batch member + serial fallback only
 
 
 def test_admin_tuning_drill_uses_positional_index_and_never_passes_silently():

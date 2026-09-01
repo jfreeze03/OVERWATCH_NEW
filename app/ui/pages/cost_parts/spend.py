@@ -1107,18 +1107,19 @@ def _attribution_tab(company: str, days: int, rate: float, database: str = "", s
             result_caption(na)
 
 
-def _account_storage_tiers(company: str, days: int, settings: dict) -> None:
+def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: tuple | None = None) -> None:
     """Account-wide storage by tier (F1b/R3, V046). Table/stage/fail-safe bill
     at the standard rate; hybrid and archive cool/cold at their own SETTINGS
     rates. Account grain — STORAGE_USAGE carries no per-database split for these
     tiers, so the company filter does not narrow it."""
     st.markdown("**Account storage by tier (billing basis)**")
-    res = run(cost_sql.storage_account_truth(days), page=_PAGE,
-              key=f"stor_acct_{days}", tier="hourly",
+    _lm = "_lm" if bounds is not None else ""
+    res = run(cost_sql.storage_account_truth(days, bounds=bounds), page=_PAGE,
+              key=f"stor_acct_{days}{_lm}", tier="hourly",
               source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
     if not res.ok or res.empty:
         res = run(cost_sql.storage_account_truth_live(days), page=_PAGE,
-                  key=f"stor_acct_live_{days}", tier="historical",
+                  key=f"stor_acct_live_{days}{_lm}", tier="historical",
                   source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
     if not res.ok:
         st.caption("Account storage tiers need migration V046 "
@@ -1240,7 +1241,7 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
                "booking, use **Cost → Optimization & Savings ▸ Storage & waste**.")
 
 
-def _storage_tab(company: str, days: int, settings: dict) -> None:
+def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | None = None) -> None:
     """Storage economics (moved from Chargeback & AI, v4.50): per-database
     calendar-month billing basis plus the account tier split. Spend-lens
     material — storage is neither chargeback nor AI."""
@@ -1376,4 +1377,4 @@ def _storage_tab(company: str, days: int, settings: dict) -> None:
                        f"days; latest {latest_txt}.")
         st.divider()
         _storage_table_drill(company, settings, df["DATABASE_NAME"].astype(str).tolist())
-    _account_storage_tiers(company, days, settings)
+    _account_storage_tiers(company, days, settings, bounds=bounds)

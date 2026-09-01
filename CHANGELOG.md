@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.412.0 - "Last month" rollout batch 4: whole Cost page threaded (2026-09-01)
+
+Threads `f["bounds"]` from the page into every remaining Cost tab, activating the bounded builders from
+v4.411 — the **entire Cost page** now honors Last month exactly:
+
+- **Chargeback** (`department_window_credits`, `role_share`, `role_share_within_warehouse`), **query-tag
+  governance** (`tag_coverage` live + mart, `untagged_executions_for_user`), **Cortex / AI spend**
+  (`fact_cortex_daily_spend`, `cortex_daily_spend`, `cortex_ai_functions_daily`), **AI users**
+  (`ai_code_user_rollup`, `ai_code_daily`, `cortex_code_token_types`), **storage** (`storage_account_truth`
+  via `_account_storage_tiers`), **unit costs** (`etl_cost_by_pipeline`, `graph_daily_costs`,
+  `measured_query_costs`, `procedure_costs_usd`, `expensive_queries_usd`, `cortex_model_costs`) and
+  **optimization** (idle/sizing/pattern/QAS/object-cost/result-cache) tabs.
+- Every scope-window cache key gains a Last-month discriminator (`{_lm}`) so a bounded read never collides
+  with a trailing read of the same day-count. Days-independent (`cortex_code_user_daily`) and fixed-window
+  helpers are left untouched. Backward compatible; new threading lock added.
+
 ## 4.411.0 - "Last month" rollout batch 3: all remaining cost builders honor bounds (2026-09-01)
 
 Adds the bounded **Last month** branch to the remaining ~40 scope-driven cost/AI/optimization SQL builders

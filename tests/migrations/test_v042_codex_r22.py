@@ -155,7 +155,7 @@ def test_ai_fact_gains_exact_stamps_and_the_tab_is_now_fact_first():
     # the tab went fact-first in P2. The 002139 probe semantics and the live
     # fallback both survive — the reasons for the original revert do not recur.
     cb = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "ai_chargeback.py").read_text(encoding="utf-8")
-    assert "mart27_sql.ai_code_user_rollup(days, company)" in cb
+    assert "mart27_sql.ai_code_user_rollup(days, company, bounds=bounds)" in cb
     assert "cortex_sql.cortex_code_user_daily(company)" in cb      # live leg kept
     assert "probe=True" in cb
     assert "ACCOUNT_USAGE.CORTEX_CODE_*_USAGE_HISTORY" in cb       # still labeled as such

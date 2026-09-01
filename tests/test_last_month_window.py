@@ -188,3 +188,25 @@ def test_remaining_cost_builders_honor_last_month_bounds():
     assert insights_sql.expensive_queries_usd(31, "ALL", bounds=_AUG).count("'2026-08-01'") >= 2
     # Ask's cortex_model_costs is unchanged when called without bounds (positional Ask path)
     assert "DATEADD('day', -30, CURRENT_TIMESTAMP())" in cortex_sql.cortex_model_costs(30)
+
+
+# ---------------------------------------------------------------------------
+# Batch 4: the Cost page threads f["bounds"] into every remaining tab
+# ---------------------------------------------------------------------------
+def test_cost_page_threads_bounds_into_every_tab():
+    cost = _src("app/ui/pages/cost.py")
+    for call in (
+        "_storage_tab(f[\"company\"], f[\"days\"], settings, bounds=f[\"bounds\"])",
+        "_chargeback_tab(f[\"company\"], f[\"days\"], rate, is_operator, bounds=f[\"bounds\"])",
+        "_cortex_spend_tab(f[\"days\"], ai_rate, bounds=f[\"bounds\"])",
+        "_ai_users_tab(f[\"company\"], f[\"days\"], ai_rate, settings, is_operator, bounds=f[\"bounds\"])",
+        "_optimization_tab(f[\"company\"], f[\"days\"], rate, settings, is_operator, bounds=f[\"bounds\"])",
+    ):
+        assert call in cost, call
+    # query-tag governance (inline) threads bounds + a Last-month cache discriminator
+    assert "_tag_bounds = f[\"bounds\"]" in cost
+    assert "tag_coverage_daily(f[\"days\"], f[\"company\"], bounds=_tag_bounds)" in cost
+    assert "untagged_executions_for_user(\n" in cost and "bounds=_tag_bounds)" in cost
+    # unit-costs receives the whole filter dict, so it reads bounds itself
+    uc = _src("app/ui/pages/cost_parts/unit_costs.py")
+    assert 'bounds = f["bounds"]' in uc

@@ -47,7 +47,7 @@ def test_wave2_reads_are_probe_gated_with_honest_degrades():
     assert "native_anomaly_insights()" in spend
     assert "native ANOMALY_INSIGHTS feed isn't available" in spend
     ai = _src("app/ui/pages/cost_parts/ai_chargeback.py")
-    assert "cortex_code_token_types(days)" in ai   # tracks the page Window filter (v4.275)
+    assert "cortex_code_token_types(days, bounds=bounds)" in ai   # tracks the page Window filter (v4.275)
     assert "TOKENS_GRANULAR isn't available" in ai
 
 

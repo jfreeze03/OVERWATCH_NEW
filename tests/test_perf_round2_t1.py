@@ -39,7 +39,7 @@ def test_t1_1_spend_facts_on_hourly_tier():
                 'key=f"cs_users_{company}_{days}_{pick}", tier="hourly"',
                 'key=f"wh_vs_prior_fact_{company}_{days}{_lm}", tier="hourly"',
                 'key=f"fact_wh_daily_{company}", tier="hourly"',
-                'key=f"stor_acct_{days}", tier="hourly"'):
+                'key=f"stor_acct_{days}{_lm}", tier="hourly"'):
         assert key in sp, key
     # the live WMH fallback stays off the hourly tier ({_lm} discriminates Last month)
     assert 'key=f"cs_ratio_{company}_{days}{_lm}", tier="recent"' in sp

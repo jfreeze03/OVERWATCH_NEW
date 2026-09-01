@@ -51,6 +51,10 @@ _UNIT_COST_MAX_DAYS = 30
 def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     company, days = f["company"], f["days"]
     database, schema_contains = f["database"], f["schema_contains"]
+    bounds = f["bounds"]
+    # Last-month discriminator: a bounded read must never collide with a trailing
+    # read of the same day-count under a shared f-string cache key.
+    _lm = "_lm" if bounds is not None else ""
     # KEPT: the second sentence is where-to-go wayfinding (allocated view / task-graph
     # panel) plus the measured-vs-allocated framing — read-correctly cues, kept visible.
     st.caption(
@@ -83,7 +87,7 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # AI fact-first BEFORE the batch (r18 #3): read FACT_AI_USAGE_DAILY and
     # pay the live Cortex scan only when the fact can't answer — the old
     # order paid the live scan in every batch, then usually threw it away.
-    _ai_m = run(mart27_sql.ai_costs_by_model(days), page=_PAGE, key=f"unit_ai_mart_{days}",
+    _ai_m = run(mart27_sql.ai_costs_by_model(days, bounds=bounds), page=_PAGE, key=f"unit_ai_mart_{days}{_lm}",
                 tier="recent", source="FACT_AI_USAGE_DAILY (mart, loaded daily — Code + Functions)")
 
     # ---- independent historical reads -> one parallel batch (Codex #15).
@@ -96,13 +100,13 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     _jobs = [
         {"key": "q", "sql": insights_sql.measured_query_costs(
             uc_days, company, database, schema_contains,
-            f["warehouse_contains"], f["user_contains"], 50),
+            f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
          "source": f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)", "max_rows": 50},
-        {"key": "p", "sql": insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50),
+        {"key": "p", "sql": insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50, bounds=bounds),
          "source": f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)", "max_rows": 50},
     ]
     if not _ai_m.usable():
-        _jobs.append({"key": "ai", "sql": cortex_sql.cortex_model_costs(days),
+        _jobs.append({"key": "ai", "sql": cortex_sql.cortex_model_costs(days, bounds=bounds),
                       "source": "CORTEX_FUNCTIONS_USAGE_HISTORY", "max_rows": 200})
     _ub = run_batch(_jobs, page=_PAGE, tier="historical")
     if _ub is not None:
@@ -113,15 +117,15 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # serve the other window's cached frame under the same key.
         q_res = run(insights_sql.measured_query_costs(
                         uc_days, company, database, schema_contains,
-                        f["warehouse_contains"], f["user_contains"], 50),
-                    page=_PAGE, key=f"unit_q_{company}_{uc_days}_{database}", tier="historical",
+                        f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
+                    page=_PAGE, key=f"unit_q_{company}_{uc_days}_{database}{_lm}", tier="historical",
                     source=f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)")
-        p_res = run(insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50),
-                    page=_PAGE, key=f"unit_p_{company}_{uc_days}_{database}", tier="historical",
+        p_res = run(insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50, bounds=bounds),
+                    page=_PAGE, key=f"unit_p_{company}_{uc_days}_{database}{_lm}", tier="historical",
                     source=f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)")
         ai_res = _ai_m if _ai_m.usable() else run(
-            cortex_sql.cortex_model_costs(days), page=_PAGE,
-            key=f"unit_ai_{days}", tier="historical",
+            cortex_sql.cortex_model_costs(days, bounds=bounds), page=_PAGE,
+            key=f"unit_ai_{days}{_lm}", tier="historical",
             source="CORTEX_FUNCTIONS_USAGE_HISTORY")
 
     kpis = []
@@ -218,8 +222,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # credits per parameterized hash — one cheap query run thousands of
     # times shows its real bill. (Kept: this is the MEASURED pattern lens;
     # Optimization's 'Recurring cost patterns' is the ALLOCATED estimate — distinct.)
-    _pc = run(mart27_sql.pattern_cost(days, company, 25), page=_PAGE,
-              key=f"patterns_{company}_{days}", tier="recent",
+    _pc = run(mart27_sql.pattern_cost(days, company, 25, bounds=bounds), page=_PAGE,
+              key=f"patterns_{company}_{days}{_lm}", tier="recent",
               source=f"MART_PATTERN_COST_DAILY ({company} + account-level)", probe=True)
     if _pc.ok and not _pc.empty:
         _pd_df = _pc.df.copy()
@@ -402,8 +406,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                  "delta_color": "off",
                  "help": "Measured compute with no pipeline tag, at the configured rate."},
             ])
-        etl = run(etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"]), page=_PAGE,
-                  key=f"etl_pipe_{company}_{days}", tier="historical",
+        etl = run(etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"], bounds=bounds), page=_PAGE,
+                  key=f"etl_pipe_{company}_{days}{_lm}", tier="historical",
                   source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)")
         if guard(etl, "No tagged pipeline runs with attributed credits in this window — "
                       "adopt the JSON QUERY_TAG (docs/design/ETL_COST_TAGS.md)."):
@@ -461,11 +465,12 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     # unit-cost material on the same QUERY_ATTRIBUTION_HISTORY basis as the
     # ETL panel above. Operational task health (failures, RCA, runtimes)
     # stays on Operations > Tasks.
-    _graphs_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"])
+    _graphs_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"], bounds=bounds)
 
 
 def _graphs_tab(company: str, days: int, rate: float, database: str = "",
-                schema_contains: str = "") -> None:
+                schema_contains: str = "", *, bounds: tuple | None = None) -> None:
+    _lm = "_lm" if bounds is not None else ""
     st.caption(
         "Cost per pipeline = measured warehouse credits for every task run in the "
         "graph (QUERY_ATTRIBUTION_HISTORY roll-up, ~8h lag) at the configured rate. "
@@ -474,8 +479,8 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
     )
     res = run_mart_first(
         mart27_sql.task_graphs(days, company, database, schema_contains),
-        graph_sql.graph_daily_costs(days, company, database, schema_contains),
-        page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}",
+        graph_sql.graph_daily_costs(days, company, database, schema_contains, bounds=bounds),
+        page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
         mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
         live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
     if not guard(res, "No task-graph runs in this scope/window."):

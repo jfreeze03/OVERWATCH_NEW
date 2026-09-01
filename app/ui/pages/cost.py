@@ -202,7 +202,7 @@ def render() -> None:
                      help="Storage economics (3 reads) and the unmapped-entity check "
                           "(1 read), loaded on demand — kept off the default first paint."):
             section_header("Storage", "info", "cost", anchor="cost-storage")
-            _storage_tab(f["company"], f["days"], settings)
+            _storage_tab(f["company"], f["days"], settings, bounds=f["bounds"])
             st.divider()
             unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
                       key=f"unmapped_{f['days']}", tier="hourly",
@@ -244,7 +244,7 @@ def render() -> None:
         _contract_tab(settings)
     elif section == "Chargeback & AI":
         section_header("Department chargeback", "info", "chargeback", anchor="cost-chargeback")
-        _chargeback_tab(f["company"], f["days"], rate, is_operator)
+        _chargeback_tab(f["company"], f["days"], rate, is_operator, bounds=f["bounds"])
         st.divider()
         section_header("Query-tag governance", "info", "chargeback", anchor="cost-tags")
         # KEPT as a plain caption: "allocated, never attributed" is a misread-prevention
@@ -260,11 +260,13 @@ def render() -> None:
         # columns) instead; with no scope, keep the cheap mart-first read.
         _tag_db = f["database"]
         _tag_sc = f["schema_contains"]
+        _tag_bounds = f["bounds"]
+        _tag_lm = "_lm" if _tag_bounds is not None else ""
         if str(_tag_db).strip() or str(_tag_sc).strip():
             tags_res = run(
                 cost_sql.tag_coverage(f["days"], f["company"], database=_tag_db,
-                                      schema_contains=_tag_sc),
-                page=_PAGE, key=f"tagcov_live_{f['company']}_{f['days']}_{_tag_db}_{_tag_sc}",
+                                      schema_contains=_tag_sc, bounds=_tag_bounds),
+                page=_PAGE, key=f"tagcov_live_{f['company']}_{f['days']}_{_tag_db}_{_tag_sc}{_tag_lm}",
                 tier="historical",
                 source="QUERY_HISTORY (exec-time-weighted, db/schema-scoped live)")
             st.caption("Scoped to the active Database/Schema filter via the live "
@@ -272,9 +274,9 @@ def render() -> None:
                        "no object columns); the live window clamps to 90 days.")
         else:
             tags_res = run_mart_first(
-                mart27_sql.tag_coverage_daily(f["days"], f["company"]),
-                cost_sql.tag_coverage(f["days"], f["company"]),
-                page=_PAGE, key=f"tagcov_{f['company']}_{f['days']}",
+                mart27_sql.tag_coverage_daily(f["days"], f["company"], bounds=_tag_bounds),
+                cost_sql.tag_coverage(f["days"], f["company"], bounds=_tag_bounds),
+                page=_PAGE, key=f"tagcov_{f['company']}_{f['days']}{_tag_lm}",
                 mart_source="MART_TAG_COVERAGE_DAILY (mart, loaded hourly)",
                 live_source="QUERY_HISTORY (exec-time-weighted, live fallback)")
         if guard(tags_res, "No workloads above the 60s floor in this window."):
@@ -311,9 +313,9 @@ def render() -> None:
             if _sel_user:
                 _u_db, _u_sc = f["database"], f["schema_contains"]
                 ut = run(cost_sql.untagged_executions_for_user(
-                             _sel_user, f["days"], f["company"], _u_db, _u_sc),
+                             _sel_user, f["days"], f["company"], _u_db, _u_sc, bounds=_tag_bounds),
                          page=_PAGE,
-                         key=f"untagged_user_{f['company']}_{f['days']}_{_sel_user}_{_u_db}_{_u_sc}",
+                         key=f"untagged_user_{f['company']}_{f['days']}_{_sel_user}_{_u_db}_{_u_sc}{_tag_lm}",
                          tier="historical", source="QUERY_HISTORY (untagged executions, per user)")
                 st.markdown(f"**Untagged executions — "
                             f"{resolve_display(_sel_user, user_display_map(_PAGE))}**")
@@ -331,7 +333,7 @@ def render() -> None:
                 st.caption("Click a user row to see their top untagged statement types.")
         st.divider()
         section_header("Cortex / AI spend", "info", "cost", anchor="cost-cortex")
-        _cortex_spend_tab(f["days"], ai_rate)
+        _cortex_spend_tab(f["days"], ai_rate, bounds=f["bounds"])
         st.divider()
         section_header("AI users", "info", "operations", anchor="cost-ai-users")
         # r22 #14: the exact Cortex Code user scan is the heaviest read in
@@ -342,7 +344,7 @@ def render() -> None:
                      key="ai_users_scan",
                      help="Runs the per-user Cortex Code scans; the rest of "
                           "this section stays cheap without it."):
-            _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator)
+            _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator, bounds=f["bounds"])
     elif section == "Unit costs":
         section_header("Unit costs — one query, one call, one AI request", "info", "cost")
         _unit_costs_tab(f, rate, ai_rate)
@@ -352,7 +354,7 @@ def render() -> None:
         _compare_tab(f["company"], rate, ai_rate)
     else:
         section_header("Optimization", "info", "optimize")
-        _optimization_tab(f["company"], f["days"], rate, settings, is_operator)
+        _optimization_tab(f["company"], f["days"], rate, settings, is_operator, bounds=f["bounds"])
         # rec2: the savings ledger belongs to the inner "Remediation & ledger" pill
         # (set by _optimization_tab's nested lazy_sections) — render it only there,
         # so the other subgroups don't pay for its read.

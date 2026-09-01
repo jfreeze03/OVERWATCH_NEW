@@ -243,17 +243,21 @@ def _capacity_forecast_panel(company: str) -> None:
     result_caption(result)
 
 
-def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool) -> None:
+def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Optimization insights: idle/right-sizing advisors, expensive queries and
     patterns, the object-cost ledger, efficiency/storage/clustering scans, and
     guarded remediation."""
+    # Last-month bounded window (f["bounds"]): give every scope-window cached
+    # read a Last-month discriminator so a bounded read never collides with a
+    # trailing read of the same day-count.
+    _lm = "_lm" if bounds is not None else ""
     # Wave 3: the idle-credit-waste HEADLINE — the single account/company "$ burned in
     # zero-query warehouse-hours" number, above the sub-tabs (per-WH detail is in Idle &
     # sizing below; the identical SQL shares one cached scan). GROSS idle, never "savings".
     _idle_head = run_mart_first(
-        mart27_sql.eff_idle_analysis(days, company),
+        mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
         insights_sql.idle_warehouse_analysis(days, company),
-        page=_PAGE, key=f"idle_{company}_{days}", days=days,
+        page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
     if _idle_head.ok and not _idle_head.empty:
@@ -291,9 +295,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         methodology_note(
             "Credits billed in warehouse-hours with zero queries — the auto-suspend opportunity.")
         idle_res = run_mart_first(
-            mart27_sql.eff_idle_analysis(days, company),
+            mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company),
-            page=_PAGE, key=f"idle_{company}_{days}", days=days,
+            page=_PAGE, key=f"idle_{company}_{days}{_lm}", days=days,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse metering in this window."):
@@ -408,9 +412,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                               "p95, idle share, and x0.5/x2 cost scenarios."):
             st.caption("Toggle to run the per-warehouse sizing profile on demand.")
         elif guard((prof_res := run_mart_first(
-                        mart27_sql.eff_sizing_profile(days, company),
+                        mart27_sql.eff_sizing_profile(days, company, bounds=bounds),
                         insights_sql.warehouse_sizing_profile(days, company),
-                        page=_PAGE, key=f"sizing_{company}_{days}", days=days,
+                        page=_PAGE, key=f"sizing_{company}_{days}{_lm}", days=days,
                         mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart — p95 is peak daily)",
                         live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")),
                    "No warehouse activity to profile in this window."):
@@ -598,8 +602,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         )
         if st.toggle("Run QAS ROI scan", key="opt_qas_roi_toggle",
                      help="Reads QUERY_ACCELERATION_ELIGIBLE + QUERY_ACCELERATION_HISTORY."):
-            qas = run(cost_sql.qas_roi(days, company), page=_PAGE,
-                      key=f"qas_roi_{company}_{days}", tier="historical",
+            qas = run(cost_sql.qas_roi(days, company, bounds=bounds), page=_PAGE,
+                      key=f"qas_roi_{company}_{days}{_lm}", tier="historical",
                       source="QUERY_ACCELERATION_ELIGIBLE x QUERY_ACCELERATION_HISTORY (QAS ROI)")
             if qas.ok and qas.empty:
                 empty_state("clean", "No Query Acceleration spend or eligible workload in this window.")
@@ -774,8 +778,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 expq = run(insights_sql.expensive_queries_usd(
                                days, company, 50,
                                database=st.session_state.get("flt_database", ""),
-                               schema_contains=st.session_state.get("flt_schema_contains", "")),
-                           page=_PAGE, key=f"expq_{company}_{days}", tier="historical",
+                               schema_contains=st.session_state.get("flt_schema_contains", ""),
+                               bounds=bounds),
+                           page=_PAGE, key=f"expq_{company}_{days}{_lm}", tier="historical",
                            source="QUERY_HISTORY x WAREHOUSE_METERING_HISTORY (hour-share allocation)")
             if guard(expq, "No warehouse queries in this window."):
                 edf_q = expq.df.copy()
@@ -825,8 +830,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                 database=st.session_state.get("flt_database", ""),
                                 schema_contains=st.session_state.get("flt_schema_contains", ""),
                                 warehouse_contains=st.session_state.get("flt_warehouse_contains", ""),
-                                limit=50),
-                            page=_PAGE, key=f"measq_{company}_{days}", tier="historical",
+                                limit=50, bounds=bounds),
+                            page=_PAGE, key=f"measq_{company}_{days}{_lm}", tier="historical",
                             source="QUERY_ATTRIBUTION_HISTORY x QUERY_HISTORY (measured, idle excluded)")
             if guard(measq, "No measured query attribution in this window (~8h view lag)."):
                 mdf_q = measq.df.copy()
@@ -1026,8 +1031,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # db switch re-reads. Schema is not applied here (object-cost is scoped by
         # database, not the free-text schema filter) — the caption says so.
         _oc_db = st.session_state.get("flt_database", "")
-        _oc = run(cost_sql.object_cost_by_arm(days, company, database=_oc_db), page=_PAGE,
-                  key=f"objcost_arm_{company}_{days}_{_oc_db}", tier="recent",
+        _oc = run(cost_sql.object_cost_by_arm(days, company, database=_oc_db, bounds=bounds), page=_PAGE,
+                  key=f"objcost_arm_{company}_{days}{_lm}_{_oc_db}", tier="recent",
                   source="FACT_OBJECT_COST_DAILY (object-cost ledger)", probe=True)
         if _oc.ok and not _oc.empty:
             _adf = _oc.df.copy()
@@ -1036,8 +1041,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                       "help": "Sum across arms x the configured rate. Additive by construction."}])
             charts.bar_usd(_adf.sort_values("USD", ascending=False), "COST_ARM", "USD",
                            title="$ by cost arm", takeaway=True)
-            _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db), page=_PAGE,
-                       key=f"objcost_top_{company}_{days}_{_oc_db}", tier="recent",
+            _top = run(cost_sql.object_cost_top(days, company, 25, database=_oc_db, bounds=bounds), page=_PAGE,
+                       key=f"objcost_top_{company}_{days}{_lm}_{_oc_db}", tier="recent",
                        source="FACT_OBJECT_COST_DAILY (top objects)", probe=True)
             if _top.ok and not _top.empty:
                 _tdf = _top.df.copy()
@@ -1201,8 +1206,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            "better predicates would cut both runtime and credits.")
                 styled_table(prune.df)
                 result_caption(prune)
-            cache = run(ops_sql.result_cache_daily(days, company), page=_PAGE,
-                        key=f"cachehit_{company}_{days}", tier="historical",
+            cache = run(ops_sql.result_cache_daily(days, company, bounds=bounds), page=_PAGE,
+                        key=f"cachehit_{company}_{days}{_lm}", tier="historical",
                         source="ACCOUNT_USAGE.QUERY_HISTORY (BYTES_SCANNED = 0)")
             if guard(cache, "No queries in the window."):
                 charts.daily_metric_line(cache.df, "DAY", "HIT_PCT", "zero-scan answers %", unit="pct")
@@ -1413,9 +1418,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
         # means this is served from the advisor's cache — the remediation block
         # no longer pays its own live metering x history join when the mart is up.
         idle_res = run_mart_first(
-            mart27_sql.eff_idle_analysis(days, company),
+            mart27_sql.eff_idle_analysis(days, company, bounds=bounds),
             insights_sql.idle_warehouse_analysis(days, company),
-            page=_PAGE, key=f"remed_idle_{company}_{days}", days=days,
+            page=_PAGE, key=f"remed_idle_{company}_{days}{_lm}", days=days,
             mart_source="MART_WAREHOUSE_EFFICIENCY_DAILY (mart, loaded hourly)",
             live_source="WAREHOUSE_METERING_HISTORY x QUERY_HISTORY (live fallback)")
         if guard(idle_res, "No warehouse activity in the window to remediate."):
