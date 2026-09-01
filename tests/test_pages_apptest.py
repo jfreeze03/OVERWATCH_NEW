@@ -145,3 +145,19 @@ def test_each_page_renders(page):
     assert not at.exception, f"{page}: {at.exception}"
     # honest-empty pattern: the page produced *some* content, not a blank body
     assert at.title or at.markdown, page
+
+
+@pytest.mark.parametrize("page", ["Overview", "Cost & Contract", "Operations",
+                                  "Security", "Control Room", "Decision Studio"])
+def test_scope_pages_render_with_last_month_selected(page):
+    # Exercises the bounded 'Last month' path THROUGH the UI (filters() -> f["bounds"]
+    # -> every threaded tab/builder call), which the default-window smoke above does not.
+    # run() is stubbed, so this catches any threading NameError / bad bounds wiring
+    # before a real query is ever built.
+    at = AppTest.from_function(_entry, default_timeout=20)
+    at.run()
+    assert not at.exception
+    at.session_state["flt_days"] = "LAST_MONTH"
+    _nav_to(at, page)
+    at.run()
+    assert not at.exception, f"{page} (Last month): {at.exception}"
