@@ -79,6 +79,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    methodology_note,
     nested_sections,
     notify,
     page_header,
@@ -269,7 +270,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 **_tp_cfg,
             },
         )
-        st.caption("Elapsed-time ranking.")
+        methodology_note("Elapsed-time ranking.")  # #1: pure sort-order note → audit-mode only
 
     # A second live QUERY_HISTORY scan (ranked by inefficiency, not elapsed). It is a
     # deliberate drill, so toggle-gate it off first paint — the Heaviest-queries scan
@@ -2030,7 +2031,8 @@ def _contention_tab(company: str, days: int) -> None:
 def _wh_change_block(company: str, is_operator: bool) -> None:
     st.divider()
     section_header("Warehouse setting changes", "info", "warehouse", anchor="ops-change-wh")
-    st.caption(
+    # #1: table-content descriptor (panel_help carries the detail) → audit-mode only.
+    methodology_note(
         "Daily warehouse setting diffs, with before/after cost and performance verdicts."
     )
     panel_help(
@@ -2125,7 +2127,8 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
 def _change_impact_tab(company: str, database: str, schema_contains: str,
                        is_operator: bool) -> None:
     section_header("Procedure and task changes", "info", "operations", anchor="ops-change-objects")
-    st.caption(
+    # #1: table-content descriptor + ranking basis (panel_help carries the detail) → audit-mode only.
+    methodology_note(
         "Daily procedure/task diffs, ranked by before/after runtime, failures, and credits/call."
     )
     panel_help(

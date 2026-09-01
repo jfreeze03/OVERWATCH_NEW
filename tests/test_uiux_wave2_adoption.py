@@ -102,6 +102,26 @@ def test_caption_sweep_cost_part2_optimize():
     assert "No ETA is intentional" in src                 # blank-column legend
 
 
+def test_caption_sweep_remaining_pages():
+    # #1 (remaining pages): a conservative pass converted only pure provenance/sort/
+    # descriptor captions on Operations (3) and Admin (3). The heavily-operational pages
+    # (Control Room, Alerts, Decision Studio bodies, Ask, Workbench) had NONE — their
+    # captions are legends, actions, conclusions, scope cues, and data-bearing lines.
+    ops = _src("app/ui/pages/operations.py")
+    admin = _src("app/ui/pages/admin.py")
+    assert "    methodology_note,\n" in ops and "    methodology_note,\n" in admin
+    assert ops.count("methodology_note(") == 3
+    assert admin.count("methodology_note(") == 3
+    assert 'methodology_note("Elapsed-time ranking.")' in ops
+    assert "methodology_note(_SCAN_NOTE)" in admin
+    # KEEP guard: the per-selection detection-timing note stays a plain caption.
+    assert 'st.caption("Change detected within a day of the ALTER.")' in ops
+    # pages with no pure-methodology captions gained no methodology_note usage
+    for rel in ("app/ui/pages/control_room.py", "app/ui/pages/alerts.py",
+                "app/ui/decision_studio.py", "app/ui/pages/ask.py", "app/ui/workbench.py"):
+        assert "methodology_note(" not in _src(rel), rel
+
+
 def test_object_cost_table_reconciles_against_an_independent_parent():
     # #30: the top-objects cost table now discloses coverage against the object-attributed
     # total. The parent is the by-ARM aggregation minus the non-object residual arm — an

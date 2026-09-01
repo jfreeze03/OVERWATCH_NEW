@@ -33,6 +33,7 @@ from app.ui.components import (
     kpi_row,
     lazy_sections,
     load_settings,
+    methodology_note,
     notify,
     page_header,
     panel_help,
@@ -715,12 +716,13 @@ _SCAN_NOTE = ("First load scans ACCOUNT_USAGE directly (a few seconds on a cold 
 
 
 def _self_cost_tab() -> None:
-    st.caption(
+    # #1: self-cost measurement provenance (how UI vs loader traffic is separated) → audit-mode only.
+    methodology_note(
         "The monitoring app and loader tasks share WH_ALFA_ADMIN (XSMALL, 60-second "
         "auto-suspend). Every interactive app query carries an OVERWATCH query tag, so "
         "the table separates UI traffic from loader and task work without another warehouse."
     )
-    st.caption(_SCAN_NOTE)
+    methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
     res = run(mart_sql.app_self_cost(14), page=_PAGE, key="self_cost", tier="historical",
               source="ACCOUNT_USAGE.QUERY_HISTORY (WH_ALFA_ADMIN, split by query tag)")
     if guard(res, "No OVERWATCH-tagged or app-warehouse queries in the last 14 days (fresh install)."):
@@ -947,7 +949,7 @@ def _performance_tab() -> None:
     if st.checkbox("Also scan ACCOUNT_USAGE for bytes scanned (slower)", key="adm_stmt_scan",
                    help="The GB-scanned figure only exists in QUERY_HISTORY — this is the "
                         "one thing the app's own telemetry cannot record."):
-        st.caption(_SCAN_NOTE)
+        methodology_note(_SCAN_NOTE)  # #1: scan/cache provenance → audit-mode only
         scan = run(mart_sql.app_statement_stats(7), page=_PAGE, key="app_stmt_stats",
                    tier="historical", source="ACCOUNT_USAGE.QUERY_HISTORY (tagged WH_ALFA_ADMIN)")
         if guard(scan, "No statements on the app warehouse in the last 7 days.",

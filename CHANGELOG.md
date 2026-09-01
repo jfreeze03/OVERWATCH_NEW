@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.394.0 - Operator/Audit caption sweep: remaining pages (2026-08-31)
+
+- **[#1, remaining pages] Caption sweep across Operations, Control Room, Alerts, Decision Studio,
+  Admin, Ask, and Workbench.** A conservative pass (bias-to-KEEP rubric) classified all 184 captions
+  on these files. Only six were pure audit-reproduction detail and moved to `methodology_note`:
+  Operations' elapsed-time sort note and its two change-diff table descriptors, and Admin's self-cost
+  measurement provenance plus the two `_SCAN_NOTE` (first-load scans directly, caches one hour) lines.
+  **Control Room, Alerts, Decision Studio bodies, Ask, and Workbench converted nothing** — their
+  captions are overwhelmingly display legends, action hints, conclusions, scope disclaimers, and
+  data-bearing lines that the operator needs at the table. This completes the operator/audit caption
+  sweep (#1) across every page. Total across the whole app: ~440 candidate captions reviewed, and a
+  deliberately small set converted, keeping every legend and don't-misread-this caveat visible.
+
 ## 4.393.0 - Operator/Audit caption sweep: Cost/Optimize (2026-08-31)
 
 - **[#1, Cost part 2] Caption sweep on `optimize.py` — the largest Cost file (58 captions).** Seven
