@@ -25,15 +25,19 @@ def test_security_identity_tables_drill_to_entity_360():
 
 
 def test_overview_methodology_captions_are_audit_gated():
-    # #1: the pure how-computed / provenance captions on Overview now render only in
-    # audit mode via methodology_note; the primitive is imported.
+    # #1 (post re-audit): pure how-computed / provenance captions on Overview render only
+    # in audit mode via methodology_note. The re-audit reverted two over-conversions
+    # (the score-defaults note — decodes the '(capped)' token + action — and the
+    # score-trend "judge the trend, not the level" caveat), so exactly 3 remain.
     src = _src("app/ui/pages/overview.py")
     assert "    methodology_note,\n" in src  # imported in the components block
-    assert src.count("methodology_note(") >= 5
+    assert src.count("methodology_note(") == 3
     # The account-wide SCOPE disclaimer stays a plain caption — hiding it in operator
-    # mode would strand the runway bar with no cue that it's account-wide (a
-    # skeptic-caught over-reach, deliberately excluded from the sweep).
+    # mode would strand the runway bar with no cue that it's account-wide.
     assert 'st.caption("Whole-account contract commitment' in src
+    # reverted on re-audit — must stay visible in operator mode
+    assert "'(capped)' means the" in src and 'methodology_note("Point values' not in src
+    assert 'judge the trend, not the level' in src and "methodology_note(\n                \"Live-score" not in src
 
 
 def test_caption_sweep_second_increment_brief_and_security():

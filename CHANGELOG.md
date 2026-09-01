@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.396.0 - Caption sweep: full cross-section re-audit (2026-08-31)
+
+- **[#1, full re-audit] Ran the both-directions re-audit across every remaining section.** After the
+  Cost re-audit, the same audit+verify (wrongly-converted and missed) was run over all other pages:
+  the conversion-bearing ones (Overview, Brief, Security, Operations, Admin) and the zero-conversion
+  operational pages (Control Room, Alerts, Decision Studio, Ask, Workbench). Result: **two more
+  over-conversions found, both on Overview** (swept with the earliest, weaker rubric) and reverted to
+  plain captions — the score-defaults note (it decodes the on-screen `(capped)` token and points to
+  the `SCORE_PTS_*` settings) and the score-trend note ("judge the trend, not the level" — an
+  interpretation/misread caveat on a chart that also renders in operator mode). Everything else was
+  confirmed correct in both directions, including one Admin caption the audit flagged as a missed
+  conversion but the verify correctly kept (its "batch-wall telemetry excluded from totals" clause is
+  a scope cue on the failure-rate figures above it). Overview conversions drop from 5 to 3. The #1
+  caption sweep is now audited clean across the entire app.
+
 ## 4.395.0 - Caption sweep: Cost correctness re-audit (2026-08-31)
 
 - **[#1, Cost re-audit] Reverted five over-conversions caught on a thorough second pass.** A dedicated

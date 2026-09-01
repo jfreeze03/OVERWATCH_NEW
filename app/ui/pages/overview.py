@@ -1073,19 +1073,23 @@ def render() -> None:
             # arithmetic is on screen — stops "−6 pts per critical" from reading as a
             # measured fact. Once SETTINGS overrides any weight, the line disappears.
             if scoring.resolve_weights(settings) == scoring.DEFAULT_WEIGHTS:
-                # #1: methodology caveat → audit-mode only (already inside a defaults check).
-                methodology_note("Point values are the shipped defaults — uncalibrated starting "
-                                 "points, not measured impact. Tune them per driver via the "
-                                 "SCORE_PTS_* settings on Admin → Settings. '(capped)' means the "
-                                 "driver is pinned at its maximum: more of it will not lower the "
-                                 "score further.")
+                # KEPT: decodes the '(capped)' token shown on the deduction rows (legend),
+                # states "not measured impact" (misread caveat), and points to the SCORE_PTS_*
+                # settings (action) — all operator-facing, so it stays a plain caption.
+                st.caption("Point values are the shipped defaults — uncalibrated starting "
+                           "points, not measured impact. Tune them per driver via the "
+                           "SCORE_PTS_* settings on Admin → Settings. '(capped)' means the "
+                           "driver is pinned at its maximum: more of it will not lower the "
+                           "score further.")
 
     if not score_series.empty:
         with st.expander("Score trend — 30 days, retro-computed from facts (account-wide)"):
             charts.daily_metric_line(score_series, "DAY", "SCORE",
                                      title="Platform score (retro, account-wide)", unit="count")
-            # #1: long how-computed caveat → audit-mode only.
-            methodology_note(
+            # KEPT: "judge the trend, not the level" + "read the first few days as
+            # unreliable, not a real improvement" are interpretation/misread caveats, and
+            # the retro trend chart renders in operator mode too — so it stays visible.
+            st.caption(
                 "Live-score weights replayed over each day's facts. Stale-source and "
                 "open-action penalties aren't in the facts, so retro sits a few points "
                 "high — judge the trend, not the level. Weights calibrate on "
