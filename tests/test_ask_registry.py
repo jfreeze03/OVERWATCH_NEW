@@ -489,6 +489,56 @@ def test_cortex_answer_no_data_on_empty_view():
     assert r.confidence == "no_data"
 
 
+def test_cortex_gate_requires_ai_plus_spend_not_a_lone_ai_word():
+    # hardening fix: the two-group gate. A question that merely NAMES an AI thing but
+    # asks about something else must reach the CORRECT answerer, not be hijacked by cortex.
+    assert route("why is my llm task failing", default_days=30,
+                 company="ALL").answerer.intent == "task_failures"
+    assert route("is my embedding pipeline job failing", default_days=30,
+                 company="ALL").answerer.intent == "task_failures"
+    # a bare AI-domain word with no spend/ranking term has no grounded path -> refuse
+    assert route("what is an llm", default_days=30, company="ALL").answerer is None
+    # the real AI-spend questions still route to cortex
+    for q in ("which model is driving AI spend", "what is driving cortex credits",
+              "top cortex models in the last 30 days"):
+        assert route(q, default_days=30, company="ALL").answerer.intent == "cortex_spend_by_model", q
+
+
+def test_cortex_flags_outlier_and_rewrites_na_top_model():
+    from app.logic.ask.registry import _analyze_cortex_by_model
+    # >=5 models with a dominant outlier exercises the z-tail + meta['top_z'] path
+    df = pd.DataFrame({
+        "FUNCTION_NAME": ["COMPLETE"] * 6,
+        "MODEL_NAME": ["big", "a", "b", "c", "d", "e"],
+        "TOKENS": [1_000_000] * 6,
+        "CREDITS": [1000.0, 10.0, 9.0, 8.0, 7.0, 6.0],
+        "CREDITS_PER_1M_TOKENS": [0.1] * 6,
+    })
+    res = _analyze_cortex_by_model(AskParams(30, "ALL"), {"cortex": df})
+    assert "big" in res.headline and "outlier" in res.headline.lower()
+    assert res.params.get("top_z", 0) >= 3.5
+    # a 'n/a' top model gets the honest 'unattributed AI functions' rewrite
+    na = pd.DataFrame({
+        "FUNCTION_NAME": ["COMPLETE", "COMPLETE"],
+        "MODEL_NAME": ["n/a", "llama"],
+        "TOKENS": [500_000, 100_000],
+        "CREDITS": [90.0, 10.0],
+        "CREDITS_PER_1M_TOKENS": [0.18, 0.1],
+    })
+    r2 = _analyze_cortex_by_model(AskParams(30, "ALL"), {"cortex": na})
+    assert "unattributed AI functions" in r2.headline
+    assert "n/a" in r2.evidence["MODEL_NAME"].tolist() and "AI_CREDITS" in r2.evidence.columns
+
+
+def test_cortex_answer_marks_scope_account_wide():
+    from app.logic.ask.registry import _analyze_cortex_by_model
+    df = pd.DataFrame({"FUNCTION_NAME": ["C"], "MODEL_NAME": ["m"], "TOKENS": [100],
+                       "CREDITS": [5.0], "CREDITS_PER_1M_TOKENS": [0.05]})
+    res = _analyze_cortex_by_model(AskParams(30, "ACME"), {"cortex": df})
+    # the render caption reads this flag to say 'scope: account-wide', not 'company=ACME'
+    assert res.params.get("account_wide") is True
+
+
 def test_cortex_evidence_ai_credits_column_triggers_the_coco_rate():
     # the whole point: the AI_CREDITS column name makes the Ask USD helper price at
     # the $2.20 AI/Cortex rate, not the $3.68 compute rate.

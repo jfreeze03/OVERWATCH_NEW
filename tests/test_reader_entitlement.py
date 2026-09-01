@@ -129,6 +129,26 @@ def test_active_profile_sis_without_identity_fails_closed(monkeypatch):
     assert sess.active_profile("SNOW_ACCOUNTADMINS") == "READER"
 
 
+def test_is_operator_sis_without_identity_fails_closed(monkeypatch):
+    # The WRITE axis must fail closed too: an unidentified SiS viewer executes with
+    # the app owner's role, so the role->profile fallback would treat them as the
+    # owner-operator and expose owner-privileged writes. Mirrors active_profile().
+    import app.core.identity as ident
+    import app.core.session as sess
+    monkeypatch.setattr(ident, "viewer_name", lambda: "")
+    monkeypatch.setattr(sess, "is_sis", lambda: True)
+    assert sess.is_operator() is False
+
+
+def test_is_operator_identified_admin_holds_on_sis(monkeypatch):
+    # An identified operator is entitled by the st.user allowlist regardless of runtime.
+    import app.core.identity as ident
+    import app.core.session as sess
+    monkeypatch.setattr(ident, "viewer_name", lambda: _ADMINS[0])
+    monkeypatch.setattr(sess, "is_sis", lambda: True)
+    assert sess.is_operator() is True
+
+
 # ---------------------------------------------------------------------------
 # End-to-end: a READER viewer's nav hides Admin/Alerts/Ask and a forced
 # _ow_page='Admin' still cannot render Admin (the dispatch hard-block)

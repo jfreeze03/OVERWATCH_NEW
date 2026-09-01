@@ -725,6 +725,20 @@ svg.dragging { cursor: grabbing; }
   fitCrit.disabled = criticalNodes.length === 0;
   fitFail.addEventListener("click", () => fitNodes(failedNodes));
   fitCrit.addEventListener("click", () => fitNodes(criticalNodes));
+  // F37: a Highlight status with zero nodes would dim EVERY node (nothing left to
+  // highlight), reading as a blank/broken graph. Disable that option instead of
+  // offering a dead selection — mirrors the fit-button guards above.
+  const suspendedNodes = graphNodes.filter(node => node.classList.contains("suspended"));
+  if (statusDim) {
+    const dimCounts = {
+      "failed": failedNodes.length,
+      "suspended": suspendedNodes.length,
+      "critical-path": criticalNodes.length,
+    };
+    Array.from(statusDim.options).forEach(opt => {
+      if (opt.value && dimCounts[opt.value] === 0) opt.disabled = true;
+    });
+  }
   document.getElementById("full").addEventListener("click", async () => {
     if (!document.fullscreenElement && host.requestFullscreen) {
       await host.requestFullscreen();

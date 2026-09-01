@@ -53,8 +53,15 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
     hash of the error, so the same operator-visible ref matches the APP_ERROR_LOG row.
     """
     at = datetime.now()
+    # The error boundary must be bulletproof: a hostile/buggy __str__ (e.g. a driver
+    # exception that lazily formats a None attribute) must NOT raise out of record_error
+    # and defeat safe_page. Render the message once, guarded.
+    try:
+        _msg = str(error)
+    except Exception:  # a raising __str__ must not be allowed to crash the boundary
+        _msg = f"<{type(error).__name__}: message unavailable>"
     _digest = hashlib.sha1(
-        f"{type(error).__name__}|{error}|{traceback.format_exc(limit=3)}".encode("utf-8", "replace")
+        f"{type(error).__name__}|{_msg}|{traceback.format_exc(limit=3)}".encode("utf-8", "replace")
     ).hexdigest()[:6].upper()
     ref = f"OW-{at.strftime('%Y%m%d-%H%M%S')}-{_digest}"
     entry = {
@@ -62,7 +69,7 @@ def record_error(page: str, error: BaseException, context: str = "") -> str:
         "ref": ref,
         "page": str(page)[:80],
         "type": type(error).__name__[:200],
-        "message": str(error)[:2000],
+        "message": _msg[:2000],
         "context": (f"ref={ref} · {context}" if context else f"ref={ref}")[:2000],
         "trace": traceback.format_exc(limit=6)[:4000],
     }
@@ -111,8 +118,9 @@ def _recovery_controls(ref: str, *, key: str) -> None:
     log. Every import here is LAZY: query.py imports this module at load, so a
     module-level import of state/session/config would be an import cycle.
     """
-    st.caption("Quote this reference if you report it — it's in the error log too "
-               "(Admin ▸ Errors & telemetry). Other pages are unaffected.")
+    st.caption("Quote this reference if you report it — it's in this session's error "
+               "list (Admin ▸ Errors & telemetry), and in the persisted log when the "
+               "connection was live. Other pages are unaffected.")
     if ref:
         st.code(ref, language=None)   # st.code carries a built-in one-click copy button
     cols = st.columns(2)

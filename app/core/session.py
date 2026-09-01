@@ -226,8 +226,13 @@ def is_operator() -> bool:
     viewer = viewer_name()
     if viewer:
         return is_operator_user(viewer)
-    # No viewer identity (off-SiS): the owner's-rights ambiguity does not apply,
-    # so the role-based check is safe and preserves local-dev/test behavior.
+    # On SiS with NO resolvable viewer identity, FAIL CLOSED (mirrors active_profile()):
+    # every viewer executes with the owner's role, so the role check below would treat an
+    # unidentified SiS viewer as the owner-operator — a write escalation. Off-SiS (local
+    # dev, tests, older runtimes) there is no owner's-rights ambiguity, so the role check
+    # is safe and preserves existing behavior.
+    if is_sis():
+        return False
     return resolve_role_profile(current_role()) in OPERATOR_PROFILES
 
 

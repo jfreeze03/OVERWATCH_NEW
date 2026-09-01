@@ -1,5 +1,42 @@
 # Changelog
 
+## 4.406.0 - Hardening pass on this session's new features (2026-09-01)
+
+An adversarial hardening + smoke-test sweep of everything shipped this session (Ask USD/Cortex,
+the scope-bar fix, the recovery boundary, entitlement). 18 findings triaged; the safe fixes land here,
+and the one metric-definition finding is FLAGGED to the owner rather than silently changed (below).
+
+- **[Ask hardening] The Cortex answerer's gate now needs an AI word AND a spend word.** It routed on a
+  lone AI token, so "why is my llm task failing" could hijack it away from task-failures. The
+  `require_all` is now two AND-groups (AI term × spend/driver term). Also: the answerer declares
+  `account_wide` so the scope caption reads "account-wide" instead of a misleading `company=…`, and the
+  evidence rate-note is labeled by each column's actual kind (new `is_ai_credit_column` helper) rather
+  than by comparing the two configured rates — an admin may set the compute and AI rates equal.
+- **[Security — write axis fails closed] `is_operator()` now returns `False` for an unidentified SiS
+  viewer.** Under owner's-rights SiS every viewer runs as the app owner's role, so the role→profile
+  fallback would have treated a viewer with no resolvable `st.user` as the owner-operator — an
+  escalation to owner-privileged writes. It now mirrors `active_profile()`: identified → allowlist,
+  unidentified-on-SiS → denied, off-SiS → the role fallback (local dev/tests unchanged).
+- **[Error boundary robustness] `record_error` can no longer be defeated by a hostile `__str__`.** An
+  exception whose `str()` itself raises would have aborted ref-minting and buffering, defeating
+  `safe_page`. The message is now rendered once behind a guard (falls back to a typed placeholder), so
+  the boundary always produces a stamped reference. The recovery caption also stops over-promising
+  persistence — the off-box sink is best-effort, so it now says "in the persisted log when the
+  connection was live."
+- **[UI regression — compact density] The scope toolbar no longer re-clips in compact mode.** The
+  compact-density stylesheet still set `.block-container` padding-top to `2.1rem`, overriding the tested
+  `2.6rem` header clearance and reintroducing the clip fixed in 4.402 for compact viewers. Pinned to
+  `2.6rem` with a regression comment.
+- **[UI — task graph] A Highlight status with zero nodes no longer greys the whole graph.** Selecting
+  e.g. "Suspended" when nothing is suspended dimmed every node (nothing left to highlight), reading as a
+  blank/broken chart. Those options are now disabled at render, mirroring the fit-button guards.
+- **[FLAGGED to owner — not changed] Decision Studio's "pays for itself" ratio mixes horizons.**
+  `_proof_signals` divides QTD cumulative verified savings (numerator) by trailing-30-day app run-cost
+  (denominator) — a horizon mismatch that inflates the flagship ROI multiple. This is pre-existing (in
+  `_scorecard`/`proof_verdict`), and correcting it changes a tracked proof number, so it needs an owner
+  decision on the fix (normalize QTD→30d, match the denominator to QTD, or add a `savings_summary_30d`
+  builder) rather than a silent redefinition.
+
 ## 4.405.0 - Defer-tier triage: fix the one real defect (2026-09-01)
 
 - **[#3, defer tier] Re-triaged all 28 deferred Wave-2 items against current code; fixed the one that

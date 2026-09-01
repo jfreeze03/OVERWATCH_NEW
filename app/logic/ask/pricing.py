@@ -36,6 +36,13 @@ def _column_is_ai(col: object, intent_is_ai: bool) -> bool:
     return bool(_AI_SEGMENTS & set(str(col).upper().split("_")))
 
 
+def is_ai_credit_column(col: object) -> bool:
+    """Public: does this credit column carry an AI/Cortex segment (so it prices at the
+    AI rate). The renderer uses this to label the rate note by the column's actual
+    kind rather than by comparing the two configured rate values (which can be equal)."""
+    return _column_is_ai(col, False)
+
+
 def add_usd_estimates(
     ev: pd.DataFrame | None,
     *,

@@ -562,7 +562,9 @@ def _analyze_cortex_by_model(
 ) -> AnswerResult:
     src = (f"cortex_sql.cortex_model_costs({params.days}d) — "
            "ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY (account-wide)")
-    meta: dict[str, object] = {"days": params.days, "company": params.company}
+    # account_wide flags the caption to say 'scope: account-wide' rather than pinning
+    # this whole-account AI spend to the page company filter (the view has no company grain).
+    meta: dict[str, object] = {"days": params.days, "company": params.company, "account_wide": True}
     no_data = (
         f"No Cortex/AI function spend in the last {params.days}d — "
         "CORTEX_FUNCTIONS_USAGE_HISTORY is empty or unavailable on this account "
@@ -750,12 +752,17 @@ REGISTRY: tuple[Answerer, ...] = (
             "genai", "embedding", "spend", "credits", "driving", "coco",
         ),
         require_all=(
-            # SINGLE gate: any AI/Cortex-domain phrase routes here. A plain spend
-            # question carries no AI phrase, so this never steals it; priority breaks
-            # a tie with the generic spender for "who is driving AI spend".
-            ("cortex", "genai", "gen ai", "llm", "token", "tokens",
-             "ai spend", "ai cost", "ai credit", "ai credits", "ai model",
-             "ai models", "coco", "embedding", "embeddings"),
+            # AI/Cortex domain token (word-boundary matched, so "ai" is the WORD, not a
+            # substring of email/maintain/etc.).
+            ("cortex", "genai", "gen ai", "llm", "token", "tokens", "coco",
+             "embedding", "embeddings", "ai"),
+            # AND a spend / ranking word — so a question that merely NAMES an AI thing but
+            # asks about something else ("why is my llm task failing") is NOT hijacked; it
+            # stays with the correct (task/warehouse) answerer. priority=1 still breaks a
+            # genuine tie with the generic spender for "which model is driving AI spend".
+            ("spend", "spending", "cost", "costs", "credit", "credits", "spik",
+             "driving", "driver", "expensive", "burn", "bill", "top", "most",
+             "biggest", "usage", "using"),
         ),
         needs=_needs_cortex_by_model,
         analyze=_analyze_cortex_by_model,

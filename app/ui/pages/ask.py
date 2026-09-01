@@ -19,7 +19,7 @@ from app.core.query import run
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.logic.ask import REGISTRY, route
-from app.logic.ask.pricing import add_usd_estimates
+from app.logic.ask.pricing import add_usd_estimates, is_ai_credit_column
 from app.logic.ask.types import AnswerResult, AskParams
 from app.logic.formulas import safe_float
 from app.ui.components import load_settings, page_header
@@ -102,7 +102,7 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
         # priced at the AI rate. No credit column -> the frame renders unchanged.
         compute_rate = safe_float(settings.get("CREDIT_PRICE_USD"), 3.68)
         ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
-        ev, usd_cols, rates = add_usd_estimates(
+        ev, usd_cols, _rates = add_usd_estimates(
             result.evidence, compute_rate=compute_rate, ai_rate=ai_rate,
             intent_is_ai=result.intent in _AI_INTENTS,
         )
@@ -115,10 +115,16 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
             st.dataframe(ev, width="stretch", hide_index=True,
                          column_config=colcfg or None)
             if usd_cols:
-                if len(rates) > 1:
+                # Label by each column's ACTUAL kind (via the pricing helper), not by
+                # comparing the two configured rates — an admin may set them equal.
+                _intent_ai = result.intent in _AI_INTENTS
+                _has_ai = _intent_ai or any(is_ai_credit_column(c[:-4]) for c in usd_cols)
+                _has_compute = (not _intent_ai) and any(
+                    not is_ai_credit_column(c[:-4]) for c in usd_cols)
+                if _has_ai and _has_compute:
                     _note = (f"AI/Cortex credits at ${ai_rate:.2f}, "
                              f"compute credits at ${compute_rate:.2f}")
-                elif rates == {round(ai_rate, 2)} and ai_rate != compute_rate:
+                elif _has_ai:
                     _note = f"at ${ai_rate:.2f}/credit (AI/Cortex rate)"
                 else:
                     _note = f"at ${compute_rate:.2f}/credit (compute rate)"
@@ -129,8 +135,11 @@ def _render_result(result: AnswerResult, company: str, params: AskParams,
     # spend mart's 182-day horizon), never the raw request, so the caption can't
     # over-claim the window the headline was actually computed over.
     win = result.params.get("days", params.days)
+    # Some answerers are account-wide by construction (e.g. Cortex usage has no company
+    # grain); label the scope honestly rather than pinning it to the page company filter.
+    _scope = "account-wide" if result.params.get("account_wide") else f"company={company}"
     st.caption(
-        f"Source: {result.source} · scope: company={company}, window={win}d "
+        f"Source: {result.source} · scope: {_scope}, window={win}d "
         "· every number above is live query output."
     )
 

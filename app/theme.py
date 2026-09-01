@@ -461,7 +461,10 @@ _COMPACT_CSS = """
 <style>
 /* Compact density (Views popover toggle): more rows per screen, same order.
    Ops/DBA scanning mode — spacing shrinks, hierarchy and colors do not. */
-.block-container { padding-top:2.1rem; padding-bottom:1.4rem; }
+/* padding-top MUST stay at the base 2.6rem header clearance — the fixed
+   stHeader overlaps the scroll container, so a smaller value re-clips the
+   scope toolbar for compact-density viewers (regression fixed 2026-09-01). */
+.block-container { padding-top:2.6rem; padding-bottom:1.4rem; }
 .main .block-container > div { gap:0.35rem; }
 div[data-testid="stMetric"] { padding:8px 10px 7px 12px; }
 [data-testid="stMetricValue"] { font-size:1.3rem !important; }

@@ -165,6 +165,10 @@ def test_task_graph_status_dim_and_neighborhood_isolation():
     # edge/node class-count locks stay stable
     for runtime in ('class="node dimmed"', 'class="edge nbr"', 'class="node nbr"'):
         assert runtime not in markup
+    # F37 hardening: a Highlight status with zero nodes would dim the WHOLE graph
+    # (nothing left to highlight); the client disables that option instead.
+    assert "const dimCounts" in markup
+    assert "dimCounts[opt.value] === 0) opt.disabled = true" in markup
     assert "<script src" not in markup and "https://" not in markup
 
 

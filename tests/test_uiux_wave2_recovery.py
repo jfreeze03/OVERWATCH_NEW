@@ -33,6 +33,36 @@ def test_same_error_is_stable_within_a_second(monkeypatch):
     assert a.split("-")[-1] == b.split("-")[-1]   # identical 6-char digest
 
 
+def test_record_error_survives_a_hostile_str(monkeypatch):
+    # The error boundary must be bulletproof: an exception whose __str__ itself raises
+    # (e.g. a driver error that lazily formats a missing attribute) must NOT abort
+    # ref-minting/buffering and defeat safe_page. record_error renders the message once,
+    # guarded, and still returns a valid stamped ref.
+    monkeypatch.setattr(errors, "st", SimpleNamespace(session_state={}))
+
+    class _Hostile(RuntimeError):
+        def __str__(self):  # deliberately raising
+            raise RuntimeError("cannot render me")
+
+    ref = errors.record_error("Operations", _Hostile(), context="render")
+    assert re.fullmatch(r"OW-\d{8}-\d{6}-[0-9A-F]{6}", ref)
+    entry = errors.st.session_state[errors._BUFFER_KEY][-1]
+    assert entry["type"] == "_Hostile"
+    assert "unavailable" in entry["message"]      # the guarded fallback text
+    assert ref in entry["context"]
+
+
+def test_record_error_ref_survives_session_unavailable(monkeypatch):
+    # The Snowflake sink is best-effort: get_cached_session() may return None (local dev,
+    # a dropped connection). The ring buffer + ref must still be produced.
+    import app.core.session as sess
+    monkeypatch.setattr(errors, "st", SimpleNamespace(session_state={}))
+    monkeypatch.setattr(sess, "get_cached_session", lambda: None)
+    ref = errors.record_error("Brief", ValueError("no conn"))
+    assert re.fullmatch(r"OW-\d{8}-\d{6}-[0-9A-F]{6}", ref)
+    assert errors.st.session_state[errors._BUFFER_KEY][-1]["ref"] == ref
+
+
 def test_safe_page_offers_a_standard_recovery_block():
     src = _src("app/core/errors.py")
     assert "def _recovery_controls(" in src
