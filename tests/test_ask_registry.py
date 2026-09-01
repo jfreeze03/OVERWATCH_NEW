@@ -539,6 +539,26 @@ def test_cortex_answer_marks_scope_account_wide():
     assert res.params.get("account_wide") is True
 
 
+def test_cortex_window_capped_to_the_live_90d_horizon():
+    # hardening v4.407: cortex_model_costs is a LIVE builder clamped to 90d, but the router
+    # permits up to 365d. The answerer must present the EFFECTIVE window everywhere and
+    # never caption a 90-day figure as a 365-day result (grounding honesty), mirroring
+    # _analyze_warehouse_waste.
+    from app.logic.ask.registry import _analyze_cortex_by_model
+    df = pd.DataFrame({"FUNCTION_NAME": ["COMPLETE"], "MODEL_NAME": ["llama"],
+                       "TOKENS": [1_000_000], "CREDITS": [80.0], "CREDITS_PER_1M_TOKENS": [0.08]})
+    res = _analyze_cortex_by_model(AskParams(365, "ALL"), {"cortex": df})
+    assert res.params["days"] == 90
+    assert "over the last 90d" in res.headline.lower() and "365d" not in res.headline
+    assert any("capped" in b and "365d" in b for b in res.bullets)
+    # a within-cap request keeps its window and adds NO cap bullet
+    res30 = _analyze_cortex_by_model(AskParams(30, "ALL"), {"cortex": df})
+    assert res30.params["days"] == 30 and not any("capped" in b for b in res30.bullets)
+    # the no_data path also reports the effective window
+    nd = _analyze_cortex_by_model(AskParams(365, "ALL"), {"cortex": pd.DataFrame()})
+    assert "365d" not in nd.headline and nd.params["days"] == 90
+
+
 def test_cortex_evidence_ai_credits_column_triggers_the_coco_rate():
     # the whole point: the AI_CREDITS column name makes the Ask USD helper price at
     # the $2.20 AI/Cortex rate, not the $3.68 compute rate.

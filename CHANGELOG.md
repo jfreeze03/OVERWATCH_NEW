@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.407.0 - Full-app adversarial hardening sweep (2026-09-01)
+
+An 11-dimension adversarial sweep of the entire app (SQL-injection, entitlement, money/metric,
+numerical, error-handling, caching, performance, Ask-grounding, input-validation, security-logic,
+alerts/DQ), each finding independently refute-verified, then ground-truthed in the code by hand. Seven
+dimensions came back clean; four real defects were confirmed and fixed:
+
+- **[error-boundary] `run()` could re-raise on a driver exception with a hostile `__str__`, breaking its
+  "never raises" contract.** In `run()`'s except path, `_classify_error` (query.py) runs FIRST and did a
+  bare `str(exc)` — before the already-guarded `record_error` — and `format_snowflake_error` (errors.py)
+  did the same. An exception whose `__str__` itself raises (the exact lazy-format driver case last batch
+  hardened `record_error` against) would propagate out of the except block, turning a one-panel soft
+  `ok=False` failure into a whole-page crash at `safe_page`. Both conversions are now guarded (classify →
+  "other"; format → typed placeholder), completing the coverage `record_error` started.
+- **[Ask grounding] The Cortex/AI answerer captioned a 90-day figure with the requested window (up to
+  365d).** `cortex_model_costs` is a live ACCOUNT_USAGE builder clamped to 90 days, but `_analyze_cortex_
+  by_model` used the raw `params.days` in its headline, source and `meta['days']` — so "what is driving
+  cortex credits this year" scanned 90 days yet was labeled 365d, a grounding-honesty breach. It now
+  computes the effective window like its two sibling answerers, labels everything with it, and adds a
+  "capped to the live 90-day window (you asked for Nd)" bullet when clamped.
+- **[Operations] The Queries tile labeled the selected window even when the live fallback served only
+  90 days.** When the hourly mart is unavailable (fresh install, mart outage) or a schema+warehouse/user
+  filter combo forces the live path, the tile fell back to a 90-day-clamped scan but still rendered
+  "Queries (365d)" — up to a 4× understatement under a wrong scope label. The label now reflects the
+  window actually served (`min(days, 90)` on the live path), gated on the existing `used_mart` flag.
+- **[Security review] Per-user "Sensitive privileges" double-counted a role reached by multiple paths.**
+  `SENSITIVE_PRIVILEGES` is a per-effective-role attribute in `effective_access` (joined on
+  EFFECTIVE_ROLE), so it repeats on every access-path row; the summary summed raw path rows while
+  EFFECTIVE_ROLES used `nunique`. A user reaching one admin-utility role via two direct roles (or diamond
+  inheritance) showed double its true reach, misdirecting least-privilege review. A new pure helper
+  `sensitive_privileges_by_user` collapses to distinct (user, effective role) before summing. (Fails safe
+  — it over-counted, never hid exposure.)
+
+Nine new tests pin all four (hostile-`__str__` through both helpers; cortex 90d cap; served-window label;
+role-deduped sensitive count). Version lockstepped 4.406.0 → 4.407.0.
+
 ## 4.406.0 - Hardening pass on this session's new features (2026-09-01)
 
 An adversarial hardening + smoke-test sweep of everything shipped this session (Ask USD/Cortex,

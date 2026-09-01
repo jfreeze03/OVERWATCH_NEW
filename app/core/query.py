@@ -199,8 +199,17 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
 
 def _classify_error(exc: object) -> str:
     """Typed failure kind from the RAW exception text (Codex r10 #4) —
-    classify BEFORE format_snowflake_error prettifies the markers away."""
-    s = str(exc or "").lower()
+    classify BEFORE format_snowflake_error prettifies the markers away.
+
+    run() calls this FIRST in its except path, before the guarded record_error, so a
+    driver exception with a raising/lazy __str__ must not re-raise here — that would
+    propagate OUT of run()'s except and break its 'never raises / returns ok=False'
+    contract (a one-panel soft failure would become a whole-page crash). An
+    unrenderable message classifies as 'other', the correct conservative kind."""
+    try:
+        s = str(exc or "").lower()
+    except Exception:
+        return "other"
     if "does not exist or not authorized" in s:
         return "absent"
     if "unknown function" in s:

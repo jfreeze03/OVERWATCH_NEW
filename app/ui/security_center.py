@@ -23,6 +23,7 @@ from app.logic.security import (
     escalation_flags,
     grant_anomaly_flags,
     posture_alert_rule_sql,
+    sensitive_privileges_by_user,
 )
 from app.logic.verdict import Signal, page_verdict
 from app.logic.workbench import create_action_sql
@@ -388,8 +389,11 @@ def render_effective_access(company: str) -> None:
             MAX_RISK=("RISK_SCORE", "max"),
             MAX_ESCALATION=("ESCALATION_SCORE", "max"),
             SELF_ESCALATE=("SELF_ESCALATION", "any"),
-            SENSITIVE_PRIVILEGES=("SENSITIVE_PRIVILEGES", "sum"),
         )
+        # SENSITIVE_PRIVILEGES is a per-effective-role attribute, so summing raw path
+        # rows double-counts a role reachable via multiple paths — merge the role-deduped
+        # per-user total instead (see sensitive_privileges_by_user).
+        .merge(sensitive_privileges_by_user(frame), on="USER_NAME", how="left")
         .sort_values(["MAX_ESCALATION", "MAX_RISK", "EFFECTIVE_ROLES"], ascending=False)
         .reset_index(drop=True)
     )

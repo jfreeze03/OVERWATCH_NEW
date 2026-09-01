@@ -208,6 +208,35 @@ def escalation_flags(
     return df
 
 
+def sensitive_privileges_by_user(frame: pd.DataFrame) -> pd.DataFrame:
+    """Per-user count of reachable sensitive-privilege grants, DE-DUPLICATED by role.
+
+    SENSITIVE_PRIVILEGES is a per-EFFECTIVE_ROLE attribute in effective_access
+    (privilege_rollup is joined on EFFECTIVE_ROLE), so it repeats on every access-PATH
+    row that reaches a role. A role reached via two direct roles — or diamond
+    inheritance (A->B->D and A->C->D) — appears on multiple rows, so summing the raw
+    path rows multi-counts it and overstates a user's real sensitive reach. Collapse to
+    distinct (USER_NAME, EFFECTIVE_ROLE) first — mirroring how the summary counts
+    EFFECTIVE_ROLES with nunique — so the total reflects reachable ROLES, not paths.
+
+    Returns a two-column frame [USER_NAME, SENSITIVE_PRIVILEGES] (int); safe on an empty
+    frame or absent columns.
+    """
+    df = frame if frame is not None else pd.DataFrame()
+    if df.empty or "USER_NAME" not in df.columns:
+        return pd.DataFrame({"USER_NAME": pd.Series(dtype=object),
+                             "SENSITIVE_PRIVILEGES": pd.Series(dtype="int64")})
+    work = df.copy()
+    work["SENSITIVE_PRIVILEGES"] = pd.to_numeric(
+        work.get("SENSITIVE_PRIVILEGES"), errors="coerce").fillna(0.0)
+    # dedup key is the role; without an EFFECTIVE_ROLE column, fall back to one row/user
+    role_col = "EFFECTIVE_ROLE" if "EFFECTIVE_ROLE" in work.columns else "USER_NAME"
+    deduped = work.drop_duplicates(["USER_NAME", role_col])
+    out = deduped.groupby("USER_NAME", as_index=False)["SENSITIVE_PRIVILEGES"].sum()
+    out["SENSITIVE_PRIVILEGES"] = out["SENSITIVE_PRIVILEGES"].round().astype("int64")
+    return out
+
+
 def _grant_reason(first_time: bool, off_hours: bool, weekend: bool) -> str:
     parts: list[str] = []
     if first_time:

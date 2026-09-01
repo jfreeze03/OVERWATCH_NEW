@@ -24,8 +24,15 @@ _BUFFER_MAX = 100
 
 
 def format_snowflake_error(error: object, max_len: int = 300) -> str:
-    """Short, user-safe rendering of a Snowflake/driver error."""
-    text = str(error or "").strip()
+    """Short, user-safe rendering of a Snowflake/driver error.
+
+    run() invokes this in its except path (to fill QueryResult.error), so like
+    _classify_error and record_error it must survive an exception whose __str__ itself
+    raises — otherwise run() re-raises and breaks its 'never raises' contract."""
+    try:
+        text = str(error or "").strip()
+    except Exception:
+        return f"<{type(error).__name__}: message unavailable>"
     if not text:
         return "Snowflake returned an empty error."
     lower = text.lower()

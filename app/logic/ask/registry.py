@@ -560,13 +560,19 @@ def _needs_cortex_by_model(params: AskParams) -> list[QuerySpec]:
 def _analyze_cortex_by_model(
     params: AskParams, frames: dict[str, pd.DataFrame]
 ) -> AnswerResult:
-    src = (f"cortex_sql.cortex_model_costs({params.days}d) — "
+    # cortex_model_costs is a LIVE ACCOUNT_USAGE builder clamped to 90d (bounded_days),
+    # while the router permits up to 365d — so a "this year"/"last 365 days" request scans
+    # only 90 days. Present the EFFECTIVE window everywhere (src, meta, no_data, headline)
+    # and disclose the cap in a bullet, exactly like _analyze_warehouse_waste, so the answer
+    # never labels a 90-day figure as a 365-day result (grounding honesty).
+    eff = bounded_days(params.days)
+    src = (f"cortex_sql.cortex_model_costs({eff}d) — "
            "ACCOUNT_USAGE.CORTEX_FUNCTIONS_USAGE_HISTORY (account-wide)")
     # account_wide flags the caption to say 'scope: account-wide' rather than pinning
     # this whole-account AI spend to the page company filter (the view has no company grain).
-    meta: dict[str, object] = {"days": params.days, "company": params.company, "account_wide": True}
+    meta: dict[str, object] = {"days": eff, "company": params.company, "account_wide": True}
     no_data = (
-        f"No Cortex/AI function spend in the last {params.days}d — "
+        f"No Cortex/AI function spend in the last {eff}d — "
         "CORTEX_FUNCTIONS_USAGE_HISTORY is empty or unavailable on this account "
         "(Cortex Code via Snowsight/CLI bills through a separate usage view)."
     )
@@ -605,11 +611,15 @@ def _analyze_cortex_by_model(
 
     tail = f" — a clear outlier vs the other models (z={top_z:.1f})" if outlier else ""
     headline = (
-        f"Over the last {params.days}d, {top_disp} is the top AI/Cortex spender: "
+        f"Over the last {eff}d, {top_disp} is the top AI/Cortex spender: "
         f"{_fmt(top_credits)} credits ({top_share * 100:.0f}% of AI-function spend){tail}."
     )
 
     bullets: list[str] = ["Account-wide — Cortex function usage carries no company grain."]
+    if eff < params.days:  # window was clamped to the live 90d horizon — say so
+        bullets.append(
+            f"AI/Cortex usage is capped to the live {eff}-day window (you asked for {params.days}d)."
+        )
     for i in range(min(5, len(agg))):
         r = agg.iloc[i]
         cr = float(r["AI_CREDITS"])

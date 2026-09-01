@@ -8,7 +8,7 @@ from datetime import timedelta
 import streamlit as st
 
 from app import companies
-from app.config import core_object
+from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import execute_cancel_query, execute_statement, run, run_batch
@@ -189,8 +189,13 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                    if _spark_ok and activity.usable() and "QUERIES" in activity.df.columns else None)
         f_spark = (activity.df["FAILS"].tolist()
                    if _spark_ok and activity.usable() and "FAILS" in activity.df.columns else None)
+        # The mart honors the full window (up to 365d); the live fallback clamps to the
+        # 90-day live-scan horizon. Label the tile with the window actually SERVED, so a
+        # >90d selection served live isn't captioned as its full requested span (the
+        # counts under it would be a 90-day subset of a 365-day-labelled tile).
+        _served_days = days if used_mart else min(days, MAX_LIVE_WINDOW_DAYS)
         kpi_row([
-            {"label": f"Queries ({days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
+            {"label": f"Queries ({_served_days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
              "delta": f"{failed:,.0f} failed" if fail_pct is not None else "No query denominator",
              "delta_color": "off", "spark": f_spark,
