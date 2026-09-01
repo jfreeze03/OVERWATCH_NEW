@@ -27,7 +27,6 @@ from app.ui.components import (
     empty_state,
     guard,
     kpi_row,
-    methodology_note,
     panel_help,
     result_caption,
     run_mart_first,
@@ -230,10 +229,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                      height=260, column_config={
                          "USD": st.column_config.NumberColumn("$", format="$%.2f"),
                          "USD_PER_RUN": st.column_config.NumberColumn("$/run", format="$%.4f")})
-        # #1: measured-basis + grouping provenance → audit-mode only.
-        methodology_note("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
-                         "parameterized hash — cheap-but-constant often out-bills "
-                         "expensive-but-rare.")
+        # KEPT: "cheap-but-constant often out-bills expensive-but-rare" is an interpretation
+        # takeaway (why to read this grouping) — operator-facing, not audit-only methodology.
+        st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
+                   "parameterized hash — cheap-but-constant often out-bills "
+                   "expensive-but-rare.")
     elif _pc.ok:
         empty_state("clean", "No repeated pattern crossed the $0.01 floor in this window.")
     else:

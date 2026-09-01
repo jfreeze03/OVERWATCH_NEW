@@ -70,7 +70,7 @@ def test_caption_sweep_cost_part1_four_files():
     spend = _src("app/ui/pages/cost_parts/spend.py")
     contract = _src("app/ui/pages/cost_parts/contract.py")
     unit = _src("app/ui/pages/cost_parts/unit_costs.py")
-    for src in (spend, contract, unit):
+    for src in (spend, contract):
         assert "    methodology_note,\n" in src
     # cost.py's only conversion (the chargeback caveat) was reverted — it's a
     # misread-prevention line, so the file no longer imports or uses methodology_note.
@@ -78,35 +78,37 @@ def test_caption_sweep_cost_part1_four_files():
     assert 'st.caption("Chargeback precision is capped by tag coverage' in cost
     assert 'methodology_note("Per-user notebook-runtime cost on this pool' in spend
     assert contract.count("methodology_note(") >= 1 and "Org-level billed spend in currency" in contract
-    # unit_costs keeps exactly ONE conversion (the grouping-basis note); the measured-basis
-    # wayfinding line and the $0-day display legend were reverted, and three legends/caveats
-    # were never converted.
-    assert unit.count("methodology_note(") == 1
+    # unit_costs: EVERY conversion was reverted across the re-audits — the wayfinding
+    # measured-basis line, the $0-day display legend, and the "cheap-but-constant"
+    # interpretation — so the file no longer imports or uses methodology_note.
+    assert "methodology_note" not in unit
     assert 'st.caption(\n        "Measured price tags:' in unit   # wayfinding, reverted
     assert '"$0 days with calls' in unit                          # $0.0000 legend, reverted
+    assert "cheap-but-constant often out-bills" in unit           # interpretation, reverted
     assert "Parent-before-child execution order" in unit          # tree indentation legend
     assert "model = Cortex Code" in unit                          # "n/a" column legend
     assert "not per-run metered" in unit                          # $/run misread caveat
 
 
 def test_caption_sweep_cost_part2_optimize():
-    # #1 (Cost sweep, part 2 — post re-audit): optimize.py keeps 5 pure basis/model/
-    # ranking/provenance conversions; the re-audit reverted two ("not a promise" and
-    # "Measured, not allocated" + reconciliation) back to plain captions.
+    # #1 (Cost sweep, part 2 — post re-audits): optimize.py keeps 4 pure basis/model/
+    # provenance conversions; the re-audits reverted three misread caveats ("not a promise",
+    # "Measured, not allocated", and the Live-scan "estimate, not the hour-share allocation").
     src = _src("app/ui/pages/cost_parts/optimize.py")
     assert "    methodology_note,\n" in src
     for conv in (
-        "Complete days only, fixed 90-day evidence window",  # forecast gating
-        "Mechanical scenario model:",               # scenario model
-        "Live scan of SUCCESS SELECTs",             # ranking methodology
-        "Books itself since V038",                  # self-booking provenance
+        "Complete days only, fixed 90-day evidence window",   # forecast gating
+        "Credits billed in warehouse-hours with zero queries",  # idle definition
+        "Mechanical scenario model:",                # scenario model
+        "Books itself since V038",                   # self-booking provenance
     ):
         assert conv in src, conv
-    # exactly 5 conversions — guards against re-converting the kept legends/caveats
-    assert src.count("methodology_note(") == 5
+    # exactly 4 conversions — guards against re-converting the kept legends/caveats
+    assert src.count("methodology_note(") == 4
     # reverted on re-audit (misread caveats — must stay visible)
     assert 'st.caption(\n            "Replays this window' in src   # "not a promise"
     assert 'st.caption(\n            "Measured, not allocated:' in src
+    assert "Live scan of SUCCESS SELECTs" in src   # reverted: "estimate, not the allocation"
     # KEEP guards (never converted)
     assert "Actionable $ = idle minus one" in src         # column definition/legend
     assert "not a dollarized saving" in src               # eligibility misread caveat

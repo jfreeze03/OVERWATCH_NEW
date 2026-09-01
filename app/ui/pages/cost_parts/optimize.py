@@ -997,8 +997,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 else:
                     styled_table(_rq_df[_rq_cols], column_config=_rq_cfg)
                 result_caption(rq_res, note="Same parameterized query shape grouped across users/warehouses.")
-                # #1: ranking + metric methodology → audit-mode only.
-                methodology_note(
+                # KEPT: the closing clause "an estimate, not the hour-share allocation the
+                # panels above use" is a misread caveat on the Avoidable $/30d column (parallel
+                # to the "Measured, not allocated" caveat kept above) — must stay visible.
+                st.caption(
                     "Live scan of SUCCESS SELECTs (OVERWATCH's own queries excluded). Ranked by "
                     "normalized 30-day estimated credits x cache-miss share, not wall-clock hours: an "
                     "X-Small hour and a 4X-Large hour differ 128x in money, and an already-cached "

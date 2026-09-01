@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.397.0 - Caption sweep: second Cost re-audit (2026-08-31)
+
+- **[#1, Cost re-audit #2] A second independent re-audit of the Cost files caught two over-conversions
+  the first pass missed.** Both carried a misread caveat buried in otherwise-methodology prose, so the
+  first re-audit let them through: `optimize.py`'s repeat-query-profiles note (its closing clause
+  "Avoidable $/30d … an estimate, **not** the hour-share allocation the panels above use" is the exact
+  "X, not Y" caveat kept elsewhere on the same page), and `unit_costs.py`'s parameterized-hash note
+  ("cheap-but-constant often out-bills expensive-but-rare" is an interpretation takeaway). Both reverted
+  to plain captions. Net: Cost conversions drop from 8 to 6, and `unit_costs.py` no longer imports
+  `methodology_note`. Two independent re-audits now agree the rest of Cost is correct.
+
 ## 4.396.0 - Caption sweep: full cross-section re-audit (2026-08-31)
 
 - **[#1, full re-audit] Ran the both-directions re-audit across every remaining section.** After the
