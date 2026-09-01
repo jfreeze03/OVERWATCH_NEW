@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.398.0 - Caption sweep: second re-audit of the remaining sections (2026-08-31)
+
+- **[#1, remaining-sections re-audit #2] Reverted Overview's last conversions; it now hides nothing.**
+  A second independent re-audit of Overview, Brief, Security, and Admin found two more Overview
+  over-conversions (Brief/Security/Admin all confirmed clean in both directions). Both bundled a scope
+  caveat with the basis: the MTD/Projected note ("storage/transfer/currency are separate — org rate
+  card is billing truth", a not-the-whole-bill scope cue on the on-screen KPIs) and the AI-digest note
+  ("Account-wide narrative — does not change with the company filter"). While fixing those, the last
+  remaining Overview conversion — the serverless/AI note whose "separate from the warehouse-compute
+  drivers above" is a don't-double-count reconciliation cue — was reverted too. Overview now converts
+  **nothing**: every one of its captions carries a scope cue, misread caveat, legend, action, or data
+  value, so all stay visible. `overview.py` no longer imports `methodology_note`. App-wide the sweep
+  is down to ~15 deliberate conversions.
+
 ## 4.397.0 - Caption sweep: second Cost re-audit (2026-08-31)
 
 - **[#1, Cost re-audit #2] A second independent re-audit of the Cost files caught two over-conversions

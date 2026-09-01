@@ -24,20 +24,21 @@ def test_security_identity_tables_drill_to_entity_360():
     assert src.count('key_col="USER_NAME", entity_type="USER"') >= 5
 
 
-def test_overview_methodology_captions_are_audit_gated():
-    # #1 (post re-audit): pure how-computed / provenance captions on Overview render only
-    # in audit mode via methodology_note. The re-audit reverted two over-conversions
-    # (the score-defaults note — decodes the '(capped)' token + action — and the
-    # score-trend "judge the trend, not the level" caveat), so exactly 3 remain.
+def test_overview_captions_all_operator_facing():
+    # #1 (fully re-audited): Overview converted NOTHING in the end — every one of its
+    # captions carries a scope cue, misread caveat, legend, action, or data value, so
+    # all stay visible. Five original conversions were reverted across three re-audit
+    # passes (score-defaults, score-trend, MTD/Projected scope, serverless reconciliation,
+    # and the digest scope caveat), and the file no longer imports methodology_note.
     src = _src("app/ui/pages/overview.py")
-    assert "    methodology_note,\n" in src  # imported in the components block
-    assert src.count("methodology_note(") == 3
-    # The account-wide SCOPE disclaimer stays a plain caption — hiding it in operator
-    # mode would strand the runway bar with no cue that it's account-wide.
-    assert 'st.caption("Whole-account contract commitment' in src
-    # reverted on re-audit — must stay visible in operator mode
-    assert "'(capped)' means the" in src and 'methodology_note("Point values' not in src
-    assert 'judge the trend, not the level' in src and "methodology_note(\n                \"Live-score" not in src
+    assert "methodology_note" not in src
+    # each reverted caption stays a plain, visible caption
+    assert 'st.caption("Whole-account contract commitment' in src   # scope disclaimer
+    assert "'(capped)' means the" in src                             # score-defaults legend
+    assert "judge the trend, not the level" in src                   # score-trend caveat
+    assert "org rate card is billing truth" in src                   # MTD/Projected scope
+    assert "separate from the warehouse-compute" in src              # serverless reconciliation
+    assert "does not change with the company filter" in src          # digest scope caveat
 
 
 def test_caption_sweep_second_increment_brief_and_security():

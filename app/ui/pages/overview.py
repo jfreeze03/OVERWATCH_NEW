@@ -54,7 +54,6 @@ from app.ui.components import (
     export_button,
     kpi_row,
     load_settings,
-    methodology_note,
     page_header,
     page_verdict_line,
     panel_help,
@@ -785,10 +784,12 @@ def render() -> None:
     # Storage and data-transfer are separate invoice lines the app reads on Cost &
     # Contract (org rate-card) — disclosed here so these figures aren't mistaken for
     # the whole bill. Not folded in: that would break the credits x rate contract.
-    # #1: pure how-computed provenance → audit-mode only (operator mode stays lean).
-    methodology_note("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
-                     "and AI. Storage, transfer, and organization currency adjustments are separate — "
-                     "Cost & Contract → org rate card is billing truth.")
+    # KEPT: the "storage/transfer/currency are separate — org rate card is billing truth"
+    # clause is a scope + not-the-whole-bill caveat + wayfinding on the on-screen MTD /
+    # Projected KPIs, so it must stay visible in operator mode.
+    st.caption("MTD & Projected are configured-rate credit-spend models for compute, serverless, "
+               "and AI. Storage, transfer, and organization currency adjustments are separate — "
+               "Cost & Contract → org rate card is billing truth.")
 
     # ---- The work + the drivers (rec4: above the charts, not buried below) ----
     # An executive landing page leads with what needs an owner, not two charts.
@@ -912,10 +913,11 @@ def render() -> None:
             svc_view = (svc.groupby("DIMENSION", as_index=False)["VALUE_USD"].sum()
                         .sort_values("VALUE_USD", ascending=False)
                         .rename(columns={"DIMENSION": "DRIVER", "VALUE_USD": "BILLED_USD"}))
-            # #1: basis/reconciliation note → audit-mode only.
-            methodology_note("Serverless & AI billed spend — separate from the warehouse-compute "
-                             "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
-                             "compute rate).")
+            # KEPT: "separate from the warehouse-compute drivers above" is a reconciliation /
+            # don't-double-count cue, so it stays visible in operator mode.
+            st.caption("Serverless & AI billed spend — separate from the warehouse-compute "
+                       "drivers above (billed $: AI/Cortex at the AI rate, the rest at the "
+                       "compute rate).")
             styled_table(svc_view, height=TABLE_H_MD, slug="serverless-ai-drivers", column_config={
                 "BILLED_USD": st.column_config.NumberColumn("Billed $", format="$%.0f"),
             })
@@ -1111,9 +1113,10 @@ def render() -> None:
         with st.expander(f"Morning AI digest — {row.get('DIGEST_DATE')} ({row.get('MODEL')})",
                          expanded=False):
             st.markdown(str(row.get("BODY") or ""))
-            # #1: provenance line → audit-mode only.
-            methodology_note("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
-                             "only. Account-wide narrative — does not change with the company filter.")
+            # KEPT: "Account-wide narrative — does not change with the company filter" is a
+            # scope caveat (parity with the kept whole-account contract note) — stays visible.
+            st.caption("Written daily by TASK_DAILY_DIGEST from exec-board facts and alert counts "
+                       "only. Account-wide narrative — does not change with the company filter.")
 
     # ---- Executive summary download -----------------------------------------
     # rec 5: export the SAME honest view-model the screen shows. An Incomplete score
