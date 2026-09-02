@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.429.0 - Codex-review live-defect fixes: storage-tile bytes, validate floor message, verified-savings format (2026-09-02)
+
+Three concrete defects the adjudicated Codex review surfaced (two verified against the running
+code), all fixed. No migration.
+
+- **CD-1: Cost ▸ Optimize storage-mover tiles rendered raw fixed-decimal TB.** The "Current storage"
+  and "Growth" KPI tiles hardcoded `f"{…:,.2f} TB"`, so a sub-TB net growth read "0.03 TB" (looks like
+  nothing) while the sibling movers table immediately below humanizes the same CURRENT_TB / GROWTH_TB
+  columns to "30.7 GB" via `_auto_formats`. Routed the tiles through `humanize_bytes(value * 1024**4)`
+  — the exact path the table uses — so tile and table agree. Same FC-1 / CSF-1 byte-format class.
+- **CD-2: validate.sql's migration-floor message was rotted.** The load-bearing teeth block enforces a
+  deliberate minimum floor of 88 (kept low so a pre-existing install still validates), but its raise
+  message said "V001..V117" and the comment said "V001..V117 all applied," while the header SELECT
+  reports the repo tip (122) — three different numbers in one file. Reconciled the message and comment
+  to state the deliberate 88 floor and why the header SELECT differs; added a test on the teeth number.
+- **CD-3: Verified-savings figure formatted inconsistently.** The Admin autobook-preview card rendered
+  VERIFIED_USD as a raw `${:,.0f}` ("$1,200,000") while Brief and Decision Studio render the same
+  ledger figure through `format_usd` ("$1.20M"). Routed the Admin card through `format_usd`.
+
 ## 4.428.0 - Bug hunt round 13: cross-surface consistency sweep (format, help, denominator, verdict, window label) (2026-09-02)
 
 A thirteenth sweep weighted toward the highest-yield remaining angle — cross-page presentation

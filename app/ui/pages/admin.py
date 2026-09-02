@@ -25,7 +25,7 @@ from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.data import cost_sql, mart_sql
-from app.logic.formulas import humanize_duration, md_dollars, safe_float
+from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.ui.components import (
     audit_mode,
     confirm_gate,
@@ -1154,7 +1154,10 @@ def _perf_rider_panels(fq_df=None) -> None:
             {"label": "Savings est -> verified / rejected",
              "value": f"{_n('SAVINGS_ESTIMATED')} -> {_n('SAVINGS_VERIFIED')} / {_n('SAVINGS_REJECTED')}"},
             {"label": "Verified savings (90d)",
-             "value": f"${float(a.get('VERIFIED_USD') or 0):,.0f}"},
+             # CD-3 (live-defect fix): the same VERIFIED_USD figure renders via format_usd
+             # on Brief + Decision Studio; a raw "${:,.0f}" here made it read differently
+             # ("$1,200,000" vs "$1.20M"). Route through format_usd for one presentation.
+             "value": format_usd(float(a.get('VERIFIED_USD') or 0))},
         ])
         st.caption("Generated -> executed -> verified, from audit rows. No impression "
                    "tracking — Streamlit cannot measure 'viewed' truthfully.")
