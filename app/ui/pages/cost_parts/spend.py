@@ -1183,9 +1183,10 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
     plus the tracked execute + savings booking live on Optimization ▸ Storage & waste."""
     st.markdown("**Drill to tables — what's driving a database's storage**")
     st.caption(
-        "Current on-disk snapshot (TABLE_STORAGE_METRICS) priced at the configured $/TiB — "
-        "an instantaneous figure for spotting drivers and candidates, so it won't sum exactly "
-        "to the per-database month-to-date billing average in the card above."
+        "Per-table on-disk bytes priced at the configured $/TiB — a point-in-time snapshot "
+        "(served from the daily storage mart, or a live TABLE_STORAGE_METRICS scan on a mart "
+        "miss — the source line below says which) for spotting drivers and candidates, so it "
+        "won't sum exactly to the per-database month-to-date billing average in the card above."
     )
     dbs = [d for d in dict.fromkeys(str(x) for x in db_names) if d.strip()]
     if not dbs:

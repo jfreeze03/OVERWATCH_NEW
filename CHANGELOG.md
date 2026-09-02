@@ -1,5 +1,30 @@
 # Changelog
 
+## 4.451.0 - Bug-hunt round 17: fix a v4.444 truncation regression + two storage caption/help inaccuracies (2026-09-02)
+
+An adversarial find→refute-verify sweep over the fresh perf work-stream (v4.441-v4.450) surfaced
+3 confirmed defects (1 refuted).
+
+- **[MED, a v4.444 regression] `ops_sql.queries_health_bundle` had no `ORDER BY`.** The GROUPING SETS
+  merge moved the `ORDER BY FAILURES DESC LIMIT 50` out of SQL into `split_health_bundle` (pandas),
+  but the read layer applies its own `DEFAULT_MAX_ROWS` transport cap — and with no `ORDER BY` that
+  cap keeps an ARBITRARY subset, so on the live-fallback path with a very high distinct-failure-family
+  count it could drop the `GRP=3` grand-total (summary) row (rendering "Queries: 0" while thousands
+  ran) or the genuinely-heaviest error families. Added `ORDER BY GRP DESC, FAILURES DESC` (floats the
+  summary row + top families first so they survive the cap) and an explicit `max_rows: 200` on the
+  bundle spec. The two replaced builders were immune (`query_window_summary` returned 1 row;
+  `failures_by_error` ordered+limited in SQL) — the refactor made row survival load-bearing without it.
+- **[LOW] Object-TCO "Storage $/mo" help claimed "incl. clone-retained" on the fallback frame.** The
+  Optimize storage-waste Object-TCO card includes `CLONE_RETAINED_GB` in its total, but that column
+  exists only on the Enterprise/`ACCESS_HISTORY` primary (`storage_reclaim`); on the `storage_waste`
+  fallback it's absent (→0), so clone was silently excluded while the help still claimed it was in the
+  total. The help now branches on whether the clone column is present.
+- **[LOW] Storage-drill captions claimed "Current on-disk snapshot (TABLE_STORAGE_METRICS) …
+  instantaneous"** while v4.449 serves them mart-first from the daily `MART_TABLE_STORAGE_DAILY` (and
+  `result_caption` below even named the mart source — a direct in-panel contradiction). Reworded both
+  (Spend + Optimize) to "a point-in-time snapshot (daily storage mart, or a live scan on a miss)".
+- Tests: `tests/test_bughunt_round17.py`. No migration.
+
 ## 4.450.0 - Perf: telemetry column-shape describe resolved once per process, not per session (2026-09-02)
 
 The one synchronous write-path cost in the read layer: `_persist_telemetry` resolves the live

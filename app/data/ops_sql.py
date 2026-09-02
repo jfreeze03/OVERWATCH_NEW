@@ -165,6 +165,13 @@ SELECT
     MAX(IFF(IS_FAIL = 1, START_TIME, NULL)) AS LAST_SEEN
 FROM scoped
 GROUP BY GROUPING SETS ((), (FAIL_CODE, FAIL_MSG))
+-- The ordering + 50-row cap live in split_health_bundle (pandas), but the read layer applies
+-- its own DEFAULT_MAX_ROWS transport cap; with no ORDER BY that cap would keep an ARBITRARY
+-- subset and could drop the GRP=3 grand-total (summary) row or the heaviest error families.
+-- GRP DESC floats the summary row (GRP=3) first, FAILURES DESC floats the top families next,
+-- so the rows the split needs always survive the cap. (bug-hunt round 17 — regression from the
+-- v4.444 refactor that moved ORDER BY/LIMIT out of SQL: the replaced failures_by_error had them.)
+ORDER BY GRP DESC, FAILURES DESC NULLS LAST
 """
 
 

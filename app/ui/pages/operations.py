@@ -197,7 +197,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
              "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
             {"key": "health", "sql": ops_sql.queries_health_bundle(
                 days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
-             "source": "ACCOUNT_USAGE.QUERY_HISTORY (window summary + failures, one scan)"},
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY (window summary + failures, one scan)",
+             # 1 summary row + top-50 failures = 51; the bundle's ORDER BY GRP DESC, FAILURES DESC
+             # keeps those first, so a small cap can't drop the summary or the heaviest families.
+             "max_rows": 200},
         ], page=_PAGE, tier="recent")
         _top_res = _live.get("top")
         _bundle_summary, _bundle_fails = _split_queries_health(_live.get("health"))

@@ -1179,9 +1179,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     # no table-grain history) — so it spots the drivers but won't sum to
                     # the growth slope above.
                     st.caption(
-                        "Current on-disk snapshot (TABLE_STORAGE_METRICS) priced at the "
-                        "configured $/TiB — it spots the drivers behind this database's "
-                        "growth, but won't sum to the growth slope above.")
+                        "Per-table on-disk bytes priced at the configured $/TiB — a point-in-time "
+                        "snapshot (daily storage mart, or a live TABLE_STORAGE_METRICS scan on a "
+                        "miss) that spots the drivers behind this database's growth, but won't sum "
+                        "to the growth slope above.")
                     _cfg = {c: st.column_config.NumberColumn(c, format="$%.2f")
                             for c in ("Active $", "Time-travel $", "Fail-safe $", "Clone $", "Total $")}
                     _show_cols = ["SCHEMA_NAME", "TABLE_NAME", "Active $", "Time-travel $",
@@ -1307,6 +1308,10 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if sel_w is not None:
                     _trow = sdf.iloc[int(sel_w)]
                     st.markdown(f"**Object TCO — `{_trow['DATABASE_NAME']}.{_trow['SCHEMA_NAME']}.{_trow['TABLE_NAME']}`**")
+                    # CLONE_RETAINED_GB rides only on the Enterprise/ACCESS_HISTORY primary frame
+                    # (storage_reclaim); on the storage_waste/mart fallback it's absent -> 0, so
+                    # don't claim it's in the total when it isn't (bug-hunt round 17).
+                    _has_clone = "CLONE_RETAINED_GB" in sdf.columns
                     _st_gb = (safe_float(_trow.get("ACTIVE_GB")) + safe_float(_trow.get("TIME_TRAVEL_GB"))
                               + safe_float(_trow.get("FAILSAFE_GB")) + safe_float(_trow.get("CLONE_RETAINED_GB")))
                     _st_usd = round(_st_gb / 1024 * safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0), 2)
@@ -1328,7 +1333,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                                 _writes = int(safe_float(krow["TOUCHES"]))
                     kpi_row([
                         {"label": "Storage $/mo", "value": f"${_st_usd:,.2f}",
-                         "help": f"{_st_gb:,.1f} GB total incl. retention + clone-retained."},
+                         "help": f"{_st_gb:,.1f} GB total incl. retention"
+                                 + (" + clone-retained." if _has_clone
+                                    else " (clone-retained not measured on this fallback path).")},
                         {"label": "Reads (30d)", "value": f"{_reads:,}",
                          "severity": "warn" if _reads == 0 else "ok"},
                         {"label": "Writes (30d)", "value": f"{_writes:,}",
