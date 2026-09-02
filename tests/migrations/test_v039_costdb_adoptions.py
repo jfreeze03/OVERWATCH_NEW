@@ -95,7 +95,9 @@ def test_categorize_stops_bucketing_new_services_as_other():
 def test_cs_by_query_type_reader_and_panel():
     sql = cost_sql.cs_by_query_type(7, "ALFA")
     assert "CREDITS_USED_CLOUD_SERVICES > 0" in sql and "GROUP BY QUERY_TYPE" in sql
-    assert "WAREHOUSE_NAME" not in cost_sql.cs_by_query_type(7, "x'y")  # unknown company -> no scope arm (enum-gated)
+    # MC-1 (round 11): a specific company now scopes via the COMPANY_SCOPE-aware UDF; an
+    # arbitrary company value is embedded SAFELY (sql_literal doubles the quote), never raw.
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'x''y'" in cost_sql.cs_by_query_type(7, "x'y")
     sp = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
     assert "Cloud-services credits by statement type" in sp
     assert "Metadata storms" in sp

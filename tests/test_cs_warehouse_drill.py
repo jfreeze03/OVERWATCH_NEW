@@ -33,10 +33,13 @@ def test_scoped_drill_drops_redundant_company_predicate():
     # for a warehouse the ratio table just flagged ELEVATED.
     unscoped = cost_sql.compile_heavy_families(30, "ALFA")
     scoped = cost_sql.compile_heavy_families(30, "ALFA", warehouse="WH_TRXS_X")
-    assert "WH!_ALFA!_%" in unscoped and "WH!_ALFA!_%" not in scoped   # company prefix dropped
+    # MC-1 (round 11): the company scope is now the COMPANY_SCOPE-aware UDF predicate; it is
+    # still dropped when an exact warehouse is given (the warehouse IS the complete scope).
+    _pred = "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'ALFA'"
+    assert _pred in unscoped and _pred not in scoped
     assert "WAREHOUSE_NAME = 'WH_TRXS_X'" in scoped
     # same for the CS-by-type builder
-    assert "WH!_ALFA!_%" not in cost_sql.cs_by_query_type(30, "ALFA", warehouse="WH_TRXS_X")
+    assert _pred not in cost_sql.cs_by_query_type(30, "ALFA", warehouse="WH_TRXS_X")
 
 
 def test_cs_by_query_type_scopes_to_warehouse():

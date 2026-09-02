@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.426.0 - Bug hunt round 11: live per-company warehouse scope honors COMPANY_SCOPE mappings (2026-09-02)
+
+An eleventh sweep on the freshest remaining angles (navigation/deep-link state, multi-company
+classification, cold-start, Snowflake NUMBER semantics, regex/identity parsing, comment rot). Two
+dimensions clean (cold-start, sql-number-semantics, regex-parsing). 4 fixed (1 MED, 3 LOW):
+
+- **Live per-company warehouse spend dropped COMPANY_SCOPE-mapped warehouses (MED).** The live
+  `cost_sql` warehouse builders scoped company by NAME PATTERN (`warehouse_clause`: WH_ALFA_* / the
+  fixed Trexis list) while labelling COMPANY by the COMPANY_SCOPE-aware UDF and while the mart path
+  filters on the stamped column. So a warehouse an operator maps to a company via the app's own
+  "map an entity" feature (a non-pattern name like COMPUTE_WH) vanished from that company's live
+  spend, showed up mislabelled under UNKNOWN, and made ALFA+Trexis+UNKNOWN != ALL — the live leg
+  disagreeing with the mart for the same warehouse. All 8 per-company warehouse scopes in `cost_sql`
+  now use the UDF (`COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = '<company>'`), matching the mart path
+  and `ops_sql._query_scope`; ALL stays a no-op filter.
+- **LOW:** a failed/empty live SHOW DATABASES read no longer evicts a legitimately-selected
+  live-only database (e.g. DBA_MAINT_DB) via the static-subset fallback — the eviction now honors
+  the same `classify_databases` rule `init_filters` uses, and keeps a valid live-only DB selectable.
+- **LOW×2 (comment rot):** the Ask router docstring + `_score` comment described the pre-ASK-1
+  "most keyword hits wins" ranking; both now state that priority dominates and hit-count only breaks
+  ties (matching the code), so a maintainer isn't misled.
+
 ## 4.425.0 - Bug hunt round 10: numpy timedelta forward-compat, Ask idle-total disclosure (2026-09-01)
 
 A tenth sweep on deep logic + forward-compat angles (deprecations, platform-score math, alert

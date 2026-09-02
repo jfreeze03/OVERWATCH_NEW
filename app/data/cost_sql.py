@@ -54,12 +54,23 @@ ORDER BY DAY
 """
 
 
+def _wh_company_scope(company: str) -> str:
+    """Company scope for a live WAREHOUSE_METERING_HISTORY read via the COMPANY_SCOPE-aware
+    UDF (COMPANY_FOR_WAREHOUSE) — the SAME axis the COMPANY label and the mart path use, and
+    the pattern ops_sql._query_scope (C10) established. The name-pattern warehouse_clause()
+    drops a COMPANY_SCOPE-mapped warehouse whose name doesn't match WH_ALFA_/the Trexis list
+    from its per-company view, so the live leg disagreed with the mart for a mapped warehouse
+    (round-11 MC-1). Empty for ALL (no filter)."""
+    return ("" if str(company or "ALL").upper() == "ALL"
+            else f"{companies.company_case_sql('WAREHOUSE_NAME')} = {sql_literal(company)}")
+
+
 def warehouse_daily_credits(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """Per-warehouse daily compute credits (exact usage, not billed), company-scoped."""
     days = bounded_days(days)
     where = and_where(
         scope_window_where("START_TIME", days, bounds=bounds),
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 SELECT
@@ -109,7 +120,7 @@ def warehouse_window_vs_prior(days: int, company: str = "ALL", *,
     where = and_where(
         f"START_TIME >= {prior_start}",
         f"START_TIME < {window_end}",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 SELECT
@@ -138,7 +149,7 @@ def hourly_credits(hours: int, company: str = "ALL") -> str:
     hours = max(1, min(int(hours), 168))  # <= 7 days, matching the timeline windows
     where = and_where(
         f"START_TIME >= DATEADD('hour', -{hours}, CURRENT_TIMESTAMP())",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 SELECT
@@ -190,7 +201,7 @@ def allocated_attribution(days: int, dimension: str, company: str = "ALL",
         _win,
         "EXECUTION_STATUS = 'SUCCESS'",
         "WAREHOUSE_NAME IS NOT NULL",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),   # MC-1: match the pool's COMPANY_SCOPE-aware axis
     )
     display_where = and_where(
         companies.database_equals_clause(database),
@@ -307,7 +318,7 @@ def qas_roi(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> 
     compute it would save. Account-wide unless scoped to a company's warehouses.
     """
     days = bounded_days(days, 365)
-    wc = companies.warehouse_clause(company)
+    wc = _wh_company_scope(company)   # MC-1: COMPANY_SCOPE-aware, not name-pattern
     win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
            if bounds is not None
            else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
@@ -759,7 +770,7 @@ def cloud_services_ratio_by_warehouse(days: int, company: str = "ALL", *,
     where = and_where(
         (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
          else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),   # MC-1: COMPANY_SCOPE-aware, not name-pattern
     )
     return f"""
 SELECT
@@ -801,7 +812,7 @@ def compile_heavy_families(days: int, company: str = "ALL", warehouse: str = "",
         # an exact warehouse is already a complete scope; the company predicate
         # (hardcoded tuple/prefix) would only subtract and can zero a warehouse
         # mapped to a company via the runtime COMPANY_SCOPE table.
-        companies.warehouse_clause(company) if not warehouse else "",
+        _wh_company_scope(company) if not warehouse else "",   # MC-1: COMPANY_SCOPE-aware
         f"WAREHOUSE_NAME = {sql_literal(warehouse)}" if warehouse else "",
     )
     return f"""
@@ -1014,7 +1025,7 @@ def cs_by_query_type(days: int, company: str = "ALL", warehouse: str = "", *, bo
         "CREDITS_USED_CLOUD_SERVICES > 0",
         # exact warehouse is a complete scope (see compile_heavy_families) — the
         # company predicate would only subtract and can zero a runtime-mapped warehouse.
-        companies.warehouse_clause(company) if not warehouse else "",
+        _wh_company_scope(company) if not warehouse else "",   # MC-1: COMPANY_SCOPE-aware
         f"WAREHOUSE_NAME = {sql_literal(warehouse)}" if warehouse else "",
     )
     return f"""

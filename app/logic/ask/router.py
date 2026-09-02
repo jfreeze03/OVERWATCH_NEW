@@ -1,10 +1,12 @@
 """Ask-OVERWATCH router — deterministic question -> answerer.
 
 No AI, no SQL. A question strongly matches an answerer only when EVERY one of its
-`require_all` synonym groups is present (the honesty gate); among strong matches
-the most keyword hits wins. Zero strong matches -> `answerer is None`, and the UI
-renders an honest refusal. Window (`days`) is lifted from the text when stated,
-else the caller's default; `company` is always the page filter, never parsed.
+`require_all` synonym groups is present (the honesty gate); among strong matches the
+HIGHEST-PRIORITY answerer wins, and keyword-hit count breaks ties only among equal
+priority (ASK-1: a domain-specific answerer must not be out-scored by a generic one
+that merely piles on overlapping keywords). Zero strong matches -> `answerer is None`,
+and the UI renders an honest refusal. Window (`days`) is lifted from the text when
+stated, else the caller's default; `company` is always the page filter, never parsed.
 """
 
 from __future__ import annotations
@@ -114,8 +116,9 @@ def route(
     if not strong:
         return RouteResult(answerer=None, params=params, score=0, considered=0)
 
-    # Rank strong candidates by total keyword hits (require_all terms count too);
-    # ties break on registry order (stable via index).
+    # _score = total keyword hits (require_all terms count too). It is only the
+    # TIE-BREAKER among equal-priority strong candidates — priority is the primary
+    # rank key at the max() below; a bare-integer registry-order tie is the last resort.
     def _score(a: Answerer) -> int:
         base = _hits(low, tokens, a.keywords)
         for group in a.require_all:

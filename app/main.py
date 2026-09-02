@@ -690,8 +690,19 @@ def _topbar_scope() -> None:
             if not _opts:
                 _opts = databases_for(_company)
             db_options = ["", *_opts]
-            if st.session_state.get("flt_database") not in db_options:
-                st.session_state["flt_database"] = ""
+            # NAV-1 (round 11): when the live SHOW DATABASES read fails/empties, the static
+            # fallback is a STRICT SUBSET of the real inventory (it omits classifiable-but-
+            # unlisted DBs like DBA_MAINT_DB). Evicting an out-of-options selection blindly
+            # would then silently wipe a legitimately-selected live-only DB — the exact scope
+            # init_filters is careful to KEEP. So only clear a selection that is genuinely
+            # invalid for this company (per the same classify_databases rule); a valid
+            # live-only DB is preserved and re-added as an option so the selectbox still works.
+            _cur_db = str(st.session_state.get("flt_database") or "")
+            if _cur_db and _cur_db not in db_options:
+                if (_inv.ok and not _inv.empty) or not classify_databases([_cur_db], _company):
+                    st.session_state["flt_database"] = ""
+                else:
+                    db_options = ["", _cur_db, *_opts]
             st.selectbox(
                 "Database", db_options, key="flt_database",
                 format_func=lambda value: value or "All databases",

@@ -8,7 +8,8 @@ def test_cloud_services_ratio_builder():
     assert "WAREHOUSE_METERING_HISTORY" in sql
     assert "CLOUD_SVC_PCT" in sql and "'ELEVATED'" in sql and "'NORMAL'" in sql
     assert "DATEADD('day', -90" in sql          # clamped
-    assert "WH_TRXS" in sql                     # company scope via warehouse names
+    # MC-1 (round 11): company scope via the COMPANY_SCOPE-aware UDF, not warehouse names.
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'Trexis'" in sql
 
 
 def test_compile_heavy_builder():

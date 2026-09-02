@@ -57,7 +57,8 @@ def test_hourly_credits_grain_scope_and_clamp():
     assert "DATE_TRUNC('hour', START_TIME)::TIMESTAMP_NTZ AS HOUR_TS" in sql
     assert "DATEADD('hour', -48," in sql
     assert "WAREHOUSE_ID > 0" in sql          # exclude the cloud-services pseudo-warehouse
-    assert "WH!_ALFA!_%" in sql               # company-scoped by warehouse
+    # MC-1 (round 11): company scope via the COMPANY_SCOPE-aware UDF, not the name pattern.
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'ALFA'" in sql
     # window clamps to 7 days of hours and never below one hour
     assert "DATEADD('hour', -168," in cost_sql.hourly_credits(10_000, "ALL")
     assert "DATEADD('hour', -1," in cost_sql.hourly_credits(0, "ALL")
@@ -87,12 +88,15 @@ def test_company_scope_present_when_requested():
     alfa = cost_sql.warehouse_daily_credits(7, "ALFA")
     trexis = cost_sql.warehouse_daily_credits(7, "Trexis")
     both = cost_sql.warehouse_daily_credits(7, "ALL")
-    assert "WH!_ALFA!_%" in alfa                       # V044: evidence-based arm
     unknown = cost_sql.warehouse_daily_credits(7, "UNKNOWN")
-    assert "NOT IN" in unknown and "WH_TRXS_LOAD" in unknown
-    assert re.search(r"\bIN \('WH_TRXS_LOAD'", trexis)
-    assert "WH_TRXS_LOAD" not in both                     # ALL view: no company WHERE filter
-    assert "COMPANY_FOR_WAREHOUSE" in both                # company labeled via the evidence UDF (item 8b)
+    # MC-1 (round 11): company scope is the COMPANY_SCOPE-aware UDF (the SAME axis as the
+    # COMPANY label and the mart path), NOT the name pattern — so a COMPANY_SCOPE-mapped
+    # warehouse whose name doesn't match WH_ALFA_/the Trexis list is kept in its company view.
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'ALFA'" in alfa
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'Trexis'" in trexis
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'UNKNOWN'" in unknown
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) =" not in both   # ALL view: no company WHERE filter
+    assert "COMPANY_FOR_WAREHOUSE" in both                          # still labeled via the evidence UDF
 
 
 def test_user_scope_carries_kebarr1_override():
