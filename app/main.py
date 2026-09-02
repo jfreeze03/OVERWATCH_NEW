@@ -22,10 +22,12 @@ st.set_page_config(
 
 from app.companies import COMPANIES, classify_databases, databases_for  # noqa: E402
 from app.config import (  # noqa: E402
+    APP_VERSION,
     DEFAULT_DAY_WINDOW,
     LAST_MONTH_WINDOW,
     MAX_LIVE_WINDOW_DAYS,
     PAGES_BY_PROFILE,
+    REQUIRED_SCHEMA_FLOOR,
     TRIAGE_WINDOW_OPTIONS,
     nav_groups_for,
 )
@@ -748,6 +750,28 @@ def _topbar_scope() -> None:
             )
 
 
+def _schema_floor_breach() -> int | None:
+    """Startup compatibility gate (Codex #8). Returns the live max(SCHEMA_VERSION)
+    when it is readable AND below config.REQUIRED_SCHEMA_FLOOR, so main() can show ONE
+    blocked state instead of scattered object-not-found errors. Returns None to
+    proceed — the gate FAILS OPEN (read failed/empty, or schema at/above the floor) so
+    a transient metadata read never bricks a working install. tier='metadata' is
+    cached (changes only when a migration is applied), so this is one cheap read."""
+    res = run(mart_sql.schema_version(), page="_shell", key="schema_floor_gate",
+              tier="metadata", source="SCHEMA_VERSION")
+    if not res.usable() or res.empty:
+        return None
+    try:
+        versions = [int(float(v)) for v in res.df["VERSION"].tolist()
+                    if v is not None and v == v]
+    except (ValueError, TypeError, KeyError):
+        return None
+    if not versions:
+        return None
+    mx = max(versions)
+    return mx if mx < REQUIRED_SCHEMA_FLOOR else None
+
+
 def main() -> None:
     _main_started = time.perf_counter()  # full render incl. chrome (Codex #18)
     # C48: full-script run counter — the write latch's run-sequence check rides
@@ -813,6 +837,20 @@ def main() -> None:
     # `page` (stale session_state, a saved deep-link, a future nav path).
     if page not in pages:
         page = pages[0]
+    # Startup compatibility gate (Codex #8): if the connected database is below the
+    # build's load-bearing schema floor, render ONE actionable blocked state rather
+    # than letting each page fail with scattered object-not-found errors. Admin is
+    # EXEMPT so the operator can always reach the Migrations tab to diagnose and fix.
+    _floor_v = _schema_floor_breach() if page != "Admin" else None
+    if _floor_v is not None:
+        st.error(f"This OVERWATCH build ({APP_VERSION}) needs the database migrated through "
+                 f"V{REQUIRED_SCHEMA_FLOOR:03d}, but the connected account is at V{_floor_v:03d}.")
+        st.markdown(
+            f"Apply the migrations in `snowflake/migrations/` in order up to "
+            f"**V{REQUIRED_SCHEMA_FLOOR:03d}** (see DEPLOYMENT.md), then reload — until then the "
+            "pages read objects that have not been created yet. **Admin ▸ Migrations** lists "
+            "exactly which are missing.")
+        return
     if page == "Overview":
         _persistent_status_bar(pages)
     _RENDERERS[page]()

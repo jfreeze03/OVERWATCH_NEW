@@ -665,11 +665,19 @@ def _migrations_tab() -> None:
     if not res.empty:
         applied = {int(v) for v in pd.to_numeric(res.df["VERSION"], errors="coerce").dropna()}
         styled_table(res.df)
-    missing = [f"V{n:03d} ({name})" for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
+    missing = [(n, name) for n, name in _EXPECTED_MIGRATIONS.items() if n not in applied]
     if missing:
-        # $-escape: migration descriptions carry '$' (V036 "measured $", V065 "MTD$/...") —
-        # joined into one warning they pair into a math span on exactly the fresh-install path
-        st.warning(md_dollars("Missing migrations: " + ", ".join(missing) + ". Run them in order (DEPLOYMENT.md)."))
+        # Impact-annotated punch list (was one opaque comma-blob): each pending
+        # migration is its OWN row with the impact text already in _EXPECTED_MIGRATIONS,
+        # because until it is applied the PRIOR proc/seed stays live and the affected
+        # surface can show pre-fix numbers with no other on-page signal.
+        st.warning(f"{len(missing)} migration(s) not yet applied. Until each runs, the previous "
+                   "proc/seed stays live and the surface it fixes can show pre-fix numbers — "
+                   "apply them IN ORDER (DEPLOYMENT.md):")
+        for n, name in missing:
+            # md_dollars each row INDIVIDUALLY: descriptions carry '$' (V036 "measured $",
+            # V065 "MTD$/...") that would pair into a LaTeX math span if joined into one string.
+            st.markdown(md_dollars(f"- **V{n:03d}** — {name}"))
     else:
         empty_state("clean", f"All {len(_EXPECTED_MIGRATIONS)} migrations applied. App {APP_VERSION} expects exactly these.")
 

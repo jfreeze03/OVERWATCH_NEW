@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.431.0 - Migration-apply safety: startup schema-floor gate + impact-annotated pending-migration punch list (2026-09-02)
+
+Two items from the review's priority list, both addressing the migration-lag problem (why
+V118-V122 keep lagging unapplied and pages can silently run pre-fix procs). No migration.
+
+- **Startup compatibility gate (Codex #8).** `main()` now reads the live max(SCHEMA_VERSION)
+  once (cached metadata tier) and, if the connected database is below the build's load-bearing
+  floor (`config.REQUIRED_SCHEMA_FLOOR`, kept equal to the `validate.sql` teeth floor), renders ONE
+  actionable blocked state naming the required and current versions instead of letting each page
+  fail with scattered object-not-found errors. The gate FAILS OPEN on any read error/empty/junk, so
+  a transient metadata hiccup never bricks a working install, and Admin is EXEMPT so the operator can
+  always reach the Migrations tab to diagnose and fix. A test pins the floor to `validate.sql`.
+- **Impact-annotated pending-migration punch list.** The Admin ▸ Migrations "missing migrations"
+  warning was one opaque comma-joined blob; it now renders each pending migration as its OWN row with
+  the impact text already carried in `_EXPECTED_MIGRATIONS` (e.g. "V118 — Savings-ledger dedup…"),
+  because until each is applied the prior proc/seed stays live and the surface it fixes can show
+  pre-fix numbers with no other on-page signal. Each row is `$`-escaped individually.
+
 ## 4.430.0 - Root-cause fix: one canonical unit->formatter ends the cross-surface number-format drift class (2026-09-02)
 
 The recurring cross-surface consistency class the last ~dozen hardening rounds kept hand-patching

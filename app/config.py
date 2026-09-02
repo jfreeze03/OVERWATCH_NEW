@@ -8,7 +8,16 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.430.0"
+APP_VERSION = "4.431.0"
+
+# The build's load-bearing schema floor. main() reads the live max(SCHEMA_VERSION)
+# once per session and, if it is BELOW this, renders ONE actionable blocked state
+# instead of letting each page fail with scattered object-not-found errors (the gate
+# FAILS OPEN on any read error, so a transient hiccup never bricks a working install).
+# Kept equal to the snowflake/validate.sql teeth floor — the same deliberate
+# "load-bearing minimum," NOT the repo tip: the app tolerates missing NEWER migrations
+# via per-read guards, so this stays a low minimum. A test pins it to validate.sql.
+REQUIRED_SCHEMA_FLOOR = 88
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
