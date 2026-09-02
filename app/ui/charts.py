@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app.logic.decision import LANE_ACTNOW_CONF, LANE_CONF_FLOOR
-from app.logic.formulas import md_dollars
+from app.logic.formulas import humanize_duration, md_dollars
 from app.logic.task_graph import TaskGraphShape, canonical_task_name
 from app.ui import palette
 from app.ui.sizing import CHART_H_MD, CHART_H_SM
@@ -204,7 +204,9 @@ def _task_node_style(row: pd.Series) -> tuple[str, str]:
     critical_path = str(row.get("CRITICAL_PATH") or "").lower() == "true"
     if critical_path:
         duration = pd.to_numeric(row.get("RUN_SEC"), errors="coerce")
-        suffix = f" · {float(duration):,.1f}s" if pd.notna(duration) else ""
+        # humanize like the page's KPI cards + RUN_SEC table column ("1h 30m"), not raw
+        # "5,400.0s" — the DAG node was the lone duration surface still on raw seconds.
+        suffix = f" · {humanize_duration(duration, 's')}" if pd.notna(duration) else ""
         return palette.ACCENT, f"critical path{suffix}"
     if "suspend" in state:
         return palette.MUTED, "suspended"
@@ -332,7 +334,7 @@ def _task_dag_markup(df: pd.DataFrame, shape: TaskGraphShape, *, height: int) ->
                 status,
                 f"warehouse: {row.get('WAREHOUSE_NAME') or 'serverless'}",
                 f"schedule: {row.get('SCHEDULE') or 'triggered'}",
-                (f"selected run: {float(row.get('RUN_SEC')):,.1f}s"
+                (f"selected run: {humanize_duration(row.get('RUN_SEC'), 's')}"
                  if pd.notna(pd.to_numeric(row.get("RUN_SEC"), errors="coerce")) else ""),
             )
             if value

@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.436.0 - Bug hunt round 14: DAG-node durations + Brief ROI degenerate-denominator false green (2026-09-02)
+
+A cross-surface-consistency round (6 dimensions). Three MED confirmed; the two clean app-code fixes
+land here, the third (an exec-board UTC vs account-clock window) is migration-gated and tracked
+separately. No migration in this release.
+
+- **DAG-1: task-graph DAG node durations rendered raw seconds.** The interactive task-graph nodes
+  showed a run duration as "5,400.0s" (selected-run tooltip and the visible "critical path · 5,400.0s"
+  node label), while the same Operations view's KPI cards ("Run wall time", "Critical path") and the
+  RUN_SEC column of the runs table below humanize it to "1h 30m". Routed both node labels through
+  `humanize_duration` — the DAG was the lone duration surface still on raw seconds.
+- **ROI-1: Brief "Verified savings (QTD)" painted a false green when the app-cost denominator was 0.**
+  The app-cost builder always returns one `COALESCE(SUM,0)` row, so `usable()` is True even when it
+  summed nothing (a renamed app warehouse or empty FACT_WAREHOUSE_DAILY zeroes the ROI denominator).
+  With nothing verified either, the KPI evaluated `0 >= 0` → green under "Green means OVERWATCH pays
+  for itself" — a false all-clear from a degenerate denominator, while the sibling Decision Studio
+  scorecard (via `proof.roi_multiple`'s `run_cost > 0` guard) honestly shows the same case as
+  unmeasured. Now a zero app cost is treated as unmeasured (delta "app cost unavailable", color off).
+
 ## 4.435.0 - Bug hunt on the review-arc code: format_unit count branch (2026-09-02)
 
 A find→refute-verify hunt over this session's new code (v4.429-v4.434: the unit formatter, the

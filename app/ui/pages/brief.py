@@ -213,8 +213,14 @@ def render() -> None:
         rrow = roi.df.iloc[0]
         verified = safe_float(rrow.get("VERIFIED_QTD_USD"))
         pipeline = safe_float(rrow.get("ESTIMATED_OPEN_USD"))
-        app_usd = (safe_float(cost_q.df.iloc[0].get("APP_CREDITS_30D")) * rate
-                   if cost_q.usable() else None)
+        # A zero APP_CREDITS_30D is a MISSING/degenerate denominator (renamed app
+        # warehouse, empty FACT_WAREHOUSE_DAILY) — the builder always returns one
+        # COALESCE(SUM,0) row, so usable() is True even when it summed nothing. Treat
+        # it as unmeasured (None), NOT $0, so the KPI does not paint a false green
+        # "pays for itself" when nothing is verified either (0 >= 0). Mirrors
+        # proof.roi_multiple's `run_cost > 0` guard + the DS "not measured yet" state.
+        _app_credits = safe_float(cost_q.df.iloc[0].get("APP_CREDITS_30D")) if cost_q.usable() else 0.0
+        app_usd = _app_credits * rate if _app_credits > 0 else None
         kpis.append({
             "label": "Verified savings (QTD)",
             "value": format_usd(verified),
