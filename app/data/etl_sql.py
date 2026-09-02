@@ -98,21 +98,25 @@ LIMIT 100
 
 
 def etl_failed_runs_for_pipeline(pipeline: str, days: int, company: str = "ALL",
-                                 database: str = "", schema_contains: str = "") -> str:
+                                 database: str = "", schema_contains: str = "",
+                                 *, bounds: tuple | None = None) -> str:
     """Per-pipeline drill: every non-SUCCESS statement for ONE tagged pipeline,
     one row per statement, with its measured attribution credits (the retry/abort
     waste that rolls up into the parent's RETRY_WASTE_CREDITS / Failed-run $).
 
-    Scoping (company/db/schema) and the ``cred`` CTE window (days+1) are IDENTICAL
-    to etl_cost_by_pipeline so the drill's summed waste $ reconciles to the row's
-    Failed-run $. Pipeline equality is an EXACT, case-preserving match on the JSON
-    tag value (no UPPER() — the parent extracts PIPELINE from the same
-    GET_PATH(...)::VARCHAR, so the clicked cell round-trips exactly)."""
+    Scoping (company/db/schema) and BOTH windows are IDENTICAL to
+    etl_cost_by_pipeline — including the Last-month ``bounds`` path — so the drill's
+    summed waste $ reconciles to the row's Failed-run $ under every scope window.
+    Pipeline equality is an EXACT, case-preserving match on the JSON tag value
+    (no UPPER() — the parent extracts PIPELINE from the same GET_PATH(...)::VARCHAR,
+    so the clicked cell round-trips exactly)."""
     days = bounded_days(days)
     from app.core.sqlsafe import contains_filter, sql_literal
 
     where = and_where(
-        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
+         if bounds is not None
+         else f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "q.QUERY_TAG IS NOT NULL",
         "GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'pipeline') IS NOT NULL",
         companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
@@ -121,12 +125,17 @@ def etl_failed_runs_for_pipeline(pipeline: str, days: int, company: str = "ALL",
         f"GET_PATH(TRY_PARSE_JSON(q.QUERY_TAG), 'pipeline')::VARCHAR = {sql_literal(pipeline)}",
         "q.EXECUTION_STATUS <> 'SUCCESS'",
     )
+    cred_where = (
+        resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
+    )
     return f"""
 WITH cred AS (
     SELECT QUERY_ID,
            SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {cred_where}
     GROUP BY QUERY_ID
 )
 SELECT

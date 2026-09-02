@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.419.0 - Bug hunt round 4: dead metrics, LIMIT-frame totals, Ask hijack, ledger double-count (2026-09-01)
+
+A fourth adversarial sweep (financial-accuracy, truncation-honesty, dead-metric, intent-routing, chart-
+alignment, formula-edge, Last-month reconciliation) — refute-verified, then ground-truthed by hand. 13
+confirmed fixed (12 app-code + 1 owner-applied migration), 3 refuted.
+
+- **`SP_LEDGER_AUTOBOOK` double-counted a warehouse's saving (V118, owner-applied).** `BASELINE/
+  AFTER_CREDITS_PER_DAY` are *warehouse*-level, but the change registry holds one row per (warehouse,
+  setting) — so when >1 cost lever changed on a warehouse in the same measured window, each lever settled
+  VERIFIED with the *full* warehouse delta and the ledger total counted one physical saving N times. V118
+  attributes the delta to one primary lever per measured window; co-occurring levers settle VERIFIED at $0,
+  plus a one-time idempotent correction of rows V038 already double-booked. **Owner must apply V118.**
+- **What-if simulator inverted the auto-suspend recommendation** for a never-suspend warehouse (round-3's
+  `auto_suspend=0` read fix exposed it): `now=0` hit the 2× idle cap, modeling *turning auto-suspend on* as
+  a cost increase. `simulate_scenario` now maps ≤0 to a never-suspend sentinel, so on→60s reads as a saving
+  and the assumptions line says "never → 60s".
+- **Three cost KPIs summed a LIMIT-capped frame as the whole-window total** (wasted-spend, stale-retention
+  GB, Cortex chargeback) — each now labels its scope and discloses when the frame is truncated at the cap.
+- **Two structurally-dead incident metrics removed** (following the v4.351 change-correlated precedent):
+  "Reopen rate" (no writer ever sets `INCIDENTS.REOPENED_FROM` → permanent 0.0%) and incident-grain MTTA
+  (no writer sets `INCIDENTS.ACK_AT` → always NULL); the alert-grain MTTA above is the real one.
+- **Ask hijack:** the AI/Cortex answerer's `priority=1` (which dominates score, not just breaks ties) let
+  "which warehouse costs the most to run ai workloads" route to a per-Cortex-model breakdown. Added a
+  negative-guard `exclude` primitive; Cortex now excludes "warehouse" (it runs serverless, never on one).
+- **Pulse trend ignored the schema filter its KPI honored** — the daily-activity fact has no schema grain,
+  so the sparkline/delta went database-wide under a schema-scoped headline; both are now suppressed (and the
+  fetch skipped) when a schema filter is active.
+- **Last-month reconciliation:** the ETL failed-runs drill ignored the Last-month bounds its parent honors,
+  so the drill's summed waste $ wouldn't reconcile to the row under that window; it now threads `bounds`.
+- **Operational replay panels aligned** on one shared x band (`resolve_scale(x="shared")` + `bounds=flush`),
+  so a cost spike sits above its events in pixels, not just in data space.
+- **Formula edges:** `pct_delta` collapses `-0.0` so a flat metric isn't signed/colored as a decrease;
+  `humanize_bytes` promotes at the unit boundary ("1.0 GB", not "1,024.0 MB").
+
 ## 4.418.0 - Bug hunt round 3: cache invalidation, text-escaping, truthiness, widget bounds (2026-09-01)
 
 A third 12-dimension adversarial sweep (empty-data render, schema contract, text-escaping, boolean/

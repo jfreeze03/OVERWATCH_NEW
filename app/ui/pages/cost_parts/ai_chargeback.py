@@ -175,11 +175,17 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         {"label": "AI monthly budget", "value": "Not configured",
          "help": "Set AI_MONTHLY_BUDGET_USD in Admin to enable budget-breach severities. Nothing is assumed."}
     )
+    # TLH-3: the user rollup is LIMIT-500 by credits desc. For a single-account fleet
+    # that never binds, but disclose it if the frame is ever at the cap so the totals
+    # aren't read as complete when they're the top-500 spenders only.
+    _cc_trunc = len(enriched) >= 500
     kpi_row([
         {"label": f"Active AI users ({days}d)", "value": f"{summary['active_users']:,}"},
         {"label": "Requests", "value": f"{summary['total_requests']:,}"},
         {"label": "Cortex Code spend", "value": format_usd(summary["spend_usd"]),
-         "help": f"Exact token credits x ${ai_rate:.2f}/credit."},
+         "help": f"Exact token credits x ${ai_rate:.2f}/credit."
+                 + (" Totals cover the top 500 users by spend (frame at cap); "
+                    "account-wide totals are higher." if _cc_trunc else "")},
         {"label": "Projected 30d", "value": format_usd(summary["projected_30d_usd"]),
          "help": (f"Run-rate over the {eff_days} day(s) this scope has actually been "
                   f"active, extended to 30 days."

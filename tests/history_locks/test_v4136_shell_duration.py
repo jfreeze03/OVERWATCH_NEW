@@ -30,7 +30,10 @@ def test_control_room_activity_shape_is_checked_before_column_reads():
     pulse = control.split('if section == "Pulse":', 1)[1].split(
         'elif section == "Incidents & triage":', 1)[0]
 
-    guard = '_activity_ready = act.usable() and _activity_cols.issubset(act.df.columns)'
+    # fsl-1: `act` is None (fetch skipped) under a schema filter the daily-activity fact
+    # can't honor, so the readiness guard now also null-checks act before touching its df.
+    guard = ('_activity_ready = act is not None and act.usable() '
+             'and _activity_cols.issubset(act.df.columns)')
     assert '_activity_cols = {"DAY", "QUERIES", "FAILS"}' in pulse
     assert guard in pulse
     assert pulse.index(guard) < pulse.index('act.df["QUERIES"]')

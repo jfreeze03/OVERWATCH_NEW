@@ -1243,13 +1243,20 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 if "DML_STATUS" in sdf.columns:
                     sdf = sdf.rename(columns={"DML_STATUS": "STATUS"})
                 stale = sdf[sdf["STATUS"].astype(str) == "STALE"]
+                # TLH-2: the scan is LIMIT-50 by retention bytes desc, so this GB sum is
+                # the shown top tables, not the account-wide stale total. Mark it a floor
+                # when the frame is truncated at the cap.
+                _wtrunc = len(sdf) >= 50
                 kpis_w = [
                     {"label": "Tables shown", "value": f"{len(sdf)}"},
                     {"label": "Stale (no DML 90d)", "value": f"{len(stale)}",
                      "delta_color": "inverse" if len(stale) else "off"},
-                    {"label": "Stale retention GB",
+                    {"label": "Stale retention GB" + (" (top 50, ≥)" if _wtrunc else ""),
                      "value": f"{float(stale['TIME_TRAVEL_GB'].sum() + stale['FAILSAFE_GB'].sum()):,.0f}"
-                              if not stale.empty else "0"},
+                              if not stale.empty else "0",
+                     "help": ("Time-travel + fail-safe GB on the stale tables shown. Only the "
+                              "top 50 tables by retention bytes are scanned, so this is a floor — "
+                              "the account-wide stale retention is higher.") if _wtrunc else None},
                 ]
                 if reads_available and "NEVER_READ" in sdf.columns:
                     never = sdf[sdf["NEVER_READ"].astype(bool) & (sdf["STATUS"].astype(str) == "STALE")]

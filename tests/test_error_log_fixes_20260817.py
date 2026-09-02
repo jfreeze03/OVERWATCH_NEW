@@ -51,10 +51,11 @@ def test_incident_metrics_has_no_nested_scalar_subquery():
     # subquery — is gone; counts are hoisted to CTEs and cross-joined.
     assert "NULLIF((SELECT" not in sql
     assert "wn AS (SELECT COUNT(*) AS N FROM w)" in sql
-    assert "FROM wn CROSS JOIN compression CROSS JOIN reopen" in sql
-    # semantics preserved: the same output columns (CHANGE_PCT dropped v4.351 — it counted
-    # INCIDENT_MEMBERS kinds no writer persists, so it was structurally always 0.0).
-    for col in ("OPEN_NOW", "DECLARED_N", "TTD_MIN", "MTTA_MIN", "MTTR_MIN",
-                "REOPEN_PCT", "COMPRESSION"):
+    assert "FROM wn CROSS JOIN compression" in sql        # reopen CTE dropped (LBA-1, below)
+    # semantics preserved: the surviving output columns. Three dead metrics dropped, each
+    # counting a column no writer persists: CHANGE_PCT (v4.351), MTTA_MIN (ALC-2:
+    # INCIDENTS.ACK_AT never set), REOPEN_PCT (ALC-1: INCIDENTS.REOPENED_FROM never set).
+    for col in ("OPEN_NOW", "DECLARED_N", "TTD_MIN", "MTTR_MIN", "COMPRESSION"):
         assert f"AS {col}" in sql, col
     assert "CHANGE_PCT" not in sql
+    assert "MTTA_MIN" not in sql and "REOPEN_PCT" not in sql and "reopen" not in sql

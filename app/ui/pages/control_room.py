@@ -617,10 +617,17 @@ def render() -> None:
             pulse = run(ops_sql.query_window_summary(1, company, database=f["database"], schema_contains=f["schema_contains"]),
                         page=_PAGE, key=f"pulse_{company}",
                         tier="live", source="ACCOUNT_USAGE.QUERY_HISTORY (since yesterday 00:00)")
-        act = run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
-                  key="cr_activity", tier="hourly", source="FACT_QUERY_HOURLY (daily)")
+        # fsl-1: the daily-activity fact has no schema grain (database only), so under
+        # an active schema filter its sparkline/delta would be schema-blind and
+        # contradict the schema-scoped Queries headline above. Suppress the trend then
+        # (and skip the fetch) rather than show a database-wide line beneath a
+        # schema-filtered number.
+        _spark_ok = not f["schema_contains"]
+        act = (run(mart_sql.fact_daily_activity(14, company, f["database"]), page=_PAGE,
+                   key="cr_activity", tier="hourly", source="FACT_QUERY_HOURLY (daily)")
+               if _spark_ok else None)
         _activity_cols = {"DAY", "QUERIES", "FAILS"}
-        _activity_ready = act.usable() and _activity_cols.issubset(act.df.columns)
+        _activity_ready = act is not None and act.usable() and _activity_cols.issubset(act.df.columns)
         q_spark = act.df["QUERIES"].tolist() if _activity_ready else None
         f_spark = act.df["FAILS"].tolist() if _activity_ready else None
         # CR3: day-over-day vs-prior delta on the Queries tile, from the already-

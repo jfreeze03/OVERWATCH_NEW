@@ -230,7 +230,8 @@ def pct_delta(current: float, prior: float) -> float | None:
     prior_v = safe_float(prior)
     if prior_v == 0.0:
         return None
-    return round((safe_float(current) - prior_v) / abs(prior_v) * 100.0, 1)
+    r = round((safe_float(current) - prior_v) / abs(prior_v) * 100.0, 1)
+    return r + 0.0 if r == 0 else r   # collapse -0.0 -> 0.0 so a flat metric isn't colored/signed as a decrease
 
 
 def month_days(day: date) -> tuple[int, int, int]:
@@ -321,9 +322,13 @@ def humanize_bytes(value: object) -> str:
         return "—"
     sign = "-" if v < 0 else ""
     n = abs(float(v))
-    for unit, factor in (("TB", 1024 ** 4), ("GB", 1024 ** 3),
-                         ("MB", 1024 ** 2), ("KB", 1024)):
+    _units = (("TB", 1024 ** 4), ("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024))
+    for i, (unit, factor) in enumerate(_units):
         if n >= factor:
+            # promote at the boundary: a value that rounds to 1024 of this unit (e.g.
+            # 1023.97 MB) reads as "1.0 GB", not "1,024.0 MB", when a larger unit exists.
+            if round(n / factor, 1) >= 1024 and i > 0:
+                unit, factor = _units[i - 1]
             return f"{sign}{n / factor:,.1f} {unit}"   # 1 decimal, Snowsight style
     return f"{sign}{n:,.0f} B"
 

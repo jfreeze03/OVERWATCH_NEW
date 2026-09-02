@@ -1332,6 +1332,11 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
         # brushed. Pin both panels to ONE explicit shared domain so they align on
         # first paint. A bar mark (not area) leaves idle hours as gaps instead of
         # interpolating filled spend across hours that metered nothing.
+        # CHART-2: the equal domain aligns the DATA extent, but the two panels' plot
+        # rectangles still offset when their y-axes differ in width (numeric "Spend
+        # $/hr" vs long categorical event-type labels). resolve_scale(x="shared") +
+        # bounds="flush" make Vega-Lite lay the panels out on one shared x band, so a
+        # spike sits directly above its events in PIXELS, not just in data space.
         span = pd.concat([data["AT"], credit_data["HOUR_TS"]])
         xdom = alt.Scale(domain=[span.min().isoformat(), span.max().isoformat()])
         spend = (
@@ -1347,7 +1352,9 @@ def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) ->
             .properties(height=70)
         )
         focus = _focus(xdom)
-        st.altair_chart(alt.vconcat(spend, focus, spacing=8), width="stretch")
+        st.altair_chart(
+            alt.vconcat(spend, focus, spacing=8, bounds="flush").resolve_scale(x="shared"),
+            width="stretch")
         return
 
     # No overlay: the persistent overview brush zooms the event focus.

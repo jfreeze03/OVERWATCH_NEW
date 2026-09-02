@@ -435,6 +435,10 @@ _EXPECTED_MIGRATIONS = {
          "the superseded older snoozed row, so one snoozed row with current-band data survives and reopens once "
          "on wake. Fixes multi-day snooze being defeated by date-banded dedupe. Band-independent identity via "
          "TRY_TO_DATE; RESOLUTION_KIND=SNOOZE_SUPPRESSED (machine close, excluded from precision). Proc only, no schema change",
+    118: "Savings-ledger dedup (LBA-1): SP_LEDGER_AUTOBOOK re-created so a warehouse's measured credit delta "
+         "is booked once even when several cost levers change on it in the same window — the primary lever carries "
+         "the full VERIFIED_USD, co-occurring levers settle VERIFIED at $0. One-time idempotent correction of rows "
+         "V038 already double-booked. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

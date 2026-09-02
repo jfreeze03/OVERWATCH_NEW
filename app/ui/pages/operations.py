@@ -541,14 +541,24 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             _wasted_total = float(_wasted_raw.sum())
             wdf["WASTED_USD"] = _wasted_raw.round(2)
             monthly = _wasted_total / max(days, 1) * 30.0
+            # TLH-1: the scan is LIMIT-50 by wasted $ desc, so this sum is the top-50
+            # fingerprints, NOT the whole-window waste. Label + monthly-ize the shown
+            # scope honestly; disclose when the frame is truncated at the cap.
+            _truncated = len(wdf) >= 50
+            _scope_lbl = f"top {len(wdf)} fingerprints" if _truncated else f"{days}d"
             kpi_row([
-                {"label": f"Wasted spend ({days}d)", "value": format_usd(_wasted_total),
-                 "help": "Allocated compute on non-success queries; monthly-ized at right."},
+                {"label": f"Wasted spend ({_scope_lbl})", "value": format_usd(_wasted_total),
+                 "help": ("Allocated compute on non-success queries, summed over the "
+                          + ("top 50 fingerprints shown (window total is higher); "
+                             if _truncated else "window; ") + "monthly-ized at right.")},
                 {"label": "Monthly-ized", "value": format_usd(monthly)},
                 {"label": "Repeat offenders",
                  "value": str(int((wdf["FAILED_RUNS"].map(safe_float) >= 5).sum())),
                  "help": "Fingerprints that failed 5+ times in the window."},
             ])
+            if _truncated:
+                st.caption("Showing the top 50 fingerprints by wasted $ — the window "
+                           "total is higher than the figure above.")
             wdf = with_user_names(wdf, _PAGE)
             _wcols = [c for c in ["WASTED_USD", "FAILED_RUNS", "USER", "USER_NAME", "WAREHOUSE_NAME",
                                   "EXECUTION_STATUS", "ERROR_CODE", "QUERY_TYPE", "QUERY_SNIPPET",

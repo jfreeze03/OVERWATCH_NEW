@@ -89,12 +89,15 @@ def test_incident_readers_shapes():
     assert "ALERT_TITLE" in mem and "'abc-123'" in mem
     assert "''" in mart_sql.incident_members_detail("x'y")    # injection-safe
     met = mart_sql.incident_metrics(90)
-    for col in ("OPEN_NOW", "TTD_MIN", "MTTA_MIN", "MTTR_MIN",
-                "REOPEN_PCT", "COMPRESSION"):
+    for col in ("OPEN_NOW", "TTD_MIN", "MTTR_MIN", "COMPRESSION"):
         assert col in met, col
-    # CHANGE_PCT (and its ('WH_CHANGE', 'DEPLOY') member-kind numerator) removed v4.351:
-    # no writer ever persists those member kinds, so it was structurally always 0.0.
+    # Three structurally-dead metrics removed, each counting a column no writer ever
+    # persists (so each was a permanent misleading value):
+    #   CHANGE_PCT (v4.351): INCIDENT_MEMBERS kind WH_CHANGE/DEPLOY, never persisted.
+    #   MTTA_MIN (ALC-2): INCIDENTS.ACK_AT is never set (ACK_AT is alert-grain only).
+    #   REOPEN_PCT (ALC-1): INCIDENTS.REOPENED_FROM is never populated.
     assert "CHANGE_PCT" not in met and "('WH_CHANGE', 'DEPLOY')" not in met
+    assert "MTTA_MIN" not in met and "REOPEN_PCT" not in met and "REOPENED_FROM" not in met
     gantt = mart_sql.incident_gantt(14, "ALFA")               # CR5 lifecycle-span reader
     for col in ("STARTED", "ENDED", "DURATION_MIN", "SEVERITY", "TITLE"):
         assert col in gantt, col

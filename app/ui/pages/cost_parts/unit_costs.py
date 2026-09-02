@@ -443,9 +443,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                          if _esel is not None and 0 <= int(_esel) < len(_etl_disp) else "")
             if _sel_pipe:
                 fr = run(etl_sql.etl_failed_runs_for_pipeline(
-                             _sel_pipe, days, company, f["database"], f["schema_contains"]),
+                             _sel_pipe, days, company, f["database"], f["schema_contains"], bounds=bounds),
                          page=_PAGE,
-                         key=f"etl_fail_{company}_{days}_{f['database']}_{f['schema_contains']}_{_sel_pipe[:40]}",
+                         key=f"etl_fail_{company}_{days}_{f['database']}_{f['schema_contains']}_{_sel_pipe[:40]}{_lm}",
                          tier="historical",
                          source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (non-SUCCESS runs, per pipeline)")
                 st.markdown(f"**Non-SUCCESS runs — {_sel_pipe}**")

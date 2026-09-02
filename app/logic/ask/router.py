@@ -83,8 +83,12 @@ def _hits(low: str, tokens: frozenset[str], terms: tuple[str, ...]) -> int:
 
 
 def _strong(low: str, tokens: frozenset[str], ans: Answerer) -> bool:
-    """Strong match = every require_all group has at least one hit. An answerer
-    with no require_all falls back to needing any keyword."""
+    """Strong match = every require_all group has at least one hit AND no exclude
+    word is present. An answerer with no require_all falls back to needing any
+    keyword. The exclude gate stops a high-priority domain answerer from hijacking
+    an off-domain question that merely shares a keyword (ASK-1)."""
+    if ans.exclude and _hits(low, tokens, ans.exclude) >= 1:
+        return False
     if ans.require_all:
         return all(_hits(low, tokens, group) >= 1 for group in ans.require_all)
     return _hits(low, tokens, ans.keywords) >= 1

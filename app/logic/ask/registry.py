@@ -774,6 +774,11 @@ REGISTRY: tuple[Answerer, ...] = (
              "driving", "driver", "expensive", "burn", "bill", "top", "most",
              "biggest", "usage", "using"),
         ),
+        # ASK-1: Cortex runs serverless, never on a user warehouse — so a question
+        # naming a "warehouse" is about infra spend, not model spend. Exclude it so
+        # priority=1 can't hijack "which warehouse costs the most to run ai workloads"
+        # away from the warehouse answerer.
+        exclude=("warehouse", "warehouses"),
         needs=_needs_cortex_by_model,
         analyze=_analyze_cortex_by_model,
         priority=1,

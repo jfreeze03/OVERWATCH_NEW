@@ -1573,20 +1573,21 @@ def render() -> None:
         if inc_met.usable():
             im = inc_met.df.iloc[0]
             kpi_row([
-                {"label": "MTTA / MTTR (90d)",
-                 "value": (f"{humanize_duration(im.get('MTTA_MIN'), 'min')} / "
-                           f"{humanize_duration(im.get('MTTR_MIN'), 'min')}"),
-                 "help": "Detected -> acknowledged / resolved at INCIDENT grain — "
-                         "the alert-grain pair above counts individual events."},
-                {"label": "Reopen rate", "value": _optional_number(im.get("REOPEN_PCT"), "%"),
-                 "help": "Of incidents resolved in the last 90 days, the share later reopened "
-                         "(a new incident links back via REOPENED_FROM)."},
+                # ALC-2: MTTA dropped at incident grain — no writer ever sets
+                # INCIDENTS.ACK_AT (ACK_AT is an ALERT_EVENTS lifecycle field), so the
+                # incident-grain MTTA was structurally always NULL ("—"). The real
+                # detected->ack median is the alert-grain MTTA shown just above.
+                {"label": "MTTR (90d)",
+                 "value": humanize_duration(im.get("MTTR_MIN"), "min"),
+                 "help": "Detected -> resolved at INCIDENT grain — the alert-grain pair "
+                         "above counts individual events."},
                 {"label": "Alerts / incident", "value": _optional_number(im.get("COMPRESSION"), decimals=1),
                  "help": "How many alerts each incident absorbs — higher means storms "
                          "compress into one object instead of many pages."},
-                # "Change-correlated" removed v4.351: it counted INCIDENT_MEMBERS of kind
-                # WH_CHANGE/DEPLOY, but no writer ever persists those kinds, so it was a
-                # permanent misleading 0%. Change correlation lives in the Control Room RCA.
+                # "Reopen rate" removed (ALC-1) and "Change-correlated" removed v4.351:
+                # both counted a column no writer ever persists (INCIDENTS.REOPENED_FROM /
+                # INCIDENT_MEMBERS kind WH_CHANGE|DEPLOY), so each was a permanent
+                # misleading 0%. Change correlation lives in the Control Room RCA.
             ])
         else:
             st.caption("Incident lifecycle metrics appear once incidents are declared (Control Room).")

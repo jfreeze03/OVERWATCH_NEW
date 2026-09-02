@@ -270,8 +270,19 @@ def simulate_scenario(
     applied_delta = SIZE_ORDER.index(size_new) - SIZE_ORDER.index(size_now)
     factor = 2.0 ** applied_delta
     busy_bounds = sorted((busy * factor, busy * 1.0))
-    suspend_ratio = min(max(_sf(autosuspend_new_s, 60), 0.0)
-                        / max(_sf(autosuspend_now_s, 600), 1.0), 2.0)
+    # auto_suspend == 0 means NEVER suspend (an effectively unbounded idle window), NOT a
+    # 0-second suspend. Modeling 0 literally pinned the ratio to the 2.0 cap, so turning
+    # auto-suspend ON for a never-suspend warehouse (a real saving) read as a cost INCREASE
+    # (round-4 regression from the round-3 fix that preserved a real 0). Map <=0 to a large
+    # sentinel so new/now behaves: now=never -> ratio ~ 0 (idle collapses); new=never -> cap.
+    _NEVER_S = 30 * 86400.0
+    def _susp(v: object, default: float) -> float:
+        s = _sf(v, default)
+        return _NEVER_S if s <= 0 else s
+    def _susp_label(v: object) -> str:
+        return "never" if _sf(v, 0) <= 0 else f"{int(_sf(v, 0))}s"
+    _now_s, _new_s = _susp(autosuspend_now_s, 600), _susp(autosuspend_new_s, 60)
+    suspend_ratio = min(_new_s / _now_s, 2.0)
     idle_new = idle * factor * suspend_ratio
     to_month = 30.0 / days
 
@@ -285,8 +296,8 @@ def simulate_scenario(
         (f"Size {size_now} -> {size_new}: busy credits bounded between rate-scaled "
          f"(x{factor:g}) and cost-neutral (perfect runtime scaling)."
          if applied_delta else "Size unchanged: busy credits unchanged."),
-        (f"Auto-suspend {int(autosuspend_now_s)}s -> {int(autosuspend_new_s)}s: idle credits "
-         f"scaled x{suspend_ratio:.2f} (linear with suspend window, capped at 2x)."),
+        (f"Auto-suspend {_susp_label(autosuspend_now_s)} -> {_susp_label(autosuspend_new_s)}: idle "
+         f"credits scaled x{suspend_ratio:.2f} (linear with suspend window, capped at 2x)."),
         "Idle burns at the NEW size's rate. Concurrency, caching, and queueing shifts are not modeled.",
     ]
     return {

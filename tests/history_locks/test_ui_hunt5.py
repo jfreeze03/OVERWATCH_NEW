@@ -19,13 +19,11 @@ def _src(rel: str) -> str:
     return (_ROOT / rel).read_text(encoding="utf-8")
 
 
-def test_reopen_rate_help_matches_the_90d_no_bound_metric():
-    # incident_metrics(90).REOPEN_PCT applies NO 14-day bound and INCIDENT_REOPEN_DAYS
-    # is dead config — the help must not claim a "14 days (owner-set window)".
+def test_reopen_rate_tile_is_gone_dead_metric():
+    # ALC-1 (round-4 hunt): the "Reopen rate" tile was removed — no writer ever
+    # populates INCIDENTS.REOPENED_FROM, so REOPEN_PCT was a permanent 0.0%.
     a = _src("app/ui/pages/alerts.py")
-    reopen = a.split('"label": "Reopen rate"', 1)[1].split("},", 1)[0]
-    assert "within 14 days" not in reopen and "owner-set window" not in reopen
-    assert "resolved in the last 90 days" in reopen and "REOPENED_FROM" in reopen
+    assert '"label": "Reopen rate"' not in a
 
 
 def test_budget_pace_help_describes_completed_days_today_excluded():

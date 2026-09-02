@@ -2330,15 +2330,21 @@ LIMIT 60
 
 
 def incident_metrics(days: int = 90, company: str = "ALL") -> str:
-    """One row of lifecycle truth: TTD/MTTA/MTTR medians, reopen rate (share of
-    resolved incidents in the same window that were reopened, bounded 0..100%),
-    and storm compression (alerts absorbed per incident).
+    """One row of lifecycle truth: TTD/MTTR medians and storm compression
+    (alerts absorbed per incident).
 
-    No change-correlated % (removed v4.351): the numerator counted INCIDENT_MEMBERS of
-    kind WH_CHANGE/DEPLOY, but no writer ever persists a member kind other than 'ALERT'
-    (both SP_INCIDENT_AUTODECLARE and the manual declare insert only 'ALERT'), so it was
-    structurally always 0.0 — a misleading permanent zero. The RCA auto-investigation
-    (control_room) is the real change-correlation surface."""
+    Two structurally-dead metrics removed (round-4 hunt), each following the
+    change-correlated % precedent from v4.351 — all three counted a column no
+    writer ever persists, so each was a permanent misleading value:
+      * MTTA_MIN (ALC-2): DATEDIFF to INCIDENTS.ACK_AT, but ACK_AT is an
+        ALERT_EVENTS lifecycle field — no incident writer ever sets it, so the
+        median was always NULL. The real detected->ack median is alert-grain.
+      * REOPEN_PCT (ALC-1): counted INCIDENTS.REOPENED_FROM parents, but no
+        writer ever populates REOPENED_FROM (declare/autodeclare insert neither
+        it nor a reopen child), so it was a permanent 0.0%.
+      * Change-correlated % (v4.351): INCIDENT_MEMBERS kind WH_CHANGE/DEPLOY,
+        never persisted (only 'ALERT'). The RCA auto-investigation
+        (control_room) is the real change-correlation surface."""
     days = bounded_days(days, 365)
     comp = ("" if str(company or "ALL").upper() == "ALL"
             else f" AND (COMPANY = {sql_literal(company)} OR UPPER(COMPANY) = 'ALL')")
@@ -2346,7 +2352,7 @@ def incident_metrics(days: int = 90, company: str = "ALL") -> str:
     # subquery — Snowflake 002031 "Unsupported subquery type cannot be evaluated" (owner
     # error log 2026-08-17). Hoist the incident count and the numerator into single-row
     # CTEs and CROSS JOIN, so the ratio is plain column arithmetic with no nested subquery.
-    # The other single-scalar subqueries (OPEN_NOW, the MEDIAN/REOPEN aggregates over w)
+    # The other single-scalar subqueries (OPEN_NOW, the MEDIAN aggregates over w)
     # are uncorrelated and fine.
     return f"""
 WITH w AS (
@@ -2359,24 +2365,6 @@ compression AS (
     FROM {core_object("INCIDENT_MEMBERS")} m
     JOIN w ON w.INCIDENT_ID = m.INCIDENT_ID
     WHERE m.MEMBER_KIND = 'ALERT'
-),
--- REOPEN_PCT is a share-of-closed reading that must not exceed 100%. The old form
--- counted reopen CHILDREN (REOPENED_FROM IS NOT NULL) in the numerator against
--- RESOLVED incidents in the denominator — different populations, so an incident
--- reopened twice (two children) over few resolved incidents read >100%. Instead
--- count, among RESOLVED incidents in the SAME window w, those that were actually
--- reopened (their id appears as some in-window child's REOPENED_FROM parent).
--- Numerator is a subset of the denominator by construction -> bounded 0..100%.
-reopen AS (
-    SELECT
-        COUNT(*) AS RESOLVED_N,
-        COUNT_IF(p.PARENT_ID IS NOT NULL) AS REOPENED_N
-    FROM w r
-    LEFT JOIN (
-        SELECT DISTINCT REOPENED_FROM AS PARENT_ID
-        FROM w WHERE REOPENED_FROM IS NOT NULL
-    ) p ON p.PARENT_ID = r.INCIDENT_ID
-    WHERE r.RESOLVED_AT IS NOT NULL
 )
 SELECT
     (SELECT COUNT(*) FROM {core_object("INCIDENTS")}
@@ -2384,13 +2372,10 @@ SELECT
     wn.N AS DECLARED_N,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', STARTED_AT, DETECTED_AT)), 1) FROM w
       WHERE STARTED_AT IS NOT NULL AND STARTED_AT < DETECTED_AT) AS TTD_MIN,
-    (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, ACK_AT)), 1) FROM w
-      WHERE ACK_AT IS NOT NULL) AS MTTA_MIN,
     (SELECT ROUND(MEDIAN(DATEDIFF('minute', DETECTED_AT, RESOLVED_AT)), 1) FROM w
       WHERE RESOLVED_AT IS NOT NULL) AS MTTR_MIN,
-    ROUND(100.0 * reopen.REOPENED_N / NULLIF(reopen.RESOLVED_N, 0), 1) AS REOPEN_PCT,
     ROUND(compression.ALERT_MEMBERS / NULLIF(wn.N, 0), 1) AS COMPRESSION
-FROM wn CROSS JOIN compression CROSS JOIN reopen
+FROM wn CROSS JOIN compression
 """
 
 

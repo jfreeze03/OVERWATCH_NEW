@@ -84,6 +84,13 @@ class Answerer:
     needs: Callable[[AskParams], list[QuerySpec]]
     analyze: Callable[[AskParams, dict[str, pd.DataFrame]], AnswerResult]
     require_all: tuple[tuple[str, ...], ...] = ()
+    # Negative guard: if the question contains ANY of these words, this answerer is
+    # NOT a strong candidate — even when require_all is satisfied. Needed because a
+    # high-priority domain answerer can otherwise hijack an off-domain question that
+    # merely shares a keyword: e.g. the AI/Cortex answerer excludes "warehouse" so
+    # "which warehouse costs the most to run ai workloads" stays with the warehouse
+    # answerer instead of being answered per-Cortex-model (priority dominates score).
+    exclude: tuple[str, ...] = ()
     # Tie-break weight among strong candidates: a more SPECIFIC domain answerer
     # (e.g. cloud-services, gated on an explicit phrase) outranks a generic one so
     # a question naming that domain can't be out-scored by duplicated generic
