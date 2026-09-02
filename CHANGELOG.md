@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.447.0 - Perf: Decision Studio prove-it signals computed once per render (2026-09-02)
+
+The usage simulator flagged Decision Studio issuing 5 duplicate reads per render. Investigation:
+`_proof_signals` (the shared savings-ledger + scorecard reads) is called by BOTH the page-open
+verdict and the Scorecard section in the same render. The `run()` cache already deduped the 5
+Snowflake reads (zero extra round-trips — the simulator's flag is a logical count the cache
+absorbs), but each duplicate call still re-did the Python aggregation AND emitted a cache-hit
+telemetry row, double-counting those 5 keys in `APP_QUERY_TELEMETRY` — the perf effort's own
+slow-query oracle.
+
+- Added a per-render memo (`_PROOF_MEMO` + `reset_proof_memo()`, called once at the top of the
+  Decision Studio page render) so the two callers share ONE computation. Safe because Decision
+  Studio has no fragments — the page always re-runs top-to-bottom through the reset before either
+  caller, and the `run()` cache remains the freshness authority across renders (the memo is
+  render-scoped, never session-scoped, so it can't serve data staler than the cache TTL).
+- Effect: Decision Studio drops from 13 reads to 8 per render, no duplicate SQL, and the verdict
+  and scorecard now agree by construction, not just by cache. The two literal
+  `decision_roi_ledger_full` `run()` sites are unchanged (the `_roi` section keeps its own
+  cache-deduped read), so the cost-hunt lock still counts exactly two.
+- Tests: `tests/test_ds_proof_memo.py`. No migration.
+
 ## 4.446.0 - Perf wins #4/#5: batch the two ETL unit-cost reads + the Ask answerer specs (2026-09-02)
 
 Two low-risk parallelization wins from the audit.

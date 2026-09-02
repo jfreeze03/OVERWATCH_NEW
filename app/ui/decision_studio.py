@@ -614,16 +614,37 @@ def _cost_truth(company: str, days: int, *, bounds: tuple | None = None) -> None
     )
 
 
+_PROOF_MEMO: dict = {}
+
+
+def reset_proof_memo() -> None:
+    """Clear the per-render _proof_signals memo. Called once at the top of the Decision
+    Studio page render so the shared prove-it computation runs ONCE per render (the
+    page-open verdict AND the Scorecard section both call _proof_signals) — never across
+    renders, where the run() cache's TTL stays the freshness authority. Safe because
+    Decision Studio has NO fragments: the page always re-runs top-to-bottom through this
+    reset before any _proof_signals caller."""
+    _PROOF_MEMO.clear()
+
+
 def _proof_signals(rate: float) -> dict | None:
     """Wave 2 #8: the shared prove-it reads + compute behind BOTH the page-open verdict
     and the Scorecard section, so the hoisted verdict and the scorecard banner are one
-    identical computation (and share the cache keys — no extra I/O). Returns None when
-    the savings ledger isn't set up yet. Keeps the `savings_ledger(limit=None)` /
-    `decision_roi_ledger_full` read to ONE site here (the other lives in _roi), which the
-    cost-hunt lock counts at exactly two."""
+    identical computation. Returns None when the savings ledger isn't set up yet. Keeps
+    the `savings_ledger(limit=None)` / `decision_roi_ledger_full` read to ONE site here
+    (the other lives in _roi), which the cost-hunt lock counts at exactly two.
+
+    Memoized PER RENDER (reset_proof_memo at the page top): the two callers now share ONE
+    computation instead of two cache-deduped read sets — same Snowflake I/O (the run() cache
+    already deduped it), but no duplicate cache-hit telemetry double-counting these keys in
+    APP_QUERY_TELEMETRY, and the verdict/scorecard agree by construction, not just by cache."""
+    _k = round(float(rate), 6)
+    if _PROOF_MEMO.get("rate") == _k:
+        return _PROOF_MEMO.get("sig")
     ledger = run(mart_sql.savings_ledger(limit=None), page=_PAGE, key="decision_roi_ledger_full",
                  tier="recent", source="SAVINGS_LEDGER (full — all-time/QTD/realization economics)")
     if not ledger.ok:
+        _PROOF_MEMO.update(rate=_k, sig=None)
         return None
     _q = run(mart_sql.savings_summary_quarter(), page=_PAGE, key="sc_quarter",
              tier="recent", source="SAVINGS_LEDGER (QTD)")
@@ -636,12 +657,14 @@ def _proof_signals(rate: float) -> dict | None:
     totals = ledger_totals(ledger.df)
     verified_qtd = safe_float(_q.df.iloc[0].get("VERIFIED_QTD_USD")) if _q.usable() else 0.0
     run_cost = safe_float(_ac.df.iloc[0].get("APP_CREDITS_30D")) * rate if _ac.usable() else 0.0
-    return {
+    sig = {
         "ledger": ledger, "totals": totals, "realization": totals["realization_pct"],
         "roi": roi_multiple(verified_qtd, run_cost),
         "acc": acceptance_summary(_acc.df if _acc.usable() else None),
         "prec": account_precision(_prec.df if _prec.usable() else None),
     }
+    _PROOF_MEMO.update(rate=_k, sig=sig)
+    return sig
 
 
 def decision_verdict(rate: float) -> dict:

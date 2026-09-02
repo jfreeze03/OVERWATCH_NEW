@@ -29,6 +29,7 @@ from app.ui.decision_studio import (
     _scorecard,
     _slos,
     decision_verdict,
+    reset_proof_memo,
 )
 
 _PAGE = "Decision Studio"
@@ -46,6 +47,11 @@ def render() -> None:
         scope_note=f"{f['company']} · {f['window_label']}",
     )
     rate = safe_float(load_settings(_PAGE).get("CREDIT_PRICE_USD"), 3.68)
+    # Per-render: the page-open verdict and the Scorecard section both call _proof_signals;
+    # reset here so they share ONE computation this render (no fragments on this page, so this
+    # reset always runs top-to-bottom before either caller). The run() cache stays the freshness
+    # authority across renders.
+    reset_proof_memo()
     # Wave 2 #8: the page-open "should I worry?" line — the prove-it verdict hoisted
     # above the section bar so it reads before any section is opened. Reuses the
     # Scorecard reads (cache-shared) and renders nothing until the ledger is set up.
