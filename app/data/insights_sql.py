@@ -38,6 +38,20 @@ def _iso_date(value: str, name: str) -> str:
 _ACTIVE_HOUR_SPAN = 25
 
 
+def _wh_company_scope(company: str, col: str = "WAREHOUSE_NAME") -> str:
+    """Company scope for a live warehouse read via the COMPANY_SCOPE-aware UDF
+    (COMPANY_FOR_WAREHOUSE) — the SAME axis the idle/sizing builders LABEL by
+    (company_case_sql) and their mart twins (eff_idle_analysis / eff_sizing_profile)
+    FILTER by (their COMPANY column is stamped by COMPANY_FOR_WAREHOUSE). The name-pattern
+    warehouse_clause dropped a COMPANY_SCOPE-mapped-but-off-pattern warehouse, so the live
+    idle/sizing fallback disagreed with its mart twin on the company axis (the MC-1 class
+    fixed in cost_sql in round 11, missed in insights_sql). '' for ALL (no filter)."""
+    from app.core.sqlsafe import sql_literal
+    if str(company or "ALL").upper() == "ALL":
+        return ""
+    return f"{companies.company_case_sql(col)} = {sql_literal(company)}"
+
+
 def _active_hours_cte(days: int, company: str, *, bounds: tuple | None = None) -> str:
     """CTE pair (`q_spans`, `query_hours`) yielding one row per active
     warehouse-hour. Callers LEFT JOIN metering to `query_hours`."""
@@ -48,7 +62,7 @@ def _active_hours_cte(days: int, company: str, *, bounds: tuple | None = None) -
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
       AND WAREHOUSE_NAME IS NOT NULL
-      AND {companies.warehouse_clause(company) or "1 = 1"}
+      AND {_wh_company_scope(company) or "1 = 1"}
 ),
 query_hours AS (
     SELECT DISTINCT s.WAREHOUSE_NAME, DATEADD('hour', g.SEQ, s.H0) AS HOUR_TS
@@ -69,7 +83,7 @@ def idle_warehouse_analysis(days: int, company: str = "ALL", *, bounds: tuple | 
     days = bounded_days(days)
     where = and_where(
         scope_window_where("M.START_TIME", days, bounds=bounds),
-        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+        _wh_company_scope(company, "M.WAREHOUSE_NAME"),   # MC-1 class: UDF axis, not name pattern
     )
     return f"""
 WITH {_active_hours_cte(days, company, bounds=bounds)}
@@ -413,7 +427,7 @@ def warehouse_sizing_profile(days: int, company: str = "ALL", *, bounds: tuple |
     where_m = and_where(
         scope_window_where("M.START_TIME", days, bounds=bounds),
         "M.WAREHOUSE_ID > 0",
-        companies.warehouse_clause(company, "M.WAREHOUSE_NAME"),
+        _wh_company_scope(company, "M.WAREHOUSE_NAME"),   # MC-1 class: UDF axis, not name pattern
     )
     return f"""
 WITH query_stats AS (
@@ -427,7 +441,7 @@ WITH query_stats AS (
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
     WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
       AND WAREHOUSE_NAME IS NOT NULL
-      AND {companies.warehouse_clause(company) or "1 = 1"}
+      AND {_wh_company_scope(company) or "1 = 1"}
     GROUP BY WAREHOUSE_NAME
 ),
 -- FBK-2: P95 = MAX of the per-DAY p95s (peak-daily), matching the mart sibling
@@ -443,7 +457,7 @@ day_p95 AS (
         FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
         WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
           AND WAREHOUSE_NAME IS NOT NULL
-          AND {companies.warehouse_clause(company) or "1 = 1"}
+          AND {_wh_company_scope(company) or "1 = 1"}
         GROUP BY WAREHOUSE_NAME, DATE(START_TIME)
     )
     GROUP BY WAREHOUSE_NAME

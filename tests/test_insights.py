@@ -43,7 +43,10 @@ def test_idle_analysis_joins_metering_to_query_hours():
     sql = insights_sql.idle_warehouse_analysis(14, "Trexis")
     assert "WAREHOUSE_METERING_HISTORY" in sql and "QUERY_HISTORY" in sql
     assert "IDLE_CREDITS" in sql
-    assert re.search(r"\bIN \('WH_TRXS_LOAD'", sql)  # company scoped
+    # round-16: company scoped by the COMPANY_FOR_WAREHOUSE UDF (matching the eff_idle_analysis
+    # mart twin + the builder's own COMPANY label), not the name pattern
+    assert "COMPANY_FOR_WAREHOUSE(M.WAREHOUSE_NAME) = 'Trexis'" in sql
+    assert not re.search(r"\bIN \('WH_TRXS_LOAD'", sql)
 
 
 def test_repeat_fingerprints_exclude_overwatch_and_clamp_min_runs():

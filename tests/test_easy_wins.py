@@ -225,6 +225,8 @@ def test_easy_wins_wired():
     sec = (_ROOT / "app" / "ui" / "pages" / "security.py").read_text(encoding="utf-8")
     assert "single_factor_logins(" in sec and "Single-factor logins (MFA-bypassed" in sec
     ov = (_ROOT / "app" / "ui" / "pages" / "overview.py").read_text(encoding="utf-8")
-    assert "budget_pace_variance(mtd_spend, budget, account_today())" in ov
+    # PACE-MTD (round-16): the pace numerator is the COMPLETE-days MTD (today excluded),
+    # not the today-inclusive mtd_spend, to match budget_pace_variance's completed denominator
+    assert "budget_pace_variance(_mtd_complete, budget, account_today())" in ov
     assert "Pace vs budget calendar" in ov
     assert "budget_burndown(" in ov and "Budget burndown" in ov   # #57

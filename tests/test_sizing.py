@@ -125,7 +125,10 @@ def test_sizing_profile_sql_invariants():
     sql = insights_sql.warehouse_sizing_profile(7, "Trexis")
     assert "WAREHOUSE_METERING_HISTORY" in sql and "IDLE_PCT" in sql
     assert "COUNT(DISTINCT DATE(START_TIME)) AS ACTIVE_QUERY_DAYS" in sql
-    assert "IN ('WH_TRXS_LOAD'" in sql
+    # round-16: scoped by the COMPANY_FOR_WAREHOUSE UDF (matching the eff_sizing_profile
+    # mart twin + the builder's own COMPANY label), not the name pattern
+    assert "COMPANY_FOR_WAREHOUSE(M.WAREHOUSE_NAME) = 'Trexis'" in sql
+    assert "IN ('WH_TRXS_LOAD'" not in sql
 
 
 def test_query_detail_validates_id():

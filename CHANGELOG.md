@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.439.0 - Bug hunt round 16: idle/sizing twin scope-axis (MC-1 class in insights_sql) + pace-vs-budget MTD basis (2026-09-02)
+
+A round led by the live-builder/mart-twin divergence angle (the systematic generalization of
+round-15's MC-2). Three MED confirmed, no migration.
+
+- **The idle-waste and right-sizing LIVE fallbacks scoped company by the warehouse NAME PATTERN while
+  their MART TWINS use the COMPANY_FOR_WAREHOUSE UDF (the MC-1 class, never swept in `insights_sql`).**
+  Round-11 MC-1 fixed all name-pattern uses in `cost_sql`, but `insights_sql.idle_warehouse_analysis`
+  and `warehouse_sizing_profile` (and their shared `_active_hours_cte`) still filtered by
+  `warehouse_clause` even though they LABEL company by `company_case_sql` (the UDF) and their mart twins
+  `eff_idle_analysis` / `eff_sizing_profile` filter on a UDF-stamped COMPANY column. A warehouse mapped
+  to a company in COMPANY_SCOPE but named off-pattern (e.g. `REPORTING_WH`) was in the idle/sizing
+  numbers when the mart served but silently dropped (or flipped to UNKNOWN) when the live fallback
+  served — the same company's "Idle credit waste", idle share, projected monthly, and per-warehouse
+  sizing verdict/savings changed by which leg (mart warmth) answered. The five filter sites now use the
+  COMPANY_FOR_WAREHOUSE axis, matching the label and the twins.
+- **The Overview "Pace vs budget calendar" card fed a today-INCLUSIVE MTD into `budget_pace_variance`,
+  which needs a today-EXCLUDED one.** The pace function computes its expected-to-date over COMPLETED
+  days (today's metering lags ~24h), but the numerator counted today's still-filling partial spend — so
+  an on-budget account read "+$X ahead of straight-line, burning fast", and early in the month the
+  partial-day term could flip the severity stripe to a false "bad" (and it contradicted the burndown
+  chart on the same page). The pace numerator now uses a complete-days MTD (`exclude_today`); the
+  displayed "MTD credit spend" KPI stays on the full today-inclusive value.
+
 ## 4.438.0 - Bug hunt round 15: mart scope-axis, incident-declare honesty, alert-hypothesis idempotency (2026-09-02)
 
 A deep logic-correctness round (6 dimensions: AI/Ask, alert/incident lifecycle, write idempotency,

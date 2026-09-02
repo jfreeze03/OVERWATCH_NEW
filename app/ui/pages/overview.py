@@ -147,16 +147,21 @@ def _billed_usd_series(frame: pd.DataFrame, rate: float, ai_rate: float) -> pd.S
 
 
 def _mtd_spend_usd(rate: float, ai_rate: float,
-                   preloaded: QueryResult | None = None) -> tuple[float, str]:
-    """MTD account billed spend (adjustment applied) from the daily fact,
-    AI credits priced at the AI rate (C1)."""
+                   preloaded: QueryResult | None = None,
+                   exclude_today: bool = False) -> tuple[float, str]:
+    """MTD account billed spend (adjustment applied) from the daily fact, AI credits
+    priced at the AI rate (C1). exclude_today drops today's still-filling PARTIAL metering
+    row (DAY < account today) — the pace-vs-budget card needs a COMPLETE-days MTD to match
+    budget_pace_variance's completed-days denominator, else an on-budget account reads
+    ~one day's spend ahead every day (a clock-driven sawtooth)."""
     res = preloaded if preloaded is not None and preloaded.ok else daily_spend_wide(_PAGE)
     if not res.usable():
         return 0.0, ""
     frame = res.df.copy()
     frame["DAY"] = pd.to_datetime(frame["DAY"], errors="coerce").dt.date
     month_start = account_today().replace(day=1)
-    mtd = frame[frame["DAY"] >= month_start]
+    mtd = (frame[(frame["DAY"] >= month_start) & (frame["DAY"] < account_today())]
+           if exclude_today else frame[frame["DAY"] >= month_start])
     if _billed_split_available(mtd):
         spend = blended_billed_usd(mtd["CREDITS_BILLED_OTHER"].map(safe_float).sum(),
                                    mtd["CREDITS_BILLED_AI"].map(safe_float).sum(),
@@ -687,7 +692,12 @@ def render() -> None:
     # no card); reuses mtd_spend + month_days, no extra query. Inserted at [1] AFTER
     # the as-of stamping so the already-stamped MTD[0]/Projected cards keep their as_of.
     if budget > 0 and mtd_source:
-        _pace_var, _expected_td = budget_pace_variance(mtd_spend, budget, account_today())
+        # PACE-MTD: pace must use a COMPLETE-days MTD (today excluded) to match
+        # budget_pace_variance's completed-days denominator — feeding the today-INCLUSIVE
+        # mtd_spend biased an on-budget account "burning fast" by today's partial spend
+        # (and the displayed "MTD credit spend" KPI stays on the full today-inclusive value).
+        _mtd_complete = _mtd_spend_usd(rate, ai_rate, preloaded=_bt_hist, exclude_today=True)[0]
+        _pace_var, _expected_td = budget_pace_variance(_mtd_complete, budget, account_today())
         _dim, _elapsed, _rem = month_days(account_today())
         _pace_word = "ahead of" if _pace_var > 0 else "behind" if _pace_var < 0 else "on"
         _pace_sign = "+" if _pace_var > 0 else "-" if _pace_var < 0 else ""
