@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.442.0 - Headless user-usage simulator: a queries-per-interaction profiler for the perf effort (2026-09-02)
+
+Kicks off the performance/efficiency work-stream with the measurement tool that makes every
+future fix provable. A comprehensive perf audit (6-agent workflow) confirmed the app is already
+well-tuned for SiS — tiered `st.cache_data` keyed on `(SQL, role+salts)` with page/filters
+excluded so account-wide reads are shared across viewers, parallel `run_batch`, mart-first hot
+pages with `ACCOUNT_USAGE` as labeled fallbacks — so the wins are targeted, not a rewrite. The
+first deliverable is the simulator.
+
+- **`tests/usage_sim.py`** — a headless usage profiler built on the existing
+  `streamlit.testing.v1.AppTest` render harness. It drives navigation across every DBA page and
+  permutes the scope bar (company × window), with the read layer replaced by RECORDING stubs that
+  return the same correctly-shaped frames the render-contract harness uses (so populated branches
+  actually render) while logging every query each interaction fires. Because `run()`/`run_batch`
+  are stubbed, the cache is bypassed, so the counts are the **cold logical queries per
+  interaction** — the SiS "chattiness" metric that drives round-trip cost. Classifies each query
+  by source (`ACCOUNT_USAGE` = slow, `DBA_MAINT_DB.OVERWATCH` mart = fast, `SHOW`/`INFORMATION_SCHEMA`
+  = metadata; an `ACCOUNT_USAGE` scan that merely *calls* a `COMPANY_FOR_*` UDF still counts as a
+  slow scan), flags redundant identical SQL, and measures the filter-tweak rerun cost. Runnable as
+  `python tests/usage_sim.py` (text or `--json`); needs no Snowflake connection.
+- **`tests/test_usage_sim.py`** — CI coverage: source-classification correctness, a small render
+  matrix (every heavy page renders + records reads under a chattiness ceiling), and a drift guard
+  that the simulator patches the same UI modules the render-contract harness does.
+- Reuses the shaper + navigation from `tests/test_pages_shaped.py` (single source of truth, no
+  drift). No app-behavior change; the perf audit's ranked fix list (e.g. `cost_sql.tag_coverage`
+  per-row `COMPANY_FOR_USER` → `user_scope_subquery`) lands next, each measured before/after here.
+
 ## 4.441.0 - App-wide close-out of the MC-1 company-scope class: every data-builder FILTER on the COMPANY_SCOPE-aware UDF axis (2026-09-02)
 
 Extending the ops/security/chargeback audit revealed the name-pattern-vs-UDF company-scope split
