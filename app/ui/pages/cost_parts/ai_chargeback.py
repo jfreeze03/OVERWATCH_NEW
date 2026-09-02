@@ -179,8 +179,14 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
     # that never binds, but disclose it if the frame is ever at the cap so the totals
     # aren't read as complete when they're the top-500 spenders only.
     _cc_trunc = len(enriched) >= 500
+    # WLA-1 (round 18): mirror the Spend tab — under "Last month" the global window sets
+    # days = the calendar span of last month (28-31) with bounds != None, but the reads
+    # are bounded to that month. A raw "{days}d" label then reads as a trailing window
+    # ending today (a DIFFERENT window than the data) and disagrees with the scope chip's
+    # "Last month (Aug 1 - Aug 31)". Use "last month" when bounded, else the trailing "{days}d".
+    _wlab = "last month" if bounds is not None else f"{days}d"
     kpi_row([
-        {"label": f"Active AI users ({days}d)", "value": f"{summary['active_users']:,}"},
+        {"label": f"Active AI users ({_wlab})", "value": f"{summary['active_users']:,}"},
         {"label": "Requests", "value": f"{summary['total_requests']:,}"},
         {"label": "Cortex Code spend", "value": format_usd(summary["spend_usd"]),
          # NP-1: this is the sum of the per-user 'Spend $' rows (each rounded to cents) so it
@@ -194,7 +200,7 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
          "help": (f"Run-rate over the {eff_days} day(s) this scope has actually been "
                   f"active, extended to 30 days."
                   + ("" if eff_days >= days else
-                     f" Asked window was {days}d — dividing by days that predate the "
+                     f" Asked window was {_wlab} — dividing by days that predate the "
                      "first Cortex request would under-report the burn."))},
         budget_kpi_item,
     ])
@@ -371,6 +377,10 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
                           "signals — on demand; needs the newer view shape."):
         return
     _lm = "_lm" if bounds is not None else ""
+    # WLA-1 (round 18): honest window label — "last month" when the scope bounds the read
+    # to the previous calendar month, else the trailing "{days}d" (see _ai_users_tab).
+    _wlab = "last month" if bounds is not None else f"{days}d"
+    _when = "last month" if bounds is not None else f"in the last {days} days"
     te_res = run(cortex_sql.cortex_code_token_types(days, bounds=bounds), page=_PAGE, key=f"cortex_token_types_{days}{_lm}",
                  tier="historical", source="CORTEX_CODE_*_USAGE_HISTORY (TOKENS_GRANULAR)",
                  probe=True)
@@ -404,7 +414,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
                        "which didn't resolve this run. The per-user token grain is account-wide and "
                        "can't be attributed to this company without it, so it's hidden here.")
         else:
-            st.caption(f"No Cortex Code credit usage for this company in the last {days} days — "
+            st.caption(f"No Cortex Code credit usage for this company {_when} — "
                        "widen the Window if they used CoCo earlier. Per-user token grain is "
                        "account-wide, so it isn't attributed to a single company here.")
         result_caption(te_res)
@@ -439,7 +449,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
              "ACTIVE_DAYS", "CR_PER_REQ", "CACHE_WRITE_PCT", "READ_AMP", "CACHE_HIT_PCT", "REASON"]
     styled_table(with_user_names(eff[_cols], _PAGE), height=340, column_config={
         "FLAG": st.column_config.TextColumn("Flag"),
-        "TOTAL_CREDITS": st.column_config.NumberColumn(f"Credits ({days}d)", format="%.1f"),
+        "TOTAL_CREDITS": st.column_config.NumberColumn(f"Credits ({_wlab})", format="%.1f"),
         "PEER_MULT": st.column_config.NumberColumn("Peer x", format="%.1f"),
         "AVG_DAILY_CR": st.column_config.NumberColumn("Avg cr/active day", format="%.1f"),
         "DAYS_OVER_CAP": st.column_config.NumberColumn(f"Days > {_cap}cr", format="%d"),
@@ -467,7 +477,7 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
         f"🚩 Review flags a high-intensity usage pattern — consistently over the {_cap} cr/day "
         f"allowance and either heavy sustained spend vs peers (peer x) or extended autonomous "
         f"sessions (cr/request, read-amp). It highlights a pattern to review, not a verdict — "
-        f"confirm against delivered work before acting. {_cache_note} Peer-relative, {days}d.")
+        f"confirm against delivered work before acting. {_cache_note} Peer-relative, {_wlab}.")
     with st.expander("Raw token grain (input / output / cache tokens)", expanded=False):
         # _econ_shown, not econ: stay scoped to the shown (company) users so a company view
         # doesn't leak other companies' per-user token traffic in this expander.
@@ -558,6 +568,8 @@ def _statement_export(company: str, rate: float) -> None:
 def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, bounds: tuple | None = None) -> None:
     """Department chargeback: warehouse = exact usage (idle + unadjusted CS), role = allocated usage lens."""
     _lm = "_lm" if bounds is not None else ""
+    # WLA-1 (round 18): "last month" when bounded to the prior calendar month, else "{days}d".
+    _wlab = "last month" if bounds is not None else f"{days}d"
     dept_res = run(chargeback_sql.department_window_credits(days, company, bounds=bounds), page=_PAGE,
                    key=f"cb_dept_{company}_{days}{_lm}", tier="historical",
                    source="WAREHOUSE_METERING_HISTORY x DEPARTMENT_MAP")
@@ -571,7 +583,7 @@ def _chargeback_tab(company: str, days: int, rate: float, is_operator: bool, *, 
     total_usd = float(dept["USD"].sum())
 
     kpi_row([
-        {"label": f"Chargeback total ({days}d)", "value": format_usd(total_usd),
+        {"label": f"Chargeback total ({_wlab})", "value": format_usd(total_usd),
          "help": "Exact WAREHOUSE-COMPUTE metering x rate — includes each warehouse's "
                  "cloud-services credits, unadjusted (the account-level rebate lives "
                  "on Cost & Contract → Spend & Attribution). Reconciles to the scoped "

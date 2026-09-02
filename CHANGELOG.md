@@ -1,5 +1,41 @@
 # Changelog
 
+## 4.452.0 - Bug-hunt round 18: cross-tab window labels, recheck-help window, MFA-gap divergence tracked (2026-09-02)
+
+An adversarial find→refute-verify sweep (review-arc over v4.451, non-storage twin-divergence,
+caption-vs-SQL, cross-page consistency, and the v4.441 UDF conversion) surfaced 3 confirmed defects
+(0 refuted). Two are fixed here; the third needs an owner migration and is tracked.
+
+- **[MED] AI/Cortex/CoCo/Chargeback tabs kept the trailing `{days}d` window label under "Last month"
+  scope (WLA-1 class, unfixed on the AI surfaces).** The Spend tab (round 13) relabels its tiles
+  "last month" when the global window bounds the read to the previous calendar month, but the sibling
+  tabs on the SAME Cost & Contract page — receiving the same `bounds`/`days` and threading `bounds=`
+  into their reads — still rendered "Active AI users (31d)", "Chargeback total (31d)", "Credits (31d)",
+  and "No Cortex Code credit usage … in the last 31 days". Under Last-month scope that names a
+  trailing 31-day window ending today (a DIFFERENT window than the bounded prior-month data),
+  contradicting both the scope chip ("Last month (Aug 1 - Aug 31)") and the Spend tiles' "last month".
+  Fix: the same `_wlab`/`_when` derivation on all six AI/Cortex/CoCo/Chargeback labels/captions
+  (`app/ui/pages/cost_parts/ai_chargeback.py`).
+- **[LOW] Alerts "Re-check condition now" help promised "TODAY's data" for a rule that re-checks 24h.**
+  The button help was one shared string; four recheckable rules filter `START_TIME >= CURRENT_DATE()`
+  (since account-midnight = today), but `PERF_QUERY_FAIL_PCT` filters a rolling
+  `HOUR_TS >= DATEADD('hour', -24, …)` window to match the alert definition. So the pre-click tooltip
+  steered the operator to "today" while that rule evaluates the last 24 hours (an evening spike no
+  longer occurring today still read as "still true"). Fix: `recheck_sql.recheck_window_phrase(rule_id)`
+  asks the builder which window the rule actually filters, so the help can't drift from the SQL; the
+  matching `source="live re-check (today)"` label dropped its now-redundant window word (the verdict's
+  `recheck_label` already discloses "query fail % (24h)").
+- **[LOW, tracked — needs owner migration] MFA-gap count diverges between the live fallback and the
+  posture mart on `DISABLED IS NULL`.** The app-wide canonical active-user filter is
+  `COALESCE(U.DISABLED, FALSE) = FALSE` (the Access-panel worklist, its live fallback, the count
+  fallback `governance_counts()`, and insights) — so a user whose `USERS.DISABLED` is NULL but who
+  password-logs-in without MFA is COUNTED. The `SP_LOAD_MARTS_V27` posture loader alone uses the bare
+  `U.DISABLED = FALSE`, which drops that user, so the governance-drift MFA-gap count can differ between
+  the warm-mart (primary) and cold-mart (live fallback) paths and disagree with the worklist length.
+  Fix direction is forced (align the mart to COALESCE — the lone outlier), but it requires re-deriving
+  the monolithic loader proc, so it is staged for the owner rather than shipped here. A regression lock
+  pins the live-side COALESCE invariant so it is never "reconciled" by breaking the live sites to bare.
+
 ## 4.451.0 - Bug-hunt round 17: fix a v4.444 truncation regression + two storage caption/help inaccuracies (2026-09-02)
 
 An adversarial find→refute-verify sweep over the fresh perf work-stream (v4.441-v4.450) surfaced

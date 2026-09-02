@@ -967,10 +967,10 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     _rc_key = f"_ow_recheck_{event_id[:8]}"
                     if _rc_sql and st.button(
                             "Re-check condition now", key=f"recheck_{event_id[:8]}",
-                            help="Runs this rule's condition against TODAY's data for "
-                                 f"{_wh_guess or 'the account'} — is this still true?"):
+                            help=f"Runs this rule's condition against {recheck_sql.recheck_window_phrase(_rid)} "
+                                 f"for {_wh_guess or 'the account'} — is this still true?"):
                         rc = run(_rc_sql, page=_PAGE, key=f"recheck_{event_id[:8]}", tier="live",
-                                 source="live re-check (today)")
+                                 source="live re-check")
                         if rc.usable():
                             # review fix: NULL (idle warehouse, zero-row window) must not
                             # coerce to a fabricated "clear 0.00" that the one-click then

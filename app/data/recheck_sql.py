@@ -91,3 +91,21 @@ WHERE HOUR_TS >= DATEADD('hour', -24, CURRENT_TIMESTAMP()) {comp}
 
 def recheck_label(rule_id: str) -> str:
     return RECHECKABLE.get(str(rule_id or "").strip().upper(), (False, ""))[1]
+
+
+# Rules whose re-check evaluates a rolling trailing-24h window (to match the alert's
+# own basis) rather than since account-midnight. Keep this next to the SQL so the
+# drawer help can never drift from what the builder actually filters on.
+_TRAILING_24H_RULES = frozenset({"PERF_QUERY_FAIL_PCT"})
+
+
+def recheck_window_phrase(rule_id: str) -> str:
+    """How to describe the window a rule's re-check evaluates, for the drawer button help.
+
+    Four rules filter ``START_TIME >= CURRENT_DATE()`` (since account-midnight = today);
+    PERF_QUERY_FAIL_PCT filters a rolling ``HOUR_TS >= DATEADD('hour', -24, ...)`` window
+    to match the alert definition. The button help is one shared string, so it must ask
+    the builder which window this rule actually uses instead of hard-coding "today".
+    """
+    rid = str(rule_id or "").strip().upper()
+    return "the last 24h of data" if rid in _TRAILING_24H_RULES else "today's data"
