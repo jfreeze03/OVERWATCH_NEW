@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.443.0 - Perf win #1: tag_coverage scopes company once-per-distinct-user, not per-row (2026-09-02)
+
+First measured fix from the perf audit. `cost_sql.tag_coverage` — the live chargeback governance
+board, and the PRIMARY path (not a rare mart-miss fallback) whenever a database/schema filter + a
+specific company are active — scoped company with `companies.user_clause` = `COMPANY_FOR_USER(USER_NAME)`
+applied PER ROW of a raw `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` scan (up to 90 days). `COMPANY_FOR_USER`'s
+body does an `EXISTS` against `ACCOUNT_USAGE.GRANTS_TO_USERS`, so that was a correlated ACCOUNT_USAGE
+lookup for every history row — the one genuinely expensive company UDF (unlike the warehouse/database
+UDFs, which read only the tiny `COMPANY_SCOPE` table and decorrelate).
+
+- Swapped it for `companies.user_scope_subquery` (the "PERF #15" membership form), which evaluates
+  `COMPANY_FOR_USER` once per DISTINCT user (typically a few hundred) and feeds a `USER_NAME IN (...)`
+  predicate. Byte-equivalent + leak-safe by the helper's contract, and identical to the pattern the
+  sibling live builder `allocated_attribution` already uses one function up.
+- The distinct-user window is the same `START_TIME` predicate the outer scan uses (a superset of its
+  filters), so no in-scope user is dropped; `ALL` scope still adds no user filter.
+- Regression lock: `tests/test_perf_tag_coverage_subquery.py` asserts the UDF is applied only inside
+  the DISTINCT-user subquery, never per-row on the main scan. Verified against the simulator: the Cost
+  page's per-interaction query COUNT is unchanged (this is an intra-query cost reduction, best seen in
+  live QUERY_HISTORY latency/credits, not the cold-count profiler). No migration.
+
 ## 4.442.0 - Headless user-usage simulator: a queries-per-interaction profiler for the perf effort (2026-09-02)
 
 Kicks off the performance/efficiency work-stream with the measurement tool that makes every

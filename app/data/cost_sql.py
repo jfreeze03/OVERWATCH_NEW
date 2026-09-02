@@ -936,9 +936,10 @@ def tag_coverage(days: int, company: str = "ALL", database: str = "",
     filter is active)."""
     from app.core.sqlsafe import contains_filter
     days = bounded_days(days)
+    _win = (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
+            else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())")
     where = and_where(
-        (resolve_effective_window(days, "START_TIME", bounds=bounds)[1] if bounds is not None
-         else f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
+        _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
         # Scope company by the USER (COMPANY_FOR_USER), NOT the warehouse: this is a USER-grain
@@ -946,7 +947,13 @@ def tag_coverage(days: int, company: str = "ALL", database: str = "",
         # Scoping the live fallback by warehouse-company returned a DIFFERENT user population than the
         # mart (a user on another company's warehouse flips in/out), so the same company's board and
         # "Tagged share" KPI changed with mart warmth (bug-hunt 2026-08-30).
-        companies.user_clause(company, "USER_NAME"),
+        # PERF: user_scope_subquery evaluates COMPANY_FOR_USER once per DISTINCT user, not once per
+        # scanned row. COMPANY_FOR_USER's body does an EXISTS on ACCOUNT_USAGE.GRANTS_TO_USERS, so the
+        # per-row user_clause form was a correlated ACCOUNT_USAGE lookup for every QUERY_HISTORY row
+        # (up to 90d). This is the membership form (PERF #15) — byte-equivalent + leak-safe, mirroring
+        # the sibling live builder allocated_attribution above (perf audit 2026-09-02).
+        companies.user_scope_subquery(company, source="SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY",
+                                      distinct_where=_win),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
