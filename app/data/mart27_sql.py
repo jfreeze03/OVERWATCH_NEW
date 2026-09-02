@@ -1064,7 +1064,8 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     (V041 R2) — the database/user-filtered attribution that used to pay two
     live QUERY_HISTORY scans per filter value; user-within-database is now
     mart-served on Spend. Global-share law preserved (v4.33.1): company scope
-    (warehouse grain, matching the live builder) sets the denominator; the
+    (COMPANY_SCOPE-aware warehouse grain via COMPANY_FOR_WAREHOUSE, matching the
+    live builder + pool) sets the denominator; the
     database filter and dimension visibility rules only pick which rows
     DISPLAY. No schema grain here by design — schema-filtered views stay on
     the live builder. Qualified (x.) per the alias-shadow rule."""
@@ -1077,10 +1078,16 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     if dim not in ("USER", "DATABASE"):
         raise ValueError(f"dimension must be USER/DATABASE, got {dimension!r}")
     dim_col = "x.USER_NAME" if dim == "USER" else "x.DATABASE_NAME"
-    scope_where = and_where(
-        _win,
-        companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
-    )
+    # MC-2 (round-15): scope by the COMPANY_SCOPE-aware UDF axis (COMPANY_FOR_WAREHOUSE),
+    # matching the live twin cost_sql.allocated_attribution (_wh_company_scope) and the
+    # dollar POOL (warehouse_window_vs_prior, stamped COMPANY). The name-pattern
+    # warehouse_clause dropped a COMPANY_SCOPE-mapped-but-non-pattern warehouse from the
+    # share DENOMINATOR while the pool included it, so those entities read $0 and their
+    # dollars redistributed onto WH_ALFA_% entities, and the mart disagreed with the live
+    # fallback. Round-11 MC-1 fixed the live builder but missed this mart twin.
+    _wh_scope = ("" if str(company or "ALL").upper() == "ALL"
+                 else f"{companies.company_case_sql('x.WAREHOUSE_NAME')} = {sql_literal(company)}")
+    scope_where = and_where(_win, _wh_scope)
     vis = (companies.user_clause(company, "KEY_NAME") if dim == "USER"
            else companies.database_visibility_clause(company, "KEY_NAME"))
     display = and_where(companies.database_equals_clause(database, "DATABASE_NAME"), vis)
@@ -1092,7 +1099,7 @@ def alloc_xdim_attribution(days: int, dimension: str, company: str = "ALL",
     # denominator's scope) and the selected database so FIRST_DAY reflects how far
     # back THIS scope actually reaches. ALL/no-filter -> whole table (unchanged).
     cov_scope = and_where(
-        companies.warehouse_clause(company, "x.WAREHOUSE_NAME"),
+        _wh_scope,
         companies.database_equals_clause(database, "x.DATABASE_NAME"),
     )
     # The coverage probe must measure the SAME window the panel serves. For 'Last month'

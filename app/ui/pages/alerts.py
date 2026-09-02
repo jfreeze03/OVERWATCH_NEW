@@ -1200,7 +1200,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                                     f"UPDATE {core_object('ALERT_EVENTS')} SET DETAIL = "
                                     f"LEFT(COALESCE(DETAIL, '') || ' | AI hypothesis: ' || "
                                     f"{sql_literal(answer[:800])}, 2000) "
-                                    f"WHERE EVENT_ID = {sql_literal(event_id)};"
+                                    f"WHERE EVENT_ID = {sql_literal(event_id)} "
+                                    # idempotent at the SQL level: a commit-then-transient-error
+                                    # retry must not append the SAME hypothesis twice (the C48
+                                    # latch only guards within one session run). CONTAINS is a
+                                    # literal substring test, so wildcards in `answer` are harmless.
+                                    "AND NOT CONTAINS(COALESCE(DETAIL, ''), "
+                                    f"{sql_literal(' | AI hypothesis: ' + answer[:800])});"
                                 )
                                 ok_u, msg_u = execute_statement(appended, page=_PAGE)
                                 stamp_write(_ai_key, ok_u)  # C48

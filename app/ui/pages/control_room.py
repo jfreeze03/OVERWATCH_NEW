@@ -73,6 +73,41 @@ _PAGE = "Control Room"
 
 
 
+def _incident_open_family_inner(company: str, fam: str, guard_entity_filter: str) -> str:
+    """The 'an OPEN/MITIGATED incident already holds a member alert of this (family,
+    company, entity)' predicate. SHARED by the declare INSERT's dedup guard (as
+    WHERE NOT EXISTS (...)) and the pre-declare check (as SELECT EXISTS (...)), so the
+    two can never drift. `fam` and `guard_entity_filter` are already sql_literal-safe."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
+        f"JOIN {core_object('INCIDENTS')} i ON i.INCIDENT_ID = m.INCIDENT_ID "
+        f"JOIN {core_object('ALERT_EVENTS')} a ON a.EVENT_ID = m.REF_ID "
+        "WHERE m.MEMBER_KIND = 'ALERT' AND i.STATUS IN ('OPEN', 'MITIGATED') "
+        f"AND (i.COMPANY = {sql_literal(str(company))} OR UPPER(i.COMPANY) = 'ALL') "
+        f"AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = {fam} "
+        f"{guard_entity_filter}"
+    )
+
+
+def _incident_family_open_check_sql(company: str, proposal_key: str) -> str:
+    """SELECT ALREADY_OPEN — whether declaring this proposal would be a silent no-op
+    because an OPEN/MITIGATED incident already covers its (family, company, entity). The
+    declare runs this FIRST so a duplicate reports an honest "already open" instead of a
+    false "declared" (the guarded INSERT no-ops and execute_statement cannot see 0 rows)."""
+    from app.core.sqlsafe import sql_literal
+    proposal_parts = str(proposal_key).split("|", 3)
+    fam = sql_literal(proposal_parts[0])
+    guard_entity_filter = ""
+    if len(proposal_parts) == 4 and proposal_parts[2].upper() != "ACCOUNT":
+        guard_entity_filter = (
+            "AND UPPER(SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 2)) = "
+            f"UPPER({sql_literal(proposal_parts[3])}) "
+        )
+    return f"SELECT EXISTS ({_incident_open_family_inner(company, fam, guard_entity_filter)}) AS ALREADY_OPEN"
+
+
 def _incident_declare_sql(title: str, severity: str, company: str, proposal_key: str) -> list[str]:
     """Generate-then-run declare: one incident + every open alert of the
     proposal's dedupe family as members (48h window). Two INSERTs sharing an
@@ -121,13 +156,7 @@ def _incident_declare_sql(title: str, severity: str, company: str, proposal_key:
     # to the proposal's entity): do not open a second incident for a (family, company, entity) that
     # already has an OPEN/MITIGATED incident holding a member alert of that family+entity.
     open_family_guard = (
-        f"WHERE NOT EXISTS (SELECT 1 FROM {core_object('INCIDENT_MEMBERS')} m "
-        f"JOIN {core_object('INCIDENTS')} i ON i.INCIDENT_ID = m.INCIDENT_ID "
-        f"JOIN {core_object('ALERT_EVENTS')} a ON a.EVENT_ID = m.REF_ID "
-        "WHERE m.MEMBER_KIND = 'ALERT' AND i.STATUS IN ('OPEN', 'MITIGATED') "
-        f"AND (i.COMPANY = {sql_literal(str(company))} OR UPPER(i.COMPANY) = 'ALL') "
-        f"AND SPLIT_PART(COALESCE(a.DEDUPE_KEY, a.EVENT_ID), '|', 1) = {fam} "
-        f"{guard_entity_filter})"
+        f"WHERE NOT EXISTS ({_incident_open_family_inner(company, fam, guard_entity_filter)})"
     )
     incidents_insert = (
         f"INSERT INTO {core_object('INCIDENTS')} "
@@ -919,19 +948,33 @@ def render() -> None:
                 if confirm_gate("DECLARE", "Declare incident + link alerts", key=_exec_key,
                                 prompt="Type DECLARE to confirm", type="primary"
                                 ) and write_gate_open(_exec_key):
-                    _ok_all = True
-                    for _stmt in _dec:
-                        _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
-                        _ok_all = _ok_all and _ok
-                        if not _ok:
-                            # Stop at the first failure — running INCIDENT_MEMBERS
-                            # after a failed INCIDENTS insert half-applies the declare.
-                            break
-                    stamp_write(_exec_key, _ok_all)  # C48
-                    notify(_ok_all, "Incident declared with members linked." if _ok_all
-                           else "Declare failed — see the error log.")
-                    if _ok_all:
-                        log_ui_event("incident_declare", page=_PAGE)
+                    # INC-1: the guarded INSERT silently no-ops when this family already has
+                    # an open incident, and execute_statement can't see the 0 rowcount — so
+                    # check FIRST (same predicate as the guard) and report honestly, rather
+                    # than a phantom "declared" toast + an inflated incident_declare event.
+                    _open_chk = run(_incident_family_open_check_sql(str(_prow["COMPANY"]), _pick),
+                                    page=_PAGE, key=f"inc_famopen_{_pick}", tier="live",
+                                    source="INCIDENTS/INCIDENT_MEMBERS family-open check")
+                    if _open_chk.usable() and bool(_open_chk.df.iloc[0].get("ALREADY_OPEN")):
+                        # family already open -> the guarded INSERT would no-op; report
+                        # honestly, no phantom "declared" toast + no incident_declare event.
+                        _ok_all = True   # the action resolved (a no-op); latch closes cleanly
+                        notify(False, "No new incident — this family already has an open "
+                                      "incident; its alerts stay linked there.")
+                    else:
+                        _ok_all = True
+                        for _stmt in _dec:
+                            _ok, _m = execute_statement(_stmt + ";", page=_PAGE)
+                            _ok_all = _ok_all and _ok
+                            if not _ok:
+                                # Stop at the first failure — running INCIDENT_MEMBERS
+                                # after a failed INCIDENTS insert half-applies the declare.
+                                break
+                        notify(_ok_all, "Incident declared with members linked." if _ok_all
+                               else "Declare failed — see the error log.")
+                        if _ok_all:
+                            log_ui_event("incident_declare", page=_PAGE)
+                    stamp_write(_exec_key, _ok_all)  # C48: single stamp, both paths
         st.caption("DBA-gated, audited, forward-only (reopen = new incident with REOPENED_FROM). "
                    "CRITICALs auto-declare hourly — one incident per dedupe family per 24h — "
                    "unless INCIDENT_AUTO_DECLARE_CRITICAL is off in Settings.")

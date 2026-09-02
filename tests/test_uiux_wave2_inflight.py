@@ -164,9 +164,14 @@ def test_declare_incident_loop_stops_at_first_failure():
     # the declare exec keys are now scoped per proposal (_exec_key = inc_prop_exec_{_pick})
     src = _src("app/ui/pages/control_room.py")
     idx = src.index("write_gate_open(_exec_key)")
-    block = src[idx:idx + 1400]
-    assert "break" in block
-    assert block.index("break") < block.index("stamp_write(_exec_key")
+    block = src[idx:idx + 2400]
+    # INC-1: a family already open pre-empts the declare (honest no-op, no phantom "declared")
+    assert "ALREADY_OPEN" in block
+    # within the declare loop, break precedes the loop's stamp_write, so a failed
+    # INCIDENTS insert never runs INCIDENT_MEMBERS
+    loop = block.split("for _stmt in _dec:", 1)[1]
+    assert "break" in loop
+    assert loop.index("break") < loop.index("stamp_write(_exec_key")
 
 
 def test_ai_hypothesis_save_swallow_is_calm():

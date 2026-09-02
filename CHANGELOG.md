@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.438.0 - Bug hunt round 15: mart scope-axis, incident-declare honesty, alert-hypothesis idempotency (2026-09-02)
+
+A deep logic-correctness round (6 dimensions: AI/Ask, alert/incident lifecycle, write idempotency,
+forward-compat, multi-company scope, KPI-vs-drill). Three confirmed, no migration.
+
+- **MC-2 (the round-11 MC-1 bug, un-fixed on the mart twin): `alloc_xdim_attribution` scoped the
+  chargeback share denominator by the warehouse NAME PATTERN while its live twin and its dollar pool
+  use the COMPANY_SCOPE-aware UDF.** Round-11 MC-1 fixed the live builder (`cost_sql.allocated_attribution`)
+  but the mart-served twin — the PREFERRED path for Spend's allocated user/database attribution — still
+  used `warehouse_clause`. So a warehouse mapped to a company in COMPANY_SCOPE but not named `WH_ALFA_%`
+  was in the dollar pool yet excluded from the share denominator: its entities read $0 and its dollars
+  were silently redistributed onto the pattern-named entities, and the board flipped answers between the
+  mart and live-fallback legs. Both the denominator and the coverage probe now use
+  `COMPANY_FOR_WAREHOUSE(x.WAREHOUSE_NAME)`.
+- **INC-1: manual incident declare reported "declared" even when its dedup guard wrote zero rows.** When a
+  family already had an open incident, the guarded INSERT silently no-ops, but `execute_statement` can't
+  see the 0 rowcount, so the operator saw a green "Incident declared with members linked" toast and an
+  `incident_declare` audit event was logged though nothing was written. The declare now runs a pre-check
+  (the SAME family-open predicate the guard applies, extracted into one shared helper) and reports "No new
+  incident — this family already has an open incident" instead of a phantom success.
+- **AI-HYP: the alert AI-hypothesis append was not retry-idempotent.** A commit-then-transient-error retry
+  re-appended the same hypothesis to `ALERT_EVENTS.DETAIL`. The UPDATE now carries a `NOT CONTAINS(...)`
+  guard (literal substring, so wildcards in the answer are harmless), so a re-append is a no-op.
+
 ## 4.437.0 - Round 14 EXEC-TZ: exec board calendar presets on the account clock (V123) (2026-09-02)
 
 The third round-14 finding, now fixed (coordinated reader + migration). The Overview exec board's
