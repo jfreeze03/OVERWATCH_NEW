@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.423.0 - Bug hunt round 8: config knob wired up (near-clean sweep) (2026-09-01)
+
+An eighth adversarial sweep across 7 fresh dimensions (injection-safety, column/schema contract,
+Streamlit widget-key collisions, write-action authorization, cache correctness, settings/config,
+lifecycle state machines). **Six of the seven dimensions found nothing** — 12 of 14 agents returned
+empty; the codebase is now very thoroughly hardened. One LOW finding fixed:
+
+- **COCO_DAILY_CAP_CREDITS was read but had no configuration path (LOW, V121).** The per-user daily
+  Cortex Code allowance the token-economics efficiency review measures against was read from SETTINGS
+  and advertised as configurable, but the key was never in DEFAULT_SETTINGS, never seeded, and not in
+  the Admin editor — so it was pinned to the 15.0 fallback and an org with a different cap (e.g.
+  30/day) got the review measured against the wrong allowance. Now in DEFAULT_SETTINGS + the Admin
+  editor, with its default row seeded by V121 (data-seed, WHEN NOT MATCHED).
+
 ## 4.422.0 - Bug hunt round 7: loader fan-out, scope-arm swap, Cortex NULL, prompt truncation (2026-09-01)
 
 A seventh adversarial sweep (7 fresh dimensions: loader procs, pandas correctness, numeric

@@ -447,6 +447,10 @@ _EXPECTED_MIGRATIONS = {
          "QUERY_ATTRIBUTION_HISTORY to one row per QUERY_ID before joining QUERY_HISTORY, so RUNS counts query "
          "executions (not attribution rows) and CREDITS_PER_RUN is no longer halved for hour-spanning patterns. "
          "Re-derived from V068; migration tail re-runs the loader over 90d. Proc only, no schema change",
+    121: "Seed COCO_DAILY_CAP_CREDITS (loader/SC-1): the per-user daily Cortex Code allowance the token-economics "
+         "efficiency review measures against, now in DEFAULT_SETTINGS + the Admin editor with its 15.0 default "
+         "row seeded so an org with a different cap (e.g. 30/day) can finally configure it. Data-seed only, "
+         "WHEN NOT MATCHED, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
@@ -494,6 +498,7 @@ _SETTING_EDITORS: dict[str, tuple[str, object]] = {
     # Budgets / contract credits (dollars / credits).
     "MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
     "AI_MONTHLY_BUDGET_USD": (_NUM, {"min_value": 0.0, "step": 100.0}),
+    "COCO_DAILY_CAP_CREDITS": (_NUM, {"min_value": 0.0, "step": 1.0}),
     "CONTRACT_CREDITS": (_NUM, {"min_value": 0.0, "step": 1000.0}),
     # Platform-score weights (per-unit penalties; STRING-typed in DEFAULT_SETTINGS).
     "SCORE_PTS_BUDGET_PER_PCT": (_NUM, {"min_value": 0.0, "step": 0.1}),

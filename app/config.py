@@ -8,7 +8,7 @@ page, not in code.
 from __future__ import annotations
 
 APP_NAME = "OVERWATCH"
-APP_VERSION = "4.422.0"
+APP_VERSION = "4.423.0"
 
 # ---------------------------------------------------------------------------
 # Snowflake object locations (must match snowflake/migrations/V001__core.sql)
@@ -54,6 +54,8 @@ DEFAULT_SETTINGS = {
     "MONTHLY_BUDGET_USD": 0.0,       # 0 = not configured; UI must not invent one
     "AI_MONTHLY_BUDGET_USD": 0.0,    # 0 = not configured; gates Cortex user severities
     "CORTEX_MODEL": "llama3.1-8b",   # model for in-app AI evaluations (Admin-editable)
+    "COCO_DAILY_CAP_CREDITS": 15.0,  # per-user daily Cortex Code allowance the token-economics
+    #                                  efficiency review measures against (30 for exception users)
     # Platform-score weights (per-unit penalties; caps fixed in scoring.py).
     # Uncalibrated starting points - tune against incident history.
     "SCORE_PTS_BUDGET_PER_PCT": "0.5",

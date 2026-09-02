@@ -42,6 +42,6 @@ def test_migration_tail_reruns_the_loader_and_keeps_the_freshness_stamp():
 
 def test_validate_floor_and_docs_track_v120():
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V120 applied" in val and "VERSION BETWEEN 1 AND 120) = 120" in val
+    assert "V001..V121 applied" in val and "VERSION BETWEEN 1 AND 121) = 121" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V120__pattern_cost_runs_fanout_fix.sql" in (_ROOT / rel).read_text(encoding="utf-8")
