@@ -62,5 +62,5 @@ def test_one_time_correction_is_idempotent_and_conservative():
 def test_validate_floor_tracks_the_tip():
     # floor moved to V119 when the auto-clear-hysteresis migration landed (round 6).
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V119 applied" in val
-    assert "VERSION BETWEEN 1 AND 119) = 119" in val
+    assert "V001..V120 applied" in val
+    assert "VERSION BETWEEN 1 AND 120) = 120" in val

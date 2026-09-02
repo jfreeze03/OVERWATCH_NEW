@@ -41,7 +41,11 @@ def test_canary_sentinel():
 def test_backfill_script_idempotent_and_mirrors_loaders():
     bf = (_ROOT / "snowflake" / "backfill_365.sql").read_text(encoding="utf-8")
     assert bf.count("COALESCE((SELECT MIN(DAY)") == 6   # older-than-existing only (+FACT_QUERY_DAILY, V042 r22 #1)
-    assert "FACT_QUERY_HOURLY" not in bf.split("--", 5)[-1].split("INSERT", 1)[0] or True
+    # FACT_QUERY_HOURLY is deliberately NOT backfilled (a year at hourly grain is huge — see
+    # the file header). Assert NO INSERT targets it. round-7 test-quality: the old check ended
+    # in `or True` (always passed) and its comment-splitting heuristic matched the header
+    # comment anyway; this pins the real invariant — the insert-target, which no comment holds.
+    assert "INSERT INTO DBA_MAINT_DB.OVERWATCH.FACT_QUERY_HOURLY" not in bf
     assert "GREATEST(0, COALESCE(CREDITS_USED, 0) + COALESCE(CREDITS_ADJUSTMENT_CLOUD_SERVICES, 0))" in bf
     assert "COMPANY_FOR_WAREHOUSE" in bf and "COMPANY_FOR_DATABASE" in bf
     assert "DATEADD('day', -365" in bf

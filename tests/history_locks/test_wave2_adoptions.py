@@ -155,7 +155,10 @@ def test_operations_adopts_graph_and_schema_marts():
     assert "mart27_sql.task_graphs" in _UC
     assert "graph_sql.graph_daily_costs" in _UC
     assert "mart27_sql.schema_window_summary" in _OPS
-    assert "elif not wh_filter and not user_filter:" in _OPS       # schema fact has no wh/user dims
+    # schema fact has no wh/user dims; round-7 scope-arm fix also gates it on company=ALL
+    # (the schema fact is database-company, so a specific company must use the warehouse-
+    # company live summary to stay consistent with the query lists below).
+    assert 'elif not wh_filter and not user_filter and str(company).upper() in ("ALL", ""):' in _OPS
 
 
 def test_control_room_adopts_schema_pulse_and_48h_timeline():

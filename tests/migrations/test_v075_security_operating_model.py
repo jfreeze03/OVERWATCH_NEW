@@ -420,7 +420,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.421.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.422.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )
@@ -435,7 +435,7 @@ def test_deploy_and_rebuild_surfaces_track_v075() -> None:
         "REVOKE UPDATE, DELETE ON TABLE DBA_MAINT_DB.OVERWATCH.ALERT_AUDIT"
     ) == 2
     assert "ACCESS_REVIEW_DECISION_LOG" not in roles
-    assert "V001..V119 applied" in _read("snowflake/validate.sql")
+    assert "V001..V120 applied" in _read("snowflake/validate.sql")
     assert "SP_LOAD_SECURITY_FACTS(90)" in _read("snowflake/backfill_365.sql")
     teardown = _read("snowflake/teardown.sql")
     for name in (

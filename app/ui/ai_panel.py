@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import streamlit as st
 
-from app.core.ai import cortex_complete
+from app.core.ai import cortex_complete, normalize_model
 from app.logic.formulas import safe_float
 from app.ui.components import download_text_button, notify
 
@@ -27,7 +27,12 @@ def ai_evaluation_panel(*, key: str, prompt: str, settings: dict, page: str,
     (e.g. append it to an alert event). Backward-compatible: omit it and no save
     button renders.
     """
-    model = str(settings.get("CORTEX_MODEL") or "llama3.1-8b")
+    # AIP-3: normalize for DISPLAY so the credit caption, the audit caption, and the
+    # downloaded .txt name the model that cortex_complete will ACTUALLY run — a stored
+    # CORTEX_MODEL with a space/underscore (edited via the unvalidated free-text input)
+    # silently falls back to the default inside cortex_complete, and attributing the answer
+    # to a model that never executed is an audit drift in an audit tool.
+    model = normalize_model(settings.get("CORTEX_MODEL") or "llama3.1-8b")
     ai_rate = safe_float(settings.get("AI_CREDIT_PRICE_USD"), 2.20)
     state_key = f"_ai_answer_{key}"
     with st.expander(f"AI evaluation — {subject}"):

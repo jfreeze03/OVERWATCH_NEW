@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.422.0 - Bug hunt round 7: loader fan-out, scope-arm swap, Cortex NULL, prompt truncation (2026-09-01)
+
+A seventh adversarial sweep (7 fresh dimensions: loader procs, pandas correctness, numeric
+precision, date boundaries, scope-arm consistency, AI plumbing, test-quality). 7 confirmed fixed
+(4 MED, 3 LOW), 5 refuted (incl. two date-boundary findings resting on a false 2-day-lag premise
+that the documented 1-day lag disproves). One migration (V120, owner-applied).
+
+- **Pattern-cost RUNS inflated (MED, V120).** `SP_LOAD_PATTERN_COST` joined QUERY_ATTRIBUTION_HISTORY
+  straight to QUERY_HISTORY and counted `COUNT(*) AS RUNS`; QAH emits a row per hour-slice, so an
+  hour-spanning query fanned into N rows — RUNS over-counted and CREDITS_PER_RUN was halved for
+  exactly the long-running patterns the panel surfaces. V120 pre-aggregates QAH per QUERY_ID before
+  the join (matching every sibling loader) and re-runs the loader over 90d.
+- **Operations/Control-Room query summary swapped the company axis (MED).** Under a schema filter
+  (specific company), the summary tile routed to a database-company mart while its caption and the
+  query lists below stayed warehouse-company — the count couldn't reconcile with the list. Now the
+  fast schema mart is used only for company=ALL; a specific company falls through to the
+  warehouse-company live summary (which honors the schema filter).
+- **Ask AI-phrasing rendered a Cortex NULL as "None" (MED).** `_ai_phrasing` `str()`-ed a SQL-NULL
+  result into the literal "None"/"nan" and showed it under "grounded numbers unchanged". Now
+  coalesces and rejects the placeholder strings, mirroring `cortex_complete`.
+- **Alert-explain prompt could lose its anti-fabrication instruction (MED).** `alert_evidence_prompt`
+  put its instructions last with no length cap, so `cortex_complete`'s front-truncation could drop
+  them on a wide evidence pack. Reordered instructions-first with evidence trimmed to budget (like
+  the other builders).
+- **LOW:** the Cortex Code spend KPI help no longer overclaims "Exact" (it's a round-then-sum that
+  can differ a few cents from the Cost page's single-rounded total — same-page reconciliation is the
+  deliberate design); the AI panel displays the *normalized* model that actually runs; and a test
+  with a neutered `or True` guarding the backfill's FACT_QUERY_HOURLY exclusion now asserts the real
+  invariant.
+
 ## 4.421.0 - Bug hunt round 6: another invalid-SQL panel, ledger $0 bug, alert auto-clear, cross-metric (2026-09-01)
 
 A sixth adversarial sweep (7 fresh dimensions: cross-metric reconciliation, deep SQL semantics,

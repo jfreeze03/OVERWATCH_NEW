@@ -136,7 +136,15 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             days, company, wh_filter, user_filter, database, bounds=bounds)
         _summary_key = f"q_fact_summary_{company}_{days}{_lm}"
         _summary_source = "FACT_QUERY_HOURLY (mart, loaded hourly)"
-    elif not wh_filter and not user_filter:
+    elif not wh_filter and not user_filter and str(company).upper() in ("ALL", ""):
+        # scope-arm (round 7): the schema-hourly mart scopes company by DATABASE
+        # (COMPANY_FOR_DATABASE — the fact has no warehouse grain), but this page's caption
+        # and every itemized panel below scope company by WAREHOUSE. Using it under a
+        # specific company would silently swap the company axis and produce a Queries count
+        # that can't reconcile with the query lists beneath it. So only use the fast schema
+        # mart when company is ALL (no company arm = no divergence); for a specific company
+        # fall through to the warehouse-company live query_window_summary (it honors the
+        # schema filter too), keeping one company axis across the whole screen.
         _summary_sql = mart27_sql.schema_window_summary(
             days, company, database, schema_contains, bounds=bounds)
         _summary_key = f"q_schema_fact_{company}_{days}{_lm}"

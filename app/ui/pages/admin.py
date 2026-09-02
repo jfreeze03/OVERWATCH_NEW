@@ -443,6 +443,10 @@ _EXPECTED_MIGRATIONS = {
          "protection set is compared on the date-stripped RULE_ID|scope identity — a perf alert held open by "
          "hysteresis is no longer falsely auto-cleared across the midnight boundary while its condition is still "
          "above the CLEAR floor. Proc only, no schema change",
+    120: "Pattern-cost RUNS fan-out fix (loader-01): SP_LOAD_PATTERN_COST pre-aggregates "
+         "QUERY_ATTRIBUTION_HISTORY to one row per QUERY_ID before joining QUERY_HISTORY, so RUNS counts query "
+         "executions (not attribution rows) and CREDITS_PER_RUN is no longer halved for hour-spanning patterns. "
+         "Re-derived from V068; migration tail re-runs the loader over 90d. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

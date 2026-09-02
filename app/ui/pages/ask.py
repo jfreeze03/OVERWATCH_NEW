@@ -96,10 +96,19 @@ def _ai_phrasing(result: AnswerResult, model: str) -> str | None:
         res = run(sql, page=_PAGE, key="ask_narrate", tier="live",
                   source="Ask:cortex_narrate")
         if res.df is not None and not res.df.empty:
-            txt = str(res.df.iloc[0]["TXT"]).strip()
+            # AIP-1: a SQL NULL result (content-filtered / model returned nothing) is a
+            # NON-empty one-row frame whose TXT is None/NaN — str() would yield the literal
+            # "None"/"nan", which has no digits so _numbers_preserved trivially passes and a
+            # non-answer renders under the "grounded numbers unchanged" caption. Coalesce and
+            # reject the placeholder strings, mirroring core.ai.cortex_complete's guard.
+            _val = res.df.iloc[0]["TXT"]
+            txt = "" if _val is None else str(_val).strip()
+            # str(NaN) == "nan"; also catch the SQL-NULL/model placeholders.
+            if txt.lower() in ("", "none", "nan", "null"):
+                return None
             # Discard a rephrase that invented or changed a number — the caption promises
             # the grounded numbers are unchanged, so honor it rather than trust the model.
-            return txt if (txt and _numbers_preserved(grounded, txt)) else None
+            return txt if _numbers_preserved(grounded, txt) else None
     except Exception:  # noqa: BLE001 — narration is a nicety; never break the answer
         return None
     return None

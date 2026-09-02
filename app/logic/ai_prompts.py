@@ -272,14 +272,27 @@ def alert_evidence_prompt(kind: str, title: str, detail: str,
     columns = _EVIDENCE_COLUMNS.get(kind, _EVIDENCE_COLUMNS["generic"])
     framing = _EVIDENCE_FRAMING.get(kind, _EVIDENCE_FRAMING["generic"])
     rows = _serialize_rows(evidence, columns, max_rows=20)
-    return (
+    # AIP-2: instructions FIRST, evidence LAST + trimmed to the remaining budget — mirrors
+    # _assemble. cortex_complete slices the prompt to MAX_PROMPT_CHARS from the FRONT, so a
+    # wide evidence pack (e.g. 20 cloud_svc rows + a long DETAIL) would otherwise push the
+    # trailing anti-fabrication / 150-word instructions past the cut, leaving Cortex evidence
+    # with no grounding constraint — the exact ungrounded-answer mode the ordering prevents.
+    head = (
         "You are a Snowflake cost & performance analyst. An automated sweep raised this alert:\n"
         f"ALERT: {str(title)[:300]}\n"
         f"DETAIL: {str(detail)[:500]}\n\n"
-        f"{framing} ({window_label}):\n"
-        f"{rows}\n\n"
-        "Using ONLY the evidence above: (1) name the 1-2 most likely drivers with the "
+        "Using ONLY the evidence rows below: (1) name the 1-2 most likely drivers with the "
         "numbers that support them, (2) state what to check or change next, (3) say "
         "'evidence is inconclusive' if the rows do not explain the alert. Max 150 words. "
-        "Never invent queries, warehouses, services, or numbers not shown."
+        "Never invent queries, warehouses, services, or numbers not shown.\n\n"
+        f"{framing} ({window_label}):\n"
     )
+    budget = MAX_PROMPT_CHARS - len(head)
+    if budget <= 0:
+        return head[:MAX_PROMPT_CHARS]
+    body = rows
+    if len(body) > budget:
+        marker = "\n- (evidence truncated to fit)"
+        body = (body[: budget - len(marker)].rstrip() + marker
+                if budget > len(marker) else body[:budget])
+    return (head + body)[:MAX_PROMPT_CHARS]

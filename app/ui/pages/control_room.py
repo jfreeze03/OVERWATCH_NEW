@@ -611,7 +611,11 @@ def render() -> None:
                           source="FACT_QUERY_HOURLY (mart, loaded hourly)")
             if m_pulse.ok and not m_pulse.empty and safe_float(m_pulse.df.iloc[0].get("QUERY_COUNT")) > 0:
                 pulse, pulse_from_mart = m_pulse, True
-        else:
+        elif str(company).upper() in ("ALL", ""):
+            # scope-arm (round 7): the schema-hourly mart scopes company by DATABASE, but the
+            # Pulse KPI is warehouse-company everywhere else — only safe to use when company
+            # is ALL (no company arm). For a specific company under a schema filter, fall
+            # through to the warehouse-company live query_window_summary (mirrors Operations).
             s_pulse = run(mart27_sql.schema_window_summary(1, company, f["database"], f["schema_contains"]),
                           page=_PAGE, key=f"pulse_schema_fact_{company}", tier="hourly",
                           source="FACT_QUERY_SCHEMA_HOURLY (mart — p95 is peak hourly)")

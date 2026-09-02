@@ -183,7 +183,11 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
         {"label": f"Active AI users ({days}d)", "value": f"{summary['active_users']:,}"},
         {"label": "Requests", "value": f"{summary['total_requests']:,}"},
         {"label": "Cortex Code spend", "value": format_usd(summary["spend_usd"]),
-         "help": f"Exact token credits x ${ai_rate:.2f}/credit."
+         # NP-1: this is the sum of the per-user 'Spend $' rows (each rounded to cents) so it
+         # reconciles exactly with the detail table below; it can differ by a few cents from the
+         # Cost>Spend CoCo tile, which rounds the credit total ONCE. So "measured", not "exact".
+         "help": f"Measured token credits x ${ai_rate:.2f}/credit, summed across the users below "
+                 "(may differ by a few cents from the Cost page's single-rounded CoCo total)."
                  + (" Totals cover the top 500 users by spend (frame at cap); "
                     "account-wide totals are higher." if _cc_trunc else "")},
         {"label": "Projected 30d", "value": format_usd(summary["projected_30d_usd"]),
