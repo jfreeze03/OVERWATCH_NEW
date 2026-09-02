@@ -30,7 +30,8 @@ def test_empty_mart_can_be_the_answer_where_declared():
     comp = (_ROOT / "app" / "ui" / "components.py").read_text(encoding="utf-8")
     body = comp.split("def run_mart_first", 1)[1].split("\ndef ", 1)[0]
     assert "empty_is_answer: bool = False" in body                # default unchanged: young
-    assert "if empty_is_answer and res.ok:" in body               # marts still fall back
+    # marts still fall back on empty; the res-is-not-None guard covers the failure-backoff skip
+    assert "if res is not None and empty_is_answer and res.ok:" in body
     ops = (_ROOT / "app" / "ui" / "pages" / "operations.py").read_text(encoding="utf-8")
     assert "empty_is_answer=True)" in ops                         # lock panel: no waits = answer
 

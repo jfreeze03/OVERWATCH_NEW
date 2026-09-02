@@ -104,7 +104,10 @@ def test_t2_3_run_mart_first_has_preloaded_seam():
     comp = _read("app/ui/components.py")
     fn = comp.split("def run_mart_first(", 1)[1].split("\ndef ", 1)[0]
     assert "preloaded=None" in fn
-    assert "preloaded if (preloaded is not None and preloaded.ok) else run(" in fn
+    # the prefetch seam is preserved; a healthy preloaded is used in place of the serial probe
+    assert "if preloaded is not None and preloaded.ok:" in fn
+    # and a recently-FAILED mart is not re-probed (failure backoff) before the live fallback
+    assert "_mart_backoff_active(page, key)" in fn
 
 
 # --- T1.9: open_alert_events standardized at LIMIT 500 -----------------------

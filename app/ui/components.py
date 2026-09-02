@@ -1050,6 +1050,38 @@ def coverage_contract(days: int, *, day_col: str = "DAY", freshness_days: int = 
     return _accept
 
 
+# ---------------------------------------------------------------------------
+# Mart-first failure backoff. A mart read that FAILS (down / not-yet-loaded /
+# erroring) is never cached (query.run: "Failures are never cached"), so
+# run_mart_first would re-probe it — re-paying the round-trip — on EVERY render
+# during an outage, always before falling to the live scan anyway. This short,
+# process-local backoff skips re-probing a recently-failed mart so the panel goes
+# straight to the (cached) live fallback; it clears the instant the mart succeeds.
+# It only ever skips a read that was going to fail, so it never changes a result —
+# and never touches the coverage-gate path (that mart SUCCEEDS and its partial data
+# is a kept fallback), only the failed-read path.
+# ---------------------------------------------------------------------------
+_MART_FAIL_BACKOFF_SEC = 120.0
+_MART_FAIL_BACKOFF: dict[tuple[str, str], float] = {}
+
+
+def _mart_backoff_active(page: str, key: str) -> bool:
+    exp = _MART_FAIL_BACKOFF.get((page, key))
+    if exp is None:
+        return False
+    if time.monotonic() >= exp:
+        _MART_FAIL_BACKOFF.pop((page, key), None)
+        return False
+    return True
+
+
+def _note_mart_health(page: str, key: str, *, ok: bool) -> None:
+    if ok:
+        _MART_FAIL_BACKOFF.pop((page, key), None)                 # recovered → probe next render
+    else:
+        _MART_FAIL_BACKOFF[(page, key)] = time.monotonic() + _MART_FAIL_BACKOFF_SEC
+
+
 def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
                    mart_source: str, live_source: str,
                    mart_tier: str = "hourly", live_tier: str = "historical",
@@ -1088,10 +1120,20 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
         mart_accept = coverage_contract(
             days, day_col=coverage_day_col, freshness_days=coverage_freshness_days)
     kwargs: dict = {} if max_rows is None else {"max_rows": max_rows}
-    res = preloaded if (preloaded is not None and preloaded.ok) else run(
-        mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
-        source=mart_source, **kwargs)
-    if res.usable():
+    if preloaded is not None and preloaded.ok:
+        res = preloaded
+        _note_mart_health(page, key, ok=True)          # healthy prefetch clears any stale backoff
+    elif _mart_backoff_active(page, key):
+        # The mart read FAILED within the last _MART_FAIL_BACKOFF_SEC; a failed read is never
+        # cached, so re-probing a down/absent mart just re-pays the round-trip every render
+        # before the inevitable live fallback. Skip it — go straight to the (cached) live path;
+        # we re-probe once the backoff expires, and it clears the instant the mart recovers.
+        res = None
+    else:
+        res = run(mart_sql, page=page, key=f"{key}_fact", tier=mart_tier,
+                  source=mart_source, **kwargs)
+        _note_mart_health(page, key, ok=res.ok)
+    if res is not None and res.usable():
         try:
             accepted = mart_accept is None or bool(mart_accept(res.df))
         except Exception as _acc_exc:  # noqa: BLE001 — a coverage probe must never break a page
@@ -1119,7 +1161,7 @@ def run_mart_first(mart_sql: str, live_sql: str, *, page: str, key: str,
     # SUCCESSFUL empty read means "genuinely nothing" — reviving the live
     # scan would pay 46-56 GB to confirm an answer we already hold. Marts
     # with young-coverage ambiguity keep the default (fallback on empty).
-    if empty_is_answer and res.ok:
+    if res is not None and empty_is_answer and res.ok:
         return _mark_served(res, live=False, days=days)
     return _mark_served(
         run(live_sql, page=page, key=key, tier=live_tier, source=live_source, **kwargs),

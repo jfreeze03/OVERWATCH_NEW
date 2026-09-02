@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.445.0 - Perf win #3: run_mart_first skips re-probing a recently-failed mart (2026-09-02)
+
+`run_mart_first` probes the fast mart first and falls to the expensive live ACCOUNT_USAGE scan
+when the mart is unusable. But a FAILED read is never cached (`query.run`: "Failures are never
+cached" — the fetcher raises, and `st.cache_data` doesn't cache exceptions), so during a mart
+outage — or for a mart that isn't loaded yet — every render re-probed the failing mart, re-paying
+the round-trip each time before the inevitable live fallback. On an actively-interacting session
+that's a wasted mart round-trip per rerun.
+
+- Added a short, process-local **failure backoff**: when a serial mart read fails, its `(page, key)`
+  is remembered for `_MART_FAIL_BACKOFF_SEC` (120s); within that window `run_mart_first` skips
+  re-probing and goes straight to the (cached) live path. The backoff clears the instant the mart
+  succeeds — including a healthy `preloaded` prefetch — so recovery is picked up immediately, and it
+  auto-expires so a down mart is re-probed periodically.
+- Safe by construction: it only ever skips a read that was going to fail (a failed mart is unusable,
+  so the code was going live regardless), so it never changes a result. It deliberately does **not**
+  touch the coverage-gate path — a mart that SUCCEEDS but doesn't cover the window still probes every
+  render and keeps its partial-data fallback.
+- Tests: `tests/test_mart_first_backoff.py` — backoff skips the re-probe and serves live, expires and
+  re-probes, clears on recovery / healthy preloaded, leaves the coverage-gate miss probing, and
+  falls through to live (never a vacuous empty) even under `empty_is_answer`. No migration.
+
 ## 4.444.0 - Perf win #2: Operations Queries live path — summary + failures from one QUERY_HISTORY scan (2026-09-02)
 
 The Operations "Queries" live-fallback path scanned `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` three
