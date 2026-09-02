@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.444.0 - Perf win #2: Operations Queries live path — summary + failures from one QUERY_HISTORY scan (2026-09-02)
+
+The Operations "Queries" live-fallback path scanned `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` three
+times over the same window — `query_window_summary` (scalar), `top_queries_by_elapsed` (row-level),
+`failures_by_error` (grouped) — firing on a schema-filtered render with a specific company (the
+mart-first path already consolidates the default). Investigation found the audit's "one scan" is
+architecturally blocked: the three grains can't share a `SELECT`, and a CTE referenced N times in
+Snowflake can re-scan. The achievable clean win is the two AGGREGATE-grain scans merged into one.
+
+- New builder `ops_sql.queries_health_bundle` merges the summary + failure taxonomy via
+  `GROUP BY GROUPING SETS ((), (error))` — the `()` set is the grand-total summary row (`GRP=3`),
+  the `(error)` set is the per-error failure rows (`GRP=0`); successful queries collapse into a
+  `FAILURES=0` group that the split drops. The CTE is referenced exactly once, so `QUERY_HISTORY`
+  is scanned exactly once. Same `_query_scope` as the three builders, so the company axis
+  (`COMPANY_FOR_WAREHOUSE`, C10) and every filter scope identically.
+- `ops_sql.split_health_bundle` (pure pandas) slices the frame back into the
+  `query_window_summary` / `failures_by_error` column shapes the panels already index; column
+  parity with the originals is asserted.
+- `operations._queries_tab`: on the live path (`_use_diag` False) the summary and failures are
+  served from one bundle scan, batched in parallel with the top-N scan — three scans of the same
+  window become two (top + bundle). `top-N` stays its own scan (row-level grain can't share the
+  `GROUP BY`). The mart-first path is untouched; each panel keeps its own live fallback, so a
+  bundle miss degrades to the old per-panel scans. No migration.
+- Tests: `tests/test_ops_queries_health_bundle.py` — single-scan + GROUPING SETS, identical
+  scope, split correctness (drops the success group, sorts, empty-safe, column parity), and a
+  rendered-under-filter check that `q_summary`/`q_fails` no longer fire a separate live scan.
+
 ## 4.443.0 - Perf win #1: tag_coverage scopes company once-per-distinct-user, not per-row (2026-09-02)
 
 First measured fix from the perf audit. `cost_sql.tag_coverage` — the live chargeback governance

@@ -12,6 +12,7 @@ from app.config import MAX_LIVE_WINDOW_DAYS, core_object
 from app.core.errors import safe_page
 from app.core.identity import identity_sql
 from app.core.query import execute_cancel_query, execute_statement, run, run_batch
+from app.core.result import QueryResult
 from app.core.session import is_operator as _is_operator
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters, navigation_context, request_navigation
@@ -105,6 +106,21 @@ from app.ui.components import (
 _PAGE = "Operations"
 
 
+def _split_queries_health(res):
+    """Wrap ops_sql.split_health_bundle into two QueryResults (summary, failures) that carry
+    the bundle read's ok/source, so the summary KPI and the failures panel consume them
+    exactly like the separate query_window_summary / failures_by_error results. An unusable
+    read is passed through unchanged so the callers fall back to their own live scans."""
+    if res is None:
+        return None, None
+    if not res.ok or not res.usable():
+        return res, res
+    summary_df, fails_df = ops_sql.split_health_bundle(res.df)
+    src = res.source
+    return (QueryResult(df=summary_df, ok=True, source=src),
+            QueryResult(df=fails_df, ok=True, source=src))
+
+
 def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                  database: str = "", schema_contains: str = "", *,
                  bounds: tuple | None = None) -> None:
@@ -167,6 +183,25 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         ])
     _mart_pf = run_batch(_mart_jobs, page=_PAGE, tier="hourly") if len(_mart_jobs) > 1 else {}
 
+    # Perf (2026-09-02): on the live-fallback path (any itemized filter -> _use_diag False),
+    # the window SUMMARY and the failure taxonomy are served from ONE QUERY_HISTORY scan via
+    # ops_sql.queries_health_bundle (GROUPING SETS: () = summary, (error) = failures), batched
+    # in parallel with the top-N scan. This replaces the old three scans of the same window
+    # (summary + top + fails) with two (top + bundle). top-N's row-level grain can't share the
+    # GROUP BY, so it stays its own scan. On the mart-first path (_use_diag True) nothing changes.
+    _bundle_summary = _bundle_fails = _top_res = None
+    if not _use_diag:
+        _live = run_batch([
+            {"key": "top", "sql": ops_sql.top_queries_by_elapsed(
+                days, company, 50, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
+            {"key": "health", "sql": ops_sql.queries_health_bundle(
+                days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
+             "source": "ACCOUNT_USAGE.QUERY_HISTORY (window summary + failures, one scan)"},
+        ], page=_PAGE, tier="recent")
+        _top_res = _live.get("top")
+        _bundle_summary, _bundle_fails = _split_queries_health(_live.get("health"))
+
     summary = None
     used_mart = False
     if _summary_sql:
@@ -176,6 +211,9 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     source=_summary_source)
         if m.ok and not m.empty and safe_float(m.df.iloc[0].get("QUERY_COUNT")) > 0:
             summary, used_mart = m, True
+    # Live path: prefer the one-scan bundle's summary (no separate QUERY_HISTORY scan).
+    if summary is None and _bundle_summary is not None and _bundle_summary.usable():
+        summary = _bundle_summary
     if summary is None:
         summary = run(ops_sql.query_window_summary(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
                       page=_PAGE, key=f"q_summary_{company}_{days}{_lm}", tier="recent",
@@ -245,15 +283,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 preloaded=_mart_pf.get("fails") if isinstance(_mart_pf, dict) else None),
         }
     else:
-        # Parallel path (same contract as Security): both queries submit async
-        # in one shot; any failure falls back to the serial per-query calls.
-        _qb = run_batch([
-            {"key": "top", "sql": ops_sql.top_queries_by_elapsed(days, company, 50, wh_filter,
-                                                                 user_filter, database, schema_contains, bounds=bounds),
-             "source": "ACCOUNT_USAGE.QUERY_HISTORY", "max_rows": 50},
-            {"key": "fails", "sql": ops_sql.failures_by_error(days, company, wh_filter, user_filter, database, schema_contains, bounds=bounds),
-             "source": "ACCOUNT_USAGE.QUERY_HISTORY"},
-        ], page=_PAGE, tier="recent")
+        # Live path: top-N from its own scan; the summary + failures already came from the
+        # single-scan bundle above (fetched in parallel with top). Each panel's own fallback
+        # (top at "Heaviest queries", fails at "Failures by error") re-fetches live if a
+        # member is missing/failed, so a bundle miss degrades to the old per-panel scans.
+        _qb = {"top": _top_res, "fails": _bundle_fails}
 
     section_header("Heaviest queries", "info", "search")
     top = _qb.get("top")

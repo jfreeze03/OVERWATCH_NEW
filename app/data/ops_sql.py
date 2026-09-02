@@ -107,6 +107,86 @@ LIMIT 50
 """
 
 
+# Column contracts the health bundle splits back into — kept next to the builder so a
+# rename can't drift from split_health_bundle (asserted by the perf test).
+QUERY_SUMMARY_COLS = ["QUERY_COUNT", "FAILED_COUNT", "P95_ELAPSED_SEC", "QUEUED_SEC", "SPILL_REMOTE_GB"]
+QUERY_FAILS_COLS = ["ERROR_CODE", "ERROR_MESSAGE", "FAILURES", "USERS_AFFECTED", "LAST_SEEN"]
+
+
+def queries_health_bundle(days: int, company: str = "ALL", warehouse_contains: str = "",
+                          user_contains: str = "", database: str = "", schema_contains: str = "", *,
+                          bounds: tuple | None = None) -> str:
+    """Window health SUMMARY + failure taxonomy from ONE QUERY_HISTORY scan (perf, 2026-09-02).
+
+    The Operations Queries live-fallback path used to scan ACCOUNT_USAGE.QUERY_HISTORY three
+    times over the same window — query_window_summary (scalar), top_queries_by_elapsed
+    (row-level), failures_by_error (grouped). This merges the two AGGREGATE-grain scans into
+    one via GROUPING SETS: the () grouping set is the grand-total summary row (GRP = 3), the
+    (error) grouping set is the per-error failure rows (GRP = 0). It is one GROUP BY over one
+    scan (the CTE is referenced ONCE — a CTE referenced N times can re-scan, so it must not
+    be), so QUERY_HISTORY is scanned exactly once. top_queries_by_elapsed stays its own scan
+    (its row-level grain cannot share this GROUP BY). ``split_health_bundle`` slices the frame
+    back into the query_window_summary + failures_by_error shapes the panels already expect.
+
+    Successful queries carry no error, so FAIL_CODE/FAIL_MSG are NULL for them; they collapse
+    into a single NULL-error group with FAILURES = 0 that the split drops. Company/window/
+    filter scope is the SAME _query_scope the three separate builders use, so the merged path
+    scopes identically (WAREHOUSE company via COMPANY_FOR_WAREHOUSE, C10)."""
+    days = bounded_days(days)
+    scope = _query_scope(days, company, warehouse_contains, user_contains, database,
+                         schema_contains, bounds=bounds)
+    return f"""
+WITH scoped AS (
+    SELECT
+        EXECUTION_STATUS,
+        USER_NAME,
+        START_TIME,
+        TOTAL_ELAPSED_TIME,
+        QUEUED_OVERLOAD_TIME,
+        QUEUED_PROVISIONING_TIME,
+        BYTES_SPILLED_TO_REMOTE_STORAGE,
+        IFF(EXECUTION_STATUS <> 'SUCCESS', 1, 0) AS IS_FAIL,
+        IFF(EXECUTION_STATUS <> 'SUCCESS', COALESCE(ERROR_CODE::VARCHAR, 'UNKNOWN'), NULL) AS FAIL_CODE,
+        IFF(EXECUTION_STATUS <> 'SUCCESS', LEFT(COALESCE(ERROR_MESSAGE, 'Unknown error'), 140), NULL) AS FAIL_MSG
+    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+    WHERE {scope}
+)
+SELECT
+    GROUPING_ID(FAIL_CODE, FAIL_MSG) AS GRP,
+    FAIL_CODE AS ERROR_CODE,
+    FAIL_MSG AS ERROR_MESSAGE,
+    COUNT(*) AS QUERY_COUNT,
+    SUM(IS_FAIL) AS FAILED_COUNT,
+    APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
+    SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_SEC,
+    SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB,
+    SUM(IS_FAIL) AS FAILURES,
+    COUNT(DISTINCT IFF(IS_FAIL = 1, USER_NAME, NULL)) AS USERS_AFFECTED,
+    MAX(IFF(IS_FAIL = 1, START_TIME, NULL)) AS LAST_SEEN
+FROM scoped
+GROUP BY GROUPING SETS ((), (FAIL_CODE, FAIL_MSG))
+"""
+
+
+def split_health_bundle(df, fail_limit: int = 50):
+    """Slice a queries_health_bundle frame into (summary_df, failures_df) matching
+    query_window_summary / failures_by_error. GRP = 3 is the grand-total summary; GRP = 0
+    rows with FAILURES > 0 are the failures (the NULL-error success group has FAILURES = 0
+    and is dropped). Pure pandas so it is unit-testable without a Streamlit context."""
+    import pandas as pd
+    if df is None or getattr(df, "empty", True) or "GRP" not in getattr(df, "columns", []):
+        return pd.DataFrame([dict.fromkeys(QUERY_SUMMARY_COLS, 0)]), pd.DataFrame(columns=QUERY_FAILS_COLS)
+    grp = pd.to_numeric(df["GRP"], errors="coerce")
+    srows = df[grp == 3]
+    summary = (srows[QUERY_SUMMARY_COLS].head(1).reset_index(drop=True)
+               if not srows.empty else pd.DataFrame([dict.fromkeys(QUERY_SUMMARY_COLS, 0)]))
+    fnum = pd.to_numeric(df.get("FAILURES"), errors="coerce").fillna(0)
+    frows = df[(grp == 0) & (fnum > 0)]
+    fails = (frows[QUERY_FAILS_COLS].sort_values("FAILURES", ascending=False)
+             .head(max(1, int(fail_limit))).reset_index(drop=True))
+    return summary, fails
+
+
 def task_runs(days: int, company: str = "ALL", database: str = "", schema_contains: str = "", *,
               bounds: tuple | None = None) -> str:
     """Task run outcomes grouped by task, newest failures surfaced."""
