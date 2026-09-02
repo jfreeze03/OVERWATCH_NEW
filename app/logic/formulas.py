@@ -393,7 +393,9 @@ def format_unit(value: object, unit: str) -> str:
         return f"{v:,.2f}"
     if u == "currency":
         return f"{v:,.0f}"                           # caller supplies the currency code
-    if u == "days":
+    if u in ("days", "count"):
+        # integers, like the table's _COUNT_SUFFIXES ("{:,.0f}") — WITHOUT this a count
+        # under 100 fell through to the ".1f" fallback and rendered "5.0" not "5".
         return f"{v:,.0f}"
     if u in ("ms", "sec", "min", "hours"):
         return humanize_duration(v, {"hours": "h"}.get(u, u))

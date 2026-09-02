@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.435.0 - Bug hunt on the review-arc code: format_unit count branch (2026-09-02)
+
+A find→refute-verify hunt over this session's new code (v4.429-v4.434: the unit formatter, the
+startup gate, the charts reconcile, the migration punch list, the live-defect fixes, and the test
+harnesses). Five of six dimensions were clean; one real defect (LOW, latent):
+
+- **`format_unit` had no `count` branch.** `_UNIT_ALIASES` maps `count`/`n` to the canonical
+  `count` token and the docstring lists it as supported, but there was no `if u == "count"` handler,
+  so a count fell through to the adaptive `.1f` fallback and rendered "5.0" / "0.0" / "42.0" for the
+  0-99 range instead of "5" / "0" / "42" — fractional formatting on an inherently-integer unit,
+  contradicting both the docstring and the cards==tables invariant (the table formats counts as
+  `{:,.0f}`). Latent (no live caller passes `unit="count"` to the card path today; chart counts use
+  the chart formatter's own integer fast-path), but a genuine bug in the canonical formatter. Merged
+  `count` into the integer branch alongside `days`. The binding test now asserts a sub-100 count reads
+  as an integer (the old test used 1234.5, which masked it since values >=100 add no decimal).
+
 ## 4.434.0 - Shaped render contracts extended to batched reads (+ fixed a vacuous gate block) (2026-09-02)
 
 Follow-up to v4.433. Two fixes to the shaped-render harness (`tests/test_pages_shaped.py`):

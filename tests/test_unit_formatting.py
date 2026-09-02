@@ -42,6 +42,12 @@ def test_format_unit_matches_surface_conventions():
     assert format_unit(0.03, "tb") != "0.03" and "GB" in format_unit(0.03, "tb")
     # percent carries its unit
     assert format_unit(93.1, "percent") == "93.1%"
+    # count / days are INTEGERS like the table's _COUNT_SUFFIXES — a small count must read
+    # "5", never "5.0" (the <100 adaptive-fallback bug the count branch fixes)
+    assert format_unit(5, "count") == "5"
+    assert format_unit(42, "n") == "42"
+    assert format_unit(0, "count") == "0"
+    assert format_unit(7, "days") == "7"
     # aliases: registry + chart + table spellings all resolve
     assert format_unit(5, "USD") == format_unit(5, "$") == format_unit(5, "usd")
     assert format_unit(50, "pct") == format_unit(50, "percent")
