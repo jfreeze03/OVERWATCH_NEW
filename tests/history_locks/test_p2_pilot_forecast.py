@@ -1,6 +1,6 @@
 """P2-17/18: DT pilot, forecast engines, backups."""
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +16,7 @@ def _daily(n=28, base=100.0, weekend=20.0):
     rows = []
     today = date(2026, 7, 15)
     for i in range(n, 0, -1):
-        d = pd.Timestamp(today) - pd.Timedelta(days=i)
+        d = pd.Timestamp(today) - timedelta(days=i)
         usd = weekend if d.weekday() >= 5 else base
         rows.append({"DAY": d.date(), "USD": usd})
     return pd.DataFrame(rows), today

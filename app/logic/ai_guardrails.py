@@ -21,6 +21,8 @@ Pure pandas; no Streamlit, no Snowflake. Tested in tests/test_ai_guardrails.py.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 
 from app.logic.anomaly import robust_zscores
@@ -51,8 +53,8 @@ def user_behavior(frame: pd.DataFrame | None, now: pd.Timestamp) -> pd.DataFrame
     if df.empty:
         return pd.DataFrame(columns=cols)
     today = pd.Timestamp(now).normalize()
-    recent_start = today - pd.Timedelta(days=7)
-    base_start = today - pd.Timedelta(days=35)
+    recent_start = today - timedelta(days=7)   # datetime.timedelta: numpy generic-unit-safe (round 10)
+    base_start = today - timedelta(days=35)
 
     for col in ("REQUESTS", "CREDITS", "TOKENS"):
         df[col] = pd.to_numeric(df.get(col, 0), errors="coerce").fillna(0.0)

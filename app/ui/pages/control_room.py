@@ -8,6 +8,7 @@ queue is visible on entry.
 from __future__ import annotations
 
 import contextlib
+from datetime import timedelta
 
 import pandas as pd
 import streamlit as st
@@ -342,8 +343,6 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
 def _day_replay() -> None:
     """One day, every domain, one story — the flight recorder Snowsight
     can't assemble from its silos."""
-    from datetime import timedelta
-
     from app.logic.formulas import account_today
     from app.logic.replay import replay_headlines
 
@@ -1129,7 +1128,7 @@ def render() -> None:
                 anchor = tdf.iloc[sel_tl]
                 try:
                     at = pd.to_datetime(anchor["AT"])
-                    lo, hi = at - pd.Timedelta(minutes=30), at + pd.Timedelta(minutes=30)
+                    lo, hi = at - timedelta(minutes=30), at + timedelta(minutes=30)
                     nearby = tdf[(pd.to_datetime(tdf["AT"]) >= lo) & (pd.to_datetime(tdf["AT"]) <= hi)]
                     # strip backticks from the data-derived LABEL so it can't break out of
                     # the markdown code-span and inject formatting (round-3 bug hunt).

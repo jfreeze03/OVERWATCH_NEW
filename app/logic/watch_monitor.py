@@ -16,6 +16,8 @@ elsewhere. Pure pandas; tested in tests/test_watch_monitor.py.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 
 from app.logic.anomaly import (
@@ -69,7 +71,11 @@ def watched_status(watchlist: pd.DataFrame | None,
             _fdays = pd.to_datetime(flagged["DAY"], errors="coerce")
             _latest = _fdays.max()
             if pd.notna(_latest):
-                flagged = flagged[_fdays >= (_latest.normalize() - pd.Timedelta(days=1))]
+                # datetime.timedelta, NOT pd.Timedelta: subtracting a pd.Timedelta from a
+                # Timestamp and comparing to a datetime64 Series triggers numpy's
+                # "generic unit timedelta is deprecated ... will raise in the future"
+                # (numpy 2.5+); datetime.timedelta is exempt. (bug-hunt round 10)
+                flagged = flagged[_fdays >= (_latest.normalize() - timedelta(days=1))]
         for h in anomaly_summary(flagged, "WAREHOUSE_NAME", "USD"):
             # anomaly_summary is strongest-first; keep the STRONGEST day per warehouse.
             cost_hits.setdefault(str(h.get("label", "")).upper(), h)

@@ -4,6 +4,7 @@ critical-veto platform-score rule."""
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -28,7 +29,7 @@ def test_velocity_flag_needs_ratio_AND_floor():
     # SPIKER: baseline 2/day for 28d, then 30/day for 7d -> 15x + >=20 req floor -> flag.
     # TINY: baseline 0.1/day then 1/day (10x) but only 7 requests -> NO flag (floor).
     for i in range(35):
-        day = _NOW - pd.Timedelta(days=34 - i)
+        day = _NOW - timedelta(days=34 - i)
         rows.append(("STEADY", day, 10, 0.5, 50_000))
         rows.append(("SPIKER", day, 30 if i >= 28 else 2, 1.0, 80_000))
         if i % 10 == 0 or i >= 28:
@@ -41,8 +42,8 @@ def test_velocity_flag_needs_ratio_AND_floor():
 
 
 def test_new_heavy_flag_and_kpis():
-    rows = [("VET", _NOW - pd.Timedelta(days=d), 5, 0.2, 10_000) for d in range(30)]
-    rows += [("FRESH", _NOW - pd.Timedelta(days=d), 40, 3.0, 900_000) for d in range(3)]
+    rows = [("VET", _NOW - timedelta(days=d), 5, 0.2, 10_000) for d in range(30)]
+    rows += [("FRESH", _NOW - timedelta(days=d), 40, 3.0, 900_000) for d in range(3)]
     b = user_behavior(_usage(rows), _NOW)
     by = {r["USER_NAME"]: r for _, r in b.iterrows()}
     assert bool(by["FRESH"]["NEW_USER"]) and "new + heavy" in by["FRESH"]["FLAGS"]
@@ -57,7 +58,7 @@ def test_steady_user_reads_1x_and_excludes_todays_partial_day():
     # Review fix #1: the recent window is half-open [today-7, today) — exactly 7
     # complete days. A perfectly steady user must read ~1.0x velocity (the old
     # ">= start" 8-day window inflated it ~14%) and today's rows must not count.
-    rows = [("STEADY", _NOW - pd.Timedelta(days=d), 10, 0.5, 50_000) for d in range(36)]
+    rows = [("STEADY", _NOW - timedelta(days=d), 10, 0.5, 50_000) for d in range(36)]
     rows.append(("STEADY", _NOW, 999, 50.0, 9_999_999))   # today's partial day: excluded
     b = user_behavior(_usage(rows), _NOW)
     row = b[b["USER_NAME"] == "STEADY"].iloc[0]
@@ -70,7 +71,7 @@ def test_partial_history_user_is_not_false_flagged():
     # Review fix #2: a steady user onboarded 10 days ago has only 3 baseline days;
     # dividing by a fixed 28 read ~9.5x velocity and false-flagged them for weeks.
     # The baseline now divides by the days the user actually existed in the window.
-    rows = [("RAMP", _NOW - pd.Timedelta(days=d), 20, 1.0, 100_000) for d in range(1, 11)]
+    rows = [("RAMP", _NOW - timedelta(days=d), 20, 1.0, 100_000) for d in range(1, 11)]
     b = user_behavior(_usage(rows), _NOW)
     row = b[b["USER_NAME"] == "RAMP"].iloc[0]
     assert abs(float(row["VELOCITY"]) - 1.0) < 0.15

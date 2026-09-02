@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from uuid import uuid4
 
 import pandas as pd
@@ -325,7 +325,7 @@ def stale_planning(frame: pd.DataFrame | None, now: object, days: int = 30) -> p
     if "UPDATED_AT" not in frame.columns:
         return pd.Series(False, index=frame.index, dtype=bool)
     updated = pd.to_datetime(frame["UPDATED_AT"], errors="coerce")
-    cutoff = pd.Timestamp(now) - pd.Timedelta(days=int(days))
+    cutoff = pd.Timestamp(now) - timedelta(days=int(days))   # numpy generic-unit-safe (round 10)
     return (updated < cutoff).fillna(False)
 
 

@@ -6,6 +6,8 @@ inflating the baseline. Pure functions over pandas frames; no Streamlit.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 
 # Standard-normal consistency constants (Iglewicz & Hoaglin modified z-scores).
@@ -61,7 +63,7 @@ def expected_spike_labels(days: pd.Series, calendar: str | None) -> pd.Series:
                 end = pd.Timestamp(end_s.strip())
                 if pd.isna(start) or pd.isna(end) or end < start:
                     continue
-                hit = (ts >= start) & (ts <= end.normalize() + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+                hit = (ts >= start) & (ts <= end.normalize() + timedelta(days=1) - timedelta(seconds=1))
                 name = (label.strip() or "scheduled event")
             else:
                 kind, _, n_s = rule.partition(":")

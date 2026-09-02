@@ -10,6 +10,8 @@ Contract (the old app broke all four of these):
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -341,7 +343,7 @@ def render() -> None:
             mdf = mlres.df.copy()
             today = account_today()
             now = account_now()
-            month_end = (today.replace(day=28) + pd.Timedelta(days=4)).replace(day=1)
+            month_end = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
             mdf["DAY"] = pd.to_datetime(mdf["DAY"]).dt.date
             # #24: the forecast slice below keeps days STRICTLY AFTER today, so the
             # rest of TODAY (the hours past the metering already booked into mtd_now)
@@ -436,7 +438,7 @@ def render() -> None:
     # diluted (or inflated). Derive both anchor and elapsed from the same UTC midnight
     # the SQL used.
     _now_utc = pd.Timestamp.utcnow().tz_localize(None)
-    _win_start = _now_utc.normalize() - pd.Timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
+    _win_start = _now_utc.normalize() - timedelta(days=_SCORE_HEALTH_WINDOW_DAYS)
     # Floor at 1.0: the window opens a full day before UTC midnight of today, so
     # elapsed is >= 1 by construction — the clamp only defends against a skewed clock,
     # and it errs toward the smaller divisor (never dilutes a real penalty away).

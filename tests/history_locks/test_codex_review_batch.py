@@ -6,7 +6,7 @@ Behavioural tests for the logic-layer fixes; source-locks for the SQL/UI-layer o
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -88,7 +88,7 @@ def test_domain_tokens_use_the_real_table_name():
 def test_month_end_projection_estimates_today():
     from app.logic.forecast import month_end_projection
     today = date(2026, 7, 21)   # 10 days remain after today (Jul 22-31)
-    rows = [{"DAY": (pd.Timestamp(today) - pd.Timedelta(days=i)).date(), "USD": 100.0}
+    rows = [{"DAY": (pd.Timestamp(today) - timedelta(days=i)).date(), "USD": 100.0}
             for i in range(1, 21)]   # Jul 1-20 complete days at $100/day, no today row
     f = month_end_projection(pd.DataFrame(rows), today, engine="linear")
     assert f.ok

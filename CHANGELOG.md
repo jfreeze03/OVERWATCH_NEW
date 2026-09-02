@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.425.0 - Bug hunt round 10: numpy timedelta forward-compat, Ask idle-total disclosure (2026-09-01)
+
+A tenth sweep on deep logic + forward-compat angles (deprecations, platform-score math, alert
+delivery, Ask analyze() math, degenerate-data, forecast/capacity, incident routing). Five
+dimensions came back clean (scoring-math, alert-delivery, degenerate-data, forecast-capacity,
+incident-routing — 10 of 14 agents empty). 2 fixed (1 MED, 1 LOW):
+
+- **numpy timedelta forward-compat time bomb (MED).** `Timestamp/Series - pd.Timedelta(days=N)`
+  emits numpy 2.5's "the 'generic' unit for NumPy timedelta is deprecated, and will raise an error
+  in the future" — currently a warning on every render/test, a hard `TypeError` on a future numpy
+  (which is unpinned). Replaced `pd.Timedelta` with `datetime.timedelta` (verified exempt) at all 8
+  sites (watch_monitor, ai_guardrails, anomaly, control_room, overview ×2, workbench), with a
+  recurrence-guard test that keeps `pd.Timedelta` out of `app/`.
+- **Ask warehouse-waste "account-wide idle" total was uncapped-but-labelled-complete (LOW).** The
+  answerer summed the builder's LIMIT-100 frame and called it the account-wide idle total with no
+  disclosure. Now discloses the top-100 cap when the frame is at it (mirrors the spend answerer's
+  round-6 fix).
+
 ## 4.424.0 - Bug hunt round 9: anomaly-sweep reconcile race, SQL-snippet escaping, rebuild-doc drift (2026-09-01)
 
 A ninth sweep, this time on deeper/fresher angles (end-to-end flagship-number reconciliation,

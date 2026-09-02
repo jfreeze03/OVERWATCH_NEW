@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -132,7 +133,7 @@ def _daily(days_credits_runs_fails, pipeline="ROOT_A"):
     rows = []
     for i, (credits, runs, fails) in enumerate(days_credits_runs_fails):
         rows.append({
-            "DAY": pd.Timestamp("2026-06-01") + pd.Timedelta(days=i),
+            "DAY": pd.Timestamp("2026-06-01") + timedelta(days=i),
             "PIPELINE": pipeline, "DATABASE_NAME": "ALFA_EDW_PRD", "SCHEMA_NAME": "EDW",
             "GRAPH_RUNS": runs, "RUNS_WITH_FAILURES": fails, "TASK_RUNS": runs * 3,
             "AVG_WALL_SEC": 100.0, "P95_WALL_SEC": 200.0, "WH_CREDITS": credits,

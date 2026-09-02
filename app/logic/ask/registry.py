@@ -400,6 +400,10 @@ def _analyze_warehouse_waste(
             d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
     d = d.sort_values("IDLE_CREDITS", ascending=False).reset_index(drop=True)
     total_idle = float(d["IDLE_CREDITS"].sum())
+    # ASK-WASTE (round 10): the builder is LIMIT-100 by idle credits, so this total is the
+    # top-100 warehouses, not the account. Disclose when the frame is at the cap (mirrors the
+    # spend answerer's ASK-G3 note) so "account-wide idle waste" isn't read as complete.
+    _idle_capped = len(df) >= 100
 
     cap_note = (
         [f"Idle analysis is capped to the live {eff}-day window (you asked for {params.days}d)."]
@@ -446,6 +450,9 @@ def _analyze_warehouse_waste(
     idle_scope = ("Account-wide idle waste this window" if params.company == "ALL"
                   else f"Idle waste across {params.company} warehouses this window")
     bullets.append(f"{idle_scope}: {_fmt(total_idle)} credits.")
+    if _idle_capped:
+        bullets.append("Total covers the top 100 warehouses by idle credits (capped per window); "
+                       "the true account-wide idle total is slightly higher.")
     bullets.extend(cap_note)
 
     ev_cols = [c for c in ("WAREHOUSE_NAME", "IDLE_CREDITS", "TOTAL_CREDITS", "IDLE_HOURS", "METERED_HOURS") if c in d.columns]
