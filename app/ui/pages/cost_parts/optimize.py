@@ -1150,9 +1150,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     Fires only on a row click — a new live usage-view scan that stays off
                     first paint — so the perf budget holds."""
                     _db = str(_mv_show.iloc[int(index)]["DATABASE_NAME"])
-                    _res = run(insights_sql.table_storage_breakdown(company, _db), page=_PAGE,
-                               key=f"storgrow_drill_{company}_{_db}", tier="historical",
-                               source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+                    _res = run_mart_first(
+                        mart_sql.table_storage_breakdown_mart(company, _db),
+                        insights_sql.table_storage_breakdown(company, _db),
+                        page=_PAGE, key=f"storgrow_drill_{company}_{_db}",
+                        mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
+                        live_source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
+                        mart_tier="hourly", live_tier="historical")
                     if not guard(_res, f"No table storage rows for {_db} "
                                        "(or TABLE_STORAGE_METRICS is unavailable)."):
                         return
@@ -1250,9 +1254,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 reads_available = waste.ok
                 if not waste.ok:
                     # ACCESS_HISTORY needs Enterprise edition — degrade to the DML-only view.
-                    waste = run(insights_sql.storage_waste(company), page=_PAGE,
-                                key=f"waste_{company}", tier="historical",
-                                source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+                    waste = run_mart_first(
+                        mart_sql.table_storage_waste_mart(company),
+                        insights_sql.storage_waste(company),
+                        page=_PAGE, key=f"waste_{company}",
+                        mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
+                        live_source="TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
+                        mart_tier="hourly", live_tier="historical")
             if waste.ok and waste.empty:
                 empty_state("clean", "No table above 1 GB of combined active + retention bytes in this scope.")
             elif guard(waste, ""):

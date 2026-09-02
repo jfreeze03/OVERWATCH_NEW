@@ -2482,3 +2482,80 @@ GROUP BY 2
 ORDER BY GRAIN, VALUE DESC
 LIMIT 300
 """
+
+
+# ---------------------------------------------------------------------------
+# Per-table storage mart readers (V124). Serve insights_sql.storage_waste /
+# table_storage_breakdown from MART_TABLE_STORAGE_DAILY's latest snapshot so the
+# Spend + Optimize storage panels stop re-scanning TABLE_STORAGE_METRICS /
+# TABLE_DML_HISTORY live. Output columns/filters/order match the live builders
+# BYTE-for-byte so run_mart_first can swap them in; COMPANY is the pre-stamped
+# COMPANY_FOR_DATABASE column (the same axis the live scope filters by), so ALL =
+# no filter (the mart holds real per-table company stamps, not an 'ALL' rollup).
+# ---------------------------------------------------------------------------
+
+def _storage_mart_company(company: str) -> str:
+    return "" if str(company or "ALL").upper() == "ALL" else f"COMPANY = {sql_literal(company)}"
+
+
+def table_storage_waste_mart(company: str = "ALL", min_gb: float = 1.0) -> str:
+    """Mart twin of insights_sql.storage_waste (heavy time-travel/fail-safe, STALE = no
+    DML in 90d) — reads the latest MART_TABLE_STORAGE_DAILY snapshot."""
+    _tbl = mart_object("MART_TABLE_STORAGE_DAILY")
+    min_bytes = int(max(0.1, float(min_gb)) * 1024 ** 3)
+    where = and_where(
+        f"DAY = (SELECT MAX(DAY) FROM {_tbl})",
+        f"ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES >= {min_bytes}",
+        _storage_mart_company(company),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    ROUND(ACTIVE_BYTES / POWER(1024, 3), 2) AS ACTIVE_GB,
+    ROUND(TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
+    ROUND(FAILSAFE_BYTES / POWER(1024, 3), 2) AS FAILSAFE_GB,
+    RETENTION_DAYS,
+    IFF(RETENTION_DAYS IS NULL, FALSE, TRUE) AS RETENTION_KNOWN,
+    LAST_DML,
+    IFF(LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS
+FROM {_tbl}
+WHERE {where}
+ORDER BY TIME_TRAVEL_BYTES + FAILSAFE_BYTES DESC
+LIMIT 50
+"""
+
+
+def table_storage_breakdown_mart(company: str = "ALL", database: str = "", limit: int = 50) -> str:
+    """Mart twin of insights_sql.table_storage_breakdown (per-table active/time-travel/
+    fail-safe/clone split, ordered by total on-disk bytes) — latest snapshot."""
+    from app import companies
+    _tbl = mart_object("MART_TABLE_STORAGE_DAILY")
+    limit = max(5, min(int(limit or 50), 500))
+    where = and_where(
+        f"DAY = (SELECT MAX(DAY) FROM {_tbl})",
+        "ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES > 0",
+        _storage_mart_company(company),
+        companies.database_equals_clause(database, "DATABASE_NAME"),
+    )
+    return f"""
+SELECT
+    DATABASE_NAME,
+    SCHEMA_NAME,
+    TABLE_NAME,
+    ROUND(ACTIVE_BYTES / POWER(1024, 3), 2) AS ACTIVE_GB,
+    ROUND(TIME_TRAVEL_BYTES / POWER(1024, 3), 2) AS TIME_TRAVEL_GB,
+    ROUND(FAILSAFE_BYTES / POWER(1024, 3), 2) AS FAILSAFE_GB,
+    ROUND(RETAINED_FOR_CLONE_BYTES / POWER(1024, 3), 2) AS CLONE_GB,
+    ROUND((ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES + RETAINED_FOR_CLONE_BYTES)
+          / POWER(1024, 3), 2) AS TOTAL_GB,
+    RETENTION_DAYS,
+    LAST_DML,
+    IFF(LAST_DML IS NULL, 'STALE', 'ACTIVE') AS STATUS,
+    IFF(RETENTION_DAYS IS NULL, TRUE, FALSE) AS DROPPED
+FROM {_tbl}
+WHERE {where}
+ORDER BY ACTIVE_BYTES + TIME_TRAVEL_BYTES + FAILSAFE_BYTES + RETAINED_FOR_CLONE_BYTES DESC
+LIMIT {limit}
+"""

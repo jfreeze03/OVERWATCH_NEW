@@ -1193,9 +1193,13 @@ def _storage_table_drill(company: str, settings: dict, db_names: list) -> None:
         return
     rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
     pick = st.selectbox("Database", dbs, key="storage_drill_db")
-    res = run(insights_sql.table_storage_breakdown(company, str(pick)), page=_PAGE,
-              key=f"storage_drill_{pick}", tier="historical",
-              source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY")
+    res = run_mart_first(
+        mart_sql.table_storage_breakdown_mart(company, str(pick)),
+        insights_sql.table_storage_breakdown(company, str(pick)),
+        page=_PAGE, key=f"storage_drill_{pick}",
+        mart_source="MART_TABLE_STORAGE_DAILY (daily snapshot)",
+        live_source="ACCOUNT_USAGE.TABLE_STORAGE_METRICS + TABLE_DML_HISTORY (live)",
+        mart_tier="hourly", live_tier="historical")
     if not guard(res, f"No table storage rows for {pick} (or TABLE_STORAGE_METRICS is unavailable)."):
         return
     t = res.df.copy()

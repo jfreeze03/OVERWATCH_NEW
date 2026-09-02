@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.449.0 - Perf: per-table storage mart (V124) de-dups the TABLE_STORAGE_METRICS scans (2026-09-02)
+
+`storage_waste` (Cost > Optimize) and `table_storage_breakdown` (the Cost > Spend AND Cost >
+Optimize per-database drills) each scanned `ACCOUNT_USAGE.TABLE_STORAGE_METRICS` + a 90-day
+`TABLE_DML_HISTORY` aggregation + a `TABLES` retention join, LIVE, on every render. `TABLE_STORAGE_METRICS`
+is current-state and low-churn, so a once-daily snapshot mart serves all of them fast.
+
+- **Migration V124 (owner-applied)** — a standalone mart, NOT a re-derivation of the byte-locked
+  `SP_LOAD_MARTS_V27` (V046/V035 precedent): NEW `MART_TABLE_STORAGE_DAILY` (per-table active /
+  time-travel / fail-safe / clone bytes + retention + 90d `LAST_DML` + `COMPANY_FOR_DATABASE`-stamped
+  company), `SP_LOAD_TABLE_STORAGE_MART` (snapshots today, prunes history, loader-owned freshness),
+  and a daily 07:10 America/Chicago task. Complements the account-level `FACT_STORAGE_ACCOUNT_DAILY`
+  (V046) with the per-table grain.
+- **App readers** `mart_sql.table_storage_waste_mart` / `table_storage_breakdown_mart` — column-for-column
+  parity with the live builders (asserted), so `run_mart_first` swaps them in. The Optimize storage-waste,
+  Optimize per-database drill, and Spend per-database drill now read the mart first with the live scan as
+  the fallback leg — so those storage panels stop re-scanning `TABLE_STORAGE_METRICS` live on every render.
+- **Deploy ordering:** the readers ship now; until the owner applies V124 the mart read fails and
+  `run_mart_first` falls back to the live scan (current behavior, plus the v4.445 mart-failure backoff).
+  `storage_reclaim` (which additionally joins `ACCESS_HISTORY`) stays live — separate concern.
+- Tests: `tests/migrations/test_v124_table_storage_mart.py`. **Owner must apply V124 in Snowsight after
+  V123** (staged for the runbox handoff).
+
 ## 4.448.0 - Perf: Security landing defers the untagged-tables worklist scan (2026-09-02)
 
 The usage simulator flagged 4 ACCOUNT_USAGE scans on the Security default view. Investigation

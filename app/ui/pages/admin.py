@@ -461,6 +461,10 @@ _EXPECTED_MIGRATIONS = {
          "session/UTC CURRENT_DATE(), matching the reader and every other account_today-anchored calendar-month "
          "surface. Fixes the evening month-boundary drift between the board and the MTD pace KPI. Proc only, "
          "no schema change",
+    124: "Per-table storage mart: MART_TABLE_STORAGE_DAILY + SP_LOAD_TABLE_STORAGE_MART + daily 07:10 task "
+         "snapshot per-table active/time-travel/fail-safe/clone bytes + retention + 90d LAST_DML + company "
+         "from TABLE_STORAGE_METRICS. storage_waste + table_storage_breakdown read it mart-first (live scan "
+         "as fallback), so the Spend + Optimize storage panels stop re-scanning TABLE_STORAGE_METRICS live",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

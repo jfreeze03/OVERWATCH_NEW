@@ -36,8 +36,8 @@ def test_v123_proc_body_is_account_clock_not_current_date():
 
 def test_v123_floor_tracks_the_tip():
     v = (_ROOT / "snowflake/validate.sql").read_text(encoding="utf-8")
-    assert "V001..V123 applied" in v
-    assert "BETWEEN 1 AND 123) = 123" in v
+    assert "V001..V124 applied" in v
+    assert "BETWEEN 1 AND 124) = 124" in v
 
 
 def test_exec_board_reader_calendar_presets_use_account_clock():

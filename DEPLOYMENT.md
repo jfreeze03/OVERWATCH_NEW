@@ -139,6 +139,7 @@ snowflake/migrations/V120__pattern_cost_runs_fanout_fix.sql
 snowflake/migrations/V121__seed_coco_daily_cap.sql
 snowflake/migrations/V122__anomaly_sweep_reconcile_race.sql
 snowflake/migrations/V123__exec_board_account_clock.sql
+snowflake/migrations/V124__table_storage_mart.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```
