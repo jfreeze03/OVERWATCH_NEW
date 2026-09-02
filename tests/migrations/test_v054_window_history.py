@@ -107,7 +107,12 @@ def test_invariant_effective_board_reads_at_least_the_max_window():
     from app.config import DAY_WINDOW_OPTIONS
     max_window = max(DAY_WINDOW_OPTIONS)
     board = _latest_proc("SP_REFRESH_EXEC_BOARD")
-    horizons = [int(n) for n in re.findall(r"DATEADD\('day', -(\d+), CURRENT_DATE\(\)\)", board)]
+    # match the integer source horizons whether anchored on session CURRENT_DATE() or the
+    # V123 account-clock date (CONVERT_TIMEZONE(...)::DATE); -w.WINDOW_DAYS joins are columns
+    # (no int literal) and stay correctly ignored.
+    horizons = [int(n) for n in re.findall(
+        r"DATEADD\('day', -(\d+), (?:CURRENT_DATE\(\)|CONVERT_TIMEZONE\('America/Chicago', "
+        r"CURRENT_TIMESTAMP\(\)\)::DATE)\)", board)]
     assert horizons, "no integer source horizons found — regex/proc shape changed"
     assert min(horizons) >= max_window, (
         f"exec-board source horizon {min(horizons)}d < max advertised window "

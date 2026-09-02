@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.437.0 - Round 14 EXEC-TZ: exec board calendar presets on the account clock (V123) (2026-09-02)
+
+The third round-14 finding, now fixed (coordinated reader + migration). The Overview exec board's
+"Current month" / "Current year" presets keyed their WINDOW_DAYS (and window ranges) off session/UTC
+`CURRENT_DATE()`, while every other calendar-month surface uses the account clock (America/Chicago) via
+`account_today_sql()` — the health-strip MTD, storage calendar, Decision Studio quarter, and the
+Overview MTD pace KPI. During the ~5-6h each evening after UTC passes Chicago midnight (worst on
+month-end), the board's days-into-month drifted one day from those siblings, so "Spend, current month"
+and the MTD pace KPI on the same screen could disagree by up to a full month of dollars; and the reader
+(query-time) vs the loader (refresh-time) could pick different WINDOW_DAYS and blank the board.
+
+- **Reader:** `mart_sql.exec_board` calendar presets now compute WINDOW_DAYS from `account_today_sql()`.
+- **Loader (V123, owner-applied):** `SP_REFRESH_EXEC_BOARD` re-derived from V073 with every
+  `CURRENT_DATE()` replaced by the account-tz date, so the stored WINDOW_DAYS and window ranges match
+  the reader. Output contract, atomic stage swap, source horizons, and the driver arm are otherwise
+  byte-identical; the migration tail re-runs the refresh to re-stamp the board immediately.
+
+**Owner action:** apply V123 in Snowsight after V122 (it joins the pending V118-V122 backlog). Until
+applied, the reader (account clock) and the still-UTC loader can miss during the evening drift and blank
+the board — a graceful degradation (no data), not a wrong number, that self-heals on apply.
+
 ## 4.436.0 - Bug hunt round 14: DAG-node durations + Brief ROI degenerate-denominator false green (2026-09-02)
 
 A cross-surface-consistency round (6 dimensions). Three MED confirmed; the two clean app-code fixes

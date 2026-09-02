@@ -456,6 +456,11 @@ _EXPECTED_MIGRATIONS = {
          "days instead of only MAX(DAY), so a cost spike on a day whose fact was mid-reload (the nightly "
          "reconcile delete+reload race) is caught on the next run via the existing per-(series,day) dedup instead "
          "of being permanently missed. Re-derived from V097; proc only, no schema change",
+    123: "Exec board on the account clock: SP_REFRESH_EXEC_BOARD re-derived so the Current-month/Current-year "
+         "calendar-preset WINDOW_DAYS and window ranges use the account-tz date (America/Chicago) instead of "
+         "session/UTC CURRENT_DATE(), matching the reader and every other account_today-anchored calendar-month "
+         "surface. Fixes the evening month-boundary drift between the board and the MTD pace KPI. Proc only, "
+         "no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

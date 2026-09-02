@@ -42,15 +42,20 @@ def exec_board(company: str, days: int, window: object = None) -> str:
     # would all show 90-day data. The page filter constrains days to
     # DAY_WINDOW_OPTIONS, so WINDOW_DAYS always resolves to a populated board row.
     days = bounded_days(days, MAX_MART_WINDOW_DAYS)
+    # Calendar-preset WINDOW_DAYS keys off the ACCOUNT clock (America/Chicago), matching
+    # the V123 loader (SP_REFRESH_EXEC_BOARD) and every other account_today-anchored
+    # calendar-month surface (health-strip MTD, storage calendar, DS quarter, MTD pace
+    # KPI). Session/UTC CURRENT_DATE() drifted one day from those each evening past
+    # Chicago midnight, so the board's days-into-month and the reader<->loader key could
+    # disagree (blank board / a "this month" differing from the pace KPI by a month).
+    _acct_today = account_today_sql()
     if window == CURRENT_MONTH_WINDOW:
         window_clause = (
-            "WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('month', CURRENT_DATE()), "
-            "CURRENT_DATE())"
+            f"WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('month', {_acct_today}), {_acct_today})"
         )
     elif window == CURRENT_YEAR_WINDOW:
         window_clause = (
-            "WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('year', CURRENT_DATE()), "
-            "CURRENT_DATE())"
+            f"WINDOW_DAYS = DATEDIFF('day', DATE_TRUNC('year', {_acct_today}), {_acct_today})"
         )
     else:
         window_clause = f"WINDOW_DAYS = {days}"
