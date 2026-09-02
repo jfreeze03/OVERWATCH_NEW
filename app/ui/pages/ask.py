@@ -17,7 +17,7 @@ import re
 import streamlit as st
 
 from app.core.errors import safe_page
-from app.core.query import run
+from app.core.query import run, run_batch_mixed
 from app.core.sqlsafe import sql_literal
 from app.core.state import filters
 from app.logic.ask import REGISTRY, route
@@ -233,22 +233,30 @@ def render() -> None:
     ans = rr.answerer
     params = rr.params
     frames = {}
-    # run() never raises — it returns ok=False with an empty frame on failure.
-    # We MUST branch on ok: feeding that empty frame to analyze() would render a
-    # query FAILURE as a confident "no data" answer, the exact false statement
-    # this feature promises never to make.
-    for spec in ans.needs(params):
-        run_kwargs = {"page": _PAGE, "key": f"ask_{ans.intent}_{spec.key}",
-                      "tier": spec.tier, "source": f"Ask:{ans.intent}:{spec.key}"}
+    # An answerer's needs() returns ALL its specs upfront (no spec depends on another's
+    # result), so a multi-query answerer submits them as ONE parallel round-trip via
+    # run_batch_mixed (each spec keeps its own tier) instead of N serial run() calls.
+    specs = list(ans.needs(params))
+    batch = []
+    for spec in specs:
+        bspec = {"key": f"ask_{ans.intent}_{spec.key}", "sql": spec.sql,
+                 "tier": spec.tier, "source": f"Ask:{ans.intent}:{spec.key}"}
         if spec.max_rows is not None:   # an answerer that aggregates asks for an uncapped read
-            run_kwargs["max_rows"] = spec.max_rows
-        res = run(spec.sql, **run_kwargs)
-        if not res.ok:
+            bspec["max_rows"] = spec.max_rows
+        batch.append(bspec)
+    results = run_batch_mixed(batch, page=_PAGE) if batch else {}
+    # run() / run_batch_mixed never raise — a failed member is ok=False with an empty frame.
+    # We MUST branch on ok: feeding that empty frame to analyze() would render a query FAILURE
+    # as a confident "no data" answer, the exact false statement this feature promises never to
+    # make. Warn on the FIRST failing spec (in needs() order) and refuse to guess.
+    for spec in specs:
+        res = results.get(f"ask_{ans.intent}_{spec.key}")
+        if res is None or not res.ok:
             st.warning(
-                f"I couldn't run the grounded query for this ({res.error_kind or 'error'}), "
+                f"I couldn't run the grounded query for this ({(res.error_kind if res else '') or 'error'}), "
                 "so I won't guess. It's logged for follow-up."
             )
-            if res.error:
+            if res is not None and res.error:
                 st.caption(res.error)
             return
         frames[spec.key] = res.df

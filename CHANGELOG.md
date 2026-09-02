@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.446.0 - Perf wins #4/#5: batch the two ETL unit-cost reads + the Ask answerer specs (2026-09-02)
+
+Two low-risk parallelization wins from the audit.
+
+- **ETL unit-cost (`unit_costs.py`):** the tag-coverage KPI and the per-pipeline board were two
+  independent, serial `run()` calls, each scanning `QUERY_HISTORY` + `QUERY_ATTRIBUTION_HISTORY`
+  over the same window/scope. Submitted them as one `run_batch([cov, pipe], tier="historical")` so
+  they execute in parallel (two serial round-trips → one wave); each keeps a serial fallback.
+  Bundled correctness fix: `etl_sql.etl_tag_coverage` now takes `bounds` and mirrors
+  `etl_cost_by_pipeline`'s window logic exactly, so under "Last month" the coverage KPI and the
+  pipeline board (which render side by side) describe the SAME bounded month instead of a trailing
+  window beside a bounded one.
+- **Ask answerer (`ask.py`):** a grounded answer looped over `ans.needs(params)` calling `run()`
+  once per spec, serially. Since `needs()` returns all specs upfront (no inter-spec dependency), a
+  multi-query answerer now submits them as one `run_batch_mixed` round-trip (each spec keeps its own
+  tier). The failure contract is preserved exactly — a failed member is `ok=False`, and the first
+  failing spec (in `needs()` order) still warns and refuses to guess rather than feeding an empty
+  frame to `analyze()` as a false "no data".
+- Tests: `tests/test_batching_wins.py` (ETL window parity + both wirings). No migration.
+
 ## 4.445.0 - Perf win #3: run_mart_first skips re-probing a recently-failed mart (2026-09-02)
 
 `run_mart_first` probes the fast mart first and falls to the expensive live ACCOUNT_USAGE scan

@@ -579,5 +579,6 @@ def test_ask_page_is_wired_and_isolated():
     assert (_ROOT / "app" / "logic" / "ask" / "registry.py").exists()
     ask_py = (_ROOT / "app" / "ui" / "pages" / "ask.py").read_text(encoding="utf-8")
     # review Finding 4: a query FAILURE must branch on res.ok, never fall through
-    # to analyze() as a false "no data".
-    assert "if not res.ok" in ask_py
+    # to analyze() as a false "no data" — preserved through the run_batch_mixed batching.
+    assert "not res.ok" in ask_py
+    assert "run_batch_mixed" in ask_py            # multi-spec answerers submit one parallel batch

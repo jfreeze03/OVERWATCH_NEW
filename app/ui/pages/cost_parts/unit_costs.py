@@ -391,9 +391,20 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
     if st.toggle("Run ETL unit-cost scan", key="etl_unit_toggle",
                  help="Scans the window's QUERY_HISTORY for JSON pipeline tags joined to "
                       "measured attribution credits. Off by default (keeps first paint fast)."):
-        cov = run(etl_sql.etl_tag_coverage(days, company, f["database"], f["schema_contains"]), page=_PAGE,
-                  key=f"etl_cov_{company}_{days}", tier="historical",
-                  source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)")
+        # The two reads are independent (coverage KPI + per-pipeline board) and share the
+        # window/scope, so submit them as one parallel batch instead of two serial round-trips.
+        _etl_cov_sql = etl_sql.etl_tag_coverage(days, company, f["database"], f["schema_contains"], bounds=bounds)
+        _etl_pipe_sql = etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"], bounds=bounds)
+        _etl_pf = run_batch([
+            {"key": "cov", "sql": _etl_cov_sql,
+             "source": "QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)"},
+            {"key": "pipe", "sql": _etl_pipe_sql,
+             "source": "QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)"},
+        ], page=_PAGE, tier="historical")
+        cov = _etl_pf.get("cov")
+        if cov is None or not cov.ok:
+            cov = run(_etl_cov_sql, page=_PAGE, key=f"etl_cov_{company}_{days}{_lm}", tier="historical",
+                      source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)")
         if cov.ok and not cov.empty:
             c0 = cov.df.iloc[0]
             kpi_row([
@@ -406,9 +417,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                  "delta_color": "off",
                  "help": "Measured compute with no pipeline tag, at the configured rate."},
             ])
-        etl = run(etl_sql.etl_cost_by_pipeline(days, company, f["database"], f["schema_contains"], bounds=bounds), page=_PAGE,
-                  key=f"etl_pipe_{company}_{days}{_lm}", tier="historical",
-                  source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)")
+        etl = _etl_pf.get("pipe")
+        if etl is None or not etl.ok:
+            etl = run(_etl_pipe_sql, page=_PAGE, key=f"etl_pipe_{company}_{days}{_lm}", tier="historical",
+                      source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (per pipeline)")
         if guard(etl, "No tagged pipeline runs with attributed credits in this window — "
                       "adopt the JSON QUERY_TAG (docs/design/ETL_COST_TAGS.md)."):
             edf = etl.df.copy()

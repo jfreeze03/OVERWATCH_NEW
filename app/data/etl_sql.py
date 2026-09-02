@@ -159,24 +159,36 @@ LIMIT 100
 
 
 def etl_tag_coverage(days: int, company: str = "ALL", database: str = "",
-                     schema_contains: str = "") -> str:
+                     schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """Credit-weighted pipeline-tag coverage: how much MEASURED compute carries
-    a pipeline tag vs not — the honest denominator for the per-pipeline KPIs."""
+    a pipeline tag vs not — the honest denominator for the per-pipeline KPIs.
+
+    Windows are IDENTICAL to ``etl_cost_by_pipeline`` (including the Last-month
+    ``bounds`` path), so the coverage KPI and the per-pipeline board describe the
+    SAME window — under 'Last month' both are the bounded calendar month, not a
+    trailing window on the coverage KPI beside a bounded board (they render together)."""
     days = bounded_days(days)
     from app.core.sqlsafe import contains_filter
 
     where = and_where(
-        f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
+        (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
+         if bounds is not None
+         else f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         companies.warehouse_company_scope(company, "q.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "q.DATABASE_NAME"),
         contains_filter("q.SCHEMA_NAME", schema_contains),
+    )
+    cred_where = (
+        resolve_effective_window(days, "START_TIME", bounds=bounds)[1]
+        if bounds is not None
+        else f"START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())"
     )
     return f"""
 WITH cred AS (
     SELECT QUERY_ID,
            SUM(COALESCE(CREDITS_ATTRIBUTED_COMPUTE, 0) + COALESCE(CREDITS_USED_QUERY_ACCELERATION, 0)) AS CREDITS
     FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY
-    WHERE START_TIME >= DATEADD('day', -{days + 1}, CURRENT_TIMESTAMP())
+    WHERE {cred_where}
     GROUP BY QUERY_ID
 ),
 q AS (
