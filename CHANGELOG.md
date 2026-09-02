@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.432.0 - Stored-procedure structural syntax coverage (the parse gate's blind spot) (2026-09-02)
+
+The migration parse gate skips `$$` / EXECUTE IMMEDIATE scripting blocks (sqlglot cannot read
+Snowflake Scripting), and the only end-to-end proc gate — the clone smoke — is opt-in +
+continue-on-error, so ~118 of 122 migrations carried their most-patched, highest-defect SQL
+(SP_ALERT_SCAN, SP_LEDGER_AUTOBOOK, SP_LOAD_*) entirely unchecked; a syntax error inside a body
+shipped to Snowsight and was caught by hand. `tests/test_migration_proc_syntax.py` adds robust
+structural coverage over every migration's `$$` bodies:
+
+- **Dollar-quote delimiter balance** — an odd `$$` count is a truncated/malformed body (the class
+  that ships unparseable). Counted after stripping comments and strings so a `$$` inside a comment
+  (V029) does not fool it.
+- **Parenthesis balance inside each `$$` body** — an unbalanced paren is a syntax error the
+  `$$`-skipping parse gate misses. A single-pass tokenizer strips comments and single-quoted strings
+  together, so a `--` inside a dynamic-SQL string (V081) is not mistaken for a comment.
+
+Verified zero-false-positive across all 122 live migrations, with a teeth test proving the checks
+fail on malformed input and a meta-guard that the bodies are actually covered. This is not a full
+parser — a keyword typo still needs the (owner-gated) blocking clone-smoke (see the review's #3) —
+but it converts zero coverage to catching the most common structural failures. No app change.
+
 ## 4.431.0 - Migration-apply safety: startup schema-floor gate + impact-annotated pending-migration punch list (2026-09-02)
 
 Two items from the review's priority list, both addressing the migration-lag problem (why
