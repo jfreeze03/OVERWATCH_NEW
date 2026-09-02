@@ -1010,7 +1010,13 @@ def _performance_tab() -> None:
                 column_config={
                     "MEDIAN_S": st.column_config.Column("Median"),
                     "P95_S": st.column_config.Column("p95"),
-                    "AVG_GB_SCANNED": st.column_config.NumberColumn("Avg GB scanned", format="%.3f"),
+                    # CSF-1 (round 13): AVG_GB_SCANNED is a byte-magnitude column (GB
+                    # token) — leave it OUT of column_config so it falls through to the
+                    # byte-humanize convention (value*1024**3 -> humanize_bytes -> "3.2
+                    # MB"), matching the Operations Heaviest-queries / triage / drill
+                    # surfaces. An explicit "%.3f" printed raw GB, collapsing a ~3 MB
+                    # average scan to "0.003" (reads as nothing scanned). Same class as
+                    # the round-12 FC-1 fix on operations.py SPILL_REMOTE_GB.
                     **_scan_cfg,
                 })
             result_caption(scan)

@@ -661,7 +661,12 @@ SELECT
     ROUND(SUM(c.EXEC_SEC), 1) AS EXEC_SEC,
     ROUND(SUM(c.UNTAGGED_EXEC_SEC), 1) AS UNTAGGED_EXEC_SEC,
     ROUND(100 * (1 - SUM(c.UNTAGGED_EXEC_SEC) / NULLIF(SUM(c.EXEC_SEC), 0)), 1) AS TAGGED_PCT,
-    SUM(c.QUERIES) AS QUERIES
+    SUM(c.QUERIES) AS QUERIES,
+    -- RD-1 (bug-hunt round 13): account-wide totals over the full post-HAVING
+    -- population, pre-LIMIT (window SUM of the group SUMs), so the Tagged-share KPI is
+    -- not biased by the top-30 display cap. Mirrors cost_sql.tag_coverage.
+    ROUND(SUM(SUM(c.EXEC_SEC)) OVER (), 1) AS TOTAL_EXEC_SEC,
+    ROUND(SUM(SUM(c.UNTAGGED_EXEC_SEC)) OVER (), 1) AS TOTAL_UNTAGGED_EXEC_SEC
 FROM {mart_object("MART_TAG_COVERAGE_DAILY")} c
 WHERE {where}
 GROUP BY c.USER_NAME

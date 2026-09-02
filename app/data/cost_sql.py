@@ -962,7 +962,15 @@ SELECT
     -- aggregate the same way (cloud_services_ratio_by_warehouse). (bug-hunt round 5)
     ROUND(100 * (1 - SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL, EXECUTION_TIME, 0))
                      / NULLIF(SUM(EXECUTION_TIME), 0)), 1) AS TAGGED_PCT,
-    COUNT(*) AS QUERIES
+    COUNT(*) AS QUERIES,
+    -- RD-1 (bug-hunt round 13): account-wide totals over the FULL post-HAVING
+    -- population (every user above the 60s floor), computed as a window SUM of the
+    -- group SUMs so they are evaluated BEFORE the LIMIT 30. The rolled-up "Tagged
+    -- share" KPI reads these instead of summing the top-30-by-untagged display frame,
+    -- which shrank the denominator far more than the numerator and biased the share
+    -- LOW (a false ok->warn flip). These repeat the aggregate (no sibling-alias ref).
+    SUM(SUM(EXECUTION_TIME)) OVER () / 1000.0 AS TOTAL_EXEC_SEC,
+    SUM(SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL, EXECUTION_TIME, 0))) OVER () / 1000.0 AS TOTAL_UNTAGGED_EXEC_SEC
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}
 GROUP BY USER_NAME

@@ -131,6 +131,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         if (_fallback and hasattr(st, "status")) else contextlib.nullcontext())
     with _load_status:
         _lm = "_lm" if bounds is not None else ""
+        # WLA-1 (round 13): under "Last month" the global window sets days = the calendar
+        # span of last month (28-31) with bounds != None, but the reads are bounded to the
+        # previous calendar month. A raw "{days}d" tile label then reads as a trailing
+        # window ending today (a DIFFERENT window than the data) and disagrees with the
+        # scope chip's "Last month (Aug 1 - Aug 31)". Use a compact honest label:
+        # "last month" when bounded, else the trailing "{days}d".
+        _wlab = "last month" if bounds is not None else f"{days}d"
         res = metering_res if metering_res is not None else run(
             mart_sql.fact_metering_by_service(days, bounds=bounds), page=_PAGE,
             key=f"metering_fact_{days}{_lm}",
@@ -179,7 +186,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     tier="historical",
                     source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)")
     _tiles = [
-        {"label": f"Credit spend, {days}d (account)", "value": format_usd(billed_usd),
+        {"label": f"Credit spend, {_wlab} (account)", "value": format_usd(billed_usd),
          "help": "Billed credits x configured rates, including the cloud-services adjustment. "
                  "The metering lens only — storage, transfer, and marketplace are in the "
                  "all-in tile; see the org rate card for the invoice total."},
@@ -193,7 +200,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             return format_usd(safe_float(v)) if _cur.upper() == "USD" else f"{safe_float(v):,.0f} {_cur}"
 
         _tiles.append({
-            "label": f"All-in billed, {days}d ({_cur})",
+            "label": f"All-in billed, {_wlab} ({_cur})",
             "value": _cur_fmt(_ar.get("TOTAL_USD")),
             "help": "The invoice total from ORGANIZATION_USAGE (org rate card) for this account "
                     f"and window — adds storage ({_cur_fmt(_ar.get('STORAGE_USD'))}), "
@@ -203,11 +210,11 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     _tiles += [
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
-        {"label": f"Total credits, {days}d", "value": format_credits(total_credits),
+        {"label": f"Total credits, {_wlab}", "value": format_credits(total_credits),
          "help": "Billed credits across all services this window (compute + serverless + AI, "
                  "cloud-services rebate applied). Credits are additive; the dollar split is on "
                  "the Credit-spend tile."},
-        {"label": f"— of which CoCo, {days}d",
+        {"label": f"— of which CoCo, {_wlab}",
          "value": format_usd(coco_usd) if coco_usd is not None else "—",
          "help": "Cortex Code (Snowsight + CLI) token credits x the configured AI rate, from "
                  "FACT_AI_USAGE_DAILY (loaded daily). rec #7: a NON-ADDITIVE subset already "
@@ -225,7 +232,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             wh_usd = float(cat_usd.get("Warehouse", 0.0)) + float(cat_usd.get("Warehouse (reader)", 0.0))
             other_usd = float(sum(cat_usd.values())) - wh_usd
             st.markdown(md_dollars(  # $-escape: three dollar amounts in one markdown body
-                f"- **This page — configured-rate credit spend ({days}d): {format_usd(billed_usd)}.** "
+                f"- **This page — configured-rate credit spend ({_wlab}): {format_usd(billed_usd)}.** "
                 "Account-wide credit-billed services with the cloud-services rebate applied; it "
                 "excludes storage, transfer, marketplace, and org currency adjustments.\n"
                 f"- **Warehouse portion of that billed spend: {format_usd(wh_usd)}** — account-wide, "
@@ -269,7 +276,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     # C37: per-service rows price the SAME billed credits x category rate as the
     # Credit-spend KPI above, so they must tie out to it exactly.
     reconciliation_footer(float(coverage["BILLED_USD"].sum()), billed_usd,
-                          label="services shown", expected_label=f"credit spend ({days}d)")
+                          label="services shown", expected_label=f"credit spend ({_wlab})")
     st.caption(
         "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
         "charges use organization currency data and appear in the on-demand detail below."
@@ -562,13 +569,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 rate_per_tb, used_org = egress_effective_rate_per_tb(org_usd, billable_tb, fallback)
                 edf["EST_USD"] = (edf["TB"] * rate_per_tb).where(edf["BILLABLE"], 0.0).round(2)
                 kpi_row([
-                    {"label": f"Total transferred ({days}d)",
+                    {"label": f"Total transferred ({_wlab})",
                      "value": humanize_bytes(total_bytes),
                      "help": "ALL outbound + cross-region bytes, billable and free — the figure "
                              "that reconciles to Snowsight ▸ Cost Management ▸ Consumption ▸ Data "
                              "Transfer for this account. Most of it is usually free same-region "
                              "transfer; only the billable slice below carries a $."},
-                    {"label": f"Estimated egress ({days}d)",
+                    {"label": f"Estimated egress ({_wlab})",
                      "value": format_usd(float(edf["EST_USD"].sum())),
                      "help": "Billable (cross-region / cross-cloud) transfer x the $/TB at right. "
                              "Same-region transfer is free and priced at $0 — so this is often "
@@ -596,14 +603,14 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                 )
                 if used_org:
                     st.caption(
-                        f"Reconciliation: billed data transfer ({days}d) is {format_usd(org_transfer)} "
+                        f"Reconciliation: billed data transfer ({_wlab}) is {format_usd(org_transfer)} "
                         "on the org rate card; the estimate distributes that across source/target/type "
                         "by billable bytes. BILLABLE is the app's cross-boundary estimate — Snowflake "
                         "owns the exact billing determination."
                     )
                 elif org_transfer > 0.0:
                     st.caption(
-                        f"Org billed {org_transfer:,.2f} {ccy} for data transfer ({days}d), shown for "
+                        f"Org billed {org_transfer:,.2f} {ccy} for data transfer ({_wlab}), shown for "
                         "reference; the USD estimate above uses the DATA_TRANSFER_USD_PER_TB setting "
                         "(org bill non-USD, or the implied $/TB was implausibly high because the app's "
                         "cross-boundary billable estimate under-counts). Edit the rate on Admin."

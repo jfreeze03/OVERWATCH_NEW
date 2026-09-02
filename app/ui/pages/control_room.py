@@ -546,6 +546,13 @@ def render() -> None:
     _stale_n = int(safe_float(_sv.get("STALE_SOURCES", "0")))
     if _stale_n:
         _vsig.append(Signal("warn", f"{_stale_n} telemetry source(s) stale or not loaded"))
+    # DDR-1 (round 13): the open-critical count is a SEPARATE live read from the health
+    # strip. When it fails, _crit_known is False and no bad critical Signal is emitted.
+    # Without this warn the verdict falls through to the green "no open criticals"
+    # all-clear even though the count is UNKNOWN, not zero. Mirrors Brief's
+    # "open-critical count unavailable" and this page's own exception-summary guard.
+    if not _crit_known:
+        _vsig.append(Signal("warn", "open-critical count unavailable"))
     if not (_strip.ok and not _strip.empty):
         _vsig.append(Signal("warn", "health telemetry unavailable"))
     page_verdict_line(page_verdict(

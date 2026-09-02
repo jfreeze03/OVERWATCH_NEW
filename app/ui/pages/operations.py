@@ -1248,7 +1248,7 @@ def _task_sla_view(company: str, days: int, database: str = "",
             kpi_row([
                 {"label": "Late or stale", "value": f"{len(late)}"},
                 {"label": "Stale (silently stopped)", "value": f"{len(stale)}",
-                 "help": "Silent for 2x+ its typical cadence beyond the ~45-min telemetry lag — likely stopped being scheduled.",
+                 "help": "Silent for 2x+ its longest NORMAL scheduled gap (p90 — so a weekend or overnight idle isn't misread as stopped), beyond the ~45-min telemetry lag; likely stopped being scheduled.",
                  "delta_color": "inverse" if len(stale) else "off"},
             ])
             styled_table(
@@ -1256,7 +1256,9 @@ def _task_sla_view(company: str, days: int, database: str = "",
                       "MEDIAN_GAP_MIN", "MINS_SINCE_SUCCESS", "OVERDUE_MIN", "LAST_SUCCESS"]],
                 sort_label="overdue desc")
         result_caption(_fres)
-    st.caption(f"Cadence is each task's own median scheduled-gap. {ACCOUNT_USAGE_LAG_NOTE}")
+    st.caption(f"Cadence is each task's own median scheduled-gap; Late/Stale is judged against "
+               f"its longest NORMAL gap (p90), so a weekend or overnight idle isn't misread as "
+               f"stopped. {ACCOUNT_USAGE_LAG_NOTE}")
     # C16: park the Tasks pill badge — tasks needing attention across BOTH panels
     # above (failure streaks + late-vs-cadence), deduplicated on the task's
     # fully-qualified name where both frames carry it. Values already computed

@@ -286,11 +286,29 @@ def render() -> None:
                 live_source="QUERY_HISTORY (exec-time-weighted, live fallback)")
         if guard(tags_res, "No workloads above the 60s floor in this window."):
             tdf_g = tags_res.df.copy()
-            total_exec = float(tdf_g["EXEC_SEC"].sum())
-            untagged = float(tdf_g["UNTAGGED_EXEC_SEC"].sum())
+            # RD-1 (round 13): the "Tagged share" KPI is an ACCOUNT-WIDE coverage
+            # number, but tdf_g is capped at the top-30 users by untagged time (LIMIT 30
+            # in both builders). Summing the capped frame shrank the denominator far
+            # more than the numerator (well-tagged heavy users ranked past #30 carry
+            # large EXEC but little untagged), biasing the share LOW and flipping
+            # ok->warn on an actually-well-tagged account. Both builders now carry
+            # account-wide TOTAL_EXEC_SEC / TOTAL_UNTAGGED_EXEC_SEC (a SUM() OVER ()
+            # window over the full post-HAVING population, pre-LIMIT); read those,
+            # falling back to the frame sum only for old-shape frames without them.
+            if "TOTAL_EXEC_SEC" in tdf_g.columns and len(tdf_g):
+                total_exec = float(safe_float(tdf_g.iloc[0]["TOTAL_EXEC_SEC"]))
+                untagged = float(safe_float(tdf_g.iloc[0]["TOTAL_UNTAGGED_EXEC_SEC"]))
+            else:
+                total_exec = float(tdf_g["EXEC_SEC"].sum())
+                untagged = float(tdf_g["UNTAGGED_EXEC_SEC"].sum())
+            # keep the repeated account-wide total columns out of the per-user board
+            tdf_g = tdf_g.drop(columns=["TOTAL_EXEC_SEC", "TOTAL_UNTAGGED_EXEC_SEC"],
+                               errors="ignore")
             kpi_row([
                 {"label": "Tagged share (exec-time)",
                  "value": f"{(1 - untagged / total_exec) * 100 if total_exec else 100:,.1f}%",
+                 "help": "Account-wide exec-time-weighted tag coverage across every user "
+                         "above the 60s floor — not just the top-30 untagged users shown below.",
                  "severity": "ok" if total_exec and untagged / total_exec < 0.3 else "warn"},
                 {"label": "Top untagged user",
                  "value": (resolve_display(tdf_g.iloc[0]["USER_NAME"], user_display_map(_PAGE))

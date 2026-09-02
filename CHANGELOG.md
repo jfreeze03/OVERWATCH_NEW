@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.428.0 - Bug hunt round 13: cross-surface consistency sweep (format, help, denominator, verdict, window label) (2026-09-02)
+
+A thirteenth sweep weighted toward the highest-yield remaining angle — cross-page presentation
+consistency — plus deep unexplored angles (ratio denominators, rank/limit ordering, degenerate-data
+rendering). Rank/limit ordering was clean; one window-label finding refuted. 5 MED fixed:
+
+- **Admin "Avg GB scanned" printed raw fixed-decimal GB (MED).** The app-warehouse statement-scan
+  table set an explicit `NumberColumn("Avg GB scanned", format="%.3f")`, so a ~3 MB average scan
+  rendered as `0.003` (reads as nothing scanned) while every other bytes-scanned surface (Operations
+  Heaviest-queries, Optimization-triage, the query drill card) byte-humanizes the same metric to
+  "3.2 MB". Dropped the explicit format so the GB-token column falls through to the humanize
+  convention — same class as the round-12 FC-1 fix, propagated to Admin.
+- **Task "Stale" KPI help described the wrong threshold (MED).** The help said "Silent for 2x+ its
+  typical cadence" and the caption defined cadence as the median scheduled-gap, but the classifier
+  flags Stale at 2x the **p90 longest-normal gap** (so a weekend/overnight idle isn't misread as
+  stopped). For a weekday-only cron the two bases diverge sharply, so the help understated the real
+  silent-stop threshold. Rewrote the help and caption to describe the p90 rule the code actually uses.
+- **"Tagged share (exec-time)" KPI used a biased denominator (MED).** The headline chargeback-coverage
+  KPI summed EXEC_SEC / UNTAGGED_EXEC_SEC over the returned frame — but both builders cap that frame to
+  the top-30 users by untagged time (`LIMIT 30`). Users ranked past #30 carry large total exec but
+  little untagged, so the capped denominator was too small and the tagged share biased LOW, able to
+  flip an ok badge to a false warn escalation. Both builders now emit account-wide `TOTAL_EXEC_SEC` /
+  `TOTAL_UNTAGGED_EXEC_SEC` via a `SUM(...) OVER ()` window over the full post-HAVING population
+  (evaluated before the LIMIT, so **no extra query**); the KPI reads those.
+- **Control Room verdict showed a false "no open criticals" all-clear (MED).** The open-critical count
+  is a separate live read from the health strip; when it failed, `_crit_known` was False, no critical
+  Signal was emitted, and the verdict fell through to the green "no open criticals, delivery clear"
+  sentence even though the count was unknown, not zero. Added a degraded warn when the read fails,
+  mirroring Brief and this page's own exception-summary guard.
+- **Spend tiles mislabeled the bounded "Last month" window (MED).** Under "Last month" the tiles read
+  "Credit spend, 31d (account)" / "Total transferred (31d)" etc. — a trailing-day descriptor over data
+  that is actually the bounded previous calendar month, contradicting the scope chip's "Last month
+  (Aug 1 - Aug 31)". Introduced a compact honest label ("last month" when bounded, else "{days}d")
+  across the flagship, all-in, credits, CoCo, transfer, and reconciliation surfaces.
+
 ## 4.427.0 - Bug hunt round 12: presentation honesty on spill, driver reconciliation, and stale-source cadence (2026-09-02)
 
 A twelfth sweep on deep, targeted angles (cross-page presentation consistency, KPI-vs-driver
