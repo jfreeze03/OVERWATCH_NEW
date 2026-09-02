@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.434.0 - Shaped render contracts extended to batched reads (+ fixed a vacuous gate block) (2026-09-02)
+
+Follow-up to v4.433. Two fixes to the shaped-render harness (`tests/test_pages_shaped.py`):
+
+- **The startup schema gate was silently blocking the render test.** v4.433 shaped `main`'s run(),
+  so the gate's SCHEMA_VERSION read returned a shaped VERSION column (max 2) that looked below the
+  floor — every non-Admin page rendered the "migrated through V088" blocked state instead of its
+  body, so the smoke was largely vacuous. The harness now bypasses `_schema_floor_breach` (it has its
+  own tests) and asserts the blocked-state text is absent, so pages render their real bodies.
+- **Batched reads are now shaped too.** `run_batch`, `run_batch_mixed`, and `run_mart_first` were
+  still returning empty, so the populated branches behind batched panels (Control Room, Operations,
+  Cost) never ran. All four read entry points are now shaped across every read-doing UI module
+  (pages, cost_parts, workbench / decision_studio / security_center / ai_panel), so batched populated
+  branches execute and a column-contract break in them surfaces as a failure. A teeth test proves the
+  batched stubs shape every member. No app change.
+
 ## 4.433.0 - Production-shaped render contracts: populated page branches now execute in CI (2026-09-02)
 
 The AppTest smoke stubbed run() to an EMPTY DataFrame, so only the honest-empty branches ran — the
