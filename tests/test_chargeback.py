@@ -41,7 +41,10 @@ def test_department_map_join_is_deduplicated_against_fanout():
 def test_role_share_normalizes_per_warehouse():
     sql = chargeback_sql.role_share_within_warehouse(7, "Trexis")
     assert "RATIO_TO_REPORT" in sql and "PARTITION BY WAREHOUSE_NAME" in sql
-    assert "IN ('WH_TRXS_LOAD'" in sql
+    # warehouse company scope via the COMPANY_SCOPE-aware UDF (warehouse_company_scope),
+    # matching the cost boards; the role visibility side still uses the role-name heuristic
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'Trexis'" in sql
+    assert "LIKE '%TRXS%'" in sql  # role_clause: role grain has no COMPANY_SCOPE mapping
     assert "$" not in sql  # dollarization happens app-side at the exact wh spend
 
 

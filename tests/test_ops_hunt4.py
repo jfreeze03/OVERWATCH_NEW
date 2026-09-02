@@ -36,8 +36,8 @@ def test_task_failure_details_keeps_only_the_terminal_attempt() -> None:
     assert "ORDER BY COMPLETED_TIME DESC NULLS LAST) = 1" in sql
     # FAILED is filtered AFTER the dedup (outer select over the terminal CTE), not in the inner scan
     assert "FROM terminal\nWHERE STATE = 'FAILED'" in sql
-    # company scoping is still live (a company-taking builder) in the inner scan
-    assert "DATABASE_NAME ILIKE 'ALFA%'" in sql
+    # company scoping is still live in the inner scan, via the COMPANY_SCOPE-aware UDF
+    assert "COMPANY_FOR_DATABASE(DATABASE_NAME) = 'ALFA'" in sql
 
 
 # --------------------------------------------------------------------------- #

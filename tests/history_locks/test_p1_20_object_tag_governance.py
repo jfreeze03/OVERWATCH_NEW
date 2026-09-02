@@ -28,11 +28,11 @@ def test_object_tag_coverage_builder_contract():
     assert "NULLIF(COUNT(*), 0)" in sql                     # no divide-by-zero
     for key in ("COST_OWNER", "SENSITIVITY", "SERVICE_TIER", "APP_OWNER"):
         assert f"'{key}'" in sql, key                       # all four tag literals
-    # company scope threads the verified database_clause on TABLE_CATALOG
-    assert companies.database_clause("ALFA", "t.TABLE_CATALOG") in sql
+    # company scope threads the COMPANY_SCOPE-aware UDF (database_company_scope) on TABLE_CATALOG
+    assert companies.database_company_scope("ALFA", "t.TABLE_CATALOG") in sql
     assert security_sql.object_tag_coverage("ALFA") != security_sql.object_tag_coverage("ALL")
-    # ALL injects no company predicate (database_clause('ALL') is empty)
-    assert companies.database_clause("ALFA", "t.TABLE_CATALOG") not in \
+    # ALL injects no company predicate (database_company_scope('ALL') is empty)
+    assert companies.database_company_scope("ALFA", "t.TABLE_CATALOG") not in \
         security_sql.object_tag_coverage("ALL")
 
 
@@ -41,7 +41,7 @@ def test_untagged_objects_builder_contract():
     assert "g.OBJECT_NAME IS NULL" in sql                   # the gap: no matching tag
     assert "'SENSITIVITY'" in sql and sql.count("UPPER(r.TAG_NAME) =") == 1  # one key
     assert "LIMIT 50" in sql
-    assert companies.database_clause("Trexis", "t.TABLE_CATALOG") in sql
+    assert companies.database_company_scope("Trexis", "t.TABLE_CATALOG") in sql
     assert "ORDER BY t.BYTES DESC" in sql                   # biggest untagged first
     # limit is clamped, never interpolated raw
     assert "LIMIT 1000" in security_sql.untagged_objects("ALL", "COST_OWNER", limit=99999)

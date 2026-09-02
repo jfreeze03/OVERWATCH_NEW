@@ -26,7 +26,7 @@ def graph_daily_costs(days: int, company: str = "ALL", database: str = "",
     where = and_where(
         scope_window_where("h.QUERY_START_TIME", days, bounds=bounds),
         "h.STATE IN ('SUCCEEDED', 'FAILED')",
-        companies.database_clause(company, "h.DATABASE_NAME"),
+        companies.database_company_scope(company, "h.DATABASE_NAME"),
         companies.database_equals_clause(database, "h.DATABASE_NAME"),
         contains_filter("h.SCHEMA_NAME", schema_contains),
     )
@@ -110,7 +110,7 @@ def serverless_task_daily(days: int, company: str = "ALL", database: str = "",
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database, "DATABASE_NAME"),
         contains_filter("SCHEMA_NAME", schema_contains),
     )

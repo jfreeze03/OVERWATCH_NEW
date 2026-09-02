@@ -33,8 +33,11 @@ def test_breakdown_splits_all_four_components_ordered_by_total():
 
 
 def test_breakdown_is_injection_safe_and_bounded():
-    # company is CLASSIFIED (never echoed), so a hostile value can't reach the SQL.
-    assert "DROP--" not in insights_sql.table_storage_breakdown("ALFA'; DROP--")
+    # company scopes via COMPANY_FOR_DATABASE (database_company_scope): a hostile value is a
+    # contained, quote-doubled string literal (fail-closed on out-of-domain), never executable.
+    csql = insights_sql.table_storage_breakdown("ALFA'; DROP--")
+    assert "'ALFA''; DROP--'" in csql        # doubled quote = safely escaped
+    assert "= 'ALFA'; DROP" not in csql       # NOT an unescaped break-out
     # database IS echoed (it names a real catalog), but sql_literal doubles any
     # quote so it stays a contained string literal — no statement break-out.
     dsql = insights_sql.table_storage_breakdown("ALFA", "X'; DROP--")

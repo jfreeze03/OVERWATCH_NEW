@@ -250,7 +250,7 @@ def replication_by_database(days: int, company: str = "ALL", database: str = "",
     days = bounded_days(days, 365)
     where = and_where(
         scope_window_where("START_TIME", days, bounds=bounds),
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database, "DATABASE_NAME"),
     )
     return f"""
@@ -430,7 +430,7 @@ def storage_by_database(days: int, company: str = "ALL", database: str = "") -> 
     days = bounded_days(days, 365)
     where = and_where(
         f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company),
+        companies.database_company_scope(company),
         companies.database_equals_clause(database),
     )
     return f"""
@@ -454,7 +454,7 @@ def storage_by_database_live(days: int, company: str = "ALL", database: str = ""
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company),
+        companies.database_company_scope(company),
         companies.database_equals_clause(database),
     )
     return f"""
@@ -488,7 +488,7 @@ def storage_by_database_calendar(company: str = "ALL", database: str = "", prior
         lo = account_month_start_sql()
         hi = account_today_sql()
     where = and_where(f"DAY >= {lo}", f"DAY < {hi}",
-                      companies.database_clause(company),
+                      companies.database_company_scope(company),
                       companies.database_equals_clause(database))
     # Divide by DAYS-IN-PERIOD, not days-with-a-row: Snowflake's monthly-average
     # billing basis counts a database that existed only part of the window as 0
@@ -523,7 +523,7 @@ def storage_by_database_calendar_live(company: str = "ALL", database: str = "", 
         lo = account_month_start_sql()
         hi = account_today_sql()
     where = and_where(f"USAGE_DATE >= {lo}", f"USAGE_DATE < {hi}",
-                      companies.database_clause(company),
+                      companies.database_company_scope(company),
                       companies.database_equals_clause(database))
     # Days-in-period denominator, matching storage_by_database_calendar (the mart
     # path) so the two never disagree — see the note there.

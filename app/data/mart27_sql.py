@@ -116,7 +116,7 @@ def task_graphs(days: int, company: str = "ALL", database: str = "",
     mart was empty (bug-hunt round 6)."""
     days = bounded_days(days, 400)
     parts = [scope_window_where("DAY", days, bounds=bounds),
-             companies.database_clause(company, "DATABASE_NAME"),
+             companies.database_company_scope(company, "DATABASE_NAME"),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
         parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")
@@ -133,14 +133,14 @@ LIMIT 5000
 def task_nodes(days: int, company: str = "ALL", database: str = "",
                schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     """C18: per-node loader timing from MART_TASK_NODE_DAILY (V058), which loads
-    but had no reader. No COMPANY column -> scope via database_clause on
-    DATABASE_NAME, same as task_graphs. Mart-ONLY (no live-parity builder: the
+    but had no reader. No COMPANY column -> scope via the COMPANY_FOR_DATABASE UDF
+    (database_company_scope) on DATABASE_NAME, same as task_graphs. Mart-ONLY (no live-parity builder: the
     dispatch-queue delay needs SCHEDULED_TIME, which no app live builder computes,
     so a fallback leg would diverge numerically). p95 dispatch queue first surfaces
     the late-start / contention offenders the mart exists to quantify."""
     days = bounded_days(days, 400)
     parts = [scope_window_where("DAY", days, bounds=bounds),
-             companies.database_clause(company, "DATABASE_NAME"),
+             companies.database_company_scope(company, "DATABASE_NAME"),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():
         parts.append(f"UPPER(DATABASE_NAME) = {sql_literal(str(database).upper())}")

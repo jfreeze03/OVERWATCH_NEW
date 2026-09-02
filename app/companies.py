@@ -345,3 +345,42 @@ def company_case_sql(warehouse_col: str = "WAREHOUSE_NAME") -> str:
     WH_ALFA_* -> ALFA, else UNKNOWN. Superseded the old 'Trexis else ALFA'
     CASE that mislabeled every residual/unmapped warehouse as ALFA."""
     return f"DBA_MAINT_DB.OVERWATCH.COMPANY_FOR_WAREHOUSE({warehouse_col})"
+
+
+# ---------------------------------------------------------------------------
+# Company-scope FILTER predicates via the COMPANY_SCOPE-aware UDFs.
+#
+# The MC-1 class (round 11, 16): the name-pattern clauses (warehouse_clause /
+# database_clause) test membership by NAME PATTERN, but COMPANY_FOR_WAREHOUSE /
+# COMPANY_FOR_DATABASE consult the operator-editable COMPANY_SCOPE table FIRST.
+# A warehouse/database mapped in COMPANY_SCOPE but off the name pattern is
+# INCLUDED by the UDF (used to LABEL every board and to FILTER the marts +
+# cost_sql + insights_sql) but DROPPED by the name-pattern clause — so a
+# name-pattern-scoped board silently disagreed with its UDF-scoped siblings on
+# which rows belong to the company. These two helpers are the canonical FILTER
+# form on the same UDF axis the marts/labels use; '' for ALL (no filter), the
+# same contract as warehouse_clause / database_clause so ALL is unchanged.
+# (COMPANY_FOR_ROLE does NOT read COMPANY_SCOPE — role has no operator mapping,
+# so role_clause is the authoritative role-grain axis and needs no UDF twin.)
+# ---------------------------------------------------------------------------
+
+def warehouse_company_scope(company: str, column: str = "WAREHOUSE_NAME") -> str:
+    """FILTER a live warehouse read to ``company`` via COMPANY_FOR_WAREHOUSE —
+    the COMPANY_SCOPE-aware axis the marts FILTER by and company_case_sql LABELS
+    by. Use instead of warehouse_clause wherever a sibling surface labels/scopes
+    warehouses by the UDF, so a COMPANY_SCOPE-mapped-but-off-pattern warehouse
+    scopes consistently. '' for the ALL scope."""
+    if str(company or "ALL").upper() == "ALL":
+        return ""
+    return f"{company_case_sql(column)} = {sql_literal(company)}"
+
+
+def database_company_scope(company: str, column: str = "DATABASE_NAME") -> str:
+    """FILTER a live database-grain read to ``company`` via COMPANY_FOR_DATABASE —
+    the COMPANY_SCOPE-aware axis cost_sql (storage-movers), insights_sql and the
+    marts already LABEL/FILTER by. Use instead of database_clause so a
+    COMPANY_SCOPE-mapped-but-off-pattern database scopes the same on Ops/Security
+    as it does on Cost/Insights. '' for the ALL scope."""
+    if str(company or "ALL").upper() == "ALL":
+        return ""
+    return f"{database_case_sql(column)} = {sql_literal(company)}"

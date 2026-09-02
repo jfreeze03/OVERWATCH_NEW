@@ -72,7 +72,7 @@ def role_share_within_warehouse(days: int, company: str = "ALL", *, bounds: tupl
         scope_window_where("START_TIME", days, bounds=bounds),
         "WAREHOUSE_NAME IS NOT NULL",
         "EXECUTION_STATUS = 'SUCCESS'",
-        companies.warehouse_clause(company),
+        companies.warehouse_company_scope(company),
     )
     vis = and_where(companies.role_clause(company, "ROLE_NAME"))
     return f"""
@@ -146,7 +146,7 @@ def role_department_map_join(days: int, company: str = "ALL") -> str:
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "WAREHOUSE_NAME IS NOT NULL",
         "EXECUTION_STATUS = 'SUCCESS'",
-        companies.warehouse_clause(company),
+        companies.warehouse_company_scope(company),
     )
     return f"""
 SELECT

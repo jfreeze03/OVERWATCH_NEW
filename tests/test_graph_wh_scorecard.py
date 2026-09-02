@@ -93,7 +93,8 @@ def test_graph_costs_honors_database_filter():
 
 def test_graph_costs_company_scope_and_day_clamp():
     trexis = graph_sql.graph_daily_costs(30, "Trexis")
-    assert "TRXS" in trexis
+    # company scope via the COMPANY_SCOPE-aware UDF (database_company_scope), not name pattern
+    assert "COMPANY_FOR_DATABASE" in trexis and "= 'Trexis'" in trexis
     clamped = graph_sql.graph_daily_costs(999999)
     assert "-90," in clamped                             # bounded live window
 

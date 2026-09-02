@@ -202,7 +202,7 @@ def storage_growth_by_database(days: int, company: str = "ALL") -> str:
     days = bounded_days(days)
     where = and_where(
         f"USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company),
+        companies.database_company_scope(company),
     )
     return f"""
 WITH daily AS (
@@ -278,7 +278,7 @@ def release_task_compare(release_date: str, window_days: int, company: str = "AL
     where = and_where(
         f"QUERY_START_TIME >= DATEADD('day', -{window}, DATE '{release}')",
         f"QUERY_START_TIME < DATEADD('day', {window}, DATE '{release}')",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
     )
     return f"""
 WITH runs AS (
@@ -343,7 +343,7 @@ def detect_release_days(days: int, company: str = "ALL") -> str:
         _RELEASE_DDL_PREDICATE,
         _RELEASE_DDL_NOISE,
         "COALESCE(QUERY_TAG, '') NOT LIKE 'OVERWATCH%'",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
     )
     return f"""
 SELECT
@@ -382,7 +382,7 @@ def task_failure_details(days: int, company: str = "ALL", database: str = "", sc
     where = and_where(
         f"SCHEDULED_TIME >= DATEADD('day', -{days + 1}, CURRENT_DATE())",
         f"QUERY_START_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -664,7 +664,7 @@ def storage_waste(company: str = "ALL", min_gb: float = 1.0) -> str:
     where = and_where(
         "m.DELETED = FALSE",
         f"m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES >= {min_bytes}",
-        companies.database_clause(company, "m.TABLE_CATALOG"),
+        companies.database_company_scope(company, "m.TABLE_CATALOG"),
     )
     return f"""
 SELECT
@@ -704,7 +704,7 @@ def table_storage_breakdown(company: str = "ALL", database: str = "", limit: int
     where = and_where(
         "m.DELETED = FALSE",
         "m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES > 0",
-        companies.database_clause(company, "m.TABLE_CATALOG"),
+        companies.database_company_scope(company, "m.TABLE_CATALOG"),
         companies.database_equals_clause(database, "m.TABLE_CATALOG"),
     )
     return f"""
@@ -1120,7 +1120,7 @@ def storage_reclaim(company: str = "ALL", min_gb: float = 1.0, read_days: int = 
     where = and_where(
         "m.DELETED = FALSE",
         f"m.ACTIVE_BYTES + m.TIME_TRAVEL_BYTES + m.FAILSAFE_BYTES >= {min_bytes}",
-        companies.database_clause(company, "m.TABLE_CATALOG"),
+        companies.database_company_scope(company, "m.TABLE_CATALOG"),
     )
     return f"""
 WITH reads AS (
@@ -1516,7 +1516,7 @@ def clustering_by_table(days: int = 30, company: str = "ALL") -> str:
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "CREDITS_USED > 0",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
     )
     return f"""
 SELECT

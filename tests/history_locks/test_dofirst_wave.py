@@ -133,8 +133,9 @@ def test_c18_task_nodes_reader():
     assert "MART_TASK_NODE_DAILY" in sql
     assert "P95_QUEUE_SEC" in sql and "P95_EXEC_SEC" in sql
     assert "ORDER BY P95_QUEUE_SEC DESC" in sql
-    # no COMPANY column on the mart — must scope via DATABASE_NAME, not COMPANY=
-    assert "COMPANY" not in sql
+    # no COMPANY column on the mart — scope via COMPANY_FOR_DATABASE(DATABASE_NAME), not COMPANY=
+    assert " AS COMPANY" not in sql and "COMPANY =" not in sql
+    assert "COMPANY_FOR_DATABASE(DATABASE_NAME) = 'ALFA'" in sql
     assert "DATABASE_NAME" in sql
 
 

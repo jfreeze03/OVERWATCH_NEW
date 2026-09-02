@@ -345,7 +345,7 @@ def recent_ddl_changes(days: int, company: str = "ALL", database: str = "", sche
     # follows the actor's company for context-less DDL and shows cross-company changes
     # under both lenses (union semantics; the disclosure caption states the rule).
     _uc = companies.user_clause(company, "g.USER_NAME")
-    _dc = companies.database_clause(company, "g.DATABASE_NAME")
+    _dc = companies.database_company_scope(company, "g.DATABASE_NAME")
     _actor_or_object = f"({_uc} OR {_dc})" if _uc and _dc else (_uc or _dc)
     where = and_where(
         companies.database_equals_clause(database),
@@ -555,8 +555,9 @@ def object_tag_coverage(company: str = "ALL",
     ``tbls`` row, so no OBJECT_DELETED filter is needed on the (unverified) tag view.
     Scoped to DOMAIN='TABLE' — this account has no ACCOUNT_USAGE.WAREHOUSES/DATABASES
     views (see ``show_warehouses_sql``), so warehouse/database tag coverage has no
-    honest denominator and is deliberately out of v1. Company scope via
-    ``database_clause`` on TABLE_CATALOG (same mechanism as insights_sql.storage_waste).
+    honest denominator and is deliberately out of v1. Company scope via the
+    COMPANY_FOR_DATABASE UDF (``database_company_scope``) on TABLE_CATALOG
+    (same mechanism as insights_sql.storage_waste).
     Tag keys are whitelisted through sql_literal — never raw UI text."""
     # dict.fromkeys de-dups while preserving order: a duplicate or case-variant tag
     # key would otherwise fan out the keys CTE and double every TOTAL/TAGGED count.
@@ -567,7 +568,7 @@ def object_tag_coverage(company: str = "ALL",
     where = and_where(
         "t.DELETED IS NULL",
         "t.TABLE_TYPE = 'BASE TABLE'",
-        companies.database_clause(company, "t.TABLE_CATALOG"),
+        companies.database_company_scope(company, "t.TABLE_CATALOG"),
     )
     return f"""
 WITH tbls AS (
@@ -613,7 +614,7 @@ def untagged_objects(company: str = "ALL", tag_name: str = "COST_OWNER",
     where = and_where(
         "t.DELETED IS NULL",
         "t.TABLE_TYPE = 'BASE TABLE'",
-        companies.database_clause(company, "t.TABLE_CATALOG"),
+        companies.database_company_scope(company, "t.TABLE_CATALOG"),
     )
     return f"""
 WITH tagged AS (
@@ -1638,7 +1639,7 @@ def recent_ddl_changes_fact(days: int, company: str = "ALL", database: str = "",
                             schema_contains: str = "", *, bounds: tuple | None = None) -> str:
     days = bounded_days(days, maximum=90)
     actor_company = companies.user_clause(company, "g.USER_NAME")
-    object_company = companies.database_clause(company, "g.DATABASE_NAME")
+    object_company = companies.database_company_scope(company, "g.DATABASE_NAME")
     actor_or_object = (
         f"({actor_company} OR {object_company})"
         if actor_company and object_company else (actor_company or object_company)

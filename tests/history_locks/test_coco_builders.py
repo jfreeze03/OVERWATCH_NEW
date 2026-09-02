@@ -62,5 +62,8 @@ def test_storage_waste_builder():
     assert "TABLE_STORAGE_METRICS" in sql and "TABLE_DML_HISTORY" in sql
     assert "'STALE'" in sql and "'ACTIVE'" in sql
     assert str(2 * 1024 ** 3) in sql            # min-size floor in bytes
-    # company never interpolates raw — unknown values fall through to no-op scope
-    assert "DROP--" not in insights_sql.storage_waste("ALFA'; DROP--")
+    # company scopes via the COMPANY_FOR_DATABASE UDF (database_company_scope); a hostile
+    # value is a contained, quote-doubled string literal (fail-closed), never executable SQL.
+    csql = insights_sql.storage_waste("ALFA'; DROP--")
+    assert "'ALFA''; DROP--'" in csql          # doubled quote = safely escaped
+    assert "= 'ALFA'; DROP" not in csql         # NOT an unescaped break-out

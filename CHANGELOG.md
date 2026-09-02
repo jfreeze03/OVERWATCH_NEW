@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.441.0 - App-wide close-out of the MC-1 company-scope class: every data-builder FILTER on the COMPANY_SCOPE-aware UDF axis (2026-09-02)
+
+Extending the ops/security/chargeback audit revealed the name-pattern-vs-UDF company-scope split
+spans **8 data-builder files**, not the 3 named — and that name-pattern (`warehouse_clause` /
+`database_clause`) was the *dominant* convention (25 database + 8 warehouse FILTER sites), while the
+COMPANY_SCOPE-aware UDFs (`COMPANY_FOR_WAREHOUSE` / `COMPANY_FOR_DATABASE`) were used only to LABEL
+boards and to FILTER the marts. Because those UDFs consult the operator-editable `COMPANY_SCOPE`
+table first, a warehouse/database mapped there but off the seeded name pattern was scoped one way on
+the mart/label side and a different way on every name-pattern board (the MC-1 class). A partial
+conversion of only the 3 named files would have made the axis *more* mixed, so — with owner sign-off —
+this closes the class **app-wide**.
+
+- **Two canonical helpers** added to `companies.py`: `warehouse_company_scope(company, col)` and
+  `database_company_scope(company, col)` — the FILTER form on the same UDF axis the marts filter by and
+  the boards label by; `''` for the ALL scope (unchanged contract).
+- **All 33 name-pattern company-FILTER call sites converted** across `ops_sql`, `security_sql`,
+  `chargeback_sql`, `cost_sql`, `insights_sql`, `mart27_sql`, `graph_sql`, `app_cost_sql`, `etl_sql`.
+  Included the one genuine *internal* divergence found in passing — the DB-size-trend builder FILTERED
+  by name pattern but LABELED `AS COMPANY` by the UDF — and the security DDL `(user[UDF] OR
+  database[name-pattern])` predicates, now single-axis.
+- **`role_clause` deliberately left as-is**: `COMPANY_FOR_ROLE` does not read `COMPANY_SCOPE` (role
+  grain has no operator mapping — role names are the only company signal), so the name-pattern IS the
+  authoritative role axis. `user_scope_subquery` already routed through `COMPANY_FOR_USER`.
+- **Behavior note (safe):** for an out-of-domain company value the UDF helpers are fail-CLOSED (a
+  quote-doubled, injection-safe literal that matches nothing) where the name-pattern clause was
+  fail-OPEN (empty → all rows). The UI constrains company to `COMPANIES`, so live numbers are
+  unchanged; this only hardens malformed input and matches the established `_wh_company_scope` contract.
+- A guard test (`tests/test_company_scope_udf_axis.py`) forbids any `companies.{warehouse,database}_clause(company`
+  FILTER call from returning to `app/data`, and pins the helper form + injection-safety. No migration.
+
 ## 4.440.0 - Audit follow-up: all remaining insights_sql warehouse-company scope on the UDF axis (2026-09-02)
 
 Auditing the ~13 remaining `companies.warehouse_clause` uses in `insights_sql` (flagged after round-16

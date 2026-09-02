@@ -280,7 +280,8 @@ def test_new_readers_parse_and_preserve_expected_shapes() -> None:
     assert "TARGET_LOCATION" in security_sql.unload_activity(7, "ALFA")
     fact_changes = security_sql.recent_ddl_changes_fact(7, "ALFA")
     assert "COMPANY_FOR_USER(g.USER_NAME) = 'ALFA'" in fact_changes
-    assert "g.DATABASE_NAME ILIKE 'ALFA%'" in fact_changes
+    # object side now on the same COMPANY_SCOPE-aware axis as the actor side (database_company_scope)
+    assert "COMPANY_FOR_DATABASE(g.DATABASE_NAME) = 'ALFA'" in fact_changes
     assert "THEN 'NOT_APPLICABLE'" in fact_changes
     for changes in (fact_changes, security_sql.recent_ddl_changes(7, "ALFA")):
         assert "EXISTS (" not in changes
@@ -420,7 +421,7 @@ def test_security_page_wires_decisions_drills_and_fact_fallbacks() -> None:
 
 
 def test_deploy_and_rebuild_surfaces_track_v075() -> None:
-    assert 'APP_VERSION = "4.440.0"' in _read("app/config.py")
+    assert 'APP_VERSION = "4.441.0"' in _read("app/config.py")
     assert "## 4.146.0 - Security page trimmed to read-only posture" in _read(
         "CHANGELOG.md"
     )

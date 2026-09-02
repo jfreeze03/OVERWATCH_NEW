@@ -113,7 +113,7 @@ def task_runs(days: int, company: str = "ALL", database: str = "", schema_contai
     days = bounded_days(days)
     where = and_where(
         scope_window_where("QUERY_START_TIME", days, bounds=bounds),
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -170,7 +170,7 @@ def task_recent_states(days: int, company: str = "ALL", database: str = "",
     where = and_where(
         f"SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
         "STATE IN ('SUCCEEDED', 'FAILED')",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -218,7 +218,7 @@ def task_freshness_sla(days: int = 14, company: str = "ALL", database: str = "",
     days = max(3, min(int(days or 14), 90))
     where = and_where(
         f"SCHEDULED_TIME >= DATEADD('day', -{days}, CURRENT_DATE())",
-        companies.database_clause(company, "DATABASE_NAME"),
+        companies.database_company_scope(company, "DATABASE_NAME"),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -287,7 +287,7 @@ SELECT
     SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB,
     APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
-WHERE {and_where(scope_window_where("START_TIME", days, bounds=bounds), "WAREHOUSE_NAME IS NOT NULL", companies.warehouse_clause(company))}
+WHERE {and_where(scope_window_where("START_TIME", days, bounds=bounds), "WAREHOUSE_NAME IS NOT NULL", companies.warehouse_company_scope(company))}
 GROUP BY 1
 HAVING SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0) + COALESCE(QUEUED_PROVISIONING_TIME, 0)) > 0
     OR SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) > 0
@@ -666,7 +666,7 @@ def warehouse_concurrency_peaks(days: int, company: str = "ALL") -> str:
     days = bounded_days(days)
     where = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        companies.warehouse_clause(company),
+        companies.warehouse_company_scope(company),
     )
     return f"""
 SELECT
@@ -689,7 +689,7 @@ def copy_load_failures(days: int, company: str = "ALL") -> str:
     where = and_where(
         f"LAST_LOAD_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "STATUS IN ('Load failed', 'Partially loaded')",
-        companies.database_clause(company, "TABLE_CATALOG_NAME"),
+        companies.database_company_scope(company, "TABLE_CATALOG_NAME"),
     )
     return f"""
 SELECT

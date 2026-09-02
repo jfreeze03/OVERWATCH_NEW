@@ -79,7 +79,7 @@ def app_cost_live(days: int = 30, company: str = "ALL", *,
         sess_scope = f"CREATED_ON >= DATEADD('day', -{days + 7}, CURRENT_TIMESTAMP())"
     q_where = and_where(
         q_scope,
-        companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
+        companies.warehouse_company_scope(company, "q.WAREHOUSE_NAME"),
     )
     return f"""
 WITH cred AS (

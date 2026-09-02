@@ -422,8 +422,8 @@ def test_detect_release_days_scans_ddl_excludes_noise_and_scopes():
     assert "CREATE_TABLE_AS_SELECT" in sql and "ALTER_SESSION" in sql
     # the app's own maintenance DDL is excluded by its query tag
     assert "NOT LIKE 'OVERWATCH%'" in sql
-    # company-scoped by the touched database (database_clause form)
-    assert "LIKE 'ALFA%'" in sql
+    # company-scoped by the touched database via the COMPANY_SCOPE-aware UDF (database_company_scope)
+    assert "COMPANY_FOR_DATABASE(DATABASE_NAME) = 'ALFA'" in sql
     assert "GROUP BY 1" in sql and "DDL_COUNT" in sql
 
 
