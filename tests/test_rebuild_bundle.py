@@ -77,3 +77,17 @@ def test_bundle_readme_matches_the_runbook_order():
     assert order == ["00", "01", "02", "03", "04", "05"]
     assert "docs/FULL_REBUILD.md" in readme
     assert "loader_chain_check.sql" in readme
+
+
+def test_bundle_readme_names_the_actual_migration_bundle_and_count():
+    """Recurrence guard (round-9 dr-rebuild-01): the runbook README's migration cell must
+    name the bundle file actually on disk and its true migration count, or an operator
+    following it during a DR rebuild looks for a file/count that no longer exists. The
+    generator now maintains this, but the README is not byte-copied so it needs its own lock."""
+    readme = (_RB / "README.md").read_text(encoding="utf-8")
+    migs = sorted((_SF / "migrations").glob("V[0-9]*.sql"))
+    maxv = max(int(re.match(r"V(\d+)", m.name).group(1)) for m in migs)
+    assert f"02_migrations_V001_V{maxv:03d}.sql" in readme
+    assert f"all {len(migs)} migrations" in readme
+    # the stale fixed "generated <date>" heading must not come back
+    assert re.search(r"generated \d{4}-\d{2}-\d{2}", readme) is None

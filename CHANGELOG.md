@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.424.0 - Bug hunt round 9: anomaly-sweep reconcile race, SQL-snippet escaping, rebuild-doc drift (2026-09-01)
+
+A ninth sweep, this time on deeper/fresher angles (end-to-end flagship-number reconciliation,
+DST/timezone, the app's own query-cost hot paths, loader task-DAG ordering, DR/rebuild integrity,
+unicode/markdown rendering, Snowflake type overflow). Flagship-reconciliation, DST, and perf-hotpath
+came back clean; the two overflow findings were refuted (over-length writes fail gracefully with a
+column-naming error, not silent truncation). 3 confirmed fixed (2 MED, 1 LOW):
+
+- **Anomaly sweep could permanently miss a spike (MED, V122).** The standalone 07:00 TASK_ANOMALY_SWEEP
+  reads FACT_METERING_DAILY / FACT_WAREHOUSE_DAILY, which the nightly reconcile deletes+reloads for
+  D-1..D-3 non-atomically. If the sweep fired mid-reload, MAX(DAY) collapsed to D-4 and yesterday's
+  spike was scored against a truncated series (or skipped) and — since the sweep only scored the single
+  latest day — never re-examined. `SP_ANOMALY_SWEEP` now scores the last 3 complete days; the existing
+  per-(series,day) dedup makes a day skipped at sweep time self-heal on the next run.
+- **Raw SQL snippet garbled a caption (MED).** The Optimize price-per-run panel rendered `QUERY_SNIPPET`
+  (verbatim SQL) into `st.caption` unescaped, so `$`/`*`/`_` in the SQL became LaTeX/emphasis. Now
+  rendered as inline code (metacharacters inert).
+- **Rebuild runbook drifted (LOW).** `snowflake/rebuild/README.md` still named the V117/117 bundle while
+  the actual bundle was V121/121, and the generator never rewrote it. `gen_rebuild_bundle.py` now
+  maintains the README's migration filename + count (and drops the stale fixed "generated" date), with a
+  recurrence-guard test.
+
 ## 4.423.0 - Bug hunt round 8: config knob wired up (near-clean sweep) (2026-09-01)
 
 An eighth adversarial sweep across 7 fresh dimensions (injection-safety, column/schema contract,

@@ -102,7 +102,7 @@ def test_v085_teardown_drops_the_new_objects():
 
 def test_v085_validate_floor_and_deploy_docs_track_the_migration():
     validate = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V121 applied" in validate
-    assert "BETWEEN 1 AND 121) = 121" in validate
+    assert "V001..V122 applied" in validate
+    assert "BETWEEN 1 AND 122) = 122" in validate
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V085__slo_breach_alert.sql" in (_ROOT / rel).read_text(encoding="utf-8")

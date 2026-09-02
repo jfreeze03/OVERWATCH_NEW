@@ -137,6 +137,7 @@ snowflake/migrations/V118__ledger_autobook_dedup.sql
 snowflake/migrations/V119__alert_autoclear_hysteresis_fix.sql
 snowflake/migrations/V120__pattern_cost_runs_fanout_fix.sql
 snowflake/migrations/V121__seed_coco_daily_cap.sql
+snowflake/migrations/V122__anomaly_sweep_reconcile_race.sql
 snowflake/roles.sql
 snowflake/validate.sql   -- read the output; every row should be OK
 ```

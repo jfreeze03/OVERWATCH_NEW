@@ -451,6 +451,10 @@ _EXPECTED_MIGRATIONS = {
          "efficiency review measures against, now in DEFAULT_SETTINGS + the Admin editor with its 15.0 default "
          "row seeded so an org with a different cap (e.g. 30/day) can finally configure it. Data-seed only, "
          "WHEN NOT MATCHED, no schema change",
+    122: "Anomaly sweep reconcile-race self-heal (task-dag-ordering): SP_ANOMALY_SWEEP scores the last 3 complete "
+         "days instead of only MAX(DAY), so a cost spike on a day whose fact was mid-reload (the nightly "
+         "reconcile delete+reload race) is caught on the next run via the existing per-(series,day) dedup instead "
+         "of being permanently missed. Re-derived from V097; proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

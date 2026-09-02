@@ -918,7 +918,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                      "help": "Bounds: rate-scaled (same wall time) vs cost-neutral "
                              "(perfect runtime scaling) — same assumptions as the what-if."},
                 ])
-                st.caption(f"Sample: {str(prow['QUERY_SNIPPET'])[:120]}")
+                # Render the raw SQL sample as INLINE CODE so its markdown/LaTeX
+                # metacharacters ($, *, _, <, ...) are inert — an unescaped caption
+                # turned `WHERE amt > $1 AND col < $2` into a garbled LaTeX/emphasis
+                # span. Collapse whitespace and neutralize any backtick (which would
+                # otherwise close the inline-code span). (bug-hunt round 9)
+                _snip = " ".join(str(prow["QUERY_SNIPPET"])[:120].split()).replace("`", "'")
+                st.caption(f"Sample: `{_snip}`")
 
         st.divider()
         # ---- Repeat-query candidates ----------------------------------------------
