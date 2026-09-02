@@ -1545,8 +1545,16 @@ def _fmt_metric_value(v: object, unit: str) -> str:
         return str(v)
     if abs(f) == float("inf"):   # degenerate -> em-dash, never "inf"
         return "—"
-    spec = _METRIC_UNIT.get(unit)
+    spec = _METRIC_UNIT.get(str(unit or "").strip().lower())
     if spec is None:
+        # N7: a unit outside this chart-local vocabulary (e.g. a metric_registry
+        # spelling like "USD"/"bytes"/"percent") used to silently drop to a bare
+        # number. Defer to the single canonical formatter so the value keeps its unit
+        # on chart tooltips too, matching the KPI cards and tables.
+        u = str(unit or "").strip().lower()
+        if u:
+            from app.logic.formulas import format_unit
+            return format_unit(f, u)
         return f"{f:,.0f}" if abs(f) >= 100 else f"{f:,.1f}"
     pre, suf, dec = spec
     # the sign leads the unit prefix: a negative balance reads "-$1,234", not "$-1,234".

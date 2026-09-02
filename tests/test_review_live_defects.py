@@ -20,15 +20,15 @@ def _imports(src: str) -> str:
     return src.split("from app.logic.formulas import", 1)[1].split("\n", 1)[0]
 
 
-# --- CD-1: storage-mover tiles humanize (no raw "%.2f TB") ------------------------------
+# --- CD-1: storage-mover tiles format via unit= (no raw "%.2f TB") ----------------------
 def test_storage_mover_tiles_byte_humanize():
     s = _src("app/ui/pages/cost_parts/optimize.py")
-    assert "humanize_bytes(float(movers['CURRENT_TB'].sum()) * 1024 ** 4)" in s
-    assert "humanize_bytes(float(movers['GROWTH_TB'].sum()) * 1024 ** 4)" in s
+    # migrated to the canonical unit API (root-cause fix): raw TiB value + unit="tb"
+    assert '"value": float(movers[\'CURRENT_TB\'].sum()), "unit": "tb"' in s
+    assert '"value": float(movers[\'GROWTH_TB\'].sum()), "unit": "tb"' in s
     # the raw fixed-decimal-TB formatting that read "0.03 TB" is gone
     assert "CURRENT_TB'].sum()):,.2f}" not in s
     assert "GROWTH_TB'].sum()):,.2f}" not in s
-    assert "humanize_bytes" in _imports(s)
 
 
 # --- CD-3: admin verified-savings uses format_usd (matches Brief / Decision Studio) -----

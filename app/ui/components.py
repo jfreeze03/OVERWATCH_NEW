@@ -382,13 +382,33 @@ def _spark_color_for(item: dict, sev: str) -> str:
     return palette.OK if good else palette.BAD
 
 
+def _display_value(item: dict, default: str = "—") -> str:
+    """Resolve a KPI / exception item's display string. When the item carries a
+    `unit`, its RAW `value` is formatted through the single canonical formatter
+    (formulas.format_unit) so the figure matches every other surface — the fix for
+    the recurring cross-surface number-format drift class. Without a `unit`, the
+    `value` is used as given (already a display string), so existing cards are
+    byte-unchanged."""
+    from app.logic.formulas import format_unit
+    unit = item.get("unit")
+    value = item.get("value")
+    if unit is not None and value is not None:
+        return format_unit(value, str(unit))
+    return default if value is None else str(value)
+
+
 def metric_card_html(item: dict) -> str:
     """Rich KPI card: severity stripe, uppercase micro-label, big tabular
     value, colored trend delta, optional inline sparkline. Full design
-    control where st.metric could not go."""
+    control where st.metric could not go.
+
+    Pass a raw scalar `value` plus a `unit` ('usd'|'credits'|'bytes'|'gb'|'tb'|
+    'percent'|'count'|...) and the value formats through formulas.format_unit, so
+    it reads identically to the same metric on every other surface. A pre-formatted
+    string `value` (no `unit`) is rendered verbatim, unchanged."""
     sev = str(item.get("severity", "") or "")
     label = html.escape(str(item.get("label", "")))
-    value = html.escape(str(item.get("value", "—")))
+    value = html.escape(_display_value(item))
     help_t = html.escape(str(item.get("help", "") or ""))
     cls = f"ow-card ow-card--{sev}" if sev in ("ok", "warn", "bad", "info") else "ow-card"
     spark = ""
@@ -553,7 +573,9 @@ def section_scope_note(filters: dict, *, honored: tuple[str, ...] = ()) -> str:
 def kpi_row(items: list[dict], columns: int | None = None) -> None:
     """Row of rich KPI cards. Item keys: label, value, delta, delta_color,
     help, plus optional severity ('ok'|'warn'|'bad'|'info') and spark (list
-    of numbers). One centralized upgrade lifts every KPI row in the app."""
+    of numbers). Pass a raw `value` + `unit` (usd|credits|bytes|gb|tb|percent|
+    count|...) to format through the canonical formatter instead of hand-building
+    the string. One centralized upgrade lifts every KPI row in the app."""
     items = [i for i in items if i]
     if not items:
         return
@@ -1363,8 +1385,7 @@ def exception_summary(items: list[dict], clean_message: str) -> None:
     rows = []
     for item in items:
         label = html.escape(str(item.get("label") or "Exception"))
-        raw_value = item.get("value")
-        value = html.escape("" if raw_value is None else str(raw_value))
+        value = html.escape(_display_value(item, default=""))
         detail = html.escape(str(item.get("detail") or ""))
         severity = "bad" if str(item.get("severity") or "").lower() == "bad" else "warn"
         rows.append(

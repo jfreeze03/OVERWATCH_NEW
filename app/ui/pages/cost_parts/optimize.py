@@ -32,7 +32,7 @@ from app.logic.actions import LEDGER_ESTIMATED, can_verify
 from app.logic.ai_prompts import idle_warehouse_prompt
 from app.logic.capacity import capacity_forecasts
 from app.logic.consolidation import WarehouseProfile, consolidation_candidates
-from app.logic.formulas import format_usd, humanize_bytes, humanize_duration, md_dollars, safe_float
+from app.logic.formulas import format_usd, humanize_duration, md_dollars, safe_float
 from app.logic.insights import (
     IDLE_TARGET_SUSPEND_SEC,
     flag_clustering_churn,
@@ -1116,15 +1116,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 )
                 _shrinking = int((movers["GROWTH_USD_30D"] < 0).sum())
                 kpi_row([
-                    # CD-1 (live-defect fix): byte-humanize like the sibling movers TABLE
-                    # below, which renders CURRENT_TB / GROWTH_TB via _auto_formats ->
-                    # _byte_unit_for_column (TB factor 1024**4) -> humanize_bytes. A raw
+                    # CD-1: pass the raw TiB value + unit="tb" so the tile formats through
+                    # the canonical formatter — the SAME humanize path the sibling movers
+                    # TABLE below derives from the CURRENT_TB / GROWTH_TB column names. A raw
                     # "%.2f TB" collapsed a sub-TB net growth to "0.03 TB" (reads as nothing)
-                    # while the table showed "30.7 GB" — same FC-1/CSF-1 byte-format class.
+                    # while the table showed "30.7 GB"; unit= ends that drift by construction.
                     {"label": "Current storage",
-                     "value": humanize_bytes(float(movers['CURRENT_TB'].sum()) * 1024 ** 4)},
+                     "value": float(movers['CURRENT_TB'].sum()), "unit": "tb"},
                     {"label": f"Growth ({days_storage}d)",
-                     "value": humanize_bytes(float(movers['GROWTH_TB'].sum()) * 1024 ** 4)},
+                     "value": float(movers['GROWTH_TB'].sum()), "unit": "tb"},
                     # E6: gainers-only, and it always was — the label now says so instead
                     # of reading like the account's net storage trend.
                     {"label": "Projected growth $/mo (confident gainers)",

@@ -343,6 +343,63 @@ def humanize_gb(value: object) -> str:
     return humanize_bytes(v * 1024 ** 3)
 
 
+# The single canonical unit -> display-string map. A KPI card / caption / tile that
+# carries a RAW scalar plus its unit formats through format_unit(), so the same figure
+# reads identically on every surface — the recurring cross-surface drift class (a tile
+# hand-formatting "0.03 TB" beside a table's humanized "30.7 GB": FC-1 / CSF-1 / CD-1).
+# Aligned to the table convention (_auto_formats / _byte_unit_for_column) for the
+# ambiguity-prone units (USD, bytes) so cards and tables agree BY CONSTRUCTION. Accepts
+# both the metric_registry spellings (USD/percent/bytes) and the chart/table spellings
+# (pct/gb/tb/sec) as aliases so any surface can name its unit however it already does.
+_UNIT_ALIASES = {
+    "$": "usd", "usd": "usd", "dollars": "usd",
+    "currency": "currency",                       # org currency, code varies -> no symbol
+    "cr": "credits", "credit": "credits", "credits": "credits",
+    "bytes": "bytes", "byte": "bytes", "b": "bytes",
+    "gb": "gb", "gib": "gb", "tb": "tb", "tib": "tb", "mb": "mb", "mib": "mb",
+    "pct": "percent", "percent": "percent", "%": "percent", "share": "percent",
+    "ratio": "ratio", "count": "count", "n": "count",
+    "days": "days", "day": "days",
+    "ms": "ms", "s": "sec", "sec": "sec", "min": "min", "h": "hours", "hours": "hours",
+    "duration": "sec",
+}
+
+
+def format_unit(value: object, unit: str) -> str:
+    """THE canonical scalar->string formatter, keyed by a unit token — the one place
+    a raw number becomes a display string, so a KPI card/caption/tile that passes
+    (value, unit) reads identically to the same metric everywhere else. Missing or
+    degenerate input renders an em-dash (never a misleading "0.03 TB" for no data);
+    an unknown unit falls back to adaptive precision (the charts' legacy default)."""
+    u = _UNIT_ALIASES.get(str(unit or "").strip().lower())
+    v = safe_float(value, default=float("nan"))
+    if v != v or abs(v) == float("inf"):
+        return "—"
+    if u == "usd":
+        return format_usd(v)
+    if u == "credits":
+        return format_credits(v)
+    if u == "bytes":
+        return humanize_bytes(v)
+    if u == "gb":
+        return humanize_gb(v)                       # v is binary GiB
+    if u == "tb":
+        return humanize_bytes(v * 1024 ** 4)        # v is binary TiB (table's TB factor)
+    if u == "mb":
+        return humanize_bytes(v * 1024 ** 2)
+    if u == "percent":
+        return f"{v:,.1f}%"
+    if u == "ratio":
+        return f"{v:,.2f}"
+    if u == "currency":
+        return f"{v:,.0f}"                           # caller supplies the currency code
+    if u == "days":
+        return f"{v:,.0f}"
+    if u in ("ms", "sec", "min", "hours"):
+        return humanize_duration(v, {"hours": "h"}.get(u, u))
+    return f"{v:,.0f}" if abs(v) >= 100 else f"{v:,.1f}"
+
+
 def humanize_age(value: object, now: object = None) -> str:
     """rec27: compact 'how stale' for a past timestamp — "just now" / "5m ago" /
     "3h ago" / "2d ago". A DISPLAY-ONLY companion to a real timestamp column (which

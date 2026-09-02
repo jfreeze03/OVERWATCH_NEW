@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.430.0 - Root-cause fix: one canonical unit->formatter ends the cross-surface number-format drift class (2026-09-02)
+
+The recurring cross-surface consistency class the last ~dozen hardening rounds kept hand-patching
+(FC-1, EXEC-1, CSF-1, CD-1 — a KPI tile hand-formatting "0.03 TB" beside a table's humanized
+"30.7 GB") had a single root cause: KPI cards, captions, and tiles consumed an ALREADY-FORMATTED
+string, so every call site formatted its own scalar however it reached for, while tables derive
+formatting from a column-name convention and rarely drift. This closes that gap by construction.
+
+- **New `formulas.format_unit(value, unit)` — the single canonical scalar->string formatter.** One
+  place a raw number becomes a display string, keyed by a unit token (usd / credits / bytes / gb / tb /
+  percent / count / ratio / days / durations), aligned to the table's `_auto_formats` /
+  `_byte_unit_for_column` conventions for the ambiguity-prone units (USD, bytes) so a card and a table
+  agree by construction. Accepts the metric_registry spellings AND the chart/table spellings as aliases.
+  Missing/degenerate input renders an em-dash, never a misleading "0.03".
+- **KPI cards and `exception_summary` now accept a raw `value` + `unit`.** When a tile carries a `unit`,
+  its raw value formats through `format_unit`; a pre-formatted string value (no unit) renders verbatim,
+  so every existing card is byte-unchanged. `kpi_row`'s contract documents the new key.
+- **The chart value formatter no longer drops a registry-spelled unit to a bare number (N7).** A unit
+  outside the chart-local 5-word vocabulary (e.g. "USD" / "bytes" / "percent") used to print an
+  unlabeled number; it now defers to `format_unit`, so tooltips keep their unit too. The existing
+  lowercase fast-path vocabulary is unchanged.
+- **The metric registry's `unit` field is now load-bearing**, guarded by a test that every registry
+  unit has a `format_unit` renderer — the registry can no longer document a unit nothing renders.
+- **A class-ending regression guard**: a test forbids any KPI card `value` from hand-building a raw
+  byte-unit string (`f"…{…}… TB"`); new byte tiles must pass `unit=` or call a humanize helper.
+- Dogfooded the API by migrating the Cost ▸ Optimize storage-mover tiles (the CD-1 fix) to
+  `{"value": <tib>, "unit": "tb"}`.
+
 ## 4.429.0 - Codex-review live-defect fixes: storage-tile bytes, validate floor message, verified-savings format (2026-09-02)
 
 Three concrete defects the adjudicated Codex review surfaced (two verified against the running
