@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.433.0 - Production-shaped render contracts: populated page branches now execute in CI (2026-09-02)
+
+The AppTest smoke stubbed run() to an EMPTY DataFrame, so only the honest-empty branches ran — the
+populated branches that index specific columns (df["CREDITS_BILLED"], iloc[0][...]) never executed,
+and a renamed/missing column raising KeyError in a populated table or chart passed CI. This is the
+exact gap that repeatedly let live KeyError failures slip through.
+
+`tests/test_pages_shaped.py` stubs run() to return a small, correctly-SHAPED frame instead: the
+columns are parsed from each builder's own SELECT (sqlglot), and dtypes are chosen by the same
+name convention the app formats on (`*_USD`/counts numeric, `*_NAME`/`*_STATUS` string, `DAY`/`*_AT`
+dates). Every DBA page then renders its populated branches, and because the shaped frame carries
+EXACTLY the builder's declared columns, a page that indexes a column its builder does not return
+raises KeyError — so the smoke has teeth (a direct test proves it) rather than passing vacuously.
+
+Scope: this shapes the direct run() reads in the page modules; `run_batch` / `run_mart_first` reads
+still return empty (a follow-up), so it is a coverage FLOOR, not yet every populated branch. No app
+change — test infrastructure only.
+
 ## 4.432.0 - Stored-procedure structural syntax coverage (the parse gate's blind spot) (2026-09-02)
 
 The migration parse gate skips `$$` / EXECUTE IMMEDIATE scripting blocks (sqlglot cannot read
