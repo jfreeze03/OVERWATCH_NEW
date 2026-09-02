@@ -913,14 +913,22 @@ def render() -> None:
             if _dtot > 0 and len(view):
                 _d0 = view.iloc[0]
                 # C5: this panel is warehouse compute ONLY — operational credits at the
-                # compute rate, from FACT_WAREHOUSE_DAILY — so it matches the headline
-                # KPIs (also warehouse-only) and the drivers reconcile to the KPI total.
-                # Serverless (tasks, Snowpipe, MV refresh) and AI/Cortex bill on separate
-                # meters and appear in their own panel below (V069 COST_DRIVER_SVC), never
-                # mixed into this "% of warehouse compute spend" denominator.
+                # compute rate, from FACT_WAREHOUSE_DAILY. Serverless (tasks, Snowpipe, MV
+                # refresh) and AI/Cortex bill on separate meters and appear in their own panel
+                # below (V069 COST_DRIVER_SVC), never mixed into this "% of warehouse compute
+                # spend" denominator.
+                # EXEC-1 (round 12): the trailing-window board COST_DRIVER panel is summed
+                # THROUGH today (the exec board is a real-time snapshot; it has no per-day
+                # grain to exclude today's partial), whereas the flagship "Spend, N days" tile
+                # was changed (rec1/rec36) to exclude today's partial day. So the driver total
+                # can slightly EXCEED the headline near end of the account day — they do NOT
+                # reconcile exactly by design, and the caption says "through today" so the
+                # reader isn't misled. (The Last-month path re-derives drivers today-excluded
+                # from the bounded frame, so it DOES reconcile there.)
+                _drv_thru = "through today" if _ov_bounds is None else "last month"
                 st.caption(f"Top driver: **{_d0['DIMENSION']}** — {format_usd(safe_float(_d0['VALUE_USD']))} "
-                           f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse "
-                           "compute spend — serverless & AI shown separately below).")
+                           f"({safe_float(_d0['VALUE_USD']) / _dtot * 100:.0f}% of warehouse compute "
+                           f"spend, {_drv_thru} — serverless & AI shown separately below).")
         elif not using_mart and not daily.empty:
             st.caption("Driver ranking appears once the exec board mart is installed.")
         else:

@@ -55,8 +55,11 @@ def test_change_risk_destructive_sql_carries_pre_limit_total():
 # 1) Admin stale-source keys on load age, never row count -------------------
 def test_admin_stale_diagnose_keys_on_age_not_row_count():
     a = _src("app/ui/pages/admin.py")
-    stale_block = a.split("Diagnose stale sources", 1)[1][:2400]
-    assert "stale = fresh.df[(_hrs > 26) | _hrs.isna()]" in stale_block   # no ROW_COUNT disjunct
+    stale_block = a.split("Diagnose stale sources", 1)[1][:2600]
+    # FRESH-1 (round 12): now cadence-aware (3h hourly / 30h daily, matching health_strip),
+    # but still keyed on AGE only — never row count.
+    assert "stale = fresh.df[(_hrs > _lim_hrs) | _hrs.isna()]" in stale_block   # no ROW_COUNT disjunct
+    assert 'THRESHOLDS["stale_daily_fact_hours"]' in stale_block
     assert "(_rows.fillna(0) <= 0)" not in stale_block
     assert 'if pd.isna(s.get("HOURS_SINCE_LOAD")):' in stale_block        # "never filled" only if never loaded
 

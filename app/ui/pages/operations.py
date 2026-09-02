@@ -281,7 +281,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 "START_TIME": st.column_config.DatetimeColumn("Started", format="MMM DD, HH:mm"),
                 "ELAPSED_SEC": st.column_config.NumberColumn("Elapsed (s)", format="%.1f"),
                 "QUEUED_SEC": st.column_config.NumberColumn("Queued (s)", format="%.1f"),
-                "SPILL_REMOTE_GB": st.column_config.NumberColumn("Spill GB", format="%.2f"),
+                # FC-1 (round 12): NO explicit SPILL_REMOTE_GB format — let it fall through to
+                # the byte-humanize convention (_auto_formats -> "30.7 MB"), matching this page's
+                # Optimization-triage table, the warehouse KPI card, and the drill card. An
+                # explicit "%.2f" rendered raw GB ("0.03"), minimizing sub-GB spill to near-zero.
                 **_tp_cfg,
             },
         )

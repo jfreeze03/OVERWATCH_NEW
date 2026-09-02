@@ -1,5 +1,28 @@
 # Changelog
 
+## 4.427.0 - Bug hunt round 12: presentation honesty on spill, driver reconciliation, and stale-source cadence (2026-09-02)
+
+A twelfth sweep on deep, targeted angles (cross-page presentation consistency, KPI-vs-driver
+reconciliation, freshness-threshold coherence, plus Snowflake dialect and two others that refuted).
+3 MED fixed, all presentation-integrity defects where one surface silently disagreed with its siblings:
+
+- **Heaviest-queries spill rendered raw GB, minimizing sub-GB spill to near-zero (MED).** The
+  "Heaviest queries" table on Operations carried an explicit `NumberColumn("Spill GB", format="%.2f")`
+  on `SPILL_REMOTE_GB`, so a real 30 MB spill printed as `0.03` — reading as "no spill" — while the
+  same metric on this page's Optimization-triage table, the warehouse KPI card, and the drill card all
+  byte-humanize it ("30.7 MB") via `_auto_formats`. Dropped the explicit format so it falls through to
+  the humanize convention, matching its own siblings.
+- **Cost-driver panel falsely claimed it reconciled to the KPI headline (MED).** An Overview comment
+  asserted "the drivers reconcile to the KPI total," but the driver board's `COST_DRIVER` is
+  through-today while the headline KPI excludes today — so the driver rows can slightly EXCEED the
+  headline, which looks like a bug to an operator eyeballing the two. Corrected the comment to state
+  the window mismatch and added the driver window basis to the caption ("through today" / "last month").
+- **Admin stale-source diagnose flagged healthy daily loaders as stale (MED).** The "Diagnose stale
+  sources" panel used a flat `_hrs > 26` threshold, so a DAILY/METERING source loaded 27h ago (normal
+  for a once-a-day cadence) was flagged stale — disagreeing with `health_strip` and `control_room`,
+  which both use the cadence-aware 3h-hourly / 30h-daily split (`THRESHOLDS`). Made it cadence-aware to
+  match, and corrected the empty-state copy.
+
 ## 4.426.0 - Bug hunt round 11: live per-company warehouse scope honors COMPANY_SCOPE mappings (2026-09-02)
 
 An eleventh sweep on the freshest remaining angles (navigation/deep-link state, multi-company

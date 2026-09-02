@@ -15,6 +15,7 @@ import streamlit as st
 from app.config import (
     APP_VERSION,
     DEFAULT_SETTINGS,
+    THRESHOLDS,
     core_object,
 )
 from app.core.errors import error_buffer, safe_page
@@ -704,17 +705,28 @@ def _migrations_tab() -> None:
             try:
                 _hrs = pd.to_numeric(fresh.df["HOURS_SINCE_LOAD"], errors="coerce")
                 # Staleness keys on load AGE only. A never-loaded source reads
-                # HOURS_SINCE_LOAD NULL (NaN>26 is False, which would silently hide the
-                # worst case) — health_strip treats a NULL load ts as maximally urgent,
-                # so mirror that and count never-loaded sources as stale. A freshly-
+                # HOURS_SINCE_LOAD NULL — health_strip treats a NULL load ts as maximally
+                # urgent, so mirror that and count never-loaded sources as stale. A freshly-
                 # loaded but legitimately EMPTY mart (ROW_COUNT 0 in a quiet window, a
                 # recent LAST_LOAD_TS) is NOT stale — "missing measurement != measured
                 # 0" — so row count never enters the staleness test.
-                stale = fresh.df[(_hrs > 26) | _hrs.isna()]
+                # FRESH-1 (round 12): use the SAME cadence-aware limit as health_strip and
+                # the Control Room freshness board — 30h for DAILY/METERING sources, else 3h
+                # (hourly). A flat 26h hid a broken hourly loader (extract/facts/exec-board/
+                # ops-diag) for up to 26h in the very tool a DBA opens to root-cause the STALE
+                # badge that sent them here.
+                _names = fresh.df["SOURCE_NAME"].astype(str)
+                _lim_hrs = pd.Series(
+                    [THRESHOLDS["stale_daily_fact_hours"]
+                     if ("DAILY" in n or "METERING" in n) else THRESHOLDS["stale_fact_hours"]
+                     for n in _names],
+                    index=fresh.df.index)
+                stale = fresh.df[(_hrs > _lim_hrs) | _hrs.isna()]
             except (KeyError, TypeError, ValueError):
                 stale = fresh.df.iloc[0:0]
             if stale.empty:
-                empty_state("clean", "Nothing stale past 26h — the loaders are keeping up.")
+                empty_state("clean", "Nothing stale past its cadence (3h hourly / 30h daily) — "
+                                     "the loaders are keeping up.")
             for _, s in stale.iterrows():
                 name = str(s["SOURCE_NAME"])
                 hint = ""
