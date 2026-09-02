@@ -978,11 +978,15 @@ def _tag_governance_panel(company: str) -> None:
             st.caption("Ranked widest gap first. Coverage is a current-state fact — "
                        "the window filter does not apply.")
     st.markdown("**Untagged tables (worklist)**")
+    # Perf (2026-09-02): defer the untagged-worklist tag-lineage scan until the operator picks a
+    # tag. The selectbox used to default to the FIRST tag, so this live scan fired on every
+    # Security landing; the coverage table above already ranks the tags, so the drill is on-demand.
+    _pick = "Pick a tag to list its untagged tables…"
     tag_choice = st.selectbox(
         "List the in-scope tables missing which tag?",
-        options=list(cov.df["TAG_NAME"].astype(str)),
+        options=[_pick, *cov.df["TAG_NAME"].astype(str)],
         key=f"tag_untagged_pick_{company}")
-    if tag_choice:
+    if tag_choice and tag_choice != _pick:
         un = run(security_sql.untagged_objects(company, str(tag_choice)), page=_PAGE,
                  key=f"tag_untagged_{company}_{tag_choice}", tier="historical",
                  source="ACCOUNT_USAGE.TABLES minus TAG_REFERENCES")
@@ -991,6 +995,9 @@ def _tag_governance_panel(company: str) -> None:
         elif guard(un, ""):
             styled_table(un.df, height=280, sort_label="largest untagged first")
             result_caption(un)
+    else:
+        st.caption("Pick a tag above to list the in-scope base tables missing it — "
+                   "the coverage table ranks which tags to check first.")
     result_caption(cov)
     st.divider()
 

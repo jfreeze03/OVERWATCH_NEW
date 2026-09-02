@@ -1,5 +1,24 @@
 # Changelog
 
+## 4.448.0 - Perf: Security landing defers the untagged-tables worklist scan (2026-09-02)
+
+The usage simulator flagged 4 ACCOUNT_USAGE scans on the Security default view. Investigation
+corrected the earlier audit note (the default "Decision queue" section is NOT mart-only — it
+renders an "Operational governance" block) and found two of the four were a simulator artifact:
+`gov_counts` is a *live fallback* that only runs when the posture mart doesn't yield the score,
+and it fires in the simulator only because shaped data has placeholder metric names — in
+production the `MART_SECURITY_POSTURE_DAILY` mart serves the score and it never runs.
+
+- The two real reads are `tag_cov` (powers the tag-coverage score + table — the landing's value,
+  kept) and `tag_untagged` (the untagged-tables worklist). They can't be batched — the worklist's
+  tag selector is populated from `tag_cov`'s result. `tag_untagged` fired on every landing only
+  because the selectbox defaulted to the FIRST tag.
+- Deferred the untagged worklist behind an explicit tag pick (placeholder-first selectbox): the
+  coverage table above already ranks the tags, so the drill is now on-demand (pick the worst-
+  covered tag) instead of auto-scanning the first tag's untagged list on every Security landing —
+  one fewer live ACCOUNT_USAGE scan per landing, and a clearer read-then-drill flow.
+- Tests: `tests/test_security_tag_worklist_deferred.py`. No migration.
+
 ## 4.447.0 - Perf: Decision Studio prove-it signals computed once per render (2026-09-02)
 
 The usage simulator flagged Decision Studio issuing 5 duplicate reads per render. Investigation:
