@@ -86,43 +86,50 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
     return sample_roll is not None and float(sample_roll) < float(sample_rate)
 
 
-def _resolve_telemetry_shape() -> None:
-    """Determine the LIVE APP_QUERY_TELEMETRY column shape ONCE, synchronously and
-    OBSERVED, and cache the result as the same downgrade flags the buffered writer reads.
+@st.cache_resource(show_spinner=False)
+def _telemetry_shape_flag() -> str:
+    """The live APP_QUERY_TELEMETRY column shape, resolved by an OBSERVED describe ONCE PER
+    PROCESS (perf audit 2026-09-02). The shape is a property of the DEPLOYED TABLE, not the
+    session, so caching it process-wide means only the FIRST telemetry persist in the whole
+    process pays the describe round-trip on a render path — every later session/rerun reuses it
+    instead of re-describing on its own first persist.
 
     Codex #30: the buffered flush submits async (collect_nowait), which returns 'submitted'
-    BEFORE the server validates the statement — so a 12-col INSERT against the live 10-col
-    table failed server-side UNOBSERVED and every telemetry row was silently dropped for the
-    whole session, while the 12->10->6 downgrade (keyed on a SYNCHRONOUS failure that never
-    happened) never fired. Reading the real column list is a describe — no data scanned, and
-    the result IS observed — so the shape is resolved deterministically on the first persist
-    and rows are formatted at the correct shape from the very first one, never mis-shaped.
-    Cached in session_state; the shape is committed at most once per session, but ONLY
-    after the column list actually resolves — a transient describe failure leaves the
-    resolved flag UNSET so the next persist retries (#27)."""
+    BEFORE the server validates the statement — so a 12-col INSERT against a live 10-col table
+    fails server-side UNOBSERVED and silently drops every telemetry row. Reading the real column
+    list is a describe (no data scanned, result OBSERVED), so rows are formatted at the correct
+    shape from the first one. Returns '' (newest 12-col: SAMPLE_PROB+QUERY_ID) / 'prev64' (10-col,
+    pre-SAMPLE_PROB/QUERY_ID) / 'old' (6-col legacy, pre-V027). RAISES on a transient/empty
+    describe so st.cache_resource does NOT cache a guess and the next persist retries (#27); a
+    truly absent table still trips _ow_qtel_off on the async write."""
+    session = get_session()
+    cols = {str(c).upper() for c in
+            session.sql(f"SELECT * FROM {core_object('APP_QUERY_TELEMETRY')} LIMIT 0").columns}
+    if not cols:
+        raise RuntimeError("APP_QUERY_TELEMETRY shape unresolved")   # not cached -> retry next persist
+    if {"SAMPLE_PROB", "QUERY_ID"} <= cols:
+        return ""
+    if {"CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED"} <= cols:
+        return "prev64"
+    return "old"
+
+
+def _resolve_telemetry_shape() -> None:
+    """Commit THIS session's APP_QUERY_TELEMETRY downgrade flags from the process-cached shape
+    (_telemetry_shape_flag). Session-gated so it commits at most once per session, and the
+    describe itself is process-cached so at most once per PROCESS ever hits a render path. A
+    transient describe failure leaves the resolved flag UNSET so the next persist retries (#27)."""
     if st.session_state.get("_ow_qtel_shape_resolved"):
         return
     try:
-        session = get_session()
-        # .columns triggers a describe (synchronous, observed) without scanning rows.
-        cols = {str(c).upper() for c in
-                session.sql(f"SELECT * FROM {core_object('APP_QUERY_TELEMETRY')} LIMIT 0").columns}
+        shape = _telemetry_shape_flag()
     except Exception:
-        # #27: transient describe failure (session blip / momentary no-grant). Do NOT mark
-        # the shape resolved — a guessed shape cached for the whole session silently drops
-        # every telemetry row against an older/mismatched table. Leave the flag unset; the
-        # next persist retries. A truly absent table still trips _ow_qtel_off on the write.
         return
-    if not cols:
-        return                                            # nothing resolved -> retry next time
-    # The column list resolved for real: NOW commit the shape decision, exactly once.
     st.session_state["_ow_qtel_shape_resolved"] = True
-    if {"SAMPLE_PROB", "QUERY_ID"} <= cols:
-        return                                            # newest 12-col shape: no flag
-    if {"CACHE_HIT", "SQL_HASH", "BATCH_SIZE", "TRUNCATED"} <= cols:
+    if shape == "prev64":
         st.session_state["_ow_qtel_prev64shape"] = True   # 10-col (pre-SAMPLE_PROB/QUERY_ID)
-    else:
-        st.session_state["_ow_qtel_oldshape"] = True      # 6-col legacy (pre-V027)
+    elif shape == "old":
+        st.session_state["_ow_qtel_oldshape"] = True       # 6-col legacy (pre-V027)
 
 
 def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,

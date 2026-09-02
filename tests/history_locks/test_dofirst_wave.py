@@ -280,6 +280,7 @@ def test_codex30_shape_resolved_once_from_real_columns(monkeypatch):
 
     from app.core import query as q
     st.session_state.clear()
+    q._telemetry_shape_flag.clear()              # the describe is now process-cached; reset it
 
     class _Cols:
         columns = ("PAGE", "TIER", "QUERY_KEY", "ELAPSED_MS", "ROWS_RETURNED", "OK",
@@ -301,6 +302,39 @@ def test_codex30_shape_resolved_once_from_real_columns(monkeypatch):
     assert st.session_state.get("_ow_qtel_prev64shape") is True   # 10-col -> prev64 downgrade
     assert not st.session_state.get("_ow_qtel_oldshape")
     st.session_state.clear()
+    q._telemetry_shape_flag.clear()
+
+
+def test_telemetry_shape_describe_is_process_cached_across_sessions(monkeypatch):
+    # perf audit 2026-09-02: the describe is a property of the DEPLOYED TABLE, so it is resolved
+    # ONCE PER PROCESS (st.cache_resource), not once per session — only the first telemetry
+    # persist in the whole process pays the describe round-trip on a render path.
+    import streamlit as st
+
+    from app.core import query as q
+    st.session_state.clear()
+    q._telemetry_shape_flag.clear()
+
+    class _Cols:
+        columns = ("PAGE", "TIER", "QUERY_KEY", "ELAPSED_MS", "ROWS_RETURNED", "OK", "CACHE_HIT",
+                   "SQL_HASH", "BATCH_SIZE", "TRUNCATED", "SAMPLE_PROB", "QUERY_ID")  # 12-col
+
+    calls = {"n": 0}
+
+    class _Sess:
+        def sql(self, _s):
+            calls["n"] += 1
+            return _Cols()
+
+    monkeypatch.setattr(q, "get_session", lambda: _Sess())
+    q._resolve_telemetry_shape()                 # session A: describes once
+    st.session_state.clear()                     # a NEW session (session_state reset)
+    q._resolve_telemetry_shape()                 # session B: reuses the PROCESS-cached shape
+    assert calls["n"] == 1                        # ONE describe across two sessions (process-cached)
+    assert not st.session_state.get("_ow_qtel_prev64shape")   # 12-col -> newest shape, no downgrade
+    assert not st.session_state.get("_ow_qtel_oldshape")
+    st.session_state.clear()
+    q._telemetry_shape_flag.clear()
 
 
 # ---------------------------------------------------------------------------

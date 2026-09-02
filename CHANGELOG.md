@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.450.0 - Perf: telemetry column-shape describe resolved once per process, not per session (2026-09-02)
+
+The one synchronous write-path cost in the read layer: `_persist_telemetry` resolves the live
+`APP_QUERY_TELEMETRY` column shape with an OBSERVED describe (`SELECT * … LIMIT 0`.columns) before
+formatting the first persisted row — needed so the async buffered flush, which can't observe a
+shape mismatch, never silently drops mis-shaped rows (Codex #30). It was gated once per *session*,
+so the first slow/failed/sampled query of every session blocked on that describe round-trip on the
+render path.
+
+- The shape is a property of the DEPLOYED TABLE, not the session, so it's now resolved by
+  `_telemetry_shape_flag()` under `st.cache_resource` — once per **process**. Only the first
+  telemetry persist in the whole process pays the describe on a render path; every later
+  session/rerun reuses it. `_resolve_telemetry_shape` still commits this session's downgrade flags
+  and keeps the once-per-session gate.
+- Correctness preserved: the describe is still observed (Codex #30), and it RAISES on a
+  transient/empty describe so `st.cache_resource` doesn't cache a guess and the next persist
+  retries (Codex #27); the reactive `_flush_group` downgrade ladder remains the secondary net.
+- Tests: `test_dofirst_wave.py` (the describe is process-cached across two sessions; only one
+  describe fires). No migration.
+
 ## 4.449.0 - Perf: per-table storage mart (V124) de-dups the TABLE_STORAGE_METRICS scans (2026-09-02)
 
 `storage_waste` (Cost > Optimize) and `table_storage_breakdown` (the Cost > Spend AND Cost >
