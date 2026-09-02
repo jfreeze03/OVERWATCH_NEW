@@ -37,6 +37,15 @@ def test_idle_and_sizing_scope_by_company_udf_not_name_pattern():
         assert fn(30, "ALL").count("COMPANY_FOR_WAREHOUSE") == 1
 
 
+# --- class guard: insights_sql has NO name-pattern warehouse-company scope left ---------
+def test_insights_sql_company_scope_is_all_udf_axis():
+    """Every warehouse-COMPANY scope in insights_sql uses the COMPANY_FOR_WAREHOUSE UDF axis
+    (matching cost_sql + the mart twins + COMPANY_SCOPE semantics), never the name-pattern
+    companies.warehouse_clause — so a COMPANY_SCOPE-mapped-but-off-pattern warehouse scopes
+    consistently across pages. Closes the MC-1 class in insights_sql (round-16 audit)."""
+    assert "companies.warehouse_clause(company" not in _src("app/data/insights_sql.py")
+
+
 # --- PACE: exclude_today drops the partial day, and the pace card uses the complete MTD --
 def test_mtd_spend_exclude_today_drops_partial(monkeypatch):
     from app.ui.pages import overview as ov

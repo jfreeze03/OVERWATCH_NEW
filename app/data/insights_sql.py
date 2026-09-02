@@ -155,7 +155,7 @@ def repeat_query_fingerprints(days: int, company: str = "ALL", min_runs: int = 1
         # cross-company activity (a Trexis/UNKNOWN principal on an ALFA warehouse
         # vanished from BOTH scoped views, appearing only under ALL), so the scoped
         # repeat-query list under-reported. Matches the V082 mart twin.
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
         companies.database_equals_clause(database),
         contains_filter("SCHEMA_NAME", schema_contains),
     )
@@ -248,7 +248,7 @@ def release_query_compare(release_date: str, window_days: int, company: str = "A
         # C10 doctrine: QUERY_HISTORY scopes by WAREHOUSE company only, never
         # warehouse AND user — the intersection dropped cross-company rows from both
         # scoped views (see repeat_query_fingerprints / ops_sql._query_scope).
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 SELECT
@@ -777,7 +777,7 @@ def warehouse_hourly_activity(days: int, company: str = "ALL", *, bounds: tuple 
         _divisor = days
     where_m = and_where(
         _m_win,
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 WITH m AS (
@@ -794,7 +794,7 @@ q AS (
     SELECT WAREHOUSE_NAME, HOUR(HOUR_TS) AS HR, SUM(QUERY_COUNT) AS QC
     FROM {core_object("FACT_QUERY_HOURLY")}
     WHERE {_q_win}
-      AND {companies.warehouse_clause(company) or "1 = 1"}
+      AND {_wh_company_scope(company) or "1 = 1"}
     GROUP BY 1, 2
 )
 SELECT m.WAREHOUSE_NAME, m.HR AS HOUR_OF_DAY,
@@ -961,7 +961,7 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
         _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     vis = and_where(
         companies.database_equals_clause(database, "q.DATABASE_NAME"),
@@ -969,7 +969,7 @@ def expensive_queries_usd(days: int, company: str = "ALL", limit: int = 50,
     )
     where_m = and_where(
         _win,
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 WITH q AS (
@@ -1040,11 +1040,11 @@ def wasted_query_spend_usd(days: int, company: str = "ALL", warehouse_contains: 
         _win,
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     where_m = and_where(
         _win,
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     vis = and_where(
         "a.EXECUTION_STATUS <> 'SUCCESS'",
@@ -1181,11 +1181,11 @@ def expensive_patterns_usd(days: int, company: str = "ALL", limit: int = 30) -> 
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "WAREHOUSE_NAME IS NOT NULL",
         "COALESCE(EXECUTION_TIME, 0) > 0",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     where_m = and_where(
         f"START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
-        companies.warehouse_clause(company),
+        _wh_company_scope(company),
     )
     return f"""
 WITH q AS (
@@ -1278,7 +1278,7 @@ def measured_query_costs(days: int, company: str = "ALL", database: str = "",
         (resolve_effective_window(days, "q.START_TIME", bounds=bounds)[1]
          if bounds is not None
          else f"q.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
-        companies.warehouse_clause(company, "q.WAREHOUSE_NAME"),
+        _wh_company_scope(company, "q.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "q.DATABASE_NAME"),
         contains_filter("q.SCHEMA_NAME", schema_contains),
         contains_filter("q.WAREHOUSE_NAME", warehouse_contains),
@@ -1338,7 +1338,7 @@ def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
          if bounds is not None
          else f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())"),
         "c.QUERY_TYPE = 'CALL'",
-        companies.warehouse_clause(company, "c.WAREHOUSE_NAME"),
+        _wh_company_scope(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
         contains_filter("c.SCHEMA_NAME", schema_contains),
     )
@@ -1471,7 +1471,7 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
     where = and_where(
         f"c.START_TIME >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())",
         "c.QUERY_TYPE = 'CALL'",
-        companies.warehouse_clause(company, "c.WAREHOUSE_NAME"),
+        _wh_company_scope(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
         contains_filter("c.SCHEMA_NAME", schema_contains),
     )

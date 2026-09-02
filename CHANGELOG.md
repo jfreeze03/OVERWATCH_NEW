@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.440.0 - Audit follow-up: all remaining insights_sql warehouse-company scope on the UDF axis (2026-09-02)
+
+Auditing the ~13 remaining `companies.warehouse_clause` uses in `insights_sql` (flagged after round-16
+fixed idle/sizing): NONE has a mart twin served via `run_mart_first`, so the round-16 twin-divergence
+bug does not extend to them. But they still scoped company by the warehouse NAME PATTERN while
+`cost_sql` (round-11), idle, and sizing use the COMPANY_FOR_WAREHOUSE UDF — so a COMPANY_SCOPE-mapped-
+but-off-pattern warehouse's queries / proc-costs appeared under a different company on the query-level
+Operations/Optimize/Cost surfaces than on the cost boards (the MC-1 class, cross-page). Converted all
+remaining sites (`repeat_query_fingerprints`, `release_query_compare`, `warehouse_hourly_activity`,
+`expensive_queries_usd`, `wasted_query_spend_usd`, `expensive_patterns_usd`, `measured_query_costs`,
+`procedure_costs_usd`, `proc_cost_trend`) to the `_wh_company_scope` UDF axis, so every warehouse-company
+scope in `insights_sql` is now consistent with `cost_sql`, the mart twins, and COMPANY_SCOPE semantics.
+A guard test forbids `companies.warehouse_clause(company` from returning to the module. No migration.
+
 ## 4.439.0 - Bug hunt round 16: idle/sizing twin scope-axis (MC-1 class in insights_sql) + pace-vs-budget MTD basis (2026-09-02)
 
 A round led by the live-builder/mart-twin divergence angle (the systematic generalization of

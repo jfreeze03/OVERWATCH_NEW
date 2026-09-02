@@ -75,7 +75,7 @@ def test_expensive_queries_shape():
     sql = insights_sql.expensive_queries_usd(7, "Trexis", 50)
     assert "WAREHOUSE_METERING_HISTORY" in sql and "QUERY_HISTORY" in sql
     assert "ALLOCATED_CREDITS" in sql and "LIMIT 50" in sql
-    assert "WH_TRXS_LOAD" in sql  # company scoping applied
+    assert "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'Trexis'" in sql  # company scope (UDF axis, round-16)
     assert "NULLIF(t.TOTAL_EXEC_MS, 0)" in sql  # no divide-by-zero
 
 

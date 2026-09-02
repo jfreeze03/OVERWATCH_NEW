@@ -124,7 +124,7 @@ def test_patterns_sql_shape():
     sql = insights_sql.expensive_patterns_usd(7, "Trexis", 30)
     assert "QUERY_PARAMETERIZED_HASH" in sql and "HAVING RUNS >= 2" in sql
     assert "HAVING RUNS >= 15" in insights_sql.expensive_patterns_usd(90, "Trexis", 30)
-    assert "CREDITS_PER_DAY" in sql and "WH_TRXS_LOAD" in sql
+    assert "CREDITS_PER_DAY" in sql and "COMPANY_FOR_WAREHOUSE(WAREHOUSE_NAME) = 'Trexis'" in sql
     assert "LIMIT 100" in insights_sql.expensive_patterns_usd(7, "ALL", 9999)
 
 

@@ -35,7 +35,8 @@ def test_measured_queries_honor_every_filter():
     # contains-filters are LIKE-escaped: '_' arrives as '~_'
     assert "WH~_ALFA" in sql and "JFREEZE" in sql and "SCHEMA_NAME ILIKE" in sql
     trexis = insights_sql.measured_query_costs(30, "Trexis")
-    assert "TRXS" in trexis                            # company via warehouse scope
+    # round-16: company via the COMPANY_FOR_WAREHOUSE UDF axis, not the name pattern
+    assert "COMPANY_FOR_WAREHOUSE(q.WAREHOUSE_NAME) = 'Trexis'" in trexis
 
 
 def test_measured_queries_clamps():
