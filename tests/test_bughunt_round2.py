@@ -88,8 +88,11 @@ def test_brief_verdict_uses_uncapped_incident_count():
 
 # --- SWI-1 / SWI-2: write CALLs use a STABLE content-signature request_key ------
 def test_operator_writes_use_stable_idempotency_key():
+    # round-5: upgraded from idempotency_key (minute-bucketed) to the time-independent
+    # content_request_key, so a lost-response retry crossing a minute boundary still
+    # dedups into a no-op instead of writing a duplicate audit/comment row.
     wb = _src("app/ui/workbench.py")
-    assert 'idempotency_key(\n                "ui_action"' in wb
+    assert 'content_request_key(\n                "ui_action"' in wb
     assert "request_key=f\"ui:{action_id}:{uuid4()}\"" not in wb    # fresh-uuid form gone
     ds = _src("app/ui/decision_studio.py")
-    assert 'idempotency_key(\n                "ui_experiment"' in ds
+    assert 'content_request_key(\n                "ui_experiment"' in ds

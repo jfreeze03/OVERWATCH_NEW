@@ -7,7 +7,7 @@ import contextlib
 import pandas as pd
 import streamlit as st
 
-from app.core.identity import idempotency_key, viewer_name
+from app.core.identity import content_request_key, viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import request_navigation
@@ -1002,7 +1002,9 @@ def _render_experiment_detail(row) -> None:
             # STABLE content-signature request_key (not a fresh uuid) so the settle proc
             # dedups an at-least-once retry into an idempotent no-op instead of double-booking
             # the savings ledger / writing a duplicate activity row (round-2 bug hunt).
-            request_key=idempotency_key(
+            # content_request_key is time-independent, so a retry crossing a minute boundary
+            # still maps to the same key (round-5 bug hunt).
+            request_key=content_request_key(
                 "ui_experiment",
                 f"{experiment_id}|{update_status}|{result_note}|"
                 f"{verified_value if update_status == 'VERIFIED' else ''}"),

@@ -127,7 +127,12 @@ def render() -> None:
     _exh = run(mart_sql.contract_exhaustion(), page=_PAGE, key="cost_verdict_exhaustion",
                tier="recent", source="SETTINGS + FACT_METERING_DAILY")
     _vsig = []
-    if _exh.usable() and safe_float(_exh.df.iloc[0].get("TOTAL")) > 0:
+    if not _exh.usable():
+        # A failed runway read must NOT read as green "contract on track" — that is a
+        # positive claim on missing data (the false-all-clear class the sibling pages
+        # guard). Surface Watch instead. (bug-hunt round 5)
+        _vsig.append(Signal("warn", "contract runway unavailable — telemetry not read"))
+    elif safe_float(_exh.df.iloc[0].get("TOTAL")) > 0:
         _dl = safe_float(_exh.df.iloc[0].get("DAYS_LEFT"), -1.0)
         if 0 <= _dl <= 30:
             _vsig.append(Signal("bad", f"contract runway {_dl:,.0f} days at current burn"))

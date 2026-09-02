@@ -7,7 +7,7 @@ from datetime import timedelta
 import pandas as pd
 import streamlit as st
 
-from app.core.identity import idempotency_key, viewer_name
+from app.core.identity import content_request_key, viewer_name
 from app.core.query import execute_statement, run
 from app.core.session import is_operator
 from app.core.state import filters, navigation_context, request_navigation
@@ -210,8 +210,9 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             # it, so an at-least-once retry (transient error after the server already wrote)
             # is idempotent instead of writing a duplicate audit/comment row. Any real edit
             # (incl. the comment text) changes the signature and writes a new row (round-2
-            # bug hunt).
-            request_key=idempotency_key(
+            # bug hunt). content_request_key is TIME-INDEPENDENT so a retry that crosses a
+            # minute boundary still maps to the same key (round-5 bug hunt).
+            request_key=content_request_key(
                 "ui_action",
                 f"{action_id}|{status}|{owner}|{_due_arg}|{defer}|{note}|{_clear_owner}|{_clear_defer}"),
             clear_owner=_clear_owner,
@@ -228,6 +229,12 @@ def _render_action_detail(row: pd.Series, *, extended: bool) -> None:
             stamp_write(f"action_save_{action_id}", ok)  # C48
             notify(ok, msg)
             if ok:
+                # Clear the free-text comment before the rerun. It maps to no row field,
+                # so a retained value keeps 'add a comment' in _effects — the item would
+                # mis-read as unsaved (dirty, Save re-armed) after a completed write, and
+                # a re-click would append a duplicate comment. The status/owner/due/defer
+                # widgets self-resolve (their values now match the re-read row). (round 5)
+                st.session_state.pop(f"action_note_{action_id}", None)
                 st.rerun()
     else:
         st.caption("Lifecycle changes require an operator; evidence remains visible to every viewer.")

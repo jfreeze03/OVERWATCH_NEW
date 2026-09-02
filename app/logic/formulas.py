@@ -358,10 +358,15 @@ def humanize_age(value: object, now: object = None) -> str:
     secs = (ref - ts).total_seconds()
     if secs < 45:                     # includes small clock skew / future stamps
         return "just now"
-    if secs < 3600:
-        return f"{round(secs / 60)}m ago"
-    if secs < 86_400:
-        return f"{round(secs / 3600)}h ago"
+    # Round to the target unit BEFORE the threshold check, so a value just under the
+    # next unit promotes ("1h ago") instead of reading the full count of the lower unit
+    # ("60m ago"). Mirrors humanize_duration; matches the humanize_bytes boundary fix.
+    mins = round(secs / 60)
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = round(secs / 3600)
+    if hours < 24:
+        return f"{hours}h ago"
     return f"{round(secs / 86_400)}d ago"
 
 
@@ -374,10 +379,14 @@ def humanize_minutes_ago(minutes: object) -> str:
     m = safe_float(minutes)
     if m < 1:
         return "just now"
-    if m < 60:
-        return f"{round(m)}m ago"
-    if m < 1440:
-        return f"{round(m / 60)}h ago"
+    # Round to the target unit before the threshold check (see humanize_age): 59.7 min
+    # reads "1h ago", not "60m ago"; 1439 min reads "1d ago", not "24h ago".
+    mins = round(m)
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = round(m / 60)
+    if hours < 24:
+        return f"{hours}h ago"
     return f"{round(m / 1440)}d ago"
 
 

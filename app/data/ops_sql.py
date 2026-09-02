@@ -300,8 +300,17 @@ def lock_contention(days: int, *, bounds: tuple | None = None) -> str:
     """Lock waits (account-wide; LOCK_WAIT_HISTORY has no warehouse grain).
     Window capped at 7d (was 14): the 14-day scan read ~56GB per run on this
     account (fleet board, 2026-07-10) and lock triage is a this-week
-    question — history beyond that lives in the incident timeline."""
+    question — history beyond that lives in the incident timeline.
+
+    The 7d cost cap holds under Last-month bounds too: an unclamped bounds would
+    make scope_window_where ignore ``days`` and scan the whole ~31-day month (~4x
+    the cap this builder exists to enforce), so bounds are intersected with the last
+    7 days of the bounded window on this LIVE fallback path (bug-hunt round 5)."""
     days = bounded_days(days, maximum=7)
+    if bounds is not None:
+        from datetime import timedelta
+        _start, _end = bounds
+        bounds = (max(_start, _end - timedelta(days=days)), _end)
     return f"""
 SELECT
     DATABASE_NAME,

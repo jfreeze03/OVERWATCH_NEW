@@ -47,3 +47,22 @@ def idempotency_key(kind: str, payload: str) -> str:
     minute = account_now().strftime("%Y%m%d%H%M")
     raw = f"{kind}|{payload}|{viewer_name()}|{minute}"
     return hashlib.sha1(raw.encode()).hexdigest()[:32]
+
+
+def content_request_key(kind: str, payload: str) -> str:
+    """Deterministic, TIME-INDEPENDENT idempotency key for a content signature.
+
+    Unlike idempotency_key (which folds a minute bucket for double-click dedup),
+    this hashes only (kind, payload, viewer), so the SAME content always maps to
+    the SAME key. Use it where a caller passes request_key as a STABLE content
+    signature for at-least-once retry idempotency (workbench action lifecycle,
+    decision-studio experiment settle): a lost-response retry — even one that
+    crosses a minute boundary — then dedups into a no-op instead of writing a
+    duplicate audit/comment row. A genuinely different action changes the payload
+    and gets a new key. (bug-hunt round 5: the minute bucket silently defeated the
+    retry-idempotency the two callers' own comments promised.)
+    """
+    import hashlib
+
+    raw = f"{kind}|{payload}|{viewer_name()}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:32]

@@ -2531,8 +2531,18 @@ def render() -> None:
         _sr = _hs.df[_hs.df["METRIC"].astype(str) == "STALE_SOURCES"]
         if not _sr.empty:
             _stale = int(safe_float(_sr.iloc[0]["VALUE"]))
+    # A failed inputs/health read must NOT manufacture a green all-clear (the class
+    # every sibling page-verdict guards: overview/control_room/brief add a degraded
+    # warn Signal for exactly this). operations_signals emits NOTHING for None inputs,
+    # so on an unreadable read the empty-signal verdict would falsely read "no failing
+    # queries or tasks ... sources are fresh". (bug-hunt round 5)
+    _ops_sigs = verdict.operations_signals(_si.df if _si.usable() else None, _stale)
+    if not _si.usable():
+        _ops_sigs.append(verdict.Signal("warn", "platform telemetry unavailable — health not evaluated"))
+    if not (_hs.ok and not _hs.empty):
+        _ops_sigs.append(verdict.Signal("warn", "source freshness unavailable"))
     page_verdict_line(verdict.page_verdict(
-        verdict.operations_signals(_si.df if _si.usable() else None, _stale),
+        _ops_sigs,
         healthy="no failing queries or tasks, warehouses aren't queueing or spilling, and sources are fresh"))
     # Contention folded under Warehouses (CoCo): warehouse health and the
     # contention it causes read together.

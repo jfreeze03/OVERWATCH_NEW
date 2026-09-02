@@ -555,12 +555,18 @@ WHERE {where}
 """
 
 
-def storage_account_truth_live(days: int) -> str:
+def storage_account_truth_live(days: int, *, bounds: tuple | None = None) -> str:
     """Live fallback for storage_account_truth from ACCOUNT_USAGE.STORAGE_USAGE
     (F1b/R3, V046). Same monthly-average billing basis; account-wide. Note the
     view is Snowflake's own estimate that will not match the invoice exactly —
-    org USAGE_IN_CURRENCY is billing truth."""
+    org USAGE_IN_CURRENCY is billing truth.
+
+    Honors ``bounds`` (Last month) via scope_window_where so the live fallback
+    covers the SAME bounded calendar month as the fact path — dropping bounds here
+    scanned a trailing today-anchored window that mixed the current partial month
+    into the figure presented as last month's (bug-hunt round 5)."""
     days = bounded_days(days, maximum=400)
+    where = scope_window_where("USAGE_DATE", days, bounds=bounds)
     return f"""
 SELECT
     AVG(COALESCE(STORAGE_BYTES, 0))              AS TABLE_BYTES,
@@ -572,7 +578,7 @@ SELECT
     COUNT(DISTINCT USAGE_DATE)                  AS DAYS_AVERAGED,
     MAX(USAGE_DATE)                             AS LATEST_DAY
 FROM SNOWFLAKE.ACCOUNT_USAGE.STORAGE_USAGE
-WHERE USAGE_DATE >= DATEADD('day', -{days}, CURRENT_DATE())
+WHERE {where}
 """
 
 
@@ -938,7 +944,13 @@ SELECT
     USER_NAME,
     SUM(EXECUTION_TIME) / 1000.0 AS EXEC_SEC,
     SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL, EXECUTION_TIME, 0)) / 1000.0 AS UNTAGGED_EXEC_SEC,
-    ROUND(100 * (1 - UNTAGGED_EXEC_SEC / NULLIF(EXEC_SEC, 0)), 1) AS TAGGED_PCT,
+    -- TAGGED_PCT must repeat the SUM expressions, NOT reference the EXEC_SEC /
+    -- UNTAGGED_EXEC_SEC aliases: Snowflake forbids lateral column-alias references
+    -- inside the SELECT list (it compiles to "invalid identifier"), unlike HAVING /
+    -- ORDER BY below where the aliases are allowed. Sibling builders repeat the
+    -- aggregate the same way (cloud_services_ratio_by_warehouse). (bug-hunt round 5)
+    ROUND(100 * (1 - SUM(IFF(NULLIF(QUERY_TAG, '') IS NULL, EXECUTION_TIME, 0))
+                     / NULLIF(SUM(EXECUTION_TIME), 0)), 1) AS TAGGED_PCT,
     COUNT(*) AS QUERIES
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
 WHERE {where}

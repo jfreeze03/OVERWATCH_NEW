@@ -1118,7 +1118,7 @@ def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: t
               key=f"stor_acct_{days}{_lm}", tier="hourly",
               source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
     if not res.ok or res.empty:
-        res = run(cost_sql.storage_account_truth_live(days), page=_PAGE,
+        res = run(cost_sql.storage_account_truth_live(days, bounds=bounds), page=_PAGE,
                   key=f"stor_acct_live_{days}{_lm}", tier="historical",
                   source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
     if not res.ok:
@@ -1252,6 +1252,61 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
     # window. Fact-first with a live DATABASE_STORAGE_USAGE_HISTORY fallback.
     _db = st.session_state.get("flt_database", "")
     today = account_today()
+
+    def _loader_watermark(r: object) -> object:
+        if not (getattr(r, "ok", False) and not r.empty) or "LATEST_DAY" not in r.df.columns:
+            return None
+        ser = pd.to_datetime(r.df["LATEST_DAY"], errors="coerce").dropna()
+        return ser.max().date() if not ser.empty else None
+
+    # tz-window round-5: under "Last month" the per-database panel must cover the SAME
+    # bounded month as the account-tier panel below (which already honors bounds) — not
+    # current MTD. The Last-month window IS the previous COMPLETE calendar month, which is
+    # exactly storage_by_database_calendar(prior=True), so render that (a completed month,
+    # watermark-backfilled vs its month-end) as the primary and skip the MTD-vs-prior frame.
+    if bounds is not None:
+        first_this = today.replace(day=1)
+        last_prior = first_this - timedelta(days=1)          # last day of the bounded month
+        period_days_prior = last_prior.day                   # its calendar length
+        pm = run(cost_sql.storage_by_database_calendar(company, _db, prior=True), page=_PAGE,
+                 key=f"storage_lastmonth_{company}", tier="historical",
+                 source="FACT_STORAGE_DAILY (previous full month daily-average)", probe=True)
+        pm_latest = _loader_watermark(pm)
+        pm_stale = pm.ok and not pm.empty and (pm_latest is None or pm_latest < last_prior - timedelta(days=2))
+        if not pm.ok or pm.empty or pm_stale:
+            pm = run(cost_sql.storage_by_database_calendar_live(company, _db, prior=True), page=_PAGE,
+                     key=f"storage_lastmonth_live_{company}", tier="historical",
+                     source="DATABASE_STORAGE_USAGE_HISTORY (previous full month daily-average, live)")
+        if guard(pm, "No storage rows for this scope in the previous month."):
+            pdf = pm.df.copy()
+            rate_tb = safe_float(settings.get("STORAGE_USD_PER_TB_MONTH"), 23.0)
+            pdf["TiB"] = (pdf["DB_BYTES"].map(safe_float) + pdf["FAILSAFE_BYTES"].map(safe_float)) / (1024**4)
+            pdf["USD_MONTH"] = pdf["TiB"] * rate_tb
+            lm_tib = float(pdf["TiB"].sum())
+            # Same account-level watermark backfill as the trend path: only rescale if the
+            # loader never reached the bounded month's end (a uniform tail-day gap).
+            first_prior = last_prior.replace(day=1)
+            if pm_latest is not None and pm_latest < last_prior:
+                loaded_days = (pm_latest - first_prior).days + 1
+                if loaded_days > 0:
+                    lm_tib *= period_days_prior / loaded_days
+            kpi_row([
+                {"label": "Storage last month (daily avg)", "value": f"{lm_tib:,.2f} TiB",
+                 "delta": f"~{format_usd(lm_tib * rate_tb)}/mo", "delta_color": "off",
+                 "help": "Previous complete calendar month's average of daily (active + Time "
+                         f"Travel + fail-safe) bytes x ${rate_tb:.2f}/TiB/mo (SETTINGS) — the same "
+                         "billing basis as the current-month view, scoped to the selected month so "
+                         "it matches the account-by-tier panel below. Hybrid/stage/archive carry no "
+                         "per-database split (account panel only)."},
+            ])
+            charts.bar_usd(pdf.sort_values("USD_MONTH", ascending=False),
+                           "DATABASE_NAME", "USD_MONTH", title="$/month by database (last month)")
+            result_caption(pm)
+            st.divider()
+            _storage_table_drill(company, settings, pdf["DATABASE_NAME"].astype(str).tolist())
+        _account_storage_tiers(company, days, settings, bounds=bounds)
+        return
+
     res = run(cost_sql.storage_by_database_calendar(company, _db, prior=False), page=_PAGE,
               key=f"storage_mtd_{company}", tier="historical",
               source="FACT_STORAGE_DAILY (MTD daily-average, billing basis)")
@@ -1264,11 +1319,7 @@ def _storage_tab(company: str, days: int, settings: dict, *, bounds: tuple | Non
     # its drop date, so the old stalest_day (MIN) read the scope as stale forever and
     # forced the live fallback on every render. A db is "active" only if it reaches
     # the watermark; a not-recently-seen db is treated as gone, not as loader loss.
-    def _loader_watermark(r: object) -> object:
-        if not (getattr(r, "ok", False) and not r.empty) or "LATEST_DAY" not in r.df.columns:
-            return None
-        ser = pd.to_datetime(r.df["LATEST_DAY"], errors="coerce").dropna()
-        return ser.max().date() if not ser.empty else None
+    # (_loader_watermark is defined once above, shared with the Last-month branch.)
     fact_latest = _loader_watermark(res)
     fact_stale = res.ok and not res.empty and (
         fact_latest is None or fact_latest < today - timedelta(days=2))

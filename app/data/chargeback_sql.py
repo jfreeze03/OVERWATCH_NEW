@@ -155,8 +155,15 @@ SELECT
     COUNT(*) AS QUERY_COUNT,
     SUM(COALESCE(Q.TOTAL_ELAPSED_TIME, 0)) / 1000.0 AS ELAPSED_SEC
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY Q
-LEFT JOIN {core_object("DEPARTMENT_MAP")} R
-       ON R.MAP_TYPE = 'ROLE' AND UPPER(R.NAME) = UPPER(Q.ROLE_NAME)
+-- Collapse the ROLE map to ONE row per UPPER(NAME) before the join (latest UPDATED_AT
+-- wins), exactly as _MAP_JOIN does for WAREHOUSE: a raw LEFT JOIN fans out — doubling
+-- this role's QUERY_COUNT / ELAPSED_SEC — if two case-variant ROLE rows (legal under the
+-- case-sensitive PK) collide on the case-insensitive join. (bug-hunt round 5)
+LEFT JOIN (
+    SELECT NAME, DEPARTMENT FROM {core_object("DEPARTMENT_MAP")}
+    WHERE MAP_TYPE = 'ROLE'
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY UPPER(NAME) ORDER BY UPDATED_AT DESC NULLS LAST, NAME) = 1
+) R ON UPPER(R.NAME) = UPPER(Q.ROLE_NAME)
 WHERE {where}
 GROUP BY 1, 2
 ORDER BY ELAPSED_SEC DESC

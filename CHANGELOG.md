@@ -1,5 +1,39 @@
 # Changelog
 
+## 4.420.0 - Bug hunt round 5: invalid tag-coverage SQL, false-green verdicts, storage-window drift (2026-09-01)
+
+A fifth adversarial sweep (7 deep dimensions: pricing, SQL-aggregation, concurrency/cache,
+timezone/window, empty-data/error, security-scope, formula-edge — find then refute-verify).
+Pricing and security-scope came back clean. 10 confirmed fixed (1 HIGH, 4 MED, 5 LOW), 1 refuted.
+
+- **Tag-coverage board silently blanked on a db/schema filter (HIGH).** `tag_coverage`'s
+  `TAGGED_PCT` referenced the `EXEC_SEC` / `UNTAGGED_EXEC_SEC` aliases defined in the *same*
+  flat SELECT list — Snowflake forbids lateral column-alias refs there (it compiles to
+  "invalid identifier"), so the live chargeback board that fires whenever a Database/Schema
+  filter is active errored and rendered empty. sqlglot parses it, so the parse gate missed
+  it and snowflake-smoke is skipped. Now inlines the SUM, matching the sibling house style.
+- **Two page verdicts read a green all-clear on unreadable telemetry (MED×2).** Operations
+  ("no failing queries or tasks … sources are fresh") and Cost ("contract on track") emitted
+  no verdict Signal when their inputs read failed, so the empty-signal verdict fell through to
+  the healthy sentence — the exact false-all-clear the other pages guard. Both now add a
+  degraded-data warn Signal (Watch, not green) when the read is unusable.
+- **Storage panels drifted under Last month (MED×2).** The per-database storage panel stayed
+  on current-MTD while its account-tier sibling honored the bounded month (two different
+  calendar months on one tab); it now renders the previous complete month under bounds. And
+  the account-tier live fallback (`storage_account_truth_live`) dropped `bounds`, scanning a
+  trailing today-anchored window that mixed the current partial month in — now bounds-aware.
+- **Idempotency contract (LOW):** the workbench/decision-studio "stable content signature"
+  request key folded a minute bucket, so a lost-response retry crossing a minute boundary
+  wrote a duplicate audit/comment row. Added a time-independent `content_request_key`; the
+  alert double-click path keeps the minute bucket by design. Also: the work-item comment box
+  now clears after a successful save (it left the item mis-reading as unsaved).
+- **Other LOW:** `lock_contention`'s 7-day scan-cost cap held under Last-month bounds (was
+  scanning the whole ~31-day month on the live fallback); `role_department_map_join` dedups
+  the ROLE map like its sibling `_MAP_JOIN` (latent double-count on a case-variant map row);
+  `humanize_age`/`humanize_minutes_ago` promote at the unit boundary ("1h ago" not "60m ago").
+- Refuted: the budget-pace "one day ahead" claim (the expected-to-date and MTD-actual are both
+  on the documented completed-days basis by design).
+
 ## 4.419.0 - Bug hunt round 4: dead metrics, LIMIT-frame totals, Ask hijack, ledger double-count (2026-09-01)
 
 A fourth adversarial sweep (financial-accuracy, truncation-honesty, dead-metric, intent-routing, chart-
