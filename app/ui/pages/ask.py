@@ -55,16 +55,26 @@ def _test_cases() -> list[str]:
 
 
 _NUM_RE = re.compile(r"\d[\d,]*\.?\d*")
+_PCT_RE = re.compile(r"(\d[\d,]*\.?\d*)\s*%")
 
 
 def _numbers_preserved(grounded: str, phrased: str) -> bool:
     """Enforce the 'grounded numbers unchanged' promise: every numeric token in the AI
     phrasing must already appear in the grounded finding. The prompt TELLS the model not to
     change numbers, but nothing made it true — a drifted figure would render under a caption
-    claiming the numbers are unchanged. Thousands-commas are normalized so '1,234' == '1234'."""
+    claiming the numbers are unchanged. Thousands-commas are normalized so '1,234' == '1234'.
+
+    ASK-G1: also bind PERCENTAGES to their role. The flat set alone let a bare number in
+    one role license the same digits as a percentage in another — e.g. the window '30d'
+    licensed a wrong '30%' when the grounded share was 60%. So every phrased ``N%`` must
+    also appear as a percentage in the grounded text, not merely as some bare digit."""
     def toks(s: str) -> set[str]:
         return {m.group().replace(",", "").rstrip(".") for m in _NUM_RE.finditer(s)}
-    return toks(phrased) <= toks(grounded)
+
+    def pct_toks(s: str) -> set[str]:
+        return {m.group(1).replace(",", "").rstrip(".") for m in _PCT_RE.finditer(s)}
+
+    return toks(phrased) <= toks(grounded) and pct_toks(phrased) <= pct_toks(grounded)
 
 
 def _ai_phrasing(result: AnswerResult, model: str) -> str | None:

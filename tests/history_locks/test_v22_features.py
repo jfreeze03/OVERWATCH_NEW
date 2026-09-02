@@ -100,7 +100,11 @@ def test_storage_reclaim_shape():
 def test_rule_precision_shape():
     sql = mart_sql.rule_precision(9999)
     assert "RESOLUTION_KIND" in sql and "-365," in sql  # clamped
-    assert "NULLIF(ACTIONED + NOISE, 0)" in sql
+    # round-6: PRECISION_PCT inlines the COUNT_IF instead of referencing the ACTIONED /
+    # NOISE aliases (Snowflake forbids a same-SELECT-list alias ref — it was ok=False).
+    assert "NULLIF(ACTIONED + NOISE, 0)" not in sql
+    assert "COUNT_IF(RESOLUTION_KIND = 'ACTIONED')\n" in sql
+    assert "+ COUNT_IF(RESOLUTION_KIND = 'NOISE'), 0), 1) AS PRECISION_PCT" in sql
 
 
 def test_mart_recon_two_checks():

@@ -115,7 +115,16 @@ BEGIN
                    (COALESCE(r.BASELINE_CREDITS_PER_DAY, 0) - COALESCE(r.AFTER_CREDITS_PER_DAY, 0))
                        * :rate * 30 AS WH_SAVED_MONTHLY_USD
               FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY r
-             WHERE r.VERDICT <> 'PENDING') s
+             WHERE r.VERDICT <> 'PENDING'
+               -- Rank ONLY changes that Step-1 actually booked a ledger row for (the
+               -- saving-direction levers). The registry also holds non-saving changes
+               -- (SIZE up, AUTO_SUSPEND up) with the SAME measured-window signature but
+               -- NO ledger row; if one of those won RN=1 it would carry the full saving
+               -- into a row that doesn't exist while the genuine saving lever settled at
+               -- $0 -- booking a real saving as ZERO. Restricting the population to booked
+               -- levers guarantees the RN=1 primary always has a row to receive the USD.
+               AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l2
+                            WHERE l2.SOURCE_CHANGE_ID = r.CHANGE_ID)) s
      WHERE l.SOURCE_CHANGE_ID = s.CHANGE_ID
        AND l.STATE = 'ESTIMATED';
 
@@ -147,7 +156,13 @@ BEGIN
                                     reg.AFTER_CREDITS_PER_DAY, reg.AFTER_DAYS
                        ORDER BY reg.CHANGE_SEEN_AT, reg.CHANGE_ID) AS PRIMARY_CHANGE_ID
               FROM DBA_MAINT_DB.OVERWATCH.WAREHOUSE_CHANGE_REGISTRY reg
-             WHERE reg.VERDICT <> 'PENDING') g
+             WHERE reg.VERDICT <> 'PENDING'
+               -- Same booked-lever population as the forward settle: rank only changes
+               -- that carry a ledger row, so a non-saving co-occurring change can never
+               -- be designated the primary (the primary-is-VERIFIED guard below already
+               -- protected correctness; this keeps PRIMARY_CHANGE_ID a real booked lever).
+               AND EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l3
+                            WHERE l3.SOURCE_CHANGE_ID = reg.CHANGE_ID)) g
      WHERE l.SOURCE_CHANGE_ID = g.CHANGE_ID
        AND g.RN > 1
        AND l.STATE = 'VERIFIED'

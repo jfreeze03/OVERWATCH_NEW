@@ -421,7 +421,6 @@ WITH query_stats AS (
         WAREHOUSE_NAME,
         COUNT(*) AS QUERY_COUNT,
         COUNT(DISTINCT DATE(START_TIME)) AS ACTIVE_QUERY_DAYS,
-        APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS P95_ELAPSED_SEC,
         SUM(COALESCE(QUEUED_OVERLOAD_TIME, 0)) / 1000.0 AS QUEUED_SEC,
         SUM(COALESCE(QUEUED_PROVISIONING_TIME, 0)) / 1000.0 AS QUEUED_PROVISIONING_SEC,
         SUM(COALESCE(BYTES_SPILLED_TO_REMOTE_STORAGE, 0)) / POWER(1024, 3) AS SPILL_REMOTE_GB
@@ -429,6 +428,24 @@ WITH query_stats AS (
     WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
       AND WAREHOUSE_NAME IS NOT NULL
       AND {companies.warehouse_clause(company) or "1 = 1"}
+    GROUP BY WAREHOUSE_NAME
+),
+-- FBK-2: P95 = MAX of the per-DAY p95s (peak-daily), matching the mart sibling
+-- eff_sizing_profile's MAX(P95_S). The old whole-window APPROX_PERCENTILE was
+-- systematically lower, so the sizing.py 'size down' gate (p95 <= 10s) flipped its
+-- verdict — and the booked $ saving — between the mart and this live fallback for the
+-- same warehouse. Both paths now share the conservative peak-daily basis (round 6).
+day_p95 AS (
+    SELECT WAREHOUSE_NAME, MAX(DAY_P95) AS P95_ELAPSED_SEC
+    FROM (
+        SELECT WAREHOUSE_NAME, DATE(START_TIME) AS D,
+               APPROX_PERCENTILE(TOTAL_ELAPSED_TIME / 1000, 0.95) AS DAY_P95
+        FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY
+        WHERE {scope_window_where("START_TIME", days, bounds=bounds)}
+          AND WAREHOUSE_NAME IS NOT NULL
+          AND {companies.warehouse_clause(company) or "1 = 1"}
+        GROUP BY WAREHOUSE_NAME, DATE(START_TIME)
+    )
     GROUP BY WAREHOUSE_NAME
 ),
 {_active_hours_cte(days, company, bounds=bounds)}
@@ -440,7 +457,7 @@ SELECT
           / NULLIF(SUM(COALESCE(M.CREDITS_USED, 0)), 0) * 100, 1) AS IDLE_PCT,
     COALESCE(MAX(Q.QUERY_COUNT), 0) AS QUERY_COUNT,
     COALESCE(MAX(Q.ACTIVE_QUERY_DAYS), 0) AS ACTIVE_QUERY_DAYS,
-    COALESCE(MAX(Q.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
+    COALESCE(MAX(P.P95_ELAPSED_SEC), 0) AS P95_ELAPSED_SEC,
     COALESCE(MAX(Q.QUEUED_SEC), 0) AS QUEUED_SEC,
     COALESCE(MAX(Q.QUEUED_PROVISIONING_SEC), 0) AS QUEUED_PROVISIONING_SEC,
     COALESCE(MAX(Q.SPILL_REMOTE_GB), 0) AS SPILL_REMOTE_GB
@@ -449,6 +466,7 @@ LEFT JOIN query_hours H
        ON H.WAREHOUSE_NAME = M.WAREHOUSE_NAME
       AND H.HOUR_TS = DATE_TRUNC('hour', M.START_TIME)
 LEFT JOIN query_stats Q ON Q.WAREHOUSE_NAME = M.WAREHOUSE_NAME
+LEFT JOIN day_p95 P ON P.WAREHOUSE_NAME = M.WAREHOUSE_NAME
 WHERE {where_m}
 GROUP BY 1, 2
 HAVING SUM(COALESCE(M.CREDITS_USED, 0)) > 0

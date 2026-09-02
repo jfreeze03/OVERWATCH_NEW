@@ -478,7 +478,7 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         "Serverless tasks bill separately and are listed below at task-day grain."
     )
     res = run_mart_first(
-        mart27_sql.task_graphs(days, company, database, schema_contains),
+        mart27_sql.task_graphs(days, company, database, schema_contains, bounds=bounds),
         graph_sql.graph_daily_costs(days, company, database, schema_contains, bounds=bounds),
         page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
         mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",

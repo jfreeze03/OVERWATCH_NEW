@@ -167,14 +167,23 @@ def _analyze_spend_by_user(
     outlier = top_z >= OUTLIER_Z
     meta["top_z"] = round(top_z, 2)
 
+    # ASK-G3: the builder is LIMIT-100, so when the raw frame is at the cap the % base
+    # is the top-100 users, not ALL named users — label it honestly (mirrors the CS
+    # answerer's "top N" disclosure) so the share isn't read as the full-population share.
+    _capped = len(df) >= 100
+    _share_base = f"the top {len(d)} named users' spend" if _capped else "named-user spend"
     tail = f" — a clear outlier vs peers (z={top_z:.1f})" if outlier else ""
     headline = (
         f"Over the last {eff}d, {top_user} is the top spender: "
-        f"{_fmt(top_credits)} credits ({top_share * 100:.0f}% of named-user "
-        f"spend){tail}."
+        f"{_fmt(top_credits)} credits ({top_share * 100:.0f}% of {_share_base}){tail}."
     )
 
     bullets: list[str] = []
+    if _capped:
+        bullets.append(
+            f"Share base is the top {len(d)} named users (attribution is capped at 100 "
+            "per window); the true named-user share is slightly lower."
+        )
     if eff < params.days:  # window was clamped to the mart horizon — say so
         bullets.append(
             f"Per-user attribution is capped to the mart's {eff}-day horizon "

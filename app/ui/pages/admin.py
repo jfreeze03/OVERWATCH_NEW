@@ -439,6 +439,10 @@ _EXPECTED_MIGRATIONS = {
          "is booked once even when several cost levers change on it in the same window — the primary lever carries "
          "the full VERIFIED_USD, co-occurring levers settle VERIFIED at $0. One-time idempotent correction of rows "
          "V038 already double-booked. Proc only, no schema change",
+    119: "Alert auto-clear hysteresis fix (MPROC-2): SP_ALERT_SCAN re-derived from V117 so the still-firing "
+         "protection set is compared on the date-stripped RULE_ID|scope identity — a perf alert held open by "
+         "hysteresis is no longer falsely auto-cleared across the midnight boundary while its condition is still "
+         "above the CLEAR floor. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

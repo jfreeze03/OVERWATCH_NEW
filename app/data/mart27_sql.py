@@ -106,10 +106,16 @@ LIMIT 5000
 
 
 def task_graphs(days: int, company: str = "ALL", database: str = "",
-                schema_contains: str = "") -> str:
-    """Same filter surface as graph_sql.graph_daily_costs (wave 2 parity)."""
+                schema_contains: str = "", *, bounds: tuple | None = None) -> str:
+    """Same filter surface as graph_sql.graph_daily_costs (wave 2 parity).
+
+    Honors Last-month ``bounds`` like its live sibling graph_daily_costs and its
+    fact sibling task_nodes: this mart is the PRIMARY served path (run_mart_first,
+    no coverage gate), so a trailing-only window here showed a rolling ~month ending
+    today under a 'Last month' scope while the bounded live leg only ran when the
+    mart was empty (bug-hunt round 6)."""
     days = bounded_days(days, 400)
-    parts = [f"DAY >= DATEADD('day', -{days}, CURRENT_DATE())",
+    parts = [scope_window_where("DAY", days, bounds=bounds),
              companies.database_clause(company, "DATABASE_NAME"),
              contains_filter("SCHEMA_NAME", schema_contains)]
     if str(database or "").strip():

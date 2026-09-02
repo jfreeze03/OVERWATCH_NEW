@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.421.0 - Bug hunt round 6: another invalid-SQL panel, ledger $0 bug, alert auto-clear, cross-metric (2026-09-01)
+
+A sixth adversarial sweep (7 fresh dimensions: cross-metric reconciliation, deep SQL semantics,
+stored-proc logic, chart/data-prep, state/rerun, Ask grounding, mart-vs-live divergence). 12
+confirmed fixed (3 HIGH, 4 MED, 5 LOW), 2 refuted. Two migrations touched (owner-applied).
+
+- **`rule_precision` blanked the alert-precision board (HIGH)** — same alias-in-SELECT-list class
+  as round 5's tag_coverage: `PRECISION_PCT` referenced the `ACTIONED`/`NOISE` aliases from its own
+  SELECT list, which Snowflake rejects. Inlined the COUNT_IF. Added a permanent **AST guard** that
+  sweeps every builder for this class (invisible to sqlglot + the skipped snowflake-smoke).
+- **V118 could book a real saving as $0 (HIGH, migration).** The round-4 ledger dedup ranked
+  co-occurring levers over ALL registry rows; a non-saving change (SIZE up) with no ledger row could
+  win the primary slot, stranding the genuine saving lever at VERIFIED $0. Restricted the ranking to
+  booked levers. **V118 was not yet applied, so it is corrected in place** — apply the current V118.
+- **Pipeline cost tab ignored Last month (HIGH)** — the `task_graphs` mart builder (the primary
+  served path) hard-coded a trailing window while its live sibling honored bounds, so under "Last
+  month" the panel showed a rolling month ending today. Threaded `bounds`.
+- **Alert auto-clear defeated its own hysteresis across midnight (MED, V119, owner-applied).**
+  `SP_ALERT_SCAN`'s "still firing" protection set was date-stamped with today while a held-open event
+  carries its raise-day date, so a perf alert still above the CLEAR floor was falsely auto-cleared
+  after midnight. New **V119** compares on the date-stripped RULE_ID|scope identity.
+- **Cross-metric (MED×2):** the sidebar "Open criticals" badge (account-wide) is relabeled
+  "(acct)" so it no longer contradicts the company-scoped page tiles; the Control Room verdict now
+  says "stale or not loaded" to reconcile with the freshness board's stale-vs-never-loaded split.
+- **State/rerun (MED+LOW):** the task-failure and idle-warehouse AI panels now key on every filter
+  that changes their grounding evidence (database/schema; Last-month), so a stale "grounded in the
+  on-screen evidence" answer can't survive a filter change.
+- **Ask (LOW×2):** the AI-phrasing number guard binds percentages to their role (the window token
+  can no longer license a wrong `N%`); the spend answerer discloses when its "% of named-user spend"
+  base is the LIMIT-100 top set.
+- **Other (LOW):** the org rate-card stacked chart is currency-aware (no more "$" on EUR/GBP spend);
+  the live warehouse-sizing p95 uses the same peak-daily basis as the mart, so a "size down"
+  recommendation no longer flips between the two fallback paths.
+- Refuted: an entity-360 type/key retention nit and one Ask finding.
+
 ## 4.420.0 - Bug hunt round 5: invalid tag-coverage SQL, false-green verdicts, storage-window drift (2026-09-01)
 
 A fifth adversarial sweep (7 deep dimensions: pricing, SQL-aggregation, concurrency/cache,

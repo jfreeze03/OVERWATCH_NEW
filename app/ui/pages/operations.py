@@ -673,7 +673,12 @@ def _failure_timeline_section(company: str, database: str = "", schema_contains:
     result_caption(res)
     _incident_routing_panel(timeline)
     ai_evaluation_panel(
-        key=f"task_failures_{company}",
+        # Key on EVERY dimension that changes the grounding evidence — the timeline
+        # varies with the Database and Schema filters too (task_failure_details), and
+        # the panel caches its answer in session_state until the button is pressed
+        # again. Omitting them re-showed a stale "grounded in the on-screen evidence"
+        # narrative after a filter change (bug-hunt round 6).
+        key=f"task_failures_{company}_{database}_{schema_contains}",
         prompt=task_failure_prompt(timeline, company),
         settings=load_settings(_PAGE),
         page=_PAGE,

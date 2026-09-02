@@ -1335,7 +1335,13 @@ SELECT
     COUNT_IF(RESOLUTION_KIND = 'NOISE')               AS NOISE,
     COUNT_IF(RESOLUTION_KIND = 'EXPECTED')            AS EXPECTED,
     COUNT_IF(RESOLUTION_KIND IS NULL)                 AS UNTAGGED,
-    ROUND(100 * ACTIONED / NULLIF(ACTIONED + NOISE, 0), 1) AS PRECISION_PCT
+    -- PRECISION_PCT must repeat the COUNT_IF expressions, NOT reference the ACTIONED /
+    -- NOISE aliases: Snowflake forbids lateral column-alias references inside the SELECT
+    -- list (compiles to "invalid identifier"), so the panel silently returned ok=False.
+    -- Same class as the round-5 tag_coverage fix; missed in that sweep. (bug-hunt round 6)
+    ROUND(100 * COUNT_IF(RESOLUTION_KIND = 'ACTIONED')
+               / NULLIF(COUNT_IF(RESOLUTION_KIND = 'ACTIONED')
+                        + COUNT_IF(RESOLUTION_KIND = 'NOISE'), 0), 1) AS PRECISION_PCT
 FROM {core_object("ALERT_EVENTS")}
 WHERE STATUS = 'RESOLVED'
   AND RAISED_AT >= DATEADD('day', -{days}, CURRENT_TIMESTAMP())

@@ -540,9 +540,13 @@ def render() -> None:
     _und_n = int(safe_float(_sv.get("UNDELIVERED_CRITICAL", "0")))
     if _und_n:
         _vsig.append(Signal("bad", f"{_und_n} critical(s) reached nobody"))
+    # health_strip STALE_SOURCES = COUNT_IF(LAST_LOAD_TS IS NULL OR AGE_H > LIM), i.e. it
+    # folds NEVER-LOADED sources into the count. The freshness board below splits those out
+    # (STALE vs NOT LOADED), so phrase this "stale or not loaded" to reconcile with it — a
+    # bare "N stale" contradicted the board's "2 stale + 1 never loaded" (bug-hunt round 6).
     _stale_n = int(safe_float(_sv.get("STALE_SOURCES", "0")))
     if _stale_n:
-        _vsig.append(Signal("warn", f"{_stale_n} stale telemetry source(s)"))
+        _vsig.append(Signal("warn", f"{_stale_n} telemetry source(s) stale or not loaded"))
     if not (_strip.ok and not _strip.empty):
         _vsig.append(Signal("warn", "health telemetry unavailable"))
     page_verdict_line(page_verdict(

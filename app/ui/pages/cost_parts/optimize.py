@@ -391,7 +391,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     "**Remediation & ledger** sub-tab — the single guarded execute + booking path."
                 )
             ai_evaluation_panel(
-                key=f"idle_{company}_{days}",
+                # Match the idle read's cache discriminator (optimize.py:303): the idle
+                # evidence differs between trailing and the bounded previous month, so
+                # without {_lm} the cached answer can survive a Trailing<->Last-month
+                # switch when the day-count matches (bug-hunt round 6).
+                key=f"idle_{company}_{days}{_lm}",
                 prompt=idle_warehouse_prompt(advisor, company, idle_days),
                 settings=settings,
                 page=_PAGE,

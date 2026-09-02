@@ -41,6 +41,12 @@ def test_dedup_attributes_the_warehouse_delta_once():
     assert "ELSE 0" in _MIG
     assert "co-attributed" in _MIG
     assert "WH_SAVED_MONTHLY_USD >= 5" in _MIG              # $5/mo noise floor preserved
+    # MPROC-1 (round-6): the ranking population is restricted to BOOKED levers (those with
+    # a ledger row), so a non-saving co-occurring change can't win RN=1 as a phantom
+    # primary and settle the real saving lever at $0. Both settle blocks carry the guard.
+    assert _MIG.count("EXISTS (SELECT 1 FROM DBA_MAINT_DB.OVERWATCH.SAVINGS_LEDGER l2\n"
+                      "                            WHERE l2.SOURCE_CHANGE_ID = r.CHANGE_ID)") == 1
+    assert "l3.SOURCE_CHANGE_ID = reg.CHANGE_ID" in _MIG
 
 
 def test_one_time_correction_is_idempotent_and_conservative():
@@ -53,7 +59,8 @@ def test_one_time_correction_is_idempotent_and_conservative():
     assert "p.SOURCE_CHANGE_ID = g.PRIMARY_CHANGE_ID" in corr and "p.STATE = 'VERIFIED'" in corr
 
 
-def test_validate_floor_moved_to_v118():
+def test_validate_floor_tracks_the_tip():
+    # floor moved to V119 when the auto-clear-hysteresis migration landed (round 6).
     val = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V118 applied" in val
-    assert "VERSION BETWEEN 1 AND 118) = 118" in val
+    assert "V001..V119 applied" in val
+    assert "VERSION BETWEEN 1 AND 119) = 119" in val

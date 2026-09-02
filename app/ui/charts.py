@@ -1159,7 +1159,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,
-                      takeaway: bool = True) -> None:
+                      takeaway: bool = True, *, currency: str = "USD") -> None:
     data = df[[day_col, category_col, usd_col]].copy()
     data.columns = ["Day", "Category", "USD"]
     if data.empty:
@@ -1172,19 +1172,28 @@ def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col
     _max_stack = float(
         pd.to_numeric(data["USD"], errors="coerce").groupby(data["Day"]).sum().max() or 0.0
     )
-    _yfmt = "$,.2f" if 0 < _max_stack < 1 else _usd_fmt(_max_stack)  # F39
+    # CV-1: the org rate-card panel feeds spend denominated in the org billing CURRENCY
+    # (EUR/GBP/AUD, from ORGANIZATION_USAGE). Only prefix '$' when the data is actually
+    # USD — otherwise strip the sign and carry the currency code in the axis/tooltip title,
+    # so the chart stops attributing dollars to euro/pound amounts (bug-hunt round 6).
+    _is_usd = str(currency or "USD").upper() == "USD"
+    _base_yfmt = "$,.2f" if 0 < _max_stack < 1 else _usd_fmt(_max_stack)  # F39
+    _yfmt = _base_yfmt if _is_usd else _base_yfmt.replace("$", "")
+    _tip_fmt = "$,.2f" if _is_usd else ",.2f"
+    _y_title = "Spend (USD)" if _is_usd else f"Spend ({currency})"
+    _tip_title = "Spend" if _is_usd else f"Spend ({currency})"
     chart = (
         _base(data)
         .mark_bar()
         .encode(
             x=alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"])),
-            y=alt.Y("sum(USD):Q", title="Spend (USD)", axis=alt.Axis(format=_yfmt)),
+            y=alt.Y("sum(USD):Q", title=_y_title, axis=alt.Axis(format=_yfmt)),
             color=_stable_color("Category", data["Category"],
                                 legend=_legend(wide=True)),
             tooltip=[
                 alt.Tooltip("Day:T", format=_DAY_TIP_FMT),
                 alt.Tooltip("Category:N"),
-                alt.Tooltip("sum(USD):Q", format="$,.2f", title="Spend"),
+                alt.Tooltip("sum(USD):Q", format=_tip_fmt, title=_tip_title),
             ],
         )
     )

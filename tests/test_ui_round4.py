@@ -63,7 +63,8 @@ def test_scope_rides_the_status_bar():
     # is sticky in 1.45), so it was dropped — the bar now carries only signal not
     # already on screen (open criticals, telemetry age, MTD).
     assert '"k": "Scope"' not in _MAIN
-    assert '"k": "Open criticals"' in _MAIN
+    # round-6: "(acct)" disambiguates the account-wide badge from the company-scoped tiles.
+    assert '"k": "Open criticals (acct)"' in _MAIN
 
 
 def test_compact_density_mode_exists():

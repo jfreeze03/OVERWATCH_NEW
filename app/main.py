@@ -573,7 +573,11 @@ def _persistent_status_bar(pages: tuple[str, ...], vals: object = _UNSET) -> Non
     mtd, _ = vals.get("MTD_CREDITS", ("", ""))
     _sev = {"BAD": "bad", "WARN": "warn", "OK": "ok", "INFO": "info", "MUTED": ""}
     stats = [
-        {"k": "Open criticals", "v": crit, "icon": "alerts",
+        # "(acct)": this global badge is account-wide (health_strip takes no company),
+        # so it disambiguates from the company-scoped "Open criticals" tiles on Brief /
+        # Overview — otherwise the same label shows two different numbers under a
+        # non-ALL company filter (bug-hunt round 6).
+        {"k": "Open criticals (acct)", "v": crit, "icon": "alerts",
          "sev": "bad" if crit_state == "BAD" or crit not in ("0", "") else "ok",
          "target": _target("Alerts", "Open events")},
         {"k": "Undelivered criticals", "v": undelivered, "icon": "bolt",
