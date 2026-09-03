@@ -1455,7 +1455,8 @@ LIMIT 500
 
 
 def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
-                    database: str = "", schema_contains: str = "") -> str:
+                    database: str = "", schema_contains: str = "", *,
+                    warehouse_contains: str = "", user_contains: str = "") -> str:
     """Daily measured $ for ONE named procedure (owner ask 2026-07-11:
     "can I enter it myself" — yes, this is the type-the-name panel).
 
@@ -1479,6 +1480,10 @@ def proc_cost_trend(proc_name: str, days: int, company: str = "ALL",
         _wh_company_scope(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
         contains_filter("c.SCHEMA_NAME", schema_contains),
+        # same warehouse/user narrowing as the $/call leaderboard, so the drill and the
+        # leaderboard "always agree" (the docstring/caption invariant) under those filters.
+        contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("c.USER_NAME", user_contains),
     )
     return f"""
 WITH calls AS (

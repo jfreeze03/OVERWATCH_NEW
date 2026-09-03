@@ -199,7 +199,11 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "The metering lens only — storage, transfer, and marketplace are in the "
                  "all-in tile; see the org rate card for the invoice total."},
     ]
-    if allin_res.usable() and not allin_res.df.empty:
+    # empty-vs-zero: org_all_in_window_usd is a bare aggregate — a window with no landed
+    # ORGANIZATION_USAGE rows (org data lags ~72h; a fresh MTD window, or a secondary account with
+    # the view granted but unpopulated) returns one all-NULL row, which would render "$0.00" as a
+    # measured invoice beneath the non-zero credit tile. Gate on TOTAL_USD so the tile is omitted then.
+    if allin_res.usable() and not allin_res.df.empty and pd.notna(allin_res.df.iloc[0].get("TOTAL_USD")):
         _ar = allin_res.df.iloc[0]
         _cur = str(_ar.get("CURRENCY") or "USD")
 
@@ -1134,7 +1138,11 @@ def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: t
     res = run(cost_sql.storage_account_truth(days, bounds=bounds), page=_PAGE,
               key=f"stor_acct_{days}{_lm}", tier="hourly",
               source="FACT_STORAGE_ACCOUNT_DAILY (avg of daily bytes)", probe=True)
-    if not res.ok or res.empty:
+    # empty-vs-zero: storage_account_truth is a bare aggregate (no GROUP BY), so an empty window
+    # returns ONE all-NULL row (DAYS_AVERAGED=0) — NOT res.empty. Gate on DAYS_AVERAGED so the
+    # mart->live fallback and the no-data note actually fire (else the all-NULL row renders a
+    # fabricated "$0.00/mo" storage bill and the live reader that holds the history is never tried).
+    if not res.ok or res.empty or safe_float(res.df.iloc[0].get("DAYS_AVERAGED"), default=0.0) <= 0:
         res = run(cost_sql.storage_account_truth_live(days, bounds=bounds), page=_PAGE,
                   key=f"stor_acct_live_{days}{_lm}", tier="historical",
                   source="ACCOUNT_USAGE.STORAGE_USAGE (avg of daily bytes, live)", probe=True)
@@ -1143,7 +1151,7 @@ def _account_storage_tiers(company: str, days: int, settings: dict, *, bounds: t
                    "(FACT_STORAGE_ACCOUNT_DAILY) or STORAGE_USAGE access — an admin "
                    "can apply it on Admin → Migrations & freshness.")
         return
-    if res.empty:
+    if res.empty or safe_float(res.df.iloc[0].get("DAYS_AVERAGED"), default=0.0) <= 0:
         st.caption("No account storage rows in this window yet.")
         return
     row = res.df.iloc[0]

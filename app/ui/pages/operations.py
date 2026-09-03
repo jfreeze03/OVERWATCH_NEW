@@ -402,10 +402,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                                       "FAIL_PCT", "AVG_S", "P95_S", "MAX_S", "TOTAL_MIN"]
                           if c in _roll.df.columns]
             styled_table(_roll.df[_roll_cols], slug="proc_sla_rollup", days=days,
-                         sort_label="calls × p95 desc")
+                         sort_label="failing first, then calls × p95")
             st.caption("Success-only latency; FAIL_PCT surfaces procs that are failing rather "
                        "than slow (including a proc broken enough to drop out of the regression "
-                       "view below). Ranked by frequency × p95.")
+                       "view below). Ranked failing-first (100% fail), then by frequency × p95.")
 
         _reg = _pb.get("reg")
         st.markdown("**Runtime regression — this window vs the prior window**")

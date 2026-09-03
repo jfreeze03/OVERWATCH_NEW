@@ -268,7 +268,11 @@ def _incident_reset_panel(company: str, open_now: int, is_op: bool) -> None:
                 and write_gate_open(key)):
             ok, msg = execute_statement(stmt, page=_PAGE)
             stamp_write(key, ok)  # C48
-            notify(ok, msg if not ok else f"Resolved {open_now:,} open incident(s) in scope.")
+            # INC-1: open_now is the render-time CACHED count; the open set may have been resolved
+            # since (the hourly auto-resolve task, or another operator), and execute_statement can't
+            # see the 0-row rowcount — so don't assert a possibly-stale N. Report honestly.
+            notify(ok, msg if not ok else "Resolved the open (OPEN/MITIGATED) incidents in this "
+                                          "scope. The board refreshes on the next read.")
             if ok:
                 log_ui_event("incident_close", page=_PAGE)
                 st.rerun()

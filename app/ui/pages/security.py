@@ -1409,7 +1409,10 @@ def _changes_tab(company: str, days: int, database: str = "", schema_contains: s
                      sort_label="risk then latest change")
         result_caption(res)
 
-    section_header("Break-glass role activity (should hug zero)", "warn", "admin")
+    # account-wide by design (all statement volume under admin roles); the Changes section
+    # declares Database/Schema applied, so mark this panel account-wide like its siblings —
+    # object filters don't narrow admin-role oversight (and admin_role_activity has no db/schema grain).
+    section_header("Break-glass role activity (account-wide; should hug zero)", "warn", "admin")
     # This panel asks "ALL statement volume under break-glass admin roles" — routine
     # SELECT/COPY/CALL work is exactly the misuse it exists to catch. FACT_SECURITY_CHANGE
     # holds only DDL/DCL change statements, so the fact twin structurally cannot see that

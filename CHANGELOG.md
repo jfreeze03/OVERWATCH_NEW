@@ -1,5 +1,40 @@
 # Changelog
 
+## 4.456.0 - Bug-hunt round 22: exhaustive empty-vs-zero sweep + silent-failure & sort honesty (2026-09-03)
+
+A find→refute-verify sweep (exhaustive empty-vs-zero, exhaustive cross-filter scope-drop, sort/rank/
+LIMIT, silent-failure/error-swallow, boundary off-by-one, review-arc over v4.455) surfaced 5 confirmed
+defects (1 refuted) plus one ground-truthed cross-filter site. The empty-vs-zero sweep vindicated the
+"systematic class" thesis — treating a bare-aggregate builder's always-present all-NULL row as a
+measured value recurs across the Spend page. Boundary off-by-one came back empty.
+
+- **[HIGH, empty-vs-zero] the "Account storage by tier" card rendered a fabricated "$0.00/mo" bill.**
+  `storage_account_truth` is a bare aggregate (no GROUP BY), so an empty `FACT_STORAGE_ACCOUNT_DAILY`
+  window returns one all-NULL row — which is not `res.empty`, so it defeated BOTH the documented
+  mart→live fallback (the live `STORAGE_USAGE` reader that holds the history) and the "No account
+  storage rows" note, and rendered $0.00 across every tier. Reachable on a fresh deploy (V046 applied,
+  loader not yet run) or a "Last month" window before the fact's earliest day. Both guards now key on
+  `DAYS_AVERAGED > 0`.
+- **[MED, empty-vs-zero] the "All-in billed" tile showed "$0.00" when ORGANIZATION_USAGE hadn't
+  landed** (org data lags ~72h; a fresh MTD window, or a secondary account with the view granted but
+  unpopulated) — a bare-aggregate all-NULL row read as a real invoice cheaper than metered credits.
+  The tile is now gated on `TOTAL_USD` being non-NULL.
+- **[MED, silent-failure] bulk incident-resolve reported the stale render-time count** as
+  "Resolved N open incident(s)" even when the UPDATE moved zero rows (the open set resolved externally
+  since render; `execute_statement` can't see the rowcount). Reports honestly now, without asserting a
+  possibly-stale N — the same INC-1 class the DECLARE path was hardened against.
+- **[MED, cross-filter — a v4.455 regression] the warehouse/user leaderboard fix didn't reach its own
+  trend drill.** v4.455 threaded those filters into `procedure_costs_usd` but not `proc_cost_trend`, so
+  clicking a leaderboard row into the trend broke the "the two always agree" invariant the caption and
+  docstring promise. `proc_cost_trend` now honors warehouse/user too.
+- **[LOW, sort-label] the "Busiest procedures" table is primary-sorted failing-first** (a deliberate,
+  commented `CASE WHEN FAIL_PCT = 100` tier) but was labeled "calls × p95 desc" — so a 100%-failing
+  proc (p95 NULL → zero SLA-impact) sat at #1 under a pure-impact label. Relabeled to disclose the
+  failing-first order (same class as the v4.455 proc_regression fix, on its sibling panel).
+- **[LOW, cross-filter] the Break-glass panel is account-wide by design** (all statement volume under
+  admin roles) but the Changes section declares Database/Schema applied and it lacked the
+  "(account-wide)" marker its sibling account-wide panels carry. Added the marker.
+
 ## 4.455.0 - Bug-hunt round 21: empty-vs-zero, cross-filter, and sort-label honesty (2026-09-02)
 
 A fresh-angle find→refute-verify sweep (empty-vs-zero honesty, cross-filter scope interaction,

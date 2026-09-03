@@ -291,7 +291,8 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             # a 365d scan here is the same stall, and the KPI below would
             # otherwise label a different window than the table it drills into.
             tres = run(insights_sql.proc_cost_trend(
-                           _pname.strip(), uc_days, company, database, schema_contains),
+                           _pname.strip(), uc_days, company, database, schema_contains,
+                           warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"]),
                        page=_PAGE, key=f"proc_trend_{_pname.strip()[:30]}_{company}_{uc_days}",
                        tier="historical",
                        source=f"QUERY_ATTRIBUTION_HISTORY rolled to CALLs, day grain ({uc_days}d)")
