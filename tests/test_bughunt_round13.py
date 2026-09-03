@@ -74,7 +74,10 @@ def test_control_room_verdict_warns_on_unknown_open_criticals():
 def test_spend_tiles_label_last_month_honestly():
     s = _src("app/ui/pages/cost_parts/spend.py")
     tab = s.split("def _spend_tab", 1)[1].split("def _attribution_tab", 1)[0]
-    assert '_wlab = "last month" if bounds is not None else f"{days}d"' in tab
+    # v4.454 (round 20): the trailing branch now names the SERVED window (the live metering
+    # fallback clamps to 90d), so it reads f"{_served_days}d" instead of the raw f"{days}d";
+    # the "last month" bounded branch is unchanged.
+    assert '_wlab = "last month" if bounds is not None else f"{_served_days}d"' in tab
     # the flagship + transfer tiles no longer hardcode the trailing "{days}d" descriptor
     assert 'f"Credit spend, {days}d (account)"' not in tab
     assert 'f"Total transferred ({days}d)"' not in tab

@@ -75,14 +75,19 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         "idle, use Optimization's allocated view instead."
     )
     _window_label = str(f.get("window_label") or f"Last {days} days")
-    _uc_full = st.toggle(
+    # The 30-day perf clamp only applies to long TRAILING windows: a bounded "Last month"
+    # read already scans the exact (<=31-day) month via the [start,end) bounds predicate
+    # (resolve_effective_window ignores the day count when bounds is set), so the cap, the
+    # toggle, and the "scanning Nd" caption are all moot then — show them only when they bite.
+    _uc_capped = bounds is None and int(days) > _UNIT_COST_MAX_DAYS
+    _uc_full = _uc_capped and st.toggle(
         f"Price over the full {_window_label.lower()}",
         key=f"uc_full_window_{company}_{days}",
         help="Off by default. The measured query/procedure reads are capped at "
              f"{_UNIT_COST_MAX_DAYS} days because a long QUERY_ATTRIBUTION_HISTORY scan "
              "costs tens of seconds and barely changes a per-query price. Turn it on to "
              "scan the whole page window anyway.")
-    uc_days = days if (_uc_full or int(days) <= _UNIT_COST_MAX_DAYS) else _UNIT_COST_MAX_DAYS
+    uc_days = _UNIT_COST_MAX_DAYS if (_uc_capped and not _uc_full) else days
     if int(uc_days) != int(days):
         st.caption(f"Page window is {_window_label.lower()}, but unit prices use "
                    f"<={_UNIT_COST_MAX_DAYS}d "

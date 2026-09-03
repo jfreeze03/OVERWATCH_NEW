@@ -137,15 +137,23 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
         # window ending today (a DIFFERENT window than the data) and disagrees with the
         # scope chip's "Last month (Aug 1 - Aug 31)". Use a compact honest label:
         # "last month" when bounded, else the trailing "{days}d".
-        _wlab = "last month" if bounds is not None else f"{days}d"
         res = metering_res if metering_res is not None else run(
             mart_sql.fact_metering_by_service(days, bounds=bounds), page=_PAGE,
             key=f"metering_fact_{days}{_lm}",
             tier="hourly", source="FACT_METERING_DAILY (mart, loaded hourly)")
+        _metering_live = False
         if not res.ok or res.empty:
+            _metering_live = True
             res = run(cost_sql.metering_daily_by_service(days, bounds=bounds), page=_PAGE,
                       key=f"metering_{days}{_lm}",
                       tier="historical", source="ACCOUNT_USAGE.METERING_DAILY_HISTORY")
+    # K1 served-window honesty (round 20): the live metering fallback clamps to
+    # MAX_LIVE_WINDOW_DAYS while the mart honors 365, so on a >90d trailing selection served live
+    # the SUM tiles would otherwise label a 90-day answer "365d". Reflect the window ACTUALLY
+    # scanned in the label (bounds windows are <=31d, so the clamp never bites there).
+    _served_days = (min(int(days), MAX_LIVE_WINDOW_DAYS)
+                    if (_metering_live and bounds is None) else int(days))
+    _wlab = "last month" if bounds is not None else f"{_served_days}d"
     if not guard(res, "No metering rows in this window yet (the view lags up to 24h)."):
         return
     panel_help(
@@ -224,7 +232,9 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "'—' until the fact loads."},
     ]
     kpi_row(_tiles)
-    st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution).")
+    st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution)."
+               + (f" Scanned {_served_days}d of the {days}d window (the live fallback caps its scan)."
+                  if _served_days != int(days) else ""))
     charts.daily_stacked_usd(df, "DAY", "CATEGORY", "USD")
     if audit_mode():   # C19: methodology detail — audit mode only
         with st.expander("Why totals differ across pages (and vs Snowsight)"):

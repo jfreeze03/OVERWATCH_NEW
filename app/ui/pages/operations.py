@@ -2116,6 +2116,12 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
             else:
                 styled_table(_ldf)
                 result_caption(res)
+                # The mart covers up to 14 days but the live LOCK_WAIT_HISTORY fallback is
+                # cost-capped to the last 7 (ops_sql.lock_contention), so the counts roughly
+                # halve when it serves — disclose the shorter span rather than imply 14 days.
+                if _served_live:
+                    st.caption("Live fallback: lock waits cover the last ~7 days (the live scan "
+                               "is cost-capped); the mart covers up to 14.")
 
 
 

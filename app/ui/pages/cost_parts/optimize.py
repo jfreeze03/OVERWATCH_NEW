@@ -371,7 +371,9 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                     ]],
                     size_note=False,
                     column_config={
-                        "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.1f%%"),
+                        # %.0f%% to match the sibling right-sizing table (:524) + both Operations
+                        # warehouse tables, which render this same credit-weighted idle share at 0dp.
+                        "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
                         "IDLE_USD": st.column_config.NumberColumn("Idle $", format="$%.0f"),
                         "PROJECTED_MONTHLY_IDLE_USD": st.column_config.NumberColumn(
                             "Proj. monthly $", format="$%.0f"),

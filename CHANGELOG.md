@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.454.0 - Bug-hunt round 20: window/format honesty on cost + ops surfaces (2026-09-02)
+
+An adversarial find→refute-verify sweep (review-arc over v4.453, WLA-1 residual + reverse sweep,
+deep caption-vs-SQL, cross-page metric format/threshold, number-formatting honesty, remaining
+twin-divergence) surfaced 4 confirmed defects (1 refuted). The review-arc, caption-vs-SQL, and
+number-formatting dimensions all came back empty — v4.453 was clean and those classes are drying up.
+
+- **[MED] Unit-costs' "scanning 30d" caption + "price over the full window" toggle lied under "Last
+  month" scope in 31-day months.** The measured-attribution reads clamp to 30 days for perf on long
+  trailing windows, but a bounded month is read via the exact `[start, end)` predicate, which ignores
+  the day count — so in a 31-day month the reads scanned all 31 days while the caption claimed
+  "scanning 30d" and the toggle did nothing when flipped. The clamp, toggle, and caption are now gated
+  on `bounds is None` (a bounded month is always ≤31 days, so the cap never applies).
+- **[MED] the Spend headline metering tiles labeled a 90-day answer as the full window.** The metering
+  read is a manual mart(365d)-then-live(90d) twin (not `run_mart_first`, so the served-days honesty
+  machinery never engaged). On a 180d/365d/Current-year selection served by the live fallback (a
+  metering-mart miss), the SUM tiles still read "Credit spend, 365d" while covering only the last 90
+  days — understating headline account spend by up to ~4x, while the neighboring cloud-services panel
+  correctly disclosed its own clamp. The tiles now label the window actually scanned and append the
+  same "Scanned Nd of the Md window (the live fallback caps its scan)" disclosure.
+- **[LOW] "Idle %" was rendered at 1 decimal on the Optimize idle-advisor evidence table but 0
+  decimals on the three other surfaces showing the same credit-weighted idle share** (the sibling
+  right-sizing table and both Operations warehouse tables) — so selecting the same warehouse showed
+  "52.3%" in one panel and "52%" in the one beside it. Aligned to 0dp (the same reconciliation round
+  19 applied to `SPILL_GB_PER_DAY`).
+- **[LOW] the Operations "Lock waits" panel covered up to 14 days from the mart but only 7 from the
+  live fallback, with no on-screen window label.** `ops_sql.lock_contention` deliberately caps its
+  scan to 7 days for cost, so when the live fallback serves (a lock-mart miss) the counts roughly
+  halve versus the mart's 14-day span with nothing to explain it. Added a disclosure naming the 7-day
+  cap when the live arm serves (the cost cap itself is intentional and unchanged).
+
 ## 4.453.0 - Bug-hunt round 19: app-wide window-label sweep + 5 cross-surface fixes (2026-09-02)
 
 An adversarial find→refute-verify sweep (app-wide WLA-1 window-label sweep, caption-vs-SQL on
