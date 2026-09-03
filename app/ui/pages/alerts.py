@@ -57,6 +57,22 @@ from app.ui.components import (
 )
 
 _PAGE = "Alerts"
+
+
+def _proc_event_count(msg: object) -> int | None:
+    """The TRUE transitioned count from an alert lifecycle/clear proc reply
+    ('OK: N event(s) ACTION'); None when the reply is not that OK-count shape
+    (e.g. DUPLICATE). Lets a receipt report what the proc actually moved instead
+    of the stale render-time selected/cached count (round-22 phantom-count class)."""
+    parts = str(msg or "").split()
+    if len(parts) >= 2 and parts[0].upper() == "OK:":
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    return None
+
+
 def _optional_number(value: object, suffix: str = "", decimals: int = 0) -> str:
     """Format a measured ratio without turning NULL evidence into a healthy zero."""
     try:
@@ -554,7 +570,12 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     if str(_c_m or "").strip().upper().startswith("DUPLICATE"):
                         _c_msg = "No change — this clear was already applied moments ago."
                     elif _c_resolve:
-                        _c_msg = f"Open queue cleared — {_open_total:,} event(s) resolved."
+                        # Report the TRUE transitioned count the proc returns ('OK: N event(s)
+                        # RESOLVE'), not the stale cached _open_total — a concurrent auto-clear
+                        # sweep or another operator may have resolved part of the scope since render.
+                        _n_res = _proc_event_count(_c_m)
+                        _c_msg = (f"Open queue cleared — {_n_res:,} event(s) resolved."
+                                  if _n_res is not None else "Open queue cleared.")
                     else:
                         _c_msg = ("Acknowledged the open events in scope — they stay in the "
                                   "open count until resolved.")
@@ -1262,7 +1283,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                         f"{sql_literal(idempotency_key('ALERT_BULK_' + b_action, ''.join(_bulk_ids)))})")
                 ok_u, msg_u = execute_action(call, [upd, aud], page=_PAGE)
                 stamp_write(f"alert_bulk_exec_{_sel_nonce}", ok_u)  # C48
-                notify(ok_u, f"Bulk {b_action}: {len(_bulk_ids)} event(s) — {msg_u}")
+                # Report the count the PROC actually moved (msg_u = 'OK: N event(s) ACTION'), not
+                # the render-time selected count: the selection may have been resolved externally,
+                # or a same-selection re-click hits DUPLICATE (0 rows) — either would overstate N.
+                _n_moved = _proc_event_count(msg_u)
+                _bulk_txt = (f"{_n_moved:,} event(s)" if _n_moved is not None
+                             else f"{len(_bulk_ids):,} selected")
+                notify(ok_u, f"Bulk {b_action}: {_bulk_txt} — {msg_u}")
                 if ok_u:
                     from app.ui.components import log_ui_event
                     log_ui_event("alert_resolve" if b_action == "RESOLVE" else "alert_ack",
@@ -1276,7 +1303,7 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     st.session_state.pop("_ow_alert_drawer_bind", None)
                     st.session_state.pop("_ow_alert_bulk_bind", None)
                     st.session_state["_ow_alert_receipt"] = (
-                        f"Bulk {b_action} recorded — {len(_bulk_ids)} event(s)")
+                        f"Bulk {b_action} recorded — {_bulk_txt}")
                     st.rerun()
 
     # V086: snoozed events are hidden from the OPEN/ACK feed until their wake time.
@@ -1287,6 +1314,13 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
     _snz = run(mart_sql.snoozed_alert_events(100, company), page=_PAGE,
                key=f"alert_snoozed_{company}", tier="live",
                source="ALERT_EVENTS (STATUS=SNOOZED)", probe=True)
+    if not _snz.ok:
+        # A FAILED snoozed read (transient timeout/lock) must not be silent: this panel exists so
+        # a snoozed CRITICAL is never a black hole, but that invariant only held for the EMPTY
+        # case. Surface the failure so a pending snooze isn't hidden behind the open-feed all-clear.
+        # (On any running deployment the V086 SNOOZE_* columns exist — floor is well past V086 — so
+        # a not-ok here is transient, not an absent-column benign miss.)
+        st.caption("💤 Snoozed-events check unavailable — a snoozed alert may still be pending.")
     if _snz.usable() and not _snz.empty:
         with st.expander(f"💤 Snoozed ({len(_snz.df)}) — hidden from triage until their wake time"):
             # F52: a relative countdown, soonest wake first — a snooze reads as

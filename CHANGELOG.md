@@ -1,5 +1,43 @@
 # Changelog
 
+## 4.457.0 - Bug-hunt round 23: exhaustive write-path phantom-success sweep (2026-09-03)
+
+A find→refute-verify sweep (exhaustive write-path phantom-success, silent-failure/error-swallow,
+stale-cache-drives-a-decision, rate/unit misapplication, chart-encoding, review-arc over v4.456)
+surfaced 7 confirmed defects (0 refuted; two dimensions — rate/unit and the review-arc — came back
+empty). The write-path sweep vindicated the "systematic class" thesis again: the round-22 control_room
+phantom-count bug recurred on write paths that fix didn't reach, because `execute_statement` /
+`execute_action` never surface the affected-row count.
+
+- **[MED] Alerts bulk ack/resolve reported the stale selected count as the outcome.** The durable
+  receipt asserted `len(_bulk_ids)` (a render-time count) even when the selection was resolved
+  externally (the hourly lifecycle task or another operator) or a re-click hit DUPLICATE (0 rows). The
+  proc actually returns the true transitioned count (`OK: N event(s)`); the receipt and toast now parse
+  and report that (`_proc_event_count`), not the selection size.
+- **[MED] Alerts clear-open-queue reported the stale cached count.** The RESOLVE receipt asserted the
+  30s-cached `_open_total`; under a concurrent auto-clear sweep it overstated the operator's action.
+  Now parses the proc's true count.
+- **[MED] The AI-governance queue reported "N/N action(s) queued" for idempotent no-ops.** The inserts
+  are `WHERE NOT EXISTS`, so re-running when the items are already open this month writes 0 rows, yet
+  each `execute_statement` returns ok — so "queued" implied N created when zero were. Reworded to honest
+  "N insert(s) ran — idempotent, already-open items skipped".
+- **[MED] The Brief exec verdict read a failed incident query as a green "no incidents" all-clear.** The
+  incident concern fired only on success-with-rows; a transient INCIDENTS failure left the verdict
+  empty, so the healthy line (which explicitly asserts "no ... incidents") rendered. Added the
+  `open-incident count unavailable` warn guard, mirroring the critical-side one.
+- **[MED] The warehouse queue-pressure chart rounded fractional avg-queue-per-query seconds to "0".**
+  `bar_count` hard-coded an integer axis/tooltip/takeaway format, so a real 0.4s/query queue displayed
+  "0" on a panel titled "Average queue per query (seconds)". `bar_count` now takes a `value_fmt`
+  (default integer, preserving its count callers); the queue chart passes 1 decimal.
+- **[LOW] Single incident-close fired `incident_close` telemetry + a success toast on a no-op.** The
+  status-guarded UPDATE no-ops when the incident was resolved externally, inflating the Admin
+  operator-effectiveness counter. Added a forward-only pre-check (mirroring the DECLARE guard) so the
+  close claim and the telemetry only fire when a row actually moves.
+- **[LOW] The Alerts snoozed backstop hid silently on a failed read.** The panel exists so a snoozed
+  CRITICAL is never a black hole, but that held only for the empty case; a transient read failure
+  rendered nothing, so a pending snooze stayed invisible behind the open-feed all-clear. Added a
+  failed-read disclosure caption.
+
 ## 4.456.0 - Bug-hunt round 22: exhaustive empty-vs-zero sweep + silent-failure & sort honesty (2026-09-03)
 
 A find→refute-verify sweep (exhaustive empty-vs-zero, exhaustive cross-filter scope-drop, sort/rank/

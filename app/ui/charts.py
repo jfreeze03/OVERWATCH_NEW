@@ -178,16 +178,21 @@ def _magnitude_usd(value: float) -> str:
     return f"${value:,.2f}" if 0 < abs(value) < 1 else f"${value:,.0f}"
 
 
-def _share_note(label: str, amount: float, total: float, *, dollars: bool = True) -> str:
+def _share_note(label: str, amount: float, total: float, *, dollars: bool = True,
+                value_fmt: str | None = None) -> str:
     """rec35 helper: 'Top: X $Y (Z% of $total).' — the lead-with-the-conclusion
     line, computed from the data the chart already has. The share is omitted when
     it would be nonsensical (categories that net out negative make a positive top
-    exceed 100% of the total)."""
-    a = _magnitude_usd(amount) if dollars else f"{amount:,.0f}"
+    exceed 100% of the total). `value_fmt` (non-dollar charts) overrides the default
+    ',.0f' so a fractional metric (e.g. seconds/query) isn't rounded to 0."""
+    def _fmt(v: float) -> str:
+        if dollars:
+            return _magnitude_usd(v)
+        return format(v, value_fmt) if value_fmt else f"{v:,.0f}"
+    a = _fmt(amount)
     share = (amount / total * 100) if total else 0.0
     if total > 0 and 0 <= share <= 100:
-        t = _magnitude_usd(total) if dollars else f"{total:,.0f}"
-        return f"Top: {label} {a} ({share:.0f}% of {t})."
+        return f"Top: {label} {a} ({share:.0f}% of {_fmt(total)})."
     return f"Top: {label} {a}."
 
 
@@ -1133,7 +1138,10 @@ def daily_stacked_count(df: pd.DataFrame, day_col: str, category_col: str,
 
 
 def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "", top_n: int = 10,
-              *, takeaway: bool = False) -> None:
+              *, takeaway: bool = False, value_fmt: str = ",.0f") -> None:
+    # value_fmt defaults to integer (",.0f") for the count callers (statements, failures);
+    # pass a fractional format (e.g. ",.1f") for a rate metric like avg seconds/query, else
+    # the axis/tooltip/takeaway round a genuine 0.4s to "0".
     data = df[[label_col, value_col]].head(top_n).copy()
     data.columns = ["Label", "Value"]
     data["Value"] = pd.to_numeric(data["Value"], errors="coerce").fillna(0.0)
@@ -1145,8 +1153,8 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         .mark_bar()
         .encode(
             y=alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260)),
-            x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=",.0f")),
-            tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Value:Q", format=",.0f")],
+            x=alt.X("Value:Q", title=title or "Count", axis=alt.Axis(format=value_fmt)),
+            tooltip=[alt.Tooltip("Label:N"), alt.Tooltip("Value:Q", format=value_fmt)],
         )
     )
     st.altair_chart(chart, width="stretch")
@@ -1157,7 +1165,7 @@ def bar_count(df: pd.DataFrame, label_col: str, value_col: str, title: str = "",
         if _full_total > 0:
             top = data.loc[data["Value"].idxmax()]
             st.caption(_share_note(str(top["Label"]), float(top["Value"]),
-                                   _full_total, dollars=False))
+                                   _full_total, dollars=False, value_fmt=value_fmt))
 
 
 def daily_stacked_usd(df: pd.DataFrame, day_col: str, category_col: str, usd_col: str,

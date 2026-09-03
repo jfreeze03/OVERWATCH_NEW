@@ -204,6 +204,21 @@ def _incident_close_sql(incident_id: str, kind: str, note: str) -> str:
     )
 
 
+def _incident_open_check_sql(incident_id: str) -> str:
+    """Is this incident still OPEN/MITIGATED right now? A forward-only close pre-check
+    (mirrors the DECLARE family-open guard): the guarded close UPDATE no-ops when the
+    incident was resolved externally since render, and execute_statement can't see the 0
+    rowcount — so without this a phantom close toast + an inflated incident_close event fire."""
+    from app.config import core_object
+    from app.core.sqlsafe import sql_literal
+    return (
+        f"SELECT IFF(COUNT(*) > 0, TRUE, FALSE) AS STILL_OPEN "
+        f"FROM {core_object('INCIDENTS')} "
+        f"WHERE INCIDENT_ID = {sql_literal(str(incident_id))} "
+        "AND STATUS IN ('OPEN', 'MITIGATED')"
+    )
+
+
 def _clear_open_incidents_sql(company: str, kind: str, note: str) -> str:
     """Bulk forward-only close: resolve EVERY open (OPEN/MITIGATED) incident in the
     current company scope, matched by STATUS + company rather than enumerated ids —
@@ -910,11 +925,24 @@ def render() -> None:
                         if confirm_gate("RESOLVE", "Execute close", key=f"inc_close_{_iid[:8]}",
                                         prompt="Type RESOLVE to confirm"
                                         ) and write_gate_open(f"inc_close_{_iid[:8]}"):
-                            ok, msg = execute_statement(_close, page=_PAGE)
-                            stamp_write(f"inc_close_{_iid[:8]}", ok)  # C48
-                            notify(ok, msg)
-                            if ok:
-                                log_ui_event("incident_close", page=_PAGE)
+                            # INC-1: the guarded UPDATE no-ops if this incident was resolved
+                            # externally since render (the hourly auto-resolve task or another
+                            # operator), and execute_statement can't see the 0 rowcount — so
+                            # pre-check FIRST and only claim a close (+ fire incident_close) when a
+                            # row actually moves, mirroring the DECLARE family-open guard below.
+                            _still = run(_incident_open_check_sql(_iid), page=_PAGE,
+                                         key=f"inc_stillopen_{_iid[:8]}", tier="live",
+                                         source="INCIDENTS forward-only close pre-check")
+                            if _still.usable() and not bool(_still.df.iloc[0].get("STILL_OPEN")):
+                                ok = True   # a no-op resolved cleanly; the latch closes
+                                notify(False, "Already resolved — no change (another operator or "
+                                              "the auto-resolve task closed it).")
+                            else:
+                                ok, msg = execute_statement(_close, page=_PAGE)
+                                notify(ok, "Incident resolved." if ok else msg)
+                                if ok:
+                                    log_ui_event("incident_close", page=_PAGE)
+                            stamp_write(f"inc_close_{_iid[:8]}", ok)  # C48 (single stamp, both paths)
         # Read proposals only for operators (they alone can act on them) — prefetched in
         # the live batch above when _is_op, else read serially here.
         props = (_live_pf.get("props") or run(mart_sql.incident_proposals(20, company), page=_PAGE,

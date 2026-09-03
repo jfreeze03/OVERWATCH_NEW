@@ -81,8 +81,12 @@ def test_compare_and_wh_change_deltas_use_fixed_polarity():
 # --- CSMC-1: Brief verdict uses the uncapped incident count ---------------------
 def test_brief_verdict_uses_uncapped_incident_count():
     brief = _src("app/ui/pages/brief.py")
-    assert "if _inc.ok and _n_inc > 0:" in brief
+    # v4.457 (round 23): the success-only `if _inc.ok and _n_inc > 0` became
+    # `if not _inc.ok: warn / elif _n_inc > 0: bad` so a FAILED incident read no longer
+    # reads as a green all-clear — but the uncapped-count intent is unchanged.
+    assert "elif _n_inc > 0:" in brief
     assert 'f"{_n_inc} open incident(s)"' in brief
+    assert 'Signal("warn", "open-incident count unavailable")' in brief   # failed-read guard
     assert "len(_inc.df)} open incident(s)" not in brief   # the capped form is gone
 
 

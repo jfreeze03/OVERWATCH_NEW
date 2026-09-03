@@ -355,7 +355,13 @@ def _ai_users_tab(company: str, days: int, ai_rate: float, settings: dict, is_op
                     ok, _msg = execute_statement(stmt.replace("\n", " "), page=_PAGE)
                     ok_all, count = ok_all and ok, count + int(ok)
                 stamp_write("cortex_queue_exec", ok_all)  # C48
-                (st.success if ok_all else st.error)(f"{count}/{len(statements)} action(s) queued.")
+                # `count` is the number of inserts that RAN (execute_statement can't see the
+                # affected-row count), NOT rows created — the inserts are idempotent WHERE-NOT-
+                # EXISTS, so items already open this month are 0-row no-ops. Say "ran/skipped",
+                # not "queued", so a re-run this month doesn't read as N new actions created.
+                (st.success if ok_all else st.error)(
+                    f"{count}/{len(statements)} governance insert(s) ran — idempotent, so any "
+                    "already open this month are skipped, not re-queued.")
             elif not is_operator:
                 st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 

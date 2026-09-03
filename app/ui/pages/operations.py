@@ -2081,7 +2081,10 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
                             if _chart_metric == "AVG_QUEUE_SEC" else "Queued seconds (total)")
             charts.bar_count(pdf.sort_values(_chart_metric, ascending=False),
                              "WAREHOUSE_NAME", _chart_metric, title=_chart_title,
-                             takeaway=True)
+                             takeaway=True,
+                             # avg queue/query is fractional seconds — keep 1 decimal so a real
+                             # 0.4s doesn't render as "0"; total queued seconds stays integer.
+                             value_fmt=",.1f" if _chart_metric == "AVG_QUEUE_SEC" else ",.0f")
             st.caption("Ranked by **Avg queue per query**, the user-felt stall signal. Query count "
                        "and total queued time remain in the evidence table so sustained materiality "
                        "is visible beside the rate. Select a warehouse to open its Entity 360.")
