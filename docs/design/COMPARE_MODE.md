@@ -93,10 +93,3 @@ exec-sec, compile — per env), FACT_QUERY_SCHEMA_HOURLY (volume per env).
    `_MGM`->PREPROD; `_PRD`->PRD; else OTHER. Trexis reuses the subset it
    has (`_DEV`->DEV, `_SIT`->UAT, `_PRD`->PRD). The env lens shows the
    channel in promotion order, not alphabetical — DEV, UAT, PREPROD, PRD.
-
-## Open questions for the owner
-
-1. V037 database column on the pattern mart now? (recommended: yes)
-2. Default pairing: last-full-month vs prior (recommended), or trailing-30?
-3. Env suffix set: is `_PRD/_SIT/_DEV` complete, or do `_QA/_UAT` exist
-   anywhere worth recognizing?

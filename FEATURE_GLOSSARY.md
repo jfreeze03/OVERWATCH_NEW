@@ -924,24 +924,23 @@ Contract check of applied schema migrations against what this build expects, the
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
-| **Missing migrations: … / All N migrations applied** | Which expected migrations are not yet in SCHEMA_VERSION; success when none missing. | [V{n} for n,name in _EXPECTED_MIGRATIONS if n not in applied]; applied = {int(VERSION)} from SCHEMA_VERSION; N=len(_EXPECTED_MIGRATIONS)=89 (dict keys 1..89) | list / count | mart_sql.schema_version -> SCHEMA_VERSION.VERSION vs admin.py _EXPECTED_MIGRATIONS dict |
+| **Missing migrations: … / All N migrations applied** | Which expected migrations are not yet in SCHEMA_VERSION; success when none missing. | [V{n} for n,name in _EXPECTED_MIGRATIONS if n not in applied]; applied = {int(VERSION)} from SCHEMA_VERSION; N=len(_EXPECTED_MIGRATIONS)=124 (dict keys 1..124) | list / count | mart_sql.schema_version -> SCHEMA_VERSION.VERSION vs admin.py _EXPECTED_MIGRATIONS dict |
 
 *Columns:* **VERSION** — Applied migration number (SCHEMA_VERSION.VERSION).; **DESCRIPTION** — Migration description (SCHEMA_VERSION.DESCRIPTION; widened to VARCHAR(4000) in V071).; **APPLIED_AT** — When the migration was applied (SCHEMA_VERSION.APPLIED_AT).; **INSTALLED_RANK** — Flyway ledger apply order (flyway_schema_history.installed_rank), newest first.; **VERSION (Flyway)** — Flyway version string (flyway_schema_history.version).; **DESCRIPTION (Flyway)** — Flyway migration description.; **INSTALLED_BY** — Role/user that applied it (flyway_schema_history.installed_by).; **INSTALLED_ON** — Flyway apply timestamp.; **EXECUTION_MS** — Flyway execution_time; column named _MS so styled_table humanizes it as a duration.; **SUCCESS** — Flyway success flag.; **SOURCE_NAME** — Loader source / mart name (SOURCE_FRESHNESS_STATE or MART_SOURCE_FRESHNESS).; **LAST_LOAD_TS** — Last successful loader write time for the source.; **ROW_COUNT** — Row count in the source at last load (0 is legitimate for a source with no events).; **HOURS_SINCE_LOAD** — Hours since LAST_LOAD_TS = DATEDIFF('minute',LAST_LOAD_TS,CURRENT_TIMESTAMP())/60.0; NULL when never loaded (state path); humanized to h. Diagnose flags >26h.
 
 ### Setup progress
-One onboarding checklist consolidating the scattered 'Apply VNNN' walls: migrations applied, feature migrations V074-V083, marts loading, and the budget/contract/route settings that light up alerting and forecasting.
+One onboarding checklist consolidating the scattered 'Apply VNNN' walls: migrations applied (one 'N of M applied' rollup), marts loading, and the budget/contract/route settings that light up alerting and forecasting.
 
 | Metric | Means | Formula | Unit | Source |
 |---|---|---|---|---|
 | **Database migrations** | Done when SCHEMA_VERSION is readable and nothing in _EXPECTED_MIGRATIONS is missing. | done = bool(applied) and not missing; detail = '{len(applied)} of {len(_EXPECTED_MIGRATIONS)} applied' | status | mart_sql.schema_version -> SCHEMA_VERSION (second read, key setup_schema_version) |
-| **V074..V083 feature rows** | One row per gated feature migration; Done iff that version is in applied set. | done = _v in applied for _v in (74..83) | status | same SCHEMA_VERSION read |
 | **Marts loading** | Done when no tracked source has a NULL LAST_LOAD_TS (never-loaded); Partial when some do. | _never = count(LAST_LOAD_TS IS NULL); done=_never==0 | status/count | mart_sql.source_freshness_state -> SOURCE_FRESHNESS_STATE |
 | **Monthly budget set** | Done when MONTHLY_BUDGET_USD is set and not 0. | done = bool(_budget) and _budget not in ('0','0.0') | status (USD setting) | load_settings -> SETTINGS.MONTHLY_BUDGET_USD |
 | **Contract configured** | Done when both CONTRACT_START_DATE and non-zero CONTRACT_CREDITS are set. | done = bool(start) and bool(credits) and credits not in ('0','0.0') | status | load_settings -> SETTINGS.CONTRACT_START_DATE, CONTRACT_CREDITS |
 | **Alert routes configured** | Done when >=1 enabled ALERT_ROUTES row exists. | _n_routes = count(ENABLED in TRUE/1); done=_n_routes>0 | count | mart_sql.alert_routes -> ALERT_ROUTES.ENABLED |
 | **N setup item(s) still pending** | Rollup banner counting non-Done checklist rows. | pending = count(STATUS != 'Done') | count | app-side over the assembled rows |
 
-*Columns:* **STEP** — Checklist item label.; **STATUS** — Done / Partial / Pending.; **DETAIL** — Evidence string (e.g. 'N of 89 applied', 'MONTHLY_BUDGET_USD = ...').; **FIX** — Remediation text; blank when Done.
+*Columns:* **STEP** — Checklist item label.; **STATUS** — Done / Partial / Pending.; **DETAIL** — Evidence string (e.g. 'N of 124 applied', 'MONTHLY_BUDGET_USD = ...').; **FIX** — Remediation text; blank when Done.
 
 ### Metrics (Cost metric registry)
 The single semantic contract for every cost number in the app — 21 registered metrics with method/grain/window/source/timezone/latency/formula-version, so a reader knows exactly what a dollar means and how it was derived.

@@ -75,9 +75,11 @@ small and self-contained; don't restructure or "clean up" beyond the task you we
 - **SiS's conda channel lags PyPI:** any newer-Streamlit widget feature needs a
   `hasattr(st, "...")` or `try/except` degrade whose fallback still delivers the
   core value (see `clickable_bar_usd`, `section_toc`, `lazy_sections`).
-- **mypy is config-scoped to the pure layers only** (`app/logic`, `app/data`,
-  `app/config`) — keep those clean and side-effect-free. `app/main.py` and
-  `app/ui/*` are **not** mypy-checked, so don't rely on mypy for UI-layer types.
+- **mypy is config-scoped** (`mypy.ini` `files =`): `app/logic`, `app/data`,
+  `app/config.py`, `app/companies.py`, and `app/core/query.py` (the query engine,
+  onboarded incrementally) — keep those clean and side-effect-free. `app/main.py`,
+  the rest of `app/core`, and all of `app/ui/*` are **not** mypy-checked, so don't
+  rely on mypy for UI-layer types.
 
 ## Process per shippable change
 

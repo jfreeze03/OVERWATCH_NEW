@@ -19,7 +19,7 @@ decision here traces to a finding in the hostile panel review of the old app
 | 461 silent `except Exception` sites | Central `safe_page` boundary + error ring buffer + optional Snowflake error sink. Ruff `BLE001` enforced in CI. |
 | 4 copies of SQL-safety primitives | One module: `app/core/sqlsafe.py`. |
 | 6,134-line setup SQL, no versioning | Numbered migrations in `snowflake/migrations/` + `SCHEMA_VERSION` table + status check on the Admin page. |
-| 92k lines, two apps, 30 zombie section modules | One app, 7 pages, pure-logic layer with tests. No dead routes. |
+| 92k lines, two apps, 30 zombie section modules | One app, 10 pages, pure-logic layer with tests. No dead routes. |
 | Anyone could change the $/credit execs see | Rates live in `DBA_MAINT_DB.OVERWATCH.SETTINGS` (seeded: **$3.68 compute, $2.20 Cortex**). Sidebar override is admin-gated and watermarked. |
 | Cloud-services adjustment hardcoded to 0 | Billed dollars come from `METERING_DAILY_HISTORY` **with** `CREDITS_ADJUSTMENT_CLOUD_SERVICES` applied. |
 | Silent LIMIT injection | Row caps fetch `n+1`, set a `truncated` flag, and the UI shows a truncation banner. |
@@ -47,13 +47,16 @@ security boundary is Snowflake roles under Streamlit-in-Snowflake.
 
 | Page | Job |
 |---|---|
+| Brief | Default landing: compact operator status and the Case File — what changed since your last visit, in one screen. |
 | Overview | Exec glance: spend vs budget, month-end forecast, alerts, platform score, real top actions. |
 | Control Room | DBA morning triage: ranked issue queue, source freshness, 24h failures, spend movers. |
 | Alerts | Alert rules, open events, ack/resolve workflow, generated native ALERT SQL. |
 | Cost & Contract | Service/warehouse/user attribution, contract pacing, Cortex + storage, savings ledger (estimated vs verified). |
 | Operations | Queries, tasks, warehouses, contention, change impact — p95, failures, queue, spill, anomalies, post-change regression verdicts. |
+| Decision Studio | Optimization experiments, savings verification, the SLO cockpit, and the workload portfolio. |
 | Security | MFA gaps (login-evidence based), failed logins, grants, recent DDL changes. |
 | Admin | Settings, migration status, source freshness, app self-cost, error log, telemetry. |
+| Ask | DBA-only grounded Q&A over the app's own data (evidence-cited, no free-text SQL). |
 
 ## Quick start
 

@@ -1,13 +1,19 @@
 # Performance backlog — full re-analysis at v4.35.1 (2026-07-12)
 
-Ranked by measured pain (fleet boards 07-11/07-12) x effort. Everything here
-is UNIMPLEMENTED as of daaef13; implemented items from Codex r11-r21 are in
-CHANGELOG and excluded. Status tags: [V041] rides the loader pass, [BATCH]
-next page/reader fix-batch, [CORE] query-core v2, [RENDER] polish round.
+> **Status (updated 2026-09-03):** Tier A SHIPPED as `V041__loader_efficiency.sql`
+> (riders R1–R11) and is now the backbone through V124 (app v4.456.0). Tiers below
+> that are not marked shipped remain live backlog; check CHANGELOG for anything
+> landed since.
 
-## Tier A — the loader pass IS the perf program [V041]
+Ranked by measured pain (fleet boards 07-11/07-12) x effort. This was written when
+everything here was UNIMPLEMENTED as of daaef13; implemented items (Codex r11-r21
+and Tier A / V041) are in CHANGELOG and excluded. Status tags: [V041] SHIPPED
+(loader pass), [BATCH] next page/reader fix-batch, [CORE] query-core v2,
+[RENDER] polish round.
 
-One migration, ELEVEN riders now. Kills the biggest measured keys:
+## Tier A — the loader pass WAS the perf program [V041 — SHIPPED]
+
+One migration, eleven riders. Killed the biggest measured keys:
 
 1. Staged QUERY_HISTORY extract (one scan/cycle feeds facts, alloc, tag
    coverage, diagnostics, timeline). Evidence: 7-8 overlapping hourly scans.

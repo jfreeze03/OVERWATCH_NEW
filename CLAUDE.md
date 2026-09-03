@@ -37,7 +37,7 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
    literals per hot page file. Lowering is welcome; raising needs a
    justification comment in the dict. Keep SQL in `app/data/*_sql.py`;
    `unit_costs.py` budget is 0. The literal count is a lint proxy (v4.51):
-   the builder-level gate in `tests/test_v451_trust.py` renders each page's
+   the builder-level gate in `tests/history_locks/test_v451_trust.py` renders each page's
    referenced builders and pins the true reachable ACCOUNT_USAGE table set —
    growing that set is the honest version of raising a budget.
 4. **Every SQL builder gets a canary** (`app/data/canary.py`, default args,
@@ -121,8 +121,8 @@ validate assumptions before Joe deploys; never CREATE/ALTER/DROP/CALL/MERGE.
 - **Cortex user attribution stays live-first, byte-exact v4.34.2 shape**
   (exact emails + timestamps; owner rejected the mart swap that lost them).
 - **No monthly-budget KPI** on Overview; MTD-vs-prior-month pace instead.
-- Deterministic prescriptive alert rules, dedupe-key pattern (19 scan arms:
-  [01]-[17] + [18] SEC_NEW_ADMIN_NETWORK + [19] COST_EGRESS_SPIKE).
+- Deterministic prescriptive alert rules, dedupe-key pattern (21 scan arms:
+  [01]-[19] + [20] SEC_NEW_EXPOSURE + [21] SEC_POSTURE_METRIC).
 - Validate/loader worksheets are pasted by Joe; the app monitors the loader
   through APP_ERROR_LOG + SOURCE_FRESHNESS_STATE (loader-owned freshness).
 
@@ -174,9 +174,9 @@ recorded in locks/comments so the story survives (grep "owner" in tests/).
 
 - r28+ queue: proc-based atomic action layer (intent + idempotency),
   reconciliation v2 by dimension, evidence-grade savings verification
-  (execute proof + snapshots), Action Queue as operating center (r29/r30
-  product round), V049 write-target attribution (check residual share via
-  `object_cost_by_arm` first — only build if material).
+  (execute proof + snapshots). (Since shipped: the Action Queue operating-center
+  foundation on ACTION_QUEUE in V074, and V049 write-target attribution — no
+  longer open items.)
 - `_BAK_20260712` clones: droppable whenever Joe is satisfied.
 - Python floor is now 3.11 (datetime.UTC in tests) — pin in docs/CI if a
   3.10 environment ever shows up.

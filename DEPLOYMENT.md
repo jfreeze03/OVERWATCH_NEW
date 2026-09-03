@@ -188,7 +188,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 >   (additive; existing rows read NULL). No new objects.
 
 > **V065 verify (alert run-rate windows — no smoke test):** pure, deterministic alert
-> logic in `SP_ALERT_SCAN_DAILY`, byte-verified by `tests/test_v065_alert_windows.py`.
+> logic in `SP_ALERT_SCAN_DAILY`, byte-verified by `tests/migrations/test_v065_alert_windows.py`.
 > No new objects, no data heal, no app runtime change (the on-screen forecast was already
 > fixed). Optional clone check: `CALL SP_ALERT_SCAN_DAILY();` runs clean and the
 > `COST_FORECAST_BREACH` projection now uses a **complete-days-only** run-rate (early on
@@ -197,7 +197,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 
 > **V066 verify (alert escalation + serverless window + timeline atomicity — no smoke
 > test):** re-derives `SP_ALERT_SCAN`, `SP_ALERT_SCAN_DAILY`, and `SP_LOAD_MARTS_V27`;
-> byte-verified by `tests/test_v066_alert_escalation.py`. No new objects. Deterministic
+> byte-verified by `tests/migrations/test_v066_alert_escalation.py`. No new objects. Deterministic
 > alert-logic edits (severity bands on three dedupe keys so a HIGH→CRITICAL / MEDIUM→HIGH
 > crossing re-pages; `COST_SERVERLESS_CREEP` today-exclusion) plus one atomicity wrap.
 > Optional clone check for **#3**: the `MART_INCIDENT_TIMELINE` arm [8] rebuild now runs
@@ -207,7 +207,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 
 > **V067 verify (alert attribution + onset + supersede + object-cost — no smoke test):**
 > re-derives `SP_ALERT_SCAN` + `SP_LOAD_OBJECT_COST`; byte-verified by
-> `tests/test_v067_alert_attribution.py`. No new objects. Deterministic edits:
+> `tests/migrations/test_v067_alert_attribution.py`. No new objects. Deterministic edits:
 > `COMPANY_FOR_DATABASE` in two rules (#22), a 999 serverless-creep onset sentinel (#20), a
 > post-scan escalation-supersede sweep (`RESOLUTION_KIND='SUPERSEDED'`, excluded from the
 > precision score; #40), and a non-OK object-cost return on rollback (#10). Optional clone
@@ -216,7 +216,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 
 > **V068 verify (standalone-mart freshness stamps — no smoke test):** re-derives
 > `SP_LOAD_LOCK_WAIT_MART` + `SP_LOAD_PATTERN_COST`; byte-verified by
-> `tests/test_v068_freshness_stamps.py`. The migration tail CALLs both procs, so verify is
+> `tests/migrations/test_v068_freshness_stamps.py`. The migration tail CALLs both procs, so verify is
 > immediate: `SELECT SOURCE_NAME, LAST_LOAD_TS, SNAPSHOT_TS FROM
 > DBA_MAINT_DB.OVERWATCH.SOURCE_FRESHNESS_STATE WHERE SOURCE_NAME IN
 > ('MART_LOCK_WAIT_DAILY','MART_PATTERN_COST_DAILY');` — both rows should show a
@@ -225,7 +225,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 
 > **V069 verify (exec-board serverless + AI cost drivers — no smoke test):** re-derives
 > `SP_REFRESH_EXEC_BOARD` from V054; byte-verified by
-> `tests/test_v069_exec_board_drivers.py`. No new objects, no app change (the new rows fill
+> `tests/migrations/test_v069_exec_board_drivers.py`. No new objects, no app change (the new rows fill
 > the existing COST_DRIVER contract). The migration tail CALLs the proc, so verify is
 > immediate — read-only:
 > ```sql
@@ -246,7 +246,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 > serverless/AI lines alongside the warehouses on the next app refresh.
 
 > **V070 verify (Teams-only delivery routing — no smoke test to apply):** re-derives
-> `SP_DAILY_DIGEST` from V018 (byte-verified by `tests/test_v070_delivery_routing.py`) so
+> `SP_DAILY_DIGEST` from V018 (byte-verified by `tests/migrations/test_v070_delivery_routing.py`) so
 > the digest walks the enabled `ALERT_ROUTES` rows and sends through each route's own
 > integration instead of the retired hardcoded `OVERWATCH_WEBHOOK`, ledgering failures as
 > `digest_send_failed`; two idempotent blocks disable any enabled route whose integration is
@@ -264,7 +264,7 @@ snowflake/validate.sql   -- read the output; every row should be OK
 
 > **V071 verify (task-graph re-chain + root retry — OWNER SMOKE TEST):** re-points the
 > readers that were racing their own data and hardens the two roots; byte-verified by
-> `tests/test_v071_task_graph.py`. It only `ALTER TASK ADD/REMOVE AFTER` + `SET` retry params
+> `tests/migrations/test_v071_task_graph.py`. It only `ALTER TASK ADD/REMOVE AFTER` + `SET` retry params
 > and widens `SCHEMA_VERSION.DESCRIPTION` — it **never** re-defines a task body (no `CREATE OR
 > REPLACE TASK`), so every existing schedule/warehouse/body is preserved. No new objects, no
 > data heal. Idempotency is a **state check** (each re-point reads the live predecessors via
@@ -452,7 +452,7 @@ surgical by design — the schema is shared with the old app, so it never drops
 `DBA_MAINT_DB.OVERWATCH` itself, only named objects:
 
 - **Section A (live):** tasks, alerts, procs, functions, views, transient
-  facts/marts. Safe anytime — re-run V001..V005 and the loaders repopulate.
+  facts/marts. Safe anytime — re-run the migrations in order (V001..V124) and the loaders repopulate.
 - **Section B (commented):** operator data — settings, company scope, alert
   config/events/audit, action queue, savings ledger, error log,
   schema_version. Uncomment only for a factory reset, and run the provided
@@ -474,7 +474,7 @@ Restore = migrations in order -> roles.sql -> validate.sql (all rows OK).
 - **Fine-grained undo:** Time Travel — `SELECT * FROM <t> AT(OFFSET => -3600)`
   or `UNDROP TABLE <t>` within the retention window.
 - **Schema dropped:** `UNDROP SCHEMA DBA_MAINT_DB.OVERWATCH;` first. If gone,
-  re-run migrations V001..V015 + roles.sql + validate.sql; facts refill from
+  re-run all migrations in order (V001..V124) + roles.sql + validate.sql; facts refill from
   the loader tasks (history limited to ACCOUNT_USAGE retention); operator
   tables restore from `*_BAK_LAST` clones if they survived, else re-seed.
 - **App broken after deploy:** `snow streamlit deploy --replace` with the

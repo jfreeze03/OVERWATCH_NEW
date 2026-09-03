@@ -9,8 +9,8 @@ troubleshooting, and disaster recovery.
 **The one-paragraph version:** OVERWATCH is a Streamlit-in-Snowflake app
 that watches this Snowflake account's cost, performance, pipelines, and
 governance for the two companies sharing it (ALFA and Trexis). Hourly tasks
-copy ACCOUNT_USAGE telemetry into small fact tables; an hourly scan raises
-alert events against ~16 rules and pushes them to webhooks; daily scans
+copy ACCOUNT_USAGE telemetry into small fact tables; hourly and daily scans
+raise alert events against ~30 rules and push them to webhooks; the daily scans
 catch anomalies, regressions, and drift; the app renders it all with honest
 labels and generates (never silently executes) the SQL to fix what it finds.
 
@@ -104,6 +104,12 @@ Run in order as a DBA role (SNOW_SYSADMINS unless noted):
 | V025 break-glass policy | `SEC_BREAK_GLASS_USE` disabled (ACCOUNTADMIN/SNOW_ACCOUNTADMINS are routine here) |
 | V026 teams-safe delivery | sender v3: JSON-escaped payloads (quotes/newlines/tabs); Teams Workflows compatible |
 
+> **This table lists landmark migrations only.** The full chain is **V001..V124**
+> (124 files in `snowflake/migrations/`, enumerated in `admin.py` `_EXPECTED_MIGRATIONS`
+> and DEPLOYMENT.md §1). Run every migration in order — the V017 predecessor guard
+> refuses to skip any. V027..V124 add the mart family (V027), the incident system,
+> loader rewrites, the alert-scan split (V062), and the per-table storage mart (V124).
+
 App files deploy to the dedicated stage
 **`DBA_MAINT_DB.OVERWATCH.OVERWATCH_STAGE`** (V017; `snowflake.yml` pins it —
 see DEPLOYMENT.md for the manual PUT path). V017 also inaugurates the
@@ -127,29 +133,28 @@ native alerts), `ml_forecast_option.sql` (SNOWFLAKE.ML.FORECAST engine), `backfi
 |---|---|---|---|
 | TASK_LOAD_HOURLY | :07 hourly | SP_LOAD_HOURLY_FACTS | FACT_QUERY_HOURLY + hourly-grain facts |
 | TASK_REFRESH_EXEC_BOARD | after hourly load | SP_REFRESH_EXEC_BOARD | MART_EXEC_BOARD |
-| TASK_ALERT_SCAN | after hourly load | SP_ALERT_SCAN (v5) | ALERT_EVENTS |
+| TASK_ALERT_SCAN | after hourly load | SP_ALERT_SCAN (hourly rules) | ALERT_EVENTS |
+| TASK_ALERT_SCAN_DAILY | after daily load + reconcile | SP_ALERT_SCAN_DAILY (daily rules, split out V062) | ALERT_EVENTS |
 | TASK_ALERT_NOTIFY | after scan (opt-in resume) | SP_NOTIFY_WEBHOOK | webhook sends, NOTIFIED_AT |
 | TASK_LOAD_DAILY | 06:45 daily | SP_LOAD_DAILY_FACTS | daily facts |
-| TASK_ANOMALY_SWEEP | 06:40 daily | SP_ANOMALY_SWEEP (v2) | anomaly + DT-failure + (Mon) drift events |
+| TASK_ANOMALY_SWEEP | 07:00 daily | SP_ANOMALY_SWEEP (v2) | anomaly + (Mon) drift events |
 | TASK_CHANGE_IMPACT_SCAN | 06:50 daily | SP_CHANGE_IMPACT_SCAN | OBJECT_CHANGE_REGISTRY + regression events |
 | TASK_DAILY_DIGEST | 07:20 daily | SP_DAILY_DIGEST | DAILY_DIGEST (Cortex) |
 | TASK_VERIFY_SAVINGS | 07:40 1st of month | SP_VERIFY_IDLE_SAVINGS | SAVINGS_LEDGER verifications |
 | TASK_PURGE_FACTS | 05:20 1st of month | SP_PURGE_FACTS | deletes beyond retention |
 | TASK_BACKUP_OPERATOR | 05:40 Sundays | SP_BACKUP_OPERATOR_TABLES | `*_BAK_LAST` clones |
 | TASK_CANARY_SENTINEL | 05:30 Mondays | SP_CANARY_SENTINEL | CANARY_RESULTS + OPS_CANARY_FAIL |
-| MART_SPEND_ROLLUP_DT | TARGET_LAG 6h (Dynamic Table) | — | monthly spend rollup (pilot) |
 
 **Notes on the automation:** the Monday 05:30 sentinel deliberately leads
 the morning batch, so its warehouse resume is shared, not extra. Its
 `EXECUTE IMMEDIATE 'SELECT 1 FROM ' || name` loop is exempt from the sqlsafe
 rule because the probe list is a hardcoded array — no user input ever
-reaches it. **Scan-proc test strategy:** CI asserts structure (17 isolated
-blocks, per-block dedupe, rule carryover on every regeneration); runtime
-failures are the sentinel's and OPS_SCAN_DEGRADED's job — a broken block
-logs `rule_block_failed` and self-alerts, which IS the failure-injection
-test running in production, safely. **DT pilot cost:** MART_SPEND_ROLLUP_DT
-refreshes on WH_ALFA_ADMIN, so its cost shows up in Admin → App
-self-cost; compare against the loader tasks before migrating more marts.
+reaches it. **Scan-proc test strategy:** CI asserts structure (isolated
+blocks, per-block dedupe, rule carryover on every regeneration) across both
+scan procs — the hourly `SP_ALERT_SCAN` and the daily `SP_ALERT_SCAN_DAILY`
+(split out in V062); runtime failures are the sentinel's and
+OPS_SCAN_DEGRADED's job — a broken block logs `rule_block_failed` and
+self-alerts, which IS the failure-injection test running in production, safely.
 
 `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` — every state should be
 `started` except TASK_ALERT_NOTIFY before its integration exists.
@@ -282,12 +287,27 @@ SOC. **Governance drift score** at top (§6). Sections:
   CREATE ALERT templates for native-alert preference.
 
 ### Admin
-Settings (edit any SETTINGS key with typed confirm) · **Emergency** (§10) ·
-Migrations & freshness (SCHEMA_VERSION vs expected 1..15 + drift warning) ·
+Settings (edit any SETTINGS key with typed confirm) ·
+Migrations & freshness (SCHEMA_VERSION vs the expected V001..V124 set — admin.py
+`_EXPECTED_MIGRATIONS` — with a drift warning) ·
 App self-cost (the app's own queries/failures on WH_ALFA_ADMIN) · Org
 spend (ORGANIZATION_USAGE currency by account) · Performance (slowest app
 statement families by parameterized hash + session cache-hit estimate) ·
 Canary (§13) · Errors & telemetry (session + persisted APP_ERROR_LOG).
+
+### Decision Studio
+- **Experiments** — propose an optimization, capture the execute-proof and
+  before/after snapshots, and verify realized savings (estimated vs verified
+  never mix; a $0 measured cost reads "not measured yet", not "free").
+- **SLO cockpit** — service-level targets vs actuals for the tracked workloads.
+- **Workload portfolio** — the ranked cost/health view of workloads with owner
+  and next-move, exception-first (the drift/breaches surface before the KPIs).
+
+### Ask
+- **Grounded Q&A (DBA only)** — ask in plain English; the answerer routes the
+  question to the app's own vetted builders, cites the evidence (USD-grounded),
+  and refuses to guess when a source is empty rather than fabricating a "no data"
+  answer. No free-text SQL — it composes reviewed reads, not arbitrary queries.
 
 ## 6. Calculated scores
 
@@ -470,7 +490,8 @@ PIPELINE_SLA_CONFIG, DAILY_DIGEST.
 **Facts (transient, rebuildable, purged by retention):** FACT_METERING_DAILY,
 FACT_WAREHOUSE_DAILY, FACT_QUERY_HOURLY, FACT_TASK_DAILY, FACT_LOGIN_DAILY,
 FACT_STORAGE_DAILY. **Marts/views:** MART_EXEC_BOARD, MART_SOURCE_FRESHNESS,
-control-room snapshot, MART_SPEND_ROLLUP_DT (Dynamic Table pilot).
+control-room snapshot, and the V027+ scheduled-task mart family (the
+MART_SPEND_ROLLUP_DT Dynamic-Table pilot was retired in V090).
 **Procs:** SP_LOAD_HOURLY_FACTS, SP_LOAD_DAILY_FACTS, SP_REFRESH_EXEC_BOARD,
 SP_ALERT_SCAN, SP_NOTIFY_WEBHOOK, SP_DAILY_DIGEST, SP_VERIFY_IDLE_SAVINGS,
 SP_CHANGE_IMPACT_SCAN, SP_ANOMALY_SWEEP, SP_PURGE_FACTS,
@@ -510,7 +531,7 @@ Snowflake release note that mentions ACCOUNT_USAGE, and after migrations.
 ## 15. Troubleshooting
 
 **A page shows "not installed yet."** Admin → Migrations: compare
-SCHEMA_VERSION to expected 1..15; run what's missing, then roles.sql.
+SCHEMA_VERSION to the expected set (V001..V124, admin.py `_EXPECTED_MIGRATIONS`); run what's missing, then roles.sql.
 
 **Everything is stale.** `SHOW TASKS IN SCHEMA DBA_MAINT_DB.OVERWATCH;` —
 suspended tasks are the usual cause (a failed run suspends after retries).
@@ -548,8 +569,8 @@ which builder; check cache-hit %; confirm sections are lazy (only the
 active pill runs) and the batch path isn't falling back (telemetry key
 `batch_fallback`).
 
-**Migration drift warning in Admin.** The app expects exactly V001..V015;
-missing = run them in order; extra = you're on a newer schema than the
+**Migration drift warning in Admin.** The app expects exactly V001..V124
+(admin.py `_EXPECTED_MIGRATIONS`); missing = run them in order; extra = you're on a newer schema than the
 deployed app — redeploy the app.
 
 ## 16. Disaster recovery
@@ -558,7 +579,7 @@ deployed app — redeploy the app.
    (weekly Sunday clone) or Time Travel:
    `CREATE OR REPLACE TABLE <T> CLONE <T> AT(OFFSET => -3600);`
 2. **Dropped object:** `UNDROP TABLE/SCHEMA ...` within retention.
-3. **Schema gone:** UNDROP first. Otherwise: migrations V001..V015 →
+3. **Schema gone:** UNDROP first. Otherwise: all migrations in order (V001..V124) →
    roles.sql → validate.sql (all OK) → facts refill from loaders (history
    bounded by ACCOUNT_USAGE retention: 365d) → operator tables from
    `*_BAK_LAST` if they survived, else re-seed (SETTINGS rates, budgets,

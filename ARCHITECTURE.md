@@ -39,8 +39,10 @@ Snowflake connection, and it is enforced by code review + the CI test matrix
 
 ## Query engine (`app/core/query.py`)
 
-- Tiers: `live` 30s / `recent` 300s / `historical` 3600s / `metadata` 14400s
-  cache TTL, with matching statement timeouts (30/120/180/30s).
+- Tiers: `live` 30s / `recent` 300s / `hourly` 3600s / `historical` 3600s /
+  `metadata` 14400s cache TTL, with matching statement timeouts
+  (30/120/120/180/30s). The `hourly` tier serves mart/fact reads whose sources
+  load hourly or daily (a 300s TTL re-paid them ~12x/hour).
 - **Errors are never cached**: the `st.cache_data` functions raise; the public
   `run()` catches outside the cache and returns a typed `QueryResult`
   (`ok/error/truncated/source/fetched_at`). A transient failure can never pin
@@ -216,7 +218,9 @@ on the dedicated XSMALL under a resource monitor — predictable cost, explicit
 procs covered by teardown/canary/tests. DTs bill serverless refresh outside
 that budget and cannot source SNOWFLAKE share views (no change tracking), so
 they cannot replace the ACCOUNT_USAGE loaders anyway. `MART_SPEND_ROLLUP_DT`
-(V015) is the measured pilot; more marts migrate if its cost proves out.
+(V015) was a measured DT pilot; the 2026-08-17 audit found nothing read it while
+it billed serverless refresh, so V090 dropped it and the app standardized on
+scheduled-task marts.
 
 **String-built SQL with a safety layer instead of Snowpark binds.** Builders
 are pure functions emitting complete statements the app also SHOWS to users
@@ -254,5 +258,7 @@ Render is not the bottleneck; warehouse scans are. The standing rules:
    a ~2% sample of everything for the healthy baseline; `batch_fallback`
    events carry tier/size/keys/exception. The Admin → Performance fleet
    table is the optimization queue, ordered by evidence.
-The next planned step is the V027 mart family (docs/design/V027_MART_FAMILY.md).
+The V027 mart family (docs/design/V027_MART_FAMILY.md) shipped as the fact-first
+backbone — its scheduled marts replaced the recurring live ACCOUNT_USAGE scans,
+with the live builders kept as labeled fallback (migrations now run through V124).
 

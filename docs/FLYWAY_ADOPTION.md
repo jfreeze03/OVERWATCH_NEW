@@ -22,7 +22,7 @@ step, nothing about the migrations themselves changes.
 4. **Baseline at the applied tip.** Existing environments already carry the
    chain without a `flyway_schema_history` table:
 
-       flyway baseline -baselineVersion=<current tip, e.g. 033>
+       flyway baseline -baselineVersion=<current tip, e.g. 124>
 
    Flyway then tracks from the NEXT migration. Fresh/dev environments skip
    the baseline and replay from V001 — which is also the long-missing

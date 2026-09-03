@@ -31,7 +31,7 @@ how Snowflake actually bills storage.
   hour-of-day / day-of-week patterns.
 - **OVERWATCH**: FACT_WAREHOUSE_DAILY `CREDITS_TOTAL = SUM(CREDITS_USED)` —
   the same compute+CS basis — with company grain, idle/efficiency/sizing on
-  top. **No pseudo-warehouse filter (see R1).**
+  top. **Pseudo-warehouse filtered out (`WAREHOUSE_ID > 0`; R1 done in V039).**
 - **Docs**: `CREDITS_USED = CREDITS_USED_COMPUTE + CREDITS_USED_CLOUD_SERVICES`;
   this is USAGE, not billing — the CS component is largely rebated at the
   account level (only CS above 10% of daily compute is billed, UTC daily).
@@ -79,8 +79,8 @@ how Snowflake actually bills storage.
   this), and 10+ AI views (Functions, AI-Functions, Analyst, Search-daily,
   DocAI, Fine-tuning, REST API, Agent, Intelligence, Code CLI+Snowsight).
 - **OVERWATCH**: everything flows through METERING_DAILY_HISTORY categories
-  on Spend — but `_categorize` buckets OPENFLOW_COMPUTE_SNOWFLAKE and
-  HYBRID_TABLE_REQUESTS into "Other" (R5); per-table clustering detail and
+  on Spend — `_categorize` now maps OPENFLOW_COMPUTE_SNOWFLAKE (Serverless) and
+  HYBRID_TABLE_REQUESTS (Storage) to their own families (R5 done, no longer "Other"); per-table clustering detail and
   the exotic AI views have no drill (R7, R8 — mostly GAP-class on this
   account today).
 - Verdict: our top-line is complete (METERING catches every service); their
@@ -106,7 +106,7 @@ how Snowflake actually bills storage.
 
 ## Recommendations, ranked
 
-- **R1 (fix-first, V039): filter the pseudo-warehouse.** Our warehouse fact
+- **R1 (DONE — V039): filter the pseudo-warehouse.** Our warehouse fact
   loader ingests every WMH row; accounts emit a `CLOUD_SERVICES_ONLY` row
   (compute=0, CS>0) that lands as a phantom warehouse — it would classify
   ALFA, appear in movers/chargeback-unmapped/Compare, and the idle advisor
@@ -127,7 +127,7 @@ how Snowflake actually bills storage.
   drivers) × our elapsed-share ALLOCATED compute per session's queries =
   "what does Tableau/dbt/PowerBI cost us monthly," labeled allocated. New
   mart arm or live toggle under Chargeback.
-- **R5 (one-line): _categorize gains OPENFLOW_COMPUTE_SNOWFLAKE (Serverless)
+- **R5 (DONE): _categorize gains OPENFLOW_COMPUTE_SNOWFLAKE (Serverless)
   and HYBRID_TABLE_REQUESTS (Storage)** so Spend's "Other" stays honest.
 - **R6 (small): CS drill gains QUERY_TYPE.** When the CS ratio is ELEVATED,
   break the warehouse's CS credits by QUERY_TYPE (QUERY_HISTORY) beside the
