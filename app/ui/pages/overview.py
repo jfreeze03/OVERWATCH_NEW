@@ -903,7 +903,9 @@ def render() -> None:
         if not driver_view.empty:
             view = driver_view
             # rec40: bars are click-through — clicking a warehouse jumps to Operations >
-            # Warehouses pre-filtered to it. clickable_bar_usd degrades to a plain bar on
+            # Queries pre-filtered to it. (Queries honors warehouse_contains; the Warehouses
+            # tab does NOT — it would render an "Active but ignored: Warehouse" no-op, the same
+            # reason Control Room routes warehouse drills to Queries.) clickable_bar_usd degrades to a plain bar on
             # runtimes without altair on_select, and its return is guarded to fire once
             # per NEW click (so returning to this page with a sticky selection won't bounce).
             # Gate the affordance to viewers whose profile HAS Operations: an EXECUTIVE
@@ -918,7 +920,7 @@ def render() -> None:
                 _picked_wh = charts.clickable_bar_usd(
                     view, "DIMENSION", "VALUE_USD", key="ov_drivers_bar", title="Spend (USD)")
                 if _picked_wh:
-                    request_navigation("Operations", "Warehouses",
+                    request_navigation("Operations", "Queries",
                                        {"warehouse_contains": _picked_wh})
             else:
                 charts.bar_usd(view, "DIMENSION", "VALUE_USD", title="Spend (USD)")

@@ -1027,19 +1027,30 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
             table = st.text_input("Table", key="sla_table")
         max_age = st.number_input("Max age (hours)", min_value=1.0, max_value=168.0, value=24.0, key="sla_age")
         owner = st.text_input("Owner", value="Data Engineering", key="sla_owner")
-        insert_sql = (
-            f"INSERT INTO {core_object('PIPELINE_SLA_CONFIG')} "
-            "(DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)\n"
-            f"VALUES ({sql_literal(db.upper())}, {sql_literal(schema.upper())}, "
-            f"{sql_literal(table.upper())}, {max_age}, {sql_literal(owner)});"
+        # MERGE, not INSERT: PIPELINE_SLA_CONFIG has no unique key and no edit UI, so
+        # re-registering a table (the only way to change its SLA) with a bare INSERT wrote a
+        # SECOND config row -> two PIPELINE_SLA_STATUS rows for one table that disagree on
+        # SLA_MET. Upsert on (DB, SCHEMA, TABLE), like every sibling config write.
+        merge_sql = (
+            f"MERGE INTO {core_object('PIPELINE_SLA_CONFIG')} t\n"
+            f"USING (SELECT {sql_literal(db.upper())} AS DATABASE_NAME, "
+            f"{sql_literal(schema.upper())} AS SCHEMA_NAME, {sql_literal(table.upper())} AS TABLE_NAME, "
+            f"{max_age} AS MAX_AGE_HOURS, {sql_literal(owner)} AS OWNER) s\n"
+            "ON t.DATABASE_NAME = s.DATABASE_NAME AND t.SCHEMA_NAME = s.SCHEMA_NAME "
+            "AND t.TABLE_NAME = s.TABLE_NAME\n"
+            "WHEN MATCHED THEN UPDATE SET MAX_AGE_HOURS = s.MAX_AGE_HOURS, OWNER = s.OWNER\n"
+            "WHEN NOT MATCHED THEN INSERT (DATABASE_NAME, SCHEMA_NAME, TABLE_NAME, MAX_AGE_HOURS, OWNER)\n"
+            "VALUES (s.DATABASE_NAME, s.SCHEMA_NAME, s.TABLE_NAME, s.MAX_AGE_HOURS, s.OWNER);"
         )
-        st.code(insert_sql, language="sql")
-        if (is_operator and st.button("Execute insert", key="sla_exec",
+        st.code(merge_sql, language="sql")
+        if (is_operator and st.button("Register table", key="sla_exec",
                                       disabled=not (db and schema and table))
                 and write_gate_open("sla_exec")):
-            ok, msg = execute_statement(insert_sql, page=_PAGE)
+            ok, msg = execute_statement(merge_sql, page=_PAGE)
             stamp_write("sla_exec", ok)  # C48
-            notify(ok, msg)
+            notify(ok, "SLA registered." if ok else msg)
+            if ok:
+                st.rerun()  # the updated 'All registered tables' list is the durable receipt
         if not is_operator:
             st.caption("Copy and run as SNOW_ACCOUNTADMINS / SNOW_SYSADMINS - in-app execution needs an admin profile.")
 
@@ -1916,7 +1927,7 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
                "No hour-of-day warehouse activity in this window."):
         import pandas as pd
         charts.hour_heatmap(_hh.df, "WAREHOUSE_NAME", "HOUR_OF_DAY", "AVG_CREDITS",
-                            title="avg credits/hour")
+                            title="avg credits/hour", value_fmt=",.3f")
         st.caption("Dark cells with credits but no matching query activity are the schedule "
                    "opportunity. Generate the SUSPEND/RESUME schedule on Cost & Contract → Optimize.")
         _windows = []

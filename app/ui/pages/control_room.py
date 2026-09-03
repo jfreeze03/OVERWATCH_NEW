@@ -454,10 +454,20 @@ def _day_replay() -> None:
     if not any(r.usable() for r in (movers, activity, ddl, grants, tasks, alerts_d)):
         empty_state("no_data_yet", f"No telemetry loaded for {day_iso} — facts cover ~120 days back.")
         return
+    # A read that FAILED (ok=False) is not "quiet" — it's unknown. Most domains disclose their
+    # own read failure via guard() at their sub-panel below, but `activity` (query health) has NO
+    # sub-panel (it only feeds the headlines), so a failed activity read would otherwise vanish
+    # into a green all-clear. Demote off the clean verdict when any read failed and name the gap.
+    _failed = [n for n, r in (("spend movers", movers), ("query health", activity),
+                              ("DDL changes", ddl), ("grant changes", grants),
+                              ("task runs", tasks), ("alerts", alerts_d)) if not r.ok]
     if heads:
         for h in heads:
             (st.error if h["severity"] == "bad" else
              st.warning if h["severity"] == "warn" else st.info)(h["text"])
+    elif _failed:
+        st.warning(f"{day_iso}: no notable movement in the domains that loaded — but "
+                   f"{', '.join(_failed)} could not be read, so this verdict is partial.")
     else:
         empty_state("clean", f"{day_iso}: a quiet day — no notable movement in any domain.")
     c1, c2 = st.columns(2)

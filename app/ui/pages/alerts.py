@@ -849,12 +849,15 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                     with c_inv:
                         if st.button("Investigate →", key="alert_investigate", width="stretch",
                                      help=f"Jump to {target['page']} · {target['section'] or 'top'} "
-                                          "with filters applied from this event"):
-                            # rec24: only claim "filters applied" when the jump actually reshapes
-                            # them, so the arrival note on the destination is never misleading.
+                                          "with the event's scope set"):
+                            # rec24 / round-24: say "scope SET", not "filters APPLIED" — the
+                            # destination decides which carried filters it honors (and discloses
+                            # ignored ones via its own "Active but ignored" banner). Claiming they
+                            # were applied contradicts that banner when the section ignores one
+                            # (e.g. warehouse_contains on Spend & Attribution).
                             _inv_ctx = None
                             if target["filters"]:
-                                _inv_ctx = {"filter_note": (f"Filters applied from alert "
+                                _inv_ctx = {"filter_note": (f"Scope set from alert "
                                                             f"[{row['RULE_ID']}]: {str(row['TITLE'])[:80]}")}
                             request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
                     with c_fix:

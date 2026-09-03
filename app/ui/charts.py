@@ -1240,8 +1240,10 @@ def sparkline_row(items: list[tuple[str, pd.DataFrame, str, str]]) -> None:
 
 
 def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
-                 title: str = "", takeaway: bool = True) -> None:
-    """Hour-of-day x entity heatmap (e.g. credits burned by warehouse-hour)."""
+                 title: str = "", takeaway: bool = True, *, value_fmt: str = ",.0f") -> None:
+    """Hour-of-day x entity heatmap (e.g. credits burned by warehouse-hour). value_fmt
+    formats the tooltip + the "Hottest" takeaway; default integer, but a fractional metric
+    (AVG_CREDITS is ROUND(cr/days, 3)) must pass e.g. ",.3f" so 0.214 isn't rounded to "0"."""
     data = df[[row_col, hour_col, value_col]].copy()
     data.columns = ["Row", "Hour", "Value"]
     if data.empty:
@@ -1266,7 +1268,7 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             y=alt.Y("Row:N", title=None),
             color=alt.Color("Value:Q", title=title or value_col,
                             scale=alt.Scale(range=_HEATMAP_RANGE)),  # rec38: one orange heat ramp
-            tooltip=["Row:N", "Hour:O", "Value:Q"],
+            tooltip=["Row:N", "Hour:O", alt.Tooltip("Value:Q", format=value_fmt)],
         )
         .properties(height=max(120, 24 * data["Row"].nunique()))
     )
@@ -1282,7 +1284,7 @@ def hour_heatmap(df: pd.DataFrame, row_col: str, hour_col: str, value_col: str,
             _p = int(_v.idxmax())
             if pd.notna(_h.iloc[_p]):
                 st.caption(f"Hottest: {_r.iloc[_p]} at hour "
-                           f"{int(_h.iloc[_p]):02d} ({float(_v.iloc[_p]):,.0f}).")
+                           f"{int(_h.iloc[_p]):02d} ({format(float(_v.iloc[_p]), value_fmt)}).")
 
 
 def operational_replay(df: pd.DataFrame, credits: pd.DataFrame | None = None) -> None:

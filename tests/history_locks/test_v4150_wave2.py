@@ -86,7 +86,7 @@ def test_dup_work_item_guard_at_both_create_sites():
 # --- rec24: arrival note plumbed and rendered once --------------------------------
 def test_filter_arrival_note_plumbed_and_shown_once():
     alerts = _src("app/ui/pages/alerts.py")
-    inv = alerts.split('key="alert_investigate"', 1)[1][:600]
+    inv = alerts.split('key="alert_investigate"', 1)[1][:1000]   # round-24 comment widened the block
     assert "filter_note" in inv
     assert 'if target["filters"]:' in inv          # note only when filters actually apply
     comp = _src("app/ui/components.py")

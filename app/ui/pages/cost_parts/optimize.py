@@ -1520,7 +1520,7 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                            source="hour-of-day activity profile")
                 if guard(prof, "No hourly profile available yet."):
                     charts.hour_heatmap(prof.df, "WAREHOUSE_NAME", "HOUR_OF_DAY", "AVG_CREDITS",
-                                        title="avg credits/hour")
+                                        title="avg credits/hour", value_fmt=",.3f")
                     st.caption("Dark cells with no matching query activity are the schedule opportunity.")
                     mine = prof.df[prof.df["WAREHOUSE_NAME"].astype(str) == wh_pick]
                     proposal = remediation.propose_quiet_window(mine.to_dict("records"))

@@ -481,7 +481,9 @@ def _dispatch_jump(pick: str, pages: tuple) -> None:
         _dbf = {"company": _co, "database": name} if _co else {"database": name}
         request_navigation("Operations", "Queries", _dbf)
     elif kind == "WH":
-        request_navigation("Operations", "Warehouses", {"warehouse_contains": name})
+        # Queries honors warehouse_contains; the Warehouses tab ignores it (would show an
+        # "Active but ignored: Warehouse" no-op) — route the WH pick to Queries like the DB pick.
+        request_navigation("Operations", "Queries", {"warehouse_contains": name})
     elif kind == "Rule":
         request_navigation("Alerts", "Rules")
 

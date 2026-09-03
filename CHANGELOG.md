@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.458.0 - Bug-hunt round 24: false-all-clear sweep + chart/write/deep-link fixes (2026-09-03)
+
+A find→refute-verify sweep (exhaustive false-all-clear, chart-encoding, write non-idempotency,
+permission-gate, deep-link/navigation scope, review-arc over v4.457) surfaced 5 confirmed defects
+(1 refuted; permission-gate and the review-arc came back empty). The false-all-clear sweep followed
+round 23's silent-failure finds, and the chart pass found a sibling of the round-23 precision bug.
+
+- **[MED, false-all-clear] The Control Room day-replay rendered a green "a quiet day — no notable
+  movement" verdict on a FAILED read.** Five of the six day-scoped domains disclose their own read
+  failure via a sub-panel below, but `activity` (query health / FACT_QUERY_HOURLY) has no sub-panel —
+  it only feeds the headlines — so a failed activity read folded into the all-clear, hiding a real
+  query-failure spike. Now demotes to a partial warning naming the domains that could not be read.
+- **[MED, chart precision] hour_heatmap's "Hottest" takeaway rounded a fractional AVG_CREDITS to an
+  integer,** printing "(0)" for the brightest cell — contradicting the tooltip and coloring under it,
+  on a view whose whole purpose is finding small idle-hour burn. Gave hour_heatmap a `value_fmt`
+  (mirroring the round-23 bar_count fix); both AVG_CREDITS callers pass 3 decimals.
+- **[MED, non-idempotent write] Pipeline-SLA registration was a bare INSERT into a keyed config table
+  with no edit UI.** Re-registering a table (the only way to change its SLA) wrote a second config
+  row, so PIPELINE_SLA_STATUS emitted two rows for one table that could disagree on SLA_MET. Now
+  MERGEs on (DATABASE, SCHEMA, TABLE) and reruns (the notify docstring's non-idempotent-write contract).
+- **[MED, deep-link] Warehouse jumps landed on a page that ignores the filter.** The Overview
+  spend-driver bar click and the Jump-to WH pick set `warehouse_contains` and routed to Operations ▸
+  Warehouses, which is company-scoped only — so the operator saw the full warehouse view under a
+  contradictory "Active but ignored: Warehouse" banner (and a sticky filter leaked to other pages).
+  Both now route to Operations ▸ Queries (which honors it), like the DB pick and the Control Room drill.
+- **[MED, deep-link] The alert "Investigate →" arrival note over-claimed "Filters applied".** For a
+  rule whose destination ignores a carried filter (e.g. COST_ANOMALY_SWEEP's warehouse_contains on
+  Spend & Attribution), the note asserted the filters were applied while the section's own banner said
+  "Active but ignored". Reworded to "Scope set from alert …", honest whether or not the destination
+  honors each carried filter.
+
 ## 4.457.0 - Bug-hunt round 23: exhaustive write-path phantom-success sweep (2026-09-03)
 
 A find→refute-verify sweep (exhaustive write-path phantom-success, silent-failure/error-swallow,
