@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.460.0 - MFA-gap posture on the COALESCE active-user canonical (V125) (2026-09-03)
+
+Closes the last tracked correctness item from the bug-hunt arc: the mart loader's MFA-gap arm was the
+lone hold-out still using a bare `U.DISABLED = FALSE`, diverging from the app-wide canonical.
+
+- **[MED, security correctness / live-vs-mart divergence] The warm-mart MFA-gap count could sit one
+  short of the live count and the worklist length.** Every live reader — `security_sql.users_without_mfa`,
+  its live twin, the `governance_counts` count fallback, and `insights_sql` — filters active users with
+  `COALESCE(U.DISABLED, FALSE) = FALSE`, so a user whose `ACCOUNT_USAGE.USERS.DISABLED` is NULL (never
+  toggled) who password-logs-in without MFA **is** counted. But the `MART_SECURITY_POSTURE_DAILY`
+  `MFA_GAP_USERS` arm, loaded by `SP_LOAD_MARTS_V27`, used a bare `U.DISABLED = FALSE`, which drops that
+  user. On the warm-mart (primary) path the posture MFA-gap KPI could therefore read one short of the
+  live/worklist figure the Security page shows right beside it. (Confirmed and deliberately deferred in
+  bug-hunt round 18, pending an owner-applied migration; this is that migration.)
+- **V125** re-derives `SP_LOAD_MARTS_V27` from V113 with the `MFA_GAP_USERS` arm on
+  `COALESCE(U.DISABLED, FALSE) = FALSE` — **everything else byte-identical** (proven: the proc block
+  differs from V113 by exactly one line). Proc only, no schema change; owner applies after V124 and the
+  mart forward-heals on the next `SP_LOAD_MARTS_V27` run. The live-side invariant stays locked by
+  `test_bughunt_round18`; the new `test_v125_mfa_gap_coalesce` locks the mart side and the byte-fidelity.
+
 ## 4.459.0 - Bug-hunt round 25: chart-format + deep-link contract siblings (2026-09-03)
 
 Two classes had each hit twice and were clearly systematic, so both got exhaustive sweeps (plus three

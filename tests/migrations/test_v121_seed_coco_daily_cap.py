@@ -42,6 +42,6 @@ def test_coco_cap_is_wired_across_all_three_config_sites():
 
 def test_validate_floor_and_docs_track_v121():
     val = _read("snowflake/validate.sql")
-    assert "V001..V124 applied" in val and "VERSION BETWEEN 1 AND 124) = 124" in val
+    assert "V001..V125 applied" in val and "VERSION BETWEEN 1 AND 125) = 125" in val
     for rel in ("DEPLOYMENT.md", "README.md"):
         assert "V121__seed_coco_daily_cap.sql" in _read(rel)

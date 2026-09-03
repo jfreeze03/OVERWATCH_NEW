@@ -465,6 +465,11 @@ _EXPECTED_MIGRATIONS = {
          "snapshot per-table active/time-travel/fail-safe/clone bytes + retention + 90d LAST_DML + company "
          "from TABLE_STORAGE_METRICS. storage_waste + table_storage_breakdown read it mart-first (live scan "
          "as fallback), so the Spend + Optimize storage panels stop re-scanning TABLE_STORAGE_METRICS live",
+    125: "MFA-gap posture on the COALESCE active-user canonical: SP_LOAD_MARTS_V27 re-derived from V113 so "
+         "the MART_SECURITY_POSTURE_DAILY MFA_GAP_USERS arm filters active users with "
+         "COALESCE(U.DISABLED, FALSE) = FALSE (was a bare U.DISABLED = FALSE), matching every live reader, so "
+         "the warm-mart MFA-gap count no longer drops a NULL-DISABLED password-login user. Proc only, "
+         "no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel
