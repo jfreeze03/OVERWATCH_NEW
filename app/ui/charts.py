@@ -1537,12 +1537,15 @@ def workload_portfolio(df: pd.DataFrame) -> None:
 # must carry its unit. Vega's d3 "%" format multiplies by 100, and our values
 # are already percentages, so we format a string column instead of a d3 code.
 _METRIC_UNIT = {
-    "usd": ("$", "", 0), "credits": ("", " cr", 0),
+    # credits keep 3 decimals: a single-warehouse per-day series is genuinely sub-unit
+    # (ROUND(SUM(CREDITS_USED),4)), so 0 dp rounded a real 0.28->0.61 cr/day change to "0/1 cr"
+    # on the axis, tooltip and peak caption (bug-hunt r25, same class as the r24 heatmap fix).
+    "usd": ("$", "", 0), "credits": ("", " cr", 3),
     "pct": ("", "%", 1), "sec": ("", "s", 1), "count": ("", "", 0),
 }
 # y-axis d3 format where a unit maps cleanly onto one (pct/sec carry the unit in
 # their title, so their axis stays a bare number).
-_METRIC_AXIS_FMT = {"usd": "$,.0f", "credits": ",.0f", "count": ",.0f"}
+_METRIC_AXIS_FMT = {"usd": "$,.0f", "credits": ",.3f", "count": ",.0f"}
 
 
 def _fmt_metric_value(v: object, unit: str) -> str:

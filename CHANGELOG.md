@@ -1,5 +1,29 @@
 # Changelog
 
+## 4.459.0 - Bug-hunt round 25: chart-format + deep-link contract siblings (2026-09-03)
+
+Two classes had each hit twice and were clearly systematic, so both got exhaustive sweeps (plus three
+genuinely-new angles and a review-arc). The sweeps found 3 confirmed defects (0 refuted) — all
+siblings of already-known classes; the three new angles (column-existence, pandas sort-stability,
+help-vs-constant) came back empty, a firm floor signal.
+
+- **[MED, chart-format] The change-impact "credits/day" line rounded sub-unit warehouse credits to
+  whole credits.** It passes `unit="credits"` to `daily_metric_line`, which rendered credits at 0
+  decimals on the axis, tooltip, AND peak caption — but the source is `ROUND(SUM(CREDITS_USED), 4)`
+  for one warehouse/day, so a real 0.28 → 0.61 cr/day change (the exact cost jump this
+  change-detection chart exists to surface) flattened to "0/1 cr" and "Peak 1 cr", contradicting the
+  fractional before/after delta KPI right above it. The chart "credits" unit now renders 3 decimals
+  (the same class as the round-23 bar_count and round-24 hour_heatmap fixes).
+- **[MED, deep-link] Cost ▸ Optimization & Savings falsely warned "Active but ignored: Warehouse".**
+  Its measured-cost scan panel filters on `warehouse_contains`, but the section contract omitted it
+  from `partial` (database/schema were declared), so a warehouse filter — set directly or via a
+  deep-link — showed the "ignored" banner while the scan was actually scoped to it. Added
+  `warehouse_contains` to the `partial` tuple.
+- **[MED, deep-link] The alert "Generate fix →" help still over-claimed "scope applied".** Round 24
+  reworded the sibling "Investigate →" note to "scope set" for exactly this contradiction, but the
+  Generate-fix button was left claiming the scope was applied while its destination (Optimization &
+  Savings) shows the "Active but ignored" banner for a carried warehouse filter. Reworded "scope set".
+
 ## 4.458.0 - Bug-hunt round 24: false-all-clear sweep + chart/write/deep-link fixes (2026-09-03)
 
 A find→refute-verify sweep (exhaustive false-all-clear, chart-encoding, write non-idempotency,

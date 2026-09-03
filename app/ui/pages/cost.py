@@ -174,9 +174,11 @@ def render() -> None:
         },
         "Optimization & Savings": {
             "applies": (),
-            # v4.157.0: the expensive/repeat/pruning scan panels honor db + schema
-            # when a scan is run — declare them partial so the banner is accurate.
-            "partial": ("company", "days", "database", "schema_contains"),
+            # v4.157.0 + r25: the expensive/repeat/pruning + measured-cost scan panels honor
+            # warehouse + db + schema when a scan is run (measured_query_costs filters
+            # q.WAREHOUSE_NAME too) — declare them partial so the banner stops warning
+            # "Active but ignored: Warehouse" where the scan actually filters on it.
+            "partial": ("company", "days", "warehouse_contains", "database", "schema_contains"),
             "note": "Savings verification and ledger totals are account-wide where labeled.",
         },
     }

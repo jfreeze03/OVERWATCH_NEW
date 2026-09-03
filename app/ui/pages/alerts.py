@@ -862,8 +862,11 @@ def _open_events_section(events, is_operator: bool, company: str = "ALL") -> Non
                             request_navigation(target["page"], target["section"], target["filters"], _inv_ctx)
                     with c_fix:
                         if fix and st.button("Generate fix →", key="alert_fix", width="stretch",
+                                             # "scope SET", not "applied": the destination decides
+                                             # which carried filters it honors (round-24 reworded the
+                                             # sibling Investigate note for this exact contradiction).
                                              help="Lands on the remediation surface with this event's "
-                                                  "scope applied — generate, confirm, execute, audited."):
+                                                  "scope set — generate, confirm, execute, audited."):
                             request_navigation(fix["page"], fix["section"], fix["filters"])
                     with c_act:
                         action = st.radio("Action", ["ACK", "RESOLVE", "SNOOZE"], horizontal=True,

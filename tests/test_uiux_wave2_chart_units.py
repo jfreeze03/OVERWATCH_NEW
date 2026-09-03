@@ -41,7 +41,9 @@ def test_f41_unit_formatter_spells_each_unit():
     assert f(742389.5, "usd") == "$742,390"        # $ + separators, 0 dp
     assert f(93.14, "pct") == "93.1%"              # % suffix, 1 dp
     assert f(12.34, "sec") == "12.3s"
-    assert f(1234, "credits") == "1,234 cr"
+    # r25: credits carry 3 dp so a sub-unit single-warehouse series isn't rounded to "0 cr"
+    assert f(1234, "credits") == "1,234.000 cr"
+    assert f(0.28, "credits") == "0.280 cr"
     assert f(1500, "count") == "1,500"
     # unknown unit -> legacy adaptive precision (unchanged for unit-less callers)
     assert f(742389.5, "") == "742,390"
