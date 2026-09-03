@@ -62,7 +62,10 @@ def test_operations_queries_tile_labels_served_window_not_requested():
     src = _src("app/ui/pages/operations.py")
     # the live fallback clamps to 90d; the label must use the served window
     assert "_served_days = days if used_mart else min(days, MAX_LIVE_WINDOW_DAYS)" in src
-    assert 'f"Queries ({_served_days}d)"' in src
+    # v4.453 (WLA-1 sweep): the served-window honesty now lives in the trailing branch of _q_wlab,
+    # which reads "last month" when the window is bounded to the prior calendar month instead.
+    assert '_q_wlab = "last month" if bounds is not None else f"{_served_days}d"' in src
+    assert 'f"Queries ({_q_wlab})"' in src
     # the raw-days label (the bug) must be gone
     assert 'f"Queries ({days}d)"' not in src
     assert "from app.config import MAX_LIVE_WINDOW_DAYS" in src

@@ -66,12 +66,18 @@ def role_share_within_warehouse(days: int, company: str = "ALL", *, bounds: tupl
     partition first; role visibility (the 2026-07-08 Trexis-leak fix) picks
     display rows AFTER. An excluded role keeps its slice of the denominator,
     so displayed shares can sum below 1 on shared warehouses — the old form
-    renormalized to 1 over this company's roles and over-billed them."""
+    renormalized to 1 over this company's roles and over-billed them.
+
+    Population is ALL statuses (round 19): the warehouse credits this share
+    multiplies include failed/timed-out queries' compute, so their elapsed time
+    must sit in the denominator too — a role whose long ETL loads time out would
+    otherwise be under-charged. This matches the mart twin mart27_sql.role_share,
+    whose EXEC_SEC (FACT_QUERY_ROLE_HOURLY) is loaded with no status filter, so
+    the allocated $ no longer flips when the panel falls to this live path."""
     days = bounded_days(days)
     where = and_where(
         scope_window_where("START_TIME", days, bounds=bounds),
         "WAREHOUSE_NAME IS NOT NULL",
-        "EXECUTION_STATUS = 'SUCCESS'",
         companies.warehouse_company_scope(company),
     )
     vis = and_where(companies.role_clause(company, "ROLE_NAME"))

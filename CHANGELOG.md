@@ -1,5 +1,49 @@
 # Changelog
 
+## 4.453.0 - Bug-hunt round 19: app-wide window-label sweep + 5 cross-surface fixes (2026-09-02)
+
+An adversarial find→refute-verify sweep (app-wide WLA-1 window-label sweep, caption-vs-SQL on
+untouched pages, remaining live/mart twin-divergence, cross-page metric-format consistency,
+number-formatting honesty, review-arc over v4.452) surfaced 14 confirmed defects (2 refuted). The
+WLA-1 generalization was the big vein — round 18 fixed the AI tabs; this round found the same
+trailing-`{days}d`-on-bounded-data label class on nine more surfaces.
+
+- **[MED ×9, WLA-1 window labels] nine more tile/column/caption labels hard-coded the trailing
+  `{days}d` while their reads are bounded to the prior calendar month under "Last month" scope**, so
+  they named a trailing window ending today, contradicting the scope chip: the Overview "Company
+  economics" section badge; Operations Queries ("Queries ({days}d)"), Task Health ("Task runs"), and
+  Wasted-spend KPIs; Unit-costs "AI spend"; Optimize "Idle credit waste", "QAS spend", and the
+  idle-remediation caption; and the Cortex/AI-spend tab that round 18's sweep missed. Each now derives
+  `_wlab = "last month" if bounds is not None else f"{days}d"`, matching the Spend tab.
+- **[MED, WLA-1 reverse — a v4.452 regression] the CoCo efficiency credit columns were relabeled
+  "last month" but their data was still a trailing window.** v4.452 swapped `_wlab` into the "Credits"
+  column header and "Peer-relative" caption, but the credit metrics come from `coco_efficiency`, which
+  windowed the credit frame as a trailing cut (no `bounds`), so under "Last month" the columns covered
+  a trailing ~31 days ending today (including current-month days, dropping the 1st) — the opposite
+  mislabel. `coco_efficiency` now takes `bounds` and applies the exact prior-calendar-month slice
+  (mirroring `cortex._window_slice`), so the credit columns match their label and the sibling bounded
+  "Active AI users" tile.
+- **[MED, live/mart twin-divergence] role-share chargeback flipped with mart warmth.** The live
+  `chargeback_sql.role_share_within_warehouse` filtered `EXECUTION_STATUS = 'SUCCESS'` while its mart
+  twin `mart27_sql.role_share` counts all statuses. Since the warehouse credits the share allocates
+  include failed/timed-out queries' compute, a role whose long ETL loads time out was under-charged
+  when the mart served and over-corrected when the live fallback served. Dropped the success-only
+  filter (the mart is right — all consumed compute belongs in the denominator).
+- **[MED, number-formatting honesty] per-call KPIs collapsed sub-cent $/call to "$0.00".** Unit-costs'
+  "Priciest procedure (per call)" and "Avg $/call" KPIs used `format_usd`, which quantizes to cents,
+  so a $0.0034/call proc read "$0.00" while the `$%.4f` leaderboard row right below named the same proc
+  at "$0.0034". New `formulas.format_usd_precise` preserves 4-decimal precision below $1 (defers to
+  `format_usd` at $1+); both KPIs use it.
+- **[LOW, caption-vs-schedule] the Security posture panels claimed a "06:30" daily load.** The posture
+  mart actually loads inside the daily chain that roots at `TASK_LOAD_DAILY` (`CRON 45 6` = 06:45) and
+  runs after the nightly reconcile, so the snapshot lands after 06:45; 06:30 is the unrelated
+  storage-truth task. A DBA checking freshness at 06:35 would wrongly conclude the loader was stale.
+  Corrected the caption, the read provenance, and the code comment to the real post-06:45 schedule.
+- **[LOW, cross-page format] warehouse spill/day rendered with different precision on two right-sizing
+  tables.** `SPILL_GB_PER_DAY` carried `format="%.2f"` on Optimize but no format on Operations (same
+  source frame, the app documents them as the same profile), so it fell to the pandas-Styler default
+  (6 decimals): "0.03" vs "0.030000". Added the matching `%.2f` column config on Operations.
+
 ## 4.452.0 - Bug-hunt round 18: cross-tab window labels, recheck-help window, MFA-gap divergence tracked (2026-09-02)
 
 An adversarial find→refute-verify sweep (review-arc over v4.451, non-storage twin-divergence,

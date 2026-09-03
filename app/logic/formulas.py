@@ -255,6 +255,18 @@ def format_usd(value: float) -> str:
     return f"${amount:,.2f}"
 
 
+def format_usd_precise(value: float) -> str:
+    """Dollar formatting that preserves sub-dollar precision for UNIT costs
+    ($/call, $/run). ``format_usd`` quantizes to cents and collapses e.g.
+    $0.0034 to "$0.00"; this shows 4 decimals for sub-$1 amounts (matching the
+    ``$%.4f`` unit-cost table columns those KPIs sit beside) and defers to
+    ``format_usd`` at $1 and above."""
+    amount = safe_float(value)
+    if 0 < abs(amount) < 1:
+        return f"${amount:,.4f}"
+    return format_usd(amount)
+
+
 def md_dollars(text: object) -> str:
     """Escape '$' for Streamlit MARKDOWN sinks (st.caption/markdown/info/...).
 

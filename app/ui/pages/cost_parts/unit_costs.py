@@ -21,7 +21,13 @@ from app.data import cortex_sql, etl_sql, graph_sql, insights_sql, mart27_sql
 from app.logic import graphs
 from app.logic.call_tree import build_call_tree
 from app.logic.directory import resolve_display
-from app.logic.formulas import credits_to_usd, format_usd, md_dollars, safe_float
+from app.logic.formulas import (
+    credits_to_usd,
+    format_usd,
+    format_usd_precise,
+    md_dollars,
+    safe_float,
+)
 from app.ui import charts
 from app.ui.components import (
     empty_state,
@@ -148,7 +154,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                 "_pc", ascending=False)
         top_p = _pp.iloc[0]
         kpis.append({"label": "Priciest procedure (per call)",
-                     "value": format_usd(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate, round_cents=False)),
+                     # format_usd_precise, not format_usd: a sub-cent $/call (e.g. $0.0034 on an
+                     # XS warehouse) must not collapse to "$0.00" and contradict the $%.4f "$/call"
+                     # leaderboard row below that names the same proc.
+                     "value": format_usd_precise(credits_to_usd(safe_float(top_p.get("CREDITS_PER_CALL")), rate, round_cents=False)),
                      "delta": str(top_p.get("PROC_NAME")), "delta_color": "off"})
     if ai_res.usable():
         ai_credits = float(ai_res.df["CREDITS"].map(safe_float).sum())
@@ -158,7 +167,11 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         # silently understating account AI spend and mislabeling the window.
         _ai_full = _ai_m.usable()
         _ai_days = days if _ai_full else min(int(days), MAX_LIVE_WINDOW_DAYS)
-        kpis.append({"label": f"AI spend ({_ai_days}d)" + ("" if _ai_full else " · Functions only"),
+        # WLA-1: the AI read is bounded to the prior calendar month under "Last month" scope, so
+        # label "last month" then rather than the trailing "{days}d" (which would name a window
+        # ending today). The served-days honesty only matters on the trailing branch.
+        _ai_wlab = "last month" if bounds is not None else f"{_ai_days}d"
+        kpis.append({"label": f"AI spend ({_ai_wlab})" + ("" if _ai_full else " · Functions only"),
                      "value": format_usd(credits_to_usd(ai_credits, ai_rate)),
                      "delta": f"{len(ai_res.df)} source/model pair(s)",
                      "delta_color": "off",
@@ -281,7 +294,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                     {"label": f"Total, {uc_days}d", "value": format_usd(_tot)},
                     {"label": "Calls", "value": f"{_calls:,}"},
                     {"label": "Avg $/call",
-                     "value": format_usd(_tot / _calls) if _calls else "n/a"},
+                     # sub-cent-aware: this trend sub-table shows $/call at $%.4f below, so the
+                     # KPI must not quantize a sub-cent average to "$0.00" beside it.
+                     "value": format_usd_precise(_tot / _calls) if _calls else "n/a"},
                 ])
                 charts.spend_trend(tdf, day_col="DAY", usd_col="USD")
                 styled_table(tdf, height=200, column_config={

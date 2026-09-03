@@ -847,7 +847,8 @@ _GOV_SIGNALS = {
 def _governance_score_panel():
     """Governance debt as a number with named deductions (CoCo item 14a)."""
     # Posture-snapshot-first (live round 6: gov_counts topped the fleet
-    # slow-fetch board — 13 hits, p95 12.3s). The daily 06:30 posture mart
+    # slow-fetch board — 13 hits, p95 12.3s). The daily posture mart (loaded
+    # after the ~06:45 nightly chain, not 06:30 — that's the storage-truth task)
     # carries all four score inputs since V030; the 4-subquery live scan
     # stays as the fallback and the pre-V030 path. Hygiene counts a day old
     # are fine — the source label says which path served.
@@ -855,7 +856,7 @@ def _governance_score_panel():
     # One 90-day read serves BOTH this score (latest day) and the trend
     # panel below (r14 #18) — the 3d + 90d double-read collapsed.
     post = run(mart27_sql.security_posture(90), page=_PAGE, key="gov_posture", tier="recent",
-               source="MART_SECURITY_POSTURE_DAILY (daily 06:30 snapshot, 90d shared)")
+               source="MART_SECURITY_POSTURE_DAILY (daily post-06:45 snapshot, 90d shared)")
     if post.usable():
         pdf_ = post.df.copy()
         snap = pdf_[pdf_["DAY"] == pdf_["DAY"].max()].set_index("METRIC")["VALUE"]
@@ -1169,7 +1170,7 @@ def _posture_trend_panel(trend) -> None:
     arrow = "flat" if latest == first else ("down " + f"{first - latest:,.0f}" if latest < first
                                             else "up " + f"{latest - first:,.0f}")
     st.caption(f"{metric}: {first:,.0f} -> {latest:,.0f} over the window ({arrow}). "
-               "Loaded daily at 06:30.")
+               "Loaded daily after the ~06:45 nightly load.")
 
 
 def _clients_tab(company: str, days: int, *, bounds: tuple | None = None) -> None:

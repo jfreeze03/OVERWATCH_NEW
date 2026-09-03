@@ -751,7 +751,11 @@ def render() -> None:
     contract_runway_bar(contract_runway(_rw.df.iloc[0]) if _rw.usable() else None)
     st.caption("Whole-account contract commitment — not narrowed by the company filter.")
 
-    section_header("Company economics", "info", "spend", badge=f"{company} · {days}d")
+    # WLA-1: the section's headline reads are bounded to the prior calendar month under "Last
+    # month" scope (_ov_bounds set), so the badge says "last month" then, matching this section's
+    # KPI label (f["window_label"]) and the page scope note — not a trailing "{days}d".
+    _ce_wlab = "last month" if _ov_bounds is not None else f"{days}d"
+    section_header("Company economics", "info", "spend", badge=f"{company} · {_ce_wlab}")
     section_filter_contract(
         f,
         applies=("company", "days"),

@@ -79,7 +79,11 @@ def _cortex_spend_tab(days: int, ai_rate: float, *, bounds: tuple | None = None)
         # served (K1 contract), not the raw ask — else a 365d view over a cold mart shows a
         # 90-day sum under a "365d" label.
         _win = served_days(res, days)
-        kpi_row([{"label": f"Cortex spend, {_win}d", "value": format_usd(float(df["USD"].sum())),
+        # WLA-1: this read honors bounds, so under "Last month" the data is bounded to the prior
+        # calendar month — say "last month" then, matching the sibling AI tiles; the served-days
+        # honesty (>90d live clamp) only bites on the trailing branch.
+        _wlab = "last month" if bounds is not None else f"{_win}d"
+        kpi_row([{"label": f"Cortex spend, {_wlab}", "value": format_usd(float(df["USD"].sum())),
                   "help": f"Billed AI-service credits x ${ai_rate:.2f}."}])
         charts.daily_stacked_usd(df, "DAY", "SERVICE_TYPE", "USD")
         result_caption(res)
@@ -405,9 +409,14 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
     # outside the selected window (emptying the rollup after the cut). The ALL view (no clause)
     # keeps its correct account-wide fallback.
     _scoped = bool(companies.user_clause(company, "USER_NAME"))
+    # Thread bounds so the credit columns (TOTAL_CREDITS, AVG_DAILY_CR, DAYS_OVER_CAP, PEER_MULT)
+    # are bounded to the prior calendar month under "Last month" scope — matching the v4.452 "last
+    # month" column/caption label AND the sibling bounded "Active AI users" tile (both use the
+    # bounded _window_slice). Without bounds coco_efficiency does a trailing cut, so the label read
+    # "last month" over a trailing-N-day window ending today (a WLA-1-reverse mismatch).
     eff = coco_efficiency(econ, ud_res.df if ud_res.usable() else None,
                           cap_credits=cap_credits, window_days=days, as_of=account_today(),
-                          scoped=_scoped)
+                          scoped=_scoped, bounds=bounds)
     if _scoped and eff.empty:
         if not ud_res.usable():
             st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "

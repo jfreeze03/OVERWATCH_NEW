@@ -245,8 +245,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # >90d selection served live isn't captioned as its full requested span (the
         # counts under it would be a 90-day subset of a 365-day-labelled tile).
         _served_days = days if used_mart else min(days, MAX_LIVE_WINDOW_DAYS)
+        # WLA-1: the summary reads are bounded to the prior calendar month under "Last month"
+        # scope, so label "last month" then; the served-days honesty applies on the trailing branch.
+        _q_wlab = "last month" if bounds is not None else f"{_served_days}d"
         kpi_row([
-            {"label": f"Queries ({_served_days}d)", "value": f"{qcount:,.0f}", "spark": q_spark},
+            {"label": f"Queries ({_q_wlab})", "value": f"{qcount:,.0f}", "spark": q_spark},
             {"label": "Fail rate", "value": f"{fail_pct:.2f}%" if fail_pct is not None else "n/a",
              "delta": f"{failed:,.0f} failed" if fail_pct is not None else "No query denominator",
              "delta_color": "off", "spark": f_spark,
@@ -593,7 +596,10 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
             # fingerprints, NOT the whole-window waste. Label + monthly-ize the shown
             # scope honestly; disclose when the frame is truncated at the cap.
             _truncated = len(wdf) >= 50
-            _scope_lbl = f"top {len(wdf)} fingerprints" if _truncated else f"{days}d"
+            # WLA-1: on the non-truncated branch the label names the window; the waste read is
+            # bounded to the prior calendar month under "Last month" scope, so say "last month".
+            _scope_lbl = (f"top {len(wdf)} fingerprints" if _truncated
+                          else ("last month" if bounds is not None else f"{days}d"))
             kpi_row([
                 {"label": f"Wasted spend ({_scope_lbl})", "value": format_usd(_wasted_total),
                  "help": ("Allocated compute on non-success queries, summed over the "
@@ -1143,8 +1149,11 @@ def _task_health_view(company: str, days: int, database: str = "",
             total_failed = safe_float(df[failed_col].sum())
             task_fail_pct = (total_failed / total_runs * 100) if total_runs else None
             known_failed = total_failed
+            # WLA-1: both task reads are bounded to the prior calendar month under "Last month"
+            # scope, so label "last month" then rather than the trailing "{days}d".
+            _tr_wlab = "last month" if bounds is not None else f"{days}d"
             kpi_row([
-                {"label": f"Task runs ({days}d)", "value": f"{total_runs:,.0f}"},
+                {"label": f"Task runs ({_tr_wlab})", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
                  "delta": (f"{task_fail_pct:.1f}%" if task_fail_pct is not None
                            else "No run denominator"),
@@ -1852,6 +1861,9 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
                              "SCORE": st.column_config.NumberColumn("Health", format="%d"),
                              "WHY": st.column_config.TextColumn("Health penalties"),
                              "IDLE_PCT": st.column_config.NumberColumn("Idle %", format="%.0f%%"),
+                             # match the Optimize right-sizing table's %.2f — same source frame, so
+                             # the spill/day figure must not render at the Styler default (6 dp) here.
+                             "SPILL_GB_PER_DAY": st.column_config.NumberColumn("Spill GB/day", format="%.2f"),
                              "MONTHLY_USD_NOW": st.column_config.NumberColumn("Now $/mo", format="$%.0f"),
                          })
         st.caption("Health = 100 − capped penalties for queueing, remote spill, long p95 runtime, "

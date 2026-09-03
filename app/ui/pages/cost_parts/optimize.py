@@ -266,8 +266,11 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
     if _idle_head.ok and not _idle_head.empty:
         _iw_days = served_days(_idle_head, days)
         _iw = idle_waste_summary(_idle_head.df, rate, _iw_days)
+        # WLA-1: the idle read is bounded to the prior calendar month under "Last month" scope,
+        # so label "last month" then; served-days honesty applies on the trailing branch.
+        _iw_wlab = "last month" if bounds is not None else f"{_iw_days}d"
         kpi_row([
-            {"label": f"Idle credit waste ({_iw_days}d)", "value": format_usd(_iw["IDLE_USD"]),
+            {"label": f"Idle credit waste ({_iw_wlab})", "value": format_usd(_iw["IDLE_USD"]),
              "severity": "warn" if _iw["IDLE_SHARE_PCT"] >= 20 else "",
              "help": "Credits billed in warehouse-hours with ZERO queries, priced at the configured "
                      "rate — the account-level auto-suspend opportunity. GROSS idle (the recoverable "
@@ -623,7 +626,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 _drop = sum(1 for v in verdicts if v.action == "drop")
                 _enable = sum(1 for v in verdicts if v.action == "enable")
                 kpi_row([
-                    {"label": f"QAS spend ({days}d)", "value": format_usd(float(qdf["QAS_USD"].sum()))},
+                    {"label": f"QAS spend ({'last month' if bounds is not None else f'{days}d'})",
+                     "value": format_usd(float(qdf["QAS_USD"].sum()))},
                     {"label": "Drop candidates", "value": str(_drop),
                      "severity": "warn" if _drop else "",
                      "help": "Paying for QAS with little eligible workload — acceleration rarely helps."},
@@ -1504,7 +1508,8 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                 else:
                     _target = int(min(_current, IDLE_TARGET_SUSPEND_SEC)) if _current > 0 else IDLE_TARGET_SUSPEND_SEC
                     stmt = remediation.auto_suspend_fix(wh_pick, _target)
-                    st.caption(f"Idle credits in window ({remed_days}d): {idle_credits:,.1f} → actionable "
+                    _rw_wlab = "last month" if bounds is not None else f"{remed_days}d"
+                    st.caption(f"Idle credits in window ({_rw_wlab}): {idle_credits:,.1f} → actionable "
                                f"${est_monthly:,.0f}/mo once the unavoidable ~{IDLE_TARGET_SUSPEND_SEC}s resume tail per "
                                "active hour is deducted (ESTIMATED until verified).")
             else:
