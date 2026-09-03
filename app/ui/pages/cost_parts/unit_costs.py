@@ -113,7 +113,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
             uc_days, company, database, schema_contains,
             f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
          "source": f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)", "max_rows": 50},
-        {"key": "p", "sql": insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50, bounds=bounds),
+        {"key": "p", "sql": insights_sql.procedure_costs_usd(
+            uc_days, company, database, schema_contains, 50,
+            warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"], bounds=bounds),
          "source": f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)", "max_rows": 50},
     ]
     if not _ai_m.usable():
@@ -131,7 +133,9 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                         f["warehouse_contains"], f["user_contains"], 50, bounds=bounds),
                     page=_PAGE, key=f"unit_q_{company}_{uc_days}_{database}{_lm}", tier="historical",
                     source=f"QUERY_ATTRIBUTION_HISTORY + QUERY_HISTORY ({uc_days}d)")
-        p_res = run(insights_sql.procedure_costs_usd(uc_days, company, database, schema_contains, 50, bounds=bounds),
+        p_res = run(insights_sql.procedure_costs_usd(
+                        uc_days, company, database, schema_contains, 50,
+                        warehouse_contains=f["warehouse_contains"], user_contains=f["user_contains"], bounds=bounds),
                     page=_PAGE, key=f"unit_p_{company}_{uc_days}_{database}{_lm}", tier="historical",
                     source=f"QUERY_ATTRIBUTION_HISTORY (rolled up to CALL, {uc_days}d)")
         ai_res = _ai_m if _ai_m.usable() else run(
@@ -256,6 +260,15 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         st.caption("Measured QUERY_ATTRIBUTION_HISTORY compute, grouped by "
                    "parameterized hash — cheap-but-constant often out-bills "
                    "expensive-but-rare.")
+        # cross-filter honesty: MART_PATTERN_COST_DAILY is keyed by QUERY_HASH + COMPANY only, so
+        # it can't narrow to the active object/warehouse/user filters the section banner declares
+        # applied — disclose that (mirrors the twin fingerprint rollup on the Optimization tab).
+        _pc_dropped = [n for n, v in (("Database", database), ("Schema", schema_contains),
+                                      ("Warehouse", f["warehouse_contains"]), ("User", f["user_contains"]))
+                       if str(v or "").strip()]
+        if _pc_dropped:
+            st.caption(f"Company-wide: this parameterized-hash rollup has no object/warehouse/user "
+                       f"grain, so the active {', '.join(_pc_dropped)} filter is not applied here.")
     elif _pc.ok:
         empty_state("clean", "No repeated pattern crossed the $0.01 floor in this window.")
     else:
@@ -425,8 +438,13 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
         if cov is None or not cov.ok:
             cov = run(_etl_cov_sql, page=_PAGE, key=f"etl_cov_{company}_{days}{_lm}", tier="historical",
                       source="QUERY_HISTORY + QUERY_ATTRIBUTION_HISTORY (tag coverage)")
-        if cov.ok and not cov.empty:
-            c0 = cov.df.iloc[0]
+        # empty-vs-zero: etl_tag_coverage is a bare aggregate (no GROUP BY), so it ALWAYS
+        # returns one row — all-NULL when no compute was attributed in scope/window. safe_float
+        # would render that NaN as a measured "0%"/"$0.00" (a fabricated governance failure), so
+        # gate on a positive TOTAL_CREDITS and otherwise show an honest note like the board below.
+        c0 = cov.df.iloc[0] if (cov.ok and not cov.empty) else None
+        _cov_total = safe_float(c0.get("TOTAL_CREDITS"), default=float("nan")) if c0 is not None else float("nan")
+        if c0 is not None and _cov_total > 0:
             kpi_row([
                 {"label": "Tagged credit coverage",
                  "value": f"{safe_float(c0.get('TAGGED_CREDIT_PCT')):.0f}%",
@@ -437,6 +455,10 @@ def _unit_costs_tab(f: dict, rate: float, ai_rate: float) -> None:
                  "delta_color": "off",
                  "help": "Measured compute with no pipeline tag, at the configured rate."},
             ])
+        elif cov.ok:
+            st.caption("No measured ETL compute in this window/scope — no credits were attributed "
+                       "to queries here, so tag coverage isn't measurable yet "
+                       "(QUERY_ATTRIBUTION_HISTORY lags ~8h).")
         etl = _etl_pf.get("pipe")
         if etl is None or not etl.ok:
             etl = run(_etl_pipe_sql, page=_PAGE, key=f"etl_pipe_{company}_{days}{_lm}", tier="historical",

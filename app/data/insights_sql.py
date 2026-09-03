@@ -1321,6 +1321,7 @@ LIMIT {limit}
 
 def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
                         schema_contains: str = "", limit: int = 50, *,
+                        warehouse_contains: str = "", user_contains: str = "",
                         bounds: tuple | None = None) -> str:
     """$/call leaderboard for EVERY stored procedure (measured credits).
 
@@ -1341,6 +1342,10 @@ def procedure_costs_usd(days: int, company: str = "ALL", database: str = "",
         _wh_company_scope(company, "c.WAREHOUSE_NAME"),
         companies.database_equals_clause(database, "c.DATABASE_NAME"),
         contains_filter("c.SCHEMA_NAME", schema_contains),
+        # narrow by the invoking session's warehouse/user, matching the sibling
+        # measured_query_costs leaderboard (both are declared applied on the section).
+        contains_filter("c.WAREHOUSE_NAME", warehouse_contains),
+        contains_filter("c.USER_NAME", user_contains),
     )
     att_guard = (
         resolve_effective_window(days, "START_TIME", bounds=bounds)[1]

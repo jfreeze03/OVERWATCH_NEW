@@ -429,8 +429,11 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                                     "CUR_CALLS", "PRIOR_CALLS", "CUR_P95_S", "PRIOR_P95_S",
                                     "P95_DELTA_PCT", "CUR_FAIL_PCT", "PRIOR_FAIL_PCT"]
                         if c in _pr.columns]
+            # proc_regression.annotate orders by severity band then composite score (worst first),
+            # NOT by P95_DELTA_PCT — a "Faster but failing" proc (negative p95 growth) can top the
+            # list, so label the ordinal by its true triage order, not "p95 growth desc".
             styled_table(_pr[_pr_cols], slug="proc_regression", days=days,
-                         sort_label="p95 growth desc")
+                         sort_label="worst first")
             st.caption(
                 "Success-only p95 this window vs the prior equal-length window (percent change "
                 "from the unrounded values). A proc needs at least "

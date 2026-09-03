@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.455.0 - Bug-hunt round 21: empty-vs-zero, cross-filter, and sort-label honesty (2026-09-02)
+
+A fresh-angle find→refute-verify sweep (empty-vs-zero honesty, cross-filter scope interaction,
+sort/rank/LIMIT correctness, delta/trend arithmetic, aggregation-grain double-count, remaining
+twin-divergence) surfaced 4 confirmed defects (0 refuted). The window-label / caption / twin classes
+being worked out, the pivot to fresh angles paid off — three of the four cluster on the Cost ▸ Unit
+costs tab. Delta/trend, aggregation-grain, and twin-divergence came back empty.
+
+- **[MED, empty-vs-zero] the ETL "Tagged credit coverage" KPI painted "0%" / "$0.00" as a measured
+  result when no compute was attributed in scope.** `etl_tag_coverage` is a bare aggregate (no GROUP
+  BY), so it always returns one row — all-NULL when its inner JOIN is empty (a company/database/schema
+  scope with no ETL compute, a young account, or the ~8h attribution lag). The guard
+  `if cov.ok and not cov.empty:` passed on that one-NULL-row frame, and `safe_float` rendered the NaN
+  as "0%" and "$0.00" — a fabricated governance failure, directly contradicting the sibling
+  per-pipeline board beside it, which honestly showed "No tagged pipeline runs…". The KPIs now gate on
+  a positive `TOTAL_CREDITS` and otherwise show a no-data note.
+- **[MED, cross-filter] the "Repeated patterns" rollup silently dropped the Database/Schema/Warehouse/
+  User filters the section banner declares applied.** It reads `MART_PATTERN_COST_DAILY`
+  (QUERY_HASH + COMPANY grain only), so it can only narrow by company — but because those text axes
+  are in the section's `applies` list, no "ignored filter" banner fires. A DBA filtering to one
+  database would read the pattern rows as belonging to it. Added a disclosure caption (mirroring the
+  identical twin panel on the Optimization tab, which already discloses this).
+- **[LOW, cross-filter] the "$/call leaderboard" (`procedure_costs_usd`) dropped the Warehouse/User
+  filters** that its adjacent "Most expensive queries" sibling applies and the section declares — so
+  the two panels disagreed under a warehouse/user filter. Since `QUERY_HISTORY` carries WAREHOUSE_NAME
+  and USER_NAME on CALL rows, the builder now honors both (matching the sibling) rather than spanning
+  every warehouse.
+- **[LOW, sort-label] the stored-proc runtime-regression table was labeled "p95 growth desc" but is
+  ordered by severity band then composite score,** so a "faster but failing" proc (negative p95
+  growth) could sit at #1 above a genuine +80% regression. The values were correct; only the pinned
+  ordinal + caption misled. Relabeled "worst first" to match the true triage order.
+
 ## 4.454.0 - Bug-hunt round 20: window/format honesty on cost + ops surfaces (2026-09-02)
 
 An adversarial find→refute-verify sweep (review-arc over v4.453, WLA-1 residual + reverse sweep,
