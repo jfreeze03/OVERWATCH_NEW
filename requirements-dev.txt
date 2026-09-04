@@ -4,9 +4,9 @@ pandas~=2.2
 pytest~=8.3
 ruff~=0.9
 # AppTest page-smoke suite (tests/test_pages_apptest.py)
-# Floors kept in lockstep with requirements.txt: streamlit~=1.52 (width='stretch'
+# Floors kept in lockstep with requirements.txt: streamlit~=1.62 (width='stretch'
 # API) forbids altair 5.4.0/5.4.1, so altair~=5.5 is the lowest co-installable.
-streamlit~=1.52
+streamlit~=1.62
 altair~=5.5
 jinja2>=3.1.2
 mypy~=1.14
