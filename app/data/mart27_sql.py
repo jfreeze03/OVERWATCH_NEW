@@ -126,7 +126,12 @@ SELECT DAY, PIPELINE, DATABASE_NAME, SCHEMA_NAME, GRAPH_RUNS, RUNS_WITH_FAILURES
 FROM {mart_object("MART_TASK_GRAPH_DAILY")}
 WHERE {and_where(*parts)}
 ORDER BY DAY, WH_CREDITS DESC
-LIMIT 5000
+-- r29 #1: this frame is SUMMED in pandas for the "Pipeline spend (window)" KPI
+-- (unit_costs._graphs_tab, called with max_rows=0), so it must NOT be capped at
+-- DEFAULT_MAX_ROWS -- a long window x many pipeline/db/schema combos exceeding
+-- 5000 day-rows would silently drop the newest days (ORDER BY DAY asc) and
+-- undercount the KPI. 50000 is a safety ceiling far above any realistic count.
+LIMIT 50000
 """
 
 

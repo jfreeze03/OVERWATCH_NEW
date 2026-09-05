@@ -1,5 +1,37 @@
 # Changelog
 
+## 4.484.0 - Bug-hunt round 29: read-execution + formatting core (row-cap + telemetry) (2026-09-05)
+
+Adversarial sweep of the un-swept read/format core (query.py, result.py, formulas.py,
+metric_registry, read_models). **4 confirmed / 9 candidates** (the cache-key finder errored =
+known gap; 4 refuted incl. a batch_wall row that is a per-key GROUP BY, not a cross-key sum).
+Two findings shared one root: a builder's trailing `LIMIT n` equal to the transport cap
+defeated the `cap+1` truncation canary. No mart/query semantics changed.
+
+- **[MED, row-cap] Task-graph "Pipeline spend (window)" KPI silently undercounted.** Both
+  `task_graphs` (mart) and `graph_daily_costs` (live) ended `ORDER BY DAY ... LIMIT 5000` ==
+  `DEFAULT_MAX_ROWS`, and `unit_costs._graphs_tab` sums the WHOLE frame in pandas for the KPI +
+  $/run trend. With the cap equal to the builder LIMIT, an account with >5000 day×pipeline×db×
+  schema rows (long window × many pipelines) had the newest days truncated (ORDER BY DAY asc)
+  and `truncated=False` — so the KPI/table/trend read low with no banner. Fixed: `_graphs_tab`
+  passes `max_rows=0` and both builders raise LIMIT to a 50000 safety ceiling.
+- **[LOW, row-cap root] `_with_row_cap` kept a builder LIMIT == cap, masking truncation.** It
+  returned the SQL unchanged whenever `n <= cap+1`, so a hard `LIMIT 5000` with the default cap
+  5000 was kept → at most cap rows → `len(df) > cap` never True → no truncation banner on any
+  such reader. Fixed: keep only a STRICTLY smaller LIMIT (`n < cap`); `n >= cap` is rewritten to
+  `cap+1` so the canary always arms.
+- **[LOW, registry-contract] `control_pulse` understated its reads.** Declared `summary_reads=2`
+  ("up to 2 reads") but the mart-miss path does 3 (empty hourly-fact read + bounded live fallback
+  + 14-day activity spark — 3 distinct SQL the cache can't dedupe). Fixed: 3.
+- **[LOW, telemetry] the slow-query oracle under-counted load in busy sessions.** The 60/session
+  healthy-persist cap was checked BEFORE the slow-row check, so slow (≥2s, `SAMPLE_PROB=1.0`)
+  rows were starved once the 2% healthy sample filled the cap — yet still stamped
+  `SAMPLE_PROB=1.0`, so the `1/SAMPLE_PROB` fleet re-weight (EST_RUNS/EST_WAIT pain board)
+  silently under-counted exactly when load was highest. Fixed: slow rows get their own reserved
+  budget (`_TELEMETRY_SLOW_CAP=40`), short-circuited ahead of the healthy cap like failures.
+
+Locks in `tests/test_bughunt_round29.py` (behavioral for `_with_row_cap` + `should_persist_telemetry`).
+
 ## 4.483.0 - V127: idle credit waste reads actual zero-query-hour credits (2026-09-05)
 
 Authored the owner-gated fix for round 28b's flagged twin-divergence **[2] idle-credit model**

@@ -55,6 +55,10 @@ _TELEMETRY_PERSIST_CAP = 60  # NON-failure rows per session: a broken page can't
 _TELEMETRY_FAIL_CAP = 20     # #28: reserved FAILURE budget beyond the row cap — failures are
                              #      the most valuable rows, so chatty healthy/slow traffic must
                              #      not crowd them out, but a broken page still can't spam forever
+_TELEMETRY_SLOW_CAP = 40     # r29 #4: reserved SLOW (>=2s) budget, like the failure reserve —
+                             #      slow rows are the whole point of the oracle and carry
+                             #      SAMPLE_PROB=1.0, so they must not be starved by the 2% healthy
+                             #      sample filling the row cap during a busy/degraded session
 _TELEMETRY_SAMPLE_RATE = 0.02  # rec18: the healthy-baseline sample; persisted as SAMPLE_PROB so Admin can re-weight
 
 
@@ -64,8 +68,11 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
                              sample_roll: float | None = None,
                              sample_rate: float = 0.02,
                              failed_persisted: int = 0,
-                             fail_cap: int = _TELEMETRY_FAIL_CAP) -> bool:
-    """Pure gate: failed qualifies (on its own reserved budget), slow qualifies, capped.
+                             fail_cap: int = _TELEMETRY_FAIL_CAP,
+                             slow_persisted: int = 0,
+                             slow_cap: int = _TELEMETRY_SLOW_CAP) -> bool:
+    """Pure gate: failed qualifies (own reserved budget), slow qualifies (own reserved
+    budget), healthy-sampled qualifies under the row cap.
 
     ``sample_roll`` (caller passes random()) additionally persists ~2% of ALL
     fetches so the fleet view sees the healthy baseline, not just the tail —
@@ -73,16 +80,23 @@ def should_persist_telemetry(elapsed_ms: float, ok: bool, persisted: int,
 
     #28: a FAILURE is short-circuited AHEAD of the ``cap`` and drawn from its own
     ``fail_cap`` reserved budget (counted by ``failed_persisted``), so chatty
-    healthy/slow rows that filled ``cap`` early can no longer suppress the very rows
-    an operator most needs — while a broken page still can't spam without bound.
-    ``persisted`` is the NON-failure count and governs only the healthy/slow streams.
+    healthy rows that filled ``cap`` early can no longer suppress the very rows an
+    operator most needs — while a broken page still can't spam without bound.
+
+    r29 #4: a SLOW (>=threshold) ok row is likewise short-circuited AHEAD of the row
+    cap and drawn from its own ``slow_cap`` reserve (counted by ``slow_persisted``).
+    Before this, ``persisted >= cap`` was checked FIRST, so once the 2% healthy sample
+    filled the 60-row cap in a busy session, later slow rows were dropped — yet they
+    were still stamped SAMPLE_PROB=1.0, so the fleet re-weight (1/SAMPLE_PROB, used by
+    the EST_RUNS/EST_WAIT pain board) silently UNDER-counted load exactly when load was
+    highest. ``persisted`` now governs ONLY the healthy-sampled stream.
     """
     if not ok:
         return int(failed_persisted) < int(fail_cap)
+    if float(elapsed_ms) >= float(threshold_ms):
+        return int(slow_persisted) < int(slow_cap)
     if persisted >= cap:
         return False
-    if float(elapsed_ms) >= float(threshold_ms):
-        return True
     return sample_roll is not None and float(sample_roll) < float(sample_rate)
 
 
@@ -144,10 +158,11 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
             return
         done = int(st.session_state.get("_ow_qtel_n", 0))
         fail_done = int(st.session_state.get("_ow_qtel_fail_n", 0))
+        slow_done = int(st.session_state.get("_ow_qtel_slow_n", 0))
         import random as _random
         if not should_persist_telemetry(elapsed_ms, ok, done, sample_roll=_random.random(),
                                         sample_rate=_TELEMETRY_SAMPLE_RATE,
-                                        failed_persisted=fail_done):
+                                        failed_persisted=fail_done, slow_persisted=slow_done):
             # #28: expose a dropped-rows counter so the fleet view can tell 'quiet' from
             # 'sampling-capped'. A dropped FAILURE (budget exhausted) is the loudest signal.
             st.session_state["_ow_qtel_dropped"] = int(st.session_state.get("_ow_qtel_dropped", 0)) + 1
@@ -155,11 +170,14 @@ def _persist_telemetry(page: str, tier: str, key: str, elapsed_ms: float,
                 st.session_state["_ow_qtel_dropped_fail"] = \
                     int(st.session_state.get("_ow_qtel_dropped_fail", 0)) + 1
             return
-        # #28: failures draw from their own reserved budget, healthy/slow from the row cap.
-        if ok:
-            st.session_state["_ow_qtel_n"] = done + 1
-        else:
+        # #28 / r29 #4: failures, SLOW rows, and healthy-sampled rows each draw from their
+        # OWN reserved budget so no stream can starve another. Increment the one this row hit.
+        if not ok:
             st.session_state["_ow_qtel_fail_n"] = fail_done + 1
+        elif float(elapsed_ms) >= TELEMETRY_PERSIST_MS:
+            st.session_state["_ow_qtel_slow_n"] = slow_done + 1
+        else:
+            st.session_state["_ow_qtel_n"] = done + 1
         base = (
             f"{sql_literal(str(page)[:80])}, {sql_literal(str(tier)[:20])}, "
             f"{sql_literal(str(key)[:120])}, {round(float(elapsed_ms), 1)}, "
@@ -244,18 +262,23 @@ def _quarantine_key(page: str, key: str, sql: str) -> str:
 def _with_row_cap(sql: str, cap: int) -> str:
     """Make max_rows authoritative (Codex r18 #1).
 
-    No trailing LIMIT: append ``LIMIT cap+1``. A trailing LIMIT larger than
-    cap+1 is rewritten DOWN to cap+1 — a 20,000-row detail reader must honor
-    a 1-row canary cap. A smaller trailing LIMIT already answers within
-    budget and is kept. Fetching cap+1 lets the caller detect truncation
-    honestly (n+1 rows back means the cap was hit) — see run()/run_batch().
+    No trailing LIMIT: append ``LIMIT cap+1``. A trailing LIMIT >= cap is
+    rewritten to ``LIMIT cap+1`` so the n+1 canary always arms — a 20,000-row
+    detail reader must honor a 1-row canary cap, AND a builder whose own LIMIT
+    equals the cap (e.g. a hard ``LIMIT 5000`` with the default
+    max_rows=5000) must NOT mask truncation: keeping it would return at most
+    ``cap`` rows so ``len(df) > cap`` can never be True and the caller would
+    render a truncated result with no banner (r29 #2). Only a STRICTLY smaller
+    trailing LIMIT (``n < cap``) is a genuine within-budget answer and is kept.
+    Fetching cap+1 lets the caller detect truncation honestly (n+1 rows back
+    means the cap was hit) — see run()/run_batch().
     """
     if cap <= 0:
         return sql
     tail = _TAIL_LIMIT_RE.search(sql.rstrip())
     if tail:
         n = int(re.search(r"\d+", tail.group(0)).group(0))
-        if n <= cap + 1:
+        if n < cap:
             return sql
         return _TAIL_LIMIT_RE.sub(f"LIMIT {cap + 1}", sql.rstrip())
     return f"{sql.rstrip().rstrip(';')}\nLIMIT {cap + 1}"

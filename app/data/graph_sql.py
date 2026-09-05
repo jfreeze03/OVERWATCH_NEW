@@ -96,7 +96,10 @@ SELECT
 FROM runs
 GROUP BY 1, 2, 3, 4
 ORDER BY DAY, WH_CREDITS DESC
-LIMIT 5000
+-- r29 #1: summed in pandas for the "Pipeline spend (window)" KPI (the live twin of
+-- mart27_sql.task_graphs; unit_costs._graphs_tab calls both with max_rows=0), so it
+-- must not cap at DEFAULT_MAX_ROWS and silently drop the newest days. Match the mart.
+LIMIT 50000
 """
 
 

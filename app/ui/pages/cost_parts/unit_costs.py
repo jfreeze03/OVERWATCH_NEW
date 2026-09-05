@@ -536,6 +536,12 @@ def _graphs_tab(company: str, days: int, rate: float, database: str = "",
         mart27_sql.task_graphs(days, company, database, schema_contains, bounds=bounds),
         graph_sql.graph_daily_costs(days, company, database, schema_contains, bounds=bounds),
         page=_PAGE, key=f"graph_costs_{company}_{days}_{database}_{schema_contains}{_lm}",
+        # r29 #1: this whole frame is summed in pandas (pipeline_summary) for the
+        # "Pipeline spend (window)" KPI + $/run trend, so it must not be capped at
+        # DEFAULT_MAX_ROWS -- a capped frame silently undercounts the window total with
+        # no truncation banner. max_rows=0 fetches the full window (the builders keep a
+        # 50000-row safety ceiling).
+        max_rows=0,
         mart_source="MART_TASK_GRAPH_DAILY (mart, loaded hourly)",
         live_source="TASK_HISTORY + QUERY_ATTRIBUTION_HISTORY (live fallback)")
     if not guard(res, "No task-graph runs in this scope/window."):

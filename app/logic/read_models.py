@@ -70,7 +70,10 @@ READ_MODELS = (
         "14-day query activity trend",
         "the pulse opens",
         "hourly facts with bounded live fallback",
-        2,
+        # r29 #3: 3, not 2 -- on a mart miss the health tile does the empty hourly-fact
+        # read + the bounded live fallback + the 14-day activity spark (3 distinct SQL, so
+        # the (sql,scope) cache does not dedupe them). "up to 3 reads" is the honest max.
+        3,
         1,
     ),
 )

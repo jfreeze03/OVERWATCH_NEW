@@ -174,11 +174,15 @@ def test_persist_slow_only_at_threshold():
 
 
 def test_persist_session_cap():
-    # #28: the row cap governs the HEALTHY/SLOW streams. A slow-but-ok fetch is dropped
-    # once the cap is reached...
-    assert not should_persist_telemetry(9999.0, ok=True, persisted=60)
-    # ...but a FAILURE is never suppressed by that cap — it has its own reserved budget,
-    # so an operator still sees failures on a busy page (the old behavior dropped them).
+    # #28 / r29 #4: the row cap governs ONLY the HEALTHY-sampled stream now. A HEALTHY fetch
+    # is dropped once the cap is reached...
+    assert not should_persist_telemetry(100.0, ok=True, persisted=60, sample_roll=0.0)
+    # ...but a SLOW (>=2s) row is NOT suppressed by the healthy cap — it has its own reserved
+    # budget (r29 #4: the old behavior dropped slow rows here, under-counting a busy session).
+    assert should_persist_telemetry(9999.0, ok=True, persisted=60, slow_persisted=0)
+    # The reserved slow budget is itself bounded.
+    assert not should_persist_telemetry(9999.0, ok=True, persisted=0, slow_persisted=40)
+    # ...and a FAILURE is never suppressed by the cap either — its own reserved budget.
     assert should_persist_telemetry(9999.0, ok=False, persisted=60)
     # The reserved fail budget is itself bounded.
     assert not should_persist_telemetry(9999.0, ok=False, persisted=60, failed_persisted=20)
