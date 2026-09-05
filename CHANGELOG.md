@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.463.0 - UI refactor P2: Admin (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Session identity is one dense caption line, not a 4-card KPI row.** Role / warehouse / account /
+  app version (plus region, which was already queried) now read as a single line — context, not four
+  headline metrics.
+- **Performance SLO rollup demoted to the one card that carries a decision** — "Pages failing SLO"
+  (severity-striped) with pass / watch counts in a caption; the per-page `SLO_STATE` table below
+  carries the detail. Same counts.
+- **Page subtitle states the page's job** ("Is this deployment installed, current, and internally
+  healthy — can you trust its numbers?") instead of re-listing the eight section pills shown beneath.
+
 ## 4.462.0 - UI refactor P2: Control Room (2026-09-05)
 
 Propagates the P0/P1 visual language to Control Room (presentation only — no data/calc/query change).

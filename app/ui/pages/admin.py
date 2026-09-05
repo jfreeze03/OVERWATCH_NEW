@@ -484,12 +484,17 @@ def _context_section() -> None:
     )
     if ctx.usable():
         row = ctx.df.iloc[0]
-        kpi_row([
-            {"label": "Role", "value": str(row.get("ROLE", "?"))},
-            {"label": "Warehouse", "value": str(row.get("WAREHOUSE", "?") or "none")},
-            {"label": "Account", "value": str(row.get("ACCOUNT", "?"))},
-            {"label": "App version", "value": APP_VERSION},
-        ])
+        # v4.461 P2: session identity is CONTEXT, not four headline KPIs — one dense
+        # caption line instead of a 4-card row (same facts, far less vertical space;
+        # region, already in the query, is now surfaced too).
+        _role = str(row.get("ROLE", "?"))
+        _wh = str(row.get("WAREHOUSE", "?") or "none")
+        _acct = str(row.get("ACCOUNT", "?"))
+        _region = str(row.get("REGION", "") or "")
+        _ident = f"**{_role}** on **{_wh}** · account `{_acct}`"
+        if _region:
+            _ident += f" · {_region}"
+        st.caption(_ident + f" · app v{APP_VERSION}")
     elif not ctx.ok:
         st.error(f"No Snowflake session: {ctx.error}")
 
@@ -939,12 +944,17 @@ def _performance_tab() -> None:
     elif guard(slo, ""):
         sdf = slo.df.copy()
         states = sdf["SLO_STATE"].astype(str)
+        _fail = int((states == "FAIL").sum())
+        _pass = int((states == "PASS").sum())
+        _watch = int(states.isin(("WATCH", "INSUFFICIENT")).sum())
+        # v4.461 P2: the only card with a decision is 'pages failing SLO' — lead with
+        # it (severity-striped) and move the pass/watch counts to a caption; the
+        # per-page SLO_STATE table below carries the detail. Same counts.
         kpi_row([
-            {"label": "Passing pages", "value": f"{int((states == 'PASS').sum())}"},
-            {"label": "Failing pages", "value": f"{int((states == 'FAIL').sum())}",
-             "delta_color": "inverse" if (states == "FAIL").any() else "off"},
-            {"label": "Watch / insufficient", "value": f"{int(states.isin(('WATCH', 'INSUFFICIENT')).sum())}"},
+            {"label": "Pages failing SLO", "value": str(_fail),
+             "severity": ("bad" if _fail else "ok")},
         ])
+        st.caption(f"{_pass} passing · {_watch} watch/insufficient · per-page detail below.")
         _slo_sel = selectable_table(sdf, key="perf_slo_sel", height=300,
                                     sort_label="SLO state then p95 render time")
         # Click a FAIL/WATCH page -> its slowest/failed fleet keys inline. Store the PAGE
@@ -1456,7 +1466,7 @@ def _setup_progress_tab() -> None:
 @safe_page(_PAGE)
 def render() -> None:
     f = filters()
-    page_header("Admin", "Settings, migrations, metrics, self-cost, performance, canary, and telemetry.", icon_name="admin")
+    page_header("Admin", "Is this deployment installed, current, and internally healthy — can you trust its numbers?", icon_name="admin")
     # #3: operator gating resolves the VIEWER identity against the allowlist, not
     # CURRENT_ROLE() (which is the app owner's role for every viewer under owner's-rights
     # SiS). Falls back to the role->profile check off-SiS. `profile` still drives page nav.
