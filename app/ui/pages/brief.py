@@ -463,7 +463,7 @@ def render() -> None:
     _case_items = list(st.session_state.get(case_file.CASE_STATE_KEY, []))
     with st.expander(f"Operator Case File ({len(_case_items)})", expanded=bool(_case_items)):
         st.caption(
-            "A session-only, cross-section handoff. Click ＋ Add to Case on evidence across "
+            "A session-only, cross-section handoff. Click **Add to Case** on evidence across "
             "Alerts, Operations, Security and Overview to collect it here, then export one "
             "Markdown document for a ticket or the next shift. Cleared when the session ends.")
         if not _case_items:

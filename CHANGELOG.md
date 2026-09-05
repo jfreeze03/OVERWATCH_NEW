@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.471.0 - UI refactor P3b: emoji control glyphs → material icons (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Shared control-glyph emoji converted to Streamlit material icons** (`icon=":material/…"`, the same
+  mechanism the status bar already uses): the CSV export/download buttons (`⬇` → `:material/download:`
+  in `export_button` and `styled_table`), the Add-to-Case button (`＋` → `:material/add:`), and the
+  panel-help popover (`ⓘ` → `:material/info:`). One change in the shared components lifts every call
+  site. The Brief caption that referenced the old `＋` glyph was aligned.
+- **Left intentionally:** functional in-cell glyphs that cannot render as SVG/material — the watch
+  stars (`★`/`☆`) and the review-flag (`🚩`) values in table cells — and the browser-tab favicon
+  fallback; these are functional affordances, not decorative nav/section chrome.
+
 ## 4.470.0 - UI refactor P3a: flatten chart fills + wordmark, finish score disclosure (2026-09-05)
 
 Presentation only — no data/calc/query change.

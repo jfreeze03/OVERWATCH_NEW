@@ -96,7 +96,7 @@ def localize_timestamps(df, columns: list[str]):
 def panel_help(text: str) -> None:
     """Per-panel 'what is this / when red do X' popover (help mode)."""
     from app.logic.formulas import md_dollars
-    with st.popover("ⓘ about this panel", width="content"):
+    with st.popover("about this panel", icon=":material/info:", width="content"):
         st.markdown(md_dollars(text))  # two $'s in help prose must not go LaTeX-math
 
 
@@ -733,13 +733,14 @@ def export_button(label: str, data: str | bytes, *, file_name: str, mime: str,
                   key: str | None = None, help: str = "", disabled: bool = False,
                   width: str = "content") -> bool:
     """rec20: one page-level export affordance for the whole app. Thin wrapper over
-    st.download_button that prefixes the same download glyph the per-table export
-    uses ("⬇ ") and suppresses the rerun a download would otherwise trigger.
-    Callers pass the noun phrase only — e.g. "Driver inventory (CSV)" — the glyph
-    conveys "download". Returns the clicked-this-run bool from download_button."""
+    st.download_button that carries the same material download icon the per-table
+    export uses (v4.461 P3: was a "⬇ " emoji prefix) and suppresses the rerun a
+    download would otherwise trigger. Callers pass the noun phrase only — e.g.
+    "Driver inventory (CSV)" — the icon conveys "download". Returns the
+    clicked-this-run bool from download_button."""
     return st.download_button(
-        f"⬇ {label}", data=data, file_name=file_name, mime=mime, key=key,
-        help=help or None, disabled=disabled,
+        label, data=data, file_name=file_name, mime=mime, key=key,
+        icon=":material/download:", help=help or None, disabled=disabled,
         width=width, on_click="ignore")
 
 
@@ -757,7 +758,8 @@ def add_to_case_button(section: str, result: QueryResult, *, summary: str,
     from app.logic import case_file
 
     usable = bool(getattr(result, "usable", lambda: False)())
-    clicked = st.button("＋ Add to Case", key=key, disabled=not usable, width="content",
+    clicked = st.button("Add to Case", key=key, disabled=not usable, width="content",
+                        icon=":material/add:",
                         help="Snapshot this evidence into the session Case File (see Brief ▸ Operator Case File).")
     if clicked and usable:
         f = filters()
@@ -2150,7 +2152,7 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                     _csv = df.to_csv(index=False).encode("utf-8")
                     _cache[_dlk] = {"fp": _fp, "bytes": _csv}
                 # Downloads are frontend-only, no rerun (r19 #20).
-                st.download_button("⬇ CSV", _csv,  # rec30: legible affordance, not a bare glyph
+                st.download_button("CSV", _csv, icon=":material/download:",  # rec30/P3: material icon
                                    file_name=_export_filename(seq, slug), mime="text/csv",
                                    key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                    on_click="ignore",
@@ -2170,11 +2172,12 @@ def _render_table(df, *, height: int | None, column_config: dict | None,
                 _ready = (isinstance(_slot, dict) and _slot.get("fp") == _fp
                           and isinstance(_slot.get("bytes"), (bytes, bytearray)))
                 if _ready:
-                    st.download_button("⬇ CSV ready", bytes(_slot["bytes"]),
+                    st.download_button("CSV ready", bytes(_slot["bytes"]), icon=":material/download:",
                                        file_name=_export_filename(seq, slug), mime="text/csv",
                                        key=f"ow_dl_{key or ''}_{seq}", type="tertiary",
                                        on_click="ignore", help=_CSV_RAW_HELP)
-                elif st.button("⬇ CSV", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
+                elif st.button("CSV", key=f"ow_dlbtn_{key or ''}_{seq}", type="tertiary",
+                               icon=":material/download:",
                                help=f"Prepare {len(df):,} rows as CSV. {_CSV_RAW_HELP}"):
                     st.session_state["_ow_dlprep"] = {
                         "fp": _fp, "bytes": df.to_csv(index=False).encode("utf-8")}
