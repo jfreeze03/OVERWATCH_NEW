@@ -52,6 +52,7 @@ from app.ui.components import (
     audit_mode,
     empty_state,
     guard,
+    hero_metric,
     kpi_row,
     lazy_sections,
     load_settings,
@@ -107,6 +108,81 @@ def _spend_attr_recent_jobs(company: str, days: int, bounds: tuple | None = None
         {"key": "coco", "sql": mart27_sql.ai_code_daily(days, "ALL", bounds=bounds),
          "source": "FACT_AI_USAGE_DAILY (Cortex Code Snowsight+CLI, daily loader)"},
     ]
+
+
+def _spend_attribution_capability(df, rate: float, ai_rate: float,
+                                  billed_usd: float, _wlab: str) -> None:
+    """v4.461 P1 (audit-gated): the attribution-CAPABILITY meta-panels — cost-drill
+    coverage and billed-vs-attributed. They describe the attribution MODEL (what can
+    be object-drilled / charged back to a company), not spend, so they render only
+    in audit mode; the default Spend view leads with the money. Byte-identical to the
+    inline block it replaced — no query or calculation changed."""
+    st.markdown("**Cost drill coverage**")
+    coverage = service_coverage_inventory(df, rate, ai_rate)
+    ready_share = drill_ready_spend_share(coverage)
+    material_gaps = coverage[
+        (coverage["MATERIALITY"] == "Material")
+        & (coverage["DRILL_STATUS"] == "Service total only")
+    ] if not coverage.empty else coverage
+    kpi_row([
+        {
+            "label": "Spend with a native drill path",
+            "value": f"{ready_share:.1f}%",
+            "help": "Share of billed metering dollars backed by a native Snowflake object-level view.",
+        },
+        {
+            "label": "Material coverage gaps",
+            "value": str(len(material_gaps)),
+            "help": "Service totals above $500 or 1% of spend without a native object-level drill.",
+        },
+    ])
+    styled_table(coverage, height=300, sort_label="$ desc",
+                 column_config={"SHARE_PCT": st.column_config.NumberColumn("Share %", format="%.1f%%")})
+    # C37: per-service rows price the SAME billed credits x category rate as the
+    # Credit-spend KPI above, so they must tie out to it exactly.
+    reconciliation_footer(float(coverage["BILLED_USD"].sum()), billed_usd,
+                          label="services shown", expected_label=f"credit spend ({_wlab})")
+    st.caption(
+        "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
+        "charges use organization currency data and appear in the on-demand detail below."
+    )
+
+    st.markdown("**Billed vs attributed**")
+    _gap_summary, _gap_breakdown = attribution_gap(df)
+    _cov = _gap_summary["coverage_pct"]
+    kpi_row([
+        {"label": "Attributable to a company",
+         "value": f"{_cov:.0f}%",
+         "help": "Share of billed metering on your OWN warehouses — the only spend with a "
+                 "company key (COMPANY_FOR_WAREHOUSE). Reader-account, serverless, AI/Cortex, "
+                 "replication and storage credits have none.",
+         "severity": ("ok" if _cov >= 85 else "warn")},
+        {"label": "Unattributed spend",
+         "value": format_usd(_gap_summary["gap_usd"]),
+         "delta": f"{100 - _cov:.0f}% of billed",
+         "delta_color": "off",
+         "help": "Reader-account, serverless, AI/Cortex, replication and storage credits — "
+                 "billed but not chargeable to a company from metering alone."},
+        {"label": "Attributed (warehouse)",
+         "value": format_usd(_gap_summary["attributed_usd"]),
+         "help": "Own-account warehouse metering only — the sole spend with a company key. "
+                 "Reader-account metering carries no company key and is part of the "
+                 "unattributed gap above, not this figure."},
+    ])
+    if not _gap_breakdown.empty:
+        charts.bar_usd(_gap_breakdown, "CATEGORY", "GAP_USD",
+                       title="Unattributed $ by service", top_n=8)
+    _gap_trend = attribution_gap_trend(complete_days_only(df))
+    if len(_gap_trend) >= 2:
+        charts.daily_metric_line(_gap_trend, "DAY", "GAP_PCT",
+                                 title="Unattributed share % (new-workload canary)", unit="pct")
+    st.caption(
+        "A DIFFERENT axis from 'Cost drill coverage' above: that measures object-level "
+        "drillability (serverless has an object ledger, so it counts as covered there); this "
+        "measures what can be charged back to a company (only warehouse metering carries a "
+        "company key). Account-wide — company-level attribution is on the Attribution tab. "
+        "Byte-metered storage/transfer live in the org rate-card panels, not this credit lens."
+    )
 
 
 def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: str = "",
@@ -193,12 +269,16 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
     allin_res = run(cost_sql.org_all_in_window_usd(days, bounds=bounds), page=_PAGE, key=f"org_allin_{days}",
                     tier="historical",
                     source="ORGANIZATION_USAGE.USAGE_IN_CURRENCY_DAILY (this account, all-in)")
-    _tiles = [
-        {"label": f"Credit spend, {_wlab} (account)", "value": format_usd(billed_usd),
-         "help": "Billed credits x configured rates, including the cloud-services adjustment. "
-                 "The metering lens only — storage, transfer, and marketplace are in the "
-                 "all-in tile; see the org rate card for the invoice total."},
-    ]
+    # v4.461 P1: primary-metric hierarchy — Credit spend is the ONE dominant number;
+    # the invoice/rebate/credits/CoCo tiles demote to small companions beside it,
+    # instead of a 5-wide row where nothing led. Same figures, same help, same order.
+    _hero = {
+        "label": f"Credit spend, {_wlab} (account)", "value": format_usd(billed_usd),
+        "help": "Billed credits x configured rates, including the cloud-services adjustment. "
+                "The metering lens only — storage, transfer, and marketplace are in the "
+                "all-in tile; see the org rate card for the invoice total.",
+    }
+    _companions = []
     # empty-vs-zero: org_all_in_window_usd is a bare aggregate — a window with no landed
     # ORGANIZATION_USAGE rows (org data lags ~72h; a fresh MTD window, or a secondary account with
     # the view granted but unpopulated) returns one all-NULL row, which would render "$0.00" as a
@@ -211,7 +291,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             # $ for USD (the common case); currency code suffix otherwise (format_usd is $-only).
             return format_usd(safe_float(v)) if _cur.upper() == "USD" else f"{safe_float(v):,.0f} {_cur}"
 
-        _tiles.append({
+        _companions.append({
             "label": f"All-in billed, {_wlab} ({_cur})",
             "value": _cur_fmt(_ar.get("TOTAL_USD")),
             "help": "The invoice total from ORGANIZATION_USAGE (org rate card) for this account "
@@ -219,7 +299,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                     f"transfer ({_cur_fmt(_ar.get('TRANSFER_USD'))}), and marketplace/"
                     f"other ({_cur_fmt(_ar.get('OTHER_USD'))}) that the credit-spend tile "
                     "excludes. Org currency, UTC, lags ~72h so it trails the credit tile near today."})
-    _tiles += [
+    _companions += [
         {"label": "Cloud-services rebate applied", "value": format_usd(abs(rebate_usd)),
          "help": "CREDITS_ADJUSTMENT_CLOUD_SERVICES — the rebate Snowflake applies before billing."},
         {"label": f"Total credits, {_wlab}", "value": format_credits(total_credits),
@@ -235,7 +315,7 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
                  "near-real-time loader for freshness; do NOT add it to the totals on the left. "
                  "'—' until the fact loads."},
     ]
-    kpi_row(_tiles)
+    hero_metric(_hero, _companions)
     st.caption("Account-wide by service (METERING_DAILY_HISTORY has no company grain; company split lives in Attribution)."
                + (f" Scanned {_served_days}d of the {days}d window (the live fallback caps its scan)."
                   if _served_days != int(days) else ""))
@@ -266,72 +346,13 @@ def _spend_tab(company: str, days: int, rate: float, ai_rate: float, database: s
             ))
     result_caption(res)
 
-    st.markdown("**Cost drill coverage**")
-    coverage = service_coverage_inventory(df, rate, ai_rate)
-    ready_share = drill_ready_spend_share(coverage)
-    material_gaps = coverage[
-        (coverage["MATERIALITY"] == "Material")
-        & (coverage["DRILL_STATUS"] == "Service total only")
-    ] if not coverage.empty else coverage
-    kpi_row([
-        {
-            "label": "Spend with a native drill path",
-            "value": f"{ready_share:.1f}%",
-            "help": "Share of billed metering dollars backed by a native Snowflake object-level view.",
-        },
-        {
-            "label": "Material coverage gaps",
-            "value": str(len(material_gaps)),
-            "help": "Service totals above $500 or 1% of spend without a native object-level drill.",
-        },
-    ])
-    styled_table(coverage, height=300, sort_label="$ desc",
-                 column_config={"SHARE_PCT": st.column_config.NumberColumn("Share %", format="%.1f%%")})
-    # C37: per-service rows price the SAME billed credits x category rate as the
-    # Credit-spend KPI above, so they must tie out to it exactly.
-    reconciliation_footer(float(coverage["BILLED_USD"].sum()), billed_usd,
-                          label="services shown", expected_label=f"credit spend ({_wlab})")
-    st.caption(
-        "Coverage describes native attribution capability, not an allocation. Paid Marketplace "
-        "charges use organization currency data and appear in the on-demand detail below."
-    )
-
-    st.markdown("**Billed vs attributed**")
-    _gap_summary, _gap_breakdown = attribution_gap(df)
-    _cov = _gap_summary["coverage_pct"]
-    kpi_row([
-        {"label": "Attributable to a company",
-         "value": f"{_cov:.0f}%",
-         "help": "Share of billed metering on your OWN warehouses — the only spend with a "
-                 "company key (COMPANY_FOR_WAREHOUSE). Reader-account, serverless, AI/Cortex, "
-                 "replication and storage credits have none.",
-         "severity": ("ok" if _cov >= 85 else "warn")},
-        {"label": "Unattributed spend",
-         "value": format_usd(_gap_summary["gap_usd"]),
-         "delta": f"{100 - _cov:.0f}% of billed",
-         "delta_color": "off",
-         "help": "Reader-account, serverless, AI/Cortex, replication and storage credits — "
-                 "billed but not chargeable to a company from metering alone."},
-        {"label": "Attributed (warehouse)",
-         "value": format_usd(_gap_summary["attributed_usd"]),
-         "help": "Own-account warehouse metering only — the sole spend with a company key. "
-                 "Reader-account metering carries no company key and is part of the "
-                 "unattributed gap above, not this figure."},
-    ])
-    if not _gap_breakdown.empty:
-        charts.bar_usd(_gap_breakdown, "CATEGORY", "GAP_USD",
-                       title="Unattributed $ by service", top_n=8)
-    _gap_trend = attribution_gap_trend(complete_days_only(df))
-    if len(_gap_trend) >= 2:
-        charts.daily_metric_line(_gap_trend, "DAY", "GAP_PCT",
-                                 title="Unattributed share % (new-workload canary)", unit="pct")
-    st.caption(
-        "A DIFFERENT axis from 'Cost drill coverage' above: that measures object-level "
-        "drillability (serverless has an object ledger, so it counts as covered there); this "
-        "measures what can be charged back to a company (only warehouse metering carries a "
-        "company key). Account-wide — company-level attribution is on the Attribution tab. "
-        "Byte-metered storage/transfer live in the org rate-card panels, not this credit lens."
-    )
+    # v4.461 P1: the attribution-CAPABILITY panels (drill coverage + billed-vs-
+    # attributed) are meta-metrics about the attribution MODEL, not spend itself, so
+    # they are audit-gated — the default Spend view leads with the money. The daily
+    # by-service chart above and the on-demand service detail below stay in the
+    # default view.
+    if audit_mode():
+        _spend_attribution_capability(df, rate, ai_rate, billed_usd, _wlab)
 
     if st.toggle(
         "Load detailed service attribution",

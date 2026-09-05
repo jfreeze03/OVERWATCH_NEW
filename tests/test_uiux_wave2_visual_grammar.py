@@ -80,8 +80,11 @@ def test_f17_kpi_cards_equalize_via_min_height_floor():
     # wrapper chain and does nothing. F17 now rides on a min-height FLOOR on the
     # base .ow-card rule, which actually renders and evens the common ragged case.
     card_rule = _THEME.split(".ow-card {", 1)[1].split("}", 1)[0]
-    assert "min-height:96px" in card_rule
-    # box-sizing:border-box so the floor includes the 14px padding rather than
+    # v4.461 P0 flatten: the floor dropped 96px -> 72px for the dense expert
+    # audience (a ragged bottom costs less than wasted fold space); the FLOOR
+    # mechanism (F17) stays — a short label+value+delta card still evens up.
+    assert "min-height:72px" in card_rule
+    # box-sizing:border-box so the floor includes the padding rather than
     # adding to it (a card is not silently taller than the declared floor).
     assert "box-sizing:border-box" in card_rule
 

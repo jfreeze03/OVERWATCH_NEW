@@ -63,7 +63,7 @@ _CSS = """
    header controls. This invariant is locked by tests/test_ask_pricing.py. */
 [data-testid="stHeader"] { background:transparent !important; }
 .block-container { padding-top:2.6rem; padding-bottom:2.4rem; max-width:1360px; }
-.main .block-container > div { gap:0.55rem; }
+.main .block-container > div { gap:0.42rem; }
 html, body, [class*="css"] { font-family:var(--ow-font); }
 h1,h2,h3,h4 { letter-spacing:0; color:var(--ow-ink); }
 h1 { font-weight:750; font-size:1.72rem; } h2 { font-weight:700; }
@@ -76,13 +76,19 @@ p,li,span,label,.stMarkdown { color:var(--ow-ink-soft); }
 .ow-breadcrumb { font-size:0.68rem; font-weight:600; letter-spacing:0.06em;
   text-transform:uppercase; color:var(--ow-ink-mute); margin:0 0 2px 1px; }
 .ow-page-heading { display:flex; align-items:center; gap:11px; margin:-2px 0 2px 0; }
-.ow-page-heading h1 { margin:0; padding:0; font-size:1.72rem; font-weight:750; letter-spacing:0; }
+.ow-page-heading h1 { margin:0; padding:0; font-size:1.4rem; font-weight:750; letter-spacing:0; }
 .ow-page-heading__icon { color:var(--ow-accent); display:inline-flex; flex:0 0 auto; }
 
+/* v4.461 P0 flatten: cards/metrics/stats communicate elevation with a slightly
+   lifted surface color + hairline, NOT a gradient + drop-shadow. Resting shadow
+   removed app-wide (none of these is clickable; the shadow implied an affordance
+   and inflated spacing). --ow-shadow stays defined for genuinely floating layers
+   (tooltip/popover) and the active-filter glow. The severity ::before stripe and
+   the token scale are untouched. */
 div[data-testid="stMetric"] {
-  position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
-  border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 12px 18px;
-  box-shadow:var(--ow-shadow); overflow:hidden; }
+  position:relative; background:var(--ow-raised);
+  border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:11px 14px 10px 16px;
+  overflow:hidden; }
 /* F13: the RESTING stripe is neutral (matching .ow-card::before) so a colored
    stripe always MEANS severity — the old default accent gradient looked semantic
    on every card and taught the eye that color carries nothing. */
@@ -109,9 +115,9 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
    robust and evens the common label+value+delta(+meta) rows. It only lifts short
    cards — a genuinely tall card (sparkline + several meta lines) still exceeds it
    and never clips (no overflow:hidden; the ::before stripe is top:0/bottom:0). */
-.ow-card { position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
-  border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:14px 16px 14px 18px;
-  box-shadow:var(--ow-shadow); margin-bottom:var(--ow-3); min-height:96px; box-sizing:border-box; }
+.ow-card { position:relative; background:var(--ow-raised);
+  border:1px solid var(--ow-hairline); border-radius:var(--ow-r); padding:11px 14px 11px 16px;
+  margin-bottom:var(--ow-3); min-height:72px; box-sizing:border-box; }
 .ow-card::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r) 0 0 var(--ow-r); background:var(--ow-ink-mute); }
 .ow-card--ok::before { background:var(--ow-ok); } .ow-card--warn::before { background:var(--ow-warn); }
 .ow-card--bad::before { background:var(--ow-bad); } .ow-card--info::before { background:var(--ow-info); }
@@ -128,6 +134,28 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 .ow-card__title { font-size:0.76rem; letter-spacing:0.06em; text-transform:uppercase; color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
 .ow-card__value { font-size:1.55rem; font-weight:720; color:var(--ow-ink); margin-top:3px; font-variant-numeric:tabular-nums; }
 .ow-card__meta { font-size:0.78rem; color:var(--ow-ink-soft); margin-top:2px; }
+
+/* v4.461 P1: primary-metric hierarchy. ONE dominant value leads a headline; the
+   supporting numbers ride beside it as small companions — instead of a row of
+   equal-weight KPI cards where nothing is primary. No card chrome (no fill/border/
+   shadow): the size contrast IS the hierarchy, closed off by a hairline rule. */
+.ow-hero { display:flex; flex-wrap:wrap; align-items:flex-end; justify-content:space-between;
+  gap:10px 34px; margin:2px 0 10px; padding:0 0 12px; border-bottom:1px solid var(--ow-hairline); }
+.ow-hero__main { display:flex; flex-direction:column; gap:2px; min-width:0; }
+.ow-hero__label { font-size:0.74rem; letter-spacing:0.06em; text-transform:uppercase;
+  color:var(--ow-ink-mute); font-weight:640; display:flex; align-items:center; gap:7px; }
+.ow-hero__value { font-size:2.3rem; font-weight:770; color:var(--ow-ink); line-height:1.04;
+  font-variant-numeric:tabular-nums; }
+.ow-hero--warn .ow-hero__value { color:var(--ow-warn); }
+.ow-hero--bad .ow-hero__value { color:var(--ow-bad); }
+.ow-hero--ok .ow-hero__value { color:var(--ow-ok); }
+.ow-hero__companions { display:flex; flex-wrap:wrap; gap:8px 26px; align-items:flex-end; }
+.ow-hero__c { display:flex; flex-direction:column; gap:1px; }
+.ow-hero__c-label { font-size:0.68rem; letter-spacing:0.05em; text-transform:uppercase;
+  color:var(--ow-ink-mute); font-weight:600; display:flex; align-items:center; gap:5px; }
+.ow-hero__c-value { font-size:1.18rem; font-weight:700; color:var(--ow-ink-soft);
+  font-variant-numeric:tabular-nums; }
+@media (max-width:640px) { .ow-hero__value { font-size:1.95rem; } }
 
 /* rec 15 (a11y): keyboard-focusable + touch-tappable KPI help. Replaces the
    hover-only card title= tooltip (invisible on touch, unreachable by keyboard).
@@ -153,9 +181,13 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
   opacity:0; visibility:hidden; transition:opacity var(--ow-ease); pointer-events:none; }
 .ow-help:hover::after, .ow-help:focus::after, .ow-help:focus-visible::after { opacity:1; visibility:visible; }
 
-.ow-section { display:flex; align-items:center; gap:10px; margin:12px 0 8px; padding:8px 12px; border-radius:var(--ow-r-sm);
+/* v4.461 P0: a NEUTRAL (no-severity) section header is a hairline-ruled subheader,
+   not a tinted banner — the resting 90deg wash is gone so a tinted header ALWAYS
+   means the section carries real, data-derived severity (the --ok/warn/bad/info
+   variants below still fill their tint from alarm_health). */
+.ow-section { display:flex; align-items:center; gap:10px; margin:14px 0 8px; padding:6px 12px; border-radius:var(--ow-r-sm);
   border:1px solid var(--ow-hairline); border-left:3px solid var(--ow-ink-mute);
-  background:linear-gradient(90deg,rgba(148,163,184,0.08),rgba(148,163,184,0.02) 64%,transparent); }
+  background:transparent; }
 .ow-section--ok { border-left-color:var(--ow-ok); background:linear-gradient(90deg,var(--ow-ok-dim),transparent 60%); }
 .ow-section--warn { border-left-color:var(--ow-warn); background:linear-gradient(90deg,var(--ow-warn-dim),transparent 60%); }
 .ow-section--bad { border-left-color:var(--ow-bad); background:linear-gradient(90deg,var(--ow-bad-dim),transparent 60%); }
@@ -217,8 +249,8 @@ div[data-testid="stMetric"]::before { content:""; position:absolute; left:0; top
 }
 
 .ow-statusbar { display:flex; gap:8px; flex-wrap:wrap; align-items:stretch; margin:0 0 12px 0; }
-.ow-stat { flex:1 1 130px; min-width:120px; position:relative; background:linear-gradient(180deg,var(--ow-raised),var(--ow-surface));
-  border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); padding:8px 12px 8px 14px; box-shadow:var(--ow-shadow); }
+.ow-stat { flex:1 1 130px; min-width:120px; position:relative; background:var(--ow-raised);
+  border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); padding:8px 12px 8px 14px; }
 .ow-stat::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; border-radius:var(--ow-r-sm) 0 0 var(--ow-r-sm); background:var(--ow-accent); }
 .ow-stat--ok::before { background:var(--ow-ok); } .ow-stat--warn::before { background:var(--ow-warn); }
 .ow-stat--bad::before { background:var(--ow-bad); } .ow-stat--info::before { background:var(--ow-info); }
@@ -407,7 +439,7 @@ div[data-baseweb="tab-highlight"] { background-color:var(--ow-active-bar) !impor
   border:1px solid rgba(96,165,250,0.52) !important; border-radius:var(--ow-r-sm); }
 .stMultiSelect [data-baseweb="tag"] span { color:#dbeafe !important; }
 .stMultiSelect [data-baseweb="tag"] svg { fill:#dbeafe !important; }
-[data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; box-shadow:var(--ow-shadow); }
+[data-testid="stDataFrame"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); overflow:hidden; }
 [data-testid="stExpander"] { border:1px solid var(--ow-hairline); border-radius:var(--ow-r-sm); background:var(--ow-surface); }
 [data-testid="stExpander"] summary:hover { color:var(--ow-accent); }
 div[data-testid="stPopover"] > button { border-radius:var(--ow-r-pill); }

@@ -252,7 +252,7 @@ def page_header(title: str, subtitle: str, scope_note: str = "", icon_name: str 
     if icon_name:
         st.markdown(
             f'<div class="ow-page-heading">'
-            f'<span class="ow-page-heading__icon">{icon(icon_name, 26)}</span>'
+            f'<span class="ow-page-heading__icon">{icon(icon_name, 20)}</span>'
             f'<h1>{html.escape(title)}</h1></div>',
             unsafe_allow_html=True,
         )
@@ -457,9 +457,58 @@ def metric_card_html(item: dict) -> str:
     _asof = str(item.get("as_of", "") or "")
     if _asof:
         as_of = f'<div class="ow-card__meta">as of {html.escape(_asof)}</div>'
-    return (f'<div class="{cls}" style="min-height:96px">'
+    # v4.461 P0: the floor lives once in the .ow-card CSS rule (72px) — the inline
+    # 96px override is gone so the single CSS source governs card height.
+    return (f'<div class="{cls}">'
             f'<div class="ow-card__title">{label}{help_html}{chips}</div>'
             f'<div class="ow-card__value">{value}</div>{sub}{as_of}{delta}{spark}</div>')
+
+
+def _help_badge(help_t: str) -> str:
+    """The keyboard-focusable + touch-tappable '?' affordance (rec15), shared by
+    the KPI card and the hero metric. Empty help -> no affordance."""
+    if not help_t:
+        return ""
+    esc = html.escape(str(help_t))
+    return (f'<span class="ow-help" tabindex="0" aria-label="{esc}" '
+            f'data-help="{esc}" title="{esc}">?</span>')
+
+
+def hero_metric(item: dict, companions: list[dict] | None = None) -> None:
+    """Primary-metric hierarchy: ONE dominant value with optional smaller companion
+    metrics inline — the alternative to a row of equal-weight KPI cards when a
+    headline has one number that leads and the rest support.
+
+    `item` and each `companions` entry take the SAME contract as metric_card_html
+    (label / value [+ optional unit] / help; item also honors delta / delta_color /
+    sub / severity). No new query, no new calculation — a presentation primitive."""
+    sev = str(item.get("severity", "") or "")
+    label = html.escape(str(item.get("label", "")))
+    value = html.escape(_display_value(item))
+    help_html = _help_badge(str(item.get("help", "") or ""))
+    delta = _delta_html(item.get("delta"), str(item.get("delta_color", "normal")))
+    sub = ""
+    _sub = str(item.get("sub", "") or "")
+    if _sub:
+        sub = f'<div class="ow-card__meta">{html.escape(_sub)}</div>'
+    comp_html = ""
+    for c in (companions or []):
+        c_label = html.escape(str(c.get("label", "")))
+        c_value = html.escape(_display_value(c))
+        c_help = _help_badge(str(c.get("help", "") or ""))
+        comp_html += (f'<div class="ow-hero__c">'
+                      f'<div class="ow-hero__c-label">{c_label}{c_help}</div>'
+                      f'<div class="ow-hero__c-value">{c_value}</div></div>')
+    comps = f'<div class="ow-hero__companions">{comp_html}</div>' if comp_html else ""
+    sev_cls = f" ow-hero--{sev}" if sev in ("ok", "warn", "bad", "info") else ""
+    st.markdown(
+        f'<div class="ow-hero{sev_cls}">'
+        f'<div class="ow-hero__main">'
+        f'<div class="ow-hero__label">{label}{help_html}</div>'
+        f'<div class="ow-hero__value">{value}</div>{delta}{sub}</div>'
+        f'{comps}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # Global dimension chips a MIXED-scope panel may or may not honor. Kept in one

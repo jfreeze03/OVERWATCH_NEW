@@ -1,5 +1,35 @@
 # Changelog
 
+## 4.461.0 - UI refactor P0 (design-system flatten) + P1 (Spend hierarchy) (2026-09-04)
+
+Begins the audit-driven "remove the AI-dashboard chrome" refactor. The full audit (12-agent
+review) found OVERWATCH is a mature operator console, not a naive AI dashboard — the tell is narrow
+and CSS-level. This ships P0 (shared theme) and P1 (Cost ▸ Spend, the chosen representative page).
+**No calculation, threshold, score, query, or mart is touched.**
+
+- **[P0, app-wide] Flattened the card grammar.** `.ow-card`, `st.metric`, and `.ow-stat` now
+  communicate elevation with a slightly-lifted surface color (`--ow-raised`) + hairline instead of a
+  decorative `raised→surface` gradient + resting drop-shadow. The severity `::before` stripe, the
+  token scale, and the KPI evidence chrome are unchanged. Resting shadow removed app-wide (none of
+  these surfaces is clickable, so elevation implied an affordance and inflated spacing); `--ow-shadow`
+  stays for genuinely floating layers (tooltip/popover) and the active-filter glow. Dropped the
+  `min-height` floor 96px→72px and the inline 96px on `metric_card_html` (one CSS source governs).
+  Also flattened the sidebar and dataframe gradients/shadows and tightened default block gap.
+- **[P0, app-wide] Neutral section headers.** A no-severity `.ow-section` is now a hairline-ruled
+  subheader (the resting 90deg wash is gone), so a *tinted* header always means the section carries
+  real, `alarm_health`-derived severity. The `--ok/warn/bad/info` tint variants are unchanged.
+- **[P0, app-wide] Shrunk the hero.** `page_header` h1 1.72rem→1.4rem and its icon 26px→20px, so the
+  header stops consuming the top of the fold for an audience that knows what page it opened.
+- **[P1, new primitive] `hero_metric()`** — the primary-metric hierarchy: ONE dominant value with
+  small inline companions, the alternative to a row of equal-weight KPI cards. Reusable by later
+  pages.
+- **[P1, Cost ▸ Spend] Applied the hierarchy.** The Spend headline now leads with **Credit spend**
+  as the hero; All-in billed / cloud-services rebate / total credits / CoCo demote to companions
+  beside it (same figures, same help, same order — just no longer a flat 5-wide KPI sea). The two
+  attribution-*capability* meta-panels (cost-drill coverage, billed-vs-attributed) are now
+  audit-gated (`_spend_attribution_capability`, byte-identical body), so the default Spend view leads
+  with the money; the daily by-service chart and on-demand service detail stay in the default view.
+
 ## 4.460.0 - MFA-gap posture on the COALESCE active-user canonical (V125) (2026-09-03)
 
 Closes the last tracked correctness item from the bug-hunt arc: the mart loader's MFA-gap arm was the
