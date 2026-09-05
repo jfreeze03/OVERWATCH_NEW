@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.469.0 - UI refactor P2: Operations (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **21 constant-"info" section headers demoted to plain hairline subheaders** (dropped the `"info"`
+  severity so they lose the blue tint/stripe; the SVG icon + title stay). This is the single biggest
+  scan win in the audit — the ~two-dozen tinted banners that were pure chrome now read as quiet
+  subheaders, so a *tinted* Operations header always means real, data-derived severity
+  (`alarm_health`/`warn` headers are untouched). It also dissolves the Warehouses tab's
+  "stacked gradient banners" density without a structural sub-nav change.
+
 ## 4.468.0 - UI refactor P2: Decision Studio (2026-09-05)
 
 Presentation only — no data/calc/query change.

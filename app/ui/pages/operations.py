@@ -295,7 +295,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
         # member is missing/failed, so a bundle miss degrades to the old per-panel scans.
         _qb = {"top": _top_res, "fails": _bundle_fails}
 
-    section_header("Heaviest queries", "info", "search")
+    section_header("Heaviest queries", "", "search")
     top = _qb.get("top")
     if top is None or not top.ok:
         top = run(
@@ -444,7 +444,7 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                 "bare vs fully-qualified CALL can split one proc. ~6h ACCOUNT_USAGE latency, so "
                 "the newest hours under-report.")
 
-    section_header("Query drill-through", "info", "search")
+    section_header("Query drill-through", "", "search")
     candidate_ids: list[str] = []
     if top.usable():
         candidate_ids = [str(q) for q in top.df["QUERY_ID"].dropna().head(50)]
@@ -632,7 +632,7 @@ def _query_insights_panel() -> None:
     """Snowflake-authored query improvement suggestions (repo review wave 2:
     QUERY_INSIGHTS) — free, vendor-written fixes beside our own heuristics.
     Optional view: probe-gated, honest not-available state."""
-    section_header("Query insights (Snowflake-authored)", "info", "search")
+    section_header("Query insights (Snowflake-authored)", "", "search")
     qi = run(insights_sql.query_insights_feed(7), page=_PAGE, key="query_insights_7",
              tier="historical", source="ACCOUNT_USAGE.QUERY_INSIGHTS", probe=True)
     if not qi.ok:
@@ -842,7 +842,7 @@ def _release_compare_tab(company: str) -> None:
     q_res = run(insights_sql.release_query_compare(release_iso, window, company), page=_PAGE,
                 key=f"rel_q_{company}_{release_iso}_{window}", tier="historical",
                 source="ACCOUNT_USAGE.QUERY_HISTORY")
-    section_header("Query health: before vs after", "info", "search")
+    section_header("Query health: before vs after", "", "search")
     verdicts: list[dict] = []
     if guard(q_res, "No query history in the compare windows."):
         verdicts = compare_release_periods(q_res.df)
@@ -859,7 +859,7 @@ def _release_compare_tab(company: str) -> None:
             empty_state("no_data_yet", "Need data on both sides of the release date to compare.")
         result_caption(q_res)
 
-    section_header("Task regressions", "info", "operations")
+    section_header("Task regressions", "", "operations")
     t_res = run(insights_sql.release_task_compare(release_iso, window, company), page=_PAGE,
                 key=f"rel_t_{company}_{release_iso}_{window}", tier="historical",
                 source="ACCOUNT_USAGE.TASK_HISTORY")
@@ -913,7 +913,7 @@ def _dq_row_volume_panel(preloaded=None) -> None:
     finding to the catalog owner. Null-rate / schema-drift monitors (which need a
     stored baseline) and the DQ_BREACH alert are the deferred owner-migration
     halves."""
-    section_header("Row-volume anomalies — registered products (robust-z, 28d)", "info", "pipeline")
+    section_header("Row-volume anomalies — registered products (robust-z, 28d)", "", "pipeline")
     panel_help(
         "Robust z-score (median / MAD, floored at 15% of the median so a rock-steady table "
         "doesn't fire on jitter; threshold 3.5) of each table's MOST RECENT load of "
@@ -1078,7 +1078,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
                    "this table is the 7-day picture with sample errors.")
         result_caption(cpf)
 
-    section_header("Volume drops (yesterday vs prior-7d average)", "info", "pipeline")
+    section_header("Volume drops (yesterday vs prior-7d average)", "", "pipeline")
     panel_help(
         "Rows added per table yesterday vs its prior-7-day average (steady movers: "
         "≥1,000 rows/day AND written on ≥3 of the prior 7 days). **Timing:** 'yesterday' "
@@ -1101,7 +1101,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
 
     _dq_row_volume_panel(_psb.get("rv"))
 
-    section_header("Dynamic table refresh health (7d)", "info", "pipeline")
+    section_header("Dynamic table refresh health (7d)", "", "pipeline")
     panel_help(
         "Source: ACCOUNT_USAGE.DYNAMIC_TABLE_REFRESH_HISTORY (up to ~3h lag). A FAILED "
         "row means every downstream consumer is reading stale data. The daily "
@@ -1115,7 +1115,7 @@ def _pipeline_sla_tab(is_operator: bool, company: str = "ALL") -> None:
         styled_table(dth.df, height=240)
         result_caption(dth)
 
-    section_header("Stream staleness", "info", "pipeline")
+    section_header("Stream staleness", "", "pipeline")
     panel_help(
         "SHOW STREAMS (live metadata — no ACCOUNT_USAGE view exists for staleness). "
         "A STALE stream has passed its retention without being consumed: downstream "
@@ -1345,7 +1345,7 @@ def _task_sla_view(company: str, days: int, database: str = "",
 def _task_runs_view(company: str, days: int, database: str = "",
                     schema_contains: str = "", *, bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
-    section_header("Node run timing", "info", "clock")
+    section_header("Node run timing", "", "clock")
     nres = run(
         mart27_sql.task_nodes(days, company, database, schema_contains, bounds=bounds),
         page=_PAGE,
@@ -1560,7 +1560,7 @@ def _task_version_compare(root_id: str) -> None:
 
 
 def _task_graph_view() -> None:
-    section_header("Pipeline topology", "info", "pipeline")
+    section_header("Pipeline topology", "", "pipeline")
     section_filter_contract(
         filters(),
         applies=(),
@@ -1751,7 +1751,7 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 def _warehouses_tab(company: str, rate: float, days: int, *,
                     bounds: tuple | None = None) -> None:
     _lm = "_lm" if bounds is not None else ""
-    section_header("Warehouse spend & anomalies", "info", "warehouse", anchor="ops-wh-spend")
+    section_header("Warehouse spend & anomalies", "", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
     if not guard(res, "No warehouse dailies yet — the hourly loader fills them.",
@@ -1832,7 +1832,7 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
     # O12: warehouse utilization & right-sizing — reuse the Cost-side profile
     # (idle share, queue/spill, size verdict) here as a DIAGNOSTIC; execution
     # (the ALTER + savings booking) stays on Cost & Contract -> Optimize.
-    section_header("Utilization & right-sizing", "info", "warehouse", anchor="ops-wh-utilization")
+    section_header("Utilization & right-sizing", "", "warehouse", anchor="ops-wh-utilization")
     if not st.toggle("Load utilization profile (heavy scan)", key="ops_wh_sizing_load",
                      help="Per-warehouse idle %, queue/spill, p95 and a size verdict over the window."):
         st.caption("Toggle to profile every warehouse's idle share and right-size verdict on demand.")
@@ -1890,7 +1890,7 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
         _peers = cost_per_query_peers(_prof.df, rate)
         if not _peers.empty:
             _out = _peers[_peers["IS_OUTLIER"]]
-            section_header("Cost-per-query outliers (vs the fleet)", "info", "warehouse",
+            section_header("Cost-per-query outliers (vs the fleet)", "", "warehouse",
                            anchor="ops-wh-peers")
             kpi_row([
                 {"label": "Warehouses compared", "value": f"{len(_peers):,}"},
@@ -1915,7 +1915,7 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
 
     # O13: quiet-hours (off-hours schedule opportunity) — the hour-of-day view +
     # a per-warehouse quiet-window verdict, reusing the Cost-side reader.
-    section_header("Quiet-hours (off-hours schedule opportunity)", "info", "warehouse",
+    section_header("Quiet-hours (off-hours schedule opportunity)", "", "warehouse",
                    anchor="ops-wh-quiet")
     if not st.toggle("Run quiet-hours scan (hour-of-day activity)", key="ops_wh_quiet_load",
                      help="Reads hour-of-day credits vs query activity per warehouse."):
@@ -1960,7 +1960,7 @@ def _adaptive_candidacy_panel(company: str, days: int, *, bounds: tuple | None =
     already read for the off-hours advisor (cached), no new scan."""
     from app.logic.adaptive import adaptive_compute_candidacy, candidacy_summary
 
-    section_header("Adaptive-compute candidacy", "info", "operations")
+    section_header("Adaptive-compute candidacy", "", "operations")
     # Both feeds share ONE window (review #4): warehouse_hourly_activity caps at 30d,
     # so cap idle to match — else the idle discount would cover a longer span than the
     # burst profile it modifies.
@@ -2070,7 +2070,7 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
     _lm = "_lm" if bounds is not None else ""
     left, right = st.columns(2)
     with left:
-        section_header("Warehouse queue & spill pressure", "info", "warehouse")
+        section_header("Warehouse queue & spill pressure", "", "warehouse")
         # r23 #1: the hourly fact answers this without a QUERY_HISTORY scan
         # (the live read sat at 17.8s on the fleet board). r19 #18 still
         # holds — no one-member batch; mart-first with the labeled fallback.
@@ -2104,7 +2104,7 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
                              key=f"ops_wh_pressure_{company}_{days}", key_col="WAREHOUSE_NAME",
                              entity_type="WAREHOUSE")
     with right:
-        section_header("Lock waits", "info", "warehouse")
+        section_header("Lock waits", "", "warehouse")
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()
         # V035: the live scan read 46-56 GB / 74-259s per view (Joe's own
         # Heaviest-queries panel, 2026-07-10) — mart-first, always.
@@ -2144,7 +2144,7 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
 
 def _wh_change_block(company: str, is_operator: bool) -> None:
     st.divider()
-    section_header("Warehouse setting changes", "info", "warehouse", anchor="ops-change-wh")
+    section_header("Warehouse setting changes", "", "warehouse", anchor="ops-change-wh")
     # #1: table-content descriptor (panel_help carries the detail) → audit-mode only.
     methodology_note(
         "Daily warehouse setting diffs, with before/after cost and performance verdicts."
@@ -2244,7 +2244,7 @@ def _wh_change_block(company: str, is_operator: bool) -> None:
 
 def _change_impact_tab(company: str, database: str, schema_contains: str,
                        is_operator: bool) -> None:
-    section_header("Procedure and task changes", "info", "operations", anchor="ops-change-objects")
+    section_header("Procedure and task changes", "", "operations", anchor="ops-change-objects")
     # #1: table-content descriptor + ranking basis (panel_help carries the detail) → audit-mode only.
     methodology_note(
         "Daily procedure/task diffs, ranked by before/after runtime, failures, and credits/call."
@@ -2319,7 +2319,7 @@ def _change_impact_tab(company: str, database: str, schema_contains: str,
             })
         result_caption(res)
 
-        section_header("Run history around one change", "info", "operations")
+        section_header("Run history around one change", "", "operations")
         picks = sorted({f"{t} {n}" for t, n in zip(df["OBJECT_TYPE"], df["OBJECT_NAME"], strict=True)})
         clicked_obj = None
         if sel_ci is not None:
