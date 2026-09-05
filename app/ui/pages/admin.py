@@ -470,6 +470,11 @@ _EXPECTED_MIGRATIONS = {
          "COALESCE(U.DISABLED, FALSE) = FALSE (was a bare U.DISABLED = FALSE), matching every live reader, so "
          "the warm-mart MFA-gap count no longer drops a NULL-DISABLED password-login user. Proc only, "
          "no schema change",
+    126: "Pipeline WH_CREDITS on the task-graph mart SUMs every attempt's compute: SP_LOAD_MARTS_V27 "
+         "re-derived from V125 with the MART_TASK_GRAPH_DAILY task-graph arm restructured to mirror the live "
+         "twin graph_sql.graph_daily_costs (keep every attempt, count scheduled tasks via TERMINAL_RN = 1, SUM "
+         "credits over all attempts). The old V102 terminal-only credit join dropped failed-retry compute, so "
+         "the same panel's pipeline spend flipped with mart warmth vs the live fallback. Proc only, no schema change",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.482.0 - V126: pipeline WH_CREDITS on the task-graph mart SUMs every attempt (2026-09-05)
+
+Authored the owner-gated fix for round 28b's flagged twin-divergence **[1] Pipeline WH_CREDITS**
+(the highest-value item that needed a mart-loader migration, not app code).
+
+- **The split.** `MART_TASK_GRAPH_DAILY.WH_CREDITS` (loaded by `SP_LOAD_MARTS_V27`) collapsed task
+  auto-retries to the **terminal attempt before** joining `QUERY_ATTRIBUTION_HISTORY`, so a failed
+  retry's compute dropped from the credit total. The live fallback `graph_sql.graph_daily_costs`
+  **SUMs credits over all attempts**. Same Cost ▸ Unit costs ▸ Task-graph panel, so "Pipeline spend"
+  and "$/run" flipped with mart warmth and disagreed with the panel's own "every task run" caption.
+  V102 had documented the terminal-only credit drop as "accepted (contextual cost)" — but that local
+  decision silently contradicted the live twin and the caption; for a cost panel, all-attempts (=
+  actual billed compute) is the correct basis.
+- **The fix (V126).** Re-derives `SP_LOAD_MARTS_V27` from **V125** (preserving the V125 MFA-gap
+  COALESCE fix) with the task-graph arm **restructured to mirror `graph_sql.graph_daily_costs`
+  exactly**: keep every attempt, tag the terminal one, count scheduled tasks via `TERMINAL_RN = 1`,
+  and `SUM` credits over all attempts. Counts stay terminal-collapsed. The two twins are now
+  structurally identical, so this metric can't re-diverge. Everything outside the arm is
+  byte-identical to V125 (machine-diff proven).
+- Proc only — no schema change, no new object (teardown untouched); forward-heals on the next
+  `SP_LOAD_MARTS_V27` run. **Owner applies after V125.** Locks in
+  `tests/migrations/test_v126_task_graph_wh_credits_all_attempts.py` (guard/version, arm-sums-all-
+  attempts, MFA-gap fix preserved, byte-fidelity-vs-V125, tip/floor/deploy tracking).
+
+⏳ **Owner action:** apply V125 then V126 in Snowsight (staged on `runbox`). The still-open flagged
+item **[2] idle-credit model** was left untouched pending a closer look (the app-side live idle calc
+also pro-rates, so it may be an intentional shared estimate).
+
 ## 4.481.0 - Bug-hunt round 28b: twin-divergence completion (5 mart/live splits) (2026-09-05)
 
 Completed the twin-divergence dimension round 28's finder skipped on a transient API error.

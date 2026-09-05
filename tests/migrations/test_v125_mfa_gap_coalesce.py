@@ -64,19 +64,16 @@ def test_v125_is_a_one_line_re_derivation_of_v113() -> None:
     assert _BARE in removed[0] and _CANON in added[0]
 
 
-def test_v125_is_the_latest_full_loader_definition() -> None:
-    """V125 must be the newest migration carrying a full SP_LOAD_MARTS_V27 body, so
-    the next re-derivation starts from it (not the now-superseded V113)."""
+def test_v125_carries_a_full_loader_definition() -> None:
+    """V125 carries a full SP_LOAD_MARTS_V27 body. V126 later superseded it as the
+    newest full re-derivation (V126 preserves this MFA-gap fix and layers the
+    task-graph WH_CREDITS all-attempts change on top), so V125 is no longer the tip."""
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    assert defs[-1].name == "V125__mfa_gap_active_user_coalesce.sql"
-
-
-def test_v125_floor_tracks_the_tip() -> None:
-    v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V125 applied" in v
-    assert "BETWEEN 1 AND 125) = 125" in v
+    names = [p.name for p in defs]
+    assert "V125__mfa_gap_active_user_coalesce.sql" in names
+    assert defs[-1].name == "V126__task_graph_wh_credits_all_attempts.sql"
 
 
 def test_v125_is_tracked_in_deploy_and_admin_surfaces() -> None:
