@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.472.0 - UI refactor deferred: Decision Studio card-density (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **SLOs: the KPI row no longer repeats the exception summary.** The actionable-first
+  `exception_summary` already surfaces breached / missing-evidence / stale objectives; the KPI row now
+  keeps only the non-duplicated totals (Objectives, Meeting target, Worst burn).
+- **Products: the 2nd and 3rd KPI rows folded into captions.** The coverage trust-anchor (mapped %,
+  unmapped residual, entity coverage) is one dense caption; the aggregate consumer metrics (reach,
+  median $/consumer, retire candidates) fold into a caption above the per-product retire table that
+  already carries the per-product detail. The headline product-metrics row is unchanged.
+
 ## 4.471.0 - UI refactor P3b: emoji control glyphs → material icons (2026-09-05)
 
 Presentation only — no data/calc/query change.

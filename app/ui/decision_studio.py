@@ -322,17 +322,14 @@ def _slos() -> None:
                 "severity": "bad",
             })
         exception_summary(exceptions, "Every measured objective is within its configured target.")
+    # deferred-item: the actionable exception_summary above already surfaces breach /
+    # missing-evidence / stale (and worst-burn when it exceeds budget) as they occur, so
+    # the KPI row keeps only the non-duplicated TOTALS — the two grammars stop repeating
+    # the same counts.
     kpi_row([
         {"label": "Objectives", "value": f"{summary['total']:,.0f}"},
         {"label": "Meeting target", "value": f"{summary['met']:,.0f}",
          "severity": "ok" if measured_objectives else ""},
-        {"label": "Breached", "value": f"{summary['breach']:,.0f}",
-         "severity": "bad" if summary["breach"] else ("ok" if measured_objectives else "")},
-        {"label": "No evidence", "value": f"{summary['no_data']:,.0f}",
-         "severity": "warn" if summary["no_data"] else ("ok" if summary["total"] else "")},
-        {"label": "Stale", "value": f"{summary['stale']:,.0f}",
-         "severity": "warn" if summary["stale"] else ("ok" if summary["total"] else ""),
-         "help": "Objectives whose newest mart day is >2 days old; the verdict is withheld."},
         {"label": "Worst burn",
          "value": (f"{summary['worst_burn']:,.2f}x" if summary["has_burn"] else "n/a"),
          "severity": ("bad" if summary["worst_burn"] > 1 else "ok") if summary["has_burn"] else "",
@@ -401,24 +398,15 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
         _cov_pct = (_mapped_obj / _total_obj * 100.0) if _total_obj > 0 else 0.0
         _tot_e = int(safe_float(_cr.get("TOTAL_ENTITIES")))
         _map_e = int(safe_float(_cr.get("MAPPED_ENTITIES")))
-        kpi_row([
-            {"label": "Product-mapped object cost", "value": format_usd(_mapped_obj),
-             "delta": f"{_cov_pct:.0f}% of account object cost",
-             "delta_color": "normal" if _cov_pct >= 80 else "inverse" if _cov_pct < 50 else "off",
-             "help": "Object cost attributable to a mapped data product, as a share of the whole "
-                     "account's object cost. Low coverage = the board below sees only a slice."},
-            {"label": "Unmapped object cost", "value": format_usd(_unmapped),
-             "delta_color": "inverse" if _unmapped > 0 else "off",
-             "help": "Object cost on entities with NO data-product mapping — invisible to the "
-                     "per-product board. Map them in the catalog to close the gap."},
-            {"label": "Entity coverage", "value": f"{_map_e:,}/{_tot_e:,}",
-             "delta": (f"{_map_e / _tot_e * 100:.0f}% mapped" if _tot_e else "no catalog"),
-             "delta_color": "off",
-             "help": "Catalog entities mapped to a data product vs all catalog entities."},
-        ])
-        st.caption("Coverage first: the per-product economics below covers only the mapped share "
-                   "above, so read its totals as a floor — not the whole account — until coverage "
-                   "is high.")
+        # deferred-item: the coverage trust-anchor folds from a 3-card row into one
+        # dense caption — it frames the board below, it is not three headline metrics.
+        _ent = (f"entity coverage {_map_e:,}/{_tot_e:,} ({_map_e / _tot_e * 100:.0f}% mapped)"
+                if _tot_e else "no catalog entities mapped")
+        st.caption(md_dollars(  # two $ amounts in one sink must not render as LaTeX math
+            f"Coverage — product-mapped object cost {format_usd(_mapped_obj)} "
+            f"({_cov_pct:.0f}% of account object cost) · unmapped {format_usd(_unmapped)} · {_ent}. "
+            "The per-product economics below covers only the mapped share, so read its totals as a "
+            "floor — not the whole account — until coverage is high."))
 
     # #28: cost-per-consumer + retirement candidates. Which products cost real money but
     # have lost their readers? Consumer reach + reads trend from ACCESS_HISTORY
@@ -449,20 +437,16 @@ def _products(company: str, days: int, rate: float, *, bounds: tuple | None = No
         # is labeled and helped as reach accordingly, not as "distinct accounts" (ds-hunt 2026-08-30).
         _reach = int(safe_float(verdicts.get("DISTINCT_CONSUMERS", pd.Series(dtype=float)).sum()))
         _cpc = verdicts["COST_PER_CONSUMER_USD"].dropna()
-        kpi_row([
-            {"label": "Consumer reach", "value": f"{_reach:,}" if _measured else "—",
-             "help": "Total product-consumer reach in the cost window: the sum of each product's "
-                     "distinct readers, so an account reading several of these products counts once "
-                     "per product (this can exceed the number of unique accounts). Any read, incl. "
-                     "service/pipeline; write-only ETL excluded. Blank when reach can't be measured "
-                     "(no Enterprise ACCESS_HISTORY)."},
-            {"label": "Median $/consumer",
-             "value": format_usd(float(_cpc.median())) if not _cpc.empty else "—",
-             "help": "Object-attributed cost per distinct consumer. Blank when no product has consumers."},
-            {"label": "Retire candidates", "value": f"{_retire:,}",
-             "severity": "warn" if _retire else "",
-             "help": "Costly products with no or collapsing reads — a candidate to review, not an order."},
-        ])
+        # deferred-item: the three aggregate consumer metrics fold into a caption — the
+        # per-product DISTINCT_CONSUMERS + COST_PER_CONSUMER_USD + verdict are columns in
+        # the retire table directly below, which is the real evidence surface.
+        _reach_txt = f"{_reach:,}" if _measured else "—"
+        _cpc_txt = format_usd(float(_cpc.median())) if not _cpc.empty else "—"
+        st.caption(
+            f"Consumer reach {_reach_txt} (sum of each product's distinct readers, so it can exceed "
+            f"the number of unique accounts) · median {_cpc_txt}/consumer · **{_retire:,}** retire "
+            "candidate(s) — costly products with no or collapsing reads (a candidate to review, not "
+            "an order). Per-product detail in the table below.")
 
         def open_retire(index: int) -> None:
             _open_entity("DATA_PRODUCT", str(verdicts.iloc[int(index)]["DATA_PRODUCT"]))

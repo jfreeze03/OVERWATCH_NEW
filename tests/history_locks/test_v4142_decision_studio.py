@@ -139,7 +139,9 @@ def test_cost_per_consumer_wired_into_products_board() -> None:
     src = (Path(__file__).resolve().parents[2] / "app" / "ui"
            / "decision_studio.py").read_text(encoding="utf-8")
     assert "product_consumer_reads(" in src and "insights.product_retirement(" in src
-    assert "RETIREMENT_VERDICT" in src and "Retire candidates" in src
+    # deferred-item: the aggregate consumer metrics folded into a caption + the retire
+    # table; the retirement wiring + the surfaced retire-candidate count stay.
+    assert "RETIREMENT_VERDICT" in src and "retirement candidates" in src
     assert "decision_product_consumers_" in src and "probe=True" in src
 
 

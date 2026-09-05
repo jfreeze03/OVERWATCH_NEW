@@ -110,7 +110,10 @@ def test_scenarios_ui_distinguishes_unpriced_and_discloses_the_cap() -> None:
 # --------------------------------------------------------------------------- #
 def test_consumer_reach_kpi_is_honestly_labeled() -> None:
     src = _src("app/ui/decision_studio.py")
-    assert '"label": "Consumer reach"' in src
+    # deferred-item: the aggregate consumer metrics folded from a KPI card into a
+    # caption; the honest "reach" framing (not "distinct accounts") lives there now.
+    assert "Consumer reach" in src
+    assert "sum of each product's distinct readers" in src   # honest reach framing
     assert '_reach = int(safe_float(verdicts.get("DISTINCT_CONSUMERS"' in src
     # the old false "distinct accounts" claim and the old label are gone
     assert '"label": "Consumers served"' not in src

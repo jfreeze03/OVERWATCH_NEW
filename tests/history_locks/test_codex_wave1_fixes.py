@@ -50,7 +50,10 @@ def test_product_mapping_coverage_is_exposed():
     assert "UPPER(COMPANY) = 'TREXIS'" in sql          # company-scoped
     ds = _src("app/ui/decision_studio.py")
     assert "product_mapping_totals(" in ds
-    assert "Unmapped object cost" in ds and "Entity coverage" in ds
+    # deferred-item: coverage folded from a 3-card row into one caption — mapped %,
+    # the unmapped residual and entity coverage are all still exposed there.
+    assert "product-mapped object cost" in ds and "% of account object cost" in ds
+    assert "unmapped" in ds and "entity coverage" in ds
 
 
 def test_filter_matrix_auto_discovers_sql_modules():
