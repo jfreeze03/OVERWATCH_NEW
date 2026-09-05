@@ -1562,7 +1562,10 @@ def failed_logins_fact(days: int, company: str = "ALL", *, bounds: tuple | None 
     return f"""
 SELECT USER_NAME,
        SUM(FAILURES) AS FAILED_ATTEMPTS,
-       COUNT(DISTINCT CLIENT_IP) AS DISTINCT_IPS,
+       -- the loader stores CLIENT_IP as COALESCE(CLIENT_IP,'(none)') (V105), so a bare
+       -- COUNT(DISTINCT) would count that sentinel as a real source IP, inflating this
+       -- spray signal by 1 vs the live twin (which drops NULL). Exclude it to match.
+       COUNT(DISTINCT NULLIF(CLIENT_IP, '(none)')) AS DISTINCT_IPS,
        MAX(LAST_SEEN) AS LAST_ATTEMPT,
        MAX_BY(ERROR_CATEGORY, LAST_SEEN) AS LAST_ERROR
 FROM {core_object('FACT_SECURITY_LOGIN_DAILY')}

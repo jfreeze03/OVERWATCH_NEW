@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.481.0 - Bug-hunt round 28b: twin-divergence completion (5 mart/live splits) (2026-09-05)
+
+Completed the twin-divergence dimension round 28's finder skipped on a transient API error.
+A refute-by-default sweep surfaced 9 candidates; **5 confirmed CODE-FIXABLE + 1 refuted
+(already disclosed) + 2 left as owner-gated mart-loader decisions.** Each fix aligns a same-
+metric mart-path vs live-path split, or surfaces a served-path caveat that was defined but
+never rendered. No calc/threshold/query source changed; no mart was converted to live.
+
+- **[MED] Control Room ▸ triage queue dropped the Schema filter on the WARM mart path.**
+  `fact_task_daily(2, company, f["database"])` omitted `f["schema_contains"]`, so when the
+  mart served, the triage queue showed task failures from **all** schemas — while the live
+  fallback one line below (and the Operations task-health twin) filtered by schema. The
+  section's own filter contract silently broke on mart warmth. Now passed on both paths.
+- **[MED] Operations ▸ Tasks ▸ Health labeled a live-capped count as the full window.** The
+  live `task_runs` fallback clamps to `MAX_LIVE_WINDOW_DAYS` (90; `bounded_days` default), but
+  the KPI printed the raw `"{days}d"`, so a >90d request served live claimed e.g. "180d" over
+  a 90-day count. Mirrors the sibling Queries tile's served-window honesty (`_tr_served`).
+- **[MED] Security ▸ Trust Center fallback KPI counted clean critical/high scanners.** The
+  `V_SECURITY_TRUST_DELTA` (mart) path gates Critical/High on `active = CURRENT_COUNT > 0`; the
+  `TRUST_CENTER.FINDINGS` fallback counted every critical/high-**severity** row, including
+  scanners with `TOTAL_AT_RISK_COUNT == 0` (clean). Same "Critical"/"High" tile, two different
+  counts depending only on which path served. The fallback now gates on at-risk > 0 to match.
+- **[LOW] Operations ▸ Contention pressure panel never surfaced its source.** The
+  `run_mart_first` call defined `mart_source="FACT_QUERY_HOURLY (mart — p95 is peak hourly)"`
+  but omitted `result_caption(res)`, so the caveat was never rendered — hiding that
+  `P95_ELAPSED_SEC` is peak-hourly on the mart vs a true window p95 on the live fallback.
+- **[LOW] `failed_logins_fact` counted the '(none)' sentinel as a distinct source IP.** The
+  loader stores `CLIENT_IP` as `COALESCE(CLIENT_IP,'(none)')` (V105), so the fact's
+  `COUNT(DISTINCT CLIENT_IP)` counted unknown-IP attempts as one real source, inflating the
+  spray signal by 1 vs the live twin (raw `LOGIN_HISTORY`, which drops NULL). Now
+  `NULLIF(CLIENT_IP,'(none)')` so both paths agree.
+
+Refuted / left for the owner:
+- **[refuted] Warehouse sizing p95 window span.** The sizing panel already discloses the
+  peak-day p95 caveat in its caption; the residual 365-vs-90-day span can't be reconciled
+  without changing the metric, which is out of scope for a truth-preserving pass.
+- **[owner-gated] Pipeline WH_CREDITS** (mart terminal-attempt collapse drops failed-retry
+  compute vs live all-attempts) and **idle-credit model** (mart pro-rates by idle-hour share)
+  both require a mart-**loader** migration and a product decision on which twin is canonical —
+  flagged for the owner rather than fixed unilaterally.
+
 ## 4.480.0 - Bug-hunt round 28: logic/SQL data-truth (spill rate + billed empty-vs-zero) (2026-09-05)
 
 Pivoted the hunt to the un-swept data-truth core (app/logic + app/data). **2 confirmed defects**

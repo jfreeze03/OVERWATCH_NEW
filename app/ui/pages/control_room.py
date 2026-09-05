@@ -1046,7 +1046,12 @@ def render() -> None:
                      key=f"cr_alerts_{company}", tier="live",
                      source="ALERT_EVENTS" if company == "ALL"
                      else f"ALERT_EVENTS ({company} + account-level)")
-        tasks = run(mart_sql.fact_task_daily(2, company, f["database"]), page=_PAGE, key=f"cr_tasks_{company}",
+        # r28b: pass the schema filter on the WARM mart path too — the live fallback below
+        # already applies f["schema_contains"], so without this the triage queue silently
+        # shows all-schema task failures whenever the mart serves, breaking the section's
+        # own filter contract (the Operations task-health twin passes it on both paths).
+        tasks = run(mart_sql.fact_task_daily(2, company, f["database"], f["schema_contains"]),
+                    page=_PAGE, key=f"cr_tasks_{company}",
                     tier="recent", source="FACT_TASK_DAILY")
         if not tasks.usable():
             tasks = run(ops_sql.task_runs(2, company, f["database"], f["schema_contains"]),

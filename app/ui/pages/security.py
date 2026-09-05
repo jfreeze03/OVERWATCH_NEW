@@ -818,12 +818,20 @@ def _trust_center_tab() -> None:
     elif guard(tcf, "", setup_hint="Grant SNOWFLAKE.TRUST_CENTER_VIEWER to your role and enable Trust Center scanners."):
         fdf = tcf.df.copy()
         sev = fdf["SEVERITY"].astype(str).str.upper()
+        # r28b: match the mart/delta path above — a scanner counts as Critical/High only when
+        # it has entities AT RISK now (TOTAL_AT_RISK_COUNT > 0), mirroring that path's
+        # `active = CURRENT_COUNT > 0` gate. A clean critical-severity scanner (0 at risk) must
+        # not inflate these KPIs, or this fallback disagrees with V_SECURITY_TRUST_DELTA for
+        # the same "Critical"/"High" tile depending only on which path served.
+        at_risk = pd.to_numeric(fdf["TOTAL_AT_RISK_COUNT"], errors="coerce").fillna(0).gt(0)
+        _crit = (sev == "CRITICAL") & at_risk
+        _high = (sev == "HIGH") & at_risk
         kpi_row([
             {"label": "Scanners reporting", "value": f"{len(fdf)}"},
-            {"label": "Critical", "value": f"{int((sev == 'CRITICAL').sum())}",
-             "delta_color": "inverse" if (sev == "CRITICAL").any() else "off"},
-            {"label": "High", "value": f"{int((sev == 'HIGH').sum())}",
-             "delta_color": "inverse" if (sev == "HIGH").any() else "off"},
+            {"label": "Critical", "value": f"{int(_crit.sum())}",
+             "delta_color": "inverse" if _crit.any() else "off"},
+            {"label": "High", "value": f"{int(_high.sum())}",
+             "delta_color": "inverse" if _high.any() else "off"},
         ])
         styled_table(fdf, height=300)
         result_caption(tcf)

@@ -1166,7 +1166,11 @@ def _task_health_view(company: str, days: int, database: str = "",
             known_failed = total_failed
             # WLA-1: both task reads are bounded to the prior calendar month under "Last month"
             # scope, so label "last month" then rather than the trailing "{days}d".
-            _tr_wlab = "last month" if bounds is not None else f"{days}d"
+            # r28b: the live fallback caps to MAX_LIVE_WINDOW_DAYS (task_runs -> bounded_days
+            # default 90), so a >90d request served live counts fewer days than "{days}d"
+            # claims. Mirror the Queries tile's served-window honesty (:247) instead.
+            _tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)
+            _tr_wlab = "last month" if bounds is not None else f"{_tr_served}d"
             kpi_row([
                 {"label": f"Task runs ({_tr_wlab})", "value": f"{total_runs:,.0f}"},
                 {"label": "Failed runs", "value": f"{total_failed:,.0f}",
@@ -2131,6 +2135,10 @@ def _contention_tab(company: str, days: int, *, bounds: tuple | None = None) -> 
                              if "AVG_QUEUE_SEC" in pdf.columns else pdf,
                              key=f"ops_wh_pressure_{company}_{days}", key_col="WAREHOUSE_NAME",
                              entity_type="WAREHOUSE")
+            # r28b: surface the source so the p95 basis is disclosed — the mart_source above
+            # carries the "p95 is peak hourly" caveat, but without this it was never rendered,
+            # leaving the peak-hourly (mart) vs window-p95 (live) divergence invisible.
+            result_caption(res)
     with right:
         section_header("Lock waits", "", "warehouse")
         _lock_db = str(st.session_state.get("flt_database", "") or "").strip()

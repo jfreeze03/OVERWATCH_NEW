@@ -50,7 +50,10 @@ def test_operations_window_labels_switch_to_last_month():
     src = _src("app/ui/pages/operations.py")
     assert '_q_wlab = "last month" if bounds is not None else f"{_served_days}d"' in src
     assert 'f"Queries ({_q_wlab})"' in src
-    assert '_tr_wlab = "last month" if bounds is not None else f"{days}d"' in src
+    # r28b: the tasks tile now labels the SERVED window (live path clamps to the live
+    # window), mirroring the Queries tile's _served_days honesty rather than raw {days}d.
+    assert '_tr_served = days if _from_mart else min(days, MAX_LIVE_WINDOW_DAYS)' in src
+    assert '_tr_wlab = "last month" if bounds is not None else f"{_tr_served}d"' in src
     assert 'f"Task runs ({_tr_wlab})"' in src
     assert '"last month" if bounds is not None else f"{days}d"' in src  # wasted-spend _scope_lbl
     # the raw trailing forms are gone
