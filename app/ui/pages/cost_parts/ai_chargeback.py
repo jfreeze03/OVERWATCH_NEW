@@ -452,11 +452,14 @@ def _token_economics_panel(company: str, days: int, cap_credits: float, *, bound
          "help": f"Users consistently over the {_cap} cr/day base allowance AND either heavy vs "
                  "peers or running extended autonomous sessions — a high-intensity usage pattern "
                  "worth reviewing."},
-        {"label": "Fleet cache-hit", "value": (f"{_fleet:.1f}%" if _has_cache else "n/a"),
-         "help": "cache_read / (cache_read + input). See the caption — where it is high and "
-                 "uniform, caching is not the lever; the review flag is."},
         {"label": "Users measured", "value": f"{len(eff):,}"},
     ])
+    # v4.461 P2: fleet cache-hit demoted from a KPI card to a conditional caption —
+    # it is a fleet aggregate the per-user CACHE_HIT_PCT column + the note below
+    # already carry; the review flag, not caching, is the decision here.
+    if _has_cache:
+        st.caption(f"Fleet cache-hit {_fleet:.1f}% (cache_read / (cache_read + input)) — where high "
+                   "and uniform, caching is not the lever; the review flag is.")
     if not ud_res.usable():
         st.caption("Credit / session / over-cap signals need the Cortex Code daily usage scan, "
                    "which didn't resolve this run — showing cache-grain behaviour only.")

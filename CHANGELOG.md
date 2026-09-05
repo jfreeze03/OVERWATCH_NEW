@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.467.0 - UI refactor P2: Cost ▸ Unit / Chargeback / Contract (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Contract & Forecast: the projected-term-overage card now carries a severity stripe** on the hard
+  fact (projected to exceed the contract, `overage > 0`), so the one decision number stands out of the
+  pace row. No threshold invented — it fires only when the projection already exceeds the commitment.
+- **Chargeback & AI: "Fleet cache-hit" demoted from a KPI card to a conditional caption** — it is a
+  fleet aggregate the per-user `CACHE_HIT_PCT` column and the existing cache note already carry; the
+  review flag, not caching, is the decision on that panel.
+
 ## 4.466.0 - UI refactor P2: Cost ▸ Optimize (2026-09-05)
 
 Presentation only — no data/calc/query change.

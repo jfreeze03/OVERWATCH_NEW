@@ -550,6 +550,9 @@ def _contract_tab(settings: dict) -> None:
         {"label": "Projected term total", "value": f"{pace['projected_term_credits']:,.0f} cr",
          "delta": (f"+{pace['projected_overage_credits']:,.0f} cr overage" if pace["projected_overage_credits"] > 0 else "within contract"),
          "delta_color": "inverse" if pace["projected_overage_credits"] > 0 else "normal",
+         # v4.461 P2: the decision number gets a severity stripe on the hard fact
+         # (projected to exceed the contract), so it stands out of the pace row.
+         "severity": "bad" if pace["projected_overage_credits"] > 0 else "",
          "help": f"Booked consumption + remaining days at the {pace.get('basis', 'trailing-30d burn')} — "
                  "the same basis as the renewal planner below and the year projection above "
                  "(no longer the optimistic lifetime average)."},
