@@ -1814,7 +1814,7 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
 
     section_header(
         "Concurrency peaks (right-size before queuing hurts)",
-        "info",
+        "",
         "warehouse",
         anchor="ops-wh-concurrency",
     )
@@ -2694,7 +2694,7 @@ def render() -> None:
         st.divider()
         section_header(
             "Contention (queue, spill & lock waits)",
-            "info",
+            "",
             "warehouse",
             anchor="ops-wh-contention",
         )

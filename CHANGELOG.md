@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.476.0 - UI refactor deferred: Operations multi-line header sweep (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Neutralized the two multi-line "info" section headers the P2 line-scoped sweep missed**
+  (Operations "Concurrency peaks" and the "Contention" parent banner) — they now render as neutral
+  hairline subheaders, completing the header sweep so no constant-"info" banner remains in Operations.
+- **Operations Warehouses `nested_sections` sub-nav: consciously not done.** Its core concern (a chrome
+  gradient-banner scroll) was already resolved by the P2 hairline sweep, its heavy scans (utilization,
+  quiet-hours) are already toggle-gated so the eager paint is only ~3 panels, and a `nested_sections`
+  restructure of ~200 lines of partly-interdependent panels (cost-per-query is nested in the
+  utilization toggle) carries regression risk that headless tests — which only render the default
+  nested lens — cannot verify. Left as an explicit future option, not a silent skip.
+
 ## 4.475.0 - UI refactor deferred: Cost ▸ Spend attribution split + shell header sweep (2026-09-05)
 
 Presentation / first-paint performance — no calculation changed; no mart-backed read became live.
