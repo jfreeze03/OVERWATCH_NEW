@@ -1,5 +1,14 @@
 # Changelog
 
+## 4.466.0 - UI refactor P2: Cost ▸ Optimize (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Right-sizing headline: 6 equal-weight cards → the 3 that carry the decision + a caption.** The
+  money and primary action lead as cards (measured idle $, potential size-down saving range, size-down
+  candidate count); the three navigational counts (size-up / add-cluster, tune-auto-suspend-first,
+  held-for-evidence/cadence) fold into a dense caption that keeps their definitions. Same figures.
+
 ## 4.465.0 - UI refactor P2: Security & Governance (2026-09-05)
 
 Presentation only — no data/calc/query change.

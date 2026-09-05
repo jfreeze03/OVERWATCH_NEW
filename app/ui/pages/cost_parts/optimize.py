@@ -467,16 +467,13 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                         "QUEUED_MIN_PER_DAY", "SPILL_GB_PER_DAY", "P95_ELAPSED_SEC", "IDLE_PCT"]
             if "PROVISION_MIN_PER_DAY" in sized.columns:
                 _sz_cols.insert(_sz_cols.index("SPILL_GB_PER_DAY"), "PROVISION_MIN_PER_DAY")
+            # v4.461 P2: lead with the money + the primary action (size-down $ range,
+            # measured idle $, size-down count); the three navigational counts fold
+            # into the caption below. Same figures, all counts preserved.
             kpi_row([
-                {"label": "Size up / add cluster", "value": f"{summary['up']}",
-                 "delta_color": "inverse" if summary["up"] else "off",
-                 "help": "Sustained overload queueing or remote spill, both PER DAY. Provisioning "
-                         "(resume) time is excluded — that is a suspend-timer signal, not concurrency."},
-                {"label": "Tune auto-suspend first", "value": f"{summary['suspend']}"},
                 {"label": "Idle spend on those", "value": format_usd(summary["idle_saving_usd"]),
                  "help": "Measured idle share of today's bill on the auto-suspend rows — reversible, "
                          "unlike the size-down bet."},
-                {"label": "Size-down candidates", "value": f"{summary['down']}"},
                 {"label": "Potential saving (down)",
                  "value": f"{format_usd(summary['potential_saving_usd'])}–{format_usd(summary['potential_saving_high_usd'])}",
                  "help": "rec #13: a RANGE, not a point. Low = half the measured IDLE (only idle "
@@ -484,11 +481,15 @@ def _optimization_tab(company: str, days: int, rate: float, settings: dict, is_o
                          "bill (if busy credits halve too — optimistic, since a compute-bound query "
                          "on a smaller warehouse runs ~2x longer). Model, not a promise; the idle "
                          "number to its left is measured."},
-                {"label": "Evidence / cadence review",
-                 "value": f"{summary['observe'] + summary['review']}",
-                 "help": "Resize advice is withheld for episodic evidence, unknown timers, and "
-                         "high idle that remains after an already-short timer."},
+                {"label": "Size-down candidates", "value": f"{summary['down']}"},
             ])
+            st.caption(
+                f"Also: {summary['up']} size-up / add-cluster · {summary['suspend']} tune-auto-suspend-first · "
+                f"{summary['observe'] + summary['review']} held for evidence/cadence review. "
+                "Size-up = sustained per-day overload queueing or remote spill (resume time excluded — a "
+                "suspend-timer signal, not concurrency). Evidence/cadence = advice withheld for episodic "
+                "evidence, unknown timers, or high idle remaining after an already-short timer."
+            )
             _sz_primary = [
                 "WAREHOUSE_NAME", "RECOMMENDATION", "RATIONALE", "CONFIDENCE",
                 "MONTHLY_USD_NOW", "IDLE_MONTHLY_USD",
