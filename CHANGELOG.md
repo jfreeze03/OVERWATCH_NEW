@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.468.0 - UI refactor P2: Decision Studio (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **The value-proof verdict now shows once.** The Scorecard section's in-line `st.success/warning`
+  banner (a second rendering of the same prove-it verdict already hoisted above the section bar as a
+  `page_verdict_line`) is dropped — ending the three-surface repetition the audit flagged.
+- **"Pays for itself N×" is now the section's focal number** via the P1 `hero_metric` primitive; the
+  four supporting signals (realization, acted-on, alert precision, evidence coverage) demote to the
+  secondary KPI row beneath it. Same figures, same help.
+
 ## 4.467.0 - UI refactor P2: Cost ▸ Unit / Chargeback / Contract (2026-09-05)
 
 Presentation only — no data/calc/query change.

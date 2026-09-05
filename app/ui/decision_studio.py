@@ -48,6 +48,7 @@ from app.ui.components import (
     empty_state,
     exception_summary,
     guard,
+    hero_metric,
     kpi_row,
     load_settings,
     master_detail,
@@ -722,20 +723,21 @@ def _scorecard(company: str, rate: float) -> None:
         if not _pf.empty and "EVIDENCE_COVERAGE" in _pf.columns:
             evcov = round(float(_pf["EVIDENCE_COVERAGE"].mean()) * 100, 0)
 
-    verdict = proof_verdict(roi, realization, acc["ACCEPTANCE_PCT"], prec)
-    _banner = {"good": st.success, "watch": st.warning, "unproven": st.info}[verdict["level"]]
-    _banner(md_dollars(verdict["headline"]))
-
+    # v4.461 P2: the prove-it verdict is hoisted ONCE above the section bar
+    # (pages/decision_studio.py → decision_verdict → page_verdict_line); the
+    # in-section st.success/warning banner that repeated the same verdict here is
+    # dropped, and the ROI multiple becomes the section's focal number.
+    hero_metric({
+        "label": "Pays for itself",
+        "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
+        "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
+        "delta": (f"{format_usd(roi['VERIFIED_USD'])} monthly verified vs {format_usd(roi['RUN_COST_USD'])} monthly run cost"
+                  if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
+        "delta_color": "off",
+        "help": "This quarter's verified savings (a 30-day/monthly-magnitude rate) as a multiple of "
+                "OVERWATCH's own trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — "
+                "same horizon on both sides. ≥1× means it pays for itself."})
     kpi_row([
-        {"label": "Pays for itself",
-         "value": (f"{roi['RATIO']:.1f}×" if roi["RATIO"] is not None else "—"),
-         "severity": ("ok" if roi["PAYS"] else ("warn" if roi["RATIO"] is not None else "")),
-         "delta": (f"{format_usd(roi['VERIFIED_USD'])} monthly verified vs {format_usd(roi['RUN_COST_USD'])} monthly run cost"
-                   if roi["RATIO"] is not None else "run cost or verified $ not measured yet"),
-         "delta_color": "off",
-         "help": "This quarter's verified savings (a 30-day/monthly-magnitude rate) as a multiple of "
-                 "OVERWATCH's own trailing-30-day warehouse run cost (APP_WAREHOUSE credits × rate) — "
-                 "same horizon on both sides. ≥1× means it pays for itself."},
         {"label": "Realization",
          "value": (f"{realization:,.0f}%" if realization is not None else "—"),
          "help": "Of what verified items were estimated to save, how much actually measured out. "
