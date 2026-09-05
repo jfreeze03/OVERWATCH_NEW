@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.478.0 - Bug-hunt round 26: attribution-split deep-link regression (2026-09-05)
+
+Adversarial find→refute-verify sweep over the fresh UI/UX refactor (v4.461–v4.477, 18 files) + V125.
+**1 confirmed defect / 0 others survived** (the refute-verify correctly killed 5 salience/color-
+prominence candidates as style, not data/behavior regressions). No calculation/query/mart changed.
+
+- **[LOW, deep-link regression I introduced in v4.475] The Control Room "Full spend movers →"
+  deep-link landed on a page where the promised table was hidden.** The v4.475 attribution eager-paint
+  split moved the by-warehouse "exact usage" movers table into `_attribution_tab`, which is now
+  deferred behind the default-off `cost_attribution_load` toggle — but the Control Room button
+  (`request_navigation("Cost & Contract", "Spend & Attribution")`) expects that table visible on
+  arrival. Fix: the button now seeds `st.session_state["cost_attribution_load"] = True` before
+  navigating, so the deep-link lands directly on the movers table while ordinary entries into the
+  section keep the toggle off (the first-paint perf default). Locked by `test_bughunt_round26`.
+
 ## 4.477.0 - UI refactor deferred: Operations Warehouses sub-nav (2026-09-05)
 
 Presentation / first-paint performance — no calculation changed; no mart-backed read became live.

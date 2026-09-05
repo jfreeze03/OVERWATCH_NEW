@@ -1292,6 +1292,12 @@ def render() -> None:
             })
             styled_table(_mv)
             if st.button("Full spend movers → Cost & Contract", key="cr_movers_cost"):
+                # r26 (bug-hunt): the full by-warehouse movers table lives in the
+                # Attribution panel, which v4.475 deferred behind the
+                # cost_attribution_load toggle (off by default). Seed it OPEN so this
+                # deep-link lands directly on the promised table; ordinary entries into
+                # Spend & Attribution keep the toggle off (the first-paint perf default).
+                st.session_state["cost_attribution_load"] = True
                 request_navigation("Cost & Contract", "Spend & Attribution")
             result_caption(movers)
 
