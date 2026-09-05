@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.462.0 - UI refactor P2: Control Room (2026-09-05)
+
+Propagates the P0/P1 visual language to Control Room (presentation only — no data/calc/query change).
+
+- **Top-3 spend movers now render as a 3-row table** (`Warehouse | Prior → current | Δ USD`) instead
+  of three equal-weight KPI cards — denser, and the from→current that was hidden in a card hover is
+  now a visible column. Same figures via the same `format_usd`.
+- **Neutralized two static-"info" section headers** (`Auto-investigation`, `14-day query activity`) —
+  they are informational, so they drop the blue tint to a plain hairline subheader, keeping the P0
+  rule that a *tinted* header always means real, data-derived severity. (The remaining headers were
+  already neutral hairlines after P0; data-driving Incidents/Triage to light up on findings needs a
+  read-reorder and is left for a later pass.)
+
 ## 4.461.0 - UI refactor P0 (design-system flatten) + P1 (Spend hierarchy) (2026-09-04)
 
 Begins the audit-driven "remove the AI-dashboard chrome" refactor. The full audit (12-agent

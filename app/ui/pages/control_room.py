@@ -318,7 +318,7 @@ def _auto_investigation(inc_row, company: str, rate: float) -> None:
         _started if pd.notna(_started) else inc_row.get("DETECTED_AT"), errors="coerce")
     if pd.isna(onset_dt):
         return
-    section_header("Auto-investigation — ranked root cause", "info", "incident")
+    section_header("Auto-investigation — ranked root cause", "", "incident")
     st.caption("Read-only synthesis: the changes, task failures, spend anomalies and grant "
                "changes around this incident's onset, ranked as candidate causes by timing "
                "(a trigger precedes onset), magnitude, and entity match. It explains — it never "
@@ -785,7 +785,7 @@ def render() -> None:
         if st.button("Full query metrics → Operations", key="cr_pulse_ops"):
             request_navigation("Operations", "Queries")
 
-        section_header("14-day query activity", "info", "operations")
+        section_header("14-day query activity", "", "operations")
         if _activity_ready:
             c_queries, c_fails = st.columns(2)
             with c_queries:
@@ -1273,13 +1273,18 @@ def render() -> None:
             # Cost ▸ Spend & Attribution owns the full movers table; here we show
             # only the top-3 by absolute movement as a glance + a deep-link.
             top = view.reindex(view["DELTA_USD"].abs().sort_values(ascending=False).index).head(3)
-            kpi_row([
-                {"label": str(r["WAREHOUSE_NAME"]),
-                 "value": format_usd(safe_float(r["DELTA_USD"])),
-                 "help": f"{format_usd(safe_float(r['USD_PRIOR']))} → "
-                         f"{format_usd(safe_float(r['USD_CURRENT']))}"}
-                for _, r in top.iterrows()
-            ])
+            # v4.461 P2: the top-3 movers read denser + sortable as a 3-row table
+            # than as three equal-weight KPI cards (the from→current was hidden in a
+            # card hover). Same figures via the same format_usd — no data change.
+            _mv = pd.DataFrame({
+                "Warehouse": top["WAREHOUSE_NAME"].astype(str).values,
+                "Prior → current": [
+                    f"{format_usd(safe_float(p))} → {format_usd(safe_float(c))}"
+                    for p, c in zip(top["USD_PRIOR"], top["USD_CURRENT"], strict=True)
+                ],
+                "Δ USD": [format_usd(safe_float(v)) for v in top["DELTA_USD"]],
+            })
+            styled_table(_mv)
             if st.button("Full spend movers → Cost & Contract", key="cr_movers_cost"):
                 request_navigation("Cost & Contract", "Spend & Attribution")
             result_caption(movers)
