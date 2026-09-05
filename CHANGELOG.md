@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.477.0 - UI refactor deferred: Operations Warehouses sub-nav (2026-09-05)
+
+Presentation / first-paint performance — no calculation changed; no mart-backed read became live.
+
+- **The Operations Warehouses tab is now a local sub-nav** (`nested_sections`, mirroring the Tasks
+  tab) over two lens helpers: **Activity & anomalies** (daily spend + per-warehouse anomalies +
+  concurrency peaks) and **Sizing & efficiency** (utilization/right-sizing + cost-per-query outliers,
+  quiet-hours, resource-monitor coverage, adaptive-compute candidacy). Only the selected lens paints
+  and queries, so the default paint no longer scrolls every panel — and the otherwise-eager
+  adaptive-candidacy hourly scan is paid only when the Sizing lens is opened. The panels were
+  extracted verbatim (byte-identical bodies), so no panel logic changed.
+- **Test harness fix (surfaced by the above):** the shaped-page test typer mis-typed `HOUR_OF_DAY`
+  and `*DAYS*` count columns as Timestamps (because "DAY" is a substring), which broke `int(hour)` /
+  `float(days)` in the warehouse hourly panels the first time a test rendered them. They are now typed
+  numerically (plural "DAYS" is always a count in this schema; singular DAY/DATE stays a date), and a
+  new `test_operations_warehouses_sizing_lens_renders_shaped` drives the non-default Sizing lens so
+  both lenses are covered — not just the default one.
+
 ## 4.476.0 - UI refactor deferred: Operations multi-line header sweep (2026-09-05)
 
 Presentation only — no data/calc/query change.

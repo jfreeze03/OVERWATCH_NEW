@@ -48,6 +48,13 @@ _DATE_TOKENS = ("_AT", "_TS", "_TIME", "DAY", "DATE", "_DAY", "_HOUR", "HOUR_TS"
 
 def _col_value(col: str, row: int):
     u = col.upper()
+    # HOUR_OF_DAY (a 0-23 clock hour) and any *DAYS* count are INTEGERS, not dates —
+    # but "DAY" is a substring of their names, so the date rule below would mis-type
+    # them as Timestamps and break int(hour) / float(days) in the warehouse
+    # quiet-hours + adaptive-candidacy panels. Plural "DAYS" is always a count in this
+    # schema; singular "DAY"/"DATE"/"LATEST_DAY" stays a real date below.
+    if "HOUR_OF_DAY" in u or "DAYS" in u:
+        return float(row % 24) if "HOUR" in u else float(row + 1)
     if u in ("DAY", "DATE", "HOUR_TS") or any(u.endswith(t) or t in u for t in _DATE_TOKENS):
         return pd.Timestamp("2026-08-15") + datetime.timedelta(days=row)
     if any(t in u for t in _STR_TOKENS):
@@ -208,3 +215,32 @@ def test_pages_render_with_shaped_data(page):
     assert not any("migrated through" in str(getattr(e, "value", "")) for e in at.error), \
         f"{page}: schema gate blocked the render"
     assert at.title or at.markdown, page
+
+
+@pytest.mark.skipif(not _APPTEST_BUTTONGROUP_OK, reason="streamlit<1.55 AppTest ButtonGroup bug")
+def test_operations_warehouses_sizing_lens_renders_shaped():
+    """deferred-item (Warehouses sub-nav): the tab's SECOND nested lens ('Sizing &
+    efficiency') is not the default, so test_pages_render_with_shaped_data only ever
+    paints the 'Activity & anomalies' lens. Drive the sizing lens AND its two heavy-scan
+    toggles explicitly, so the extracted sizing / cost-per-query / quiet-hours / monitor
+    / adaptive-candidacy panels actually execute under shaped data (the coverage a
+    default-lens-only render can't give)."""
+    at = AppTest.from_function(_entry, default_timeout=30)
+    at.run()
+    assert not at.exception
+    _nav_to(at, "Operations")
+    at.session_state["ops_section"] = "Warehouses"        # top-level section
+    at.session_state["ops_wh_view"] = "Sizing & efficiency"  # the non-default nested lens
+    at.session_state["ops_wh_sizing_load"] = True         # utilization profile + cost-per-query
+    at.session_state["ops_wh_quiet_load"] = True          # quiet-hours heatmap
+    at.run()
+    assert not at.exception, f"warehouses sizing lens (shaped): {at.exception}"
+    # the page finished (no safe_page 'could not finish rendering' error caption)
+    assert not any("could not finish rendering" in str(getattr(e, "value", "")) for e in at.error), \
+        "the sizing lens raised mid-render"
+    blob = " ".join(m.value for m in at.markdown)
+    # the sizing lens painted its own panels — the split is reachable AND the extracted
+    # sizing/adaptive panels execute (the coverage the default 'Activity' lens can't give)
+    assert "Utilization &amp; right-sizing" in blob or "Utilization & right-sizing" in blob, \
+        "sizing lens did not paint its right-sizing header"
+    assert "Adaptive-compute candidacy" in blob, "adaptive-candidacy panel did not paint"

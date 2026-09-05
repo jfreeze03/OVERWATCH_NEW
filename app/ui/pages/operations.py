@@ -1755,7 +1755,22 @@ def _tasks_tab(company: str, days: int, database: str = "", schema_contains: str
 
 def _warehouses_tab(company: str, rate: float, days: int, *,
                     bounds: tuple | None = None) -> None:
-    _lm = "_lm" if bounds is not None else ""
+    # deferred-item: one lens at a time — split the long warehouse scroll into a local
+    # sub-nav (mirrors the Tasks tab's nested_sections). The default paint renders only
+    # the Activity lens; the sizing/schedule reads — including the otherwise-eager
+    # adaptive-candidacy hourly scan — are paid only when the Sizing lens is opened.
+    _view = nested_sections(["Activity & anomalies", "Sizing & efficiency"],
+                            key="ops_wh_view")
+    if _view == "Sizing & efficiency":
+        _wh_sizing_efficiency(company, rate, days, bounds=bounds)
+        return
+    _wh_activity_anomalies(company, rate)
+
+
+def _wh_activity_anomalies(company: str, rate: float) -> None:
+    """Warehouse 'Activity & anomalies' lens: daily spend + per-warehouse anomaly
+    detection and concurrency peaks. (deferred-item: extracted from _warehouses_tab
+    so the sub-nav renders one lens at a time.)"""
     section_header("Warehouse spend & anomalies", "", "warehouse", anchor="ops-wh-spend")
     res = run(mart_sql.fact_warehouse_daily(30, company), page=_PAGE, key=f"w_fact_{company}",
               tier="hourly", source="FACT_WAREHOUSE_DAILY")
@@ -1834,6 +1849,14 @@ def _warehouses_tab(company: str, rate: float, days: int, *,
         })
         result_caption(peaks)
 
+
+def _wh_sizing_efficiency(company: str, rate: float, days: int, *,
+                          bounds: tuple | None = None) -> None:
+    """Warehouse 'Sizing & efficiency' lens: utilization & right-sizing (+ cost-per-
+    query outliers), quiet-hours, resource-monitor coverage, and adaptive-compute
+    candidacy. (deferred-item: extracted from _warehouses_tab; its reads — including
+    the adaptive-candidacy hourly scan — are paid only when this lens is opened.)"""
+    _lm = "_lm" if bounds is not None else ""
     # O12: warehouse utilization & right-sizing — reuse the Cost-side profile
     # (idle share, queue/spill, size verdict) here as a DIAGNOSTIC; execution
     # (the ALTER + savings booking) stays on Cost & Contract -> Optimize.
