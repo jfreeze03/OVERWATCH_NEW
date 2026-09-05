@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.474.0 - UI refactor deferred: Control Room Incidents header is data-driven (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **The Control Room "Incidents" header is now data-driven.** It is rendered after the open-incident
+  count resolves and passes `alarm_health(_open_now)`, so its stripe lights amber only when incidents
+  are actually open, reads ok on a verified zero, and stays neutral when the metrics read didn't
+  resolve (never a false all-clear). Was a constant chrome title. (The Triage/Timeline headers stay
+  neutral hairlines post-P0 — their queue table + the page verdict + the section-pill badge already
+  carry severity, and data-driving them would need a large read-reorder for marginal gain.)
+
 ## 4.473.0 - UI refactor deferred: Alerts verdict carries oldest-critical age (2026-09-05)
 
 Presentation only — the counts aggregate gains one display column; no calculation changed.

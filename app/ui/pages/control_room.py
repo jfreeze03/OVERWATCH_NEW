@@ -42,6 +42,7 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
+    alarm_health,
     confirm_gate,
     empty_state,
     exception_summary,
@@ -802,7 +803,8 @@ def render() -> None:
 
     elif section == "Incidents & triage":
         # ---- Incidents (V032) ------------------------------------------------------
-        section_header("Incidents")
+        # deferred-item: the header is rendered below, AFTER the open-incident count
+        # resolves, so its severity is data-driven (was a constant chrome title).
         from app.core.query import execute_statement, run_batch
         from app.core.session import is_operator
         from app.ui.components import log_ui_event, notify
@@ -842,6 +844,10 @@ def render() -> None:
         # first triage question is "what needs me", answered from numbers already in
         # hand (health strip + incident metrics), zero extra queries.
         _open_now = int(safe_float(inc_met.df.iloc[0].get("OPEN_NOW"))) if inc_met.usable() else 0
+        # deferred-item: data-driven header — amber only when incidents are actually
+        # open; a verified 0 reads ok; a failed metrics read stays neutral (never a
+        # false all-clear stripe). Its inputs are the exception_summary just below.
+        section_header("Incidents", alarm_health(_open_now if inc_met.usable() else None))
         _exc = []
         if _open_crit:
             _exc.append({"label": "Open criticals", "value": f"{_open_crit:,}",
