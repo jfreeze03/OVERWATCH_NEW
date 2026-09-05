@@ -89,9 +89,9 @@ def test_rec6_control_room_headings():
     cr = _src("app/ui/pages/control_room.py")
     for title in ("Triage queue", "Telemetry freshness", "Spend movers (window vs prior)"):
         assert f'section_header("{title}")' in cr
-    # deferred-item: the Incidents header is now data-driven (alarm_health on the
-    # open-incident count) — still a section_header, just no longer a bare title.
-    assert 'section_header("Incidents", alarm_health(' in cr
+    # r27: the Incidents header is data-driven from the FULL exception set (_inc_health),
+    # not just the open-incident count — still a section_header, just no longer bare.
+    assert 'section_header("Incidents", _inc_health)' in cr
     assert cr.count("st.subheader(") <= 1                     # only the one sub-panel remains
 
 

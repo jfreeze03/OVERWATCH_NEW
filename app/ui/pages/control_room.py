@@ -42,7 +42,6 @@ from app.logic.formulas import (
 from app.logic.verdict import Signal, page_verdict
 from app.ui import charts
 from app.ui.components import (
-    alarm_health,
     confirm_gate,
     empty_state,
     exception_summary,
@@ -844,10 +843,8 @@ def render() -> None:
         # first triage question is "what needs me", answered from numbers already in
         # hand (health strip + incident metrics), zero extra queries.
         _open_now = int(safe_float(inc_met.df.iloc[0].get("OPEN_NOW"))) if inc_met.usable() else 0
-        # deferred-item: data-driven header — amber only when incidents are actually
-        # open; a verified 0 reads ok; a failed metrics read stays neutral (never a
-        # false all-clear stripe). Its inputs are the exception_summary just below.
-        section_header("Incidents", alarm_health(_open_now if inc_met.usable() else None))
+        # The data-driven "Incidents" header stripe is computed AFTER the exception
+        # list below, from the SAME inputs, so it can never disagree with the body.
         _exc = []
         if _open_crit:
             _exc.append({"label": "Open criticals", "value": f"{_open_crit:,}",
@@ -865,11 +862,27 @@ def render() -> None:
         # a failed incident_metrics / critical-count / health-strip read collapses to 0
         # above, which would otherwise read as "nothing wrong" during an outage (green must
         # never mean "nothing loaded"). Surface the gap so the clean message can't mislead.
-        if not (inc_met.usable() and _crit_known and _sv):
+        _partial = not (inc_met.usable() and _crit_known and _sv)
+        if _partial:
             _exc.append({"label": "Telemetry", "value": "partial",
                          "detail": "Some incident / critical / health feeds are unavailable — the "
                                    "all-clear can't be trusted until they load.",
                          "severity": "warn"})
+        # r27 (bug-hunt): the header stripe mirrors the SAME inputs as the exception
+        # list above — NOT just the open-incident count — so it can never render a green
+        # all-clear while the body flags open criticals, stale feeds, or partial telemetry.
+        # (v4.474's data-drive keyed only off _open_now and reintroduced the r24
+        # false-all-clear class: alarm_health(0)='ok' painted green with 5 open criticals
+        # or a failed feed.) Partial telemetry -> neutral, never green.
+        if _partial:
+            _inc_health = ""
+        elif any(e["severity"] == "bad" for e in _exc):
+            _inc_health = "bad"
+        elif _exc:
+            _inc_health = "warn"
+        else:
+            _inc_health = "ok"
+        section_header("Incidents", _inc_health)
         exception_summary(_exc, "No open criticals, open incidents, or stale sources.")
         # v4.50: the 90d lifecycle medians (MTTA/MTTR, reopen, compression,
         # change-correlated) moved to Alerts > History — retrospective process

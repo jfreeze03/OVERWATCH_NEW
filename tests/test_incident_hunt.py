@@ -107,6 +107,8 @@ def test_incident_gantt_lanes_distinct_same_title_incidents(monkeypatch):
 
 def test_incidents_section_flags_partial_telemetry_before_all_clear():
     body = _CR.split('elif section == "Incidents & triage":', 1)[1]
-    assert "if not (inc_met.usable() and _crit_known and _sv):" in body
+    # r27: the partial-telemetry condition is hoisted to _partial and now drives BOTH the
+    # exception list AND the header stripe (neutral, never a false green on partial).
+    assert "_partial = not (inc_met.usable() and _crit_known and _sv)" in body
     # the partial-telemetry signal is appended to the same exception list the all-clear reads
     assert '"value": "partial"' in body

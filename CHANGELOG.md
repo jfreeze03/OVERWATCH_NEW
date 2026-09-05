@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.479.0 - Bug-hunt round 27: Control Room Incidents false-all-clear (2026-09-05)
+
+Fresh-angle sweep over the refactor (empty-vs-zero on folds, session-state stickiness, hero/caption
+edges). **1 unique confirmed defect** (reported by two dimensions); the rest refuted. No calc/query
+change.
+
+- **[MED, false-all-clear I introduced in v4.474] The Control Room "Incidents" section-header stripe
+  went green when a feed failed or open criticals existed.** The v4.474 deferred-item data-drive keyed
+  the header off `alarm_health(_open_now)` — the open-*incident* count ALONE. So `alarm_health(0)` →
+  "ok" painted a green all-clear stripe when there were open CRITICAL alerts (`_open_crit`>0, incidents
+  0) or when a feeding read (open-critical count / health strip) had failed and collapsed to 0 —
+  directly contradicting the `exception_summary` immediately below, which correctly flags open
+  criticals (bad) and partial telemetry ("the all-clear can't be trusted"). This is the round-24
+  false-all-clear class, reintroduced by my own header change. Fix: the header stripe is now derived
+  from the SAME exception set as the body (`_inc_health`) — partial telemetry → neutral (never green),
+  any bad finding → bad, any warn → warn, only a fully-loaded genuinely-clean state → ok. Locked by
+  `test_bughunt_round27`.
+
 ## 4.478.0 - Bug-hunt round 26: attribution-split deep-link regression (2026-09-05)
 
 Adversarial find→refute-verify sweep over the fresh UI/UX refactor (v4.461–v4.477, 18 files) + V125.

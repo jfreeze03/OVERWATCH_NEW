@@ -115,7 +115,7 @@ def test_incident_readers_shapes():
 # ---------------------------------------------------------------------------
 
 def test_control_room_incidents_section():
-    assert 'section_header("Incidents", alarm_health(' in _CR   # rec6 + deferred: data-driven header
+    assert 'section_header("Incidents", _inc_health)' in _CR   # rec6 + r27: data-driven header, mirrors the exception set
     # #3 (2026-07-31): operator gating moved from CURRENT_ROLE() (the app owner's role
     # under owner's-rights SiS, same for every viewer) to session.is_operator(), which
     # resolves the VIEWER identity against an allowlist. The section is still op-gated.
