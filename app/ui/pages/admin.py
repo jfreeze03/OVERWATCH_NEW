@@ -475,6 +475,12 @@ _EXPECTED_MIGRATIONS = {
          "twin graph_sql.graph_daily_costs (keep every attempt, count scheduled tasks via TERMINAL_RN = 1, SUM "
          "credits over all attempts). The old V102 terminal-only credit join dropped failed-retry compute, so "
          "the same panel's pipeline spend flipped with mart warmth vs the live fallback. Proc only, no schema change",
+    127: "Idle credit waste reads ACTUAL zero-query-hour credits: MART_WAREHOUSE_EFFICIENCY_DAILY gains an "
+         "IDLE_CREDITS column and SP_LOAD_MARTS_V27 (re-derived from V126) stores it by joining hourly metering "
+         "to the span-expanded active hours (mirrors the live twin insights_sql.idle_warehouse_analysis). The old "
+         "readers pro-rated the day's total credits by an hour-count IDLE_PCT, over-stating idle for scale-out "
+         "warehouses and disagreeing with the live fallback feeding the same idle-$ KPI. Readers COALESCE to the "
+         "legacy pro-rate for pre-re-stamp rows. Adds one column (ALTER ADD COLUMN)",
 }
 # tests/test_perf_budgets.py locks this dict against snowflake/migrations/ —
 # adding a migration without updating it fails CI (Codex r3 #1: the panel

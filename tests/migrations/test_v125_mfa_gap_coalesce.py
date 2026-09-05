@@ -73,7 +73,8 @@ def test_v125_carries_a_full_loader_definition() -> None:
                   in p.read_text(encoding="utf-8"))
     names = [p.name for p in defs]
     assert "V125__mfa_gap_active_user_coalesce.sql" in names
-    assert defs[-1].name == "V126__task_graph_wh_credits_all_attempts.sql"
+    # superseded as the tip by a later full re-derivation (don't hardcode which)
+    assert defs[-1].name != "V125__mfa_gap_active_user_coalesce.sql"
 
 
 def test_v125_is_tracked_in_deploy_and_admin_surfaces() -> None:

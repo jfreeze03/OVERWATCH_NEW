@@ -203,8 +203,10 @@ LIMIT 5000
 
 def eff_idle_analysis(days: int, company: str = "ALL", *, bounds: tuple | None = None) -> str:
     """insights_sql.idle_warehouse_analysis contract from the efficiency mart.
-    IDLE_CREDITS uses each day's IDLE_PCT x credits (loader-computed from
-    billed-vs-active hours), so no metering/query-history join at read time."""
+    IDLE_CREDITS reads the loader-stored actual zero-query-hour credits (V127,
+    m_idle arm — mirrors the live twin), falling back to the legacy pro-rate
+    (CREDITS_TOTAL x IDLE_PCT/100) for rows loaded before V127 populated the
+    column, so no metering/query-history join at read time."""
     days = bounded_days(days, 400)
     where = and_where(scope_window_where("DAY", days, bounds=bounds),
                       _company_arm(company))
@@ -215,7 +217,7 @@ SELECT
     SUM(BILLED_HOURS) AS METERED_HOURS,
     GREATEST(SUM(BILLED_HOURS) - SUM(ACTIVE_HOURS), 0) AS IDLE_HOURS,
     ROUND(SUM(CREDITS_TOTAL), 4) AS TOTAL_CREDITS,
-    ROUND(SUM(CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100), 4) AS IDLE_CREDITS
+    ROUND(SUM(COALESCE(IDLE_CREDITS, CREDITS_TOTAL * COALESCE(IDLE_PCT, 0) / 100)), 4) AS IDLE_CREDITS
 FROM {mart_object("MART_WAREHOUSE_EFFICIENCY_DAILY")}
 WHERE {where}
   AND UPPER(WAREHOUSE_NAME) <> 'CLOUD_SERVICES_ONLY'
@@ -239,7 +241,7 @@ SELECT
     e.WAREHOUSE_NAME,
     ANY_VALUE(e.COMPANY) AS COMPANY,
     ROUND(SUM(e.CREDITS_TOTAL), 4) AS CREDITS_TOTAL,
-    ROUND(SUM(e.CREDITS_TOTAL * COALESCE(e.IDLE_PCT, 0) / 100)
+    ROUND(SUM(COALESCE(e.IDLE_CREDITS, e.CREDITS_TOTAL * COALESCE(e.IDLE_PCT, 0) / 100))
           / NULLIF(SUM(e.CREDITS_TOTAL), 0) * 100, 1) AS IDLE_PCT,
     SUM(e.QUERIES) AS QUERY_COUNT,
     COUNT_IF(COALESCE(e.QUERIES, 0) > 0) AS ACTIVE_QUERY_DAYS,

@@ -95,19 +95,17 @@ def test_v126_differs_from_v125_only_in_the_task_graph_arm() -> None:
     assert any("QUALIFY ROW_NUMBER()" in d and d.startswith("-") for d in diff)
 
 
-def test_v126_is_the_latest_full_loader_definition() -> None:
-    """V126 is the newest migration carrying a full SP_LOAD_MARTS_V27 body, so the next
-    re-derivation starts from it (not the now-superseded V125/V113)."""
+def test_v126_carries_a_full_loader_definition() -> None:
+    """V126 carries a full SP_LOAD_MARTS_V27 body. V127 later superseded it as the newest
+    full re-derivation (V127 preserves V126's task-graph fix and layers the wh_eff idle-credit
+    change on top), so V126 is no longer the tip."""
     defs = sorted(p for p in _MIG_DIR.glob("V[0-9]*.sql")
                   if "CREATE OR REPLACE PROCEDURE DBA_MAINT_DB.OVERWATCH.SP_LOAD_MARTS_V27"
                   in p.read_text(encoding="utf-8"))
-    assert defs[-1].name == "V126__task_graph_wh_credits_all_attempts.sql"
-
-
-def test_v126_floor_tracks_the_tip() -> None:
-    v = (_ROOT / "snowflake" / "validate.sql").read_text(encoding="utf-8")
-    assert "V001..V126 applied" in v
-    assert "BETWEEN 1 AND 126) = 126" in v
+    names = [p.name for p in defs]
+    assert "V126__task_graph_wh_credits_all_attempts.sql" in names
+    # superseded as the tip by a later full re-derivation (don't hardcode which)
+    assert defs[-1].name != "V126__task_graph_wh_credits_all_attempts.sql"
 
 
 def test_v126_is_tracked_in_deploy_and_admin_surfaces() -> None:

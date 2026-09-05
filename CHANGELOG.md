@@ -1,5 +1,44 @@
 # Changelog
 
+## 4.483.0 - V127: idle credit waste reads actual zero-query-hour credits (2026-09-05)
+
+Authored the owner-gated fix for round 28b's flagged twin-divergence **[2] idle-credit model**
+(confirmed real by a 5-agent trace + ground-truthing — my earlier "they agree" call was wrong;
+`optimize.py:158` is a sizing what-if, not the live twin).
+
+- **The split.** The idle-$ headline ("Idle credit waste" / "Idle share" / "Projected monthly"
+  on Optimize) is fed by one `run_mart_first` pair. The **mart** reader `eff_idle_analysis`
+  ([mart27_sql.py:218](app/data/mart27_sql.py)) derived idle spend by **pro-rating** the day's
+  total credits by an hour-count `IDLE_PCT` (`SUM(CREDITS_TOTAL * IDLE_PCT/100)`) — because
+  `MART_WAREHOUSE_EFFICIENCY_DAILY` stored only `IDLE_PCT`, no idle-credit column. The **live**
+  twin `insights_sql.idle_warehouse_analysis` ([insights_sql.py:96](app/data/insights_sql.py))
+  sums the **actual** credits burned in zero-query hours. Same KPI, two formulas → the dollar
+  figure flipped with mart warmth, and the pro-rate **over-states idle for scale-out warehouses**
+  (their idle hours are cheaper than their active multi-cluster hours).
+- **The fix (V127).** (a) `ALTER TABLE ... ADD COLUMN IF NOT EXISTS IDLE_CREDITS` — V127 is the
+  first non-proc-only migration in a while (one additive, idempotent, metadata-only column).
+  (b) Re-derive `SP_LOAD_MARTS_V27` from V126 so the `wh_eff` arm computes and stores
+  `IDLE_CREDITS` by joining hourly metering to the span-expanded active hours and summing credits
+  in zero-query hours — **mirroring the live twin exactly**. (c) Readers `eff_idle_analysis` /
+  `eff_sizing_profile` switch to `SUM(COALESCE(IDLE_CREDITS, <legacy pro-rate>))`, so rows loaded
+  before the re-stamp degrade gracefully (no regression) and re-stamped rows are accurate.
+- Byte-identical to V126 outside the `wh_eff` arm + the ALTER + guard/version (machine-diff
+  proven); preserves the V125 MFA-gap fix and the V126 task-graph fix. **Owner applies after V126.**
+  Locks in `tests/migrations/test_v127_wh_eff_idle_credits_actual_hours.py` (schema change,
+  loader formula mirrors the live twin, reader fallback, both prior fixes preserved, byte-fidelity).
+
+Known residual (adversarial-review finding, accepted): at the FIRST day of the read window the
+two paths can still differ by a few boundary hours — a query that started the prior day and spans
+past midnight is seen by the loader's rolling scan (hours marked active) but not by the live twin's
+reader-window scan (hours marked idle). The query really ran, so the mart is the MORE accurate
+side; this asymmetry pre-dates V127 (it already lived in ACTIVE_HOURS/IDLE_PCT) and is tiny on any
+multi-day window. Not fixed here — closing it means widening the shared live `_active_hours_cte`,
+orthogonal to this mart fix. The RUN_NEXT reconciliation uses a tolerance so it does not false-alarm.
+
+⏳ **Owner action:** apply V125 → V126 → V127 in Snowsight (staged on `runbox`), then the one-time
+90-day idle backfill in RUN_NEXT. Until applied, the idle mart read fails on the missing column
+and `run_mart_first` serves the accurate live path (a transient extra probe, backoff-suppressed).
+
 ## 4.482.0 - V126: pipeline WH_CREDITS on the task-graph mart SUMs every attempt (2026-09-05)
 
 Authored the owner-gated fix for round 28b's flagged twin-divergence **[1] Pipeline WH_CREDITS**
