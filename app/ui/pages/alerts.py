@@ -1409,14 +1409,22 @@ def render() -> None:
         crit_n = int(safe_float(_c0.get("CRIT")))
         high_n = int(safe_float(_c0.get("HIGH")))
         total_n = int(safe_float(_c0.get("TOTAL")))
+        _oldest_crit_min = safe_float(_c0.get("OLDEST_CRIT_MIN"))
     else:
         crit_n = high_n = total_n = 0
+        _oldest_crit_min = 0.0
     # C17: the page answers "should I worry?" BEFORE the section bar, from the
     # uncapped counts it already reads. Rendered only when the counts resolved —
     # a failed read must never manufacture a green all-clear.
     if counts.usable():
+        # deferred-item: the verdict carries what the count cards below cannot — the
+        # AGE of the oldest open critical (MTTR pressure), so it stops merely echoing
+        # the crit/high counts. OLDEST_CRIT_MIN is the uncapped-aggregate age.
+        _crit_label = f"{crit_n} open critical(s)"
+        if crit_n and _oldest_crit_min and _oldest_crit_min > 0:
+            _crit_label += f" · oldest open {humanize_duration(_oldest_crit_min, 'min')}"
         page_verdict_line(page_verdict([
-            Signal("bad", f"{crit_n} open critical(s)") if crit_n else None,
+            Signal("bad", _crit_label) if crit_n else None,
             Signal("warn", f"{high_n} open high(s)") if high_n else None,
         ], healthy=(f"{total_n} open event(s), none critical or high"
                     if total_n else "the alert queue is empty")))

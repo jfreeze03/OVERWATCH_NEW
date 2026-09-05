@@ -83,8 +83,13 @@ def test_alerts_page_verdict_is_data_derived_and_never_a_false_all_clear():
     idx = src.index("page_verdict_line(page_verdict(")
     # rendered only when the uncapped counts resolved
     gate = src.rindex("if counts.usable():", 0, idx)
-    assert src[gate:idx].count("\n") < 6                # the gate directly guards it
-    assert 'Signal("bad", f"{crit_n} open critical(s)")' in src
+    # deferred-item: the crit signal now also carries the oldest-open-critical AGE
+    # (built into _crit_label just under the gate), so a few more lines sit between
+    # the gate and the verdict — but the gate still DIRECTLY guards it (no unguarded
+    # all-clear path).
+    assert src[gate:idx].count("\n") < 12
+    assert 'Signal("bad", _crit_label)' in src
+    assert '_crit_label = f"{crit_n} open critical(s)"' in src   # still crit-count-derived
     assert 'Signal("warn", f"{high_n} open high(s)")' in src
     # verdict renders BEFORE the section bar (the "before navigation" contract)
     assert idx < src.index('section = lazy_sections([')

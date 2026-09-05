@@ -566,7 +566,13 @@ SELECT
     COUNT_IF(UPPER(SEVERITY) = 'HIGH')     AS HIGH,
     COUNT_IF(UPPER(SEVERITY) = 'MEDIUM')   AS MED,
     COUNT_IF(UPPER(SEVERITY) NOT IN ('CRITICAL', 'HIGH', 'MEDIUM')) AS LOW,
-    COUNT(*) AS TOTAL
+    COUNT(*) AS TOTAL,
+    -- deferred-item: age (minutes) of the OLDEST still-open critical, so the page
+    -- verdict can carry MTTR pressure (duration) that a raw count hides. Mirrors the
+    -- UNDELIVERED_OLDEST_MIN age pattern; NULL when no open critical. New column —
+    -- existing consumers read CRIT/HIGH/TOTAL by name and ignore it.
+    MAX(CASE WHEN UPPER(SEVERITY) = 'CRITICAL'
+             THEN DATEDIFF('minute', RAISED_AT, CURRENT_TIMESTAMP()) END) AS OLDEST_CRIT_MIN
 FROM {core_object("ALERT_EVENTS")}
 WHERE {and_where(*where)}
 """

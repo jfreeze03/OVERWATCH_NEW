@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.473.0 - UI refactor deferred: Alerts verdict carries oldest-critical age (2026-09-05)
+
+Presentation only — the counts aggregate gains one display column; no calculation changed.
+
+- **The Alerts page verdict now carries the AGE of the oldest open critical**, not just the count the
+  KPI cards already show — the MTTR-pressure signal a raw count hides ("2 open critical(s) · oldest
+  open 3h"). `open_alert_severity_counts` gained an `OLDEST_CRIT_MIN` column (mirroring the route
+  backlog's `UNDELIVERED_OLDEST_MIN` age pattern; NULL when no open critical), so the verdict reads it
+  from the same uncapped, authoritative aggregate it already uses — no extra query, no read reorder.
+  The new column is additive; the five other pages that read this aggregate are unaffected.
+
 ## 4.472.0 - UI refactor deferred: Decision Studio card-density (2026-09-05)
 
 Presentation only — no data/calc/query change.
