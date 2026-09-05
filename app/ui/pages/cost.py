@@ -184,23 +184,31 @@ def render() -> None:
     }
     section_filter_contract(f, **_contracts[section])
     if section == "Spend & Attribution":
-        # perf #15: submit the four INDEPENDENT recent mart reads that gate the
-        # eager Spend + Attribution paint as ONE parallel batch instead of four
-        # serial round-trips. Each panel still falls back to its own mart/live
-        # read if the batch is unavailable (run_batch -> None) or a member misses
-        # (a None/empty prefetch triggers that panel's existing fallback).
-        _pf = run_batch(_spend_attr_recent_jobs(f["company"], f["days"], f["bounds"]),
+        # deferred-item: split Attribution OUT of the eager first paint. The combined
+        # recent-mart spec still carries all five reads with bounds threaded (perf #15),
+        # but the FIRST paint batches only Spend's three (metering/csr/coco) — so the
+        # default view is Spend-only and pays three reads, not five. Attribution's two
+        # (wh/daily) run on demand behind its own toggle. Each panel keeps its serial
+        # fallback (a None/empty prefetch triggers the panel's existing read).
+        _all_jobs = _spend_attr_recent_jobs(f["company"], f["days"], f["bounds"])
+        _pf = run_batch([j for j in _all_jobs if j["key"] in ("metering", "csr", "coco")],
                         page=_PAGE, tier="hourly") or {}
-        section_header("Spend", "info", "spend", anchor="cost-spend")
+        section_header("Spend", "", "spend", anchor="cost-spend")
         _spend_tab(f["company"], f["days"], rate, ai_rate, f["database"],
                    bounds=f["bounds"],
                    metering_res=_pf.get("metering"), csr_res=_pf.get("csr"),
                    coco_res=_pf.get("coco"))
         st.divider()
-        section_header("Attribution", "info", "chargeback", anchor="cost-attribution")
-        _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
-                         bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
-        st.divider()
+        if st.toggle("Load company attribution (cost by company & user)",
+                     key="cost_attribution_load",
+                     help="Per-company / per-user cost attribution — two mart reads, loaded "
+                          "on demand and kept off the default first paint."):
+            _pf = run_batch([j for j in _all_jobs if j["key"] in ("wh", "daily")],
+                            page=_PAGE, tier="hourly") or {}
+            section_header("Attribution", "", "chargeback", anchor="cost-attribution")
+            _attribution_tab(f["company"], f["days"], rate, f["database"], f["schema_contains"],
+                             bounds=f["bounds"], wh_res=_pf.get("wh"), daily_res=_pf.get("daily"))
+            st.divider()
         # perf #15: Storage (3 reads) + Unmapped (1 read) are below-fold detail;
         # gate both behind ONE toggle so the default first paint pays only the
         # Spend/Attribution batch. A toggle (not st.expander) is required — an
@@ -208,7 +216,7 @@ def render() -> None:
         if st.toggle("Load storage & unmapped-entity detail", key="cost_spend_detail",
                      help="Storage economics (3 reads) and the unmapped-entity check "
                           "(1 read), loaded on demand — kept off the default first paint."):
-            section_header("Storage", "info", "cost", anchor="cost-storage")
+            section_header("Storage", "", "cost", anchor="cost-storage")
             _storage_tab(f["company"], f["days"], settings, bounds=f["bounds"])
             st.divider()
             unm = run(mart_sql.unmapped_entities(f["days"]), page=_PAGE,
@@ -247,13 +255,13 @@ def render() -> None:
                 result_caption(unm)
                 _unmapped_mapper(_disp, is_operator)
     elif section == "Contract & Forecast":
-        section_header("Contract pacing & renewal planner", "info", "contract")
+        section_header("Contract pacing & renewal planner", "", "contract")
         _contract_tab(settings)
     elif section == "Chargeback & AI":
-        section_header("Department chargeback", "info", "chargeback", anchor="cost-chargeback")
+        section_header("Department chargeback", "", "chargeback", anchor="cost-chargeback")
         _chargeback_tab(f["company"], f["days"], rate, is_operator, bounds=f["bounds"])
         st.divider()
-        section_header("Query-tag governance", "info", "chargeback", anchor="cost-tags")
+        section_header("Query-tag governance", "", "chargeback", anchor="cost-tags")
         # KEPT as a plain caption: "allocated, never attributed" is a misread-prevention
         # caveat (don't read allocated chargeback as true per-user attribution), not
         # audit-only methodology — it must stay visible in operator mode.
@@ -358,10 +366,10 @@ def render() -> None:
             else:
                 st.caption("Click a user row to see their top untagged statement types.")
         st.divider()
-        section_header("Cortex / AI spend", "info", "cost", anchor="cost-cortex")
+        section_header("Cortex / AI spend", "", "cost", anchor="cost-cortex")
         _cortex_spend_tab(f["days"], ai_rate, bounds=f["bounds"])
         st.divider()
-        section_header("AI users", "info", "operations", anchor="cost-ai-users")
+        section_header("AI users", "", "operations", anchor="cost-ai-users")
         # r22 #14: the exact Cortex Code user scan is the heaviest read in
         # this group — it runs only when asked, like the other deep scans.
         from app.ui.components import toggle_cost_hint
@@ -372,14 +380,14 @@ def render() -> None:
                           "this section stays cheap without it."):
             _ai_users_tab(f["company"], f["days"], ai_rate, settings, is_operator, bounds=f["bounds"])
     elif section == "Unit costs":
-        section_header("Unit costs — one query, one call, one AI request", "info", "cost")
+        section_header("Unit costs — one query, one call, one AI request", "", "cost")
         _unit_costs_tab(f, rate, ai_rate)
     elif section == "Compare":
-        section_header("Compare — period vs period", "info", "cost")
+        section_header("Compare — period vs period", "", "cost")
         from app.ui.pages.cost_parts.compare import _compare_tab
         _compare_tab(f["company"], rate, ai_rate)
     else:
-        section_header("Optimization", "info", "optimize")
+        section_header("Optimization", "", "optimize")
         _optimization_tab(f["company"], f["days"], rate, settings, is_operator, bounds=f["bounds"])
         # rec2: the savings ledger belongs to the inner "Remediation & ledger" pill
         # (set by _optimization_tab's nested lazy_sections) — render it only there,

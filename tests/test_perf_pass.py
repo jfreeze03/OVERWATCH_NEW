@@ -188,15 +188,17 @@ def test_unit_costs_reads_go_out_as_one_batch():
 
 
 def test_cost_spend_section_batches_recent_and_defers_storage_unmapped():
-    """#15: the default 'Spend & Attribution' section submits its four independent
-    recent mart reads as ONE run_batch and defers Storage + Unmapped behind a
-    toggle, so first paint pays one parallel group instead of ~10 serial reads."""
+    """#15 + deferred-item: the default 'Spend & Attribution' section batches Spend's
+    recent mart reads (metering/csr/coco) on first paint and DEFERS Attribution
+    (wh/daily), Storage and Unmapped behind toggles, so the default paint pays one
+    small parallel group instead of ~10 serial reads."""
     cost = (_ROOT / "app" / "ui" / "pages" / "cost.py").read_text(encoding="utf-8")
     spend = (_ROOT / "app" / "ui" / "pages" / "cost_parts" / "spend.py").read_text(encoding="utf-8")
-    # one batch feeds the eager Spend + Attribution panels (T1.1: hourly tier —
-    # the members are hourly-loaded facts, so 3600s TTL not 300s)
-    assert "run_batch(_spend_attr_recent_jobs(" in cost and 'tier="hourly")' in cost
-    for k in ("metering", "csr", "wh", "daily"):        # every member threaded, none dropped
+    # the combined spec still exists (bounds threaded); first paint batches only Spend's
+    # reads, Attribution's run behind its own toggle (T1.1: hourly tier for both)
+    assert "_all_jobs = _spend_attr_recent_jobs(" in cost and 'tier="hourly")' in cost
+    assert 'key="cost_attribution_load"' in cost         # attribution deferred behind a toggle
+    for k in ("metering", "csr", "wh", "daily"):        # every member still threaded, none dropped
         assert f'_pf.get("{k}")' in cost, k
     # the spec-builder lives in spend.py and references all four fact builders
     assert "def _spend_attr_recent_jobs(" in spend

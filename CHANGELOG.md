@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.475.0 - UI refactor deferred: Cost ▸ Spend attribution split + shell header sweep (2026-09-05)
+
+Presentation / first-paint performance — no calculation changed; no mart-backed read became live.
+
+- **Attribution is split out of the eager Spend first paint.** The combined recent-mart spec still
+  exists with bounds threaded (perf #15), but the first paint now batches only Spend's three reads
+  (metering/csr/coco); Attribution's two (wh/daily) run on demand behind a "Load company attribution"
+  toggle — so the default Cost ▸ Spend view is Spend-first and pays three reads, not five. Each panel
+  keeps its serial fallback; Attribution self-fetches if its prefetch is absent.
+- **Cost & Contract shell: 11 constant-"info" section headers → neutral hairline subheaders**
+  (Spend/Attribution/Storage/Contract/Chargeback/tags/Cortex/AI-users/Unit-costs/Compare/Optimization),
+  matching the Operations P2 sweep — a tinted header now always means real severity.
+
 ## 4.474.0 - UI refactor deferred: Control Room Incidents header is data-driven (2026-09-05)
 
 Presentation only — no data/calc/query change.
