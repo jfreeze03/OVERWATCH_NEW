@@ -1468,12 +1468,14 @@ def render() -> None:
                  "delta_color": "inverse" if crit_n else "off"},
                 {"label": "Open high", "value": f"{high_n}",
                  "severity": "warn" if high_n else "ok"},
+                # v4.461 P2: 'Open total' is neutral — a colored card stripe should
+                # always mean a threshold was crossed (P0/F13). Critical/high above
+                # carry the severity; the running total is context.
                 {"label": "Open total", "value": f"{total_n}",
                  "help": ("True open+ack count across all severities. The feed table below "
                           "shows the 500 most severe/newest; tiles count every open event."
                           if counts.usable() and total_n > 500
-                          else "Open + acknowledged events across all severities."),
-                 "severity": "info"},
+                          else "Open + acknowledged events across all severities.")},
             ])
         _open_events_section(events, is_operator, company)
     elif section == "Rules":
@@ -1645,31 +1647,29 @@ def render() -> None:
             row0 = slo.df.iloc[0]
             _und = int(safe_float(row0.get("UNDELIVERED_CRITICALS_30M")))
             _exp = int(safe_float(row0.get("EXPIRED_UNDELIVERED")))
+            # v4.461 P2: the two severity-gated numbers (the ones that turn red and
+            # demand action) lead as cards; the three delivery diagnostics fold into
+            # one dense line below. Same figures. rec19: expired-undelivered is the
+            # webhook's own flag for an event aged past the 24h window unsent.
             kpi_row([
-                {"label": "Events delivered (30d)",
-                 "value": f"{safe_float(row0.get('EVENTS_DELIVERED')):,.0f} / {safe_float(row0.get('EVENTS_RAISED')):,.0f}",
-                 "help": "Raised events with at least one delivery row. Routes filter by "
-                         "severity, so 100% is not the target."},
-                {"label": "Latency p50 / p95",
-                 "value": (f"{humanize_duration(row0.get('MEDIAN_MIN'), 'min')} / "
-                           f"{humanize_duration(row0.get('P95_MIN'), 'min')}"),
-                 "help": "RAISED_AT -> first SENT_AT; the notify task rides the hourly chain."},
                 {"label": "Undelivered criticals (30m+)", "value": f"{_und}",
                  "severity": "bad" if _und else "ok",
                  "delta_color": "inverse" if _und else "off"},
-                {"label": "Route failures (30d)",
-                 "value": f"{safe_float(row0.get('ROUTE_FAILURES')):,.0f}",
-                 "help": "distinct route-days with a send failure (route_send_failed in APP_ERROR_LOG, "
-                         "deduped so an hourly-retrying broken route counts once per day, not per run) — "
-                         "RUNBOOK section 19 has the Teams debugging path."},
-                # rec19: the webhook itself flags an OPEN event that aged past the
-                # 24h delivery window with no send — surfaced here, not just in logs.
                 {"label": "Expired-undelivered (30d)", "value": f"{_exp}",
                  "severity": "bad" if _exp else "ok",
                  "delta_color": "inverse" if _exp else "off",
                  "help": "undelivered_expired rows SP_NOTIFY_WEBHOOK raises when an eligible "
                          "event crosses 24h unsent — a persistent integration outage, not lag."},
             ])
+            st.caption(
+                f"Delivered {safe_float(row0.get('EVENTS_DELIVERED')):,.0f} / "
+                f"{safe_float(row0.get('EVENTS_RAISED')):,.0f} raised (30d) · "
+                f"latency p50 {humanize_duration(row0.get('MEDIAN_MIN'), 'min')} / "
+                f"p95 {humanize_duration(row0.get('P95_MIN'), 'min')} · "
+                f"{safe_float(row0.get('ROUTE_FAILURES')):,.0f} route failure(s) (30d, "
+                "deduped per route-day; RUNBOOK §19 has the Teams path). "
+                "Routes filter by severity, so 100% is not the target."
+            )
             _db = run_batch([
                 {"key": "rt", "sql": mart_sql.delivery_by_route(30), "source": "ALERT_DELIVERIES by route"},
                 {"key": "bl", "sql": mart_sql.route_backlog(),

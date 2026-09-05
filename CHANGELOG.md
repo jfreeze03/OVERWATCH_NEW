@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.464.0 - UI refactor P2: Alerts (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Delivery health (SLO) row: 5 cards → the 2 that turn red + a dense diagnostics line.**
+  Undelivered-criticals(30m+) and Expired-undelivered stay as severity-gated cards; the
+  delivered ratio, latency p50/p95, and route-failures fold into one caption. Same figures.
+- **"Open total" is now a neutral card** (dropped `severity="info"`), so a colored card stripe on
+  the open-events tiles always means a real threshold was crossed (P0/F13) — critical/high carry the
+  severity, the running total is context.
+- (The page verdict still echoes the open crit/high counts; enriching it with oldest-open-critical
+  age needs a read/query change and is left for a later pass, not this presentation-only one.)
+
 ## 4.463.0 - UI refactor P2: Admin (2026-09-05)
 
 Presentation only — no data/calc/query change.
