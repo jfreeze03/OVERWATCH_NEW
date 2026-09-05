@@ -908,15 +908,12 @@ def spend_trend(
     data["AVG7"] = data["USD"].rolling(7, min_periods=3).mean().round(2)
     data["PROVISIONAL"] = data["Day"] == data["Day"].max()
     data["DayStr"] = data["Day"].dt.strftime("%Y-%m-%d")   # UI23: stable click key
-    grad = alt.Gradient(gradient="linear", x1=0, x2=0, y1=1, y2=0,
-                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
-                               alt.GradientStop(color=_ACCENT, offset=1.0)])
     bar_size = max(4, min(20, int(660 / max(len(data), 1))))
     enc_x = alt.X("yearmonthdate(Day):T", title=None, axis=_day_axis(data["Day"]))
     tip = [alt.Tooltip("Day:T", format=_DAY_TIP_FMT),
            alt.Tooltip("USD:Q", format="$,.2f", title="Spend"),
            alt.Tooltip("AVG7:Q", format="$,.0f", title="7-day avg")]
-    bars = (alt.Chart().mark_bar(color=grad, cornerRadiusEnd=2, size=bar_size)
+    bars = (alt.Chart().mark_bar(color=_ACCENT, cornerRadiusEnd=2, size=bar_size)
             .encode(x=enc_x,
                     y=alt.Y("USD:Q", title="Spend (USD)",
                             axis=alt.Axis(format=_usd_fmt(data["USD"].max()))),
@@ -1004,9 +1001,6 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
     if data.empty:
         _empty_note()
         return
-    grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
-                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
-                               alt.GradientStop(color=_ACCENT, offset=1.0)])
     enc_y = alt.Y("Label:N", sort="-x", title=None,
                   axis=alt.Axis(labelLimit=260))  # full names (hover for longer)
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
@@ -1030,7 +1024,7 @@ def bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, title: str = "", top
             stroke=_ACCENT, strokeWidth=1.5, strokeDash=_MODELED_DASH,
         ).encode(y=enc_y, x=enc_x, tooltip=tip)
     else:
-        bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
+        bars = base.mark_bar(color=_ACCENT, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
     st.altair_chart(bars + labels, width="stretch")
@@ -1054,9 +1048,6 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
     chart always renders and a missing click never breaks the page."""
     data = df[[label_col, usd_col]].head(top_n).copy()
     data.columns = ["Label", "USD"]
-    grad = alt.Gradient(gradient="linear", x1=0, x2=1, y1=0, y2=0,
-                        stops=[alt.GradientStop(color=_ACCENT2, offset=0.0),
-                               alt.GradientStop(color=_ACCENT, offset=1.0)])
     enc_y = alt.Y("Label:N", sort="-x", title=None, axis=alt.Axis(labelLimit=260))
     dmax = float(pd.to_numeric(data["USD"], errors="coerce").fillna(0).max())
     # Sub-dollar spend (e.g. per-user Cortex/AI token cost) must keep its cents — else
@@ -1068,7 +1059,7 @@ def clickable_bar_usd(df: pd.DataFrame, label_col: str, usd_col: str, *, key: st
                   scale=alt.Scale(domain=[0, dmax * 1.16]) if dmax > 0 else alt.Scale())
     tip = [alt.Tooltip("Label:N"), alt.Tooltip("USD:Q", format="$,.2f")]
     base = _base(data, height=max(_HEIGHT, 30 * len(data)))
-    bars = base.mark_bar(color=grad, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
+    bars = base.mark_bar(color=_ACCENT, cornerRadiusEnd=4).encode(y=enc_y, x=enc_x, tooltip=tip)
     labels = base.mark_text(align="left", dx=5, color=_LABEL, fontSize=11).encode(
         y=enc_y, x=enc_x, text=alt.Text("USD:Q", format=_fmt))
     plain = bars + labels

@@ -300,15 +300,11 @@ div[data-testid="stVerticalBlockBorderWrapper"]:has(.ow-scope-active){
   box-shadow:0 0 10px rgba(96,165,250,0.72),0 0 2px rgba(45,212,191,0.82); animation:ow-pulse 2.8s ease-in-out infinite; }
 .ow-brand-dot--off { background:var(--ow-ink-mute); box-shadow:none; animation:none; opacity:0.6; }
 @keyframes ow-pulse { 0%,100% { opacity:1; } 50% { opacity:0.55; } }
-/* F22: solid-ink base; the gradient text-clip applies ONLY where the engine
-   supports it — otherwise the wordmark rendered as a transparent hole (the
-   single brand anchor in the chrome). */
+/* v4.461 P3: the wordmark is solid ink. The gradient text-clip (F22) was a classic
+   AI-startup flourish — retired for the operator aesthetic, so the single brand
+   anchor in the chrome reads as plain, confident type. */
 .ow-brand-word { font-weight:850; letter-spacing:0.08em; font-size:1.55rem; line-height:1.02;
   color:var(--ow-ink); }
-@supports ((-webkit-background-clip:text) or (background-clip:text)) {
-  .ow-brand-word { background:linear-gradient(90deg,var(--ow-ink),var(--ow-accent));
-    -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-}
 .ow-brand-sub { font-size:0.72rem; font-weight:600; color:var(--ow-ink-mute);
   letter-spacing:0.04em; margin:1px 0 0 20px; text-transform:uppercase; }
 

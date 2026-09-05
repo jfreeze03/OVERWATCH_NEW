@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.470.0 - UI refactor P3a: flatten chart fills + wordmark, finish score disclosure (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Chart bar fills flattened to a solid accent.** `spend_trend`, `bar_usd`, and `clickable_bar_usd`
+  dropped their `accent2 → accent` gradient fills (they encoded neither magnitude nor category) — the
+  P0 flatten extended to the chart marks. Bars, the 7-day average line, provisional dimming, and the
+  budget rule are unchanged.
+- **Wordmark is solid ink.** Retired the gradient text-clip (a classic AI-startup flourish) for the
+  operator aesthetic; the brand anchor now reads as plain, confident type.
+- **[§8 disclosure] Finished the "heuristic ordering" captions.** The query-advisor `/100` line now
+  says it is a heuristic ordering of the findings below, not a verdict; the task-graph
+  `BOTTLENECK_SCORE` gained a caption naming its formula (runtime weighted by downstream fan-out) with
+  its inputs shown as columns. (The adaptive-candidacy score already carried this disclosure.)
+
 ## 4.469.0 - UI refactor P2: Operations (2026-09-05)
 
 Presentation only — no data/calc/query change.

@@ -67,11 +67,14 @@ def test_c4_brand_dot_binds_to_connection():
     assert '"ow-brand-dot" if connected else "ow-brand-dot ow-brand-dot--off"' in _MAIN
 
 
-def test_f22_wordmark_has_solid_fallback_behind_supports_gate():
+def test_f22_wordmark_is_solid_ink():
+    # v4.461 P3: the gradient text-clip (an AI-startup flourish) was retired for the
+    # operator aesthetic — the wordmark is now unconditionally solid ink, and the
+    # background-clip:text / text-fill-color machinery is gone from the CSS entirely.
     word = _CSS.split(".ow-brand-word", 1)[1].split("}", 1)[0]
-    assert "color:var(--ow-ink)" in word                    # base renders everywhere
-    assert "text-fill-color" not in word                    # transparency NOT unconditional
-    assert "@supports ((-webkit-background-clip:text) or (background-clip:text))" in _CSS
+    assert "color:var(--ow-ink)" in word                    # solid ink, renders everywhere
+    assert "text-fill-color" not in _CSS                    # no gradient clip anywhere
+    assert "background-clip:text" not in _CSS
 
 
 def test_f19_section_severity_reaches_icon_and_badge():

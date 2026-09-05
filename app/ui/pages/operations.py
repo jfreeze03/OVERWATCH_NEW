@@ -522,7 +522,8 @@ def _queries_tab(company: str, days: int, wh_filter: str, user_filter: str,
                     st.markdown(
                         f"**Optimize-me-first score: {_adv_score}/100** — "
                         f"{len(_adv_findings)} finding"
-                        f"{'s' if len(_adv_findings) != 1 else ''}, most impactful first.")
+                        f"{'s' if len(_adv_findings) != 1 else ''}, most impactful first. "
+                        "A heuristic ordering of the findings below, not a verdict.")
                     status_chips([(f.title, "bad" if f.severity == "bad" else "")
                                   for f in _adv_findings])
                     for _f in _adv_findings:
@@ -1486,6 +1487,10 @@ def _task_run_analyzer(root_id: str, topology, shape) -> None:
         on_select=_open_task, height=340, column_config=profile_config,
         sort_label="critical path, bottleneck score, then duration",
     )
+    # v4.461 P3 (§8 disclosure): name what the composite orders by — its inputs
+    # (RUN_SEC, DOWNSTREAM_TASKS) are columns in the same table.
+    st.caption("Bottleneck score = node runtime weighted by downstream fan-out "
+               "(RUN_SEC × (1 + log₂(downstream + 1))) — a heuristic ordering, not a verdict.")
     result_caption(nodes, note=f"graph run {run_key}")
 
 
