@@ -413,6 +413,14 @@ def render_effective_access(company: str) -> None:
     selection = selectable_table(
         summary, key="sec_effective_users", height=260, sort_label="escalation risk"
     )
+    # v4.461 P2 (§8 disclosure): the two composite scores driving this table are
+    # heuristic ORDERING devices, not verdicts — surface exactly what folds into each.
+    st.caption(
+        "Escalation risk (the sort) = ownership×10 + sensitive-priv×20 (cap 100) + path-depth×4 "
+        "+ reaches-admin×25 + can-self-escalate×40, clipped 0–100. RISK_SCORE (the ≥70 "
+        "'high-risk users' KPI) = ownership×10 + manage-grants×25 + sensitive-priv×20, cap 100. "
+        "Heuristic ordering for review, not a verdict."
+    )
     users = summary["USER_NAME"].astype(str).tolist()
     if not users:
         return

@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.465.0 - UI refactor P2: Security & Governance (2026-09-05)
+
+Presentation only — no data/calc/query change.
+
+- **Collapsed three single-metric KPI cards that only restated the table beneath them:** MFA-gaps
+  ("Users needing MFA now") → a count badge on the section header; New-networks → folded into the
+  table caption; Tag-keys-tracked → folded into the tag-coverage table caption (the coverage *score*
+  card stays — it carries the decision). The tables are the evidence; the counts no longer duplicate them.
+- **[§8 disclosure] Effective-access scores now state their basis on-surface.** An always-visible
+  caption under the effective-access table gives the exact composition of the escalation-risk sort
+  (`ownership×10 + sensitive×20 [cap100] + depth×4 + reaches-admin×25 + self-escalate×40`) and of
+  RISK_SCORE (the ≥70 "high-risk users" KPI: `ownership×10 + manage×25 + sensitive×20`), framed as a
+  heuristic ordering device, not a verdict. No score math changed.
+
 ## 4.464.0 - UI refactor P2: Alerts (2026-09-05)
 
 Presentation only — no data/calc/query change.

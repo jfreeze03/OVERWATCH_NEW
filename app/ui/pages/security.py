@@ -135,18 +135,18 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
             _mfa_unproven = True
     # C23: severity comes from the data — amber only when the gap list has rows.
     section_header("MFA gaps with password-login evidence (30d)", alarm_health(mfa),
-                   "security", anchor="sec-mfa")
+                   "security", anchor="sec-mfa",
+                   badge=(f"{len(mfa.df)} to fix" if (mfa.usable() and not mfa.empty) else ""))
     if _mfa_unproven:
         empty_state("no_data_yet", "MFA evidence did not resolve — neither the login fact nor "
                     "the live LOGIN_HISTORY fallback returned. MFA posture is unconfirmed, not clear.")
     elif mfa.ok and mfa.empty:
         empty_state("clean", "No active user logs in with a password but no MFA. SSO/key-pair users are excluded by design.")
     elif guard(mfa, ""):
-        kpi_row([{
-            "label": "Users needing MFA now",
-            "value": f"{len(mfa.df)}",
-            "help": "Password logins in the last 30 days and no MFA. SSO/key-pair-only users are not listed.",
-        }])
+        # v4.461 P2: the count lives in the section-header badge; the table (one row
+        # per user) IS the list, so a single-metric card restating len() is dropped.
+        st.caption("Password logins in the last 30 days with no MFA. "
+                   "SSO/key-pair-only users are excluded by design.")
         # #25: rows are users → drill to Entity 360 (mirrors the dormant-users table).
         entity_nav_table(with_user_names(mfa.df, _PAGE), key=f"sec_mfa_{company}",
                          key_col="USER_NAME", entity_type="USER")
@@ -278,14 +278,11 @@ def _access_tab(company: str, days: int, *, bounds: tuple | None = None) -> None
     if nn.ok and nn.empty:
         empty_state("clean", "No break-glass account logged in from a network unseen in the last 90 days.")
     elif guard(nn, ""):
-        kpi_row([{
-            "label": "New networks", "value": f"{len(nn.df)}", "delta_color": "inverse",
-            "help": "An admin-role user's (user, IP) pair first appeared inside this window. "
-                    "An IP quiet for 90+ days re-flags on purpose — better a stale re-flag "
-                    "than a silent novel network.",
-        }])
+        # v4.461 P2: the count folds into the caption; the table is the evidence.
         styled_table(with_user_names(nn.df, _PAGE))
-        st.caption("Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
+        st.caption(f"{len(nn.df)} new (user, network) pair(s) — an admin-role user's (user, IP) "
+                   "first appeared inside this window (an IP quiet 90+ days re-flags on purpose). "
+                   "Expected after travel, VPN changes, or a new automation host — anything else is the finding.")
         result_caption(nn)
 
     section_header("Expiring credentials (10-day horizon)", "warn", "clock", anchor="sec-creds")
@@ -962,6 +959,9 @@ def _tag_governance_panel(company: str) -> None:
         empty_state("no_data_yet", "No base tables in scope to measure tag coverage against.")
         st.divider()
         return
+    # v4.461 P2: the coverage score is the one metric that carries a decision; the
+    # 'tag keys tracked' count restated the table's own row count, so it folds into
+    # the table caption below.
     kpi_row([
         {"label": "Tag coverage score", "value": f"{score.score}/100",
          "delta": score.state, "delta_color": "off",
@@ -969,9 +969,9 @@ def _tag_governance_panel(company: str) -> None:
                  "(COST_OWNER, SENSITIVITY, SERVICE_TIER, APP_OWNER), pooled across "
                  "keys. Healthy >=90 / Watch >=75 / Act. TABLE domain only — this "
                  "account exposes no warehouse/database inventory view to score against."},
-        {"label": "Tag keys tracked", "value": f"{len(cov.df)}"},
     ])
     styled_table(cov.df, height=200, sort_label="lowest coverage first")
+    st.caption(f"{len(cov.df)} tag key(s) tracked, ranked lowest coverage first.")
     if score.drivers:
         with st.expander(f"Coverage gaps ({score.score}/100 · {score.state})"):
             for d in score.drivers:
